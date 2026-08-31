@@ -358,29 +358,78 @@ GPU-clocked samples (`MP_TRANSFER_PHASE_SAMPLES`) are popped when a transfer's
 popped from the registry, and possibly across several pops when other
 transfers end in between. `TransferPhaseTracingSubscriber`
 therefore captures the parent context on `MP_*_START` and keeps it (bounded by
-a TTL) and accumulates the transfer's samples. `MP_*_END` is published on the
+a TTL) and accumulates the transfer's samples. One request stores several
+chunks, so a session id maps to *several* same-direction transfers. Each
+transfer therefore mints its own `transfer_key` at the call site, echoed on
+both `MP_*_START` and `MP_*_END` and carried down into the native call, and
+the subscriber keys its table by that rather than by `(session_id,
+direction)`. One slot per session drops all but one of a five-chunk request's
+phase span pairs; matching them FIFO instead is not enough either, because
+`pop_completed_phase_timings()` is a process-global pop, so a single samples
+batch can carry several transfers' sections in arbitrary order. In the sample
+tuple the key travels in the `session_id` slot -- the native layer has no
+separate field for it -- so that value is a transfer key, not a session id.
+The direction is still checked against the key's transfer, or a mislabelled
+sample would hang a retrieve phase under a store span. `MP_*_END` is published on the
 transfer stream, so any samples event queued after it was popped after the
 last section finished: at the first samples event after END the subscriber
 starts one child per phase with
 explicit `start_time` / `end_time` against the retained context. OTel accepts children of an ended parent as long as the
 timestamps are supplied. The children are stacked back to back (each as long
-as its phase's busy time) rather than placed at their real, interleaved
+as its phase's total elapsed) rather than placed at their real, interleaved
 intervals, so the bars read as a breakdown.
 
 ```python
     def _on_transfer_start(self, event: Event) -> None:
-        ctx = self._registry.get_context(event.session_id, "store")
-        self._parents[(event.session_id, "store")] = (ctx, time.monotonic())
+        parent = _PARENT_BY_EVENT[event.event_type]
+        ctx = self._registry.get_context(event.session_id, parent)
+        self._transfers[str(event.metadata["transfer_key"])] = _TransferTotals(
+            session_id=event.session_id, parent=parent, parent_ctx=ctx,
+            captured_at=time.monotonic())
 
     def _flush(self) -> None:
         cursor_s = transfer_first_start_s
         for phase, totals in phases_in_execution_order:
             span = _tracer.start_span(name_of(phase), context=parent_ctx,
                                       start_time=int(cursor_s * 1e9))
-            span.set_attribute("busy_seconds", totals.busy_s)
-            cursor_s += totals.busy_s
+            span.set_attribute("elapsed_seconds", totals.elapsed_s)
+            cursor_s += totals.elapsed_s
             span.end(end_time=int(cursor_s * 1e9))
 ```
 
-This produces `request → mp.store → transfer.kernel / transfer.staging`
-(one child per phase, stacked, each as long as that phase's busy time).
+This produces `request → mp.store → transfer.kernel_interval / transfer.staging`
+(one child per phase, stacked, each as long as that phase's total elapsed).
+
+### Reading the phase bars
+
+A bar's length is the interval between two CUDA events on the transfer stream,
+which is not the time that phase's work spent running.  A stream's ordering
+guarantee says op N+1 starts after op N, not that the device served this
+stream in between.  The two phases sit on opposite sides of that distinction:
+the staging copy is DMA on a copy engine, hardware the co-resident inference
+engine never asks for, so its bar is the transfer; the gather/scatter kernel
+needs SMs, which the engine holds, so its bar is mostly the wait for the
+engine's kernels to retire.
+
+A trace shows this against itself.  At a 2048-token chunked-prefill budget a
+9984-token prompt stores five chunks, and the fifth is issued after prefill
+has finished, onto an empty stream.  In one such trace the first four kernel
+bars read ~10.0 ms for 117 MB (11.7 GB/s) and the fifth read 0.18 ms for
+102 MB (571 GB/s) -- same code, a payload within 12%, 56x apart.  Across 15
+traces the medians were 11.4 GB/s for non-final chunks against 571.0 GB/s for
+final ones, while staging held at 18.1 GB/s throughout.  The empty-stream
+figure is the real one: profiling both processes on the same box put the d2h
+kernel at 21 us / 636 GB/s while its section read ~1280 us, the 1104 us gap
+ahead of it being the engine's own kernels.
+
+So a long kernel bar reads as *this transfer met a busy engine*, not *this
+copy was slow*, and dividing its `nbytes` by its duration is meaningless --
+`METRICS.md` ships no kernel throughput metric for that reason.  The bar is
+kept because that distinction, met-a-busy-engine versus slow-link, is worth
+seeing per transfer, and staging's bar beside it is the one that answers the
+link question.
+
+The wait is also not a cost the request pays.  The store bars in that trace
+sit ~170 ms apart -- the chunked-prefill cadence -- so each one overlaps the
+prefill step that is delaying it, and the 21.5 ms bars do not lengthen the
+859 ms request.

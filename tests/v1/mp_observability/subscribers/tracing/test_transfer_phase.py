@@ -77,19 +77,31 @@ def _run(
     bus.stop()
 
 
-def _store_events(sid: str, now: float) -> list[Event]:
+def _store_transfer_events(
+    sid: str, now: float, offset: float, tkey: str
+) -> list[Event]:
+    """One store transfer's START/END pair, `offset` seconds into the request.
+
+    `tkey` is the transfer key the phase-timing samples echo back; the
+    subscriber matches on it, so the sample tuples must carry the same value
+    in their session_id slot.
+    """
     return [
-        Event(event_type=EventType.MP_REQUEST_START, session_id=sid, timestamp=now),
         Event(
             event_type=EventType.MP_STORE_START,
             session_id=sid,
-            timestamp=now + 0.001,
-            metadata={"device": "cuda:0", "engine_id": 0, "model_name": "m"},
+            timestamp=now + offset,
+            metadata={
+                "device": "cuda:0",
+                "engine_id": 0,
+                "model_name": "m",
+                "transfer_key": tkey,
+            },
         ),
         Event(
             event_type=EventType.MP_STORE_END,
             session_id=sid,
-            timestamp=now + 0.010,
+            timestamp=now + offset + 0.009,
             metadata={
                 "device": "cuda:0",
                 "stored_count": 1,
@@ -98,12 +110,24 @@ def _store_events(sid: str, now: float) -> list[Event]:
                 "cache_salt": "",
                 "total_bytes": 0,
                 "num_tokens": 0,
+                "transfer_key": tkey,
             },
         ),
-        Event(
-            event_type=EventType.MP_REQUEST_END, session_id=sid, timestamp=now + 0.02
-        ),
     ]
+
+
+def _store_events(sid: str, now: float, tkey: str | None = None) -> list[Event]:
+    return (
+        [Event(event_type=EventType.MP_REQUEST_START, session_id=sid, timestamp=now)]
+        + _store_transfer_events(sid, now, 0.001, tkey or sid)
+        + [
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.02,
+            )
+        ]
+    )
 
 
 def _samples_event(samples: list, now: float, sid: str = "other") -> Event:
@@ -122,7 +146,7 @@ def _spans_named(exporter: InMemorySpanExporter, name: str) -> list:
 def test_phases_stack_under_the_store_span(exporter):
     """Two batch steps -> one kernel span and one staging span, stacked:
     kernel (ran first) starts at the transfer's real start and lasts its busy
-    time, staging follows for its busy time; totals summed; nested under
+    time, staging follows for its elapsed; totals summed; nested under
     mp.store even though that span has already ended."""
     now = time.time()
     sid = "req-1"
@@ -136,7 +160,7 @@ def test_phases_stack_under_the_store_span(exporter):
 
     store = _spans_named(exporter, "mp.store")
     assert len(store) == 1
-    kernel = _spans_named(exporter, "transfer.kernel")
+    kernel = _spans_named(exporter, "transfer.kernel_interval")
     staging = _spans_named(exporter, "transfer.staging")
     assert len(kernel) == 1 and len(staging) == 1
     for child in (kernel[0], staging[0]):
@@ -154,10 +178,14 @@ def test_phases_stack_under_the_store_span(exporter):
     assert kernel[0].attributes["first_start_s"] == pytest.approx(now + 0.002)
     assert kernel[0].attributes["last_end_s"] == pytest.approx(now + 0.006)
     assert staging[0].attributes["last_end_s"] == pytest.approx(now + 0.008)
-    assert kernel[0].attributes["busy_seconds"] == pytest.approx(0.002)
-    assert kernel[0].attributes["throughput_GB_per_second"] == pytest.approx(
-        2 * MB / 0.002 / 1e9
+    assert kernel[0].attributes["elapsed_seconds"] == pytest.approx(0.002)
+    # Only staging carries a rate. A kernel section's elapsed is mostly the
+    # wait for the co-resident engine's SMs, so nbytes/elapsed there would
+    # report contention as if it were transfer rate.
+    assert staging[0].attributes["throughput_GB_per_second"] == pytest.approx(
+        2 * MB / 0.004 / 1e9
     )
+    assert "throughput_GB_per_second" not in kernel[0].attributes
 
 
 def test_samples_split_across_pops_merge_into_one_span(exporter):
@@ -178,7 +206,7 @@ def test_samples_split_across_pops_merge_into_one_span(exporter):
             _samples_event(second, now + 0.5),  # popped after END: the rest
         ]
     )
-    kernel = _spans_named(exporter, "transfer.kernel")
+    kernel = _spans_named(exporter, "transfer.kernel_interval")
     assert len(kernel) == 1
     assert kernel[0].attributes["num_steps"] == 2
     assert kernel[0].attributes["first_start_s"] == pytest.approx(now + 0.002)
@@ -200,9 +228,9 @@ def test_not_emitted_before_end(exporter):
     for event in (start, store_start, _samples_event(samples, now + 0.5)):
         bus.publish(event)
     time.sleep(0.15)
-    assert _spans_named(exporter, "transfer.kernel") == []
+    assert _spans_named(exporter, "transfer.kernel_interval") == []
     bus.stop()  # shutdown flushes best-effort
-    assert len(_spans_named(exporter, "transfer.kernel")) == 1
+    assert len(_spans_named(exporter, "transfer.kernel_interval")) == 1
 
 
 def test_samples_without_wall_clock_emit_no_spans(exporter):
@@ -211,7 +239,7 @@ def test_samples_without_wall_clock_emit_no_spans(exporter):
     sid = "req-3"
     samples = [(KERNEL, D2H, 0, 1.0, MB, sid, 0.0, 0.0)]
     _run(_store_events(sid, now) + [_samples_event(samples, now + 0.5)])
-    assert _spans_named(exporter, "transfer.kernel") == []
+    assert _spans_named(exporter, "transfer.kernel_interval") == []
 
 
 def test_unknown_session_or_direction_mismatch_is_skipped(exporter):
@@ -224,7 +252,7 @@ def test_unknown_session_or_direction_mismatch_is_skipped(exporter):
         (KERNEL, H2D, 0, 1.0, MB, sid, now, now + 0.001),
     ]
     _run(_store_events(sid, now) + [_samples_event(samples, now + 0.5)])
-    assert _spans_named(exporter, "transfer.kernel") == []
+    assert _spans_named(exporter, "transfer.kernel_interval") == []
 
 
 @pytest.mark.parametrize(
@@ -240,7 +268,7 @@ def test_unknown_session_or_direction_mismatch_is_skipped(exporter):
 def test_malformed_samples_dropped(exporter, sample):
     now = time.time()
     _run(_store_events("req-5", now) + [_samples_event([sample], now + 0.5)])
-    assert _spans_named(exporter, "transfer.kernel") == []
+    assert _spans_named(exporter, "transfer.kernel_interval") == []
     assert _spans_named(exporter, "transfer.staging") == []
 
 
@@ -254,7 +282,7 @@ def test_parent_expires_after_ttl(exporter):
         parent_ttl_s=0.05,
         settle_s=0.03,
     )
-    assert _spans_named(exporter, "transfer.kernel") == []
+    assert _spans_named(exporter, "transfer.kernel_interval") == []
 
 
 def test_second_transfer_of_a_session_does_not_reuse_a_released_parent(exporter):
@@ -268,6 +296,76 @@ def test_second_transfer_of_a_session_does_not_reuse_a_released_parent(exporter)
         _store_events(sid, now)
         + [_samples_event(first, now + 0.5), _samples_event(late, now + 0.6)]
     )
-    kernel = _spans_named(exporter, "transfer.kernel")
+    kernel = _spans_named(exporter, "transfer.kernel_interval")
     assert len(kernel) == 1
     assert kernel[0].attributes["num_steps"] == 1
+
+
+def _two_transfer_case(exporter, order: str):
+    """One request, two store transfers, samples arriving in `order`.
+
+    `order="samples_first"` interleaves SAMPLES1 before START2 (the drain
+    thread keeps up); `order="ends_first"` dispatches both ENDs before any
+    samples, which is what happens whenever the drain thread lags -- the
+    sampler publishes SAMPLES from inside an END handler, so they queue
+    behind an already-published START/END of the next transfer.
+    """
+    now = time.time()
+    sid = "req-two"
+    k1, k2 = f"{sid}#1", f"{sid}#2"
+    first = [
+        (KERNEL, D2H, 0, 1.0, MB, k1, now + 0.002, now + 0.003),
+        (STAGING, D2H, 0, 2.0, MB, k1, now + 0.003, now + 0.005),
+    ]
+    second = [
+        (KERNEL, D2H, 0, 9.0, 2 * MB, k2, now + 0.012, now + 0.021),
+        (STAGING, D2H, 0, 3.0, 2 * MB, k2, now + 0.021, now + 0.024),
+    ]
+    start1, end1 = _store_transfer_events(sid, now, 0.001, k1)
+    start2, end2 = _store_transfer_events(sid, now, 0.011, k2)
+    s1 = _samples_event(first, now + 0.5, sid)
+    s2 = _samples_event(second, now + 0.6, sid)
+    seq = (
+        [start1, end1, s1, start2, end2, s2]
+        if order == "samples_first"
+        else [start1, end1, start2, end2, s1, s2]
+    )
+    _run(
+        [Event(event_type=EventType.MP_REQUEST_START, session_id=sid, timestamp=now)]
+        + seq
+        + [
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.04,
+            )
+        ]
+    )
+    store = _spans_named(exporter, "mp.store")
+    kernel = _spans_named(exporter, "transfer.kernel_interval")
+    staging = _spans_named(exporter, "transfer.staging")
+    assert len(store) == 2
+    assert len(kernel) == 2 and len(staging) == 2, (
+        f"lost a transfer's phase spans ({order}): {len(kernel)}"
+    )
+    store_ids = {sp.context.span_id for sp in store}
+    for child in kernel + staging:
+        assert child.parent is not None and child.parent.span_id in store_ids
+    # Each transfer keeps its own totals -- no folding into one.
+    assert len({c.parent.span_id for c in kernel}) == 2
+    assert sorted(c.attributes["nbytes"] for c in kernel) == [MB, 2 * MB]
+    assert sorted(c.attributes["nbytes"] for c in staging) == [MB, 2 * MB]
+
+
+def test_two_transfers_samples_between_ends(exporter):
+    """Drain keeps up: SAMPLES1 lands before the next transfer starts."""
+    _two_transfer_case(exporter, "samples_first")
+
+
+def test_two_transfers_both_ends_before_samples(exporter):
+    """Drain lags: both ENDs dispatch before either samples event.
+
+    Order-based matching folds everything into the first transfer here and
+    drops the second's spans; matching on the transfer key does not.
+    """
+    _two_transfer_case(exporter, "ends_first")

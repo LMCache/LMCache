@@ -31,7 +31,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
-from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
     is_observability_enabled,
@@ -294,7 +294,8 @@ def _run_object_group_transfer_plan(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
-    session_id: str = "",
+    *,
+    transfer_key: str,
 ) -> None:
     """Plan and execute one object group's transfer in a single native call.
 
@@ -317,8 +318,10 @@ def _run_object_group_transfer_plan(
         batch_size: Number of memory objects per batched copy.
         skip_first_n_tokens: Tokens to skip writing at the start of the range.
         direction: H2D (retrieve) or D2H (store).
-        session_id: Request the transfer serves; attached to the phase-timing
-            samples so tracing can nest them under the request span.
+        transfer_key: Identity of this store/retrieve operation, echoed back on
+            every phase-timing sample so tracing can match samples to the
+            transfer that produced them. Required: a request issues several
+            transfers, so a missing key would silently drop their phase spans.
 
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
@@ -458,7 +461,9 @@ def _run_object_group_transfer_plan(
         {
             "phase_timing_enabled": is_observability_enabled()
             and get_event_bus().has_subscribers(EventType.MP_TRANSFER_PHASE_SAMPLES),
-            "session_id": session_id,
+            # The native layer only stores and echoes this string back on
+            # each sample; it is the transfer's identity, not the request's.
+            "session_id": transfer_key,
         }
         if _HAS_TRANSFER_PHASE_TIMING
         else {}
@@ -481,7 +486,8 @@ def transfer_kv_per_object_group(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
-    session_id: str = "",
+    *,
+    transfer_key: str,
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -502,8 +508,8 @@ def transfer_kv_per_object_group(
             the retrieve range. This avoids overwriting APC-shared GPU blocks that
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
-        session_id: Request the transfer serves; attached to the phase-timing
-            samples so tracing can nest them under the request span.
+        transfer_key: Identity of this store/retrieve operation, echoed back on
+            every phase-timing sample; see _run_object_group_transfer_plan.
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
@@ -522,7 +528,7 @@ def transfer_kv_per_object_group(
             batch_size,
             skip_first_n_tokens,
             direction,
-            session_id,
+            transfer_key=transfer_key,
         )
         return
 
@@ -1203,6 +1209,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ):
                 self._publish_token_bindings(key, obj_keys_per_obj_group[0])
 
+            # One key per store operation: a request issues several (one per
+            # chunked-prefill step), and the phase-timing samples echo this
+            # back so they can be matched to the transfer that produced them.
+            transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
                 Event(
@@ -1212,6 +1222,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "device": str(cache_context.device),
                         "engine_id": instance_id,
                         "model_name": model_name,
+                        "transfer_key": transfer_key,
                     },
                 ),
             )
@@ -1257,7 +1268,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
-                        session_id=key.request_id,
+                        transfer_key=transfer_key,
                     )
 
                 store_succeeded = True
@@ -1289,6 +1300,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "model_name": model_name,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
+                            "transfer_key": transfer_key,
                         },
                     ),
                 )
@@ -1383,6 +1395,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
         )
 
+        # One key per retrieve operation; see the store path for why
+        # session_id cannot serve as the transfer's identity.
+        transfer_key = next_transfer_key(key.request_id)
         self._ctx.event_bus.publish_on_stream(
             cache_context.cupy_stream,
             Event(
@@ -1392,6 +1407,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     "device": str(cache_context.device),
                     "engine_id": instance_id,
                     "model_name": model_name,
+                    "transfer_key": transfer_key,
                 },
             ),
         )
@@ -1497,7 +1513,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             batch_size=cache_context.max_batch_size,
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmcache_native.TransferDirection.H2D,
-                            session_id=key.request_id,
+                            transfer_key=transfer_key,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
@@ -1532,6 +1548,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "cache_salt": key.cache_salt,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
+                            "transfer_key": transfer_key,
                         },
                     ),
                 )

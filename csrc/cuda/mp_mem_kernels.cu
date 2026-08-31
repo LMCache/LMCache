@@ -529,6 +529,10 @@ void execute_object_group_transfer(
   // Set the device guard once for the whole plan so every staging copy and
   // kernel launch below is enqueued on this device's current stream, in order.
   const at::cuda::OptionalCUDAGuard device_guard(device);
+  // Hoisted: every section below runs on this stream, and passing the call
+  // directly would pay a cudaGetDevice per section even with timing off --
+  // the argument is evaluated before Section's disabled-path bail-out.
+  const cudaStream_t transfer_stream = at::cuda::getCurrentCUDAStream();
   const bool is_h2d = (direction == TransferDirection::H2D);
   const auto int64_opts = at::TensorOptions().dtype(at::kLong).device(device);
 
@@ -541,7 +545,7 @@ void execute_object_group_transfer(
 
   PhaseTimer phase_timer(
       phase_timing_enabled,
-      static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream()),
+      transfer_stream,
       static_cast<int>(direction), static_cast<int>(device.index()),
       batch_steps.size() * 2, session_id);
 
@@ -554,11 +558,13 @@ void execute_object_group_transfer(
     // GPU->CPU after the kernel writes them. The per-step ordering must be
     // preserved because temp buffers are reused across steps.
     if (is_h2d) {
-      auto section = phase_timer.section(TransferPhase::STAGING, step_bytes);
+      auto section = phase_timer.section(
+          TransferPhase::STAGING, step_bytes, transfer_stream);
       do_staging(step.staging);
     }
     {
-      auto section = phase_timer.section(TransferPhase::KERNEL, kernel_bytes);
+      auto section = phase_timer.section(
+          TransferPhase::KERNEL, kernel_bytes, transfer_stream);
       for (const auto& launch : step.launches) {
         TORCH_CHECK(
             launch.group_idx >= 0 &&
@@ -614,7 +620,8 @@ void execute_object_group_transfer(
       }
     }
     if (!is_h2d) {
-      auto section = phase_timer.section(TransferPhase::STAGING, step_bytes);
+      auto section = phase_timer.section(
+          TransferPhase::STAGING, step_bytes, transfer_stream);
       do_staging(step.staging);
     }
   }

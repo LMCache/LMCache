@@ -3,9 +3,9 @@
 """Gather/DMA phase breakdown of each transfer as child spans.
 
 Consumes ``MP_TRANSFER_PHASE_SAMPLES`` and emits, per transfer, two children
-under the request's ``mp.store`` / ``mp.retrieve`` span -- ``transfer.kernel``
+under the request's ``mp.store`` / ``mp.retrieve`` span -- ``transfer.kernel_interval``
 and ``transfer.staging`` -- stacked back to back, each as long as that
-phase's total busy time, with the phase totals as attributes.
+phase's total elapsed, with the phase totals as attributes.
 
 Samples arrive after the parent span has ended (``TransferPhaseSampler``
 pops them on ``MP_*_END``); a transfer is emitted at the first samples event
@@ -52,8 +52,22 @@ _PARENT_BY_EVENT: dict[EventType, str] = {
     EventType.MP_RETRIEVE_END: "retrieve",
 }
 _SPAN_NAME_BY_PHASE: dict[int, str] = {
-    int(TransferPhase.KERNEL): "transfer.kernel",
+    int(TransferPhase.KERNEL): "transfer.kernel_interval",
     int(TransferPhase.STAGING): "transfer.staging",
+}
+# Put the caveat where it is read. A kernel bar is mostly the wait for the
+# co-resident inference engine's SMs, so a reader who does not know that
+# concludes the transfer was slow -- see "Reading the phase bars" in
+# docs/design/observability/request-event-span.md.
+_ELAPSED_MEANING_BY_PHASE: dict[int, str] = {
+    int(TransferPhase.KERNEL): (
+        "stream interval, not execution time: the kernel needs SMs and queues "
+        "behind the co-resident inference engine, so most of this bar is that "
+        "wait. Do not read it as a transfer rate."
+    ),
+    int(TransferPhase.STAGING): (
+        "transfer time: DMA on the copy engine, which does not contend for SMs."
+    ),
 }
 
 
@@ -63,7 +77,7 @@ class _PhaseTotals:
 
     first_start_s: float  # earliest section start (real time)
     last_end_s: float  # latest section end (real time)
-    busy_s: float = 0.0  # sum of section durations (same stream: no overlap)
+    elapsed_s: float = 0.0  # sum of section durations (same stream: no overlap)
     nbytes: int = 0
     num_steps: int = 0
 
@@ -72,8 +86,10 @@ class _PhaseTotals:
 class _TransferTotals:
     """Running totals of one transfer, per phase."""
 
-    session_id: str
+    session_id: str  # the request, for the span attribute
+    parent: str  # "store" / "retrieve"; a sample's direction must agree
     parent_ctx: Any
+    captured_at: float  # time.monotonic() at MP_*_START; drives the TTL
     device_index: int = -1  # set by the first sample
     phases: dict[int, _PhaseTotals] = field(default_factory=dict)
     ended: bool = False  # MP_*_END seen
@@ -95,11 +111,14 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
 
     def __init__(self, registry: SpanRegistry, parent_ttl_s: float = 120.0) -> None:
         self._registry = registry
-        self._parent_ttl_s = parent_ttl_s
-        # (session_id, parent logical name) -> (otel context, captured_at)
-        self._parents: dict[tuple[str, str], tuple[Any, float]] = {}
-        # (session_id, parent logical name) -> running totals
-        self._transfers: dict[tuple[str, str], _TransferTotals] = {}
+        self._transfer_ttl_s = parent_ttl_s
+        # transfer_key -> running totals. The key identifies one store /
+        # retrieve *operation*: a request issues several (vLLM stores each
+        # chunked-prefill step separately), and pop_completed_phase_timings()
+        # is a process-global pop, so a samples batch can span transfers.
+        # Matching by identity is the only thing that survives both; any
+        # ordering scheme silently drops spans under a drain-thread lag.
+        self._transfers: dict[str, _TransferTotals] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
@@ -114,90 +133,105 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
         for transfer in self._transfers.values():
             self._emit(transfer)
         self._transfers.clear()
-        self._parents.clear()
 
-    # -- Parent capture -------------------------------------------------------
+    # -- Transfer lifecycle ---------------------------------------------------
 
     def _on_transfer_start(self, event: Event) -> None:
-        """Capture the parent context; samples arrive after the span ends."""
+        """Open a transfer under its key, capturing the parent context its
+        phase spans hang under; samples arrive after that span has ended."""
         if not _HAS_OTEL or not event.session_id:
+            return
+        transfer_key = event.metadata.get("transfer_key")
+        if not transfer_key:
             return
         parent = _PARENT_BY_EVENT[event.event_type]
         ctx = self._registry.get_context(event.session_id, parent)
         if ctx is None:
             return
-        self._parents[(event.session_id, parent)] = (ctx, time.monotonic())
+        self._transfers[str(transfer_key)] = _TransferTotals(
+            session_id=event.session_id,
+            parent=parent,
+            parent_ctx=ctx,
+            captured_at=time.monotonic(),
+        )
 
     def _on_transfer_end(self, event: Event) -> None:
-        """Mark the transfer complete (END is stream-published: all
-        sections done)."""
-        self._expire_parents()
-        key = (event.session_id, _PARENT_BY_EVENT[event.event_type])
+        """Mark this transfer complete (END is stream-published: all of its
+        sections are done)."""
+        self._expire_transfers()
+        key = str(event.metadata.get("transfer_key", ""))
         transfer = self._transfers.get(key)
         if transfer is None:
-            entry = self._parents.get(key)
-            if entry is None:
-                return
-            transfer = _TransferTotals(session_id=key[0], parent_ctx=entry[0])
-            self._transfers[key] = transfer
+            return
         transfer.ended = True
+        # Emission waits for the samples batch this END publishes: the pop is
+        # process-global, so sections of this transfer may have been collected
+        # by an earlier END too, and both halves have to land before the span
+        # is complete (see test_samples_split_across_pops_merge_into_one_span).
 
     # -- Sample accumulation --------------------------------------------------
 
     def _on_samples(self, event: Event) -> None:
         if not _HAS_OTEL:
             return
-        self._expire_parents()
+        self._expire_transfers()
+        touched: set[str] = set()
         for sample in event.metadata.get("samples", ()):
-            self._accumulate(sample)
-        # END is stream-published, so a samples event queued after it holds
-        # everything the transfer had left: emit ended transfers now.
-        ended = [k for k, t in self._transfers.items() if t.ended]
-        for key in ended:
-            self._emit(self._transfers.pop(key))
-            self._parents.pop(key, None)
+            key = self._accumulate(sample)
+            if key is not None:
+                touched.add(key)
+        # Emit only what this batch fed. An already-ended transfer that this
+        # batch did not touch is still waiting for its own samples -- emitting
+        # it here would drop them, which is exactly the bug that order-based
+        # matching had.
+        for key in touched:
+            transfer = self._transfers.get(key)
+            if transfer is not None and transfer.ended:
+                self._emit(self._transfers.pop(key))
 
-    def _accumulate(self, sample: Sequence[Any]) -> None:
+    def _accumulate(self, sample: Sequence[Any]) -> str | None:
         """Fold one sample into its transfer's per-phase totals.
+
+        Returns:
+            The transfer key the sample landed on, or None if it was skipped.
 
         Skips silently: samples without wall-clock bounds (anchor failed),
         samples without a captured parent, malformed samples.
         """
         if len(sample) != 8:
-            return
+            return None
         phase, direction, device_index, elapsed_ms, nbytes, session_id, t0, t1 = sample
         if not isinstance(t0, (int, float)) or not isinstance(t1, (int, float)):
-            return
+            return None
         if not isinstance(elapsed_ms, (int, float)) or not isinstance(nbytes, int):
-            return
+            return None
         if t0 <= 0 or t1 < t0:
-            return
+            return None
         try:
             parent = _PARENT_BY_DIRECTION.get(direction)
             known_phase = phase in _SPAN_NAME_BY_PHASE
         except TypeError:  # unhashable field
-            return
+            return None
         if parent is None or not known_phase:
-            return
-        sid = str(session_id)
-        entry = self._parents.get((sid, parent))
-        if entry is None:
-            return
-        parent_ctx, _ = entry
-        transfer = self._transfers.get((sid, parent))
-        if transfer is None:
-            transfer = _TransferTotals(session_id=sid, parent_ctx=parent_ctx)
-            self._transfers[(sid, parent)] = transfer
+            return None
+        key = str(session_id)
+        transfer = self._transfers.get(key)
+        # The key alone identifies the transfer; the direction still has to
+        # agree, or a mislabelled sample would hang a retrieve phase under a
+        # store span.
+        if transfer is None or transfer.parent != parent:
+            return None
         totals = transfer.phases.get(int(phase))
         if totals is None:
             totals = _PhaseTotals(first_start_s=t0, last_end_s=t1)
             transfer.phases[int(phase)] = totals
         totals.first_start_s = min(totals.first_start_s, t0)
         totals.last_end_s = max(totals.last_end_s, t1)
-        totals.busy_s += elapsed_ms / 1e3
+        totals.elapsed_s += elapsed_ms / 1e3
         totals.nbytes += nbytes
         totals.num_steps += 1
         transfer.device_index = int(device_index)
+        return key
 
     def _emit(self, transfer: _TransferTotals) -> None:
         """Emit the stacked phase spans of one transfer."""
@@ -216,21 +250,26 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
             span.set_attribute("device_index", transfer.device_index)
             span.set_attribute("num_steps", totals.num_steps)
             span.set_attribute("nbytes", totals.nbytes)
-            span.set_attribute("busy_seconds", totals.busy_s)
+            span.set_attribute("elapsed_seconds", totals.elapsed_s)
+            span.set_attribute("elapsed_meaning", _ELAPSED_MEANING_BY_PHASE[phase])
             span.set_attribute("first_start_s", totals.first_start_s)
             span.set_attribute("last_end_s", totals.last_end_s)
-            if totals.busy_s > 0:
+            # Only staging. A kernel section's elapsed is dominated by the
+            # wait for the co-resident engine to release the SMs, so the same
+            # ratio there reports contention, not transfer rate -- see
+            # docs/design/observability/request-event-span.md, "Reading the
+            # phase bars". Kept off the span for the same reason metrics
+            # ships no kernel throughput histogram.
+            if phase == TransferPhase.STAGING and totals.elapsed_s > 0:
                 span.set_attribute(
                     "throughput_GB_per_second",
-                    totals.nbytes / totals.busy_s / 1e9,
+                    totals.nbytes / totals.elapsed_s / 1e9,
                 )
-            cursor_s += totals.busy_s
+            cursor_s += totals.elapsed_s
             span.end(end_time=int(cursor_s * 1e9))
 
-    def _expire_parents(self) -> None:
-        """Drop parent contexts (and their totals) older than the TTL."""
-        cutoff = time.monotonic() - self._parent_ttl_s
-        stale = [k for k, (_, at) in self._parents.items() if at < cutoff]
-        for k in stale:
-            del self._parents[k]
-            self._transfers.pop(k, None)
+    def _expire_transfers(self) -> None:
+        """Drop transfers whose parent context is older than the TTL."""
+        cutoff = time.monotonic() - self._transfer_ttl_s
+        for key in [k for k, t in self._transfers.items() if t.captured_at < cutoff]:
+            del self._transfers[key]

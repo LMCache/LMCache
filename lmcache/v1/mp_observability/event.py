@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+import itertools
 
 
 class EventType(Enum):
@@ -183,3 +184,29 @@ class Event:
     timestamp: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str = ""
+
+
+# One store/retrieve *operation* -- the unit an ``mp.store`` / ``mp.retrieve``
+# span covers -- gets one of these. A request issues several: vLLM's chunked
+# prefill stores each prefill step separately, so a 10k-token prompt at a 2048
+# token budget is five stores under one request id. ``session_id`` therefore
+# cannot identify a transfer, and the phase-timing samples that echo it back
+# have to carry this instead.
+_TRANSFER_SEQ = itertools.count()
+
+
+def next_transfer_key(request_id: str) -> str:
+    """Mint a key unique to one store/retrieve operation.
+
+    The request id is kept as a prefix so the key is readable in a log or a
+    span attribute; uniqueness comes from the counter alone. ``next()`` on an
+    ``itertools.count`` is atomic under the GIL, so concurrent publishers
+    cannot collide.
+
+    Args:
+        request_id: The request the operation serves.
+
+    Returns:
+        A process-unique key, e.g. ``"req-7#42"``.
+    """
+    return f"{request_id}#{next(_TRANSFER_SEQ)}"

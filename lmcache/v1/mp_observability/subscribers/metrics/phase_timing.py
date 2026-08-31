@@ -5,16 +5,25 @@
 Consumes ``MP_TRANSFER_PHASE_SAMPLES`` events and emits, labeled by
 ``device_index`` and ``direction``:
 
-  - ``lmcache_mp.transfer_kernel_throughput``  — per-batch-step GB/s of
-    gather/scatter kernel sections (paged blocks <-> GPU staging buffers)
   - ``lmcache_mp.transfer_staging_throughput`` — per-batch-step GB/s of
     host<->device DMA staging sections (GPU staging buffers <-> pinned
     host memory)
-  - ``lmcache_mp.transfer_phase_bytes`` / ``lmcache_mp.transfer_phase_busy_time``
-    — cumulative bytes and busy seconds per phase (extra ``phase`` label).
-    ``rate(bytes) / rate(busy_time)`` gives the byte-weighted aggregate
-    throughput the per-step histograms cannot provide, and
-    ``rate(busy_time)`` against wall time gives each phase's time share.
+
+There is deliberately no kernel counterpart. A section's elapsed is the
+interval between two CUDA events on the transfer stream, and the gather/
+scatter kernel needs SMs, which the co-resident inference engine holds: the
+interval is then mostly the wait for the engine's kernels to finish, not the
+transfer's own work. Measured on one box, that made the figure read ~50x low
+and differ 7x between directions for reasons unrelated to the kernel. Staging
+has no such problem -- DMA rides the copy engine, which the engine does not
+touch, so its sections wait 0.4-6 us and the rate is the real link rate. The
+per-phase span pair in tracing still carries the kernel's section time for
+diagnosis; it is only unfit as an always-on metric.
+  - ``lmcache_mp.transfer_phase_bytes`` / ``lmcache_mp.transfer_phase_elapsed``
+    — cumulative bytes and elapsed seconds per phase (extra ``phase``
+    label). ``rate(bytes) / rate(elapsed)`` gives the byte-weighted
+    aggregate throughput the per-step histograms cannot provide, and
+    ``rate(elapsed)`` against wall time gives each phase's time share.
 
 Sample layout: see ``EventType.MP_TRANSFER_PHASE_SAMPLES``.
 """
@@ -58,14 +67,6 @@ class TransferPhaseMetricsSubscriber(EventSubscriber):
 
     def __init__(self) -> None:
         meter = metrics.get_meter("lmcache_mp.perf")
-        self._kernel_hist = meter.create_histogram(
-            "lmcache_mp.transfer_kernel_throughput",
-            description=(
-                "Histogram of gather/scatter kernel-section throughput in "
-                "GB/s, one sample per plan-executor batch step."
-            ),
-            unit="GB/s",
-        )
         self._staging_hist = meter.create_histogram(
             "lmcache_mp.transfer_staging_throughput",
             description=(
@@ -78,17 +79,20 @@ class TransferPhaseMetricsSubscriber(EventSubscriber):
             "lmcache_mp.transfer_phase_bytes",
             description=(
                 "Cumulative bytes moved per transfer phase (label 'phase'). "
-                "Divide its rate by transfer_phase_busy_time's rate for the "
-                "byte-weighted aggregate phase throughput."
+                "Divide its rate by transfer_phase_elapsed's rate for the "
+                "byte-weighted DMA rate -- for phase='staging' only; see that "
+                "metric's description for why the kernel ratio is not one."
             ),
             unit="By",
         )
-        self._busy_counter = meter.create_counter(
-            "lmcache_mp.transfer_phase_busy_time",
+        self._elapsed_counter = meter.create_counter(
+            "lmcache_mp.transfer_phase_elapsed",
             description=(
-                "Cumulative stream-clocked busy seconds per transfer phase "
-                "(label 'phase'); its rate against wall time is the phase's "
-                "time share."
+                "Cumulative stream interval per transfer phase (label "
+                "'phase'): the time between the section's two CUDA events, "
+                "which for 'staging' is the DMA itself but for 'kernel' is "
+                "mostly the wait for the co-resident engine to free the SMs. "
+                "Divide bytes by it for 'staging' only."
             ),
             unit="s",
         )
@@ -126,22 +130,21 @@ class TransferPhaseMetricsSubscriber(EventSubscriber):
             return
         if elapsed_ms <= 0 or nbytes <= 0:
             return
-        if phase == TransferPhase.KERNEL:
-            hist = self._kernel_hist
-        elif phase == TransferPhase.STAGING:
-            hist = self._staging_hist
-        else:
+        if phase not in (TransferPhase.KERNEL, TransferPhase.STAGING):
             return
         attrs: dict[str, Any] = {
             "device_index": str(device_index),
             "direction": _direction_name(direction),
         }
         elapsed_s = elapsed_ms / 1e3
-        hist.record(nbytes / elapsed_s / 1e9, attributes=attrs)
+        # Only staging gets a throughput histogram; see the module docstring
+        # for why the kernel phase does not.
+        if phase == TransferPhase.STAGING:
+            self._staging_hist.record(nbytes / elapsed_s / 1e9, attributes=attrs)
 
         phase_attrs: dict[str, Any] = {
             **attrs,
             "phase": TransferPhase(phase).name.lower(),
         }
         self._bytes_counter.add(int(nbytes), attributes=phase_attrs)
-        self._busy_counter.add(elapsed_s, attributes=phase_attrs)
+        self._elapsed_counter.add(elapsed_s, attributes=phase_attrs)

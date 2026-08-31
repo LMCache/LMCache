@@ -71,19 +71,21 @@ struct PhaseTimingSample {
 class PhaseTimer {
  public:
   // A timed section of work: the constructor records the start event on
-  // the transfer stream, the destructor records the end and files the
+  // the section's stream, the destructor records the end and files the
   // sample with the timer. Inert when timing is off, nbytes <= 0, or an
   // event call fails; destruction during exception unwinding discards
   // the sample.
   class Section {
    public:
-    Section(PhaseTimer& timer, TransferPhase phase, int64_t nbytes);
+    Section(PhaseTimer& timer, TransferPhase phase, int64_t nbytes,
+            cudaStream_t stream);
     ~Section();
     Section(const Section&) = delete;
     Section& operator=(const Section&) = delete;
 
    private:
-    PhaseTimer* timer_;  // owning timer; nullptr => inert section
+    PhaseTimer* timer_;    // owning timer; nullptr => inert section
+    cudaStream_t stream_;  // stream this section's events are recorded on
     cudaEvent_t start_;
     cudaEvent_t end_;
     TransferPhase phase_;
@@ -97,8 +99,14 @@ class PhaseTimer {
   PhaseTimer(const PhaseTimer&) = delete;
   PhaseTimer& operator=(const PhaseTimer&) = delete;
 
-  Section section(TransferPhase phase, int64_t nbytes) {
-    return Section(*this, phase, nbytes);
+  // `stream` must be the stream this section's work is actually enqueued
+  // on, which is not always the timer's: a section running under a
+  // CUDAStreamGuard (a staging copy on a dedicated copy stream, say)
+  // records its events there. Recording them on the timer's stream instead
+  // would leave the pair not bracketing the work it claims to time -- and
+  // it fails silently, as a plausible-looking elapsed time.
+  Section section(TransferPhase phase, int64_t nbytes, cudaStream_t stream) {
+    return Section(*this, phase, nbytes, stream);
   }
 
   // Hand the collected records to the recorder.
@@ -111,7 +119,6 @@ class PhaseTimer {
   void add(const PhaseTimingRecord& record);
 
   bool enabled_;
-  cudaStream_t stream_;  // stream the sections record their events on
   std::shared_ptr<PhaseTimingContext> ctx_;  // shared by this call's records
   std::vector<PhaseTimingRecord> records_;   // completed sections
   bool committed_ = false;

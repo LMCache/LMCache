@@ -96,7 +96,7 @@ bool measure(const PhaseTimingRecord& record, PhaseTimingSample& sample) {
 PhaseTimer::PhaseTimer(bool enabled, cudaStream_t stream, int direction,
                        int device_index, size_t max_sections,
                        std::string session_id)
-    : enabled_(enabled), stream_(stream) {
+    : enabled_(enabled) {
   if (!enabled_) {
     return;
   }
@@ -148,8 +148,9 @@ void PhaseTimer::add(const PhaseTimingRecord& record) {
 }
 
 PhaseTimer::Section::Section(PhaseTimer& timer, TransferPhase phase,
-                             int64_t nbytes)
+                             int64_t nbytes, cudaStream_t stream)
     : timer_(nullptr),
+      stream_(stream),
       start_(nullptr),
       end_(nullptr),
       phase_(phase),
@@ -162,10 +163,10 @@ PhaseTimer::Section::Section(PhaseTimer& timer, TransferPhase phase,
   }
 
   // Open the interval: create the event pair and stamp its start onto the
-  // transfer stream.
+  // stream this section's work runs on.
   const bool opened = cudaEventCreate(&start_) == cudaSuccess &&
                       cudaEventCreate(&end_) == cudaSuccess &&
-                      cudaEventRecord(start_, timer.stream_) == cudaSuccess;
+                      cudaEventRecord(start_, stream_) == cudaSuccess;
   if (!opened) {
     // Degrade to an inert section; the transfer itself is unaffected.
     destroy_phase_timing_events(start_, end_);
@@ -193,7 +194,7 @@ PhaseTimer::Section::~Section() {
   // Close the interval: stamp the end onto the stream. A never-recorded
   // event queries as "complete", so on failure the pair must be dropped
   // rather than kept as a bogus sample.
-  if (cudaEventRecord(end_, timer_->stream_) != cudaSuccess) {
+  if (cudaEventRecord(end_, stream_) != cudaSuccess) {
     destroy_phase_timing_events(start_, end_);
     return;
   }

@@ -209,7 +209,7 @@ Timing is on when the bus is enabled and this event has a subscriber
 executor records one anchor event per call plus a host callback stamping the
 EventRecorder wall clock, which gives each sample its `session_id` and
 `start_time_s`/`end_time_s`. `TransferPhaseTracingSubscriber` folds them into
-per-transfer `transfer.kernel` / `transfer.staging` child spans (see
+per-transfer `transfer.kernel_interval` / `transfer.staging` child spans (see
 `docs/design/observability/request-event-span.md`, Example 3).
 
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`

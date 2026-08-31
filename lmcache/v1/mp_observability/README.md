@@ -60,7 +60,7 @@ EventBus  (async queue + drain thread)
     ├──► MPServerTracingSubscriber        request / mp.store / mp.retrieve / ...
     ├──► BlendTracingSubscriber           cb.request and children
     ├──► TimeoutTracingSubscriber         timeout span with exception event
-    └──► TransferPhaseTracingSubscriber   transfer.kernel / transfer.staging
+    └──► TransferPhaseTracingSubscriber   transfer.kernel_interval / transfer.staging
                                           under mp.store / mp.retrieve
 
 OTel SDK  (configured at startup)
