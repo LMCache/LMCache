@@ -69,7 +69,6 @@ def resolve_object_keys(
     ipc_key = IPCCacheServerKey(
         model_name=model_name,
         world_size=world_size,
-        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(token_ids),
         start=0,
