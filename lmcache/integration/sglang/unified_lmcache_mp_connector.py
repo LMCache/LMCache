@@ -1,0 +1,983 @@
+# SPDX-License-Identifier: Apache-2.0
+"""LMCache multiprocess connector used by SGLang's unified radix cache.
+
+This module deliberately talks to LMCache's engine-neutral MP protocol.  It
+does not use LMCache's legacy SGLang integration and it never constructs an
+in-process LMCache engine.  The registered SGLang GPU KV tensors remain owned
+by SGLang; LMCache accesses them through device-memory and event IPC handles.
+"""
+
+# Future
+from __future__ import annotations
+
+# Standard
+from dataclasses import dataclass
+from typing import Any, Optional
+import logging
+import threading
+import uuid
+
+# Third Party
+import torch
+import torch.distributed as dist
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_MQ_TIMEOUT_SECONDS = 300.0
+_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10.0
+
+
+class _ImmediateFuture:
+    """Minimal future used to preserve TP operation order on local failure."""
+
+    def __init__(self, result: bool) -> None:
+        self._result = result
+
+    def query(self) -> bool:
+        return True
+
+    def result(self, timeout: Optional[float] = None) -> bool:
+        del timeout
+        return self._result
+
+    def retain_reference(self, value: object) -> None:
+        del value
+
+
+@dataclass
+class LMCacheLookupOperation:
+    request_id: str
+    token_ids: list[int]
+    local_hit_tokens: int
+    cache_salt: str
+    submission_future: Any = None
+    completion_future: Any = None
+    total_hit_tokens: Optional[int] = None
+    locks_held: bool = False
+    lock_start: int = 0
+
+
+@dataclass(frozen=True)
+class LMCacheKVGroup:
+    """One SGLang KV address space exposed as one LMCache engine group.
+
+    ``kv_tensors`` are registered as independent, single-plane byte-equivalent
+    views.  This keeps SGLang's separately allocated K and V buffers zero-copy
+    while giving every component a stable per-group block-id namespace.
+    """
+
+    name: str
+    kv_tensors: tuple[torch.Tensor, ...]
+    sliding_window_size: int = -1
+    # Logical tokens covered by one engine block id. Attention groups use the
+    # SGLang page size; a recurrent/Mamba group uses its checkpoint grid.
+    tokens_per_block: int = 0
+    # SGLang allocator slots covered by one block id. This is page_size for
+    # attention and 1 for a Mamba checkpoint slot. The connector folds each
+    # complete block into one opaque row before LMCache registration, so this
+    # is intentionally distinct from LMCache's detected physical BS (= 1).
+    slots_per_block: int = 0
+    # Number of source tensor rows making up one block, one value per tensor.
+    # Usually this equals slots_per_block. Page-native sidecars such as the DSA
+    # indexer and DeepSeek V4 compressed/state pools already store one complete
+    # logical page in each row and therefore use 1.
+    tensor_rows_per_block: tuple[int, ...] = ()
+    recurrent_state: bool = False
+
+
+@dataclass
+class LMCacheLoadOperation:
+    request_id: str
+    token_ids: list[int]
+    start: int
+    end: int
+    local_hit_tokens: int
+    device_indices: torch.Tensor
+    future: Any
+    lookup: LMCacheLookupOperation
+    result: Optional[bool] = None
+
+    def query(self) -> bool:
+        return self.result is not None or bool(self.future.query())
+
+
+@dataclass
+class LMCacheStoreOperation:
+    request_id: str
+    start: int
+    end: int
+    future: Any
+    result: Optional[bool] = None
+
+    def query(self) -> bool:
+        return self.result is not None or bool(self.future.query())
+
+
+class UnifiedLMCacheMPConnector:
+    """Asynchronous, CUDA-IPC connector to a standalone LMCache server."""
+
+    def __init__(
+        self,
+        *,
+        config_file: Optional[str],
+        model_name: str,
+        world_size: int,
+        worker_id: int,
+        tp_group: Optional[dist.ProcessGroup],
+        page_size: int,
+        kv_groups: list[LMCacheKVGroup],
+    ) -> None:
+        try:
+            # Third Party
+            import zmq
+
+            # First Party
+            from lmcache.v1.config import load_engine_config_with_overrides
+            from lmcache.v1.multiprocess.mq import MessageQueueClient
+        except ImportError as exc:
+            raise ImportError(
+                "LMCacheUnifiedRadixCache requires the `lmcache` package and "
+                "a running LMCache multiprocess server."
+            ) from exc
+
+        if not kv_groups or any(not group.kv_tensors for group in kv_groups):
+            raise ValueError("LMCache KV group registration cannot be empty")
+        kv_tensors = [tensor for group in kv_groups for tensor in group.kv_tensors]
+        if any(t.device.type != "cuda" for t in kv_tensors):
+            raise NotImplementedError("LMCache MP currently requires CUDA KV tensors")
+        if any(t.device != kv_tensors[0].device for t in kv_tensors):
+            raise ValueError("All LMCache-registered KV tensors must share one device")
+        if any(t.dim() < 2 for t in kv_tensors):
+            raise NotImplementedError(
+                "LMCache MP requires tensors with a leading block/slot axis"
+            )
+        if any(not tensor.is_contiguous() for tensor in kv_tensors):
+            raise NotImplementedError(
+                "LMCache MP currently requires contiguous SGLang NHD/MLA tensors"
+            )
+
+        resolved_groups: list[LMCacheKVGroup] = []
+        for group in kv_groups:
+            tokens_per_block = group.tokens_per_block or page_size
+            slots_per_block = group.slots_per_block or page_size
+            if tokens_per_block <= 0 or slots_per_block <= 0:
+                raise ValueError(
+                    f"LMCache group {group.name!r} has invalid block geometry: "
+                    f"{tokens_per_block=}, {slots_per_block=}"
+                )
+            if tokens_per_block % slots_per_block:
+                raise ValueError(
+                    f"LMCache group {group.name!r} tokens_per_block "
+                    f"{tokens_per_block} must be a multiple of slots_per_block "
+                    f"{slots_per_block}"
+                )
+            tensor_rows_per_block = group.tensor_rows_per_block or (
+                slots_per_block,
+            ) * len(group.kv_tensors)
+            if len(tensor_rows_per_block) != len(group.kv_tensors):
+                raise ValueError(
+                    f"LMCache group {group.name!r} has "
+                    f"{len(group.kv_tensors)} tensors but "
+                    f"{len(tensor_rows_per_block)} tensor row geometries"
+                )
+            for tensor, rows_per_block in zip(
+                group.kv_tensors, tensor_rows_per_block, strict=True
+            ):
+                if rows_per_block <= 0 or tensor.shape[0] % rows_per_block:
+                    raise ValueError(
+                        f"LMCache group {group.name!r} tensor rows "
+                        f"{tensor.shape[0]} are not divisible by "
+                        f"tensor_rows_per_block={rows_per_block}"
+                    )
+            resolved_groups.append(
+                LMCacheKVGroup(
+                    name=group.name,
+                    kv_tensors=group.kv_tensors,
+                    sliding_window_size=group.sliding_window_size,
+                    tokens_per_block=tokens_per_block,
+                    slots_per_block=slots_per_block,
+                    tensor_rows_per_block=tuple(tensor_rows_per_block),
+                    recurrent_state=group.recurrent_state,
+                )
+            )
+
+        # Register every SGLang block as one opaque row. Attention tensors fold
+        # their page_size consecutive token slots into that row; a recurrent
+        # tensor already has one complete state slot per block. This mirrors
+        # vLLM's Mamba page view: LMCache sees a uniform physical BS of 1 while
+        # EngineGroupInfo.tokens_per_block carries the logical token coverage
+        # (page_size/checkpoint grid) independently. All views are zero-copy.
+        #
+        # MHA K and V live in separate allocations, so a hybrid registration
+        # cannot represent them as one nested [K_layers, V_layers] object
+        # without losing the component boundary. Treating every page as opaque
+        # bytes is byte-for-byte symmetric for store/load.
+        wire_groups: list[LMCacheKVGroup] = []
+        for group in resolved_groups:
+            wire_tensors = tuple(
+                self._to_wire_block_tensor(tensor, rows_per_block)
+                for tensor, rows_per_block in zip(
+                    group.kv_tensors,
+                    group.tensor_rows_per_block,
+                    strict=True,
+                )
+            )
+            wire_block_counts = {tensor.shape[0] for tensor in wire_tensors}
+            if len(wire_block_counts) != 1:
+                raise ValueError(
+                    f"LMCache group {group.name!r} tensors expose different "
+                    f"block counts: {sorted(wire_block_counts)}"
+                )
+            wire_groups.append(
+                LMCacheKVGroup(
+                    name=group.name,
+                    kv_tensors=wire_tensors,
+                    sliding_window_size=group.sliding_window_size,
+                    tokens_per_block=group.tokens_per_block,
+                    slots_per_block=group.slots_per_block,
+                    tensor_rows_per_block=(1,) * len(group.kv_tensors),
+                    recurrent_state=group.recurrent_state,
+                )
+            )
+        kv_tensors = [tensor for group in wire_groups for tensor in group.kv_tensors]
+
+        config = load_engine_config_with_overrides(config_file_path=config_file)
+        if not config.mp_host:  # type: ignore[attr-defined]
+            raise ValueError(
+                "LMCache MP config must define mp_host; pass "
+                "--lmcache-config-file or LMCACHE_CONFIG_FILE"
+            )
+        host = str(config.mp_host)  # type: ignore[attr-defined]
+        if "://" not in host:
+            host = f"tcp://{host}"
+        self.server_url = f"{host.rstrip(':')}:{int(config.mp_port)}"  # type: ignore[attr-defined]
+        self._mq_timeout = float(
+            config.get_extra_config_value(  # type: ignore[attr-defined]
+                "lmcache.mp.mq_timeout", _DEFAULT_MQ_TIMEOUT_SECONDS
+            )
+        )
+        self._heartbeat_interval = float(
+            config.get_extra_config_value(  # type: ignore[attr-defined]
+                "lmcache.mp.heartbeat_interval",
+                _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+            )
+        )
+        if any(group.recurrent_state for group in wire_groups):
+            logger.warning(
+                "LMCache Mamba/recurrent groups require the LMCache MP server "
+                "to be started with --separate-object-groups; otherwise a "
+                "partial-prefix lookup can observe a recurrent state from the "
+                "wrong checkpoint."
+            )
+
+        self.model_name = model_name
+        self.world_size = int(world_size)
+        self.worker_id = int(worker_id)
+        self.tp_group = tp_group
+        if self.world_size > 1:
+            if self.tp_group is None:
+                raise ValueError("LMCache TP>1 requires a CPU TP process group")
+            group_size = dist.get_world_size(group=self.tp_group)
+            if group_size != self.world_size:
+                raise NotImplementedError(
+                    "LMCache MP requires its synchronization group to match "
+                    f"the registered world size, got {group_size=} and "
+                    f"{self.world_size=}"
+                )
+            self._lookup_leader = dist.get_rank(group=self.tp_group) == 0
+        else:
+            self._lookup_leader = True
+        self.page_size = int(page_size)
+        # Every registered wire row is one complete engine block/page.
+        self._layout_slots_per_block = 1
+        self.device = kv_tensors[0].device
+        self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
+        self._kv_caches = {f"kv_{i}": tensor for i, tensor in enumerate(kv_tensors)}
+        self._kv_groups = tuple(wire_groups)
+        (
+            self._engine_group_info_specs,
+            self._kernel_group_to_engine_group,
+        ) = self._build_engine_group_info_specs()
+        self._context = zmq.Context.instance()
+        self._mq_client = MessageQueueClient(self.server_url, self._context)
+        self._transfer_ctx: Any = None
+        self._event_backend: Any = None
+        self._registered = False
+        self._closed = False
+        self._lookups: dict[str, LMCacheLookupOperation] = {}
+        self._active_sessions: set[str] = set()
+        self._store_submitted_tokens: dict[str, int] = {}
+        self._control_futures: list[Any] = []
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+
+        self.chunk_size = self._get_chunk_size()
+        if self.chunk_size <= 0 or any(
+            self.chunk_size % group.tokens_per_block for group in self._kv_groups
+        ):
+            raise ValueError(
+                f"LMCache chunk size {self.chunk_size} must be a positive "
+                "multiple of every SGLang group tokens_per_block"
+            )
+        # LMCache-driven MP ignores this compatibility argument; per-group
+        # block counts are derived from EngineGroupInfo.tokens_per_block.
+        self.blocks_in_chunk = self.chunk_size
+        self.register_kv_cache()
+        self._start_heartbeat()
+
+    @staticmethod
+    def _to_wire_block_tensor(
+        tensor: torch.Tensor, slots_per_block: int
+    ) -> torch.Tensor:
+        """View one complete SGLang block as one opaque LMCache row."""
+        if tensor.shape[0] % slots_per_block:
+            raise ValueError(
+                f"Tensor rows {tensor.shape[0]} are not divisible by "
+                f"slots_per_block={slots_per_block}"
+            )
+        return tensor.view(tensor.shape[0] // slots_per_block, 1, -1)
+
+    def _build_engine_group_info_specs(
+        self,
+    ) -> tuple[list[dict[str, Any]], tuple[int, ...]]:
+        """Build kernel-group metadata while preserving component address spaces."""
+        specs: list[dict[str, Any]] = []
+        tensor_offset = 0
+        for engine_group_id, group in enumerate(self._kv_groups):
+            # LMCache creates one copy-kernel group per physical identity.  The
+            # opaque wire format has NH=1 and a shared page size, so flattened
+            # per-token width and dtype reproduce LMCache's kernel identity.
+            buckets: dict[tuple[Any, ...], list[int]] = {}
+            for local_idx, tensor in enumerate(group.kv_tensors):
+                identity = (tensor.shape[-1], tensor.dtype)
+                buckets.setdefault(identity, []).append(tensor_offset + local_idx)
+            for indices in buckets.values():
+                specs.append(
+                    {
+                        "engine_group_id": engine_group_id,
+                        "layer_indices": tuple(indices),
+                        "tokens_per_block": group.tokens_per_block,
+                        "sw_size_tokens": group.sliding_window_size,
+                        "recurrent_state": group.recurrent_state,
+                    }
+                )
+            tensor_offset += len(group.kv_tensors)
+        return specs, tuple(spec["engine_group_id"] for spec in specs)
+
+    @staticmethod
+    def _send_request(mq_client: Any, request_type: Any, payloads: list[Any]):
+        # First Party
+        from lmcache.v1.multiprocess.protocol import get_response_class
+
+        return mq_client.submit_request(
+            request_type, payloads, get_response_class(request_type)
+        )
+
+    def _get_chunk_size(self) -> int:
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType
+
+        return int(
+            self._send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, []).result(
+                timeout=self._mq_timeout
+            )
+        )
+
+    @property
+    def is_lookup_leader(self) -> bool:
+        return self._lookup_leader
+
+    @property
+    def operation_timeout(self) -> float:
+        return self._mq_timeout
+
+    def _sync_leader_int(self, value: int) -> int:
+        if self.world_size == 1:
+            return value
+        tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=self.tp_group)
+        return int(tensor.item())
+
+    def _sync_success(self, success: bool) -> bool:
+        if self.world_size == 1:
+            return success
+        tensor = torch.tensor([int(success)], dtype=torch.int32, device="cpu")
+        dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=self.tp_group)
+        return bool(tensor.item())
+
+    def register_kv_cache(self) -> None:
+        """Export the SGLang GPU tensors to the LMCache MP server once."""
+        # First Party
+        from lmcache.utils import EngineType
+        from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+        from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+        from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+
+        if self._registered:
+            raise RuntimeError("LMCache KV tensors are already registered")
+        self._event_backend = get_event_ipc_backend(self.device)
+        self._event_backend.check_event_support(self.device)
+        self._transfer_ctx = create_transfer_context(
+            self._kv_caches, mode="lmcache_driven"
+        )
+        engine_group_infos = [
+            EngineGroupInfo(**spec) for spec in self._engine_group_info_specs
+        ]
+        try:
+            self._transfer_ctx.register(
+                self.instance_id,
+                self._kv_caches,
+                self.model_name,
+                self.world_size,
+                self.blocks_in_chunk,
+                self._mq_client,
+                self._mq_timeout,
+                self._send_request,
+                # This hint describes the physical tensor shape. Logical
+                # compression is carried independently by EngineGroupInfo.
+                layout_hints={"tokens_per_block": self._layout_slots_per_block},
+                engine_group_infos=engine_group_infos,
+                engine_type=EngineType.SGLANG,
+            )
+        except Exception:
+            self._transfer_ctx.close()
+            self._transfer_ctx = None
+            raise
+        self._registered = True
+
+    def _start_heartbeat(self) -> None:
+        if self._heartbeat_thread is not None:
+            return
+
+        def heartbeat() -> None:
+            # First Party
+            from lmcache.v1.multiprocess.protocol import RequestType
+
+            while not self._heartbeat_stop.wait(self._heartbeat_interval):
+                try:
+                    self._send_request(
+                        self._mq_client, RequestType.PING, [self.instance_id]
+                    ).result(timeout=self._heartbeat_interval)
+                except Exception:
+                    logger.warning("LMCache MP heartbeat failed", exc_info=True)
+
+        self._heartbeat_thread = threading.Thread(
+            target=heartbeat, name="sglang-lmcache-heartbeat", daemon=True
+        )
+        self._heartbeat_thread.start()
+
+    def _new_event(self) -> Any:
+        event = self._event_backend.create_event(self.device)
+        stream = torch.get_device_module(self.device).current_stream()
+        self._event_backend.record_event(event, stream)
+        return event
+
+    def _create_key(
+        self,
+        operation: LMCacheLookupOperation,
+        *,
+        start: int,
+        end: int,
+        worker_id: Optional[int],
+    ) -> Any:
+        # First Party
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+        return IPCCacheServerKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=worker_id,
+            # TODO(chunxiaozheng): optimie MLA
+            # Each TP rank registers and retrieves its own worker_id-scoped
+            # object, so every stored KV object has exactly one reader.
+            num_kv_readers=1,
+            token_ids=tuple(operation.token_ids),
+            start=start,
+            end=end,
+            request_id=operation.request_id,
+            cache_salt=operation.cache_salt,
+        )
+
+    def submit_lookup(
+        self,
+        request_id: str,
+        token_ids: list[int],
+        *,
+        local_hit_tokens: int,
+        cache_salt: str,
+    ) -> LMCacheLookupOperation:
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType
+
+        # A chunked-prefill request can look up the same request_id again.
+        # Retire only the preceding lookup; the server session also owns any
+        # in-flight stores and must live until finish_request().
+        self.end_lookup(request_id)
+        operation = LMCacheLookupOperation(
+            request_id=request_id,
+            token_ids=list(token_ids),
+            local_hit_tokens=int(local_hit_tokens),
+            cache_salt=cache_salt,
+        )
+        self._lookups[request_id] = operation
+        self._active_sessions.add(request_id)
+        aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
+        if aligned_end == 0:
+            operation.total_hit_tokens = 0
+            return operation
+
+        submitted = True
+        if self.is_lookup_leader:
+            try:
+                key = self._create_key(
+                    operation, start=0, end=aligned_end, worker_id=None
+                )
+                operation.submission_future = self._send_request(
+                    self._mq_client,
+                    RequestType.LOOKUP,
+                    [key, self.world_size],
+                )
+            except Exception:
+                logger.exception("LMCache lookup submission failed for %s", request_id)
+                submitted = False
+        if not self._sync_success(submitted):
+            operation.total_hit_tokens = 0
+        return operation
+
+    def poll_lookup(self, operation: LMCacheLookupOperation) -> Optional[int]:
+        """Return total hit tokens, or ``None`` while lookup+prefetch runs."""
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType
+
+        if operation.total_hit_tokens is not None:
+            return operation.total_hit_tokens
+        result = -1
+        if self.is_lookup_leader:
+            try:
+                if operation.submission_future is None:
+                    result = 0
+                elif not operation.submission_future.query():
+                    result = -1
+                elif operation.completion_future is None:
+                    operation.submission_future.result(timeout=0)
+                    operation.completion_future = self._send_request(
+                        self._mq_client,
+                        RequestType.WAIT_PREFETCH_STATUS,
+                        [operation.request_id, self._mq_timeout],
+                    )
+                    result = -1
+                elif not operation.completion_future.query():
+                    result = -1
+                else:
+                    matched_chunks = operation.completion_future.result(timeout=0)
+                    result = (
+                        0
+                        if matched_chunks is None
+                        else int(matched_chunks) * self.chunk_size
+                    )
+            except Exception:
+                logger.exception(
+                    "LMCache lookup completion failed for %s", operation.request_id
+                )
+                result = 0
+
+        result = self._sync_leader_int(result)
+        if result < 0:
+            return None
+        aligned_end = len(operation.token_ids) // self.chunk_size * self.chunk_size
+        operation.total_hit_tokens = min(max(result, 0), aligned_end)
+        operation.locks_held = operation.total_hit_tokens > 0
+        return operation.total_hit_tokens
+
+    def _slots_to_blocks(
+        self,
+        slots: torch.Tensor,
+        *,
+        slots_per_block: Optional[int] = None,
+        allow_dummy_page: bool = False,
+    ) -> list[int]:
+        slots_per_block = slots_per_block or self.page_size
+        if slots.numel() == 0:
+            return []
+        if slots.numel() % slots_per_block:
+            raise ValueError("LMCache slots must contain complete SGLang pages")
+        pages = (
+            slots.detach()
+            .to(dtype=torch.int64, device="cpu")
+            .reshape(-1, slots_per_block)
+        )
+        starts = pages[:, 0]
+        expected = starts[:, None] + torch.arange(slots_per_block, dtype=torch.int64)
+        dummy_pages = torch.all(pages == 0, dim=1) if allow_dummy_page else None
+        valid_pages = torch.all(pages == expected, dim=1)
+        if dummy_pages is not None:
+            valid_pages |= dummy_pages
+        if torch.any(starts % slots_per_block) or not bool(torch.all(valid_pages)):
+            raise ValueError("LMCache slots must be page-aligned contiguous pages")
+        return (starts // slots_per_block).tolist()
+
+    def _normalize_group_indices(
+        self, device_indices: list[torch.Tensor] | torch.Tensor
+    ) -> list[torch.Tensor]:
+        if isinstance(device_indices, torch.Tensor):
+            device_indices = [device_indices]
+        if len(device_indices) != len(self._kv_groups):
+            raise ValueError(
+                f"Expected {len(self._kv_groups)} LMCache block-id groups, "
+                f"got {len(device_indices)}"
+            )
+        for group, indices in zip(self._kv_groups, device_indices, strict=True):
+            if indices.numel() % group.slots_per_block:
+                raise ValueError(
+                    f"LMCache group {group.name!r} indices do not contain "
+                    "complete physical blocks"
+                )
+        return device_indices
+
+    def _expand_engine_group_block_ids(
+        self, engine_group_block_ids: list[list[int]]
+    ) -> list[list[int]]:
+        """Expand component block IDs to LMCache's physical kernel-group order."""
+        return [
+            list(engine_group_block_ids[engine_group_id])
+            for engine_group_id in self._kernel_group_to_engine_group
+        ]
+
+    def _block_ids_for_transfer(
+        self,
+        device_indices: list[torch.Tensor] | torch.Tensor,
+        *,
+        allow_dummy_page: bool,
+    ) -> list[list[int]]:
+        per_engine_group = [
+            self._slots_to_blocks(
+                indices,
+                slots_per_block=group.slots_per_block,
+                allow_dummy_page=allow_dummy_page,
+            )
+            for group, indices in zip(
+                self._kv_groups,
+                self._normalize_group_indices(device_indices),
+                strict=True,
+            )
+        ]
+        return self._expand_engine_group_block_ids(per_engine_group)
+
+    def _free_lookup_locks(
+        self, operation: LMCacheLookupOperation, start: int, end: int
+    ) -> None:
+        if not self.is_lookup_leader or start >= end:
+            return
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType
+
+        key = self._create_key(operation, start=start, end=end, worker_id=None)
+        self._track_control_future(
+            self._send_request(
+                self._mq_client,
+                RequestType.FREE_LOOKUP_LOCKS,
+                [key, self.world_size],
+            )
+        )
+
+    def _track_control_future(self, future: Any) -> None:
+        # Keep fire-and-forget control RPCs alive and bound the local list.
+        self._control_futures = [f for f in self._control_futures if not f.query()]
+        self._control_futures.append(future)
+
+    def _flush_control_futures(self) -> None:
+        for future in self._control_futures:
+            try:
+                future.result(timeout=self._mq_timeout)
+            except Exception:
+                logger.warning(
+                    "LMCache control RPC failed during shutdown", exc_info=True
+                )
+        self._control_futures.clear()
+
+    def submit_load(
+        self,
+        operation: LMCacheLookupOperation,
+        device_indices: list[torch.Tensor] | torch.Tensor,
+        *,
+        local_hit_tokens: int,
+        owned_device_indices: Optional[torch.Tensor] = None,
+    ) -> LMCacheLoadOperation:
+        if operation.total_hit_tokens is None or not operation.locks_held:
+            raise RuntimeError("LMCache load requires a completed, locked lookup")
+        total_hit = operation.total_hit_tokens
+        start = local_hit_tokens // self.chunk_size * self.chunk_size
+        prefix_pad = local_hit_tokens - start
+        group_indices = self._normalize_group_indices(device_indices)
+        fresh_tokens = total_hit - local_hit_tokens
+        transfer_tokens = total_hit - start
+        for group, indices in zip(self._kv_groups, group_indices, strict=True):
+            group_covered_tokens = (
+                int(indices.numel()) * group.tokens_per_block // group.slots_per_block
+            )
+            expected_tokens = transfer_tokens if group.recurrent_state else fresh_tokens
+            if group_covered_tokens != expected_tokens:
+                raise ValueError(
+                    f"LMCache load group {group.name!r} indices cover "
+                    f"{group_covered_tokens} tokens, expected {expected_tokens}"
+                )
+        if any(
+            prefix_pad % group.tokens_per_block
+            for group in self._kv_groups
+            if not group.recurrent_state
+        ):
+            raise ValueError(
+                "LMCache local hit must align to every group tokens_per_block"
+            )
+        fresh_blocks = [
+            self._slots_to_blocks(
+                indices,
+                slots_per_block=group.slots_per_block,
+                allow_dummy_page=True,
+            )
+            for group, indices in zip(self._kv_groups, group_indices, strict=True)
+        ]
+        engine_group_block_ids = [
+            (
+                blocks
+                if group.recurrent_state
+                else [0] * (prefix_pad // group.tokens_per_block) + blocks
+            )
+            for group, blocks in zip(self._kv_groups, fresh_blocks, strict=True)
+        ]
+        block_ids = self._expand_engine_group_block_ids(engine_group_block_ids)
+        key = self._create_key(
+            operation, start=start, end=total_hit, worker_id=self.worker_id
+        )
+        self._free_lookup_locks(operation, 0, start)
+        operation.lock_start = start
+        try:
+            event = self._new_event()
+            future = self._transfer_ctx.submit_retrieve(
+                operation.request_id,
+                key,
+                self.instance_id,
+                self._kv_caches,
+                block_ids,
+                event,
+                self.blocks_in_chunk,
+                skip_first_n_tokens=prefix_pad,
+            )
+        except Exception:
+            # Every TP rank must enqueue one operation in the same order. A
+            # ready-false future lets completion consensus fail the operation
+            # after successful peers finish their already-submitted retrieve.
+            logger.exception(
+                "LMCache retrieve submission failed for %s",
+                operation.request_id,
+            )
+            future = _ImmediateFuture(False)
+            event = None
+        if event is not None:
+            future.retain_reference(event)
+        return LMCacheLoadOperation(
+            request_id=operation.request_id,
+            token_ids=operation.token_ids,
+            start=start,
+            end=total_hit,
+            local_hit_tokens=local_hit_tokens,
+            device_indices=(
+                group_indices[0]
+                if owned_device_indices is None
+                else owned_device_indices
+            ),
+            future=future,
+            lookup=operation,
+        )
+
+    def complete_load(
+        self, operation: LMCacheLoadOperation, *, synchronize: bool = True
+    ) -> bool:
+        if operation.result is not None:
+            return operation.result
+        success = False
+        try:
+            success = bool(operation.future.result(timeout=0))
+        except Exception:
+            logger.exception("LMCache retrieve failed for %s", operation.request_id)
+        if synchronize:
+            success = self._sync_success(success)
+        if not success and operation.lookup.locks_held:
+            self._free_lookup_locks(operation.lookup, operation.start, operation.end)
+        operation.lookup.locks_held = False
+        operation.result = success
+        return success
+
+    def submit_store(
+        self,
+        request_id: str,
+        token_ids: list[int],
+        device_indices: list[torch.Tensor] | torch.Tensor,
+        *,
+        cache_salt: str,
+    ) -> Optional[LMCacheStoreOperation]:
+        aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
+        start = min(self._store_submitted_tokens.get(request_id, 0), aligned_end)
+        start = start // self.chunk_size * self.chunk_size
+        if aligned_end <= start:
+            return None
+        self._active_sessions.add(request_id)
+        lookup = LMCacheLookupOperation(
+            request_id=request_id,
+            token_ids=list(token_ids),
+            local_hit_tokens=0,
+            cache_salt=cache_salt,
+        )
+        group_indices = self._normalize_group_indices(device_indices)
+        for group, indices in zip(self._kv_groups, group_indices, strict=True):
+            group_covered_tokens = (
+                int(indices.numel()) * group.tokens_per_block // group.slots_per_block
+            )
+            if group_covered_tokens < aligned_end:
+                raise ValueError(
+                    f"LMCache store group {group.name!r} indices cover "
+                    f"{group_covered_tokens} tokens, expected at least {aligned_end}"
+                )
+        engine_group_blocks = []
+        for group, indices in zip(self._kv_groups, group_indices, strict=True):
+            start_slot = start * group.slots_per_block // group.tokens_per_block
+            end_slot = aligned_end * group.slots_per_block // group.tokens_per_block
+            engine_group_blocks.append(
+                self._slots_to_blocks(
+                    indices[start_slot:end_slot],
+                    slots_per_block=group.slots_per_block,
+                    allow_dummy_page=True,
+                )
+            )
+        # Slot/page zero is SGLang's padding sink. For attention a zero means
+        # the SWA page has already been tombstoned, so defer the store. Mamba is
+        # deliberately sparse: only the final checkpoint is real and LMCache's
+        # recurrent object group skips all-null earlier chunks.
+        if any(
+            0 in blocks
+            for group, blocks in zip(self._kv_groups, engine_group_blocks, strict=True)
+            if not group.recurrent_state
+        ):
+            logger.debug(
+                "LMCache store deferred for %s: transfer range contains an "
+                "unmapped component page",
+                request_id,
+            )
+            return None
+        blocks = self._expand_engine_group_block_ids(engine_group_blocks)
+        key = self._create_key(
+            lookup, start=start, end=aligned_end, worker_id=self.worker_id
+        )
+        try:
+            event = self._new_event()
+            future = self._transfer_ctx.submit_store(
+                request_id,
+                key,
+                self.instance_id,
+                self._kv_caches,
+                blocks,
+                event,
+                self.blocks_in_chunk,
+            )
+        except Exception:
+            logger.exception("LMCache store submission failed for %s", request_id)
+            future = _ImmediateFuture(False)
+            event = None
+        if event is not None:
+            future.retain_reference(event)
+        self._store_submitted_tokens[request_id] = aligned_end
+        return LMCacheStoreOperation(request_id, start, aligned_end, future)
+
+    def complete_store(
+        self, operation: LMCacheStoreOperation, *, synchronize: bool = True
+    ) -> bool:
+        if operation.result is not None:
+            return operation.result
+        success = False
+        try:
+            success = bool(operation.future.result(timeout=0))
+        except Exception:
+            logger.exception("LMCache store failed for %s", operation.request_id)
+        operation.result = self._sync_success(success) if synchronize else success
+        if (
+            not operation.result
+            and self._store_submitted_tokens.get(operation.request_id) == operation.end
+        ):
+            # Allow a later chunk/final store to retry this failed tail.
+            self._store_submitted_tokens[operation.request_id] = operation.start
+        return operation.result
+
+    def end_lookup(self, request_id: str) -> None:
+        operation = self._lookups.pop(request_id, None)
+        if operation is None:
+            return
+        if operation.locks_held and operation.total_hit_tokens:
+            self._free_lookup_locks(
+                operation, operation.lock_start, operation.total_hit_tokens
+            )
+            operation.locks_held = False
+
+    def end_session(self, request_id: str) -> None:
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType
+
+        was_active = request_id in self._active_sessions or request_id in self._lookups
+        self.end_lookup(request_id)
+        if was_active and self.is_lookup_leader:
+            self._track_control_future(
+                self._send_request(
+                    self._mq_client, RequestType.END_SESSION, [request_id]
+                )
+            )
+        self._active_sessions.discard(request_id)
+
+    def finish_request(self, request_id: str) -> None:
+        self.end_session(request_id)
+        self._store_submitted_tokens.pop(request_id, None)
+
+    def end_all_sessions(self) -> None:
+        for request_id in list(self._active_sessions):
+            self.end_session(request_id)
+
+    def clear(self) -> bool:
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType
+
+        success = True
+        try:
+            if self.is_lookup_leader:
+                self._send_request(self._mq_client, RequestType.CLEAR, []).result(
+                    timeout=self._mq_timeout
+                )
+        except Exception:
+            logger.exception("Failed to clear LMCache MP storage")
+            success = False
+        return self._sync_success(success)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType
+
+        self.end_all_sessions()
+        self._flush_control_futures()
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=max(1.0, self._heartbeat_interval))
+            self._heartbeat_thread = None
+        if self._registered:
+            try:
+                self._send_request(
+                    self._mq_client,
+                    RequestType.UNREGISTER_KV_CACHE,
+                    [self.instance_id],
+                ).result(timeout=self._mq_timeout)
+            except Exception:
+                logger.warning("Failed to unregister LMCache KV tensors", exc_info=True)
+            self._registered = False
+        if self._transfer_ctx is not None:
+            self._transfer_ctx.close()
+            self._transfer_ctx = None
+        self._mq_client.close()
