@@ -79,13 +79,26 @@ Output Formats
 
 Commands that produce metrics share three common flags:
 
-* ``--format {terminal,json}`` — stdout format (default: ``terminal``).
+* ``--format {terminal,json,csv}`` — stdout format (default: ``terminal``).
 * ``--output PATH`` — also write metrics to a file (uses ``--format``).
 * ``-q`` / ``--quiet`` — suppress stdout; rely on the exit code.
 
 The terminal output uses human-readable labels (e.g. ``"Round trip time
 (ms)"``), while JSON uses machine-readable keys (e.g.
 ``"round_trip_time_ms"``).
+
+``csv`` renders the same metrics as a flat ``section,index,key,label,value``
+table — one row per metric — so output loads directly into a spreadsheet or
+dataframe. This is handy for comparing ``lmcache bench`` runs or appending
+periodic snapshots to a single file:
+
+.. code-block:: bash
+
+   # Append a benchmark summary to a results file for later comparison
+   lmcache bench engine --output results.csv --format csv
+
+   # Filter one nested group from a status report without a JSON parser
+   lmcache describe kvcache --format csv | grep '^models,'
 
 Adding New Commands
 -------------------

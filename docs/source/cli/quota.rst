@@ -67,7 +67,7 @@ Create or update a quota for a given ``cache_salt``.
      - LMCache HTTP server URL (default: ``http://localhost:8080``).
    * - ``--format``
      - No
-     - Output format: ``terminal`` (default) or ``json``.
+     - Output format: ``terminal`` (default), ``json``, or ``csv``.
    * - ``--output``
      - No
      - Save output to a file (uses the format chosen by ``--format``).
@@ -114,7 +114,7 @@ Show the current quota limit and live usage for a specific ``cache_salt``.
      - LMCache HTTP server URL (default: ``http://localhost:8080``).
    * - ``--format``
      - No
-     - Output format: ``terminal`` (default) or ``json``.
+     - Output format: ``terminal`` (default), ``json``, or ``csv``.
    * - ``--output``
      - No
      - Save output to a file.
@@ -189,7 +189,7 @@ List all registered quotas along with their current usage.
      - LMCache HTTP server URL (default: ``http://localhost:8080``).
    * - ``--format``
      - No
-     - Output format: ``terminal`` (default) or ``json``.
+     - Output format: ``terminal`` (default), ``json``, or ``csv``.
    * - ``--output``
      - No
      - Save output to a file.
@@ -236,7 +236,7 @@ evicted (effective limit drops to 0).
      - LMCache HTTP server URL (default: ``http://localhost:8080``).
    * - ``--format``
      - No
-     - Output format: ``terminal`` (default) or ``json``.
+     - Output format: ``terminal`` (default), ``json``, or ``csv``.
    * - ``--output``
      - No
      - Save output to a file.

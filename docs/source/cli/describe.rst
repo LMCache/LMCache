@@ -126,7 +126,7 @@ Options
      - Server URL. Defaults per target: ``http://localhost:8080`` for
        ``kvcache``, ``http://localhost:8000`` for ``engine``.
    * - ``--format``
-     - Output format: ``terminal`` (default) or ``json``.
+     - Output format: ``terminal`` (default), ``json``, or ``csv``.
    * - ``--output PATH``
      - Save metrics to a file (format follows ``--format``).
    * - ``-q`` / ``--quiet``

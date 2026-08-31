@@ -441,7 +441,10 @@ The metrics system uses a **handler + formatter** architecture:
 
 - **Metrics** — the collector. Holds sections and entries.
 - **Handler** — the destination (stdout, file, etc.).
-- **Formatter** — the rendering (ASCII table, JSON, etc.).
+- **Formatter** — the rendering. Built-in formats are ``terminal`` (ASCII
+  table), ``json`` (nested document), and ``csv`` (flat one-row-per-metric
+  table). Register a new one with the ``@register_formatter("name")``
+  decorator in ``lmcache/cli/metrics/formatter.py``.
 
 ``BaseCommand.create_metrics()`` sets up default handlers automatically, so
 command authors just build metrics and call ``emit()``:
