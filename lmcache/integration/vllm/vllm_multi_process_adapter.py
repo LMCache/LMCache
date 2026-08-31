@@ -29,6 +29,7 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.grpc import MessagingFuture, MultiprocessGrpcClient
+from lmcache.v1.multiprocess.protocol import RpcMethod, coerce_rpc_method
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
@@ -164,6 +165,36 @@ def _resolve_extra_config(
 
 class _IpcEvent(Protocol):
     def wait(self, stream: Any = None) -> None: ...
+
+
+def send_lmcache_request(
+    mq_client: MultiprocessGrpcClient,
+    request_type: RpcMethod | str,
+    payloads: list[Any],
+) -> MessagingFuture[Any]:
+    """Submit a legacy helper-style request through the typed gRPC client.
+
+    Older external integrations, including the CacheBlend compatibility plugin,
+    imported this helper and passed ``(client, request_type, payloads)``. The
+    mp transport now exposes one typed method per RPC on
+    :class:`MultiprocessGrpcClient`; this shim keeps the old import surface while
+    routing to the typed method.
+
+    Args:
+        mq_client: The LMCache multiprocess mode gRPC client.
+        request_type: Descriptor-derived RPC method token or method name.
+        payloads: Positional payloads for the typed RPC method.
+
+    Returns:
+        A messaging future for the request.
+
+    Raises:
+        ValueError: If ``request_type`` does not name a supported RPC method.
+        AttributeError: If the client does not expose the typed RPC method.
+    """
+    rpc_method = coerce_rpc_method(request_type)
+    rpc_call = getattr(mq_client, rpc_method.client_method_name)
+    return rpc_call(*payloads)
 
 
 def get_lmcache_chunk_size(

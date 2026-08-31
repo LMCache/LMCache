@@ -24,13 +24,25 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
     ParallelStrategy,
+    send_lmcache_request,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.protocol import RPC
 
 
 class FakeCudaEvent:
     def ipc_handle(self) -> bytes:
         return b"fake-ipc-handle"
+
+
+def test_send_lmcache_request_shim_routes_to_typed_client_method() -> None:
+    """External compatibility helper delegates to the generated client method."""
+    expected = MagicMock(name="future")
+    mq_client = MagicMock()
+    mq_client.ping.return_value = expected
+
+    assert send_lmcache_request(mq_client, RPC.Ping, [123]) is expected
+    mq_client.ping.assert_called_once_with(123)
 
 
 class FakeHeartbeatThread:
