@@ -175,57 +175,10 @@ RPC_METHODS = _build_rpc_methods()
 RPC = _RpcNamespace(RPC_METHODS)
 
 
-class RequestType(enum.Enum):
-    """Legacy request-token namespace kept for external plugin compatibility."""
-
-    REGISTER_KV_CACHE = RPC.RegisterKvCache
-    REGISTER_Q_CACHE = RPC.RegisterQCache
-    UNREGISTER_KV_CACHE = RPC.UnregisterKvCache
-    UNREGISTER_Q_CACHE = RPC.UnregisterQCache
-    STORE_Q = RPC.StoreQ
-    STORE = RPC.Store
-    RETRIEVE = RPC.Retrieve
-    LOOKUP = RPC.Lookup
-    QUERY_PREFETCH_STATUS = RPC.QueryPrefetchStatus
-    WAIT_PREFETCH_STATUS = RPC.WaitPrefetchStatus
-    QUERY_PREFETCH_LOOKUP_HITS = RPC.QueryPrefetchLookupHits
-    FREE_LOOKUP_LOCKS = RPC.FreeLookupLocks
-    END_SESSION = RPC.EndSession
-    REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT = RPC.RegisterKvCacheEngineDrivenContext
-    UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT = RPC.UnregisterKvCacheEngineDrivenContext
-    PREPARE_STORE = RPC.PrepareStore
-    COMMIT_STORE = RPC.CommitStore
-    PREPARE_RETRIEVE = RPC.PrepareRetrieve
-    COMMIT_RETRIEVE = RPC.CommitRetrieve
-
-    CLEAR = RPC.Clear
-    GET_CHUNK_SIZE = RPC.GetChunkSize
-    GET_EXPERIMENTAL = RPC.GetExperimental
-    PING = RPC.Ping
-
-    REPORT_BLOCK_ALLOCATION = RPC.ReportBlockAllocation
-
-    NOOP = RPC.Noop
-
-    CB_REGISTER_ROPE = RPC.CbRegisterRope
-    CB_UNREGISTER_ROPE = RPC.CbUnregisterRope
-    CB_RETRIEVE_PRE_COMPUTED = RPC.CbRetrievePreComputed
-    CB_UNIFIED_LOOKUP = RPC.CbUnifiedLookup
-    CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
-    CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE
-    CB_RETRIEVE_PRE_COMPUTED_V3 = CB_RETRIEVE_PRE_COMPUTED
-
-    P2P_LOOKUP_AND_LOCK = RPC.P2PLookupAndLock
-    P2P_QUERY_LOOKUP_RESULTS = RPC.P2PQueryLookupResults
-    P2P_UNLOCK_OBJECTS = RPC.P2PUnlockObjects
-
-
-def coerce_rpc_method(req_type: RpcMethod | str | enum.Enum) -> RpcMethod:
+def coerce_rpc_method(req_type: RpcMethod | str) -> RpcMethod:
     """Resolve a protobuf RPC method token."""
     if isinstance(req_type, RpcMethod):
         return req_type
-    if isinstance(req_type, enum.Enum):
-        return coerce_rpc_method(req_type.value)
     method = RpcMethod._by_method_name.get(req_type)
     if method is not None:
         return method
@@ -275,7 +228,6 @@ __all__ = [
     "InstanceID",
     "KeyType",
     "RpcMethod",
-    "RequestType",
     "coerce_rpc_method",
     "get_grpc_method_options",
     "get_payload_classes",

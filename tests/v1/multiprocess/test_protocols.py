@@ -5,12 +5,7 @@
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.protocol import (
-    RPC,
-    RPC_METHODS,
-    RequestType,
-    coerce_rpc_method,
-)
+from lmcache.v1.multiprocess.protocol import RPC, RPC_METHODS, coerce_rpc_method
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     get_request_message_class,
     get_response_message_class,
@@ -50,28 +45,6 @@ def test_blend_methods_are_registered_on_blend_service() -> None:
         rpc_method = getattr(RPC, name)
         assert coerce_rpc_method(name) is rpc_method
         assert rpc_method.service_name == "BlendService"
-
-
-def test_legacy_request_type_members_resolve_to_rpc_methods() -> None:
-    """The old RequestType import surface remains usable by external plugins."""
-    ping = RequestType.PING
-    cb_lookup = RequestType.CB_UNIFIED_LOOKUP
-
-    assert ping.name == "PING"
-    assert ping.value is RPC.Ping
-    assert coerce_rpc_method(ping) is RPC.Ping
-    assert cb_lookup.value is RPC.CbUnifiedLookup
-    assert coerce_rpc_method(cb_lookup) is RPC.CbUnifiedLookup
-
-
-def test_legacy_request_type_keeps_cacheblend_v3_aliases() -> None:
-    """CacheBlend's deprecated V3 RequestType members map to current RPCs."""
-    assert RequestType.CB_REGISTER_ROPE_V3 is RequestType.CB_REGISTER_ROPE
-    assert RequestType.CB_UNREGISTER_ROPE_V3 is RequestType.CB_UNREGISTER_ROPE
-    assert (
-        RequestType.CB_RETRIEVE_PRE_COMPUTED_V3 is RequestType.CB_RETRIEVE_PRE_COMPUTED
-    )
-    assert coerce_rpc_method(RequestType.CB_REGISTER_ROPE_V3) is RPC.CbRegisterRope
 
 
 @pytest.mark.parametrize("name", DEPRECATED_CB_NAMES)

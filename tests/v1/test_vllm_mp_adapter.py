@@ -27,7 +27,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     send_lmcache_request,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 
 
 class FakeCudaEvent:
@@ -41,7 +41,7 @@ def test_send_lmcache_request_shim_routes_to_typed_client_method() -> None:
     mq_client = MagicMock()
     mq_client.ping.return_value = expected
 
-    assert send_lmcache_request(mq_client, RequestType.PING, [123]) is expected
+    assert send_lmcache_request(mq_client, RPC.Ping, [123]) is expected
     mq_client.ping.assert_called_once_with(123)
 
 
