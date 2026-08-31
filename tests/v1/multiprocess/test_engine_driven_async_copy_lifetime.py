@@ -12,6 +12,7 @@ CPU-only unit CI. The hardware reproductions live alongside them in
 """
 
 # Standard
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 # Third Party
@@ -53,7 +54,10 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
         patch.object(base, "torch_dev") as dev,
         patch("lmcache.device_ops") as ops,
     ):
-        base.scatter_cpu_to_paged_kv(kv, list(range(4)), chunks, 4)
+        # cast: the mocks stand in for tensors on purpose (see above).
+        base.scatter_cpu_to_paged_kv(
+            kv, list(range(4)), cast(list[torch.Tensor], chunks), 4
+        )
         assert ops.multi_layer_block_kv_transfer.called, (
             "fixture must reach the async H2D launches"
         )
@@ -78,9 +82,12 @@ def test_pickle_store_syncs_before_commit_serializes() -> None:
     ctx = worker_transfer.EngineDrivenTransferContext()
     ctx._engine_driven_context = MagicMock()
     ctx._engine_driven_context.prepare_store.return_value = None  # pickle mode
-    ctx._engine_driven_context.commit_store.side_effect = lambda *a, **k: (
-        order.append("commit") or True
-    )
+
+    def _commit(*_a: object, **_k: object) -> bool:
+        order.append("commit")
+        return True
+
+    ctx._engine_driven_context.commit_store.side_effect = _commit
     ctx._layout_hints = None
     ctx._engine_kv_format = None
 
