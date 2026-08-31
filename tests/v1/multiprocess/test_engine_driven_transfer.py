@@ -411,11 +411,13 @@ def test_create_transfer_context_auto_routes_xpu_to_engine_driven() -> None:
     from lmcache.v1.multiprocess.transfer_context import (
         EngineDrivenTransferContext,
         create_transfer_context,
+        worker_transfer,
     )
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(worker_transfer, "get_device", lambda _: type("D", (), {"type": "xpu"})())
+    monkeypatch.setattr(
+        worker_transfer, "get_device", lambda _: type("D", (), {"type": "xpu"})()
+    )
     try:
         context = create_transfer_context({"layer_0": torch.randn(2, 2)})
         assert isinstance(context, EngineDrivenTransferContext)

@@ -91,6 +91,7 @@ class _XpuEventIPCBackend:
         if hasattr(event, "synchronize"):
             event.synchronize()
 
+
 # ---------------------------------------------------------------------------
 # Device detection registry entry
 # ---------------------------------------------------------------------------
