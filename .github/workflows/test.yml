@@ -113,7 +113,7 @@ jobs:
 
       - name: "CPU only unit tests"
         run: |
-          pytest -m "not cuda and not musa and not xpu and not npu and not neuron"
+          pytest -m "not (cuda or musa or xpu or npu or neuron)"
 
   raw-block-tests:
     needs: changes
