@@ -108,6 +108,17 @@ def _reference_kv_rows(layer_t: torch.Tensor, fmt: EngineKVFormat, slots, geo):
     return k, v
 
 
+def _reference_packed_rows(layer_t: torch.Tensor, fmt: EngineKVFormat, slots, geo):
+    """The engine's packed rows for ``slots``, flattened to NH*CS."""
+    block_idx = slots // geo.block_size
+    block_off = slots % geo.block_size
+    if fmt in _HND_FORMATS:
+        rows = layer_t[block_idx, :, block_off, :]
+    else:
+        rows = layer_t[block_idx, block_off, :, :]
+    return rows.reshape(slots.numel(), -1)
+
+
 def _sentinel_layers(geo: _Geometry, fmt: EngineKVFormat, device) -> list:
     """Engine tensors whose int32 values encode (layer, slot, head, kv, off)."""
     layers = []
@@ -143,6 +154,7 @@ def _run_transfer(
     layout: MemObjKVLayout,
     head_size: int,
     skip_prefix_n_tokens: int = 0,
+    block_stride_elems: int = 0,
 ) -> None:
     if backend == "py":
         torch_ops.multi_layer_kv_transfer(
@@ -156,6 +168,7 @@ def _run_transfer(
             block_size=geo.block_size,
             head_size=head_size,
             skip_prefix_n_tokens=skip_prefix_n_tokens,
+            block_stride_elems=block_stride_elems,
             mem_obj_kv_layout=layout,
         )
         return
@@ -178,6 +191,7 @@ def _run_transfer(
         block_size=geo.block_size,
         head_size=head_size,
         skip_prefix_n_tokens=skip_prefix_n_tokens,
+        block_stride_elems=block_stride_elems,
         mem_obj_kv_layout=MemObjKVLayout(int(layout)),
     )
     torch.cuda.synchronize()
@@ -595,3 +609,132 @@ def test_packed_roundtrip(backend, fmt, dtype):
         ok, ov = _reference_kv_rows(original.cpu(), fmt, slots, geo)
         assert torch.equal(rk, ok)
         assert torch.equal(rv, ov)
+
+
+# ---------------------------------------------------------------------------
+# Padded pools (vLLM standardized blocks-first layouts)
+# ---------------------------------------------------------------------------
+
+# vLLM's standardized BLHNC/BLNHC pools are classified as these formats with a
+# padded dim-0 stride carried in block_stride_elems, so the fused addressing has
+# to honour it. The pure-torch fallback rebuilds layers at their tight stride and
+# rejects a padded pool instead, hence cuda only.
+_PAD_LAYERS = 2
+_POISON = -12345
+
+
+def _padded_pool(geo: _Geometry, fmt: EngineKVFormat, device, pad_layers=_PAD_LAYERS):
+    """Pool with ``pad_layers`` extra layer slots per block; the per-layer views'
+    ``stride(0)`` is the padded per-block step, not the tight one."""
+    inner = geo.layer_shape(fmt)[1:]
+    buf = torch.full(
+        (geo.num_blocks, geo.num_layers + pad_layers) + inner,
+        _POISON,
+        dtype=torch.int32,
+        device=device,
+    )
+    return buf, [buf[:, i] for i in range(geo.num_layers)]
+
+
+_LAYOUTS = [MemObjKVLayout.SPLIT_KV_2LTD, MemObjKVLayout.FUSED_PACKED]
+
+
+def _memobj_zeros(geo: _Geometry, layout: MemObjKVLayout, num_tokens: int, dev):
+    split = layout == MemObjKVLayout.SPLIT_KV_2LTD
+    return torch.zeros(
+        2 if split else 1,
+        geo.num_layers,
+        num_tokens,
+        geo.hidden if split else geo.num_heads * geo.content_size,
+        dtype=torch.int32,
+        device=dev,
+    )
+
+
+@pytest.mark.skipif(not _CUDA, reason="requires CUDA cuda_ops")
+@pytest.mark.parametrize("fmt", _FUSED_FORMATS)
+@pytest.mark.parametrize("layout", _LAYOUTS)
+def test_padded_pool_d2h_matches_reference(fmt, layout):
+    geo = _GEO
+    dev = torch.device("cuda")
+    num_tokens = 16
+    _, views = _padded_pool(geo, fmt, dev)
+    for view, sentinel in zip(views, _sentinel_layers(geo, fmt, dev), strict=True):
+        view.copy_(sentinel)
+    slots = _shuffled_slot_mapping(geo, num_tokens)
+    memobj = _memobj_zeros(geo, layout, num_tokens, dev)
+
+    _run_transfer(
+        "cuda",
+        memobj,
+        views,
+        slots.to(dev),
+        TransferDirection.D2H,
+        fmt,
+        geo,
+        layout,
+        head_size=geo.content_size,
+        block_stride_elems=views[0].stride(0),
+    )
+
+    for layer_id, view in enumerate(views):
+        if layout == MemObjKVLayout.SPLIT_KV_2LTD:
+            k_ref, v_ref = _reference_kv_rows(view.cpu(), fmt, slots, geo)
+            assert torch.equal(memobj[0, layer_id].cpu(), k_ref)
+            assert torch.equal(memobj[1, layer_id].cpu(), v_ref)
+        else:
+            expected = _reference_packed_rows(view.cpu(), fmt, slots, geo)
+            assert torch.equal(memobj[0, layer_id].cpu(), expected)
+
+
+@pytest.mark.skipif(not _CUDA, reason="requires CUDA cuda_ops")
+@pytest.mark.parametrize("fmt", _FUSED_FORMATS)
+@pytest.mark.parametrize("layout", _LAYOUTS)
+def test_padded_pool_h2d_matches_reference(fmt, layout):
+    geo = _GEO
+    dev = torch.device("cuda")
+    num_tokens = 16
+    buf, views = _padded_pool(geo, fmt, dev)
+    for view in views:
+        view.zero_()
+    slots = _shuffled_slot_mapping(geo, num_tokens)
+    memobj = _memobj_zeros(geo, layout, num_tokens, dev)
+    memobj.copy_(
+        (
+            1_000_000 * torch.arange(memobj.shape[0]).view(-1, 1, 1, 1)
+            + 100_000 * torch.arange(geo.num_layers).view(1, -1, 1, 1)
+            + 1_000 * torch.arange(num_tokens).view(1, 1, -1, 1)
+            + torch.arange(memobj.shape[3]).view(1, 1, 1, -1)
+        ).to(torch.int32)
+    )
+
+    _run_transfer(
+        "cuda",
+        memobj,
+        views,
+        slots.to(dev),
+        TransferDirection.H2D,
+        fmt,
+        geo,
+        layout,
+        head_size=geo.content_size,
+        block_stride_elems=views[0].stride(0),
+    )
+
+    untouched = torch.tensor(
+        [s for s in range(geo.page_buffer_size) if s not in set(slots.tolist())]
+    )
+    for layer_id, view in enumerate(views):
+        if layout == MemObjKVLayout.SPLIT_KV_2LTD:
+            k_rows, v_rows = _reference_kv_rows(view.cpu(), fmt, slots, geo)
+            assert torch.equal(k_rows, memobj[0, layer_id].cpu())
+            assert torch.equal(v_rows, memobj[1, layer_id].cpu())
+            uk, uv = _reference_kv_rows(view.cpu(), fmt, untouched, geo)
+            assert not uk.any() and not uv.any()
+        else:
+            written = _reference_packed_rows(view.cpu(), fmt, slots, geo)
+            assert torch.equal(written, memobj[0, layer_id].cpu())
+            assert not _reference_packed_rows(view.cpu(), fmt, untouched, geo).any()
+    # The pad slots share every block with the real layers: a tight step would
+    # have written into them.
+    assert (buf[:, geo.num_layers :] == _POISON).all()
