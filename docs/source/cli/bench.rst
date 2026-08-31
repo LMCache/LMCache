@@ -178,6 +178,10 @@ General Options
    * - ``-q`` / ``--quiet``
      - No
      - Suppress the real-time progress display.
+   * - ``--no-warmup``
+     - No
+     - Skip the warmup phase and start measuring immediately.
+       See :ref:`bench-warmup`.
 
 
 .. _bench-tokens-per-gb:
@@ -199,6 +203,53 @@ startup log:
 Then compute::
 
    tokens_per_gb = 567890 / 12.34 = 46,020
+
+
+.. _bench-warmup:
+
+Warmup Phase
+~~~~~~~~~~~~
+
+Most workloads run a warmup phase before the measured run. What it sends is
+workload-specific -- ``long-doc-qa`` prefills each document, ``rag-qa-quality``
+prefills each document behind the system block, ``prefix-suffix-tuner`` sends a
+full pass over its prefix pool, ``multi-round-chat`` primes each session, and
+``long-doc-permutator`` sends a single dummy request. ``random-prefill`` has no
+warmup at all. Warmup requests are sent with ``max_tokens=1`` and their stats
+are discarded, so they never appear in the reported numbers.
+
+Warmup serves two purposes: it absorbs the engine's one-time first-request cost
+(``torch.compile``, CUDA-graph capture, weight paging), and -- for the workloads
+that prefill their data -- it puts the KV cache in the state the measured run is
+designed to exercise.
+
+``--no-warmup`` skips the phase entirely and starts measuring immediately:
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --no-warmup
+
+Use it to measure a cold start -- what the first requests against a fresh
+engine and an empty cache actually cost -- or to shorten a smoke test where the
+absolute numbers do not matter.
+
+.. warning::
+
+   Do not compare a ``--no-warmup`` run against a warmed run: the numbers
+   measure different things. Without warmup, the first requests pay the
+   engine's first-request cost and read from a cold cache, which inflates TTFT
+   and depresses cache hit rate.
+
+   For workloads whose warmup populates the data they then measure reuse of
+   (``long-doc-qa``, ``rag-qa-quality``, ``prefix-suffix-tuner``,
+   ``multi-round-chat``), skipping it removes the reuse the workload was built
+   to measure. ``prefix-suffix-tuner`` in particular reports pass-2 results
+   against a cache that pass 1 was supposed to fill, so its output is not
+   meaningful with ``--no-warmup``.
 
 
 Workloads
