@@ -27,7 +27,7 @@ import numpy as np
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
-from lmcache.v1.mp_coordinator.key_directory import Placement
+from lmcache.v1.mp_coordinator.views.key_directory import Placement
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -179,13 +179,20 @@ class QuotaConfigResponse(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """Combined quota and usage for a single ``cache_salt``.
+    """Combined quota and usage for a single ``cache_salt``, on one tier.
+
+    Every field describes the tier the request asked for. Quotas are
+    enforced on L2 only, so an ``l1`` request reports L1 usage with
+    ``quota_exists=False`` — never the L2 quota, which governs different
+    bytes.
 
     Attributes:
         cache_salt: The tenant identifier.
-        quota_limit_gb: The byte budget in GiB (0.0 if no quota set).
-        quota_exists: Whether an explicit quota is registered.
-        usage_gb: Current usage in GiB.
+        quota_limit_gb: The byte budget in GiB (0.0 if no quota applies
+            to the requested tier).
+        quota_exists: Whether an explicit quota is registered for the
+            requested tier.
+        usage_gb: Current usage in GiB on the requested tier.
     """
 
     cache_salt: str
@@ -195,25 +202,91 @@ class StatusResponse(BaseModel):
 
 
 class StatusListResponse(BaseModel):
-    """Reply to ``GET /quota``.
+    """Reply to ``GET /quota``, scoped to the requested tier.
 
     Attributes:
-        total_gb: Aggregate usage in GiB.
-        by_cache_salt: Per-tenant breakdown with quota and usage.
+        total_gb: Aggregate usage in GiB on the requested tier.
+        by_cache_salt: Per-tenant breakdown with quota and usage. Rows
+            come from the tier's usage plus the quotas that apply to it,
+            so an ``l1`` listing holds only salts with L1 usage.
     """
 
     total_gb: float
     by_cache_salt: list[StatusResponse]
 
 
+# -- Memory pressure ---------------------------------------------------------
+
+
+class ModuleMemoryStatus(BaseModel):
+    """Usage joined to declared capacity for one memory compartment.
+
+    Attributes:
+        tier: ``l1`` or ``l2``.
+        backend: Storage backend within the tier.
+        shared: Set for a fleet-shared pool, whose bytes are counted once
+            for the fleet, not once per mounting instance.
+        used_bytes: Bytes held, from the admitted cache-event stream.
+        capacity_bytes: Declared capacity, or ``0`` if none was declared.
+        usage_ratio: ``used_bytes / capacity_bytes``, or ``None`` when no
+            capacity was declared -- ``None`` rather than a sentinel, which
+            would read as real occupancy. Values above ``1.0`` are not
+            clamped: they mean the declared cap disagrees with what the
+            tier admitted.
+    """
+
+    tier: Tier
+    backend: str
+    shared: bool
+    used_bytes: int
+    capacity_bytes: int
+    usage_ratio: float | None = None
+
+
+class InstanceMemoryStatus(BaseModel):
+    """One MP server's memory compartments.
+
+    Attributes:
+        instance_id: The server this describes.
+        registered: Whether it is currently in the instance registry. A
+            deregistered server can still hold L2 bytes, so ``False`` is
+            valid.
+        declared_capacity: Whether any capacity was declared. When
+            ``False``, every module's ``usage_ratio`` is ``None``.
+        modules: Privately-owned compartments, sorted by tier then backend.
+            Shared pools are reported at the fleet level instead.
+    """
+
+    instance_id: str
+    registered: bool
+    declared_capacity: bool
+    modules: list[ModuleMemoryStatus] = Field(default_factory=list)
+
+
+class FleetMemoryResponse(BaseModel):
+    """Fleet-wide memory view: every server plus the shared pools.
+
+    Attributes:
+        instances: Per-server status, sorted by ``instance_id``.
+        shared_modules: Fleet-shared compartments, counted once. Capacity is
+            reported only when every declaring server agrees; a disagreement
+            reads as undeclared.
+    """
+
+    instances: list[InstanceMemoryStatus] = Field(default_factory=list)
+    shared_modules: list[ModuleMemoryStatus] = Field(default_factory=list)
+
+
 # -- Key directory -----------------------------------------------------------
 
 
-class DirectoryEventsRequest(BaseModel):
-    """Body of ``POST /directory/events``.
+class CacheEventsRequest(BaseModel):
+    """Body of ``POST /events``.
 
     Attributes:
         batches: Event batches to apply, in emission order per instance.
+            Includes ``config`` batches, which declare capacity rather than
+            report placements.
     """
 
     batches: list[CacheEventBatch] = Field(default_factory=list)
@@ -239,8 +312,8 @@ class DirectoryEventsRequest(BaseModel):
         return value
 
 
-class DirectoryEventsResponse(BaseModel):
-    """Reply to ``POST /directory/events``.
+class CacheEventsResponse(BaseModel):
+    """Reply to ``POST /events``.
 
     Attributes:
         applied: Batches applied to the directory.
@@ -374,78 +447,16 @@ class DirectoryListResponse(BaseModel):
     keys: list[DirectoryKeyInfo] = Field(default_factory=list)
 
 
-# -- Global CacheBlend fingerprint directory ------------------------------
+class BlendLookupRequest(BaseModel):
+    """Body of ``POST /directory/blend-lookup``.
 
-
-class StoreRangeModel(BaseModel):
-    """Wire form of one published stored token range (see ``StoreRange``).
-
-    The coordinator chunks ``tokens`` at its chunk size and hashes each chunk;
-    chunk ``i`` maps to ``object_keys[i]`` at ``old_st_base + i * chunk_size``.
+    Unlike ``/directory/lookup`` the query need not be a prefix.
 
     Attributes:
-        model_scope: Reuse scope (the model name).
-        tokens: The stored tokens (``token_ids[start:end]``).
-        object_keys: Shared-L2 storage key (hex) per chunk, in order.
-        old_st_base: Token position of the range's first token.
-    """
-
-    model_scope: str
-    tokens: list[int] = Field(default_factory=list)
-    object_keys: list[str] = Field(default_factory=list)
-    old_st_base: int = Field(ge=0)
-
-
-class BlendFingerprintRequest(BaseModel):
-    """Body of ``POST /blend/fingerprints``: register stored ranges.
-
-    Attributes:
-        ranges: Stored token ranges to register (idempotent).
-    """
-
-    ranges: list[StoreRangeModel] = Field(default_factory=list)
-
-
-class BlendFingerprintResponse(BaseModel):
-    """Reply to ``POST /blend/fingerprints``.
-
-    Attributes:
-        inserted: Number of fingerprints newly registered.
-    """
-
-    inserted: int
-
-
-class BlendEvictRequest(BaseModel):
-    """Body of ``DELETE /blend/fingerprints``: evict by storage key.
-
-    Attributes:
-        object_keys: ``object_key`` values to evict.
-    """
-
-    object_keys: list[str] = Field(default_factory=list)
-
-
-class BlendEvictResponse(BaseModel):
-    """Reply to ``DELETE /blend/fingerprints``.
-
-    Attributes:
-        removed: Number of fingerprint entries evicted.
-    """
-
-    removed: int
-
-
-class BlendMatchRequest(BaseModel):
-    """Body of ``POST /blend/match``.
-
-    Attributes:
-        model_scope: Scope to match within.
-        tokens_b64: The request tokens, packed via :func:`encode_tokens`
+        tokens_b64: The query tokens, packed via :func:`encode_tokens`
             (base64 little-endian ``uint32``).
     """
 
-    model_scope: str
     tokens_b64: str = ""
 
     @field_validator("tokens_b64")
@@ -453,9 +464,8 @@ class BlendMatchRequest(BaseModel):
     def _validate_tokens_b64(cls, value: str) -> str:
         """Reject a malformed token buffer at request validation.
 
-        Without this, ``decode_tokens`` would raise ``ValueError`` inside the
-        route handler, which FastAPI surfaces as a 500 (server error) for what
-        is really bad client input. Validating here returns a 422 instead.
+        Validating here returns 422 rather than the 500 a decode failure
+        inside the handler would produce.
 
         Args:
             value: The base64 ``tokens_b64`` field.
@@ -464,35 +474,37 @@ class BlendMatchRequest(BaseModel):
             The unchanged value once it is confirmed decodable.
 
         Raises:
-            ValueError: If ``value`` is not valid base64 or not a whole number
-                of ``uint32`` tokens (surfaced by FastAPI as 422).
+            ValueError: If ``value`` is not valid base64 or not a whole
+                number of ``uint32`` tokens.
         """
         decode_tokens(value)
         return value
 
 
-class GlobalMatchModel(BaseModel):
-    """Wire form of one matched chunk (see ``GlobalMatch``).
+class BlendMatchModel(BaseModel):
+    """Wire form of one blend match (see ``BlendMatch``).
 
     Attributes:
-        object_key: Shared-L2 storage key of the matched chunk.
-        old_st: Token position in the stored sequence (re-RoPE source).
-        cur_st: Token position in the request (re-RoPE target).
+        chunk_hash: Hex of the matched chunk's ``ObjectKey.chunk_hash``.
+        old_st: Its position in the sequence it was stored under
+            (re-RoPE source).
+        cur_st: Its position in the query (re-RoPE target).
     """
 
-    object_key: str
+    chunk_hash: str
     old_st: int
     cur_st: int
 
 
-class BlendMatchResponse(BaseModel):
-    """Reply to ``POST /blend/match``.
+class BlendLookupResponse(BaseModel):
+    """Reply to ``POST /directory/blend-lookup``.
 
     Attributes:
-        matches: Matched chunks, ascending by ``cur_st``.
+        matches: Matched chunks, ascending by ``cur_st``. They may
+            overlap in the query; the caller resolves overlaps.
     """
 
-    matches: list[GlobalMatchModel]
+    matches: list[BlendMatchModel] = Field(default_factory=list)
 
 
 class PrefetchRequest(BaseModel):

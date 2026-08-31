@@ -13,6 +13,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.lmcache_native import EngineKVFormat
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
@@ -26,7 +27,6 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
-from lmcache.v1.platform.ops_types import EngineKVFormat
 
 if TYPE_CHECKING:
     # First Party
@@ -301,12 +301,11 @@ class MUSACacheContext(BaseCacheContext):
             engine_type,
             layout_hints,
         )
-        if not isinstance(discovered, list) or not all(
-            isinstance(tensor, torch.Tensor) for tensor in discovered
-        ):
-            raise ValueError("MUSACacheContext requires one tensor per KV layer")
-        kv_caches_norm = cast(list[torch.Tensor], discovered)
-        normalized_discoverable = cast(DiscoverableKVCache, kv_caches_norm)
+        # KV-list discovery returns nested ``[key_layers, value_layers]`` rather
+        # than a flat per-layer tensor list, so only require a list layout here.
+        if not isinstance(discovered, list):
+            raise ValueError("MUSACacheContext requires a list-based KV layout")
+        normalized_discoverable = cast(DiscoverableKVCache, discovered)
         self.device_ = get_device(normalized_discoverable)
         if self.device_.type != "musa":
             raise ValueError(
@@ -330,8 +329,10 @@ class MUSACacheContext(BaseCacheContext):
             device=self.device_,
         )
 
+        # BaseCacheContext still types kv_caches as list[Tensor]; nested KV-list
+        # layouts are stored as DiscoverableKVCache and cast at the boundary.
         super().__init__(
-            kv_caches=kv_caches_norm,
+            kv_caches=cast(list[torch.Tensor], discovered),
             device=self.device_,
             num_layers=num_layers_val,
             kv_layer_groups_manager=kv_layer_groups_manager,
@@ -342,7 +343,7 @@ class MUSACacheContext(BaseCacheContext):
         self.group_kv_pointers_: list[torch.Tensor] = []
         for group_idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
             pointers = get_group_data_ptrs(
-                self.kv_caches_,
+                cast(DiscoverableKVCache, self.kv_caches_),
                 self.get_engine_kv_format(group_idx),
                 group.layer_indices,
             )
@@ -363,7 +364,7 @@ class MUSACacheContext(BaseCacheContext):
             "MUSACacheContext: %d layers, %d blocks, dtype=%s",
             self.num_layers_,
             self.num_blocks,
-            self.kv_caches_[0].dtype,
+            self.kv_layer_groups_manager_.kernel_groups[0].dtype,
         )
 
     def close(self) -> None:
@@ -411,8 +412,9 @@ class MUSACacheContext(BaseCacheContext):
             kernel_group_idx: Index of the requested kernel group.
 
         Returns:
-            A one-dimensional ``int64`` tensor containing one pointer per
-            layer in kernel order.
+            A one-dimensional ``int64`` tensor in kernel order. KV-list groups
+            contain key-layer pointers followed by value-layer pointers;
+            other supported layouts contain one pointer per layer.
         """
         return self.group_kv_pointers_[kernel_group_idx]
 

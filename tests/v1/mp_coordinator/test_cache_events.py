@@ -11,12 +11,20 @@ import threading
 
 # Third Party
 import httpx
+import numpy as np
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import L1BackendType, ObjectKey, Tier
+from lmcache.v1.distributed.api import (
+    CapacitySnapshot,
+    L1BackendType,
+    ModuleMemoryCapacity,
+    ObjectKey,
+    Tier,
+)
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
+    UNKNOWN_TOKEN_OFFSET,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
@@ -29,6 +37,7 @@ from lmcache.v1.mp_coordinator.cache_events import (
     HttpCacheEventSink,
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 import lmcache.v1.mp_coordinator.cache_events as cache_events
@@ -156,6 +165,7 @@ def test_tokens_stored_events_publish_no_batches():
             metadata={
                 "chunk_hashes": [_key(1).chunk_hash],
                 "token_chunks": [[1, 2]],
+                "token_offsets": [0],
             },
         ),
     )
@@ -179,6 +189,7 @@ def test_tokens_event_stamps_store_entries():
             metadata={
                 "chunk_hashes": [_key(1).chunk_hash],
                 "token_chunks": [[1, 2]],
+                "token_offsets": [0],
             },
         ),
         Event(
@@ -206,6 +217,41 @@ def test_tokens_event_stamps_store_entries():
     assert l2_store.entries[0].token_ids == [1, 2]
     # Deletes never carry tokens.
     assert delete.entries[0].token_ids == []
+    # The chunk's position rides with its tokens, on every stamped entry.
+    # The third key's chunk is unknown to the binding cache, so it carries no
+    # position rather than claiming 0.
+    assert [e.token_offset for e in l1_store.entries] == [0, 0, UNKNOWN_TOKEN_OFFSET]
+    assert l2_store.entries[0].token_offset == 0
+
+
+def test_tokens_event_stamps_the_chunks_offset():
+    """Each chunk carries its own position, so a mid-sequence chunk is
+    stamped with its offset rather than the batch's first."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    keys = [_key(1), _key(2)]
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_TOKENS,
+            metadata={
+                "chunk_hashes": [key.chunk_hash for key in keys],
+                "token_chunks": [[1, 2], [3, 4]],
+                "token_offsets": [256, 512],
+            },
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": keys, "meta": [_meta(100)] * 2},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    store = batches[-1]
+    assert [e.token_ids for e in store.entries] == [[1, 2], [3, 4]]
+    assert [e.token_offset for e in store.entries] == [256, 512]
 
 
 def test_token_binding_cache_evicts_oldest_down_to_half(monkeypatch):
@@ -228,6 +274,7 @@ def test_token_binding_cache_evicts_oldest_down_to_half(monkeypatch):
             metadata={
                 "chunk_hashes": [key.chunk_hash for key in keys],
                 "token_chunks": [[1, 2], [3, 4], [5, 6]],
+                "token_offsets": [0, 256, 512],
             },
         ),
         Event(
@@ -268,6 +315,7 @@ def test_token_binding_eviction_warns(monkeypatch):
             metadata={
                 "chunk_hashes": [_key(i).chunk_hash for i in (1, 2, 3)],
                 "token_chunks": [[1, 2], [3, 4], [5, 6]],
+                "token_offsets": [0, 256, 512],
             },
         ),
     )
@@ -288,6 +336,25 @@ def test_mismatched_token_chunks_raise():
                 metadata={
                     "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
                     "token_chunks": [[1, 2]],
+                    "token_offsets": [0, 256],
+                },
+            ),
+        )
+
+
+def test_mismatched_token_offsets_raise():
+    """Offsets are parallel to the chunks by construction, so a length
+    mismatch is a publisher bug, not a degraded binding."""
+    subscriber = _subscriber(_RecordingSink())
+    with pytest.raises(ValueError):
+        _dispatch(
+            subscriber,
+            Event(
+                event_type=EventType.MP_TOKENS,
+                metadata={
+                    "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
+                    "token_chunks": [[1, 2], [3, 4]],
+                    "token_offsets": [0],
                 },
             ),
         )
@@ -475,8 +542,8 @@ def test_flush_with_empty_buffer_publishes_nothing():
 
 
 def test_publish_failure_drops_batches_and_leaves_a_seq_gap():
-    # Failed flushes consume their seq numbers so the directory sees a
-    # gap and can flag the instance for resync.
+    # Failed flushes consume their seq numbers so the ingest gate sees a
+    # gap and can flag the instance for replay.
     sink = _RecordingSink()
     subscriber = _subscriber(sink)
 
@@ -683,9 +750,8 @@ def test_http_sink_feeds_the_directory_end_to_end():
             assert results[1]["placements"] == []
 
             stats = (await client.get("/directory/stats")).json()
-            instance = stats["instances"]["node-a"]
-            assert instance["last_seq"] == 2
-            assert instance["gap_detected"] is False
+            assert stats["num_keys"] == 1
+            assert stats["num_placements"] == 1
 
     asyncio.run(_verify())
 
@@ -693,7 +759,12 @@ def test_http_sink_feeds_the_directory_end_to_end():
 def test_token_bindings_feed_the_key_directory_end_to_end():
     """Token-binding event + store events -> emitter -> HTTP sink ->
     coordinator app -> key directory bindings, with the synchronous sink."""
-    config = MPCoordinatorConfig(health_check_interval=0.0, eviction_check_interval=0.0)
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        enable_blend_lookup=True,
+        chunk_size=2,
+    )
     app = create_app(config)
     asgi = httpx.ASGITransport(app=app)
 
@@ -709,6 +780,7 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
             metadata={
                 "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
                 "token_chunks": [[1, 2], [3, 4]],
+                "token_offsets": [0, 256],
             },
         ),
         Event(
@@ -718,11 +790,16 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
     )
     subscriber.flush()
 
-    key_directory = app.state.ctx.key_directory
+    key_directory = app.state.ctx.views.get(KeyDirectory)
     assert key_directory.get_token_ids([_key(1).chunk_hash, _key(2).chunk_hash]) == [
         (1, 2),
         (3, 4),
     ]
+    # The offsets survive the emitter -> HTTP -> directory round trip, and
+    # reach a match as the re-RoPE source position.
+    (first,) = key_directory.blend_match(np.asarray([1, 2], dtype=np.uint64))
+    (second,) = key_directory.blend_match(np.asarray([3, 4], dtype=np.uint64))
+    assert (first.old_st, second.old_st) == (0, 256)
 
 
 def test_http_sink_raises_publish_error_on_http_failure():
@@ -739,3 +816,113 @@ def test_http_sink_raises_publish_error_on_http_failure():
     with pytest.raises(CacheEventPublishError):
         sink.publish([batch])
     sink.close()
+
+
+# -- Capacity declarations ----------------------------------------------------
+
+
+def _snapshot(*modules: ModuleMemoryCapacity) -> CapacitySnapshot:
+    """A capacity snapshot as StorageManager publishes it."""
+    return CapacitySnapshot(modules=tuple(modules))
+
+
+def _capacity_event(snapshot: CapacitySnapshot) -> Event:
+    """The bus event StorageManager emits on a topology change."""
+    return Event(
+        event_type=EventType.SM_CAPACITY_CHANGED,
+        metadata={"snapshot": snapshot},
+    )
+
+
+def test_a_declaration_becomes_one_config_batch_per_compartment():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        _capacity_event(
+            _snapshot(
+                ModuleMemoryCapacity(Tier.L1, "dram", 40 * (1 << 30), False),
+                ModuleMemoryCapacity(Tier.L2, "s3", 0, True),
+            )
+        ),
+    )
+    subscriber.flush()
+
+    batches = sink.published[0]
+    assert [b.event_type for b in batches] == [CacheEventType.CONFIG] * 2
+    assert [(b.tier, b.backend, b.capacity_bytes, b.shared) for b in batches] == [
+        (Tier.L1, "dram", 40 * (1 << 30), False),
+        (Tier.L2, "s3", 0, True),
+    ]
+    # One declaration, so one revision -- that is what lets the coordinator
+    # tell a fresh declaration from a continuation.
+    assert {b.capacity_revision for b in batches} == {1}
+    # A declaration carries no placements.
+    assert all(b.entries == [] for b in batches)
+
+
+def test_config_batches_share_the_seq_space_with_placements():
+    # They ride the same stream, so a reused seq would be dropped as a
+    # duplicate by the gate.
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        _capacity_event(
+            _snapshot(ModuleMemoryCapacity(Tier.L1, "dram", 8 * (1 << 30), False))
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(1)], "meta": [_meta(100)]},
+        ),
+    )
+    subscriber.flush()
+
+    batches = sink.published[0]
+    assert [b.seq for b in batches] == [1, 2]
+    # Declaration first, so the denominator lands before the bytes.
+    assert batches[0].event_type == CacheEventType.CONFIG
+    assert batches[1].event_type == CacheEventType.STORE
+
+
+def test_a_newer_declaration_supersedes_an_unflushed_one():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        _capacity_event(
+            _snapshot(ModuleMemoryCapacity(Tier.L1, "dram", 8 * (1 << 30), False))
+        ),
+        _capacity_event(
+            _snapshot(ModuleMemoryCapacity(Tier.L1, "dram", 16 * (1 << 30), False))
+        ),
+    )
+    subscriber.flush()
+
+    batches = sink.published[0]
+    assert [b.capacity_bytes for b in batches] == [16 * (1 << 30)]
+    # Coalesced into one declaration, so one revision -- not two burnt.
+    assert batches[0].capacity_revision == 1
+
+
+def test_a_declaration_survives_a_publish_failure():
+    # The whole topology, so resending repairs it; a byte delta could not.
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        _capacity_event(
+            _snapshot(ModuleMemoryCapacity(Tier.L1, "dram", 8 * (1 << 30), False))
+        ),
+    )
+    sink.fail_next = True
+    subscriber.flush()
+    assert sink.published == []
+
+    # Re-emitted at a fresh revision; the coordinator takes the newer one.
+    subscriber.flush()
+    assert [b.capacity_revision for b in sink.published[0]] == [2]

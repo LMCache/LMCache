@@ -6,8 +6,9 @@ standalone HTTP service that tracks the MP server instances in a deployment. MP
 servers register with it and send periodic heartbeats; the coordinator evicts
 any instance whose heartbeat lapses past ``--instance-timeout``.
 
-It replaces ``python -m lmcache.v1.mp_coordinator``. The process runs in the
-foreground; stop it with ``Ctrl-C``.
+It is the preferred form of ``python -m lmcache.v1.mp_coordinator``, which still
+works and accepts the same flags. The process runs in the foreground; stop it
+with ``Ctrl-C``.
 
 .. code-block:: bash
 
@@ -59,38 +60,54 @@ Options
      - Token hash algorithm for pin key resolution; must equal the MP servers'
        ``--hash-algorithm``. ``blake3`` (default) is self-contained; other
        algorithms require vLLM importable in the coordinator.
+   * - ``--enable-blend-lookup``
+     - Index stored chunk content so ``POST /directory/blend-lookup`` can serve
+       fleet CacheBlend reuse. Off by default: hashing content costs CPU on
+       every store and is useless without CacheBlend. Also requires the MP
+       servers' ``--coordinator-event-reporting``, which feeds the index.
    * - ``--blend-probe-stride N``
      - Positions between CacheBlend match probes; ``1`` probes every offset
-       for full recall (default: ``1``).
+       for full recall (default: ``1``). Ignored unless blend lookup is on.
+   * - ``--checkpoint-path FILE``
+     - Checkpoint the coordinator's directory, usage view and stream cursors
+       to this file, so a restart resumes instead of starting cold. Unset
+       disables checkpointing.
+   * - ``--checkpoint-interval SECS``
+     - Seconds between checkpoint writes; ``0`` writes only on a clean stop
+       (default: ``60``). Ignored unless ``--checkpoint-path`` is set.
+   * - ``--metadata-path FILE``
+     - Store operator-set state -- L2 pins and per-``cache_salt`` quotas -- in
+       this file, written whenever it changes. Unset means that state is lost
+       on restart.
+   * - ``--extra-config JSON``
+     - JSON object of settings the core flags do not name, read by whichever
+       view or controller looks for them. Lets a new one ship with its own
+       settings without a flag here.
    * - ``--timeout-keep-alive SECS``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response`` (default: ``10``).
+   * - ``--disable-metrics``
+     - Disable OpenTelemetry metrics. Metrics are enabled by default.
+   * - ``--otlp-endpoint URL``
+     - Push metrics to the specified OTLP gRPC endpoint. When unset, Prometheus
+       pull mode exposes ``/metrics`` on the coordinator HTTP port.
 
 Configuration
 -------------
 
-Every flag is optional. Unset flags fall back to the
-``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``,
-``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, ``EVICTION_CHECK_INTERVAL``,
-``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, ``CHUNK_SIZE``, ``HASH_ALGORITHM``,
-``BLEND_PROBE_STRIDE``, ``TIMEOUT_KEEP_ALIVE``), and then to the built-in
-defaults. A supplied flag always overrides the matching env-derived value, so
-env-only deployments keep working unchanged.
+Every flag is optional; an unset flag keeps the built-in default listed above.
 
-A second set of env-only knobs controls the startup L2 resync —
-``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC`` (default ``True``),
-``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL`` (``1``),
-``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` (``60``), and
-``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE`` (``1000``). See
-:doc:`/mp/coordinator` for the boot-time resync flow and the active
-eviction loop.
+Prometheus pull mode reuses the coordinator's existing HTTP server; it does not
+start a second server or reserve a separate Prometheus port. Metrics-disabled
+and OTLP push modes both return HTTP 404 from the local ``/metrics`` route.
+
+See :doc:`/mp/coordinator` for the active eviction loop.
 
 The coordinator drives fleet-wide L2 eviction by calling each MP
-server's ``DELETE /l2`` endpoint, and resync paginates ``GET /l2/keys``
-on a registered MP server. Both endpoints are documented at
+server's ``DELETE /l2`` endpoint, documented at
 :ref:`mp-http-l2-keys-api`.
 
 See :doc:`/mp/coordinator` for the coordinator's architecture, registration

@@ -5,8 +5,8 @@
 from typing import Optional
 
 # First Party
-from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
+from lmcache.utils import get_size_bytes
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error

@@ -206,6 +206,8 @@ fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<b
 
 ///Per batch tracking for in flight I/O operation
 type BatchTracking = (Arc<AtomicU64>, Arc<Condvar>);
+type IoUringCompletionErrors = Vec<(usize, String)>;
+type IoUringBatchResults = (Vec<bool>, IoUringCompletionErrors);
 
 /// Round up to nearest multiple of alignment (required for O_DIRECT).
 #[allow(clippy::manual_div_ceil)]
@@ -792,6 +794,28 @@ impl IoCompletion {
         }
         guard.take().unwrap()
     }
+}
+
+// Convert a batch's completion objects into a success bitmap and sparse errors.
+fn collect_iouring_completion_results(
+    completions: Option<Vec<Arc<IoCompletion>>>,
+) -> IoUringBatchResults {
+    let Some(completions) = completions else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut results = Vec::with_capacity(completions.len());
+    let mut errors = Vec::new();
+    for (operation_index, completion) in completions.iter().enumerate() {
+        match completion.wait() {
+            Ok(()) => results.push(true),
+            Err(error) => {
+                results.push(false);
+                errors.push((operation_index, error.to_string()));
+            }
+        }
+    }
+    (results, errors)
 }
 
 /// Manages io_uring worker thread notification, using one `epoll` instance
@@ -2148,8 +2172,10 @@ impl RawBlockDevice {
     /// All writes are queued to the worker thread, which processes them
     /// in batches to maximize throughput.
     ///
-    /// Returns a batch_id that must be passed to wait_iouring() to wait
-    /// for completions for that batch.
+    /// Returns a batch ID that must be passed to `wait_iouring()` to wait for
+    /// completion and obtain a success bitmap plus sparse completion errors.
+    /// Validation or request-preparation errors are raised instead of returning
+    /// a batch ID.
     #[pyo3(signature = (offsets, buffers, total_lens, placement_ids = None))]
     fn batched_write(
         &self,
@@ -2405,12 +2431,16 @@ impl RawBlockDevice {
     ///     batch_id: The batch ID returned by batched_write() or batched_read().
     ///               Only completions from this batch are checked.
     ///
-    /// Returns an error if any I/O operation in this batch failed. The error message
-    /// includes details about the first failure encountered.
+    /// Returns a success bitmap aligned with the operations submitted in this
+    /// batch and a sparse list of `(operation_index, error_message)` entries.
+    /// `batched_read()` and `batched_write()` can raise validation or
+    /// request-preparation errors instead of returning a batch ID. After a
+    /// batch ID is returned, I/O completion failures are reported in both
+    /// returned collections.
     #[pyo3(signature = (batch_id))]
-    fn wait_iouring(&self, py: Python<'_>, batch_id: u64) -> PyResult<()> {
+    fn wait_iouring(&self, py: Python<'_>, batch_id: u64) -> PyResult<IoUringBatchResults> {
         if !self.use_iouring {
-            return Ok(());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         // Get the per-batch tracking for this batch
@@ -2423,24 +2453,12 @@ impl RawBlockDevice {
                     // Check if there are any completions for this batch
                     let mut completions = self.batched_completions.lock().unwrap();
                     let batch_completions = completions.remove(&batch_id);
-                    let mut first_error: Option<PyErr> = None;
-                    if let Some(comp_vec) = batch_completions {
-                        for comp in comp_vec.iter() {
-                            if let Err(e) = comp.wait() {
-                                if first_error.is_none() {
-                                    first_error = Some(e);
-                                }
-                            }
-                        }
-                    }
+                    drop(completions);
+                    let results = collect_iouring_completion_results(batch_completions);
                     // Clear stored buffer objects for this batch
                     let mut stored_objs = self.batched_buffer_objs.lock().unwrap();
                     stored_objs.remove(&batch_id);
-                    return if let Some(e) = first_error {
-                        Err(e)
-                    } else {
-                        Ok(())
-                    };
+                    return Ok(results);
                 }
             }
         };
@@ -2460,16 +2478,8 @@ impl RawBlockDevice {
         // Check all completion results for errors for this specific batch
         let mut completions = self.batched_completions.lock().unwrap();
         let batch_completions = completions.remove(&batch_id);
-        let mut first_error: Option<PyErr> = None;
-        if let Some(comp_vec) = batch_completions {
-            for comp in comp_vec.iter() {
-                if let Err(e) = comp.wait() {
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
-                }
-            }
-        }
+        drop(completions);
+        let results = collect_iouring_completion_results(batch_completions);
 
         // Clear stored buffer objects for this batch now that I/O is complete
         let mut stored_objs = self.batched_buffer_objs.lock().unwrap();
@@ -2479,11 +2489,7 @@ impl RawBlockDevice {
         let mut batch_map = self.batch_in_flight.lock().unwrap();
         batch_map.remove(&batch_id);
 
-        if let Some(e) = first_error {
-            Err(e)
-        } else {
-            Ok(())
-        }
+        Ok(results)
     }
 
     /// Synchronous read using io_uring.
@@ -2541,8 +2547,10 @@ impl RawBlockDevice {
             }
         }
 
-        // Check if the buffer is aligned for O_DIRECT
-        let ptr_aligned = if self.use_odirect {
+        // O_DIRECT and NVMe io_uring_cmd both require a page-aligned ptr for
+        // multi-page transfers (kernel / PRP list entries).
+        let needs_align = self.use_odirect || self.use_uring_cmd;
+        let ptr_aligned = if needs_align {
             (ptr as usize).is_multiple_of(align)
         } else {
             true
@@ -2559,7 +2567,7 @@ impl RawBlockDevice {
         };
 
         // Use bounce buffer if:
-        // Buffer is not aligned (O_DIRECT requirement)
+        // Buffer is not aligned (O_DIRECT or io_uring_cmd PRP requirement)
         // Buffer capacity is less than total_len
         let use_bounce = !ptr_aligned || cap < total_len;
 
@@ -2777,8 +2785,10 @@ impl RawBlockDevice {
     /// All reads are queued to the worker thread, which processes them
     /// in batches to maximize throughput.
     ///
-    /// Returns a batch_id that must be passed to wait_iouring() to wait
-    /// for completions for that batch
+    /// Returns a batch ID that must be passed to `wait_iouring()` to wait for
+    /// completion and obtain a success bitmap plus sparse completion errors.
+    /// Validation or request-preparation errors are raised instead of returning
+    /// a batch ID.
     #[pyo3(signature = (offsets, buffers, total_lens))]
     fn batched_read(
         &self,
@@ -2859,6 +2869,7 @@ impl RawBlockDevice {
 
         let fd = self.fd;
         let use_odirect = self.use_odirect;
+        let use_uring_cmd = self.use_uring_cmd;
         let alignment = self.alignment;
         let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
         // Clone the fixed buffer map before releasing GIL to avoid lock contention
@@ -2885,19 +2896,12 @@ impl RawBlockDevice {
         let res = py.allow_threads(move || {
             let mut submissions: Vec<(IoSubmission, Arc<IoCompletion>)> = Vec::with_capacity(n);
 
-            // Prepare all requests, validate buffers and collect submission data.
+            // Per-item bounce decision mirrors `read_uring`.
+            let needs_align = use_odirect || use_uring_cmd;
             for i in 0..n {
                 let total_len = total_lens[i];
                 let offset = offsets[i];
                 let cap = caps[i];
-
-                // Validate buffer capacity
-                if cap < total_len {
-                    return Err(PyValueError::new_err(format!(
-                        "output buffer too small: cap={} need={}",
-                        cap, total_len
-                    )));
-                }
 
                 if use_odirect {
                     #[allow(clippy::manual_is_multiple_of)]
@@ -2908,28 +2912,57 @@ impl RawBlockDevice {
                     if total_len % alignment != 0 {
                         return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
                     }
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if ptrs[i] % alignment != 0 {
-                        return Err(PyValueError::new_err("O_DIRECT requires aligned buffers"));
-                    }
                 }
+
+                // cap < total_len is OK (bounce handles it); cap == 0 is invalid.
+                if cap == 0 {
+                    return Err(PyValueError::new_err(format!(
+                        "output buffer too small: cap={} need={}",
+                        cap, total_len
+                    )));
+                }
+
+                let ptr_aligned = if needs_align {
+                    ptrs[i].is_multiple_of(alignment)
+                } else {
+                    true
+                };
+                let use_bounce = !ptr_aligned || cap < total_len;
 
                 let comp = Arc::new(IoCompletion::new());
 
-                // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                let (ptr_addr, fixed_idx, bounce_opt, original_ptr_opt, payload_len_opt) =
+                    if use_bounce {
+                        let bounce = AlignedBuf::new(total_len, alignment)?;
+                        let bounce_arc = Arc::new(bounce);
+                        let bounce_ptr = bounce_arc.as_mut_ptr() as usize;
+                        // Copy-back bounded by caller capacity.
+                        let payload_len = std::cmp::min(cap, total_len);
+                        (
+                            bounce_ptr,
+                            None,
+                            Some(bounce_arc),
+                            Some(ptrs[i]),
+                            Some(payload_len),
+                        )
+                    } else {
+                        // Fixed buffers are pre-registered with io_uring,
+                        // enabling true zero-copy I/O.
+                        let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                        (ptrs[i], fixed_idx, None, None, None)
+                    };
 
                 let sub = IoSubmission {
                     fd,
                     offset,
                     len: total_len,
-                    ptr_addr: ptrs[i],
+                    ptr_addr,
                     is_write: false, // read operation
                     completion: comp.clone(),
                     fixed_buffer_idx: fixed_idx,
-                    bounce: None,
-                    original_ptr: None,
-                    payload_len: None,
+                    bounce: bounce_opt,
+                    original_ptr: original_ptr_opt,
+                    payload_len: payload_len_opt,
                     batch_id,
                     nvme_cmd_data: nvme_cmd_data.clone(),
                 };

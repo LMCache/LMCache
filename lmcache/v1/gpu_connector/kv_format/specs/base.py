@@ -23,7 +23,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 # A format's enum name *is* its shape: ``_``-joined tokens, with ``X`` marking a
 # list level. ``TWO_X_NL_X_NBBS_NH_HS`` reads as ``2 x NL x [PBS, NH, HS]``.
@@ -58,23 +58,27 @@ _ACCESSORS = {
 }
 
 
-def _render_shape(fmt: "lmc_ops.EngineKVFormat", token: Callable[[str], str]) -> str:
+def _render_shape(
+    fmt: "lmcache_native.EngineKVFormat", token: Callable[[str], str]
+) -> str:
     *lists, inner = fmt.name.split("_X_")
     body = ", ".join(token(t) for t in inner.split("_"))
     return " x ".join([token(t) for t in lists] + [f"[{body}]"])
 
 
-def describe_shape(fmt: "lmc_ops.EngineKVFormat") -> str:
+def describe_shape(fmt: "lmcache_native.EngineKVFormat") -> str:
     """Symbolic shape of a format, e.g. ``NL_X_NB_BS_HS`` -> ``NL x [NB, BS, HS]``.
 
     Named ``describe_shape`` (not ``shape_desc``) to avoid confusion with the
-    unrelated :class:`lmc_ops.PageBufferShapeDesc` and its ``shape_desc``
+    unrelated :class:`device_ops.PageBufferShapeDesc` and its ``shape_desc``
     instances used on the transfer path.
     """
     return _render_shape(fmt, lambda t: _LABELS[t])
 
 
-def concrete_shape(fmt: "lmc_ops.EngineKVFormat", size: Callable[[str], int]) -> str:
+def concrete_shape(
+    fmt: "lmcache_native.EngineKVFormat", size: Callable[[str], int]
+) -> str:
     """Numeric shape of a format; ``size(label)`` gives each axis's dimension.
 
     E.g. ``NL_X_TWO_NB_BS_NH_HS`` with ``NL=32, NB=2048, BS=16, NH=8, HS=128``
@@ -121,7 +125,7 @@ class KVFormatSpec(ABC):
     object: that would keep the engine's GPU KV tensors alive past disconnect.
     """
 
-    engine_kv_format: ClassVar["lmc_ops.EngineKVFormat"]
+    engine_kv_format: ClassVar["lmcache_native.EngineKVFormat"]
     attention_backends: ClassVar[tuple[str, ...]] = ()
 
     # ── Static layout facts (see the class docstring) ──────────────────
@@ -146,6 +150,9 @@ class KVFormatSpec(ABC):
     # ``num_blocks`` and ``block_size`` are folded into one PBS axis, which
     # leaves both of them undefined for this format.
     is_pbs_fused: ClassVar[bool] = False
+    # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
+    # than a single stacked per-layer tensor.
+    is_kv_second_tuple: ClassVar[bool] = False
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The
@@ -211,9 +218,12 @@ class KVFormatSpec(ABC):
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
         """Return device pointers for ``layer_indices`` in kernel-expected order.
 
-        Per-layer formats: one pointer per layer. SGLang two-list MHA: all K
-        pointers then all V. Cross-layer: a single base pointer (the kernel
-        walks layers itself, so ``layer_indices`` is ignored).
+        Per-layer formats: one pointer per layer.
+
+        SGLang two-list MHA: all K pointers, then all V pointers.
+
+        Cross-layer with a K/V axis: a single base pointer; the kernel walks
+        layers itself, so ``layer_indices`` is ignored.
         """
 
     def concrete_shape_str(self) -> str:

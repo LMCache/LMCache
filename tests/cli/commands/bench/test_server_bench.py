@@ -22,6 +22,7 @@ import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.bench.server_bench.config import WorkerSpec
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _allocate_kv_cache,
     _build_token_ids,
@@ -33,6 +34,31 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+
+
+def _make_shape_desc(
+    *,
+    kv_size: int,
+    nl: int,
+    nb: int,
+    bs: int,
+    nh: int,
+    hs: int,
+    dtype: torch.dtype,
+) -> PageBufferShapeDesc:
+    """Build a typed ``PageBufferShapeDesc`` for bench test groups."""
+    shape_desc = PageBufferShapeDesc()
+    shape_desc.kv_size = kv_size
+    shape_desc.nl = nl
+    shape_desc.nb = nb
+    shape_desc.bs = bs
+    shape_desc.nh = nh
+    shape_desc.hs = hs
+    shape_desc.element_size = dtype.itemsize
+    shape_desc.dtype = dtype
+    return shape_desc
+
 
 # ------------------------------------------------------------------ #
 #  Fixtures
@@ -388,9 +414,6 @@ class TestAllocateKVCache:
         (and the total ``num_layers`` from the sum), silently producing
         wrong tensors for layers in later groups.
         """
-        # Standard
-        from types import SimpleNamespace
-
         # First Party
         from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 
@@ -400,12 +423,28 @@ class TestAllocateKVCache:
         # requirement of paged KV, enforced in CLI execute().)
         group_a = KVLayerGroupInfo(
             layer_indices=[0, 1, 2],
-            shape_desc=SimpleNamespace(kv_size=2, nb=2, bs=2, nh=8, hs=16, nl=3),
+            shape_desc=_make_shape_desc(
+                kv_size=2,
+                nl=3,
+                nb=2,
+                bs=2,
+                nh=8,
+                hs=16,
+                dtype=torch.float16,
+            ),
             dtype=torch.float16,
         )
         group_b = KVLayerGroupInfo(
             layer_indices=[3, 4],
-            shape_desc=SimpleNamespace(kv_size=1, nb=2, bs=2, nh=4, hs=32, nl=2),
+            shape_desc=_make_shape_desc(
+                kv_size=1,
+                nl=2,
+                nb=2,
+                bs=2,
+                nh=4,
+                hs=32,
+                dtype=torch.bfloat16,
+            ),
             dtype=torch.bfloat16,
         )
         tensors = _allocate_kv_cache(
@@ -885,9 +924,6 @@ class TestAllocShapeContract:
     """
 
     def test_mla_alloc_shape_is_rank3(self) -> None:
-        # Standard
-        from types import SimpleNamespace
-
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _allocate_kv_cache,
@@ -896,7 +932,15 @@ class TestAllocShapeContract:
 
         group = KVLayerGroupInfo(
             layer_indices=[0, 1],
-            shape_desc=SimpleNamespace(kv_size=1, nb=4, bs=2, nh=1, hs=32, nl=2),
+            shape_desc=_make_shape_desc(
+                kv_size=1,
+                nl=2,
+                nb=4,
+                bs=2,
+                nh=1,
+                hs=32,
+                dtype=torch.bfloat16,
+            ),
             dtype=torch.bfloat16,
         )
         tensors = _allocate_kv_cache(device="cpu", groups=[group])
@@ -907,9 +951,6 @@ class TestAllocShapeContract:
             assert t.dtype == torch.bfloat16
 
     def test_classical_alloc_shape_is_rank5(self) -> None:
-        # Standard
-        from types import SimpleNamespace
-
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _allocate_kv_cache,
@@ -918,7 +959,15 @@ class TestAllocShapeContract:
 
         group = KVLayerGroupInfo(
             layer_indices=[0],
-            shape_desc=SimpleNamespace(kv_size=2, nb=4, bs=2, nh=8, hs=16, nl=1),
+            shape_desc=_make_shape_desc(
+                kv_size=2,
+                nl=1,
+                nb=4,
+                bs=2,
+                nh=8,
+                hs=16,
+                dtype=torch.float16,
+            ),
             dtype=torch.float16,
         )
         tensors = _allocate_kv_cache(device="cpu", groups=[group])
@@ -989,13 +1038,16 @@ class TestProcessRequestMultiWorker:
         for rank in range(tp_size):
             workers.append(
                 WorkerContext(
-                    kv_worker_id=0 if is_mla else rank,
-                    kv_world_size=kv_world_size,
-                    instance_id=_INSTANCE_ID_BASE + rank,
+                    spec=WorkerSpec(
+                        rank=rank,
+                        kv_worker_id=0 if is_mla else rank,
+                        kv_world_size=kv_world_size,
+                        instance_id=_INSTANCE_ID_BASE + rank,
+                        store_enabled=(rank == 0) if is_mla else True,
+                        retrieve_enabled=True,
+                    ),
                     client_tensors=None,
                     server_pool=None,
-                    # MLA: only rank 0 stores; non-MLA: every rank stores.
-                    is_kv_writer=(rank == 0) if is_mla else True,
                 )
             )
 
@@ -1011,7 +1063,7 @@ class TestProcessRequestMultiWorker:
             patch.object(sv_helpers, "_call", side_effect=fake_call),
             patch.object(sv_helpers, "_make_event_handle", return_value=b""),
         ):
-            _process_request(
+            result = _process_request(
                 client=None,  # type: ignore[arg-type]  # unused: _call mocked
                 seq_no=0,
                 num_tokens=32,
@@ -1027,10 +1079,11 @@ class TestProcessRequestMultiWorker:
                 world_size=kv_world_size,
             )
 
-        return calls
+        assert result is not None
+        return calls, result
 
     def test_mla_tp2_store_only_from_rank0(self) -> None:
-        calls = self._run(is_mla=True, tp_size=2)
+        calls, result = self._run(is_mla=True, tp_size=2)
         # Extract STORE + RETRIEVE calls with their instance_id argument.
         stores = [c for c in calls if c[0].name == "STORE"]
         retrieves = [c for c in calls if c[0].name == "RETRIEVE"]
@@ -1053,9 +1106,14 @@ class TestProcessRequestMultiWorker:
         )
         # No hits in the fake -> RETRIEVE is skipped entirely.
         assert retrieves == []
+        assert result.lookup.is_full_miss
+        assert result.store is not None
+        assert result.store.attempted_worker_ranks == (0,)
+        assert result.store.successful_worker_ranks == (0,)
+        assert result.store.succeeded
 
     def test_non_mla_tp2_store_on_every_rank(self) -> None:
-        calls = self._run(is_mla=False, tp_size=2)
+        calls, result = self._run(is_mla=False, tp_size=2)
         stores = [c for c in calls if c[0].name == "STORE"]
         # Non-MLA: every rank stores.
         assert len(stores) == 2
@@ -1072,22 +1130,25 @@ class TestProcessRequestMultiWorker:
             )
         worker_ids = sorted(c[1][0].worker_id for c in stores)
         assert worker_ids == [0, 1]
+        assert result.store is not None
+        assert result.store.attempted_worker_ranks == (0, 1)
+        assert result.store.successful_worker_ranks == (0, 1)
+        assert result.store.succeeded
 
     def test_lookup_called_once_regardless_of_tp(self) -> None:
         for is_mla in (True, False):
             for tp in (1, 2, 4):
-                calls = self._run(is_mla=is_mla, tp_size=tp)
+                calls, _result = self._run(is_mla=is_mla, tp_size=tp)
                 lookups = [c for c in calls if c[0].name == "LOOKUP"]
                 assert len(lookups) == 1, (
                     "LOOKUP should fire exactly once regardless of tp_size "
                     "(is_mla=%s, tp=%d)" % (is_mla, tp)
                 )
-                # LOOKUP payload is ``[key, tp_size]``. MLA with tp>1
-                # needs tp_size on the wire so the server adds
-                # ``tp_size - 1`` extra read locks per chunk (see
-                # compute_extra_count in lookup.py); a hard-coded 1
-                # under-locks and subsequent-rank RETRIEVE reads stale
-                # bytes with a "non-read-locked key" warning.
+                # LOOKUP payload is ``[key, tp_size]``. The server
+                # reserves ``key.num_kv_readers`` read locks per chunk
+                # (see IPCCacheServerKey.require_num_kv_readers);
+                # tp_size is a legacy wire field kept for
+                # compatibility, so assert it still travels intact.
                 assert lookups[0][1][1] == tp, (
                     "LOOKUP payload tp_size must equal simulated tp "
                     "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])

@@ -33,6 +33,8 @@ from lmcache.v1.metadata import LMCacheMetadata
 import lmcache as lmc
 import lmcache.v1.gpu_connector as gpu_connector_module
 
+pytestmark = pytest.mark.musa
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -117,7 +119,8 @@ def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
     from lmcache.v1.platform._device_detect import _detect_device
 
     with patch.dict("sys.modules", {"torch": stub}):
-        return _detect_device()
+        dev, name, _ = _detect_device()
+        return dev, name
 
 
 def test_detect_device_prefers_musa_when_available() -> None:
@@ -265,13 +268,36 @@ def test_create_gpu_connector_musa_dispatches_to_musa_connector(
     )
 
 
-def test_create_gpu_connector_rejects_sglang_on_musa(
+@pytest.mark.parametrize("use_layerwise", [False, True])
+def test_create_gpu_connector_dispatches_sglang_on_musa(
     monkeypatch: pytest.MonkeyPatch,
+    use_layerwise: bool,
 ) -> None:
-    """Stage2 does not expose SGLang MUSA connector dispatch."""
+    """SGLang on MUSA selects the matching MUSA connector."""
     _patch_device(monkeypatch, "musa")
-    with pytest.raises(ValueError, match="SGLang on MUSA"):
-        CreateGPUConnector(_make_config(), _make_metadata(), EngineType.SGLANG)
+    monkeypatch.setattr(
+        gpu_connector_module.torch, "device", lambda *_args, **_kwargs: "musa:0"
+    )
+
+    # First Party
+    from lmcache.v1.gpu_connector import musa_connectors as musa_sglang
+
+    sentinel = object()
+    target_name = (
+        "SGLangLayerwiseMUSAConnector" if use_layerwise else "SGLangMUSAConnector"
+    )
+    monkeypatch.setattr(
+        musa_sglang,
+        target_name,
+        lambda *_args, **_kwargs: sentinel,
+    )
+
+    connector = CreateGPUConnector(
+        _make_config(use_layerwise=use_layerwise),
+        _make_metadata(),
+        EngineType.SGLANG,
+    )
+    assert connector is sentinel
 
 
 # ---------------------------------------------------------------------------

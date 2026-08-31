@@ -19,7 +19,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
@@ -845,29 +845,29 @@ class TestMultipleRequests:
 
 
 # =============================================================================
-# extra_count Path
+# num_kv_readers Path
 # =============================================================================
 
 
-class TestExtraCountPrefetch:
-    """Test that extra_count is correctly propagated through the prefetch path.
+class TestNumKVReadersPrefetch:
+    """Test that num_kv_readers is correctly propagated through prefetch.
 
-    When extra_count=N is passed to submit_prefetch_request, the controller
-    must acquire 1 + N read locks per key (one for the prefetch controller
-    itself, plus N for additional TP workers).  Each consumer must call
-    finish_read (or finish_read_prefetched) once to release its lock.
+    When num_kv_readers=N is passed on the spec, the controller must
+    acquire N read locks per key (one per reader that will retrieve the
+    object).  Each consumer must call finish_read (or
+    finish_read_prefetched) once to release its read lock.
 
     These tests verify:
-    1. Keys remain accessible after the first finish_read when extra_count > 0.
-    2. Keys are evictable only after ALL 1 + N locks are released.
-    3. extra_count=0 (default) behaves identically to the original single-lock
-       path.
-    4. Prefix trimming still works correctly with extra_count > 0.
-    5. Non-prefix loaded keys have all extra locks released by _finalize_load.
+    1. Keys remain accessible after the first finish_read when N > 1.
+    2. Keys are evictable only after ALL N locks are released.
+    3. num_kv_readers=1 (default) behaves identically to the original
+       single-lock path.
+    4. Prefix trimming still works correctly with N > 1.
+    5. Non-prefix loaded keys have all read locks released by _finalize_load.
     """
 
-    def test_extra_count_zero_default_behavior(self, l1_manager):
-        """extra_count=0 (default): single read lock, key freed after one
+    def test_single_reader_default_behavior(self, l1_manager):
+        """num_kv_readers=1 (default): single read lock, key freed after one
         finish_read."""
         adapter = make_adapter()
         layout = make_layout()
@@ -883,7 +883,7 @@ class TestExtraCountPrefetch:
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(
-            PrefetchRequestSpec(keys, {0: layout}, extra_count=0)
+            PrefetchRequestSpec(keys, {0: layout}, num_kv_readers=1)
         )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
@@ -894,15 +894,15 @@ class TestExtraCountPrefetch:
             assert read_results[key][0] == L1Error.SUCCESS
 
         # Release the single read lock — keys should become unlocked
-        finish_results = l1_manager.finish_read(keys, extra_count=0)
+        finish_results = l1_manager.finish_read(keys, read_locks=1)
         for key in keys:
             assert finish_results[key] == L1Error.SUCCESS
 
         ctrl.stop()
         adapter.close()
 
-    def test_extra_count_one_requires_two_finish_reads(self, l1_manager):
-        """extra_count=1: two read locks acquired; key stays locked after
+    def test_two_readers_require_two_finish_reads(self, l1_manager):
+        """num_kv_readers=2: two read locks acquired; key stays locked after
         first finish_read and is released after second."""
         adapter = make_adapter()
         layout = make_layout()
@@ -917,9 +917,9 @@ class TestExtraCountPrefetch:
         )
         ctrl.start()
 
-        # extra_count=1 → 2 read locks per key
+        # num_kv_readers=2 → 2 read locks per key
         req_id = ctrl.submit_prefetch_request(
-            PrefetchRequestSpec(keys, {0: layout}, extra_count=1)
+            PrefetchRequestSpec(keys, {0: layout}, num_kv_readers=2)
         )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
@@ -929,8 +929,8 @@ class TestExtraCountPrefetch:
         for key in keys:
             assert read_results[key][0] == L1Error.SUCCESS
 
-        # Release lock #1 (the "prefetch controller" lock, extra_count=0)
-        finish_results = l1_manager.finish_read(keys, extra_count=0)
+        # Release lock #1 (the "prefetch controller" read lock)
+        finish_results = l1_manager.finish_read(keys, read_locks=1)
         for key in keys:
             assert finish_results[key] == L1Error.SUCCESS
 
@@ -941,16 +941,16 @@ class TestExtraCountPrefetch:
                 f"Key {key} should still be read-locked after first finish_read"
             )
 
-        # Release lock #2 (the TP worker lock, extra_count=0)
-        finish_results2 = l1_manager.finish_read(keys, extra_count=0)
+        # Release lock #2 (the TP worker read lock)
+        finish_results2 = l1_manager.finish_read(keys, read_locks=1)
         for key in keys:
             assert finish_results2[key] == L1Error.SUCCESS
 
         ctrl.stop()
         adapter.close()
 
-    def test_extra_count_three_requires_four_finish_reads(self, l1_manager):
-        """extra_count=3 (TP=4): four read locks; key stays locked until all
+    def test_four_readers_require_four_finish_reads(self, l1_manager):
+        """num_kv_readers=4 (TP=4): four read locks; key stays locked until all
         four are released."""
         adapter = make_adapter()
         layout = make_layout()
@@ -965,16 +965,16 @@ class TestExtraCountPrefetch:
         )
         ctrl.start()
 
-        # extra_count=3 → 4 read locks per key
+        # num_kv_readers=4 → 4 read locks per key
         req_id = ctrl.submit_prefetch_request(
-            PrefetchRequestSpec(keys, {0: layout}, extra_count=3)
+            PrefetchRequestSpec(keys, {0: layout}, num_kv_readers=4)
         )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2
 
         # Release locks one by one; key must remain readable until the last
         for release_idx in range(3):
-            finish_results = l1_manager.finish_read(keys, extra_count=0)
+            finish_results = l1_manager.finish_read(keys, read_locks=1)
             for key in keys:
                 assert finish_results[key] == L1Error.SUCCESS
 
@@ -987,15 +987,15 @@ class TestExtraCountPrefetch:
                 )
 
         # Release the final lock
-        finish_results = l1_manager.finish_read(keys, extra_count=0)
+        finish_results = l1_manager.finish_read(keys, read_locks=1)
         for key in keys:
             assert finish_results[key] == L1Error.SUCCESS
 
         ctrl.stop()
         adapter.close()
 
-    def test_extra_count_with_prefix_trim(self, l1_manager):
-        """extra_count=1 with a gap in L2: only prefix keys get 2 locks;
+    def test_multi_reader_with_prefix_trim(self, l1_manager):
+        """num_kv_readers=2 with a gap in L2: only prefix keys get 2 locks;
         non-prefix keys are never loaded."""
         adapter = make_adapter()
         layout = make_layout()
@@ -1013,7 +1013,7 @@ class TestExtraCountPrefetch:
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(
-            PrefetchRequestSpec(all_keys, {0: layout}, extra_count=1)
+            PrefetchRequestSpec(all_keys, {0: layout}, num_kv_readers=2)
         )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2, f"Expected 2 prefix hits (gap at index 2), got {result}"
@@ -1026,7 +1026,7 @@ class TestExtraCountPrefetch:
             assert read_results[key][0] == L1Error.SUCCESS
 
         # Release lock #1 — prefix keys still held by lock #2
-        l1_manager.finish_read(prefix_keys, extra_count=0)
+        l1_manager.finish_read(prefix_keys, read_locks=1)
 
         read_results2 = l1_manager.unsafe_read(prefix_keys)
         for key in prefix_keys:
@@ -1035,7 +1035,7 @@ class TestExtraCountPrefetch:
             )
 
         # Release lock #2
-        l1_manager.finish_read(prefix_keys, extra_count=0)
+        l1_manager.finish_read(prefix_keys, read_locks=1)
 
         # Non-prefix keys must NOT be in L1
         non_prefix_keys = all_keys[2:]
@@ -1048,13 +1048,13 @@ class TestExtraCountPrefetch:
         ctrl.stop()
         adapter.close()
 
-    def test_extra_count_non_prefix_loaded_keys_fully_released(self, l1_manager):
+    def test_non_prefix_loaded_keys_fully_released(self, l1_manager):
         """Keys loaded beyond the prefix (due to partial load failure) must
         have ALL extra locks released by the finish so they can be evicted.
 
         Keys {0, 1, 2} are in L2 and all reserve fine, but the *load* of
         key 1 fails (fault-injected), creating a gap so that key 2 is loaded
-        but lies beyond the prefix.  The finish must release 1 + extra_count
+        but lies beyond the prefix.  The finish must release every read lock
         locks for key 2.
         """
         layout = make_layout()
@@ -1073,18 +1073,18 @@ class TestExtraCountPrefetch:
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(
-            PrefetchRequestSpec(keys, {0: layout}, extra_count=1)
+            PrefetchRequestSpec(keys, {0: layout}, num_kv_readers=2)
         )
         result = wait_for_prefetch_result(ctrl, req_id)
         # Only key 0 is in the prefix (key 1 load failed → gap)
         assert result == 1, f"Expected 1 prefix hit, got {result}"
 
-        # key[0] should be in L1 with 2 read locks (1 + extra_count=1)
+        # key[0] should be in L1 with 2 read locks (num_kv_readers=2)
         read_results = l1_manager.unsafe_read([keys[0]])
         assert read_results[keys[0]][0] == L1Error.SUCCESS
 
         # key[2] was loaded but is beyond the prefix; the finish must have
-        # released all 1 + extra_count=2 locks, so it should be gone from L1
+        # released all 2 read locks, so it should be gone from L1
         # (it's a temporary object and its lock count should be 0).
         reserve_results = l1_manager.reserve_read([keys[2]])
         assert reserve_results[keys[2]][0] == L1Error.KEY_NOT_EXIST, (
@@ -1093,8 +1093,8 @@ class TestExtraCountPrefetch:
         )
 
         # Clean up: release key[0]'s 2 locks
-        l1_manager.finish_read([keys[0]], extra_count=0)
-        l1_manager.finish_read([keys[0]], extra_count=0)
+        l1_manager.finish_read([keys[0]], read_locks=1)
+        l1_manager.finish_read([keys[0]], read_locks=1)
         ctrl.stop()
         fault.close()
 

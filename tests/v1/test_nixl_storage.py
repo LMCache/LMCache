@@ -21,6 +21,7 @@ from nixl._api import nixl_agent as NixlAgent
 from nixl._api import nixl_agent_config as NixlAgentConfig
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
@@ -34,12 +35,12 @@ from lmcache.v1.storage_backend.nixl_storage_backend import (
 )
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
-# cuFile-based backends (GDS, GDS_MT) need a GDS-capable filesystem
+# Scratch directory for cuFile-backed GDS probes and tests.
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
 
 @functools.lru_cache(maxsize=None)
-def _can_register_file_with_nixl_backend(backend: str) -> bool:
+def _nixl_file_registration_error(backend: str) -> str | None:
     """Probe ``cuFileHandleRegister`` via NIXL on the test scratch dir."""
 
     probe_dir = tempfile.mkdtemp(prefix="nixl_gds_probe_", dir=_TEST_TMPDIR)
@@ -54,9 +55,9 @@ def _can_register_file_with_nixl_backend(backend: str) -> bool:
         fd = os.open(probe_path, os.O_CREAT | os.O_RDWR, 0o600)
         os.write(fd, b"\x00" * 4096)
         agent.register_memory([(0, 4096, fd, "")], mem_type="FILE")
-        return True
-    except Exception:
-        return False
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
     finally:
         if fd >= 0:
             with contextlib.suppress(OSError):
@@ -64,10 +65,15 @@ def _can_register_file_with_nixl_backend(backend: str) -> bool:
         shutil.rmtree(probe_dir, ignore_errors=True)
 
 
-_GDS_SKIP_REASON = (
-    "NIXL {backend} cannot register file handles in this environment; "
-    "set LMCACHE_TEST_TMPDIR to a GDS-capable mount (ext4/xfs) to enable."
-)
+def _gds_skip_reason(backend: str) -> str:
+    scratch_dir = _TEST_TMPDIR or tempfile.gettempdir()
+    error = _nixl_file_registration_error(backend)
+    return (
+        f"NIXL {backend} could not register a file handle under {scratch_dir}: "
+        f"{error}. The path may not support GDS-direct I/O, or cuFile "
+        f"allow_compat_mode may be disabled; check `findmnt -T {scratch_dir}`, "
+        "`/etc/cufile.json`, and `gdscheck -p`."
+    )
 
 
 @pytest.fixture
@@ -265,10 +271,10 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not _can_register_file_with_nixl_backend("GDS_MT"),
-    reason=_GDS_SKIP_REASON.format(backend="GDS_MT"),
+    _nixl_file_registration_error("GDS_MT") is not None,
+    reason=_gds_skip_reason("GDS_MT"),
 )
 def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
@@ -277,7 +283,7 @@ def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
     dtype = torch.bfloat16
     shape = torch.Size([4, 2, 256, 8, 128])
 
-    config.nixl_buffer_device = "cuda"
+    config.nixl_buffer_device = torch_device_type
     # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
     # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
     config.nixl_buffer_size = 1024**3
@@ -290,8 +296,8 @@ def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.skipif(
-    not _can_register_file_with_nixl_backend("GDS_MT"),
-    reason=_GDS_SKIP_REASON.format(backend="GDS_MT"),
+    _nixl_file_registration_error("GDS_MT") is not None,
+    reason=_gds_skip_reason("GDS_MT"),
 )
 def test_nixl_gds_mt_cpu_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
@@ -309,10 +315,10 @@ def test_nixl_gds_mt_cpu_backend(nixl_tmp_path):
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not _can_register_file_with_nixl_backend("GDS"),
-    reason=_GDS_SKIP_REASON.format(backend="GDS"),
+    _nixl_file_registration_error("GDS") is not None,
+    reason=_gds_skip_reason("GDS"),
 )
 def test_nixl_gds_cuda_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
@@ -321,7 +327,7 @@ def test_nixl_gds_cuda_backend(nixl_tmp_path):
     dtype = torch.bfloat16
     shape = torch.Size([4, 2, 256, 8, 128])
 
-    config.nixl_buffer_device = "cuda"
+    config.nixl_buffer_device = torch_device_type
     # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
     # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
     config.nixl_buffer_size = 1024**3
@@ -334,8 +340,8 @@ def test_nixl_gds_cuda_backend(nixl_tmp_path):
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.skipif(
-    not _can_register_file_with_nixl_backend("GDS"),
-    reason=_GDS_SKIP_REASON.format(backend="GDS"),
+    _nixl_file_registration_error("GDS") is not None,
+    reason=_gds_skip_reason("GDS"),
 )
 def test_nixl_gds_cpu_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
@@ -447,6 +453,10 @@ def test_nixl_presence_cache_only_requires_presence_cache():
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(
+    _nixl_file_registration_error("POSIX") is not None,
+    reason="NIXL POSIX backend cannot register file handles in this environment",
+)
 def test_nixl_posix_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
@@ -463,6 +473,10 @@ def test_nixl_posix_backend(nixl_tmp_path):
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(
+    _nixl_file_registration_error("POSIX") is not None,
+    reason="NIXL POSIX backend cannot register file handles in this environment",
+)
 def test_nixl_posix_backend_multipath():
     """Test NIXL backend with multipath support and path sharding."""
     BASE_DIR = Path(__file__).parent

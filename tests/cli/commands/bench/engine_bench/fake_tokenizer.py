@@ -64,6 +64,30 @@ class FakeTokenizer:
             for t, i in self._text_to_id.items()
         }
 
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        tokenize: bool = False,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        """Wrap the first message the way a chat model's template would.
+
+        Only the shape matters to callers that measure how many tokens the
+        template inserts ahead of the content, so this renders a fixed
+        role prefix and suffix rather than any real model's template.
+
+        Args:
+            messages: Chat messages; only the first one's content is used.
+            tokenize: Accepted for signature compatibility and ignored —
+                the rendering is always returned as text.
+            add_generation_prompt: Accepted for signature compatibility and
+                ignored — the assistant prefix is always appended.
+
+        Returns:
+            The rendered text.
+        """
+        return "user\n" + messages[0]["content"] + "\nassistant\n"
+
     def batch_decode(self, ids_list: list[list[int]]) -> list[str]:
         return [self.decode(ids) for ids in ids_list]
 
