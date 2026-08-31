@@ -103,7 +103,6 @@ def worker_with_transfer_context(
 
     worker = AtomMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",
-        context=MagicMock(name="zmq_context"),
         model_name="atom-test-model",
         block_size=64,
         parallel_config=AtomMPParallelConfig(
@@ -143,14 +142,12 @@ def _make_adapter(
     if adapter_kind == "scheduler":
         return AtomMPSchedulerAdapter(
             server_url="tcp://127.0.0.1:5555",
-            context=MagicMock(name="zmq_context"),
             model_name="atom-test-model",
             block_size=64,
             parallel_config=AtomMPParallelConfig(2, 1, 2),
         )
     return AtomMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",
-        context=MagicMock(name="zmq_context"),
         model_name="atom-test-model",
         block_size=64,
         parallel_config=AtomMPParallelConfig(2, 1, 2),
@@ -652,7 +649,6 @@ def test_atom_shutdown_discards_late_recovery_registration(
     _FakeHeartbeatThread.instances.clear()
     worker = AtomMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",
-        context=MagicMock(name="zmq_context"),
         model_name="atom-test-model",
         block_size=64,
         parallel_config=AtomMPParallelConfig(2, 1, 2),
@@ -722,7 +718,6 @@ def test_atom_heartbeat_publish_and_start_are_one_lifecycle_transition(
     _BlockingStartHeartbeat.instances.clear()
     worker = AtomMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",
-        context=MagicMock(name="zmq_context"),
         model_name="atom-test-model",
         block_size=64,
         parallel_config=AtomMPParallelConfig(2, 1, 2),

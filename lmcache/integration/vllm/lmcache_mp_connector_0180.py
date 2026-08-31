@@ -7,10 +7,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-import zmq
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import check_interprocess_event_support, init_logger as lmcache_init_logger
+from lmcache.utils import (
+    check_interprocess_event_support,
+    init_logger as lmcache_init_logger,
+)
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -103,7 +105,6 @@ def extract_world_size_and_kv_rank(
 
 def create_scheduler_adapter(
     server_url: str,
-    zmq_context: zmq.Context,
     vllm_config: VllmConfig,
     mq_timeout: float,
     heartbeat_interval: float,
@@ -122,12 +123,11 @@ def create_scheduler_adapter(
         kwargs["tp_size"] = tp_size
 
     return LMCacheMPSchedulerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
-        world_size,
-        kv_rank,
-        vllm_config.cache_config.block_size,
+        server_urls=[server_url],
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=world_size,
+        parallel_strategy=kv_rank,
+        legacy_block_size=vllm_config.cache_config.block_size,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
         **kwargs,
@@ -136,7 +136,6 @@ def create_scheduler_adapter(
 
 def create_worker_adapter(
     server_url: str,
-    zmq_context: zmq.Context,
     vllm_config: VllmConfig,
     mq_timeout: float,
     heartbeat_interval: float,
@@ -148,12 +147,11 @@ def create_worker_adapter(
     )
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPWorkerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
-        world_size,
-        kv_rank,
-        vllm_config.cache_config.block_size,
+        server_url=server_url,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=world_size,
+        parallel_strategy=kv_rank,
+        legacy_block_size=vllm_config.cache_config.block_size,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
         extra_config=extra_config,
@@ -489,11 +487,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         )
 
         server_url = f"{server_host}:{server_port}"
-        zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
                 server_url,
-                zmq_context,
                 vllm_config,
                 mq_timeout,
                 heartbeat_interval,
@@ -502,7 +498,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         elif self.role == KVConnectorRole.WORKER:
             self.worker_adapter = create_worker_adapter(
                 server_url,
-                zmq_context,
                 vllm_config,
                 mq_timeout,
                 heartbeat_interval,

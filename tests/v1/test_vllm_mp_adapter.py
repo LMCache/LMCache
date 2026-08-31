@@ -108,7 +108,6 @@ def _make_worker_adapter(
     )
     return LMCacheMPWorkerAdapter(
         server_url="tcp://127.0.0.1:0",
-        context=MagicMock(name="zmq_context"),
         model_name="test-model",
         vllm_block_size=16,
         parallel_strategy=parallel_strategy,
@@ -680,7 +679,6 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     )
     adapter = _NullingTransferCtxAdapter(
         server_url="tcp://127.0.0.1:0",
-        context=MagicMock(name="zmq_context"),
         model_name="test-model",
         vllm_block_size=16,
         parallel_strategy=parallel_strategy,

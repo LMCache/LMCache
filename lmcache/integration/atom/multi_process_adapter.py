@@ -165,14 +165,13 @@ class AtomMPSchedulerAdapter:
     def __init__(
         self,
         server_url: str,
-        context: Any,
         model_name: str,
         block_size: int,
         parallel_config: AtomMPParallelConfig,
         *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
     ) -> None:
-        client = MultiprocessGrpcClient(server_url, context)
+        client = MultiprocessGrpcClient(server_url)
         self._model_name = model_name
         self._parallel = parallel_config
         self._mq_timeout = mq_timeout
@@ -307,7 +306,6 @@ class AtomMPWorkerAdapter:
     def __init__(
         self,
         server_url: str,
-        context: Any,
         model_name: str,
         block_size: int,
         parallel_config: AtomMPParallelConfig,
@@ -316,7 +314,7 @@ class AtomMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         transfer_mode: str | None = None,
     ) -> None:
-        client = MultiprocessGrpcClient(server_url, context)
+        client = MultiprocessGrpcClient(server_url)
         self._model_name = model_name
         self._block_size = block_size
         self._parallel = parallel_config

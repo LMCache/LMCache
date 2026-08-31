@@ -567,7 +567,6 @@ class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
         server_urls: list[str],
-        context: Any,
         model_name: str,
         vllm_block_size: int,
         parallel_strategy: ParallelStrategy | int,
@@ -580,7 +579,6 @@ class LMCacheMPSchedulerAdapter:
         """
         Args:
             server_urls: The server URLs for LMCache multiprocess gRPC.
-            context: Legacy transport context slot, ignored by gRPC.
             model_name: The model name used for LMCache keys
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
@@ -597,7 +595,6 @@ class LMCacheMPSchedulerAdapter:
                 ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
         """
-        del context
         vllm_block_size, parallel_strategy, mq_timeout = _normalize_adapter_init_args(
             vllm_block_size,
             parallel_strategy,
@@ -1055,7 +1052,6 @@ class LMCacheMPWorkerAdapter:
     def __init__(
         self,
         server_url: str,
-        context: Any,
         model_name: str,
         vllm_block_size: int,
         parallel_strategy: ParallelStrategy | int,
@@ -1069,7 +1065,6 @@ class LMCacheMPWorkerAdapter:
 
         Args:
             server_url: The server URL for LMCache multiprocess gRPC.
-            context: Legacy transport context slot, ignored by gRPC.
             model_name: The model name used for LMCache keys.
             vllm_block_size: The block size used in vLLM, or legacy KV world
                 size when ``parallel_strategy`` is an int.
@@ -1088,7 +1083,6 @@ class LMCacheMPWorkerAdapter:
         Raises:
             TypeError: If the connector argument shape is unsupported.
         """
-        del context
         vllm_block_size, parallel_strategy, mq_timeout = _normalize_adapter_init_args(
             vllm_block_size,
             parallel_strategy,

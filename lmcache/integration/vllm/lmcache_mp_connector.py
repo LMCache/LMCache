@@ -31,7 +31,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 import torch
-import zmq
 
 # First Party
 from lmcache.banner import print_banner_once
@@ -368,7 +367,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     f"Got pp_size={pp_size}."
                 )
 
-        zmq_context = zmq.Context.instance()
         parallel_strategy = build_parallel_strategy_from_vllm_config(
             vllm_config, n_servers
         )
@@ -390,7 +388,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             print_banner_once(sys.stderr)
             self.scheduler_adapter = LMCacheMPSchedulerAdapter(
                 server_urls=server_urls,
-                context=zmq_context,
                 model_name=vllm_config.model_config.model,
                 vllm_block_size=vllm_config.cache_config.block_size * dcp_size,
                 parallel_strategy=parallel_strategy,
@@ -417,7 +414,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ]
             self.worker_adapter = LMCacheMPWorkerAdapter(
                 server_url=local_server_url,
-                context=zmq_context,
                 model_name=vllm_config.model_config.model,
                 vllm_block_size=vllm_config.cache_config.block_size * dcp_size,
                 parallel_strategy=parallel_strategy,

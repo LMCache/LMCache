@@ -11,7 +11,7 @@ protobuf request/response messages now define the wire protocol.
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence, TypeVar
+from typing import Any, Callable, Sequence, TypeVar
 from urllib.parse import parse_qs, urlparse
 import threading
 import uuid
@@ -231,17 +231,12 @@ class MultiprocessGrpcClient:
         server_url: Either ``grpc://host:port``, ``grpc+unix:///path``, a bare
             ``host:port``, or a legacy alias such as ``tcp://host:port`` /
             ``ipc:///path``.
-        context: Legacy positional slot kept for backwards compatibility
-            with the historical zmq-based constructor; ignored.
     """
 
     def __init__(
         self,
         server_url: str,
-        context: Optional[Any] = None,
-        transport: Optional[Any] = None,
     ):
-        del context, transport  # legacy positional slots, no longer used
         _ensure_grpc_runtime()
         target = _parse_grpc_url(server_url)
         compression = _parse_grpc_compression(server_url)
@@ -542,8 +537,6 @@ class MultiprocessGrpcServer:
 
     Args:
         bind_url: Either ``grpc://host:port`` or a bare ``host:port``.
-        context: Legacy positional slot (used to be zmq.Context); ignored.
-        transport: Legacy positional slot; ignored.
         grpc_max_workers: Size of the base grpc thread pool.  Sync
             handlers run here directly; blocking handlers hand off to
             their dedicated thread pool so this executor stays free
@@ -553,11 +546,8 @@ class MultiprocessGrpcServer:
     def __init__(
         self,
         bind_url: str,
-        context: Optional[Any] = None,
-        transport: Optional[Any] = None,
         grpc_max_workers: int = 32,
     ):
-        del context, transport  # legacy positional slots, no longer used
         self._bind_url = bind_url
         self._grpc_max_workers = grpc_max_workers
         self.handlers: dict[RpcMethod, GrpcRequestHandler] = {}

@@ -8,7 +8,6 @@ import time
 # Third Party
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -267,24 +266,14 @@ def server_process() -> Generator[mp.Process, None, None]:
             process.join()
 
 
-@pytest.fixture(scope="module")
-def zmq_context() -> Generator[zmq.Context, None, None]:
-    """
-    Fixture that provides a legacy constructor context for the test module.
-    """
-    context = zmq.Context.instance()
-    yield context
-    # Context cleanup is handled by the legacy context owner.
-
-
 @pytest.fixture(scope="function")
 def client(
-    server_process: mp.Process, zmq_context: zmq.Context
+    server_process: mp.Process,
 ) -> Generator[MultiprocessGrpcClient, None, None]:
     """
     Fixture that provides a gRPC client for each test function.
     """
-    client = MultiprocessGrpcClient(server_url=SERVER_URL, context=zmq_context)
+    client = MultiprocessGrpcClient(server_url=SERVER_URL)
     yield client
     # Client cleanup
     client.close()
