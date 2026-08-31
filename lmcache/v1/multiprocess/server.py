@@ -427,7 +427,16 @@ def run_cache_server(
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
     zmq_context = zmq.Context.instance()
-    server = MessageQueueServer(
+    # Only the layer-wise path registers a streaming handler, and only the
+    # streaming subclass knows how to dispatch one; every other deployment
+    # keeps the plain server and its unmodified dispatch.
+    server_cls: type[MessageQueueServer] = MessageQueueServer
+    if mp_config.layerwise_batch > 0:
+        # First Party
+        from lmcache.v1.multiprocess.mq_streaming import StreamingMessageQueueServer
+
+        server_cls = StreamingMessageQueueServer
+    server = server_cls(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=zmq_context,
     )
