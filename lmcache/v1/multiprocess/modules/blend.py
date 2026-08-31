@@ -57,6 +57,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
     chunk_hash_windows_numba,
@@ -104,17 +105,6 @@ _TORCH_TO_AT_SCALAR = {
 # Default for cb_register_rope's wire-typed group_rot parameter (legacy: no
 # declared windows). Never mutated — the handler only iterates it.
 _EMPTY_GROUP_ROT: list[list[int]] = []
-
-
-#: ``Session.extras`` key holding the lookup's TP-expanded obj_keys per found
-#: chunk hash — sparse-prefetch READ-LOCKED keys awaiting the retrieve.
-#: Contract: written once by ``_sparse_classify``; consumed at most once via
-#: an atomic ``extras.pop`` (the retrieve, or the session destroy listener
-#: ``BlendModule._release_unretrieved_locks``), so nothing releases twice.
-#: Whatever remains when the session is destroyed is released by that
-#: listener, so a client that never retrieves (e.g. every match shadowed by
-#: vLLM's local prefix cache) cannot leak the locks.
-_UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
 
 
 @dataclass
@@ -726,6 +716,11 @@ class BlendModule(InstanceLivenessTarget):
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
+    #: ``Session.extras`` key: read-locked obj_keys per found chunk hash,
+    #: written by the sparse classify and consumed by exactly one
+    #: ``extras.pop`` — the retrieve, or :meth:`_release_unretrieved_locks`.
+    UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
+
     def __init__(
         self,
         ctx: MPCacheServerContext,
@@ -751,11 +746,8 @@ class BlendModule(InstanceLivenessTarget):
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
-        # L2 opt: the lookup's TP-expanded obj_keys ride the request Session
-        # (``_UNRETRIEVED_KEYS_EXTRA``): stashed at classify, popped at
-        # retrieve, and released by this destroy listener when the session is
-        # destroyed with the stash unconsumed — END_SESSION at request end or
-        # the TTL reaper for clients that died without one.
+        # Backstop for locks the retrieve never consumed (see
+        # UNRETRIEVED_KEYS_EXTRA / _release_unretrieved_locks).
         ctx.session_manager.destroy_listeners.append(self._release_unretrieved_locks)
 
         # vLLM may call retrieve twice per request (partial- then full-block
@@ -868,44 +860,33 @@ class BlendModule(InstanceLivenessTarget):
             "active_cb_lookups": len(self._cb_jobs),
         }
 
-    def _release_unretrieved_locks(self, session) -> None:
-        """Session destroy listener: release the request's unconsumed locks.
+    def _release_unretrieved_locks(self, session: Session) -> None:
+        """Release read locks the request's retrieve never consumed.
 
-        The unified lookup read-locks every found chunk's object keys for
-        the retrieve — but a client that drops all its matches (e.g. every
-        match falls inside vLLM's local prefix-cache coverage) never sends
-        ``CB_RETRIEVE_PRE_COMPUTED``, and no other path releases those
-        locks: the retrieve's orphan sweep never runs and
-        ``free_lookup_locks`` covers only the prefix leg's lock model. The
-        locks would pin the chunks in L1 for the server's lifetime,
-        stacking one more count per repeat lookup. Session destruction
-        (END_SESSION at request end, or the TTL reaper for clients that
-        died without one) is the safe release point: by then no retrieve
-        for this request can still arrive.
+        A client whose matches are all covered by its own prefix cache sends
+        no ``CB_RETRIEVE_PRE_COMPUTED``, so the retrieve's orphan sweep never
+        runs and the sparse-prefetch locks would pin those chunks in L1 for
+        the server's lifetime. Session destruction is the safe release point:
+        no retrieve for the request can arrive afterwards.
 
         Args:
-            session: The session being destroyed by the session manager.
+            session: The session being destroyed.
         """
-        per_hash = session.extras.pop(_UNRETRIEVED_KEYS_EXTRA, None)
+        per_hash = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
         if not per_hash:
             return
         keys = [key for hash_keys in per_hash.values() for key in hash_keys]
         self._ctx.storage_manager.finish_read_prefetched(keys)
         logger.info(
-            "Released %d unretrieved sparse-prefetch read lock(s) at session "
-            "end for request %s",
+            "Released %d unretrieved read lock(s) for ended request %s",
             len(keys),
             session.request_id,
         )
 
     def close(self) -> None:
-        if (
-            self._release_unretrieved_locks
-            in self._ctx.session_manager.destroy_listeners
-        ):
-            self._ctx.session_manager.destroy_listeners.remove(
-                self._release_unretrieved_locks
-            )
+        listeners = self._ctx.session_manager.destroy_listeners
+        if self._release_unretrieved_locks in listeners:
+            listeners.remove(self._release_unretrieved_locks)
         self._fingerprint_stop.set()
         if self._coordinator is not None:
             # Joins the client's daemon thread and closes its httpx.Client;
@@ -1358,8 +1339,8 @@ class BlendModule(InstanceLivenessTarget):
                 )
             )
 
-        # Stash per-hash obj_keys on the session for the retrieve (L2 opt);
-        # the session destroy listener releases anything never retrieved.
+        # Stash per-hash obj_keys for the retrieve (L2 opt); whatever it
+        # never consumes is released by _release_unretrieved_locks.
         if found_cb_match_result:
             cache_entry = {
                 r.hash: per_hash_obj_keys[r.hash]
@@ -1367,7 +1348,7 @@ class BlendModule(InstanceLivenessTarget):
                 if r.hash in per_hash_obj_keys
             }
             self._ctx.session_manager.get_or_create(key.request_id).extras[
-                _UNRETRIEVED_KEYS_EXTRA
+                self.UNRETRIEVED_KEYS_EXTRA
             ] = cache_entry
 
         return found_cb_match_result
@@ -2852,13 +2833,12 @@ class BlendModule(InstanceLivenessTarget):
                     f"slot_bound={slot_bound}",
                     scatter_ran=False,
                 )
-        # L2 opt: consume the lookup's obj_keys stash from the session
-        # (take-once; later calls fall back to re-resolve). ``get`` not
-        # ``get_or_create``: a retrieve after session end must not recreate
-        # ownership state.
+        # L2 opt: take the lookup's obj_keys stash (once; later calls
+        # re-resolve). ``get``, not ``get_or_create``: a retrieve after
+        # session end must not recreate ownership state.
         session = self._ctx.session_manager.get(key.request_id)
         cached = (
-            session.extras.pop(_UNRETRIEVED_KEYS_EXTRA, None)
+            session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
             if session is not None
             else None
         )

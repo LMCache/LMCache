@@ -146,12 +146,9 @@ def test_retrieve_take_prevents_double_release_at_session_end():
     _run_lookup(blend, "req-retrieved")
 
     # Emulate the retrieve's consumption + release of the taken keys.
-    # First Party
-    from lmcache.v1.multiprocess.modules.blend import _UNRETRIEVED_KEYS_EXTRA
-
     session = ctx.session_manager.get("req-retrieved")
     assert session is not None
-    cached = session.extras.pop(_UNRETRIEVED_KEYS_EXTRA, None)
+    cached = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
     assert cached is not None and len(cached) == N_CHUNKS
     storage.finish_read_prefetched([key for keys in cached.values() for key in keys])
     assert storage.outstanding() == 0
