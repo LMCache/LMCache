@@ -400,21 +400,29 @@ plain `RETRIEVE` dispatch path completely untouched.
 
 ### 8.2 How the Message Queue Stays Neutral
 
-`mq.py` has no notion of a partial result.  It gained two generic
-capabilities instead:
+`mq.py` has no notion of a partial result, and none of its existing
+classes were modified.  Two additions carry the whole mechanism:
 
-1. **The result decides completion.**  `MessagingFuture.deliver(response)`
-   returns True when the exchange is over; the client pops the pending
-   future only then.  The default implementation calls `set_result` and
-   returns True, so single-frame requests behave exactly as before.
-   `LayerwiseDeviceMessagingFuture` installs itself as the raw future's
-   delivery sink via `set_delivery_sink()`, so buffering the intermediate
-   frames lives entirely inside that future.
-2. **A handler may answer more than once.**  A blocking handler opts in by
-   declaring a keyword-only `response_channel` parameter; the server
-   detects it by signature and passes the same frame-emitting closure it
-   already uses for the final response.  Handlers that do not declare it
-   are called unchanged.
+1. **The future re-arms itself.**  `process_inbound` is unchanged: it
+   pops the pending entry and calls `future.set_result(...)`, exactly as
+   it always has.  `LayerwiseRawFuture` overrides `set_result` so that a
+   non-final frame is buffered *and* the future puts itself back into the
+   pending table under the same uid.  It holds that table because
+   `submit_streaming_request` handed it over via `bind_registry` before
+   the request reached the polling loop.  Both halves of the multi-frame
+   contract therefore live in the future; `mq.py` is byte-identical to
+   before this feature, and so is `futures.py`.
+2. **A handler may answer more than once.**  This lives entirely in
+   `mq_streaming.py`, which `mq.py` never imports.
+   `StreamingMessageQueueServer` subclasses `MessageQueueServer` and
+   intercepts `HandlerType.STREAMING` in `add_handler` / `_call_handler`,
+   delegating every other handler type to `super()`.
+   `StreamingRequestHandler` subclasses `BlockingRequestHandler`, so
+   thread-pool assignment and validation need no changes, and passes the
+   handler the same frame-emitting closure the server already uses for the
+   final response, as a keyword-only `response_channel` argument.
+   `server.py` builds the subclass only when `layerwise_batch > 0`; every
+   other deployment runs the unmodified server dispatch.
 
 ### 8.3 Frame Formats
 
@@ -442,41 +450,47 @@ entry under that UID until the future reports the exchange is over.
 client                                  server (affinity pool thread)
   |                                        |
   |-- RETRIEVE_LAYERWISE (uid=7) --------->|
+  |   future.bind_registry(pending, 7)     |
   |   pending_futures[7] = future          |
   |                                        |  batch 0: H2D + scatter
   |                                        |           record_event(e0)
   |<-- [7, type, (first=0, cnt=N, idx=0)] -|  response_channel(...)
-  |   deliver() -> False -> re-arm [7]     |
+  |   set_result -> buffers, re-arms [7]   |
   |                                        |  batch 1: H2D + scatter
   |                                        |           record_event(e1)
   |<-- [7, type, (first=N, cnt=N, idx=N)] -|  response_channel(...)
-  |   deliver() -> False -> re-arm [7]     |
+  |   set_result -> buffers, re-arms [7]   |
   |             ...                        |             ...
   |                                        |  handler returns
   |<-- [7, type, (b"", True, succeeded)] --|  done-callback
-  |   deliver() -> True  -> drop [7]       |
+  |   set_result -> completes, stays out   |
   |                                        |
 ```
 
-Client dispatch, in `MessageQueueClient.process_inbound`:
+Client dispatch is the stock `MessageQueueClient.process_inbound`,
+unchanged: it pops the entry and calls `set_result`.  The re-arm happens
+inside `LayerwiseRawFuture.set_result`, in `futures_layerwise.py`:
 
 ```python
-b_request_uid, b_request_type, *b_response = msg
-...
-if request_uid in self.pending_futures:
-    future = self.pending_futures.pop(request_uid)
-    response = msgspec_decode(b_response[0], cls=response_cls) if b_response else None
-    if not future.deliver(response):
-        self.pending_futures[request_uid] = future   # put it back
+def set_result(self, result):
+    payload, is_final, _ = result
+    if not is_final:
+        self._partial_queue.put(payload)
+        if self._registry is not None:
+            # Runs on the polling-loop thread, the only writer of this table.
+            self._registry[self._request_uid] = self
+        return
+    self._partial_queue.put(None)
+    super().set_result(result)
 ```
 
-The entry is popped and re-inserted under the **same** UID until
-`deliver()` returns True.  There is no second request and no side
-channel.
+The entry is re-inserted under the **same** UID until the closing frame
+arrives.  There is no second request and no side channel.
 
-Server dispatch, in `MessageQueueServer._call_blocking_handler`: the
-same closure serves both frame kinds, so intermediate and closing
-frames are indistinguishable on the wire apart from `is_final`:
+Server dispatch, in `StreamingMessageQueueServer._call_streaming_handler`
+(`mq_streaming.py`): the same closure serves both frame kinds, so
+intermediate and closing frames are indistinguishable on the wire apart
+from `is_final`:
 
 ```python
 def _send_response(response):
@@ -490,18 +504,34 @@ def _send_response(response):
 The ROUTER socket consumes `identity` for routing, so the client's
 DEALER receives `[uid, type, *response]`.
 
-**Why the future must be pre-created.**  This is the reason
-`submit_request` accepts a `future=` argument.  The delivery sink has to
-be installed *before* the request becomes visible to the polling loop:
+**Why the future must be pre-created.**  This is the reason the
+layer-wise path submits through `submit_streaming_request` rather than
+`MessageQueueClient.submit_request`.  The multi-frame behaviour is baked
+into the future's *type*, so it has to be the object handed to the
+polling loop:
 
 ```python
-raw_future.set_delivery_sink(self._deliver_frame)
+submit_streaming_request(
+    self._mq_client, RequestType.RETRIEVE_LAYERWISE, payloads,
+    layerwise_future.raw_future_,
+)
 ```
 
-If `submit_request` built the future internally, a frame could arrive
-and be dispatched before the caller got the object back to attach the
-sink.  The first intermediate frame would then complete the future
-outright and the remaining frames would be dropped.
+`submit_request` builds a plain `MessagingFuture` internally, which the
+first intermediate frame would complete outright, dropping the rest.  The
+helper additionally calls `bind_registry` *before* the `input_queue.put`,
+because a reply can land the instant the polling loop sees the request.
+Because the behaviour comes from the class rather than from state
+attached afterwards, there is no window in which the future is submitted
+only half-configured.
+
+The helper duplicates the few lines of request-building in
+`submit_request` rather than adding a flag to it, so the per-chunk path
+carries nothing about streaming.  The copy is pinned to the original by
+`test_streaming_submit_matches_the_base_client`, which compares the two
+enqueued `WrappedRequest` objects field by field via
+`dataclasses.fields`, so a field added to the base path but missed here
+fails the build.
 
 **Frames signal enqueue, not completion.**  Each intermediate frame is
 emitted immediately after `record_event`, which follows an *enqueue-only*

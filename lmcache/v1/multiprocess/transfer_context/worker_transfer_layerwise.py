@@ -24,7 +24,8 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.futures_layerwise import LayerwiseDeviceMessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.mq_streaming import submit_streaming_request
+from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     IPCEvent,
     LMCacheDrivenTransferContext,
@@ -161,28 +162,22 @@ class LMCacheLayerwiseTransferContext(LMCacheDrivenTransferContext):
                 "Call register() before submit_retrieve()."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        # Build the future and wrap it *before* submitting.  The wrapper
-        # installs itself as the raw future's delivery sink, and the server
-        # answers a layer-wise retrieve with one message per layer batch;
-        # ``submit_request`` hands the request to the polling loop before it
-        # returns, so a first batch that lands ahead of the sink would take
-        # the default single-frame path -- completing the raw future with a
-        # non-final payload and dropping every later batch on the floor.
-        # ``self._send_request`` cannot carry a pre-built future, so this
-        # path talks to the client directly; it is otherwise the same call.
-        raw_future: MessagingFuture = MessagingFuture()
+        # The server answers a layer-wise retrieve with one message per
+        # layer batch, so the future has to exist, and know how to re-arm
+        # itself, before the request reaches the polling loop.  That is what
+        # ``submit_streaming_request`` arranges; the per-chunk
+        # ``submit_request`` is left untouched by this path.
         layerwise_future: LayerwiseDeviceMessagingFuture = (
             LayerwiseDeviceMessagingFuture(
-                raw_future,
                 device=self._device,
                 event_pool=self._event_pool,
             )
         )
-        self._mq_client.submit_request(
+        submit_streaming_request(
+            self._mq_client,
             RequestType.RETRIEVE_LAYERWISE,
             [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens],
-            get_response_class(RequestType.RETRIEVE_LAYERWISE),
-            future=raw_future,
+            layerwise_future.raw_future_,
         )
         return layerwise_future
 

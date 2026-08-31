@@ -68,6 +68,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "RETRIEVE_LAYERWISE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool, bool],
-            handler_type=HandlerType.BLOCKING,
+            handler_type=HandlerType.STREAMING,
         ),
     }
