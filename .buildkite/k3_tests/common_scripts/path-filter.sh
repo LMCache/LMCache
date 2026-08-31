@@ -73,6 +73,22 @@ _path_filter_should_skip_for_pipeline() {
                     # direct pytest file under tests/v1/platform/ still counts
                     return 1
                     ;;
+                lmcache/v1/platform/*)
+                    # For CUDA unit, platform implementation changes under
+                    # lmcache/v1/platform/cuda/ are relevant and should trigger the
+                    # pipeline; keep other nested device directories as non-targets.
+                    if [[ "$changed_file" == lmcache/v1/platform/cuda/* ]]; then
+                        return 1
+                    fi
+                    if [[ "$changed_file" == lmcache/v1/platform/*/* ]]; then
+                        return 0
+                    fi
+                    return 1
+                    ;;
+                examples/*)
+                    # Example-only changes should not trigger unit tests.
+                    return 0
+                    ;;
                 .buildkite/k3_tests/unit/*|tests/*)
                     return 1
                     ;;
@@ -82,6 +98,10 @@ _path_filter_should_skip_for_pipeline() {
             case "$changed_file" in
                 .buildkite/k3_tests/integration/*|.buildkite/configs/local_cpu.yaml|.buildkite/configs/local_disk.yaml)
                     return 1
+                    ;;
+                examples/*)
+                    # Example-only changes should not trigger integration tests.
+                    return 0
                     ;;
                 tests/*|.buildkite/k3_tests/*)
                     return 0
@@ -93,6 +113,10 @@ _path_filter_should_skip_for_pipeline() {
                 .buildkite/correctness/*|.buildkite/k3_tests/correctness/*)
                     return 1
                     ;;
+                examples/*)
+                    # Example-only changes should not trigger correctness tests.
+                    return 0
+                    ;;
                 tests/*|.buildkite/k3_tests/*)
                     return 0
                     ;;
@@ -103,6 +127,10 @@ _path_filter_should_skip_for_pipeline() {
                 benchmarks/long_doc_qa/*|.buildkite/k3_tests/multiprocess/*)
                     return 1
                     ;;
+                examples/*)
+                    # Example-only changes should not trigger multiprocess tests.
+                    return 0
+                    ;;
                 tests/*|.buildkite/k3_tests/*)
                     return 0
                     ;;
@@ -110,8 +138,16 @@ _path_filter_should_skip_for_pipeline() {
             ;;
         comprehensive)
             case "$changed_file" in
-                .buildkite/configs/*|benchmarks/*|examples/disagg_prefill*/*|.buildkite/k3_tests/comprehensive/*)
+                .buildkite/configs/*|benchmarks/*|.buildkite/k3_tests/comprehensive/*)
                     return 1
+                    ;;
+                examples/disagg_prefill*/*)
+                    return 1
+                    ;;
+                examples/*)
+                    # Keep other example changes out of the comprehensive pipeline.
+                    # They are treated as safe no-op paths for this suite.
+                    return 0
                     ;;
                 tests/*|.buildkite/k3_tests/*)
                     return 0
@@ -123,6 +159,10 @@ _path_filter_should_skip_for_pipeline() {
                 .buildkite/k3_harness/setup-blend-env.sh|.buildkite/k3_tests/blend/*)
                     return 1
                     ;;
+                examples/*)
+                    # Example-only changes should not trigger blend tests.
+                    return 0
+                    ;;
                 tests/*|.buildkite/k3_tests/*)
                     return 0
                     ;;
@@ -133,70 +173,43 @@ _path_filter_should_skip_for_pipeline() {
                 .buildkite/k3_harness/setup-sglang-env.sh|lmcache/integration/sglang/*|.buildkite/k3_tests/sglang/*)
                     return 1
                     ;;
+                examples/*)
+                    # Example-only changes should not trigger sglang tests.
+                    return 0
+                    ;;
                 tests/*|.buildkite/k3_tests/*)
                     return 0
                     ;;
             esac
             ;;
         xpu)
-            case "$changed_file" in
-                tests/v1/platform/xpu/*|.buildkite/k3_tests/xpu/*)
-                    return 1
-                    ;;
-                tests/v1/platform/*)
-                    # Keep the generic platform root as a non-target for xpu;
-                    # nested platform dirs remain the only platform-specific skip.
-                    return 0
-                    ;;
-                tests/*)
-                    return 1
-                    ;;
-            esac
+            if declare -F "_path_filter_xpu_should_skip" >/dev/null 2>&1; then
+                _path_filter_xpu_should_skip "$changed_file"
+                return $?
+            fi
+            return 1
+            ;;
+        amd)
+            if declare -F "_path_filter_amd_should_skip" >/dev/null 2>&1; then
+                _path_filter_amd_should_skip "$changed_file"
+                return $?
+            fi
+            return 1
             ;;
         musa)
-            # TODO: real MUSA pipeline is not implemented yet; this is only a
-            # placeholder so the path filter recognizes the platform kind.
-            case "$changed_file" in
-                tests/v1/platform/musa/*|.buildkite/k3_tests/musa/*)
-                    return 1
-                    ;;
-                tests/v1/platform/*)
-                    return 0
-                    ;;
-                tests/*)
-                    return 1
-                    ;;
-            esac
+            # Placeholder only: no dedicated MUSA pipeline dir is introduced here.
+            # Keep the platform kind explicit for future CI extension.
+            return 1
             ;;
         rbln)
-            # TODO: real RBLN pipeline is not implemented yet; keep this as a
-            # placeholder until the backend-specific CI job is added.
-            case "$changed_file" in
-                tests/v1/platform/rbln/*|.buildkite/k3_tests/rbln/*)
-                    return 1
-                    ;;
-                tests/v1/platform/*)
-                    return 0
-                    ;;
-                tests/*)
-                    return 1
-                    ;;
-            esac
+            # Placeholder only: no dedicated RBLN pipeline dir is introduced here.
+            # Keep the platform kind explicit for future CI extension.
+            return 1
             ;;
         neuron)
-            # TODO: real Neuron pipeline is not implemented yet; this placeholder
-            # preserves the platform kind and the intent for the future job.
-            case "$changed_file" in
-                tests/v1/platform/neuron/*|.buildkite/k3_tests/neuron/*)
-                    return 1
-                    ;;
-                tests/v1/platform/*)
-                    return 0
-                    ;;
-                tests/*)
-                    return 1
-                    ;;
-            esac
+            # Placeholder only: no dedicated Neuron pipeline dir is introduced here.
+            # Keep the platform kind explicit for future CI extension.
+            return 1
             ;;
         generic)
             return 1
@@ -217,22 +230,28 @@ _path_filter_pipeline_kind() {
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/sglang/pipeline.yml) echo sglang ;;
         *k3_tests/xpu/pipeline.yml) echo xpu ;;
+        *k3_tests/musa/pipeline.yml) echo musa ;;
+        *k3_tests/amd/pipeline.yml) echo amd ;;
         *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
         *) echo generic ;;
     esac
 }
 
-_path_filter_file_affects_pipeline() {
-    local pipeline_kind="$1"
-    local changed_file="$2"
+_path_filter_load_device_filter() {
+    local pipeline_file="${1:-}"
+    local pipeline_dir filter_script
 
-    # This is the boolean inverse of _path_filter_should_skip_for_pipeline:
-    # if we would skip, then this file does not affect the pipeline.
-    if _path_filter_should_skip_for_pipeline "$pipeline_kind" "$changed_file"; then
-        return 1
+    [[ -n "$pipeline_file" ]] || return 0
+    pipeline_dir="$(cd "$(dirname "$pipeline_file")" 2>/dev/null && pwd)" || return 0
+    filter_script="${pipeline_dir}/filter.sh"
+
+    if [[ -f "$filter_script" ]]; then
+        # shellcheck disable=SC1090
+        source "$filter_script"
+        if [[ -n "${FILTER_TRIGGER_CONDITION:-}" ]]; then
+            echo "path-filter: loaded ${filter_script} trigger: ${FILTER_TRIGGER_CONDITION}" >&2
+        fi
     fi
-
-    return 0
 }
 
 # ── Changed-files detection ───────────────────────────────────
@@ -305,6 +324,7 @@ should_skip_ci() {
     fi
 
     pipeline_kind="$(_path_filter_pipeline_kind "$pipeline_file")"
+    _path_filter_load_device_filter "$pipeline_file"
 
     local has_non_trivial=0
     local has_relevant_change=0
