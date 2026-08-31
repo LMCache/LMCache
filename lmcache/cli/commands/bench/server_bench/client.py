@@ -8,8 +8,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+import hashlib
 import mmap
 import os
+import time
 
 # First Party
 from lmcache import torch_dev
@@ -249,9 +251,6 @@ class ServerBenchClient:
         """
         mq_client = self._require_started()
 
-        # Standard
-        import time
-
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _make_key,
@@ -321,9 +320,6 @@ class ServerBenchClient:
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
-
-        # Standard
-        import time
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
@@ -414,9 +410,6 @@ class ServerBenchClient:
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
-
-        # Standard
-        import time
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
@@ -550,9 +543,6 @@ class ServerBenchClient:
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
-
-        # Standard
-        import hashlib
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
