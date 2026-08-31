@@ -88,6 +88,19 @@ class LocalDiskWorker:
         with self.put_lock:
             self.put_tasks.append(key)
 
+    def try_insert_put_task(self, key: CacheEngineKey) -> bool:
+        """Register ``key`` as in-flight if it is not already registered.
+
+        Returns:
+            True if this caller now owns the in-flight slot. False if another
+            put for the same key is already in progress.
+        """
+        with self.put_lock:
+            if key in self.put_tasks:
+                return False
+            self.put_tasks.append(key)
+            return True
+
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.put_lock:
             return key in self.put_tasks
@@ -331,40 +344,57 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         assert memory_obj.tensor is not None
 
-        # skip repeated save
-        if self.exists_in_put_tasks(key):
+        # TODO(Jiayi): Fragmentation is not considered here.
+        required_size = memory_obj.get_physical_size()
+
+        # skip repeated save — claim the in-flight slot atomically so two
+        # concurrent puts for the same key cannot both schedule work.
+        if not self.disk_worker.try_insert_put_task(key):
             logger.debug("Put task for %s is already in progress.", key)
             return None
 
-        self.disk_worker.insert_put_task(key)
-
-        # TODO(Jiayi): Fragmentation is not considered here.
-        required_size = memory_obj.get_physical_size()
         all_evict_keys = []
         evict_success = True
         with self.disk_lock:
-            while self.current_cache_size + required_size > self.max_cache_size:
-                evict_keys = self.cache_policy.get_evict_candidates(
-                    self.dict, num_candidates=1
+            deficit = self.current_cache_size + required_size - self.max_cache_size
+            if deficit > 0:
+                # Count evictable bytes first. Do not call get_evict_candidates()
+                # speculatively: LFU mutates policy state when candidates are
+                # selected, and a request that cannot fit must not delete valid
+                # resident entries before failing.
+                evictable_bytes = sum(
+                    meta.size for meta in self.dict.values() if meta.can_evict
                 )
-                if not evict_keys:
+                if evictable_bytes < deficit:
                     logger.warning(
                         "No eviction candidates found. Disk space under pressure."
                     )
                     evict_success = False
-                    break
+                else:
+                    while self.current_cache_size + required_size > self.max_cache_size:
+                        evict_keys = self.cache_policy.get_evict_candidates(
+                            self.dict, num_candidates=1
+                        )
+                        if not evict_keys:
+                            logger.warning(
+                                "No eviction candidates found. "
+                                "Disk space under pressure."
+                            )
+                            evict_success = False
+                            break
 
-                for evict_key in evict_keys:
-                    self.current_cache_size -= self.dict[evict_key].size
+                        for evict_key in evict_keys:
+                            self.current_cache_size -= self.dict[evict_key].size
 
-                self.batched_remove(evict_keys, force=False)
+                        self.batched_remove(evict_keys, force=False)
 
-                all_evict_keys.extend(evict_keys)
+                        all_evict_keys.extend(evict_keys)
             if evict_success:
                 self.current_cache_size += required_size
                 self.cache_policy.update_on_put(key)
 
         if not evict_success:
+            self.disk_worker.remove_put_task(key)
             return None
 
         memory_obj.ref_count_up()
