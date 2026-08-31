@@ -2,7 +2,7 @@
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Tuple
 import asyncio
 import os
 import threading
@@ -455,33 +455,82 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> List[Optional[MemoryObj]]:
         """Load multiple KV chunks from disk with concurrent I/O.
 
-        Metadata lookup and memory allocation are performed sequentially
-        under the disk lock, then all file reads are dispatched to a
-        ``ThreadPoolExecutor`` so they run in parallel.  The GIL is
-        released during the underlying ``readinto`` syscall, so threads
-        achieve true I/O parallelism.
+        Metadata lookup and memory allocation are performed sequentially,
+        then all file reads are dispatched to a ``ThreadPoolExecutor`` so
+        they run in parallel.  The GIL is released during the underlying
+        ``readinto`` syscall, so threads achieve true I/O parallelism.
+
+        The fields needed to size a staging buffer are copied out of
+        :class:`DiskCacheMetadata` while ``disk_lock`` is held, rather than
+        retaining the metadata objects and dereferencing them after the lock
+        is released -- a concurrent eviction could otherwise mutate the
+        values used for allocation.
+
+        A key is reported as a miss (``None``) when it has no metadata, when
+        its metadata lacks the ``shape``/``dtype``/``fmt`` needed to size a
+        buffer, or when the staging allocation fails.
 
         :param keys: Cache keys identifying the KV chunks to load.
-        :returns: A list of ``MemoryObj`` (or ``None`` for missing keys),
-            in the same order as *keys*.
+        :returns: A list of ``MemoryObj`` (or ``None`` for a miss), in the
+            same order as *keys*.
         """
+        if not keys:
+            return []
+
         if len(keys) <= 1:
             return [self.get_blocking(k) for k in keys]
 
         # --- 1. Batch metadata lookup (single lock acquisition) -----------
+        # (path, shape, dtype, fmt) per key, or None for a miss.
+        plans: List[Optional[Tuple[str, torch.Size, torch.dtype, MemoryFormat]]] = []
         with self.disk_lock:
-            metas = [self.dict.get(key) for key in keys]
+            for key in keys:
+                disk_meta = self.dict.get(key)
+                if disk_meta is None:
+                    plans.append(None)
+                elif (
+                    disk_meta.shape is None
+                    or disk_meta.dtype is None
+                    or disk_meta.fmt is None
+                ):
+                    # Cannot size a staging buffer without all three; treat
+                    # as a miss rather than passing None into allocate().
+                    logger.warning(
+                        "Disk metadata for key %s is missing shape/dtype/fmt; "
+                        "treating as a miss.",
+                        key,
+                    )
+                    plans.append(None)
+                else:
+                    plans.append(
+                        (
+                            disk_meta.path,
+                            disk_meta.shape,
+                            disk_meta.dtype,
+                            disk_meta.fmt,
+                        )
+                    )
 
         # --- 2. Pre-allocate staging buffers (sequential) -----------------
-        memory_objs = [
-            self.local_cpu_backend.allocate(m.shape, m.dtype, m.fmt)
-            if m is not None
-            else None
-            for m in metas
-        ]
+        paths: List[Optional[str]] = []
+        memory_objs: List[Optional[MemoryObj]] = []
+        for plan in plans:
+            if plan is None:
+                paths.append(None)
+                memory_objs.append(None)
+                continue
+            path, shape, dtype, fmt = plan
+            memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
+            if memory_obj is None:
+                logger.error(
+                    "Staging allocation failed during batched disk load; the "
+                    "CPU staging pool may be exhausted. Consider raising "
+                    "max_local_cpu_size or lowering the request size."
+                )
+            paths.append(path)
+            memory_objs.append(memory_obj)
 
         # --- 3. Concurrent file reads via thread pool ---------------------
-        paths = [m.path if m is not None else None for m in metas]
         results: List[Optional[MemoryObj]] = list(
             self._read_thread_pool.map(
                 self._load_chunk_into_memory, keys, paths, memory_objs
