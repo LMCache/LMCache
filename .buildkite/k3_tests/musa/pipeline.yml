@@ -2,11 +2,13 @@
 # unit-tests-musa pipeline.
 
 env:
+  HF_HUB_OFFLINE: "1"
   LMCACHE_TRACK_USAGE: "false"
-  # Small deterministic model; override in Buildkite for an image-cached model.
-  MUSA_E2E_MODEL: "Qwen/Qwen3-0.6B"
+  # Small deterministic model preloaded in both MUSA serving images.
+  MUSA_E2E_MODEL: "/models/Qwen3-0.6B"
   MUSA_E2E_ENABLE_SGLANG: "1"
   MUSA_VISIBLE_DEVICES: "0"
+  TRANSFORMERS_OFFLINE: "1"
 
 steps:
   - label: "MUSA Runtime + Transfer Smoke"

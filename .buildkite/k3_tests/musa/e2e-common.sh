@@ -43,6 +43,9 @@ require_model() {
     if [[ "${MODEL}" == /* && ! -d "${MODEL}" ]]; then
         fail "configured model path does not exist: ${MODEL}"
     fi
+    if [[ "${MODEL}" == /* && ! -f "${MODEL}/config.json" ]]; then
+        fail "configured model path has no config.json: ${MODEL}"
+    fi
     log "Using model ${MODEL}"
 }
 
@@ -59,7 +62,7 @@ sentence = (
     "Moore Threads MUSA LMCache deterministic cache reuse validation. "
     "The same prefix must produce the same completion after a cache retrieve. "
 )
-Path(sys.argv[1]).write_text(sentence * 96 + "Summarize this validation in one sentence.\n")
+Path(sys.argv[1]).write_text(sentence * 64 + "Summarize this validation in one sentence.\n")
 PY
     fi
     [[ -s "${PROMPT_FILE}" ]] || fail "E2E prompt is empty"

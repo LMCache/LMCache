@@ -283,6 +283,7 @@ PY
     )
     run_pytest "${PYTEST_ARGS[@]}" \
         "${UNIT_REPORT_ARGS[@]}" \
+        --deselect=tests/v1/distributed/serde/test_turboquant.py::test_turboquant_direct_roundtrip_cuda \
         -m "not cuda and not xpu and not sglang" \
         "${UNIT_TEST_FILES[@]}" \
         2>&1 | tee "${ARTIFACT_DIR}/pytest.log"

@@ -39,7 +39,7 @@ Optional debugging overrides:
 | `TEST_SELECTOR` | unset | Pass a pytest `-k` selector to the selected suite |
 | `MUSA_CI_IMAGE` | `sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci:latest` | Override the vLLM/UT MUSA CI image |
 | SGLang image | `sh-harbor.mthreads.com/ai-kv/kuae-lmcache-sglang-ci:latest` | Fixed image for the gating SGLang E2E step |
-| `MUSA_E2E_MODEL` | `Qwen/Qwen3-0.6B` | Model ID or path visible inside the CI container |
+| `MUSA_E2E_MODEL` | `/models/Qwen3-0.6B` | Model directory preloaded in both serving images |
 | `MUSA_SGLANG_MODEL` | `${MUSA_E2E_MODEL}` | Model ID or local path required by SGLang E2E |
 | `MUSA_E2E_ENABLE_SGLANG` | `1` | Set to `0` only during temporary SGLang image bring-up |
 | `MUSA_E2E_HIT_PATTERN` | `LMCache.*(retrieve|retrieved|cache hit|hit tokens)` | Regex used for cache-retrieval log evidence |
@@ -80,24 +80,29 @@ The self-hosted agent must provide:
    SGLang CI image
    `sh-harbor.mthreads.com/ai-kv/kuae-lmcache-sglang-ci:latest`.
 4. A compatible, pinned `torch`, `torch_musa`, `libmusart.so`, compiler, pip,
-   curl, vLLM and SGLang inside the corresponding images.
-5. Access to the configured Python package index so the job can synchronize
+   curl and vLLM inside the vLLM image; the SGLang image must provide the
+   `/root/.virtualenvs/sglang-default/bin/activate` environment.
+5. `/models/Qwen3-0.6B/config.json` and the complete model files available in
+   both serving images; E2E runs with Hugging Face and Transformers offline.
+6. Access to the configured Python package index so the job can synchronize
    the current LMCache build and test requirements.
-6. Device index `0` available to the pipeline's explicit
+7. Device index `0` available to the pipeline's explicit
    `MUSA_VISIBLE_DEVICES=0` binding.
 
 The wrapper mounts the current Buildkite checkout read-only and copies it to an
 ephemeral container working directory, so tests exercise the PR rather than
 the copy baked into the image without leaving root-owned build files on the
-agent. The script directly uses the pre-provisioned Python environment and
-does not create a venv. It installs the repository's current build, common,
-and test requirements without requesting upgrades; the image's installed
-TorchMUSA build satisfies the unpinned `torch` requirement. LMCache itself is
-rebuilt from that working copy with
+agent. Unit and vLLM modes use the image's pre-provisioned Python environment;
+the SGLang mode first sources
+`/root/.virtualenvs/sglang-default/bin/activate`. Neither mode creates a new
+venv. The scripts install the repository's current build, common, and test
+requirements without requesting upgrades; the image's installed TorchMUSA
+build satisfies the unpinned `torch` requirement. LMCache itself is rebuilt
+from that working copy with
 `BUILD_WITH_MUSA=1`, `BUILD_MOONCAKE=0`, and `--no-deps`, so installation
-cannot replace the image's pinned TorchMUSA stack. The `latest` tags are
-mutable; the image publisher should record a digest for each Buildkite build
-and keep a rollback tag available.
+cannot replace the image's pinned TorchMUSA stack. Docker refreshes the
+mutable `latest` tag before each job; the image publisher should record a
+digest for each Buildkite build and keep a rollback tag available.
 
 The Docker invocation uses the maintainer-validated `--ipc=host` and
 `--network=host` flags. It explicitly sets `--entrypoint /bin/bash` because the
@@ -135,10 +140,10 @@ steps:
 The dynamically uploaded unit, smoke, vLLM and SGLang steps target
 `MooreThreads` and use a shared global concurrency limit of one, so two jobs
 cannot contend for the same device even though their GitHub status contexts are
-independent. The E2E steps require `MUSA_E2E_MODEL`; configure that variable in
-  the `musa-mp-test` pipeline or its agent environment with a cached model ID or
-  container-visible path. Arbitrary host paths are not mounted into the
-  container. The SGLang image is fixed for the gating step; the step can be
+independent. The E2E steps use the model baked into both serving images at
+`/models/Qwen3-0.6B`; override `MUSA_E2E_MODEL` only with another complete
+container-visible model directory. Arbitrary host paths are not mounted into
+the container. The SGLang image is fixed for the gating step; the step can be
   temporarily disabled with
 `MUSA_E2E_ENABLE_SGLANG=0` while the dedicated image is being prepared.
 

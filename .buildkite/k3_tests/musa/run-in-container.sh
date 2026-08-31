@@ -16,11 +16,13 @@ else
 fi
 INNER_SCRIPT=""
 DOCKER_ENV_ARGS=(
+    -e "HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}"
     -e "LMCACHE_TRACK_USAGE=${LMCACHE_TRACK_USAGE:-false}"
     -e "MUSA_CI_ARTIFACT_DIR=/musa-ci-artifacts"
     -e "MUSA_CI_PREPROVISIONED=1"
     -e "MUSA_CI_PYTHON=${MUSA_CI_PYTHON:-python3}"
     -e "MUSA_VISIBLE_DEVICES=${MUSA_VISIBLE_DEVICES:-0}"
+    -e "TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}"
 )
 
 log() {
@@ -30,7 +32,7 @@ log() {
 fail() {
     mkdir -p "${ARTIFACT_DIR}" 2>/dev/null || true
     printf '[musa-ci] ERROR: %s\n' "$*" \
-        | tee -a "${ARTIFACT_DIR}/failure.log" >&2
+        | tee -a "${ARTIFACT_DIR}/runner-failure.log" >&2
     exit 1
 }
 
@@ -100,7 +102,14 @@ if command -v mthreads-gmi >/dev/null 2>&1; then
 fi
 
 log "Running ${MODE} tests in ${IMAGE}"
+CONTAINER_COMMAND='workdir="$(mktemp -d /tmp/lmcache-ci.XXXXXX)" && cp -R /mnt/LMCache-src/. "${workdir}" && cd "${workdir}" && bash "$1"'
+if [[ "${MODE}" == "sglang-e2e" ]]; then
+    log "Activating /root/.virtualenvs/sglang-default for SGLang E2E"
+    CONTAINER_COMMAND='test -f /root/.virtualenvs/sglang-default/bin/activate && source /root/.virtualenvs/sglang-default/bin/activate && workdir="$(mktemp -d /tmp/lmcache-ci.XXXXXX)" && cp -R /mnt/LMCache-src/. "${workdir}" && cd "${workdir}" && bash "$1"'
+fi
+
 docker run --rm \
+    --pull=always \
     --ipc=host \
     --network=host \
     "${DOCKER_ENV_ARGS[@]}" \
@@ -110,5 +119,5 @@ docker run --rm \
     --entrypoint /bin/bash \
     "${IMAGE}" \
     -lc \
-        'workdir="$(mktemp -d /tmp/lmcache-ci.XXXXXX)" && cp -R /mnt/LMCache-src/. "${workdir}" && cd "${workdir}" && bash "$1"' \
+        "${CONTAINER_COMMAND}" \
         musa-ci "${INNER_SCRIPT}" || fail "MUSA ${MODE} container failed"
