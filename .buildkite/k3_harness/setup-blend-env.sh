@@ -49,13 +49,18 @@ if ! "${_cb_git[@]}" clone --depth 1 --branch "${CB_PLUGIN_REF}" "${_cb_url}" "$
 fi
 echo "    cacheblend-plugin @ $(git -C "${CB_PLUGIN_DIR}" rev-parse --short HEAD) (ref=${CB_PLUGIN_REF})"
 
-# 4. Install the plugin editable; --no-deps keeps the env's torch/vllm/lmcache,
+# 4. Patch older plugin refs that still import the removed RequestType enum.
+echo "--- :wrench: Adapting cacheblend-plugin RPC names"
+python "${REPO_ROOT}/.buildkite/k3_tests/blend/scripts/patch-cacheblend-plugin.py" \
+    "${CB_PLUGIN_DIR}"
+
+# 5. Install the plugin editable; --no-deps keeps the env's torch/vllm/lmcache,
 #    --no-build-isolation because the plugin is pure-Python (no compile step).
 echo "--- :python: Installing cacheblend-plugin (editable)"
 git config --global --add safe.directory "${CB_PLUGIN_DIR}" 2>/dev/null || true
 uv pip install -e "${CB_PLUGIN_DIR}" --no-deps --no-build-isolation
 
-# 5. Import/registration smoke so a broken install fails here, not 180s into a
+# 6. Import/registration smoke so a broken install fails here, not 180s into a
 #    server-boot timeout inside the harness.
 python -c "import lmcache_cacheblend; print('cacheblend-plugin imported OK')"
 
