@@ -101,6 +101,28 @@ def test_sglang_mla_depth1():
     assert fmt == F.NL_X_NBBS_ONE_HS
 
 
+def test_sglang_unified_components_keep_explicit_block_geometry() -> None:
+    kv = [_t(NB, BS, NH, HS) for _ in range(2 * NL)]
+
+    fmt, out = detect_format(kv, EngineType.SGLANG, {"kv_list_layout": "unified"})
+
+    assert fmt == F.NL_X_NB_BS_NH_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], torch.Tensor)
+    assert tuple(out[0].shape) == (NB, BS, NH, HS)
+
+
+def test_sglang_unified_mla_keeps_single_latent_plane() -> None:
+    kv = [_t(NB, BS, HS) for _ in range(NL)]
+
+    fmt, out = detect_format(kv, EngineType.SGLANG, {"kv_list_layout": "unified"})
+
+    assert fmt == F.NL_X_NB_BS_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], torch.Tensor)
+    assert tuple(out[0].shape) == (NB, BS, HS)
+
+
 def test_sglang_mha_depth2_fused():
     kv = [[_t(NB * BS, NH, HS) for _ in range(NL)] for _ in range(2)]
     fmt, _ = detect_format(kv, EngineType.SGLANG, {})
