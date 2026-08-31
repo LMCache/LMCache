@@ -24,9 +24,12 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferService,
 )
 from lmcache.v1.multiprocess.modules.lookup import EngineLookupService
-from lmcache.v1.multiprocess.protocol import HandlerType, grpc_method
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2 as _pb2_typed,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    HandlerType,
+    grpc_method,
 )
 
 if TYPE_CHECKING:

@@ -12,7 +12,10 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.modules.blend import BlendService
-from lmcache.v1.multiprocess.protocol import HandlerType, grpc_method
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    HandlerType,
+    grpc_method,
+)
 
 
 class BlendServiceImpl:

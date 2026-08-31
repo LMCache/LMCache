@@ -18,17 +18,17 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.protocol import (
-    RPC,
-    HandlerType,
-    RpcMethod,
-    get_grpc_method_options,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
     MultiprocessGrpcClient,
     MultiprocessGrpcServer,
     _parse_grpc_compression,
     _parse_grpc_url,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    RPC,
+    HandlerType,
+    RpcMethod,
+    get_grpc_method_options,
 )
 
 # Test helpers
@@ -122,11 +122,11 @@ def _server_process(
 
     # Register all handlers
     blocking_types: list[RpcMethod] = []
-    for request_type, handler in request_handlers.items():
+    for rpc_method, handler in request_handlers.items():
         handler_type, _requires_client_affinity = get_grpc_method_options(handler)
-        server.add_handler(request_type, handler)
+        server.add_handler(rpc_method, handler)
         if handler_type == HandlerType.BLOCKING:
-            blocking_types.append(request_type)
+            blocking_types.append(rpc_method)
 
     # Assign a normal pool for all blocking handlers in tests
     if blocking_types:
@@ -147,7 +147,7 @@ def _server_process(
 def _run_client_test(
     server_url: str,
     ready_event: EventClass,
-    request_type: RpcMethod,
+    rpc_method: RpcMethod,
     payloads: list[Any],
     expected_response: Any,
     num_requests: int = 1,
@@ -159,7 +159,7 @@ def _run_client_test(
     Args:
         server_url: URL to connect to
         ready_event: Event to wait for server to be ready
-        request_type: Type of request to send
+        rpc_method: RPC method to send
         payloads: List of payloads for the request
         expected_response: Expected response from server
         num_requests: Number of requests to send
@@ -181,7 +181,7 @@ def _run_client_test(
 
     try:
         futures = []
-        rpc = getattr(client, request_type.client_method_name)
+        rpc = getattr(client, rpc_method.client_method_name)
 
         # Submit requests
         for _ in range(num_requests):
@@ -226,7 +226,7 @@ class MessageQueueTestHelper:
         helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5556")
         helper.register_handler(RPC.Noop, noop_handler)
         helper.run_test(
-            request_type=RPC.Noop,
+            rpc_method=RPC.Noop,
             payloads=[],
             expected_response="NOOP_OK",
             num_requests=10,  # Each client sends 10 requests
@@ -241,25 +241,25 @@ class MessageQueueTestHelper:
 
     def register_handler(
         self,
-        request_type: RpcMethod,
+        rpc_method: RpcMethod,
         handler: Callable,
     ) -> "MessageQueueTestHelper":
         """
         Register a handler for a specific RpcMethod.
 
         Args:
-            request_type: The type of request to handle
+            rpc_method: The RPC method to handle
             handler: Handler function that matches the protocol signature
 
         Returns:
             self for method chaining
         """
-        self.handlers[request_type] = handler
+        self.handlers[rpc_method] = handler
         return self
 
     def run_test(
         self,
-        request_type: RpcMethod,
+        rpc_method: RpcMethod,
         payloads: list[Any],
         expected_response: Any,
         num_requests: int = 1,
@@ -270,7 +270,7 @@ class MessageQueueTestHelper:
         Run a test by starting server and client processes.
 
         Args:
-            request_type: Type of request to send
+            rpc_method: RPC method to send
             payloads: List of payloads for the request
             expected_response: Expected response from server
             num_requests: Number of requests each client should send
@@ -298,7 +298,7 @@ class MessageQueueTestHelper:
                 args=(
                     self.server_url,
                     ready_event,
-                    request_type,
+                    rpc_method,
                     payloads,
                     expected_response,
                     num_requests,
@@ -360,7 +360,7 @@ def test_grpc_noop_request():
 
     # Run test with single request
     helper.run_test(
-        request_type=RPC.Noop,
+        rpc_method=RPC.Noop,
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=1,
@@ -377,7 +377,7 @@ def test_grpc_noop_multiple_requests():
 
     # Run test with multiple requests
     helper.run_test(
-        request_type=RPC.Noop,
+        rpc_method=RPC.Noop,
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=10,
@@ -394,7 +394,7 @@ def test_grpc_noop_multiple_clients():
 
     # Run test with multiple clients, each sending multiple requests
     helper.run_test(
-        request_type=RPC.Noop,
+        rpc_method=RPC.Noop,
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=5,
@@ -432,7 +432,7 @@ def test_grpc_register_kv_cache():
 
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
-        request_type=RPC.RegisterKvCache,
+        rpc_method=RPC.RegisterKvCache,
         payloads=[
             gpu_id,
             kv_cache,
@@ -463,7 +463,7 @@ def test_grpc_unregister_kv_cache():
 
     # Run test with UNREGISTER_KV_CACHE request
     helper.run_test(
-        request_type=RPC.UnregisterKvCache,
+        rpc_method=RPC.UnregisterKvCache,
         payloads=[gpu_id],
         expected_response=None,
         num_requests=1,
@@ -486,7 +486,7 @@ def test_grpc_unregister_kv_cache_multiple_clients():
 
     # Run test with multiple clients
     helper.run_test(
-        request_type=RPC.UnregisterKvCache,
+        rpc_method=RPC.UnregisterKvCache,
         payloads=[gpu_id],
         expected_response=None,
         num_requests=3,
@@ -512,7 +512,7 @@ def test_grpc_store():
 
     # Run test with STORE request
     helper.run_test(
-        request_type=RPC.Store,
+        rpc_method=RPC.Store,
         payloads=[key, gpu_id, gpu_block_ids, test_handle],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
@@ -537,7 +537,7 @@ def test_grpc_retrieve():
 
     # Run test with RETRIEVE request
     helper.run_test(
-        request_type=RPC.Retrieve,
+        rpc_method=RPC.Retrieve,
         payloads=[key, gpu_id, gpu_block_ids, test_handle, 0],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
@@ -562,7 +562,7 @@ def test_grpc_lookup():
 
     # Run test with LOOKUP request
     helper.run_test(
-        request_type=RPC.Lookup,
+        rpc_method=RPC.Lookup,
         payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
@@ -586,7 +586,7 @@ def test_grpc_lookup_with_different_key():
 
     # Run test with LOOKUP request
     helper.run_test(
-        request_type=RPC.Lookup,
+        rpc_method=RPC.Lookup,
         payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
@@ -619,7 +619,7 @@ def test_grpc_report_block_allocation():
     )
 
     helper.run_test(
-        request_type=RPC.ReportBlockAllocation,
+        rpc_method=RPC.ReportBlockAllocation,
         payloads=[42, "test-model", records],
         expected_response=None,
         num_requests=1,
@@ -639,7 +639,7 @@ def test_grpc_report_block_allocation_empty():
     )
 
     helper.run_test(
-        request_type=RPC.ReportBlockAllocation,
+        rpc_method=RPC.ReportBlockAllocation,
         payloads=[0, "", records],
         expected_response=None,
         num_requests=1,

@@ -55,7 +55,8 @@ def test_patch_cacheblend_plugin_rewrites_legacy_request_type(
     assert patched == [source]
     assert source.read_text() == "\n".join(
         [
-            "from lmcache.v1.multiprocess.protocol import RPC, RpcMethod",
+            "from lmcache.v1.multiprocess.transport.grpc_impl.protocol import RPC, "
+            "RpcMethod",
             "",
             "def submit(request_type: RpcMethod) -> RpcMethod:",
             "    return request_type",
@@ -85,7 +86,9 @@ def test_patch_cacheblend_plugin_preserves_other_protocol_imports(
     module.patch_cacheblend_plugin(tmp_path)
 
     assert source.read_text() == (
-        "from lmcache.v1.multiprocess.protocol import RPC, KeyType, RpcMethod\n"
+        "from lmcache.v1.multiprocess.protocol import KeyType\n"
+        "from lmcache.v1.multiprocess.transport.grpc_impl.protocol import RPC, "
+        "RpcMethod\n"
         "KEY = RPC.Lookup\n"
     )
 

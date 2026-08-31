@@ -48,6 +48,10 @@ PROTOCOL_IMPORT = re.compile(
     r"^from lmcache\.v1\.multiprocess\.protocol import (?P<imports>.+)$"
 )
 REQUEST_TYPE_ACCESS = re.compile(r"\bRequestType\.([A-Z0-9_]+)\b")
+GRPC_PROTOCOL_IMPORT = (
+    "from lmcache.v1.multiprocess.transport.grpc_impl.protocol import"
+)
+TRANSPORT_NEUTRAL_PROTOCOL_NAMES = {"InstanceID", "KeyType"}
 
 
 def patch_cacheblend_plugin(plugin_dir: Path) -> list[Path]:
@@ -98,12 +102,27 @@ def _patch_protocol_imports(source: str) -> str:
             lines.append(line)
             continue
 
-        names = ["RPC" if name == "RequestType" else name for name in names]
-        if "RpcMethod" not in names:
-            names.append("RpcMethod")
-        lines.append(
-            f"from lmcache.v1.multiprocess.protocol import {', '.join(names)}{newline}"
-        )
+        neutral_names = [
+            name
+            for name in names
+            if name != "RequestType" and name in TRANSPORT_NEUTRAL_PROTOCOL_NAMES
+        ]
+        grpc_names = [
+            name
+            for name in names
+            if name != "RequestType" and name not in TRANSPORT_NEUTRAL_PROTOCOL_NAMES
+        ]
+        if "RPC" not in grpc_names:
+            grpc_names.append("RPC")
+        if "RpcMethod" not in grpc_names:
+            grpc_names.append("RpcMethod")
+
+        if neutral_names:
+            lines.append(
+                "from lmcache.v1.multiprocess.protocol import "
+                f"{', '.join(neutral_names)}{newline}"
+            )
+        lines.append(f"{GRPC_PROTOCOL_IMPORT} {', '.join(grpc_names)}{newline}")
 
     return "".join(lines)
 

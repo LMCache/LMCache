@@ -28,7 +28,6 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.protocol import RpcMethod, coerce_rpc_method
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
@@ -37,6 +36,10 @@ from lmcache.v1.multiprocess.transfer_context import (
 from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
     MessagingFuture,
     MultiprocessGrpcClient,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    RpcMethod,
+    coerce_rpc_method,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 from lmcache.v1.platform.base.event_ipc import (

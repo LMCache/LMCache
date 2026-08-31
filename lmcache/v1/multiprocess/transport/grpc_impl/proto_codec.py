@@ -36,13 +36,13 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_decoder,
     get_customized_encoder,
 )
-from lmcache.v1.multiprocess.protocol import (
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mp_pb2 as _pb2_typed,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
     RPC_METHODS,
     RpcMethod,
     coerce_rpc_method,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mp_pb2 as _pb2_typed,
 )
 
 # Generated protobuf classes are dynamic and opaque to static analysis.
@@ -73,33 +73,33 @@ def _build_service_methods() -> dict[str, tuple[str, Any]]:
 _SERVICE_METHODS = _build_service_methods()
 
 
-def request_type_to_method_name(request_type: RpcMethod | str) -> str:
+def rpc_method_to_method_name(rpc_method: RpcMethod | str) -> str:
     """Return the protobuf service method name for an RPC method.
 
     Args:
-        request_type: Multiprocess protocol operation.
+        rpc_method: Multiprocess protocol operation.
 
     Returns:
         The CamelCase protobuf method name.
     """
-    return str(coerce_rpc_method(request_type))
+    return str(coerce_rpc_method(rpc_method))
 
 
-def get_request_message_class(request_type: RpcMethod | str) -> Any:
+def get_request_message_class(rpc_method: RpcMethod | str) -> Any:
     """Return the generated protobuf request class for an RPC method."""
-    method = _SERVICE_METHODS[str(coerce_rpc_method(request_type))][1]
+    method = _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][1]
     return getattr(lmcache_mp_pb2, method.input_type.name)
 
 
-def get_response_message_class(request_type: RpcMethod | str) -> Any:
+def get_response_message_class(rpc_method: RpcMethod | str) -> Any:
     """Return the generated protobuf response class for an RPC method."""
-    method = _SERVICE_METHODS[str(coerce_rpc_method(request_type))][1]
+    method = _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][1]
     return getattr(lmcache_mp_pb2, method.output_type.name)
 
 
-def get_service_name(request_type: RpcMethod | str) -> str:
+def get_service_name(rpc_method: RpcMethod | str) -> str:
     """Return the protobuf service name for an RPC method."""
-    return _SERVICE_METHODS[str(coerce_rpc_method(request_type))][0]
+    return _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][0]
 
 
 def get_service_names() -> set[str]:
@@ -946,6 +946,6 @@ __all__ = [
     "get_service_names",
     "msgspec_decode",
     "msgspec_encode",
-    "request_type_to_method_name",
+    "rpc_method_to_method_name",
     "validate_protocol_descriptor",
 ]

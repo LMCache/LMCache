@@ -27,7 +27,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     send_lmcache_request,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RPC
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import RPC
 
 
 class FakeCudaEvent:

@@ -23,12 +23,15 @@ pytest.importorskip(
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     _ensure_transport_scheme,
 )
-from lmcache.v1.multiprocess.protocol import RPC, RpcMethod  # noqa: E402
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (  # noqa: E402
     lmcache_mp_pb2_grpc,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (  # noqa: E402
-    request_type_to_method_name,
+    rpc_method_to_method_name,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (  # noqa: E402
+    RPC,
+    RpcMethod,
 )
 
 
@@ -51,7 +54,7 @@ def test_ensure_transport_scheme_preserves_existing_scheme(url):
 
 
 @pytest.mark.parametrize(
-    "request_type,expected",
+    "rpc_method,expected",
     [
         (RPC.Store, "Store"),
         (RPC.Retrieve, "Retrieve"),
@@ -60,17 +63,17 @@ def test_ensure_transport_scheme_preserves_existing_scheme(url):
         (RPC.P2PLookupAndLock, "P2PLookupAndLock"),
     ],
 )
-def test_request_type_to_method_name(request_type, expected):
-    assert request_type_to_method_name(request_type) == expected
+def test_rpc_method_to_method_name(rpc_method, expected):
+    assert rpc_method_to_method_name(rpc_method) == expected
 
 
-def test_every_request_type_maps_to_a_real_grpc_method():
+def test_every_rpc_method_maps_to_a_real_grpc_method():
     # The .proto file must define a rpc method for every RpcMethod,
     # otherwise the servicer dispatch layer would 404 that rpc.
     missing = [
-        (rt.service_name, rt.name, request_type_to_method_name(rt))
+        (rt.service_name, rt.name, rpc_method_to_method_name(rt))
         for rt in RpcMethod
-        if request_type_to_method_name(rt)
+        if rpc_method_to_method_name(rt)
         not in dir(getattr(lmcache_mp_pb2_grpc, f"{rt.service_name}Servicer"))
     ]
     assert not missing, (

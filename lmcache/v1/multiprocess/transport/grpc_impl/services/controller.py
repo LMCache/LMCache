@@ -6,7 +6,10 @@ from __future__ import annotations
 
 # First Party
 from lmcache.v1.multiprocess.modules.management import ManagementService
-from lmcache.v1.multiprocess.protocol import HandlerType, grpc_method
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    HandlerType,
+    grpc_method,
+)
 
 
 class ControllerServiceImpl:

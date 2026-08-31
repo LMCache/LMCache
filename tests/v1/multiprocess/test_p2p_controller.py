@@ -23,14 +23,6 @@ from lmcache.v1.multiprocess.modules.p2p_controller import (
     _P2PState,
     _PeerInstance,
 )
-from lmcache.v1.multiprocess.protocol import (
-    RPC,
-    HandlerType,
-    RpcMethod,
-    get_grpc_method_options,
-    get_payload_classes,
-    get_response_class,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2,
 )
@@ -38,6 +30,14 @@ from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
     MultiprocessGrpcServer,
     msgspec_decode,
     msgspec_encode,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    RPC,
+    HandlerType,
+    RpcMethod,
+    get_grpc_method_options,
+    get_payload_classes,
+    get_response_class,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.services import P2PServiceImpl
 

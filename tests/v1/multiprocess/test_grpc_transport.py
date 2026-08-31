@@ -30,7 +30,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RPC, HandlerType, RpcMethod
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2 as _pb2_typed,
 )
@@ -40,13 +39,18 @@ from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
 from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
     MultiprocessGrpcClient,
     MultiprocessGrpcServer,
-    request_type_to_method_name,
+    rpc_method_to_method_name,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_request_decoder,
     encode_request_from_call,
     get_request_message_class,
     get_response_message_class,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    RPC,
+    HandlerType,
+    RpcMethod,
 )
 
 # Generated message classes are dynamic; rebind through Any so static analysis
@@ -64,7 +68,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl import grpc
 assert "grpc" not in sys.modules
 assert "grpc_tools" not in sys.modules
 assert grpc.grpc is None
-assert grpc.request_type_to_method_name("Ping") == "Ping"
+assert grpc.rpc_method_to_method_name("Ping") == "Ping"
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -102,11 +106,11 @@ def test_service_descriptor_covers_every_protocol_rpc() -> None:
         for service in services.values()
         for method in service.methods
     }
-    expected_methods = {request_type_to_method_name(item) for item in RpcMethod}
+    expected_methods = {rpc_method_to_method_name(item) for item in RpcMethod}
     assert set(service_methods) == expected_methods
 
     for rpc_method in RpcMethod:
-        service_name, method = service_methods[request_type_to_method_name(rpc_method)]
+        service_name, method = service_methods[rpc_method_to_method_name(rpc_method)]
         assert service_name == rpc_method.service_name
         assert get_request_message_class(rpc_method).DESCRIPTOR is method.input_type
         assert get_response_message_class(rpc_method).DESCRIPTOR is method.output_type
@@ -114,9 +118,9 @@ def test_service_descriptor_covers_every_protocol_rpc() -> None:
 
 def test_client_installs_function_style_rpc_methods() -> None:
     """Every protocol method is directly callable on the client."""
-    for request_type in RpcMethod:
-        method = getattr(MultiprocessGrpcClient, request_type.client_method_name, None)
-        assert callable(method), request_type.name
+    for rpc_method in RpcMethod:
+        method = getattr(MultiprocessGrpcClient, rpc_method.client_method_name, None)
+        assert callable(method), rpc_method.name
 
 
 def test_service_descriptor_has_no_legacy_batch_rpc() -> None:
@@ -127,7 +131,7 @@ def test_service_descriptor_has_no_legacy_batch_rpc() -> None:
 
 
 def test_ping_method_name_matches_proto() -> None:
-    assert request_type_to_method_name(RPC.Ping) == "Ping"
+    assert rpc_method_to_method_name(RPC.Ping) == "Ping"
 
 
 def test_concurrent_mixed_requests_roundtrip_over_unary_rpcs() -> None:

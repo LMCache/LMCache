@@ -14,7 +14,11 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import HandlerType, KeyType, grpc_method
+from lmcache.v1.multiprocess.protocol import KeyType
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    HandlerType,
+    grpc_method,
+)
 
 # ==============================================================================
 # NOOP Request Handlers

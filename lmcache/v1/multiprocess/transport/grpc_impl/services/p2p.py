@@ -8,7 +8,10 @@ from __future__ import annotations
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
-from lmcache.v1.multiprocess.protocol import HandlerType, grpc_method
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    HandlerType,
+    grpc_method,
+)
 
 
 class P2PServiceImpl:

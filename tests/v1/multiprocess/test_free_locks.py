@@ -11,7 +11,11 @@ import threading
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocol import (
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mp_pb2,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
     RPC,
     HandlerType,
     RpcMethod,
@@ -19,10 +23,6 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
     get_response_class,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mp_pb2,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 
 # Test helpers
 from tests.v1.multiprocess import test_grpc_handler_helpers
@@ -79,7 +79,7 @@ def test_grpc_free_locks():
     )
 
     helper.run_test(
-        request_type=RPC.FreeLookupLocks,
+        rpc_method=RPC.FreeLookupLocks,
         payloads=[key, 1],
         expected_response=None,
         num_requests=1,

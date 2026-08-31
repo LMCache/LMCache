@@ -22,13 +22,6 @@ from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.futures import (
     MessagingFuture,
 )
-from lmcache.v1.multiprocess.protocol import (
-    RPC_METHODS,
-    HandlerType,
-    RpcMethod,
-    coerce_rpc_method,
-    get_grpc_method_options,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2 as _pb2_typed,
 )
@@ -50,10 +43,17 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     msgspec_encode as msgspec_encode,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
-    request_type_to_method_name as request_type_to_method_name,
+    rpc_method_to_method_name as rpc_method_to_method_name,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     validate_protocol_descriptor,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    RPC_METHODS,
+    HandlerType,
+    RpcMethod,
+    coerce_rpc_method,
+    get_grpc_method_options,
 )
 
 # Message classes come out of the protobuf descriptor pool at runtime
@@ -103,7 +103,7 @@ def _ensure_grpc_runtime() -> None:
 
 
 _RPC_METHOD_NAMES = {
-    rpc_method: request_type_to_method_name(rpc_method) for rpc_method in RPC_METHODS
+    rpc_method: rpc_method_to_method_name(rpc_method) for rpc_method in RPC_METHODS
 }
 _CLIENT_RPC_METHOD_NAMES = {
     rpc_method: rpc_method.client_method_name for rpc_method in RPC_METHODS
@@ -561,13 +561,13 @@ class MultiprocessGrpcServer:
 
     def add_handler(
         self,
-        request_type: RpcMethod | str,
+        rpc_method: RpcMethod | str,
         *args: Any,
     ) -> None:
         """Register one protobuf method handler.
 
         Args:
-            request_type: Descriptor-derived protobuf method token.
+            rpc_method: Descriptor-derived protobuf method token.
             *args: Either ``(handler,)`` or the legacy test-only
                 ``(_payload_classes, handler_type, handler)`` shape.
 
@@ -576,7 +576,7 @@ class MultiprocessGrpcServer:
             NotImplementedError: If non-blocking handlers are requested.
             ValueError: If the handler type is unknown.
         """
-        rpc_method = coerce_rpc_method(request_type)
+        rpc_method = coerce_rpc_method(rpc_method)
         if len(args) == 1 and callable(args[0]):
             handler = args[0]
             handler_type, requires_client_affinity = get_grpc_method_options(handler)
@@ -607,13 +607,13 @@ class MultiprocessGrpcServer:
 
     def _register_handler(
         self,
-        request_type: RpcMethod | str,
+        rpc_method: RpcMethod | str,
         handler: Callable[..., Any],
         *,
         handler_type: HandlerType,
         requires_client_affinity: bool,
     ) -> None:
-        rpc_method = coerce_rpc_method(request_type)
+        rpc_method = coerce_rpc_method(rpc_method)
         request_cls = get_request_message_class(rpc_method)
         response_cls = get_response_message_class(rpc_method)
         request_decoder, payload_types = compile_request_decoder(request_cls, handler)
@@ -633,11 +633,11 @@ class MultiprocessGrpcServer:
 
     def add_sync_handler(
         self,
-        request_type: RpcMethod | str,
+        rpc_method: RpcMethod | str,
         handler: Callable[..., Any],
     ) -> None:
         self._register_handler(
-            request_type,
+            rpc_method,
             handler=handler,
             handler_type=HandlerType.SYNC,
             requires_client_affinity=False,
@@ -645,13 +645,13 @@ class MultiprocessGrpcServer:
 
     def add_blocking_handler(
         self,
-        request_type: RpcMethod | str,
+        rpc_method: RpcMethod | str,
         handler: Callable[..., Any],
         *,
         requires_client_affinity: bool = False,
     ) -> None:
         self._register_handler(
-            request_type,
+            rpc_method,
             handler=handler,
             handler_type=HandlerType.BLOCKING,
             requires_client_affinity=requires_client_affinity,
@@ -659,10 +659,10 @@ class MultiprocessGrpcServer:
 
     def add_nonblocking_handler(
         self,
-        request_type: RpcMethod | str,
+        rpc_method: RpcMethod | str,
         handler: Callable[..., Any],
     ) -> None:
-        del request_type, handler
+        del rpc_method, handler
         raise NotImplementedError
 
     def add_service(self, service_name: str, implementation: object) -> None:
@@ -727,11 +727,11 @@ class MultiprocessGrpcServer:
 
     def _validate_blocking_handlers(
         self,
-        request_types: Sequence[RpcMethod | str],
+        rpc_methods: Sequence[RpcMethod | str],
         method_name: str,
     ) -> None:
-        for request_type in request_types:
-            rpc_method = coerce_rpc_method(request_type)
+        for rpc_method in rpc_methods:
+            rpc_method = coerce_rpc_method(rpc_method)
             handler = self.handlers.get(rpc_method)
             if handler is None:
                 raise ValueError(
@@ -746,11 +746,11 @@ class MultiprocessGrpcServer:
 
     def add_normal_thread_pool(
         self,
-        request_types: Sequence[RpcMethod | str],
+        rpc_methods: Sequence[RpcMethod | str],
         max_workers: int,
     ) -> None:
-        self._validate_blocking_handlers(request_types, "add_normal_thread_pool")
-        if not request_types:
+        self._validate_blocking_handlers(rpc_methods, "add_normal_thread_pool")
+        if not rpc_methods:
             return
 
         pool = ThreadPoolExecutor(
@@ -758,24 +758,24 @@ class MultiprocessGrpcServer:
             thread_name_prefix=f"normal-pool-{len(self.extra_pools)}",
         )
         self.extra_pools.append(pool)
-        for request_type in request_types:
-            rpc_method = coerce_rpc_method(request_type)
+        for rpc_method in rpc_methods:
+            rpc_method = coerce_rpc_method(rpc_method)
             handler = self.handlers[rpc_method]
             handler.executor = pool
 
         logger.debug(
             "Created normal thread pool (max_workers=%d) for %s",
             max_workers,
-            [coerce_rpc_method(rt).name for rt in request_types],
+            [coerce_rpc_method(method).name for method in rpc_methods],
         )
 
     def add_affinity_thread_pool(
         self,
-        request_types: Sequence[RpcMethod | str],
+        rpc_methods: Sequence[RpcMethod | str],
         max_workers: int,
     ) -> None:
-        self._validate_blocking_handlers(request_types, "add_affinity_thread_pool")
-        if not request_types:
+        self._validate_blocking_handlers(rpc_methods, "add_affinity_thread_pool")
+        if not rpc_methods:
             return
 
         pool = AffinityThreadPool(
@@ -783,15 +783,15 @@ class MultiprocessGrpcServer:
             thread_name_prefix=f"affinity-pool-{len(self.extra_pools)}",
         )
         self.extra_pools.append(pool)
-        for request_type in request_types:
-            rpc_method = coerce_rpc_method(request_type)
+        for rpc_method in rpc_methods:
+            rpc_method = coerce_rpc_method(rpc_method)
             handler = self.handlers[rpc_method]
             handler.executor = pool
 
         logger.debug(
             "Created affinity thread pool (max_workers=%d) for %s",
             max_workers,
-            [coerce_rpc_method(rt).name for rt in request_types],
+            [coerce_rpc_method(method).name for method in rpc_methods],
         )
 
     # ------------------------------------------------------------------
