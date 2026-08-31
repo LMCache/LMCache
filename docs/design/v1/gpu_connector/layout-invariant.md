@@ -165,6 +165,29 @@ pointer, the kernel walks layers internally via `shape_desc.nl`. Use
 `get_spec_class(fmt).is_cross_layer` for that dispatch and
 `.is_hnd` to detect head-major within-block layouts.
 
+### LMCache-side buffer layout for fused formats (`MemObjKVLayout`)
+
+`EngineKVFormat` fixes the *engine* layout; for the fused-packed formats
+(`get_spec_class(fmt).is_fused_packed`) it does not fix the *LMCache* one. Those
+engines pack each head's K and V into one `CS = 2·HS` content dim, and LMCache
+holds that data in one of two shapes the buffer alone cannot tell apart. The
+in-process transfer entry points therefore take an explicit `MemObjKVLayout`,
+declared by the caller and validated on both the CUDA and pure-torch paths.
+
+| `MemObjKVLayout` | Memory object shape | Declared by |
+|---|---|---|
+| `SPLIT_KV_2LTD` | `[2, L, T, NH·HS]` — true K/V planes | `VLLMPagedMemGPUConnectorV2` / `V3` (in-process) |
+| `FUSED_PACKED` | `[1, L, T, NH·CS]` — engine rows verbatim | CacheBlend scatter and the MP staging slots |
+| `UNSPECIFIED` | n/a | every non-fused format — passing anything else is an error |
+
+For a fused format the transfer entry points' `head_size` is the **packed**
+per-head width `CS`, matching `get_head_size` and `PageBufferShapeDesc.hs`; the
+split mapping derives `HS = CS / 2` from it. Non-fused formats keep `HS`.
+
+`block_stride_elems` applies to both layouts — vLLM's standardized blocks-first
+pools reach these formats with a padded per-block step, so the split mapping
+honours it exactly as the packed one does.
+
 ### Reshape-via-hints (TRT-LLM)
 
 TRT-LLM hands LMCache a 4-D pool tensor
