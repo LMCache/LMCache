@@ -404,6 +404,25 @@ def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
     assert isinstance(context, EngineDrivenTransferContext)
 
 
+def test_create_transfer_context_auto_routes_xpu_to_engine_driven() -> None:
+    """XPU does not support the event-IPC handle path, so auto mode must use
+    the data-copy transport instead of the LMCache-driven handle transport."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        create_transfer_context,
+    )
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(worker_transfer, "get_device", lambda _: type("D", (), {"type": "xpu"})())
+    try:
+        context = create_transfer_context({"layer_0": torch.randn(2, 2)})
+        assert isinstance(context, EngineDrivenTransferContext)
+    finally:
+        monkeypatch.undo()
+
+
 def test_create_transfer_context_invalid_mode_raises() -> None:
     """Unknown mode strings must raise a clear ValueError."""
     # First Party

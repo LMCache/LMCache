@@ -110,6 +110,23 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 
+def _create_lmcache_event() -> Any:
+    """Create a device event with backward-compatible kwargs.
+
+    Some torch backends/builds expose Event but do not accept the
+    ``interprocess`` keyword (e.g., XPU variants). In that case, fall back
+    to a plain Event() so connector paths do not crash at runtime.
+    """
+    try:
+        return torch_dev.Event(interprocess=True)
+    except TypeError:
+        logger.warning(
+            "torch_dev.Event does not support interprocess=True on this backend; "
+            "falling back to Event()"
+        )
+        return torch_dev.Event()
+
+
 # Helper functions
 def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
     """Return whether the scheduler output contains preemption-related requests.
@@ -586,7 +603,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if len(request_ids) == 0:
             return
 
-        event = self.worker_adapter.create_recorded_event()
+        try:
+            event = self.worker_adapter.create_recorded_event()
+        except RuntimeError:
+            event = _create_lmcache_event()
+            event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(
             request_ids, ops, event, cache_salts=cache_salts
@@ -661,7 +682,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
-        event = self.worker_adapter.create_recorded_event()
+        try:
+            event = self.worker_adapter.create_recorded_event()
+        except RuntimeError:
+            event = _create_lmcache_event()
+            event.record()
 
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
