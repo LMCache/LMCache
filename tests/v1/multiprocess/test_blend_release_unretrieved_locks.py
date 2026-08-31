@@ -197,20 +197,7 @@ def test_destroy_listener_failure_does_not_break_removal():
         raise RuntimeError("listener failure")
 
     manager = SessionManager(hasher=MagicMock(), cleanup_interval=None)
-    manager.add_destroy_listener(_boom)
+    manager.destroy_listeners.append(_boom)
     manager.get_or_create("req-x")
     assert manager.remove("req-x") is not None
     assert manager.get("req-x") is None
-
-
-def test_remove_destroy_listener_is_idempotent():
-    """Removing an unregistered listener is a no-op."""
-    manager = SessionManager(hasher=MagicMock(), cleanup_interval=None)
-
-    def _listener(session: Session) -> None:
-        pass
-
-    manager.remove_destroy_listener(_listener)  # not registered: no-op
-    manager.add_destroy_listener(_listener)
-    manager.remove_destroy_listener(_listener)
-    manager.remove_destroy_listener(_listener)  # second removal: no-op

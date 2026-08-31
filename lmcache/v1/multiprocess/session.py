@@ -264,13 +264,14 @@ class SessionManager:
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
-        #: Called (outside the manager lock) for every session this manager
-        #: destroys — explicit ``remove`` and TTL ``cleanup_expired`` alike —
-        #: so modules holding per-request resources in ``Session.extras``
-        #: (e.g. the blend module's unretrieved sparse-prefetch read locks)
-        #: can release them on every destruction path. Exceptions are
-        #: logged, never propagated.
-        self._destroy_listeners: list[Callable[[Session], None]] = []
+        #: Modules append callbacks here to be invoked for every session
+        #: this manager destroys — explicit ``remove`` and TTL
+        #: ``cleanup_expired`` alike, outside the manager lock — so
+        #: per-request resources kept in ``Session.extras`` (e.g. the blend
+        #: module's unretrieved sparse-prefetch read locks) are released on
+        #: every destruction path. A listener that raises is logged and
+        #: skipped; destruction always completes.
+        self.destroy_listeners: list[Callable[[Session], None]] = []
         self._cleanup_interval = cleanup_interval
         self._cleanup_thread: PeriodicThread | None = None
         if cleanup_interval is not None and cleanup_interval > 0:
@@ -313,7 +314,14 @@ class SessionManager:
         if session is None:
             return None
         logger.debug("Removed session for request_id=%s", request_id)
-        self._notify_destroy(session)
+        for listener in list(self.destroy_listeners):
+            try:
+                listener(session)
+            except Exception:
+                logger.exception(
+                    "Session destroy listener failed for request_id=%s",
+                    session.request_id,
+                )
         return session
 
     def cleanup_expired(self) -> int:
@@ -331,53 +339,17 @@ class SessionManager:
                     del self._sessions[rid]
 
         for session in expired:
-            self._notify_destroy(session)
+            for listener in list(self.destroy_listeners):
+                try:
+                    listener(session)
+                except Exception:
+                    logger.exception(
+                        "Session destroy listener failed for request_id=%s",
+                        session.request_id,
+                    )
         if expired:
             logger.info("Cleaned up %d expired sessions", len(expired))
         return len(expired)
-
-    def add_destroy_listener(self, listener: Callable[[Session], None]) -> None:
-        """Register a callback invoked for every session this manager destroys.
-
-        Fires on both destruction paths — explicit :meth:`remove` and TTL
-        :meth:`cleanup_expired` — outside the manager lock, so a module that
-        keeps per-request resources in ``Session.extras`` can release them
-        regardless of how the request ended. A listener that raises is
-        logged and skipped; destruction always completes.
-
-        Args:
-            listener: Called with each session just after it is removed.
-        """
-        with self._lock:
-            self._destroy_listeners.append(listener)
-
-    def remove_destroy_listener(self, listener: Callable[[Session], None]) -> None:
-        """Unregister a destroy listener; a no-op if it is not registered.
-
-        Args:
-            listener: The callback previously passed to
-                :meth:`add_destroy_listener`.
-        """
-        with self._lock:
-            if listener in self._destroy_listeners:
-                self._destroy_listeners.remove(listener)
-
-    def _notify_destroy(self, session: Session) -> None:
-        """Invoke every destroy listener for one removed session.
-
-        Args:
-            session: The session that was just removed from the manager.
-        """
-        with self._lock:
-            listeners = list(self._destroy_listeners)
-        for listener in listeners:
-            try:
-                listener(session)
-            except Exception:
-                logger.exception(
-                    "Session destroy listener failed for request_id=%s",
-                    session.request_id,
-                )
 
     def active_count(self) -> int:
         """Return the number of active sessions.

@@ -756,7 +756,7 @@ class BlendModule(InstanceLivenessTarget):
         # retrieve, and released by this destroy listener when the session is
         # destroyed with the stash unconsumed — END_SESSION at request end or
         # the TTL reaper for clients that died without one.
-        ctx.session_manager.add_destroy_listener(self._release_unretrieved_locks)
+        ctx.session_manager.destroy_listeners.append(self._release_unretrieved_locks)
 
         # vLLM may call retrieve twice per request (partial- then full-block
         # alloc): ranges already scattered, so the repeat call skips them.
@@ -899,9 +899,13 @@ class BlendModule(InstanceLivenessTarget):
         )
 
     def close(self) -> None:
-        self._ctx.session_manager.remove_destroy_listener(
+        if (
             self._release_unretrieved_locks
-        )
+            in self._ctx.session_manager.destroy_listeners
+        ):
+            self._ctx.session_manager.destroy_listeners.remove(
+                self._release_unretrieved_locks
+            )
         self._fingerprint_stop.set()
         if self._coordinator is not None:
             # Joins the client's daemon thread and closes its httpx.Client;
