@@ -147,52 +147,61 @@ def _fake_obj_key(chunk_hash: bytes, worker_id: int) -> SimpleNamespace:
 
 
 def test_obj_keys_cache_round_trip_tp1():
-    """At world_size=1, retrieve can rebuild from the cache exactly."""
-    eng = MagicMock()
-    eng._lookup_obj_keys_cache = {}
-    eng._lookup_obj_keys_lock = threading.Lock()
+    """At world_size=1, retrieve can rebuild from the session stash exactly."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend import (
+        _record_unretrieved_keys,
+        _take_unretrieved_keys,
+    )
+    from lmcache.v1.multiprocess.session import Session
 
-    # Simulate what cb_lookup_subsequences stores.
+    session = Session(request_id="req-1", hasher=MagicMock())
+
+    # Simulate what the lookup's classify stores.
     chunk_hashes = [b"h1", b"h2", b"h3"]
     obj_keys_per_chunk = {h: [_fake_obj_key(h, 0)] for h in chunk_hashes}
-    with eng._lookup_obj_keys_lock:
-        eng._lookup_obj_keys_cache["req-1"] = obj_keys_per_chunk
+    _record_unretrieved_keys(session, obj_keys_per_chunk)
 
-    # Simulate retrieve consuming the cache.
+    # Simulate retrieve consuming the stash (take-once).
     matches_sorted = [
         SimpleNamespace(hash=h, cur_st=i) for i, h in enumerate(chunk_hashes)
     ]
-    with eng._lookup_obj_keys_lock:
-        cached = eng._lookup_obj_keys_cache.pop("req-1", None)
+    cached = _take_unretrieved_keys(session)
 
     assert cached is not None
     assert all(r.hash in cached for r in matches_sorted)
     rebuilt = [k for r in matches_sorted for k in cached[r.hash]]
     assert len(rebuilt) == 3
     assert [k.chunk_hash for k in rebuilt] == chunk_hashes
-    # Cache is now empty for this request.
-    with eng._lookup_obj_keys_lock:
-        assert "req-1" not in eng._lookup_obj_keys_cache
+    # Stash is now empty: a second take (the session destroy listener after
+    # a successful retrieve) releases nothing twice; a missing session is
+    # also a clean miss.
+    assert _take_unretrieved_keys(session) is None
+    assert _take_unretrieved_keys(None) is None
 
 
 def test_obj_keys_cache_round_trip_tp_expanded():
     """world_size>1: cached entry per hash is a list of length world_size,
     rebuilt list is flat chunk-major."""
-    eng = MagicMock()
-    eng._lookup_obj_keys_cache = {}
-    eng._lookup_obj_keys_lock = threading.Lock()
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend import (
+        _record_unretrieved_keys,
+        _take_unretrieved_keys,
+    )
+    from lmcache.v1.multiprocess.session import Session
+
+    session = Session(request_id="req-tp", hasher=MagicMock())
 
     ws = 4
     chunk_hashes = [b"h1", b"h2"]
     per_hash = {h: [_fake_obj_key(h, w) for w in range(ws)] for h in chunk_hashes}
-    with eng._lookup_obj_keys_lock:
-        eng._lookup_obj_keys_cache["req-tp"] = per_hash
+    _record_unretrieved_keys(session, per_hash)
 
     matches_sorted = [
         SimpleNamespace(hash=h, cur_st=i) for i, h in enumerate(chunk_hashes)
     ]
-    with eng._lookup_obj_keys_lock:
-        cached = eng._lookup_obj_keys_cache.pop("req-tp", None)
+    cached = _take_unretrieved_keys(session)
+    assert cached is not None
     rebuilt = [k for r in matches_sorted for k in cached[r.hash]]
     # Length = 2 chunks × 4 workers.
     assert len(rebuilt) == 8

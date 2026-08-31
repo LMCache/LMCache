@@ -106,6 +106,42 @@ _TORCH_TO_AT_SCALAR = {
 _EMPTY_GROUP_ROT: list[list[int]] = []
 
 
+#: ``Session.extras`` key holding the lookup's TP-expanded obj_keys per found
+#: chunk hash — sparse-prefetch READ-LOCKED keys awaiting the retrieve.
+#: Written once by ``_sparse_classify``, consumed once by the retrieve
+#: (:func:`_take_unretrieved_keys`); whatever remains when the session is
+#: destroyed is released by ``BlendModule._release_unretrieved_locks``, so a
+#: client that never retrieves (e.g. every match shadowed by vLLM's local
+#: prefix cache) cannot leak the locks.
+_UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
+
+
+def _record_unretrieved_keys(session, per_hash: "dict[bytes, list]") -> None:
+    """Stash the read-locked obj_keys on the request session (replace-once).
+
+    Args:
+        session: The request's :class:`~lmcache.v1.multiprocess.session.Session`.
+        per_hash: All-ranks-expanded object keys per found chunk hash.
+    """
+    session.extras[_UNRETRIEVED_KEYS_EXTRA] = per_hash
+
+
+def _take_unretrieved_keys(session) -> "dict[bytes, list] | None":
+    """Consume the stashed obj_keys (at most once; dict.pop is atomic).
+
+    Args:
+        session: The request's session, or None when it no longer exists.
+
+    Returns:
+        The per-hash object-key map, or None if the session is gone, nothing
+        was stashed, or it was already taken — so a later taker (the session
+        destroy listener after a successful retrieve) releases nothing twice.
+    """
+    if session is None:
+        return None
+    return session.extras.pop(_UNRETRIEVED_KEYS_EXTRA, None)
+
+
 @dataclass
 class _CBRopeState:
     """Per-instance RoPE state IPC-shared from vLLM; dangles on reallocate.
@@ -740,9 +776,12 @@ class BlendModule(InstanceLivenessTarget):
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
-        # L2 opt: cache TP-expanded obj_keys at lookup, pop at retrieve.
-        self._lookup_obj_keys_cache: dict[str, dict[bytes, list]] = {}
-        self._lookup_obj_keys_lock = threading.Lock()
+        # L2 opt: the lookup's TP-expanded obj_keys ride the request Session
+        # (``_UNRETRIEVED_KEYS_EXTRA``): stashed at classify, popped at
+        # retrieve, and released by this destroy listener when the session is
+        # destroyed with the stash unconsumed — END_SESSION at request end or
+        # the TTL reaper for clients that died without one.
+        ctx.session_manager.add_destroy_listener(self._release_unretrieved_locks)
 
         # vLLM may call retrieve twice per request (partial- then full-block
         # alloc): ranges already scattered, so the repeat call skips them.
@@ -854,7 +893,40 @@ class BlendModule(InstanceLivenessTarget):
             "active_cb_lookups": len(self._cb_jobs),
         }
 
+    def _release_unretrieved_locks(self, session) -> None:
+        """Session destroy listener: release the request's unconsumed locks.
+
+        The unified lookup read-locks every found chunk's object keys for
+        the retrieve — but a client that drops all its matches (e.g. every
+        match falls inside vLLM's local prefix-cache coverage) never sends
+        ``CB_RETRIEVE_PRE_COMPUTED``, and no other path releases those
+        locks: the retrieve's orphan sweep never runs and
+        ``free_lookup_locks`` covers only the prefix leg's lock model. The
+        locks would pin the chunks in L1 for the server's lifetime,
+        stacking one more count per repeat lookup. Session destruction
+        (END_SESSION at request end, or the TTL reaper for clients that
+        died without one) is the safe release point: by then no retrieve
+        for this request can still arrive.
+
+        Args:
+            session: The session being destroyed by the session manager.
+        """
+        per_hash = _take_unretrieved_keys(session)
+        if not per_hash:
+            return
+        keys = [key for hash_keys in per_hash.values() for key in hash_keys]
+        self._ctx.storage_manager.finish_read_prefetched(keys)
+        logger.info(
+            "Released %d unretrieved sparse-prefetch read lock(s) at session "
+            "end for request %s",
+            len(keys),
+            session.request_id,
+        )
+
     def close(self) -> None:
+        self._ctx.session_manager.remove_destroy_listener(
+            self._release_unretrieved_locks
+        )
         self._fingerprint_stop.set()
         if self._coordinator is not None:
             # Joins the client's daemon thread and closes its httpx.Client;
@@ -1307,15 +1379,18 @@ class BlendModule(InstanceLivenessTarget):
                 )
             )
 
-        # Stash per-hash obj_keys for retrieve (L2 opt).
+        # Stash per-hash obj_keys on the session for the retrieve (L2 opt);
+        # the session destroy listener releases anything never retrieved.
         if found_cb_match_result:
             cache_entry = {
                 r.hash: per_hash_obj_keys[r.hash]
                 for r in found_cb_match_result
                 if r.hash in per_hash_obj_keys
             }
-            with self._lookup_obj_keys_lock:
-                self._lookup_obj_keys_cache[key.request_id] = cache_entry
+            _record_unretrieved_keys(
+                self._ctx.session_manager.get_or_create(key.request_id),
+                cache_entry,
+            )
 
         return found_cb_match_result
 
@@ -2799,9 +2874,11 @@ class BlendModule(InstanceLivenessTarget):
                     f"slot_bound={slot_bound}",
                     scatter_ran=False,
                 )
-        # L2 opt: reuse lookup's obj_keys cache; fall back to re-resolve.
-        with self._lookup_obj_keys_lock:
-            cached = self._lookup_obj_keys_cache.pop(key.request_id, None)
+        # L2 opt: consume the lookup's obj_keys stash from the session
+        # (take-once; later calls fall back to re-resolve). ``get`` not
+        # ``get_or_create``: a retrieve after session end must not recreate
+        # ownership state.
+        cached = _take_unretrieved_keys(self._ctx.session_manager.get(key.request_id))
         if cached is not None and all(r.hash in cached for r in cb_match_result):
             # The lookup cached all-ranks obj keys (group-major, rank-minor).
             # Select THIS rank's key per read group, else the pairing mispairs
