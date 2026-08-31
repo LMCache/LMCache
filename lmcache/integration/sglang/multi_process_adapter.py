@@ -32,7 +32,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
 

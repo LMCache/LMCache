@@ -20,7 +20,7 @@ from lmcache.v1.multiprocess.config import (
     add_mp_server_args,
     parse_args_to_mp_server_config,
 )
-from lmcache.v1.multiprocess.services.blend import BlendTokenRangeMatcher
+from lmcache.v1.multiprocess.modules.blend import BlendTokenRangeMatcher
 
 CHUNK_SIZE = 256
 

@@ -23,12 +23,12 @@ pytest.importorskip(
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     _ensure_transport_scheme,
 )
-from lmcache.v1.multiprocess.grpc import (  # noqa: E402
-    request_type_to_method_name,
-)
 from lmcache.v1.multiprocess.protocol import RPC, RpcMethod  # noqa: E402
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (  # noqa: E402
     lmcache_mp_pb2_grpc,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (  # noqa: E402
+    request_type_to_method_name,
 )
 
 

@@ -19,7 +19,6 @@ from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -28,6 +27,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,

@@ -894,7 +894,7 @@ def _read_transfer_channel_address(message: Any) -> TransferChannelAddress:
     return TransferChannelAddress(offset=message.offset, size=message.size)
 
 
-# These serializers remain part of ``multiprocess.grpc``'s compatibility API.
+# These serializers remain part of the gRPC transport compatibility API.
 _SPECIAL_ENCODER_DECODERS = {
     DeviceIPCWrapper: (
         get_customized_encoder(DeviceIPCWrapper),

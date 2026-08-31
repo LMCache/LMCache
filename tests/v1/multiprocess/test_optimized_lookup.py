@@ -29,7 +29,7 @@ import pytest
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.services.blend import BlendTokenRangeMatcher
+from lmcache.v1.multiprocess.modules.blend import BlendTokenRangeMatcher
 from lmcache.v1.multiprocess.token_hasher import rolling_hash_windows_numba
 
 CHUNK_SIZE = 256

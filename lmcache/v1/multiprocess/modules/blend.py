@@ -48,11 +48,11 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.service import InstanceLivenessTarget
-from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferService,
 )
+from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
     chunk_hash_windows_numba,

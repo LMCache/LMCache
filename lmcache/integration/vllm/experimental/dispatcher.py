@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.qringbuffer import QRingBufferAdapter, QRingBufferCapture
 from lmcache.utils import init_logger
-from lmcache.v1.multiprocess.services.experimental import TRANSFER_QUERY
+from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 
 if TYPE_CHECKING:
     # Third Party

@@ -60,8 +60,8 @@ try:
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
     from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
+    from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
     from lmcache.v1.platform.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,

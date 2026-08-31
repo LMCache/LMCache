@@ -30,17 +30,17 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.grpc import (
-    MultiprocessGrpcClient,
-    MultiprocessGrpcServer,
-    request_type_to_method_name,
-)
 from lmcache.v1.multiprocess.protocol import RPC, HandlerType, RpcMethod
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2 as _pb2_typed,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2_grpc as _pb2_grpc_typed,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
+    MultiprocessGrpcClient,
+    MultiprocessGrpcServer,
+    request_type_to_method_name,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_request_decoder,
@@ -59,7 +59,7 @@ def test_grpc_import_does_not_load_grpc_runtime() -> None:
     """Importing gRPC helpers must not initialize gRPC native libraries."""
     script = """
 import sys
-from lmcache.v1.multiprocess import grpc
+from lmcache.v1.multiprocess.transport.grpc_impl import grpc
 
 assert "grpc" not in sys.modules
 assert "grpc_tools" not in sys.modules

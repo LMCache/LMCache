@@ -119,7 +119,7 @@ class MPServerConfig:
 
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
-    (see lmcache.v1.multiprocess.services.experimental.__init___.py)."""
+    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -434,7 +434,7 @@ def add_mp_server_args(
         nargs="*",
         default=[],
         help="List of experimental transfer modules to enable. "
-        "Options: transfer_query (see lmcache.v1.multiprocess.services."
+        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
         "experimental.__init___.py).",
     )
     return parser

@@ -18,7 +18,7 @@ import pytest
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format import get_spec_class
-from lmcache.v1.multiprocess.services.blend import _cb_group_rope_geometry
+from lmcache.v1.multiprocess.modules.blend import _cb_group_rope_geometry
 import lmcache.lmcache_native as lmcache_native
 
 F = lmcache_native.EngineKVFormat

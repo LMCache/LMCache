@@ -5,12 +5,12 @@
 from unittest.mock import MagicMock
 
 # First Party
-from lmcache.v1.multiprocess.server import MPCacheServer
-from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferService,
 )
-from lmcache.v1.multiprocess.services.management import ManagementService
+from lmcache.v1.multiprocess.modules.management import ManagementService
+from lmcache.v1.multiprocess.server import MPCacheServer
 
 
 def _engine(

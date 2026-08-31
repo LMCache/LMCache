@@ -26,11 +26,11 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

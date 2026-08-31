@@ -35,10 +35,6 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     RegisterEngineDrivenContextPayload,
 )
-from lmcache.v1.multiprocess.grpc import (
-    MultiprocessGrpcClient,
-    MultiprocessGrpcServer,
-)
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     HandlerType,
@@ -47,6 +43,10 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2 as _pb2_typed,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
+    MultiprocessGrpcClient,
+    MultiprocessGrpcServer,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 

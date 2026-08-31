@@ -17,10 +17,10 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.services.experimental import TRANSFER_QUERY
-from lmcache.v1.multiprocess.services.experimental import qstore as qstore_mod
-from lmcache.v1.multiprocess.services.experimental.qstore import QStoreService
-from lmcache.v1.multiprocess.services.lmcache_driven_transfer import ContextEntry
+from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
+from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreService
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
 
 REGISTER_ARGS = ("model##query", 2)
 

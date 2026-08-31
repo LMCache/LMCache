@@ -24,8 +24,8 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.server import run_cache_server
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 
 # Configuration constants
 SERVER_HOST = "localhost"

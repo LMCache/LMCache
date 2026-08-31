@@ -36,7 +36,7 @@ from lmcache.utils import EngineType, check_interprocess_event_support
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)

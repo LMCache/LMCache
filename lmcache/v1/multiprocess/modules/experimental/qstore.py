@@ -25,15 +25,15 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.service import InstanceLivenessTarget
-from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     downsample_and_stage_block_ids,
     get_layout_desc,
     transfer_kv_per_object_group,
 )
+from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 

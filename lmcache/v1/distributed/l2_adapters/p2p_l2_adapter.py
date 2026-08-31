@@ -34,7 +34,7 @@ from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_facto
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 
 logger = init_logger(__name__)

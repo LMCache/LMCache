@@ -15,11 +15,11 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)

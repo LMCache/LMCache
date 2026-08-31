@@ -10,7 +10,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.service import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -150,7 +150,7 @@ class ManagementService:
 
         Returns:
             The enabled experimental intermediate tensor transfer types.
-            See ``lmcache.v1.multiprocess.services.experimental.__init__``.
+            See ``lmcache.v1.multiprocess.modules.experimental.__init__``.
         """
         return list(self._experimental_transfer)
 

@@ -9,11 +9,11 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 
 
 class EngineDrivenContextPickle(EngineDrivenContext):

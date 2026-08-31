@@ -48,23 +48,23 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcServer
-from lmcache.v1.multiprocess.service import InstanceLivenessTarget
-from lmcache.v1.multiprocess.services.engine_driven_transfer import (
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferService,
 )
-from lmcache.v1.multiprocess.services.experimental import (
+from lmcache.v1.multiprocess.modules.experimental import (
     EXPERIMENTAL_TRANSFER,
     TRANSFER_QUERY,
 )
-from lmcache.v1.multiprocess.services.experimental.qstore import QStoreService
-from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreService
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferService,
 )
-from lmcache.v1.multiprocess.services.lookup import EngineLookupService
-from lmcache.v1.multiprocess.services.management import ManagementService
-from lmcache.v1.multiprocess.services.p2p_controller import P2PController
-from lmcache.v1.multiprocess.services.rpc_services import (
+from lmcache.v1.multiprocess.modules.lookup import EngineLookupService
+from lmcache.v1.multiprocess.modules.management import ManagementService
+from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcServer
+from lmcache.v1.multiprocess.transport.grpc_impl.services import (
     BlendServiceImpl,
     ControllerServiceImpl,
     DebugServiceImpl,
@@ -78,7 +78,7 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.services.blend import BlendService
+    from lmcache.v1.multiprocess.modules.blend import BlendService
 
 
 class _StatusReporter(Protocol):
@@ -259,7 +259,7 @@ def _build_rpc_services(
         from lmcache.v1.mp_coordinator.blend_client import (
             BlendCoordinatorClient,
         )
-        from lmcache.v1.multiprocess.services.blend import BlendService
+        from lmcache.v1.multiprocess.modules.blend import BlendService
 
         if lmcache_driven_transfer is None:
             raise ValueError("blend engine requires LMCache-driven transfer support")

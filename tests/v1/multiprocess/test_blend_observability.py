@@ -20,7 +20,7 @@ import time
 from lmcache.v1.distributed.api import AttnWindowDesc, TrimPolicy
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.services import blend as blend_mod
+from lmcache.v1.multiprocess.modules import blend as blend_mod
 
 _CHUNK = 256
 

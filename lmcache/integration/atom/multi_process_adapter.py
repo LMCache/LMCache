@@ -25,11 +25,11 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)

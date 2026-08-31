@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Concrete Python implementations for the generated LMCache gRPC services."""
+"""gRPC adapter for the generated ``EngineService`` surface."""
 
 # Future
 from __future__ import annotations
@@ -9,37 +9,29 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
-    BlockAllocationRecord,
-    CBMatchResult,
-    CBUnifiedLookupResult,
-    DeviceIPCWrapper,
     IPCCacheServerKey,
     KVCache,
     RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import HandlerType, grpc_method
-from lmcache.v1.multiprocess.services.engine_driven_transfer import (
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferService,
 )
-from lmcache.v1.multiprocess.services.experimental.qstore import QStoreService
-from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreService
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferService,
 )
-from lmcache.v1.multiprocess.services.lookup import EngineLookupService
-from lmcache.v1.multiprocess.services.management import ManagementService
-from lmcache.v1.multiprocess.services.p2p_controller import P2PController
+from lmcache.v1.multiprocess.modules.lookup import EngineLookupService
+from lmcache.v1.multiprocess.protocol import HandlerType, grpc_method
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2 as _pb2_typed,
 )
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.services.blend import BlendService
+    from lmcache.v1.multiprocess.modules.blend import BlendService
 
 
 T = TypeVar("T")
@@ -274,140 +266,3 @@ class EngineServiceImpl:
         return _require(
             self._engine_driven_transfer, "engine-driven KV transfer"
         ).commit_retrieve(key, instance_id)
-
-
-class ControllerServiceImpl:
-    """Implementation of the generated ``ControllerService`` RPC surface."""
-
-    def __init__(self, management: ManagementService) -> None:
-        self._management = management
-
-    @grpc_method(HandlerType.BLOCKING)
-    def Clear(self) -> None:
-        """Clear all stored KV cache data."""
-        return self._management.clear()
-
-    def GetChunkSize(self) -> int:
-        """Return the configured chunk size."""
-        return self._management.get_chunk_size()
-
-    def GetExperimental(self) -> list[str]:
-        """Return enabled experimental server features."""
-        return self._management.get_experimental()
-
-    @grpc_method(HandlerType.BLOCKING)
-    def Ping(self, instance_id: int | None) -> bool:
-        """Refresh worker liveness and report server reachability."""
-        return self._management.ping(instance_id)
-
-
-class DebugServiceImpl:
-    """Implementation of the generated ``DebugService`` RPC surface."""
-
-    def __init__(self, management: ManagementService) -> None:
-        self._management = management
-
-    def Noop(self) -> str:
-        """Return a simple health-check string."""
-        return self._management.debug()
-
-
-class ObservabilityServiceImpl:
-    """Implementation of the generated ``ObservabilityService`` RPC surface."""
-
-    def __init__(self, management: ManagementService) -> None:
-        self._management = management
-
-    @grpc_method(HandlerType.BLOCKING)
-    def ReportBlockAllocation(
-        self,
-        instance_id: int,
-        model_name: str,
-        records: list[BlockAllocationRecord],
-    ) -> None:
-        """Publish vLLM block allocation records to the event bus."""
-        return self._management.report_block_allocations(
-            instance_id, model_name, records
-        )
-
-
-class P2PServiceImpl:
-    """Implementation of the generated ``P2PService`` RPC surface."""
-
-    def __init__(self, controller: P2PController) -> None:
-        self._controller = controller
-
-    @grpc_method(HandlerType.BLOCKING)
-    def P2PLookupAndLock(
-        self,
-        keys: list[ObjectKey],
-        group_layout_descs: dict[int, MemoryLayoutDesc],
-    ) -> int:
-        """Start a peer-to-peer lookup and lock matching L1 objects."""
-        return self._controller.p2p_lookup_and_lock(keys, group_layout_descs)
-
-    @grpc_method(HandlerType.BLOCKING)
-    def P2PQueryLookupResults(
-        self,
-        task_id: int,
-    ) -> list[TransferChannelAddress] | None:
-        """Poll the result of a peer-to-peer lookup."""
-        return self._controller.p2p_query_lookup_results(task_id)
-
-    @grpc_method(HandlerType.BLOCKING)
-    def P2PUnlockObjects(self, keys: list[ObjectKey]) -> None:
-        """Release peer-to-peer read locks for object keys."""
-        return self._controller.p2p_unlock_objects(keys)
-
-
-class BlendServiceImpl:
-    """Implementation of the generated ``BlendService`` RPC surface."""
-
-    def __init__(self, blend: BlendService) -> None:
-        self._blend = blend
-
-    def CbRegisterRope(
-        self,
-        instance_id: int,
-        cos_sin_caches_ipc: list[DeviceIPCWrapper],
-        head_size: int,
-        is_neox_style: bool,
-        group_to_cache: list[int],
-        group_rot: list[list[int]],
-    ) -> None:
-        """Register rope metadata for CacheBlend re-RoPE."""
-        return self._blend.cb_register_rope(
-            instance_id,
-            cos_sin_caches_ipc,
-            head_size,
-            is_neox_style,
-            group_to_cache,
-            group_rot,
-        )
-
-    def CbUnregisterRope(self, instance_id: int) -> None:
-        """Unregister CacheBlend rope metadata."""
-        return self._blend.cb_unregister_rope(instance_id)
-
-    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
-    def CbRetrievePreComputed(
-        self,
-        key: IPCCacheServerKey,
-        cb_match_result: list[CBMatchResult],
-        gpu_block_ids: list[list[int]],
-        instance_id: int,
-        event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
-        """Retrieve pre-computed CacheBlend chunks."""
-        return self._blend.cb_retrieve_pre_computed(
-            key, cb_match_result, gpu_block_ids, instance_id, event_ipc_handle
-        )
-
-    @grpc_method(HandlerType.BLOCKING)
-    def CbUnifiedLookup(
-        self,
-        key: IPCCacheServerKey,
-        tp_size: int,
-    ) -> CBUnifiedLookupResult | None:
-        """Run the CacheBlend unified lookup RPC."""
-        return self._blend.cb_unified_lookup(key, tp_size)

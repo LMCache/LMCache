@@ -18,17 +18,17 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.grpc import (
-    MultiprocessGrpcClient,
-    MultiprocessGrpcServer,
-    _parse_grpc_compression,
-    _parse_grpc_url,
-)
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     HandlerType,
     RpcMethod,
     get_grpc_method_options,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
+    MultiprocessGrpcClient,
+    MultiprocessGrpcServer,
+    _parse_grpc_compression,
+    _parse_grpc_url,
 )
 
 # Test helpers

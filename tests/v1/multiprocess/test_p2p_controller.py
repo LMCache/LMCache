@@ -17,10 +17,11 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
-from lmcache.v1.multiprocess.grpc import (
-    MultiprocessGrpcServer,
-    msgspec_decode,
-    msgspec_encode,
+from lmcache.v1.multiprocess.modules.p2p_controller import (
+    _MAX_MISSES,
+    P2PController,
+    _P2PState,
+    _PeerInstance,
 )
 from lmcache.v1.multiprocess.protocol import (
     RPC,
@@ -30,16 +31,15 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
     get_response_class,
 )
-from lmcache.v1.multiprocess.services.p2p_controller import (
-    _MAX_MISSES,
-    P2PController,
-    _P2PState,
-    _PeerInstance,
-)
-from lmcache.v1.multiprocess.services.rpc_services import P2PServiceImpl
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
+    MultiprocessGrpcServer,
+    msgspec_decode,
+    msgspec_encode,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.services import P2PServiceImpl
 
 
 def _make_key(i: int) -> ObjectKey:

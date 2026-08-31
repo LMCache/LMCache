@@ -22,7 +22,7 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
-from lmcache.v1.multiprocess.service import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2 as _pb2_typed,

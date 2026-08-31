@@ -41,7 +41,7 @@ if TYPE_CHECKING:
         RegisterEngineDrivenContextPayload,
     )
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.services.engine_driven_transfer import (
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
         EngineDrivenTransferService,
     )
 
@@ -1064,7 +1064,7 @@ def server_service_factory(
 
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.services.engine_driven_transfer import (
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
         EngineDrivenTransferService,
     )
 

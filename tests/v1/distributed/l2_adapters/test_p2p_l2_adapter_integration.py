@@ -59,9 +59,13 @@ from lmcache.v1.multiprocess.config import (  # noqa: E402
     CoordinatorConfig,
     P2PConfig,
 )
-from lmcache.v1.multiprocess.grpc import MultiprocessGrpcServer  # noqa: E402
-from lmcache.v1.multiprocess.services.p2p_controller import P2PController  # noqa: E402
-from lmcache.v1.multiprocess.services.rpc_services import P2PServiceImpl  # noqa: E402
+from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (  # noqa: E402
+    MultiprocessGrpcServer,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.services import (  # noqa: E402
+    P2PServiceImpl,
+)
 
 _PAGE = 4096
 _NUM_KEYS = 3

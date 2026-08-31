@@ -391,7 +391,7 @@ def run_server_bench(
         parse_kvcache_shape_spec,
     )
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
+    from lmcache.v1.multiprocess.transport.grpc_impl.grpc import MultiprocessGrpcClient
 
     quiet = getattr(args, "quiet", False)
 

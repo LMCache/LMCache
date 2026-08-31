@@ -16,6 +16,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.modules.lookup import EngineLookupService, _PrefetchJob
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     HandlerType,
@@ -25,7 +26,6 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
     grpc_method,
 )
-from lmcache.v1.multiprocess.services.lookup import EngineLookupService, _PrefetchJob
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2,
 )

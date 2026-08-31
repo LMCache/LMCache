@@ -31,7 +31,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.multiprocess.services.blend import _cb_group_rope_geometry
+from lmcache.v1.multiprocess.modules.blend import _cb_group_rope_geometry
 import lmcache.lmcache_native as lmcache_native
 
 _CONTENT, _ROPE = 24, 8  # latent = [content | rope], hidden = 32
@@ -269,7 +269,7 @@ def test_rot_for_group_dtype_skip_under_declared_map():
     quantized kernel group is skipped by dtype; the float one gets the
     window. Legacy maps keep today's behavior (no dtype skip)."""
     # First Party
-    from lmcache.v1.multiprocess.services.blend import _CBRopeState
+    from lmcache.v1.multiprocess.modules.blend import _CBRopeState
 
     declared = _CBRopeState(
         head_size=64,
