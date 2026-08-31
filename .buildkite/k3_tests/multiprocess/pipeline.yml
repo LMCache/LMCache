@@ -33,17 +33,30 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
-  # 4-GPU group is listed first so the heaviest job gets scheduled before the
-  # 2- and 1-GPU jobs.
+  # 4-GPU group. Runs on a PR labelled "dsv4", or on any build started with
+  # RUN_DSV4_TEST=true.
   #
-  # On the SM120 agent fleet (RTX PRO 6000 Blackwell) this step first builds a
-  # DeepGEMM carrying SM120 kernels, because the vLLM wheel's bundled one has
-  # none -- an upstream regression (vllm#50000 repointed the DeepGEMM pin onto
-  # a base that never had SM120). run-dsv4-flash-tp.sh documents the full
-  # chain and no-ops the build on SM90/SM100. The build measures ~1-2 min in
-  # CI, well inside the timeout below.
+  # This is the only 4-GPU step in the suite -- every other step here takes one
+  # or two -- and it runs 40+ min, so on a fleet whose nodes carry four GPUs it
+  # holds a whole node for the length of the build, up to three times that
+  # under the retry policy above, while the 1- and 2-GPU steps of every other
+  # build queue behind it. Unconditional, it paid that toll on every
+  # "mp"/"full"-labelled PR build and every dev push and became the suite's
+  # head-of-line blocker. The conditions below move it to where the wait is
+  # nobody else's problem: the "dsv4" label is how a PR touching the
+  # hybrid-KV-group / slot-compression path opts in -- the same shape as the
+  # "mp"/"full" labels that gate this pipeline, and it needs nothing but
+  # GitHub write access. (Those labels still gate the build itself, so such a
+  # PR carries "dsv4" alongside "mp".) RUN_DSV4_TEST=true is the same opt-in
+  # for a manual build, where there is no PR to label.
+  #
+  # This leaves the step with no periodic run of its own: DeepSeek-V4-Flash
+  # support is exercised when someone asks for it, not on a timer. That is
+  # deliberate -- a 4-GPU node for 40+ minutes is too expensive to spend on a
+  # schedule nobody is watching -- but it does mean a regression here surfaces
+  # at the next opt-in build rather than the next morning.
   - group: ":compression: Multiprocess (4-GPU)"
-    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    if: build.pull_request.labels includes "dsv4" || build.env("RUN_DSV4_TEST") == "true"
     steps:
       # L1 + slot-compression KV correctness for DeepSeek-V4-Flash (sparse-MLA
       # + fp8, TP=4). The model's KV cache groups mix block geometries
@@ -53,12 +66,29 @@ steps:
       # preserved), re-sends the identical request now served from the L1 CPU
       # pool, and asserts the two greedy outputs are byte-identical. The 160GB
       # fp8 TP-shard load (plus the weight download on a cold hf-cache node)
-      # needs the long timeout. The SM120 DeepGEMM build adds ~1-2 min,
-      # measured in CI, so it does not move this budget.
+      # needs the long timeout; the script logs a per-phase timing summary, so
+      # a run that approaches it can be attributed from the log alone.
       - label: ":compression: dsv4_flash_tp"
         command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
         timeout_in_minutes: 90
         retry: *flaky-retry
+        env:
+          # Every JIT cache this step fills lives under one mount (see below),
+          # named explicitly so none of them depends on what HOME happens to
+          # be inside the image. DeepGEMM in particular is named rather than
+          # left to default to VLLM_CACHE_ROOT/deep_gemm, which would mean
+          # persisting all of /root/.cache/vllm -- the torch.compile cache and
+          # the P2P-access probe results included -- for one subdirectory.
+          # FlashInfer takes a base rather than a cache dir: it appends
+          # .cache/flashinfer/<version>/<arch>/cached_ops to it itself.
+          DG_JIT_CACHE_DIR: /root/.cache/jit/deep_gemm
+          TRITON_CACHE_DIR: /root/.cache/jit/triton
+          TILELANG_CACHE_DIR: /root/.cache/jit/tilelang
+          FLASHINFER_WORKSPACE_BASE: /root/.cache/jit/flashinfer
+          # Nobody publishes a DeepGEMM wheel, so the SM120 workaround in
+          # the script builds one; cache it on the same mount so only the
+          # first build on a node pays for it.
+          DEEPGEMM_WHEEL_CACHE_DIR: /root/.cache/jit/deepgemm_wheel
         agents: { queue: "k8s" }
         plugins:
           - kubernetes:
@@ -70,9 +100,42 @@ steps:
                     resources: { limits: { "nvidia.com/gpu": "4" } }
                     volumeMounts:
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: jit-cache, mountPath: /root/.cache/jit }
                       - { name: dshm, mountPath: /dev/shm }
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  # One mount for every JIT cache in this step's startup path,
+                  # with each framework given its own subdirectory of it by the
+                  # env vars above. DeepSeek-V4-Flash compiles through four of
+                  # them -- DeepGEMM for the fp8 linears, MoE experts, prenorm
+                  # GEMM and o_proj einsum, FlashInfer for the sampler and the
+                  # fp8 blockscale GEMM, then Triton and TileLang -- and the
+                  # pod's filesystem starts empty every run, so without this
+                  # the step recompiles the whole set every time: measured
+                  # locally, 685s of a 788s vLLM startup, against 103s with all
+                  # four warm.
+                  # Sharing them across builds is safe because each keys on
+                  # something that changes when the toolchain does. DeepGEMM
+                  # hashes the kernel source, the nvcc version and the compile
+                  # flags, which carry the -gencode arch; FlashInfer puts its
+                  # version and arch in the path; Triton's cache key hashes its
+                  # own compiler and backend sources along with the kernel, the
+                  # backend options and the env; TileLang namespaces its cache
+                  # by its own version and the torch version. A new pin, a new
+                  # CUDA or a different GPU arch lands on new keys rather than
+                  # reusing an old cubin.
+                  # Concurrency differs between them: DeepGEMM compiles into a
+                  # temp dir and renames into place, which is already how it
+                  # tolerates concurrent ranks on one cache, while FlashInfer
+                  # builds in place and serialises concurrent builders on a
+                  # per-module filelock -- they wait rather than each
+                  # recompiling, and a build killed mid-link is left for ninja
+                  # to redo on the next run.
+                  # The script reports each cache's resolved path, writability
+                  # and entry count before and after the run, so a mount that
+                  # silently fails to take effect shows up in the log instead
+                  # of just costing the compile time again.
+                  - { name: jit-cache, hostPath: { path: /data/jit_cache, type: DirectoryOrCreate } }
                   # TP=4 NCCL + vLLM shared memory; the 1Gi used by the
                   # smaller pods is too tight for four ranks.
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 8Gi } }

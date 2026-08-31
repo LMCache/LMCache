@@ -19,8 +19,8 @@
 #   linears, MoE experts, hyper-connection prenorm GEMM and attention o_proj
 #   einsum through DeepGEMM, so the arch must have DeepGEMM kernels.
 #
-#   On SM120 the vLLM wheel's *bundled* DeepGEMM does not, which is why this
-#   script provisions one (see "Provision DeepGEMM" below). That is a
+#   On SM120 the vLLM wheel's *bundled* DeepGEMM still does not work, which is
+#   why this script provisions one (see "Provision DeepGEMM" below). That is a
 #   workaround for an upstream regression, not a permanent requirement:
 #
 #     vllm#47304 (07-02) pinned deepseek-ai/DeepGEMM@a6b593d2, whose
@@ -28,28 +28,27 @@
 #       SM120 worked.
 #     vllm#50000 (07-30) repointed the pin to vllm-project/DeepGEMM@f5a76426,
 #       a fork branch based off DeepGEMM main. SM120 only ever lived on
-#       nv_dev, so the `== 12` branches silently vanished and weight loading
-#       began aborting at the fallthrough
+#       nv_dev, so the `== 12` branches vanished and weight loading began
+#       aborting at the fallthrough
 #       DG_HOST_UNREACHABLE("Unknown SF transformation"),
 #       csrc/apis/layout.hpp:60.
-#     vllm#51003 (08-04) rebased a CUDA FP8 header fix onto that same
-#       SM120-less base (e21c821f), which is the pin as of writing. Note
-#       tools/install_deepgemm.sh still carries the stale comment
-#       "targeting nv-dev branch due to sm120 support" above that SHA.
+#     vllm#52035 (08-12) pinned it back to deepseek-ai/DeepGEMM's nv_dev tip
+#       (8b1392b9), which does carry the SM120 kernels -- 9 sm120_*.cuh impls
+#       ship in the wheel -- and the `arch_major == 12` branches are back in
+#       layout.hpp. That is still not enough: measured on an SM120 agent
+#       against that exact pin, weight loading dies at the same
+#       layout.hpp:60 fallthrough, so whatever (dtype, gran_mn, gran_k) this
+#       model presents matches none of the arch-12 branches.
 #
-#   Delete this workaround once vLLM's pin carries SM120 again; the guard
-#   below then no-ops on its own, since the bundled DeepGEMM will work.
+#   So the delete condition for this workaround is not "the pin carries SM120
+#   kernels" -- that is true today and insufficient. It is "the bundled
+#   DeepGEMM loads this model on an SM120 agent", which has to be measured,
+#   not read off a commit.
 #
-#   Disabling DeepGEMM instead (VLLM_USE_DEEP_GEMM=0) does not work on SM120.
-#   Only the fp8 linear and FP4 MoE call sites consult is_deep_gemm_supported();
-#   measured on an SM120 node, those do demote (CutlassFp8BlockScaledMMKernel,
-#   MARLIN) and the run then dies in mhc_pre_broadcast_tilelang, which calls
-#   DeepGEMM unconditionally. Patching that gate exposes the next wall --
-#   torch.ops._C.cutlass_scaled_mm has no SM120 block-scaled kernel in the
-#   wheel -- and behind it DSv4's per-layer _o_proj -> deep_gemm_fp8_o_proj,
-#   which has no non-DeepGEMM implementation on the CUDA path. (The ROCm and
-#   XPU model modules define alternative _o_proj implementations, but
-#   _select_dsv4_attn_cls only ever returns CUDA classes here.)
+#   Disabling DeepGEMM instead (VLLM_USE_DEEP_GEMM=0) is not an escape hatch:
+#   not an escape hatch: only the fp8 linear and FP4 MoE call sites consult
+#   is_deep_gemm_supported(), and a run with DeepGEMM disabled dies in
+#   mhc_pre_broadcast_tilelang, which calls DeepGEMM unconditionally.
 #
 # This test is self-contained: it launches its own LMCache server + a TP=N
 # vLLM instead of using launch-processes.sh / wait-for-servers.sh, since it
@@ -122,6 +121,8 @@ fi
 # makes an accidental match astronomically unlikely.
 MAX_TOKENS="${MAX_TOKENS:-128}"
 # Seconds to let async LMCache stores drain before the retrieve run.
+STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
+
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 
 # vllm-project/DeepGEMM@codex/cuda129-fp8-include-5f33a180 (2fd67329).
@@ -220,12 +221,149 @@ count_retrieves() {
     grep -c "Retrieved" "$LMCACHE_LOG" 2>/dev/null || true
 }
 
+# Phase timing. Buildkite reports one wall-clock number for the whole step,
+# which hides where the time goes -- and this is the most expensive step in
+# the suite (a 4-GPU pod, a 160GB TP-shard load, and DeepGEMM's per-kernel JIT
+# compiles on a cold cache). begin_phase closes the open phase and opens a new
+# one; the EXIT trap prints the summary even when the run fails, so a slow or
+# hung run is attributable from the log alone.
+PHASE_TIMINGS=()
+PHASE_NAME=""
+PHASE_START=0
+
+end_phase() {
+    if [ -n "$PHASE_NAME" ]; then
+        local elapsed=$((SECONDS - PHASE_START))
+        echo "[timing] ${PHASE_NAME}: ${elapsed}s"
+        PHASE_TIMINGS+=("$(printf '%-22s %6ds' "$PHASE_NAME" "$elapsed")")
+        PHASE_NAME=""
+    fi
+}
+
+begin_phase() {
+    end_phase
+    PHASE_NAME="$1"
+    PHASE_START=$SECONDS
+}
+
+# ── JIT cache report ────────────────────────────────────────
+# Nearly all of this step's startup is nvcc, not model work: on a fully cold
+# cache the four JIT frameworks below account for ~685s of a 788s vLLM
+# startup (DeepGEMM ~400s, FlashInfer ~198s, Triton and TileLang ~87s), which
+# is why pipeline.yml points each one at its own hostPath mount. A mount that
+# silently fails to take effect -- wrong path, read-only, a node without
+# /data -- costs exactly that time again with no error anywhere, so report
+# what each cache actually resolved to, before and after the run.
+#
+# Reading two consecutive builds: on the second one, "entries" should be
+# large and "new this run" near 0 for every cache. An "entries=0" on a second
+# build means that mount is not persisting; "writable=False" means it mounted
+# read-only.
+JIT_CACHE_SNAPSHOT="$TP_DIR/jit_cache_before.json"
+
+jit_cache_report() {
+    local label="$1"
+    echo "=== JIT caches ($label) ==="
+    python3 - "$label" "$JIT_CACHE_SNAPSHOT" <<'PYEOF' || true
+import json
+import os
+import pathlib
+import sys
+
+label, snapshot_path = sys.argv[1], sys.argv[2]
+
+
+def resolve():
+    """Return [(cache name, resolved path)] for the four JIT caches.
+
+    The three env-var caches are reported from the environment, so an unset
+    variable shows up as such. FlashInfer is asked to resolve its own path
+    instead: it takes a *base* and appends the rest itself, so reading it
+    back from the library is the only way to see where it will really write.
+    """
+    out = [
+        ("DeepGEMM", os.environ.get("DG_JIT_CACHE_DIR", "<unset>")),
+        ("Triton", os.environ.get("TRITON_CACHE_DIR", "<unset>")),
+        ("TileLang", os.environ.get("TILELANG_CACHE_DIR", "<unset>")),
+    ]
+    try:
+        from flashinfer.jit import env as fi_env
+
+        out.append(("FlashInfer", str(fi_env.FLASHINFER_CACHE_DIR)))
+    except Exception as exc:
+        out.append(("FlashInfer", "<unresolved: %s>" % exc))
+    return out
+
+
+def count_files(path):
+    p = pathlib.Path(path)
+    if not p.is_dir():
+        return 0
+    return sum(len(files) for _, _, files in os.walk(p))
+
+
+print("  HOME=%s" % os.environ.get("HOME", "<unset>"))
+before = {}
+if label != "before":
+    try:
+        with open(snapshot_path) as f:
+            before = json.load(f)
+    except Exception:
+        before = {}
+
+counts = {}
+for name, path in resolve():
+    n = count_files(path)
+    counts[name] = n
+    exists = pathlib.Path(path).is_dir()
+    writable = os.access(path, os.W_OK) if exists else "n/a"
+    line = "  %-11s entries=%-7d exists=%-5s writable=%-5s" % (
+        name,
+        n,
+        exists,
+        writable,
+    )
+    if name in before:
+        line += " new_this_run=%-6d" % (n - before[name])
+    print("%s %s" % (line, path))
+
+if label == "before":
+    with open(snapshot_path, "w") as f:
+        json.dump(counts, f)
+PYEOF
+    echo ""
+}
+
+print_timing_summary() {
+    end_phase
+    echo ""
+    echo "=== Phase timing (total ${SECONDS}s) ==="
+    if [ "${#PHASE_TIMINGS[@]}" -gt 0 ]; then
+        printf '  %s\n' "${PHASE_TIMINGS[@]}"
+    fi
+    echo ""
+    jit_cache_report after
+}
+trap print_timing_summary EXIT
+
+jit_cache_report before
+
 # ── 0. Provision DeepGEMM (SM120 only) ──────────────────────
 # vLLM's _import_deep_gemm() prefers a `deep_gemm` in site-packages over the
 # copy bundled in the wheel, so installing one overrides the arch-incomplete
 # bundled build without rebuilding vLLM. Build steps mirror vLLM's own
 # tools/install_deepgemm.sh. No-op on SM90/SM100, where the bundled copy is
 # correct and must be left alone.
+#
+# Nobody publishes a DeepGEMM wheel -- PyPI carries only an unrelated sdist,
+# and the upstream repos tag releases with no assets -- because it is a JIT
+# library whose installable part still has to be built against the local torch
+# ABI and CUDA. So the wheel is built here, and cached on
+# DEEPGEMM_WHEEL_CACHE_DIR (a hostPath in CI) so that only the first build on
+# a node pays for it. The cache key carries the DeepGEMM ref, the Python tag
+# and the torch/CUDA versions, which is everything the wheel is valid
+# against; anything else lands on a new key rather than reusing a wheel built
+# for a different ABI. Unset the variable to disable caching.
 provision_deepgemm_sm120() {
     local arch_major
     arch_major=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i 0 \
@@ -238,6 +376,38 @@ provision_deepgemm_sm120() {
     if python3 -c "import deep_gemm" 2>/dev/null; then
         echo "=== SM120: deep_gemm already present in site-packages ==="
         return 0
+    fi
+
+    local key cached=""
+    key=$(python3 - "$DEEPGEMM_SM120_REF" <<'PYEOF'
+import sys
+ref = sys.argv[1][:12]
+tag = "cp%d%d" % (sys.version_info.major, sys.version_info.minor)
+try:
+    import torch
+    abi = "torch%s-cu%s" % (torch.__version__.split("+")[0], torch.version.cuda)
+except Exception:
+    abi = "torch-unknown"
+print("%s-%s-%s" % (ref, tag, abi))
+PYEOF
+    )
+    if [ -n "${DEEPGEMM_WHEEL_CACHE_DIR:-}" ]; then
+        mkdir -p "$DEEPGEMM_WHEEL_CACHE_DIR"
+        cached=$(find "$DEEPGEMM_WHEEL_CACHE_DIR/$key" -name '*.whl' 2>/dev/null | head -1)
+    fi
+
+    if [ -n "$cached" ]; then
+        echo "=== SM120: installing cached DeepGEMM wheel ($key) ==="
+        if { command -v uv >/dev/null 2>&1 && uv pip install "$cached" \
+                || python3 -m pip install "$cached"; } \
+            && python3 -c "import deep_gemm" 2>/dev/null; then
+            echo "DeepGEMM installed from cache: $cached"
+            return 0
+        fi
+        # A cached wheel that will not install or import is worse than none:
+        # drop it and fall through to a fresh build rather than failing here.
+        echo "Cached wheel unusable, rebuilding: $cached"
+        rm -rf "$DEEPGEMM_WHEEL_CACHE_DIR/$key"
     fi
 
     echo "=== SM120: building DeepGEMM @ ${DEEPGEMM_SM120_REF:0:12} ==="
@@ -259,13 +429,30 @@ provision_deepgemm_sm120() {
         rm -rf "$build_dir"
         return 1
     fi
+
+    # Publish the wheel for the next build on this node. Staged in a temp
+    # directory and renamed into place so a concurrent reader never sees a
+    # half-copied wheel.
+    if [ -n "${DEEPGEMM_WHEEL_CACHE_DIR:-}" ]; then
+        local stage
+        stage="$(mktemp -d -p "$DEEPGEMM_WHEEL_CACHE_DIR")"
+        if cp "$build_dir"/deepgemm/dist/*.whl "$stage/" 2>/dev/null \
+            && mv -T "$stage" "$DEEPGEMM_WHEEL_CACHE_DIR/$key" 2>/dev/null; then
+            echo "Cached DeepGEMM wheel for next run: $DEEPGEMM_WHEEL_CACHE_DIR/$key"
+        else
+            rm -rf "$stage"
+            echo "Could not cache the DeepGEMM wheel (harmless; it rebuilds next run)"
+        fi
+    fi
+
     cd "$REPO_ROOT"
     rm -rf "$build_dir"
     echo "DeepGEMM installed: $(python3 -c 'import deep_gemm; print(deep_gemm.__file__)')"
 }
+begin_phase deepgemm_provision
 provision_deepgemm_sm120
-
 # ── 1. Launch LMCache MP server with an explicit L1 pool ────
+begin_phase lmcache_server
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT, L1 ${L1_SIZE_GB}GB) ==="
 lmcache server \
     --host localhost \
@@ -282,6 +469,7 @@ echo "LMCache MP server started (PID=$LMCACHE_PID)"
 sleep 10
 
 # ── 2. Build a long, deterministic prompt ───────────────────
+begin_phase prompt_build
 # A ~7-8k word document (spanning many 256-token LMCache chunks, so several
 # slot-compressed blocks per group are stored) built by repeating a fixed
 # paragraph, so the input is identical on every run.
@@ -318,6 +506,7 @@ echo "Prompt built ($(wc -w < "$PROMPT_FILE") words)."
 echo ""
 
 # ── 3. Launch vLLM (dev mode for /reset_prefix_cache) ───────
+begin_phase vllm_startup
 echo "=== Launching vLLM ($MODEL, TP=$TENSOR_PARALLEL_SIZE, port $VLLM_PORT) ==="
 echo "Log: $VLLM_LOG"
 # Save and unset VLLM_PORT: vLLM's internal get_open_port() would otherwise
@@ -351,27 +540,32 @@ echo "$VLLM_PID" >> "$PID_FILE"
 export VLLM_PORT="$saved_port"
 echo "vLLM started (PID=$VLLM_PID)"
 
-if ! wait_for_server "$VLLM_PORT" "$VLLM_READY_TIMEOUT" "$VLLM_LOG"; then
+if ! wait_for_server "$VLLM_PORT" "$VLLM_READY_TIMEOUT" "$VLLM_LOG" "$VLLM_PID"; then
     echo "vLLM failed to start."
     exit 1
 fi
 echo ""
 
 # ── 4. vLLM run: compute from scratch, populating LMCache ───
+begin_phase cold_run
 send_completion "$OUT_A" "vLLM run"
 
+begin_phase store_drain
 echo "Waiting ${STORE_DRAIN_SECONDS}s for LMCache stores to drain..."
 sleep "$STORE_DRAIN_SECONDS"
 retrieves_before=$(count_retrieves)
 
 # ── 5. Invalidate vLLM's local prefix cache (keep LMCache) ──
+begin_phase apc_reset
 reset_vllm_prefix_cache
 
 # ── 6. Retrieve run: vLLM APC misses -> LMCache serves the KV ─
+begin_phase retrieve_run
 send_completion "$OUT_B" "LMCache retrieve run"
 retrieves_after=$(count_retrieves)
 
 # ── 7. Compare outputs and verify LMCache was actually used ──
+begin_phase verify
 echo "============================================"
 echo "=== Verifying L1 slot-compression correctness ==="
 echo "============================================"

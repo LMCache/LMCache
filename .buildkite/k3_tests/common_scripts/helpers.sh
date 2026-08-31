@@ -156,11 +156,37 @@ wait_for_server() {
     local port="$1"
     local timeout="${2:-180}"
     local log_file="${3:-}"
+    # Optional PID of the server process. When given, the wait ends as soon as
+    # that process is gone instead of running out the clock: a server that dies
+    # during startup is otherwise indistinguishable from one that is still
+    # compiling, and the caller pays the whole timeout for no information. The
+    # dsv4_flash_tp step passes a 2700s timeout, so that mistake costs 45
+    # minutes of a 4-GPU node.
+    local server_pid="${4:-}"
+    # Seconds between progress lines. Startup output goes to the server's own
+    # log file, so without this the step log is blank for the whole wait and a
+    # slow start looks exactly like a hung one.
+    local heartbeat="${WAIT_FOR_SERVER_HEARTBEAT_SECONDS:-60}"
     echo "Waiting for vLLM on port $port (timeout=${timeout}s)..."
     for ((i = 0; i < timeout; i++)); do
         if curl -sf "http://localhost:${port}/v1/models" >/dev/null 2>&1; then
             echo "vLLM ready on port $port (${i}s)"
             return 0
+        fi
+        if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
+            echo "Server process $server_pid exited after ${i}s without opening port $port" >&2
+            if [[ -n "$log_file" && -f "$log_file" ]]; then
+                echo "--- :page_facing_up: Last 200 lines of ${log_file}" >&2
+                tail -n 200 "$log_file" >&2
+            fi
+            return 1
+        fi
+        if [[ "$heartbeat" -gt 0 ]] && ((i > 0)) && ((i % heartbeat == 0)); then
+            local last=""
+            if [[ -n "$log_file" && -f "$log_file" ]]; then
+                last=$(tr '\r' '\n' < "$log_file" | grep -v '^[[:space:]]*$' | tail -n 1)
+            fi
+            echo "  [${i}s] still waiting${last:+ | $last}"
         fi
         sleep 1
     done
