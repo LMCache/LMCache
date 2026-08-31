@@ -5,14 +5,12 @@
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
-    get_request_message_class,
-    get_response_message_class,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
     RPC,
     RPC_METHODS,
     coerce_rpc_method,
+    get_request_message_class,
+    get_response_message_class,
 )
 
 CB_METHODS = [

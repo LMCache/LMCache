@@ -43,12 +43,15 @@ import time
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import (
+from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
     MultiprocessGrpcClient,
     MultiprocessGrpcServer,
 )
-from lmcache.v1.multiprocess.protocol import RPC, get_payload_classes
-from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    RPC,
+    HandlerType,
+    get_payload_classes,
+)
 
 
 def _handle_ping(instance_id: int | None) -> bool:  # noqa: D401

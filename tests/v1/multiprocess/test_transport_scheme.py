@@ -26,12 +26,10 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (  # noqa: E402
     lmcache_mp_pb2_grpc,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (  # noqa: E402
-    rpc_method_to_method_name,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (  # noqa: E402
     RPC,
     RpcMethod,
+    rpc_method_to_method_name,
 )
 
 

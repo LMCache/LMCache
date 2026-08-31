@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Descriptor-native RPC method tokens for the LMCache gRPC transport."""
+"""Descriptor-derived RPC metadata for the LMCache gRPC transport."""
 
 # Standard
 from typing import Any, Callable, ClassVar, TypeVar
@@ -149,8 +149,9 @@ def _method_name_to_client_method_name(method_name: str) -> str:
     return client_name.lower().replace("p2_p", "p2p")
 
 
-def _build_rpc_methods() -> tuple[RpcMethod, ...]:
+def _build_rpc_methods() -> tuple[tuple[RpcMethod, ...], dict[str, tuple[str, Any]]]:
     methods: list[RpcMethod] = []
+    service_methods: dict[str, tuple[str, Any]] = {}
     seen_method_names: set[str] = set()
     for service in lmcache_mp_pb2.DESCRIPTOR.services_by_name.values():
         for method in service.methods:
@@ -159,15 +160,16 @@ def _build_rpc_methods() -> tuple[RpcMethod, ...]:
             seen_method_names.add(method.name)
             rpc_method = RpcMethod(method.name, service.name)
             methods.append(rpc_method)
+            service_methods[method.name] = (service.name, method)
             setattr(RpcMethod, method.name, rpc_method)
 
     members = tuple(methods)
     RpcMethod._members = members
     RpcMethod._by_method_name = {str(method): method for method in members}
-    return members
+    return members, service_methods
 
 
-RPC_METHODS = _build_rpc_methods()
+RPC_METHODS, _SERVICE_METHODS = _build_rpc_methods()
 RPC = _RpcNamespace(RPC_METHODS)
 
 
@@ -181,6 +183,47 @@ def coerce_rpc_method(rpc_method: RpcMethod | str) -> RpcMethod:
     raise ValueError(f"Invalid RPC method: {rpc_method}")
 
 
+def rpc_method_to_method_name(rpc_method: RpcMethod | str) -> str:
+    """Return the protobuf service method name for an RPC method."""
+    return str(coerce_rpc_method(rpc_method))
+
+
+def get_request_message_class(rpc_method: RpcMethod | str) -> Any:
+    """Return the generated protobuf request class for an RPC method."""
+    method = _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][1]
+    return getattr(lmcache_mp_pb2, method.input_type.name)
+
+
+def get_response_message_class(rpc_method: RpcMethod | str) -> Any:
+    """Return the generated protobuf response class for an RPC method."""
+    method = _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][1]
+    return getattr(lmcache_mp_pb2, method.output_type.name)
+
+
+def get_service_name(rpc_method: RpcMethod | str) -> str:
+    """Return the protobuf service name for an RPC method."""
+    return _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][0]
+
+
+def get_service_names() -> set[str]:
+    """Return all generated protobuf service names."""
+    return {
+        service.name for service in lmcache_mp_pb2.DESCRIPTOR.services_by_name.values()
+    }
+
+
+def validate_protocol_descriptor() -> None:
+    """Verify the descriptor-derived protocol method set is self-consistent."""
+    descriptor_methods = set(_SERVICE_METHODS)
+    protocol_methods = {str(method) for method in RPC_METHODS}
+    if descriptor_methods != protocol_methods:
+        missing = sorted(protocol_methods - descriptor_methods)
+        extra = sorted(descriptor_methods - protocol_methods)
+        raise RuntimeError(
+            f"gRPC service/RpcMethod mismatch: missing={missing}, extra={extra}"
+        )
+
+
 def get_payload_classes(rpc_method: RpcMethod | str) -> list[Any]:
     """
     Get the protobuf request class for an RPC method.
@@ -191,9 +234,6 @@ def get_payload_classes(rpc_method: RpcMethod | str) -> list[Any]:
     Returns:
         A single-item list containing the generated protobuf request class.
     """
-    # Local
-    from .proto_codec import get_request_message_class
-
     return [get_request_message_class(rpc_method)]
 
 
@@ -207,9 +247,6 @@ def get_response_class(rpc_method: RpcMethod | str) -> Any:
     Returns:
         The generated protobuf response class.
     """
-    # Local
-    from .proto_codec import get_response_message_class
-
     return get_response_message_class(rpc_method)
 
 
@@ -221,8 +258,14 @@ __all__ = [
     "KeyType",
     "RpcMethod",
     "coerce_rpc_method",
+    "get_request_message_class",
+    "get_response_class",
+    "get_response_message_class",
     "get_grpc_method_options",
     "get_payload_classes",
-    "get_response_class",
+    "get_service_name",
+    "get_service_names",
     "grpc_method",
+    "rpc_method_to_method_name",
+    "validate_protocol_descriptor",
 ]

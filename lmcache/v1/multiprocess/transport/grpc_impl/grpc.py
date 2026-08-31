@@ -32,9 +32,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_response_encoder,
     decode_response_to_python,
     encode_request_from_call,
-    get_request_message_class,
-    get_response_message_class,
-    get_service_names,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     msgspec_decode as msgspec_decode,
@@ -42,18 +39,17 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     msgspec_encode as msgspec_encode,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
-    rpc_method_to_method_name as rpc_method_to_method_name,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
-    validate_protocol_descriptor,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
     RPC_METHODS,
     HandlerType,
     RpcMethod,
     coerce_rpc_method,
     get_grpc_method_options,
+    get_request_message_class,
+    get_response_message_class,
+    get_service_names,
+    rpc_method_to_method_name,
+    validate_protocol_descriptor,
 )
 
 # Message classes come out of the protobuf descriptor pool at runtime

@@ -39,18 +39,18 @@ from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
 from lmcache.v1.multiprocess.transport.grpc_impl.grpc import (
     MultiprocessGrpcClient,
     MultiprocessGrpcServer,
-    rpc_method_to_method_name,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_request_decoder,
     encode_request_from_call,
-    get_request_message_class,
-    get_response_message_class,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
     RPC,
     HandlerType,
     RpcMethod,
+    get_request_message_class,
+    get_response_message_class,
+    rpc_method_to_method_name,
 )
 
 # Generated message classes are dynamic; rebind through Any so static analysis
@@ -64,11 +64,14 @@ def test_grpc_import_does_not_load_grpc_runtime() -> None:
     script = """
 import sys
 from lmcache.v1.multiprocess.transport.grpc_impl import grpc
+from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
+    rpc_method_to_method_name,
+)
 
 assert "grpc" not in sys.modules
 assert "grpc_tools" not in sys.modules
 assert grpc.grpc is None
-assert grpc.rpc_method_to_method_name("Ping") == "Ping"
+assert rpc_method_to_method_name("Ping") == "Ping"
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 

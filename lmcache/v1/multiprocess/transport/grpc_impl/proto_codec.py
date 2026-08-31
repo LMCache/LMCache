@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Descriptor-driven protobuf helpers for the multiprocess gRPC transport.
+"""Protobuf/Python value codecs for the multiprocess gRPC transport.
 
-This module intentionally has no per-RPC registry.  Request/response message
-classes come from the generated protobuf descriptor, and Python value
-conversion is derived from handler annotations plus protobuf field names.
-Adding an RPC should not require editing this file.
+This module intentionally has no RPC method registry. The caller provides a
+generated request or response message class, and Python value conversion is
+derived from handler annotations plus protobuf field names. Adding an RPC
+should not require editing this file.
 """
 
 # Standard
@@ -39,11 +39,6 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mp_pb2 as _pb2_typed,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.protocol import (
-    RPC_METHODS,
-    RpcMethod,
-    coerce_rpc_method,
-)
 
 # Generated protobuf classes are dynamic and opaque to static analysis.
 lmcache_mp_pb2: Any = _pb2_typed
@@ -58,67 +53,6 @@ RequestEncoder = Callable[..., Any]
 RequestDecoder = Callable[[Any], tuple[Any, ...]]
 ResponseEncoder = Callable[[Any], Any]
 ResponseDecoder = Callable[[Any], Any]
-
-
-def _build_service_methods() -> dict[str, tuple[str, Any]]:
-    methods: dict[str, tuple[str, Any]] = {}
-    for service in lmcache_mp_pb2.DESCRIPTOR.services_by_name.values():
-        for method in service.methods:
-            if method.name in methods:
-                raise RuntimeError(f"Duplicate gRPC method name: {method.name}")
-            methods[method.name] = (service.name, method)
-    return methods
-
-
-_SERVICE_METHODS = _build_service_methods()
-
-
-def rpc_method_to_method_name(rpc_method: RpcMethod | str) -> str:
-    """Return the protobuf service method name for an RPC method.
-
-    Args:
-        rpc_method: Multiprocess protocol operation.
-
-    Returns:
-        The CamelCase protobuf method name.
-    """
-    return str(coerce_rpc_method(rpc_method))
-
-
-def get_request_message_class(rpc_method: RpcMethod | str) -> Any:
-    """Return the generated protobuf request class for an RPC method."""
-    method = _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][1]
-    return getattr(lmcache_mp_pb2, method.input_type.name)
-
-
-def get_response_message_class(rpc_method: RpcMethod | str) -> Any:
-    """Return the generated protobuf response class for an RPC method."""
-    method = _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][1]
-    return getattr(lmcache_mp_pb2, method.output_type.name)
-
-
-def get_service_name(rpc_method: RpcMethod | str) -> str:
-    """Return the protobuf service name for an RPC method."""
-    return _SERVICE_METHODS[str(coerce_rpc_method(rpc_method))][0]
-
-
-def get_service_names() -> set[str]:
-    """Return all generated protobuf service names."""
-    return {
-        service.name for service in lmcache_mp_pb2.DESCRIPTOR.services_by_name.values()
-    }
-
-
-def validate_protocol_descriptor() -> None:
-    """Verify the descriptor-derived protocol method set is self-consistent."""
-    descriptor_methods = set(_SERVICE_METHODS)
-    protocol_methods = {str(method) for method in RPC_METHODS}
-    if descriptor_methods != protocol_methods:
-        missing = sorted(protocol_methods - descriptor_methods)
-        extra = sorted(descriptor_methods - protocol_methods)
-        raise RuntimeError(
-            f"gRPC service/RpcMethod mismatch: missing={missing}, extra={extra}"
-        )
 
 
 def _unwrap_optional(py_type: Any) -> tuple[Any, bool]:
@@ -940,12 +874,6 @@ __all__ = [
     "compile_response_encoder",
     "decode_response_to_python",
     "encode_request_from_call",
-    "get_request_message_class",
-    "get_response_message_class",
-    "get_service_name",
-    "get_service_names",
     "msgspec_decode",
     "msgspec_encode",
-    "rpc_method_to_method_name",
-    "validate_protocol_descriptor",
 ]
