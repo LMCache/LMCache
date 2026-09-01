@@ -814,7 +814,8 @@ List cached keys and their placements, one page at a time.
               "shared": false
             }
           ],
-          "num_tokens": 256
+          "num_tokens": 256,
+          "access_count": 7
         }
       ]
     }
@@ -824,8 +825,9 @@ List cached keys and their placements, one page at a time.
 placements**. ``num_tokens`` reports how many token ids the directory knows for
 the key's chunk (``0`` = unknown) -- fetch the actual tokens via
 ``POST /directory/lookup``, which exists precisely so listing pages stay
-small. Pages of a changing directory may skip or repeat keys (snapshot
-semantics).
+small. ``access_count`` is the number of ``access`` events applied to the key
+since the directory first saw it. Pages of a changing directory may skip or
+repeat keys (snapshot semantics).
 
 **HTTP status codes:**
 
@@ -901,7 +903,8 @@ forms -- supply exactly one:
             {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
              "backend": "dram", "size_bytes": 8388608, "shared": false}
           ],
-          "token_ids": [15496, 11, 995]
+          "token_ids": [15496, 11, 995],
+          "access_count": 7
         }
       ]
     }
@@ -911,7 +914,8 @@ the number of keys requested); ``results`` has one entry per resolved key, in
 request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
 is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
-on, or not yet re-reported after an event gap).
+on, or not yet re-reported after an event gap). ``access_count`` is the number
+of ``access`` events applied to the key, ``0`` for unknown keys.
 
 **HTTP status codes:**
 
