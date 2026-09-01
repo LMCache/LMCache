@@ -26,14 +26,24 @@ values derived from the multimodal identifier before hashing.
     chunk overlapping `k` placeholder tokens carries `31*k` bits of item
     identity (effectively bounded only by the 64-bit chunk-hash width for
     `k >= 3`).
-  - **Position dependence**: the value encodes the offset within the item,
-    mirroring vLLM's `(mm_hash, offset)` extra-key semantics.
+  - **Position dependence**: the value at offset `i` is a function of the
+    whole identifier *and* of `i`, so no two positions repeat. This is what
+    makes the entropy accumulate: a span holding one repeated value carries
+    that value's entropy however long the span is. It also separates two
+    segments of the same item, which matters on the one path where the
+    chunk hash is not chained -- `SegmentTokenDatabase` hashes each segment
+    on its own, so nothing else there distinguishes an item's first tokens
+    from its later ones. Under `ChunkedTokenDatabase` the prefix chain
+    already carries position, and this property is the entropy argument
+    alone. vLLM's `(mm_hash, offset)` extra keys encode the same pair.
   - **Prefix stability**: `values(x, m) == values(x, n)[:m]` for `m <= n`,
     so partial prompts (save-path truncation, chunk boundaries) hash
     consistently with full prompts.
 - `apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)`
   overwrites each placeholder span in-place with that sequence, truncating
-  at the tensor length.
+  at the tensor length. `token_ids` must be the full prompt or a prefix of
+  it: `PlaceholderRange.offset` is absolute, so a suffix or a mid-slice
+  would substitute the wrong positions and raise nothing.
 
 Values are capped at 31 bits so they stay positive in a signed int32, the
 narrowest integer representation token IDs may pass through downstream.

@@ -258,8 +258,12 @@ def apply_mm_hashes_to_token_ids(
     entropy into every chunk that overlaps the span.
 
     Args:
-        token_ids: 1-D tensor of token IDs to modify in-place. May be a
-            prefix of the full prompt; spans are truncated to its length.
+        token_ids: 1-D tensor of token IDs to modify in-place. Must be the
+            full prompt or a prefix of it, because ``mm_positions`` offsets
+            are absolute: a suffix or a mid-slice would overwrite unrelated
+            positions and leave the placeholder spans untouched, silently
+            restoring the cross-image collision this substitution exists to
+            prevent. A prefix is fine; spans are truncated to its length.
         mm_hashes: Multimodal identifiers, parallel to ``mm_positions``.
         mm_positions: Placeholder ranges (``offset``/``length``) within the
             full prompt, parallel to ``mm_hashes``.
