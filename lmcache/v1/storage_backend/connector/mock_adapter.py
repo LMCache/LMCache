@@ -36,8 +36,8 @@ class MockConnectorAdapter(ConnectorAdapter):
             capacity_gb = int(parsed.netloc)
         except ValueError as e:
             raise ValueError(
-                f"Invalid capacity '{parsed.netloc}' for",
-                " mock connector; must be an integer (GB).",
+                f"Invalid capacity '{parsed.netloc}' for"
+                " mock connector; must be an integer (GB)."
             ) from e
 
         params = parse_qs(parsed.query) if parsed.query else {}

@@ -89,6 +89,9 @@ select = [
     #"G",
     # flake8-self (private member access)
     "SLF",
+    # pylint: logging format string arg count (too many / too few args)
+    "PLE1205",
+    "PLE1206",
 ]
 ignore = [
     # star imports
