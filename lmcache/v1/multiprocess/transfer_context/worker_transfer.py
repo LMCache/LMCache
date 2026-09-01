@@ -590,6 +590,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             RequestType.STORE,
             [key, instance_id, block_ids, event_ipc_handle],
         ).to_device_future(device=self._device)
+        future.retain_reference(event)
         self._inflight_store_futures.add(future)
         return future
 

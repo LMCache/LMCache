@@ -393,8 +393,8 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     assert isinstance(context, LMCacheDrivenTransferContext)
 
 
-def test_lmcache_driven_preemption_waits_for_remote_store_futures() -> None:
-    """Handle-path flush waits on remote completion, not the worker device."""
+def test_lmcache_driven_preemption_retains_each_store_event_and_waits() -> None:
+    """Two stores for one request retain both events until remote completion."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
         LMCacheDrivenTransferContext,
@@ -403,14 +403,24 @@ def test_lmcache_driven_preemption_waits_for_remote_store_futures() -> None:
 
     context = LMCacheDrivenTransferContext()
     registration_future = MagicMock(name="registration_future")
-    raw_store_future = MagicMock(name="raw_store_future")
-    pending = MagicMock(name="pending_store_future")
-    raw_store_future.to_device_future.return_value = pending
+    raw_store_futures = [
+        MagicMock(name="raw_store_future_1"),
+        MagicMock(name="raw_store_future_2"),
+    ]
+    pending = [
+        MagicMock(name="pending_store_future_1"),
+        MagicMock(name="pending_store_future_2"),
+    ]
+    for pending_future in pending:
+        pending_future.query.return_value = False
+    for raw_future, pending_future in zip(raw_store_futures, pending, strict=True):
+        raw_future.to_device_future.return_value = pending_future
     send_request = MagicMock(
-        name="send_request", side_effect=[registration_future, raw_store_future]
+        name="send_request", side_effect=[registration_future, *raw_store_futures]
     )
     event_backend = MagicMock(name="event_backend")
-    event_backend.export_event.return_value = b"event"
+    event_backend.export_event.side_effect = [b"event-1", b"event-2"]
+    events = [MagicMock(name="event_1"), MagicMock(name="event_2")]
 
     with (
         patch.object(
@@ -430,21 +440,27 @@ def test_lmcache_driven_preemption_waits_for_remote_store_futures() -> None:
             mq_timeout=2.5,
             send_request=send_request,
         )
-        context.submit_store(
-            _request_id="request",
-            key="key",
-            instance_id=1,
-            kv_caches={},
-            block_ids=[[0]],
-            event=MagicMock(name="event"),
-            _blocks_in_chunk=1,
-        )
+        for index, event in enumerate(events):
+            context.submit_store(
+                _request_id="request",
+                key=f"key-{index}",
+                instance_id=1,
+                kv_caches={},
+                block_ids=[[index]],
+                event=event,
+                _blocks_in_chunk=1,
+            )
+
+    pending[0].retain_reference.assert_called_once_with(events[0])
+    pending[1].retain_reference.assert_called_once_with(events[1])
 
     context.flush_inflight_stores()
 
-    pending.result.assert_called_once_with(timeout=2.5)
+    for pending_future in pending:
+        pending_future.result.assert_called_once_with(timeout=2.5)
     context.flush_inflight_stores()
-    pending.result.assert_called_once()
+    for pending_future in pending:
+        pending_future.result.assert_called_once()
 
 
 def test_lmcache_driven_preemption_without_stores_is_noop() -> None:
