@@ -407,7 +407,7 @@ target the empty-string salt.
 
    Do **not** use the MP server's node-local ``/quota`` API together with the
    coordinator's. The two are independent, unsynchronized quota registries
-   enforcing eviction on the **same shared L2**: the server-side enforcer
+   enforcing eviction on the **same L2 contents**: the server-side enforcer
    (active when the server runs a per-salt eviction policy) uses strict
    allowlist semantics — any salt missing from *its own* table is fully
    evicted — and it never sees quotas registered on the coordinator, and vice
@@ -452,15 +452,31 @@ detected.
 **Active eviction loop.** Every ``--eviction-check-interval`` seconds, the
 coordinator inspects per-salt usage against the registered quotas and,
 for any salt over the trigger watermark, picks LRU victims and
-dispatches a single ``DELETE /cache/objects`` to a uniformly random registered MP
-server. Because all MP servers share the same backing L2 (e.g. one S3
-bucket), one dispatch evicts the keys for the whole fleet. The MP
-server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
+dispatches ``DELETE /cache/objects`` to the MP servers that hold them.
+``DELETE /cache/objects`` is node-scoped — it removes keys from the L2 adapter
+of the server it reaches — so the coordinator reads each victim's placements
+from the key directory and routes accordingly:
+
+* **Shared L2** (``shared: true`` on the adapter, e.g. one S3 bucket the whole
+  fleet mounts): one dispatch to any registered server evicts the keys for the
+  whole fleet.
+* **Local L2** (the default, e.g. per-node disk): the bytes live on the
+  instance that stored them, so one dispatch goes to each owning instance. A
+  key held privately by three servers costs three deletes.
+
+Each request also names the placement's tier and its backend (as the ``adapter``
+selector), so a server running several L2 adapters deletes from the one that
+actually holds the key. A local copy whose owning instance is no longer
+registered cannot be deleted by anyone; the coordinator skips it — rather than
+spending the salt's eviction budget on it every cycle — and its bytes stay
+counted against the salt until that instance rejoins.
+
+The MP server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
 delete completes; those listeners ship ``delete`` events back through
 ``POST /events``, which is what updates the coordinator's LRU +
 per-salt totals. Dispatch failures or no-instances-registered fall
 through to the next cycle — at-least-once semantics, safe because the
-S3 delete is idempotent.
+underlying delete is idempotent.
 
 **Cold start.** The coordinator's trackers are in-memory and are built
 only from the cache-event stream, so after a restart per-salt usage

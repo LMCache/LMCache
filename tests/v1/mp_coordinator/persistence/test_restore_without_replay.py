@@ -30,7 +30,9 @@ class _Coordinator:
     def __init__(self) -> None:
         self.directory = KeyDirectory()
         self.usage = CacheUsageManager()
-        self.controller = FleetEvictionController(usage_manager=self.usage)
+        self.controller = FleetEvictionController(
+            usage_manager=self.usage, key_directory=KeyDirectory()
+        )
         self.broadcaster = CacheEventBroadcaster()
         self.broadcaster.register_consumer(self.directory)
         self.broadcaster.register_consumer(self.usage)
