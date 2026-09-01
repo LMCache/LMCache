@@ -38,8 +38,8 @@ __global__ void multi_layer_block_transfer_kernel_layerwise(
   const int obj_idx = flat_block_idx / num_blocks_per_object;
   const int block_idx_in_object = flat_block_idx % num_blocks_per_object;
   const int engine_block_idx = engine_block_ids[flat_block_idx];
-  multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine, format,
-                                          /*allow_interleaved=*/true>(
+  multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
+                                          format>(
       lmcache_object_ptrs[obj_idx], paged_buffer_ptrs, engine_block_idx,
       block_idx_in_object * shape_desc.bs,  // offset in LMCache object
       shape_desc, lmcache_chunk_size);
