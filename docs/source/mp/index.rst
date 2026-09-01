@@ -296,10 +296,15 @@ Each config module exposes a composable triple:
     add_storage_manager_args(parser)  # from distributed/config.py
       # which internally calls add_l2_adapters_args(parser)
     add_observability_args(parser)    # from mp_observability/config.py
+    add_coordinator_args(parser)      # from multiprocess/config.py
+      # coordinator registration flags (--coordinator-url and friends)
 
 ``http_server.py`` reuses this pattern, adding
-``add_http_frontend_args()`` and ``add_coordinator_args()`` for the
-``lmcache server`` CLI. CacheBlend is no longer a separate entry point —
+``add_http_frontend_args()`` (``--http-host`` / ``--http-port``) and
+``add_p2p_args()`` (the ``--p2p-*`` flags) on top for the ``lmcache
+server`` CLI; ``add_coordinator_args()`` is shared with ``server.py``
+above, so both entry points accept ``--coordinator-*`` flags. CacheBlend
+is no longer a separate entry point —
 it is opted into at runtime by passing ``--engine-type`` to
 ``server.py`` (or ``lmcache server``): ``--engine-type blend`` appends
 ``BlendModule``.
