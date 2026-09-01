@@ -87,6 +87,11 @@ def round_down(x: int, y: int) -> int:
     return (x // y) * y
 
 
+def round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    return ((x + y - 1) // y) * y
+
+
 def compress_slot_mapping(slots: list[int]) -> list[Union[int, list[int]]]:
     """Compress a list of slot indices into ranges while preserving order.
 

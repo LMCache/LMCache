@@ -23,7 +23,7 @@ from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -1393,7 +1393,7 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        self._kv_device = next(iter(kv_caches.values())).device
+        self._kv_device = get_device(next(iter(kv_caches.values())))
         self._event_ipc_backend = get_event_ipc_backend(self._kv_device)
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = self._layout_hints
