@@ -58,7 +58,7 @@ steps:
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
-        artifact_paths: ["*.log"]
+        artifact_paths: ["*.log", "ci_results_*/**"]
 
       - label: ":xpu: vllm_bench"
         command: |
@@ -67,9 +67,10 @@ steps:
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
           export CPU_BUFFER_SIZE="32"
+          export VLLM_DISABLE_PREFIX_CACHING="true"
           .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 45
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
-        artifact_paths: ["*.log"]
+        artifact_paths: ["*.log", "ci_results_*/**"]

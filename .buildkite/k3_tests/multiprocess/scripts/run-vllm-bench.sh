@@ -222,6 +222,31 @@ else:
     return "$failed"
 }
 
+verify_single_instance_result() {
+    local lmcache_result="$VLLM_BENCH_DIR/lmcache.json"
+
+    echo "=== LMCache Benchmark Result ==="
+    if [ ! -f "$lmcache_result" ]; then
+        echo "LMCache result file not found: $lmcache_result"
+        return 1
+    fi
+
+    local lmcache_total_input_tokens lmcache_completed lmcache_throughput
+    lmcache_total_input_tokens=$(extract_json_field "$lmcache_result" "total_input_tokens")
+    lmcache_completed=$(extract_json_field "$lmcache_result" "completed")
+    lmcache_throughput=$(extract_json_field "$lmcache_result" "total_token_throughput")
+
+    echo "  total_input_tokens: $lmcache_total_input_tokens"
+    echo "  completed: $lmcache_completed"
+    echo "  total_token_throughput: $lmcache_throughput"
+
+    if [ "$lmcache_completed" -ne "$EXPECTED_COMPLETED" ] 2>/dev/null; then
+        echo "LMCache completed: $lmcache_completed (expected: $EXPECTED_COMPLETED) FAIL"
+        return 1
+    fi
+    echo "LMCache completed: $lmcache_completed (expected: $EXPECTED_COMPLETED) PASS"
+}
+
 warmup_server() {
     local port="$1"
     local description="$2"
@@ -446,6 +471,10 @@ if [ "${LAUNCH_BASELINE:-true}" = "true" ]; then
     fi
 else
     echo "Single-instance benchmark mode: skipping baseline-vs-LMCache comparison"
+    if ! verify_single_instance_result; then
+        echo "Single-instance benchmark result verification failed"
+        exit 1
+    fi
 fi
 
 if [ "${LMCACHE_MP_LAZY_OFFLOAD:-false}" = "true" ]; then
