@@ -45,6 +45,9 @@ logger = init_logger(__name__)
 
 DEFAULT_SERVER_URL = "ipc:///tmp/lmcache.sock"
 DEFAULT_MQ_TIMEOUT: float = 300.0
+# Best-effort unregister budget in destructor cleanup; do not block exit on the
+# full business MQ timeout.
+DEFAULT_CLEANUP_UNREGISTER_TIMEOUT: float = 5.0
 
 
 def _get_server_url(llm_args: "TorchLlmArgs") -> str:
@@ -93,6 +96,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
+        self._closed = False
 
         future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
         self._chunk_size = future.result(timeout=self._mq_timeout)
@@ -275,6 +279,36 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         """No-op — block IDs are captured in :meth:`build_connector_meta`."""
         pass
 
+    def _cleanup(self) -> None:
+        """Release scheduler resources during connector destruction.
+
+        This method is idempotent and tolerates partial initialization if
+        ``__init__`` failed before all attributes were set.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+
+        mq_client = getattr(self, "_mq_client", None)
+        if mq_client is not None:
+            try:
+                mq_client.close()
+            except Exception as e:
+                logger.warning("LMCache MP scheduler: failed to close MQ client: %s", e)
+
+        zmq_context = getattr(self, "_zmq_context", None)
+        if zmq_context is not None:
+            try:
+                zmq_context.destroy(linger=0)
+            except Exception as e:
+                logger.warning(
+                    "LMCache MP scheduler: failed to destroy ZMQ context: %s", e
+                )
+
+    def __del__(self) -> None:
+        """Destructor to ensure resources are cleaned up."""
+        self._cleanup()
+
 
 class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
     """TRT-LLM worker that routes store/retrieve to an LMCache MP server."""
@@ -290,6 +324,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
+        self._closed = False
 
         self._instance_id = os.getpid()
         self._registered = False
@@ -512,3 +547,60 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
     ) -> Tuple[List[int], List[int]]:
         """All operations are synchronous — nothing is ever pending."""
         return [], []
+
+    def _cleanup(self) -> None:
+        """Release worker resources during connector destruction.
+
+        This method is idempotent and tolerates partial initialization if
+        ``__init__`` failed before all attributes were set. If the worker is
+        registered, it best-effort sends UNREGISTER_KV_CACHE with a short
+        timeout, then closes the MQ client and destroys the ZMQ context.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+
+        mq_client = getattr(self, "_mq_client", None)
+        if getattr(self, "_registered", False) and mq_client is not None:
+            instance_id = getattr(self, "_instance_id", None)
+            unregister_timeout = DEFAULT_CLEANUP_UNREGISTER_TIMEOUT
+            if instance_id is not None:
+                try:
+                    future = _send_request(
+                        mq_client,
+                        RequestType.UNREGISTER_KV_CACHE,
+                        [instance_id],
+                    )
+                    future.result(timeout=unregister_timeout)
+                except TimeoutError:
+                    logger.warning(
+                        "LMCache MP worker: KV cache unregistration timed out "
+                        "after %ss",
+                        unregister_timeout,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "LMCache MP worker: failed to unregister KV cache: %s",
+                        e,
+                        exc_info=True,
+                    )
+            self._registered = False
+
+        if mq_client is not None:
+            try:
+                mq_client.close()
+            except Exception as e:
+                logger.warning("LMCache MP worker: failed to close MQ client: %s", e)
+
+        zmq_context = getattr(self, "_zmq_context", None)
+        if zmq_context is not None:
+            try:
+                zmq_context.destroy(linger=0)
+            except Exception as e:
+                logger.warning(
+                    "LMCache MP worker: failed to destroy ZMQ context: %s", e
+                )
+
+    def __del__(self) -> None:
+        """Destructor to ensure resources are cleaned up."""
+        self._cleanup()
