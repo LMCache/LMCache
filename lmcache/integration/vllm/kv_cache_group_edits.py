@@ -51,6 +51,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.kv_format.types import (
+    KV_LAYOUT_NAMES,
+    is_hnd_kv_layout,
+)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
@@ -418,9 +422,10 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
             "single-layer KV cache must be a torch.Tensor"
         )
         kv_layout = layout_hints.get("kv_layout", "none")
-        if kv_layout not in ("NHD", "HND"):
+        if kv_layout not in KV_LAYOUT_NAMES:
             raise ValueError(
-                f"Unsupported kv_layout: {kv_layout}. Only NHD and HND are supported."
+                f"Unsupported kv_layout: {kv_layout}; "
+                f"expected one of {', '.join(KV_LAYOUT_NAMES)}."
             )
         num_blocks = kv_cache.shape[0]
         row = kv_cache[0].numel()
@@ -447,12 +452,12 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
                 f"cannot tile a {row}-element state row into {block_size} "
                 f"aligned tokens within the {page_bytes}-byte page"
             )
-        if kv_layout == "NHD":
-            inner = (block_size, 1, head_size)
-            inner_strides = (head_size, head_size, 1)
-        else:
+        if is_hnd_kv_layout(kv_layout):
             inner = (1, block_size, head_size)
             inner_strides = (block_size * head_size, head_size, 1)
+        else:
+            inner = (block_size, 1, head_size)
+            inner_strides = (head_size, head_size, 1)
         return kv_cache.as_strided(
             (num_blocks, *inner), (kv_cache.stride(0), *inner_strides)
         )

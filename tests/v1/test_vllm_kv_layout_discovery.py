@@ -16,7 +16,6 @@ import pytest
 
 # First Party
 from lmcache.integration.vllm.utils import (
-    translate_vllm_kv_cache_layout,
     try_get_vllm_kv_cache_layout,
     vllm_layout_hints,
 )
@@ -59,29 +58,10 @@ def stub_module(
     return module
 
 
-class TestTranslateVllmKVCacheLayout:
-    def test_standardized_names_map_to_lmcache_names(self):
-        assert translate_vllm_kv_cache_layout("LBNHC") == "NHD"
-        assert translate_vllm_kv_cache_layout("LBHNC") == "HND"
-
-    def test_lmcache_names_pass_through(self):
-        for name in ("NHD", "HND", "BLHNC", "BLNHC"):
-            assert translate_vllm_kv_cache_layout(name) == name
-
-    @pytest.mark.parametrize("name", UNSUPPORTED_LAYOUTS)
-    def test_unsupported_layouts_fail_loudly(self, name):
-        with pytest.raises(NotImplementedError, match=name):
-            translate_vllm_kv_cache_layout(name)
-
-    def test_unknown_name_raises(self):
-        with pytest.raises(NotImplementedError, match="XYZ"):
-            translate_vllm_kv_cache_layout("XYZ")
-
-
 class TestTryGetVllmKVCacheLayout:
-    def test_resolved_layout_from_explicit_config(self):
+    def test_resolved_member_name_is_the_hint(self):
         config = make_vllm_config("LBNHC")
-        assert try_get_vllm_kv_cache_layout(config) == "NHD"
+        assert try_get_vllm_kv_cache_layout(config) == "LBNHC"
 
     def test_unresolved_layout_error_passes_through(self):
         with pytest.raises(ValueError, match="resolved"):
@@ -96,7 +76,7 @@ class TestTryGetVllmKVCacheLayout:
     def test_ambient_config_is_used_when_not_passed(self, monkeypatch):
         config = make_vllm_config("LBHNC")
         stub_module(monkeypatch, "vllm.config", get_current_vllm_config=lambda: config)
-        assert try_get_vllm_kv_cache_layout() == "HND"
+        assert try_get_vllm_kv_cache_layout() == "LBHNC"
 
     def test_legacy_vllm_falls_back_to_backend_query(self, monkeypatch):
         stub_module(
@@ -114,9 +94,9 @@ class TestTryGetVllmKVCacheLayout:
 
 
 class TestVllmLayoutHints:
-    def test_hint_present_and_translated(self):
+    def test_hint_carries_the_member_name(self):
         config = make_vllm_config("LBHNC")
-        assert vllm_layout_hints(config) == {"kv_layout": "HND"}
+        assert vllm_layout_hints(config) == {"kv_layout": "LBHNC"}
 
     def test_unresolved_layout_raises_through_hints(self):
         with pytest.raises(ValueError, match="resolved"):

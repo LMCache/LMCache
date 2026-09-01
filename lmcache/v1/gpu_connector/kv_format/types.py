@@ -8,7 +8,7 @@ sites.
 """
 
 # Standard
-from typing import Literal, TypedDict, Union, get_args
+from typing import Literal, TypedDict, Union
 
 # Third Party
 import torch
@@ -22,8 +22,15 @@ import torch
 # for unwrapping to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 
-KVLayoutName = Literal["NHD", "HND", "BLHNC", "BLNHC"]
-KV_LAYOUT_NAMES: tuple[str, ...] = get_args(KVLayoutName)
+# Accepted ``LayoutHints.kv_layout`` values: vLLM ``KVCacheLayout`` member
+# names plus the legacy per-layer spellings.
+KV_LAYOUT_NAMES: tuple[str, ...] = ("NHD", "HND", "LBNHC", "LBHNC", "BLHNC", "BLNHC")
+
+
+def is_hnd_kv_layout(kv_layout: str) -> bool:
+    """Heads before block tokens within a block (``HND`` == ``LBHNC``;
+    ``BLHNC`` is HND-ordered with blocks outermost)."""
+    return kv_layout in ("HND", "LBHNC", "BLHNC")
 
 
 class LayoutHints(TypedDict, total=False):
@@ -54,7 +61,7 @@ class LayoutHints(TypedDict, total=False):
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
-    kv_layout: KVLayoutName
+    kv_layout: str
     num_kv_heads: int
     tokens_per_block: int
     kv_list_layout: Literal["k_v"]
