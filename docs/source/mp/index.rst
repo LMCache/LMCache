@@ -375,11 +375,14 @@ The ``L2AdapterInterface`` (in ``base.py``) defines three async task methods:
 - ``submit_lookup_and_lock_task(keys)`` -- Check if keys exist in L2.
 - ``submit_load_task(keys, layout_desc)`` -- Load data from L2 into L1.
 
-The factory function ``create_l2_adapter()`` (in ``__init__.py``) uses
-``isinstance()`` on the config type to instantiate the correct adapter.
+The factory function ``create_l2_adapter()`` (in ``__init__.py``) delegates
+to a factory registry keyed by the config's registered type name
+(``create_l2_adapter_from_registry`` in ``factory.py``, which resolves the
+name via ``get_type_name_for_config`` and dispatches through the
+``_L2_ADAPTER_FACTORY_REGISTRY``).
 
 New adapter types are registered via ``register_l2_adapter_type()`` in
-``config.py``.
+``config.py`` and ``register_l2_adapter_factory()`` in ``factory.py``.
 
 Controllers
 ~~~~~~~~~~~
