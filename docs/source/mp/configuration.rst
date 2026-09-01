@@ -8,6 +8,45 @@ server.  Arguments are grouped by the config module that defines them.
    :local:
    :depth: 2
 
+Per-request LMCache configuration
+---------------------------------
+
+vLLM clients can attach request-scoped LMCache metadata through the top-level
+``kv_transfer_params`` field.  When vLLM uses ``LMCacheMPConnector``, entries
+whose keys start with ``lmcache.`` are forwarded with the request across the
+MP scheduler and worker IPC paths.  Other ``kv_transfer_params`` entries are
+reserved for the transfer layer and are not forwarded to LMCache.
+
+For example:
+
+.. code-block:: bash
+
+   curl -X POST http://localhost:8000/v1/completions \
+       -H "Content-Type: application/json" \
+       -d '{
+           "model": "Qwen/Qwen3-14B",
+           "prompt": "Explain KV cache reuse.",
+           "max_tokens": 32,
+           "kv_transfer_params": {
+               "lmcache.tag.tenant": "example-tenant",
+               "lmcache.ttl": 60
+           }
+       }'
+
+The connector carries these values on lookup, prefetch, store, retrieve, and
+lookup-lock cleanup operations so server-side features can inspect the same
+request metadata throughout the request lifecycle.
+
+.. important::
+
+   Forwarding a value does not by itself make the MP server act on it or make
+   it part of cache identity.  The current MP server treats request configs as
+   metadata.  Do not rely on ``lmcache.tag.*``, ``lmcache.ttl``,
+   ``lmcache.skip_save``, or another request config for isolation, expiration,
+   or cache-control behavior in MP mode unless the selected server-side
+   feature explicitly documents support for it.  The in-process
+   ``LMCacheConnectorV1`` may interpret these values differently.
+
 MP Server
 ---------
 
