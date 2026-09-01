@@ -605,6 +605,46 @@ class RegistryTree:
                     return result
             return None
 
+    def find_kv_all(
+        self,
+        key: int,
+        exclude_instance_id: Optional[str] = None,
+    ) -> dict[str, KVChunkInfo]:
+        """
+        Find a KV chunk across all instances, returning every holder.
+
+        Unlike ``find_kv``, which returns the first instance found, this
+        reports one ``KVChunkInfo`` per instance that holds the chunk (the
+        first worker found within each instance, matching ``find_kv``'s
+        choice). Callers that compare or rank instances - for example a
+        cache- and load-aware router - need the full holder set: with only
+        the first holder reported, a chunk replicated on two instances is
+        indistinguishable from one held by a single instance.
+
+        The dict preserves instance iteration order, so its first entry is
+        the same instance ``find_kv`` would return.
+
+        Args:
+            key: The KV chunk key to find.
+            exclude_instance_id: Instance ID to exclude
+            (all workers in this instance will be excluded).
+
+        Returns: A dict mapping instance_id to KVChunkInfo; empty if no
+        instance holds the chunk.
+        """
+        with self._rwlock.read_lock(timeout=1):
+            holders: dict[str, KVChunkInfo] = {}
+            for instance_id, instance_node in self.instances.items():
+                if (
+                    exclude_instance_id is not None
+                    and instance_id == exclude_instance_id
+                ):
+                    continue
+                result = instance_node.find_key_simple(key)
+                if result is not None:
+                    holders[instance_id] = result
+            return holders
+
     def find_kv_with_worker_info(
         self,
         key: int,
