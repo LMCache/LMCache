@@ -121,9 +121,9 @@ SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp dsv4_flash_tp "
 # LAUNCH_BASELINE=false to keep the lane single-instance) before applying the
 # default baseline heuristic below.
 BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
-#if [ -n "${LAUNCH_BASELINE:-}" ]; then
-#    export LAUNCH_BASELINE
-if [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
+if [ -n "${LAUNCH_BASELINE:-}" ]; then
+    export LAUNCH_BASELINE
+elif [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
     export LAUNCH_BASELINE=true
 else
     export LAUNCH_BASELINE=false

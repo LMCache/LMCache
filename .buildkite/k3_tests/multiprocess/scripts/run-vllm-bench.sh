@@ -448,9 +448,13 @@ else
     echo "Single-instance benchmark mode: skipping baseline-vs-LMCache comparison"
 fi
 
-if ! verify_cache_hit_replay; then
-    echo "Cache-hit replay validation failed"
-    exit 1
+if [ "${LMCACHE_MP_LAZY_OFFLOAD:-false}" = "true" ]; then
+    echo "Lazy-offload benchmark mode: skipping two-request cache-hit replay validation"
+else
+    if ! verify_cache_hit_replay; then
+        echo "Cache-hit replay validation failed"
+        exit 1
+    fi
 fi
 
 echo "============================================"

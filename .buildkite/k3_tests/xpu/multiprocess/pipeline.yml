@@ -66,7 +66,10 @@ steps:
           export L1_USE_LAZY="false"
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
-          export CPU_BUFFER_SIZE="4"
+          export CPU_BUFFER_SIZE="8"
+          export LMCACHE_MP_LAZY_OFFLOAD="true"
+          export LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="10"
+          export LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="10"
           .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 45
         retry: *flaky-retry

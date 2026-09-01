@@ -223,12 +223,13 @@ echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
 echo "Port: $vllm_port"
 
-# A dedicated GPU integration test enables FIFO lazy offload through this
-# flag. Keep the normal launch configuration eager so the existing test suite
-# preserves its current store timing.
+# Lazy offload settings are configurable so benchmarks can trade immediate
+# cache availability for batched store throughput without changing this script.
 KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
+    LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
     python3 - <<'PY'
 import json
 import os
@@ -242,8 +243,12 @@ if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
         {
             "lmcache.mp.lazy_offload": True,
             "lmcache.mp.lazy_offload_policy": "FIFO",
-            "lmcache.mp.lazy_offload_threshold": 2,
-            "lmcache.mp.lazy_offload_select_count": 1,
+            "lmcache.mp.lazy_offload_threshold": int(
+                os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
+            ),
+            "lmcache.mp.lazy_offload_select_count": int(
+                os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
+            ),
         }
     )
 
