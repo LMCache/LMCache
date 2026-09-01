@@ -9,7 +9,7 @@ deadline. Pure policy: it decides, ``LazyOffloadManager`` acts. See
 """
 
 # Standard
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Iterable, Iterator, cast
 import math
 import time
@@ -48,13 +48,7 @@ _EMA_ALPHA = 0.3
 _OVERDUE_RANK = -1
 
 _STATS_LOG_INTERVAL_S = 5.0  # Minimum seconds between ledger log lines.
-_DROP_LOG_SAMPLE_OPS = 8  # Dropped ops named in the drop line; rest counted.
-
-#: Counters that advance on every drain whatever the policy decided, so a
-#: change watcher has to skip them.
-_COST_SENSOR_FIELDS = frozenset(
-    {"drain_steps", "free_queue_blocks_read", "requests_validated", "blocks_validated"}
-)
+_DROP_LOG_SAMPLE_OPS = 8  # Dropped requests named in the drop line.
 
 
 class GPUBlockPoolView:
@@ -143,18 +137,6 @@ class PendingStoreOp:
     admitted_at_time: float = 0.0
 
 
-def _format_drop_sample(dropped: list[PendingStoreOp]) -> str:
-    """Render up to ``_DROP_LOG_SAMPLE_OPS`` dropped ops, then ``+N more``."""
-    sample = ", ".join(
-        f"{op.request_id} (prefix {op.prefix_end_tokens})"
-        for op in dropped[:_DROP_LOG_SAMPLE_OPS]
-    )
-    omitted = len(dropped) - _DROP_LOG_SAMPLE_OPS
-    if omitted > 0:
-        sample += f", +{omitted} more"
-    return sample
-
-
 @dataclass(frozen=True)
 class LazyOffloadPolicyConfig:
     """Tunables of the eviction-aware drain policy.
@@ -207,8 +189,7 @@ class LazyOffloadCounters:
 
     The operation counts close as a ledger: ``admitted`` equals the pending
     depth plus ``emitted`` plus every drop counter. The rest are weights and
-    sensors beside it, ``_COST_SENSOR_FIELDS`` being the ones that measure
-    the per-step decision's own cost. The design doc reads them one by one.
+    sensors beside it, read one by one in the design doc.
     """
 
     admitted: int = 0
@@ -225,17 +206,10 @@ class LazyOffloadCounters:
     dropped_id_reuse: int = 0
     throttled_drains: int = 0
     drain_steps: int = 0
-    free_queue_blocks_read: int = 0
-    requests_validated: int = 0
-    blocks_validated: int = 0
 
     def decisions(self) -> tuple[int, ...]:
-        """Every counter but the cost sensors, in declaration order."""
-        return tuple(
-            value
-            for name, value in asdict(self).items()
-            if name not in _COST_SENSOR_FIELDS
-        )
+        """Every counter but ``drain_steps``, which advances on every drain."""
+        return tuple(v for n, v in asdict(self).items() if n != "drain_steps")
 
 
 @dataclass
@@ -472,14 +446,6 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         self._broken_prefixes.add(request_id)
         return len(dropped)
 
-    def num_pending_ops(self) -> int:
-        """Return the total number of buffered store operations."""
-        return self._pending_ops.num_ops()
-
-    def stats(self) -> LazyOffloadCounters:
-        """Return a copy of the cumulative policy counters."""
-        return replace(self._counters)
-
     def drain(self, signals: DrainSignals) -> LazyOffloadDrain:
         """Record the step's block pressure and release what it made due.
 
@@ -498,7 +464,20 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             self._ema_initialized = True
         self._next_step_estimate = signals.est_next_step_blocks
         result = self._collect_due(signals.blocked_request_ids)
-        self._log_drain(result)
+        if result.dropped_evicted:
+            # INFO, not DEBUG: each drop is a unit of cache-quality loss and
+            # production rarely runs at DEBUG. One line per drain, so a burst
+            # evicting a large queue cannot flood the scheduler hot path.
+            logger.info(
+                "Lazy offload: dropped %d store op(s), blocks evicted before "
+                "drain (%s)",
+                len(result.dropped_evicted),
+                ", ".join(
+                    op.request_id
+                    for op in result.dropped_evicted[:_DROP_LOG_SAMPLE_OPS]
+                ),
+            )
+        self._maybe_log_stats()
         items: dict[str, PendingStoreItem] = {}
         for op in result.to_store:
             # add() rejects a second epoch while ops are buffered, so all of
@@ -658,7 +637,6 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             shift_blocks += len(newly_pinned)
             remaining = surviving[len(emitted) :]
             self._replace_pending(request_id, emitted, remaining, result)
-        self._counters.free_queue_blocks_read += len(window.ranks)
         if held_back:
             self._counters.throttled_drains += 1
         return result
@@ -689,7 +667,6 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         A hash mismatch means the block was recycled; that op and every later
         op of the request go, and further admissions are rejected.
         """
-        self._counters.requests_validated += 1
         first_lost = len(ops)
         for index, op in enumerate(ops):
             if not self._snapshot_intact(op):
@@ -732,11 +709,10 @@ class EvictionAwareStoreQueue(OffloadPolicy):
 
     def _snapshot_intact(self, op: PendingStoreOp) -> bool:
         """Whether every covered block still holds its admission-time hash."""
-        for block_id, snapshot in op.block_hashes.items():
-            self._counters.blocks_validated += 1
-            if self._pool.block_hash(block_id) != snapshot:
-                return False
-        return True
+        return all(
+            self._pool.block_hash(block_id) == snapshot
+            for block_id, snapshot in op.block_hashes.items()
+        )
 
     def _replace_pending(
         self,
@@ -758,25 +734,11 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         """
         logger.info("Lazy offload final counters: %s", self._format_ledger())
 
-    def _log_drain(self, result: DrainResult) -> None:
-        """Report one drain's evicted operations and the periodic ledger."""
-        if result.dropped_evicted:
-            # INFO, not DEBUG: each drop is a unit of cache-quality loss and
-            # production rarely runs at DEBUG. One line per drain, so a burst
-            # evicting a large queue cannot flood the scheduler hot path.
-            logger.info(
-                "Lazy offload: dropped %d store op(s): blocks evicted "
-                "before drain (%s)",
-                len(result.dropped_evicted),
-                _format_drop_sample(result.dropped_evicted),
-            )
-        self._maybe_log_stats()
-
     def _maybe_log_stats(self) -> None:
         """Log the counter ledger if it changed and the throttle allows.
 
-        The change test reads the decision counters only: the cost sensors
-        advance every drain and would log a line for the engine's lifetime.
+        The change test skips ``drain_steps``, which advances every drain and
+        would otherwise log a line for the engine's lifetime.
         """
         decisions = self._counters.decisions()
         if decisions == self._last_logged_decisions:

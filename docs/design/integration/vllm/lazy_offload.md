@@ -322,7 +322,7 @@ when those buffered operations leave the queue.
 
 Scheduler-side lazy-offload integration is isolated behind
 `LazyOffloadManager`. `LMCacheMPConnector` forwards scheduler, request, and
-store-receipt lifecycle events to this facade and applies its explicit
+store-receipt lifecycle events to it and applies its explicit
 `LazyOffloadActions` (stores to submit and sessions to end). The manager owns
 policy construction, pressure-signal translation, metadata coalescing, block
 pin/unpin bookkeeping, and failure handling. Consequently a policy change does
