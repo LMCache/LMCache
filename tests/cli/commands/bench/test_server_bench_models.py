@@ -9,7 +9,9 @@ import argparse
 import pytest
 
 # First Party
-from lmcache.cli.commands.bench.server_bench.cases import BaselineBenchCase
+from lmcache.cli.commands.bench.server_bench.cases.baseline import (
+    BaselineBenchCase,
+)
 from lmcache.cli.commands.bench.server_bench.client import (
     LookupResult,
     TransferResult,
@@ -83,12 +85,16 @@ def test_bench_config_excludes_case_and_cli_fields() -> None:
 
 def test_run_spec_binds_case_to_config() -> None:
     config = parse_args_to_config(_args())
-    case = BaselineBenchCase(start=0, end=1, interval=0)
+    bench_case = BaselineBenchCase(
+        sequence_count=1,
+        sequence_id_offset=0,
+        interval_seconds=0,
+    )
 
-    run_spec = BenchRunSpec(config=config, case=case)
+    run_spec = BenchRunSpec(config=config, bench_case=bench_case)
 
     assert run_spec.config is config
-    assert run_spec.case is case
+    assert run_spec.bench_case is bench_case
 
 
 @pytest.mark.parametrize(

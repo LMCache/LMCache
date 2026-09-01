@@ -39,8 +39,10 @@ import os
 import sys
 
 # First Party
-from lmcache.cli.commands.bench.server_bench.case import BenchResult
-from lmcache.cli.commands.bench.server_bench.cases import BaselineBenchCase
+from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
+from lmcache.cli.commands.bench.server_bench.cases.baseline import (
+    BaselineBenchCase,
+)
 from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
 from lmcache.cli.commands.bench.server_bench.config import (
     BenchRunSpec,
@@ -369,12 +371,13 @@ def run_server_bench(
     """
     _require_full_install()
     config = parse_args_to_config(args)
+    sequence_count = None if args.end is None else max(0, args.end - args.start)
     run_spec = BenchRunSpec(
         config=config,
-        case=BaselineBenchCase(
-            start=args.start,
-            end=args.end,
-            interval=args.interval,
+        bench_case=BaselineBenchCase(
+            sequence_count=sequence_count,
+            sequence_id_offset=args.start,
+            interval_seconds=args.interval,
         ),
     )
 
@@ -389,7 +392,7 @@ def run_server_bench(
     # benchmark has already run. ``None`` when --flamegraph is off.
     profiler = _build_server_profiler(args, log)
 
-    result = BenchResult(case_name=run_spec.case.name)
+    result = BenchResult(case_name=run_spec.bench_case.name)
     bench_client = ServerBenchClient(run_spec.config, log)
     try:
         bench_client.start()
@@ -397,7 +400,7 @@ def run_server_bench(
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
             profiler.start(log)
-        result = run_spec.case.run(bench_client, log)
+        result = run_spec.bench_case.run(bench_client, log)
         if result.interrupted:
             log("\nStopping...")
     except RuntimeError as exc:

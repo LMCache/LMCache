@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -27,6 +27,11 @@ class BenchResult:
     def record_check(self, name: str, passed: bool) -> None:
         """Append a correctness result under the given name."""
         self.checks.setdefault(name, []).append(passed)
+
+    def record_checks(self, checks: Mapping[str, bool]) -> None:
+        """Append multiple correctness results."""
+        for name, passed in checks.items():
+            self.record_check(name, passed)
 
     def record_latency(self, name: str, latency_ms: float) -> None:
         """Append a latency sample under the given name."""

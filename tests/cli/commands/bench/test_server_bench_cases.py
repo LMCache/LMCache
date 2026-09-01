@@ -8,8 +8,10 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
-from lmcache.cli.commands.bench.server_bench.case import BenchResult
-from lmcache.cli.commands.bench.server_bench.cases import BaselineBenchCase
+from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
+from lmcache.cli.commands.bench.server_bench.cases.baseline import (
+    BaselineBenchCase,
+)
 from lmcache.cli.commands.bench.server_bench.client import (
     LookupResult,
     RequestContext,
@@ -18,14 +20,14 @@ from lmcache.cli.commands.bench.server_bench.client import (
 
 
 def _request(
-    label: str,
+    request_kind: str,
     num_full_tokens: int = 2,
     total_chunks: int = 1,
 ) -> RequestContext:
     return RequestContext(
-        seq_no=0,
-        request_id=f"req-0-{label}",
-        label=label,
+        sequence_id=0,
+        request_id=f"req-0-{request_kind}",
+        request_kind=request_kind,
         token_ids=(1, 2),
         num_full_tokens=num_full_tokens,
         total_chunks=total_chunks,
@@ -65,7 +67,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
     client = _client("same", "same")
     messages: list[str] = []
 
-    result = BaselineBenchCase(start=0, end=1, interval=0).run(
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0).run(
         client,
         messages.append,
     )
@@ -73,13 +75,13 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
     cold = _request("cold")
     warm = _request("warm")
     assert client.method_calls == [
-        call.create_request(0, request_id="req-0-cold", label="cold"),
+        call.create_request(0, request_id="req-0-cold", request_kind="cold"),
         call.lookup(cold),
         call.compute_checksums(cold, start_token=0, token_count=2),
         call.retrieve(cold, start_token=0, token_count=0),
         call.store(cold, start_token=0, token_count=2),
         call.end_session(cold),
-        call.create_request(0, request_id="req-0-warm", label="warm"),
+        call.create_request(0, request_id="req-0-warm", request_kind="warm"),
         call.lookup(warm),
         call.zero_destination(warm, start_token=0, token_count=2),
         call.retrieve(warm, start_token=0, token_count=2),
@@ -90,11 +92,12 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
     assert result.completed_runs == 1
     assert result.succeeded
     assert result.checks == {
-        "lookup_succeeded": [True, True],
+        "cold_lookup_succeeded": [True],
+        "warm_lookup_succeeded": [True],
         "cold_full_miss": [True],
-        "store_succeeded": [True],
+        "cold_store_succeeded": [True],
         "warm_full_hit": [True],
-        "retrieve_succeeded": [True],
+        "warm_retrieve_succeeded": [True],
         "checksum_available": [True],
         "checksum_match": [True],
     }
@@ -110,7 +113,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
 def test_baseline_case_records_checksum_mismatch() -> None:
     messages: list[str] = []
 
-    result = BaselineBenchCase(start=0, end=1, interval=0).run(
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0).run(
         _client("cold", "warm"),
         messages.append,
     )
@@ -133,7 +136,7 @@ def test_baseline_case_preserves_partial_hit_ranges() -> None:
     client.retrieve.side_effect = [_transfer("retrieve"), _transfer("retrieve")]
     client.store.side_effect = [_transfer("store"), _transfer("store")]
 
-    result = BaselineBenchCase(start=0, end=1, interval=0).run(
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0).run(
         client,
         lambda _message: None,
     )
@@ -152,8 +155,8 @@ def test_baseline_case_preserves_partial_hit_ranges() -> None:
     ]
     assert result.checks["cold_full_miss"] == [False]
     assert result.checks["warm_full_hit"] == [False]
-    assert result.checks["store_succeeded"] == [True]
-    assert result.checks["retrieve_succeeded"] == [True]
+    assert result.checks["cold_store_succeeded"] == [True]
+    assert result.checks["warm_retrieve_succeeded"] == [True]
 
 
 def test_baseline_case_preserves_results_when_interrupted() -> None:
@@ -173,14 +176,15 @@ def test_baseline_case_preserves_results_when_interrupted() -> None:
     client.retrieve.side_effect = [None, _transfer("retrieve"), None]
     client.store.side_effect = [_transfer("store"), None, _transfer("store")]
 
-    result = BaselineBenchCase(start=0, end=2, interval=0).run(
+    result = BaselineBenchCase(sequence_count=2, interval_seconds=0).run(
         client,
         lambda _message: None,
     )
 
     assert result.interrupted
     assert result.completed_runs == 1
-    assert result.checks["lookup_succeeded"] == [True, True]
+    assert result.checks["cold_lookup_succeeded"] == [True]
+    assert result.checks["warm_lookup_succeeded"] == [True]
     assert result.checks["checksum_match"] == [True]
     assert result.latencies_ms["cold.lookup"] == [1.0, 2.0]
     assert result.latencies_ms["warm.lookup"] == [1.5]
@@ -197,29 +201,60 @@ def test_baseline_case_records_failed_lookup_and_latency() -> None:
     client.retrieve.side_effect = [None, _transfer("retrieve")]
     client.store.side_effect = [None, None]
 
-    result = BaselineBenchCase(start=0, end=1, interval=0).run(
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0).run(
         client,
         lambda _message: None,
     )
 
-    assert result.checks["lookup_succeeded"] == [False, True]
+    assert result.checks["cold_lookup_succeeded"] == [False]
+    assert result.checks["warm_lookup_succeeded"] == [True]
     assert result.latencies_ms["cold.lookup"] == [1.0]
     assert result.latencies_ms["warm.lookup"] == [1.5]
     assert result.checks["cold_full_miss"] == [False]
 
 
+def test_baseline_case_uses_sequence_offset_and_count() -> None:
+    client = MagicMock()
+    client.create_request.return_value = None
+
+    result = BaselineBenchCase(
+        sequence_count=2,
+        sequence_id_offset=5,
+        interval_seconds=0,
+    ).run(client, lambda _message: None)
+
+    assert client.create_request.call_args_list == [
+        call(5, request_id="req-5-cold", request_kind="cold"),
+        call(5, request_id="req-5-warm", request_kind="warm"),
+        call(6, request_id="req-6-cold", request_kind="cold"),
+        call(6, request_id="req-6-warm", request_kind="warm"),
+    ]
+    assert result.completed_runs == 2
+
+
+def test_baseline_case_rejects_negative_sequence_count() -> None:
+    with pytest.raises(ValueError, match="sequence_count must be non-negative"):
+        BaselineBenchCase(sequence_count=-1, interval_seconds=0)
+
+
 def test_baseline_case_rejects_negative_interval() -> None:
-    with pytest.raises(ValueError, match="interval must be non-negative"):
-        BaselineBenchCase(start=0, end=1, interval=-0.1)
+    with pytest.raises(ValueError, match="interval_seconds must be non-negative"):
+        BaselineBenchCase(sequence_count=1, interval_seconds=-0.1)
 
 
 def test_bench_result_records_checks_and_latencies() -> None:
     result = BenchResult(case_name="test")
 
     result.record_check("lookup", True)
+    result.record_checks({"store": True, "retrieve": True})
     result.record_latency("lookup", 1.25)
 
     assert result.passed_count("lookup") == 1
     assert result.failed_count("lookup") == 0
+    assert result.checks == {
+        "lookup": [True],
+        "store": [True],
+        "retrieve": [True],
+    }
     assert result.latencies_ms == {"lookup": [1.25]}
     assert result.succeeded

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import argparse
 
 # First Party
-from lmcache.cli.commands.bench.server_bench.case import BenchCase
+from lmcache.cli.commands.bench.server_bench.cases.base import BenchCase
 
 
 @dataclass(frozen=True)
@@ -115,11 +115,11 @@ class BenchRunSpec:
 
     Attributes:
         config: Client, Worker, and KV layout configuration.
-        case: Configured bench case to execute.
+        bench_case: Configured bench case to execute.
     """
 
     config: BenchConfig
-    case: BenchCase
+    bench_case: BenchCase
 
 
 def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
