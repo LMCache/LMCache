@@ -236,6 +236,28 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     assert adapter.create_recorded_event() is None
 
 
+def test_register_kv_caches_tuple_caches_extract_device(fake_adapter, monkeypatch):
+    """Per-layer (K, V) tuple caches register and yield the tensor device."""
+    adapter, send_mock, _ = fake_adapter
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.vllm_layout_hints",
+        lambda: {},
+        raising=False,
+    )
+    # NL_X_TWO_X_NB_BS_NH_HS layout: [NB, BS, NH, HS] per plane.
+    k = torch.randn(2, 8, 4, 8)
+    v = torch.randn(2, 8, 4, 8)
+    tuple_kv = {"layer.0": (k, v), "layer.1": (k, v)}
+
+    adapter.register_kv_caches(tuple_kv)
+
+    assert adapter._kv_device == k.device
+    assert adapter.kv_caches is tuple_kv
+    assert send_mock.call_count == 1
+    args, _kwargs = send_mock.call_args
+    assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+
+
 def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     """submit_store_request stores the returned future in store_futures."""
     adapter, _send_mock, _ = fake_adapter

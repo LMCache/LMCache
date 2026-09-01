@@ -197,7 +197,7 @@ def _get_kv_device(kv_caches: dict[str, torch.Tensor]) -> torch.device:
     """
     if not kv_caches:
         raise ValueError("LMCache-driven transfer requires at least one KV cache")
-    return next(iter(kv_caches.values())).device
+    return get_device(next(iter(kv_caches.values())))
 
 
 class TransferContext(ABC):
