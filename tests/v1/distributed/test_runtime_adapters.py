@@ -388,3 +388,66 @@ class TestStorageManagerRuntimeAdapters:
             assert pairs[0][1] is a1
         finally:
             sm.close()
+
+    def test_closed_behavior(self, empty_storage_manager_config):
+        """Once closed, StorageManager rejects adapter operations."""
+        sm = StorageManager(empty_storage_manager_config)
+        adapter_id = sm.add_l2_adapter(make_mock_config())
+        assert len(sm.l2_adapters()) == 1
+
+        sm.close()
+
+        # check that list is empty
+        assert sm.l2_adapters() == []
+        assert sm.report_status()["num_l2_adapters"] == 0
+
+        # subsequent calls to close should be safe
+        sm.close()
+
+        # operations should raise RuntimeError
+        with pytest.raises(RuntimeError, match="StorageManager is closed"):
+            sm.add_l2_adapter(make_mock_config())
+
+        with pytest.raises(RuntimeError, match="StorageManager is closed"):
+            sm.delete_l2_adapter(adapter_id)
+
+        class DummyListener:
+            pass
+
+        with pytest.raises(RuntimeError, match="StorageManager is closed"):
+            sm.register_l2_listener(DummyListener())  # type: ignore
+
+    def test_concurrent_close_and_add(self, empty_storage_manager_config):
+        """Verify that concurrent close and add_l2_adapter is thread-safe."""
+        # Standard
+        import threading
+        import time
+
+        sm = StorageManager(empty_storage_manager_config)
+        close_started = threading.Event()
+        errors = []
+
+        def worker():
+            close_started.wait()
+            for _ in range(100):
+                try:
+                    sm.add_l2_adapter(make_mock_config())
+                except RuntimeError as e:
+                    if "closed" in str(e):
+                        break
+                    errors.append(e)
+                except Exception as e:
+                    errors.append(e)
+
+        t = threading.Thread(target=worker)
+        t.start()
+
+        time.sleep(0.01)
+        close_started.set()
+
+        sm.close()
+        t.join()
+
+        assert not errors, f"Unexpected errors during concurrent test: {errors}"
+        assert sm.l2_adapters() == []
+        assert sm.report_status()["num_l2_adapters"] == 0
