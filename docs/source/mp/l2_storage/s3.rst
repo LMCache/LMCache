@@ -7,8 +7,18 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 
 **Required fields:**
 
-- ``s3_endpoint``: Bucket URL -- either ``"s3://<bucket>"`` or the bare host form
-  (used for non-AWS endpoints).
+- ``s3_endpoint``: Bucket URL.  The endpoint is used as the request ``Host``
+  header (virtual-hosted addressing), so it must resolve in DNS.  Accepted
+  forms:
+
+  - ``"s3://<bucket>"`` (bare bucket name): expanded automatically to
+    ``"<bucket>.s3.<s3_region>.amazonaws.com"``.
+  - ``"s3://<bucket>.<host>"`` or ``"<bucket>.<host>"``: used as-is.  Required
+    for bucket names containing dots and for S3 Express One Zone directory
+    buckets (their hostname embeds the availability-zone id, e.g.
+    ``"<bucket>.s3express-<az-id>.<region>.amazonaws.com"``).
+  - ``"<host>:<port>"``: used as-is (S3-compatible endpoints such as
+    MinIO/Ceph).
 - ``s3_region``: AWS region string (e.g. ``"us-west-2"``).
 
 **Optional fields:**

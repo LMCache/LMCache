@@ -305,15 +305,68 @@ def _is_connection_error(error_msg: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def resolve_s3_endpoint(
+    endpoint: str, region: str, enable_s3express: bool = False
+) -> str:
+    """Resolve the configured ``s3_endpoint`` into the request Host.
+
+    The endpoint is used verbatim as the ``Host`` header, so it must be
+    a resolvable virtual-hosted hostname. Three input forms are
+    accepted:
+
+    - ``"s3://<bucket>"`` (bare bucket name, no dots or port): expanded
+      to the AWS virtual-hosted form
+      ``"<bucket>.s3.<region>.amazonaws.com"``. Without this expansion
+      the bare name fails DNS resolution (``AWS_IO_DNS_INVALID_NAME``)
+      and every request errors out.
+    - ``"s3://<bucket>.<host>"``: the ``s3://`` scheme is stripped and
+      the remainder is used as-is.
+    - ``"<host>"`` or ``"<host>:<port>"``: used as-is (S3-compatible
+      endpoints such as MinIO/Ceph).
+
+    Args:
+        endpoint: the raw ``s3_endpoint`` config value.
+        region: the ``s3_region`` config value, used to build the AWS
+            virtual-hosted hostname when ``endpoint`` is a bare bucket
+            name.
+        enable_s3express: the ``s3_enable_s3express`` config value.
+
+    Returns:
+        The hostname (optionally with port) to use as the request Host.
+
+    Raises:
+        ValueError: ``endpoint`` is a bare bucket name and
+            ``enable_s3express`` is true — an S3 Express One Zone
+            hostname embeds the availability-zone id and cannot be
+            derived from the region alone.
+    """
+    endpoint = endpoint.rstrip("/")
+    if endpoint.startswith("s3://"):
+        endpoint = endpoint[len("s3://") :]
+        if "." not in endpoint and ":" not in endpoint:
+            if enable_s3express:
+                raise ValueError(
+                    "s3_endpoint: cannot derive an S3 Express One Zone "
+                    "hostname from a bare bucket name; use the full "
+                    "virtual-hosted form "
+                    '"<bucket>.s3express-<az-id>.<region>.amazonaws.com"'
+                )
+            endpoint = f"{endpoint}.s3.{region}.amazonaws.com"
+    return endpoint
+
+
 class S3L2AdapterConfig(L2AdapterConfigBase):
     """Config for the S3 L2 adapter.
 
     Fields:
     - s3_endpoint (str, required): bucket URL using **virtual-hosted**
-      style; accepts either ``"s3://<bucket>.<host>"`` or the bare
-      ``"<bucket>.<host>"`` form. The bucket name must be part of the
-      host because requests are signed and routed against this Host
-      header (path-style addressing is not supported).
+      style; accepts ``"s3://<bucket>.<host>"``, the bare
+      ``"<bucket>.<host>"`` form, or ``"s3://<bucket>"`` (bare bucket
+      name), which is expanded to
+      ``"<bucket>.s3.<s3_region>.amazonaws.com"``. The bucket name must
+      be part of the host because requests are signed and routed
+      against this Host header (path-style addressing is not
+      supported).
     - s3_region (str, required): AWS region used for SigV4.
     - s3_num_io_threads (int): CRT IO threads.
     - s3_prefer_http2 (bool): ALPN negotiate to HTTP/2.
@@ -446,9 +499,15 @@ class S3L2Adapter(L2AdapterInterface):
         super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config = config
 
-        endpoint = config.s3_endpoint
-        if endpoint.startswith("s3://"):
-            endpoint = endpoint[len("s3://") :]
+        endpoint = resolve_s3_endpoint(
+            config.s3_endpoint, config.s3_region, config.s3_enable_s3express
+        )
+        if endpoint != config.s3_endpoint:
+            logger.info(
+                "S3L2Adapter resolved s3_endpoint %r -> %r",
+                config.s3_endpoint,
+                endpoint,
+            )
         self._endpoint = endpoint
         self._region = config.s3_region
         self._enable_s3express = config.s3_enable_s3express
