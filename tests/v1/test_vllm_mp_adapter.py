@@ -217,8 +217,12 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
 def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     fake_adapter, monkeypatch
 ):
-    """CPU registration uses the synchronous context without an event."""
+    """CPU-only capability fallback registers without requiring an event."""
     adapter, send_mock, _ = fake_adapter
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "lmcache.integration.vllm.utils.vllm_layout_hints",
         lambda: {},
@@ -239,8 +243,12 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
 def test_register_kv_caches_tuple_caches_use_engine_driven_context(
     fake_adapter, monkeypatch
 ):
-    """Per-layer (K, V) tuple caches register without requiring an IPC event."""
+    """CPU-only tuple caches register without requiring an IPC event."""
     adapter, send_mock, _ = fake_adapter
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "lmcache.integration.vllm.utils.vllm_layout_hints",
         lambda: {},
