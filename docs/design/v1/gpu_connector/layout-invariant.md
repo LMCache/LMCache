@@ -255,8 +255,9 @@ consumer code must never do any of the following — it queries via the
   passing the `block_stride_elems` resolved by
   `resolve_block_stride_and_log_layout`. The real constructor is the
   only way in — no test-only shortcuts, no cached topology fields; the
-  manager exposes only `kv_layer_groups`, `num_groups`, and
-  `get_shape_desc`.
+  manager exposes only `kernel_groups`, `num_kernel_groups`, and
+  `get_shape_desc` (the old `kv_layer_groups` / `num_groups` properties
+  remain as deprecated aliases).
 - **`lmcache/v1/platform/cuda/cache_context.py::GPUCacheContext`** —
   constructs the manager directly at init, delegates
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
