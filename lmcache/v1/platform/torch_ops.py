@@ -575,17 +575,10 @@ def multi_layer_kv_transfer(
             f"Expected torch.Tensor or list, but got {type(key_value_ptrs).__name__}"
         )
 
-    # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
-    # NL_X_NB_TWO_NH_BS_HS) as next step.
-    if int(engine_kv_format) in (
+    is_hnd_split_kv = int(engine_kv_format) in (
         int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
         int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
-    ):
-        raise NotImplementedError(
-            "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
-            "are not supported in the non-CUDA fallback. "
-            "head_size parameter is required but not implemented in this path."
-        )
+    )
     # 1. Filter out invalid slots.
     #    valid_mask_kv:  on key_value.device, used to index key_value
     #    valid_slots:    on paged_memory_device, used to index paged_tensor
@@ -603,7 +596,8 @@ def multi_layer_kv_transfer(
     if not valid_mask_kv.any():
         return
 
-    valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
+    token_indices = valid_mask_kv.nonzero(as_tuple=False).flatten()
+    valid_slots = slots_kv.index_select(0, token_indices).to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
     is_mla = _format_spec(engine_kv_format).is_mla
@@ -612,10 +606,15 @@ def multi_layer_kv_transfer(
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
 
-    # For the flash_infer interleaved layout, pre-compute block-level indices.
-    if is_flash_infer:
+    # For block-indexed layouts, pre-compute block-level indices.
+    if is_flash_infer or is_hnd_split_kv:
         block_indices = valid_slots // block_size
         block_offsets = valid_slots % block_size
+
+    # For HND layouts, derive num_heads from hidden_size and head_size.
+    if is_hnd_split_kv:
+        assert head_size > 0, "head_size is required for HND layouts"
+        num_heads = hidden_size // head_size
 
     # Determine the physical shape of the underlying paged tensor
     # (used when wrapping a raw pointer).
@@ -626,6 +625,12 @@ def multi_layer_kv_transfer(
     elif is_flash_infer:
         num_blocks = page_buffer_size // block_size
         layer_shape = (num_blocks, 2, block_size, hidden_size)
+    elif is_hnd_split_kv:
+        num_blocks = page_buffer_size // block_size
+        if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
+            layer_shape = (2, num_blocks, num_heads, block_size, head_size)
+        else:
+            layer_shape = (num_blocks, 2, num_heads, block_size, head_size)
     else:
         layer_shape = (2, page_buffer_size, hidden_size)
 
@@ -669,6 +674,60 @@ def multi_layer_kv_transfer(
                 key_value[:, layer_id, valid_mask_kv, :] = gathered.to(
                     kv_device, non_blocking=False
                 ).transpose(0, 1)
+        elif is_hnd_split_kv:
+            # NL_X_TWO_NB_NH_BS_HS: [2, NB, NH, BS, HS]
+            # NL_X_NB_TWO_NH_BS_HS: [NB, 2, NH, BS, HS]
+            # key_value layout:      [2, NL, num_tokens, hidden_size]
+            is_two_first = int(engine_kv_format) == int(
+                EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
+            )
+            # For non-CUDA devices (e.g. Neuron), fancy indexing on device
+            # tensors may fail. Move to CPU for the reshape, then back.
+            paged_cpu = paged_tensor.cpu()
+            bi_cpu = block_indices.cpu()
+            bo_cpu = block_offsets.cpu()
+            if int(direction) == int(TransferDirection.H2D):
+                parts = []
+                for kv_idx in range(2):
+                    parts.append(
+                        key_value[kv_idx, layer_id].index_select(0, token_indices)
+                    )
+                lmc_valid = torch.stack(parts, dim=0)
+                # lmc_valid: [2, num_valid, hidden_size]
+                src = lmc_valid.contiguous().view(2, -1, num_heads, head_size)
+                # src: [2, num_valid, NH, HS]
+                if is_two_first:
+                    # paged: [2, NB, NH, BS, HS]
+                    # Advanced indexing on dims 1,3 puts indexed dim first:
+                    # need [num_valid, NH, HS] per KV, write via loop
+                    for kv_idx in range(2):
+                        paged_cpu[kv_idx, bi_cpu, :, bo_cpu, :] = src[kv_idx]
+                else:
+                    # paged: [NB, 2, NH, BS, HS]
+                    for kv_idx in range(2):
+                        paged_cpu[bi_cpu, kv_idx, :, bo_cpu, :] = src[kv_idx]
+                paged_tensor.copy_(paged_cpu)
+            else:
+                if is_two_first:
+                    # paged: [2, NB, NH, BS, HS]
+                    parts = []
+                    for kv_idx in range(2):
+                        g = paged_cpu[kv_idx, bi_cpu, :, bo_cpu, :]
+                        # g: [num_valid, NH, HS]
+                        parts.append(g.reshape(-1, hidden_size))
+                    flat = torch.stack(parts, dim=0)
+                    # flat: [2, num_valid, hidden_size]
+                else:
+                    parts = []
+                    for kv_idx in range(2):
+                        g = paged_cpu[bi_cpu, kv_idx, :, bo_cpu, :]
+                        parts.append(g.reshape(-1, hidden_size))
+                    flat = torch.stack(parts, dim=0)
+                flat_c = flat.clone().to(kv_device, non_blocking=False)
+                for kv_idx2 in range(2):
+                    key_value[kv_idx2, layer_id].index_copy_(
+                        0, token_indices, flat_c[kv_idx2]
+                    )
         else:
             # Paged layout : [2, page_buffer_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]

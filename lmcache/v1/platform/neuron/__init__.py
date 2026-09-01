@@ -35,18 +35,18 @@ class NeuronDeviceSpec(DeviceSpec):
     def is_available(self) -> bool:
         """Check Neuron availability.
 
-        Imports ``torch_neuronx`` to trigger
-        ``rename_privateuse1_backend("neuron")``, which registers
-        ``torch.neuron``.  Without this import the device module does
-        not exist on ``torch`` and detection silently fails.
+        Supports both the legacy ``torch_neuronx`` XLA shim (which calls
+        ``rename_privateuse1_backend("neuron")``) and the native PyTorch
+        Neuron backend (SDK >= 2.27) where ``torch.neuron`` is registered
+        by ``vllm_neuron`` or the runtime itself.
         """
         try:
-            # Third Party
             import torch
 
+            if hasattr(torch, "neuron") and torch.neuron.is_available():  # type: ignore[attr-defined]
+                return True
             try:
-                # Third Party
-                import torch_neuronx  # noqa: F401 — side-effect: registers torch.neuron
+                import torch_neuronx  # noqa: F401
             except ImportError:
                 return False
             return hasattr(torch, "neuron") and torch.neuron.is_available()  # type: ignore[attr-defined]

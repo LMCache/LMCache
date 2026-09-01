@@ -15,8 +15,12 @@ from lmcache.v1.metadata import LMCacheMetadata
 # subset of accelerators. Each entry is ``(attr_name, human_label,
 # supported_devices)``; the human label is what appears in the error message.
 _DEVICE_SCOPED_VLLM_BOOL_FEATURES: tuple[tuple[str, str, frozenset[str]], ...] = (
-    ("enable_blending", "config.enable_blending", frozenset({"cuda", "xpu"})),
-    ("use_gpu_connector_v3", "config.use_gpu_connector_v3", frozenset({"cuda", "xpu"})),
+    ("enable_blending", "config.enable_blending", frozenset({"cuda", "xpu", "neuron"})),
+    (
+        "use_gpu_connector_v3",
+        "config.use_gpu_connector_v3",
+        frozenset({"cuda", "xpu", "neuron"}),
+    ),
 )
 
 
@@ -158,19 +162,18 @@ def CreateGPUConnector(
     elif engine == EngineType.VLLM:
         _validate_vllm_device_features(config)
 
-        # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import (
-            VLLMBufferLayerwiseGPUConnector,
-            VLLMPagedMemGPUConnectorV2,
-            VLLMPagedMemGPUConnectorV3,
-            VLLMPagedMemLayerwiseGPUConnector,
-        )
-
         local_worker_id = metadata.local_worker_id
         torch_dev.set_device(local_worker_id)
         device = torch.device(f"{torch_device_type}:{local_worker_id}")
+        enable_neuron_nixl_staging = (
+            torch_device_type == "neuron"
+            and config.get_extra_config_value("neuron_use_nixl_staging", True)
+        )
+        neuron_nixl_backends = config.get_extra_config_value(
+            "neuron_nixl_backends", None
+        )
 
-        if torch_device_type == "cuda":
+        if torch_device_type in ("cuda", "neuron"):
             # First Party
             from lmcache.v1.gpu_connector.gpu_connectors import (
                 VLLMBufferLayerwiseGPUConnector,
@@ -191,11 +194,21 @@ def CreateGPUConnector(
 
             if config.use_gpu_connector_v3:
                 return VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device, layout_hints=layout_hints
+                    metadata,
+                    use_gpu,
+                    device,
+                    layout_hints=layout_hints,
+                    enable_neuron_nixl_staging=enable_neuron_nixl_staging,
+                    neuron_nixl_backends=neuron_nixl_backends,
                 )
             else:
                 return VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device, layout_hints=layout_hints
+                    metadata,
+                    use_gpu,
+                    device,
+                    layout_hints=layout_hints,
+                    enable_neuron_nixl_staging=enable_neuron_nixl_staging,
+                    neuron_nixl_backends=neuron_nixl_backends,
                 )
         elif torch_device_type == "xpu":
             # First Party
