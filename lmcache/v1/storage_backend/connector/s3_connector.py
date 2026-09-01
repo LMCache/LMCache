@@ -21,6 +21,13 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
+# HTTP statuses that mark a request as permanently rejected rather than
+# transiently failed: the request is refused for what it is, so retrying it
+# for every subsequent chunk hits the same wall. They therefore count toward
+# the connection circuit breaker. 404 is deliberately excluded: it is an
+# expected cache miss, not a broken connection.
+NON_RETRYABLE_STATUS_CODES = frozenset({400, 401, 403})
+
 
 class Priorities(IntEnum):
     PEEK = auto()
@@ -298,9 +305,15 @@ class S3Connector(RemoteConnector):
         self,
         key_str: str,
         mem_obj: MemoryObj,
-    ) -> "s3.S3Request":
+    ) -> tuple["s3.S3Request", dict]:
         """
         Download a file from S3.
+
+        Returns:
+            The in-flight request and the dict its completion callback
+            records into. The dict holds the aws-crt error under "err" and
+            the HTTP status under "status", and is only meaningful once
+            `finished_future` has resolved.
         """
         headers = HttpHeaders()
         headers.add("Host", self.s3_endpoint)
@@ -315,14 +328,17 @@ class S3Connector(RemoteConnector):
             # Directly write chunk to the memory object at the correct offset
             self._write_mem_obj(mem_obj, chunk, offset)
 
+        done = {"err": None, "status": None}
+
         # NOTE(Jiayi): Run in crt threads (not this thread) with GIL
         # See https://github.com/awslabs/aws-crt-python/blob/4250709624119de1af3ca86816e1a154fcac7cc8/source/common.c#L51
+        # Only record here: aws-crt resolves `finished_future` before running
+        # this callback, so raising would not reach the awaiting coroutine.
+        # The caller inspects `done` after the await instead, the same way
+        # `_get_object_size` inspects `got`.
         def on_done(error=None, status_code=None, **kwargs):
-            ok = (status_code in (200, 206)) or (status_code is None)
-            if error or not ok:
-                raise RuntimeError(
-                    f"Failed to download {key_str} from S3: {error or status_code}"
-                )
+            done["err"] = error
+            done["status"] = status_code
 
         # TODO(Jiayi): Need to support offset to enable zero-copy
         # More concretely, we need to get the shared memory offset.
@@ -336,7 +352,27 @@ class S3Connector(RemoteConnector):
             on_done=on_done,
         )
 
-        return s3_req
+        return s3_req, done
+
+    @staticmethod
+    def _download_error(key_str: str, done: dict) -> Optional[str]:
+        """
+        Check a completed download for failure.
+
+        Args:
+            key_str: The key that was downloaded, used in the message.
+            done: The dict recorded by `_s3_download`'s completion callback,
+                holding the aws-crt error under "err" and the HTTP status
+                under "status".
+
+        Returns:
+            An error message if the download failed, None otherwise.
+        """
+        status_code = done["status"]
+        ok = (status_code in (200, 206)) or (status_code is None)
+        if done["err"] or not ok:
+            return f"Failed to download {key_str} from S3: {done['err'] or status_code}"
+        return None
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         # Circuit breaker: if connection is disabled, return None immediately
@@ -380,7 +416,7 @@ class S3Connector(RemoteConnector):
             memory_obj.ref_count_down()
             return None
 
-        s3_req = self._s3_download(
+        s3_req, done = self._s3_download(
             key_str=key_str,
             mem_obj=memory_obj,
         )
@@ -389,15 +425,22 @@ class S3Connector(RemoteConnector):
             # use blocking_timeout_sec in config to control the timeout
             await asyncio.wrap_future(s3_req.finished_future)
 
+            download_error = self._download_error(key_str, done)
+            if download_error is not None:
+                raise RuntimeError(download_error)
+
             # Reset failure counter on success
             self._reset_connection_failures()
 
             return memory_obj
         except Exception as e:
             error_msg = str(e)
+            status_code = self._failed_status_code(e, done)
 
             # Update connection failures and check if it's a connection error
-            is_connection_error = self._update_connection_failures(error_msg)
+            is_connection_error = self._update_connection_failures(
+                error_msg, status_code
+            )
 
             if not is_connection_error:
                 # Log non-connection errors
@@ -419,6 +462,7 @@ class S3Connector(RemoteConnector):
 
         memory_objs: List[Optional[MemoryObj]] = []
         futures = []
+        dones = []
         future_to_memobj_idx = []
 
         for idx, key in enumerate(keys):
@@ -460,12 +504,13 @@ class S3Connector(RemoteConnector):
 
             memory_objs.append(memory_obj)
 
-            s3_req = self._s3_download(
+            s3_req, done = self._s3_download(
                 key_str=key_str,
                 mem_obj=memory_obj,
             )
             fut = asyncio.wrap_future(s3_req.finished_future)
             futures.append(fut)
+            dones.append(done)
             future_to_memobj_idx.append(len(memory_objs) - 1)
 
         # Use return_exceptions to prevent one failure from stopping all downloads
@@ -475,11 +520,22 @@ class S3Connector(RemoteConnector):
 
         for future_idx, result in enumerate(results):
             memobj_idx = future_to_memobj_idx[future_idx]
+            done = dones[future_idx]
+            key_str = keys[memobj_idx].to_string()
 
+            # A request that aws-crt did not fail may still have completed
+            # with an error status; its completion callback only records.
             if isinstance(result, Exception):
-                error_msg = str(result)
+                error_msg: Optional[str] = str(result)
+                status_code = self._failed_status_code(result, done)
+            else:
+                error_msg = self._download_error(key_str, done)
+                status_code = done["status"]
 
-                is_connection_error = self._update_connection_failures(error_msg)
+            if error_msg is not None:
+                is_connection_error = self._update_connection_failures(
+                    error_msg, status_code
+                )
 
                 if not is_connection_error:
                     # Log non-connection errors
@@ -505,9 +561,15 @@ class S3Connector(RemoteConnector):
         self,
         key_str: str,
         memory_obj: MemoryObj,
-    ) -> "s3.S3Request":
+    ) -> tuple["s3.S3Request", dict]:
         """
         Upload a file to S3.
+
+        Returns:
+            The in-flight request and the dict its completion callback
+            records into. The dict holds the aws-crt error under "err" and
+            the HTTP status under "status", and is only meaningful once
+            `finished_future` has resolved.
         """
         # Zero-copy approach using MemoryViewStream
         stream = MemoryViewStream(memory_obj.byte_array)
@@ -525,12 +587,11 @@ class S3Connector(RemoteConnector):
 
         done = {"err": None, "status": None}
 
+        # Runs in crt threads, like `_s3_download`'s callback: only record
+        # here, the caller inspects `done` after awaiting the request.
         def on_done(error=None, status_code=None, **kwargs):
             done["err"] = error
             done["status"] = status_code
-
-            if done["err"] or done["status"] not in (200, 201):
-                raise RuntimeError(f"Upload failed in S3Connector: {done}")
 
         s3_req = s3.S3Request(
             client=self.s3_client,
@@ -540,7 +601,7 @@ class S3Connector(RemoteConnector):
             region=self.s3_region,
             on_done=on_done,
         )
-        return s3_req
+        return s3_req, done
 
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """
@@ -569,10 +630,16 @@ class S3Connector(RemoteConnector):
             )
             return
 
+        # Recorded by the upload's completion callback, see `_s3_upload`.
+        done: dict = {"err": None, "status": None}
+
         try:
             logger.debug("Uploading %s to S3", key_str)
-            s3_req = self._s3_upload(key_str, memory_obj)
+            s3_req, done = self._s3_upload(key_str, memory_obj)
             await asyncio.wrap_future(s3_req.finished_future)
+
+            if done["err"] or done["status"] not in (200, 201):
+                raise RuntimeError(f"Upload failed in S3Connector: {done}")
 
             self.object_size_cache[key_str] = memory_obj.get_physical_size()
             logger.debug("Uploaded %s to S3 successfully", key_str)
@@ -581,9 +648,12 @@ class S3Connector(RemoteConnector):
             self._reset_connection_failures()
         except Exception as e:
             error_msg = str(e)
+            status_code = self._failed_status_code(e, done)
 
             # Update connection failures and check if it's a connection error
-            is_connection_error = self._update_connection_failures(error_msg)
+            is_connection_error = self._update_connection_failures(
+                error_msg, status_code
+            )
 
             if not is_connection_error:
                 # Log non-connection errors
@@ -674,7 +744,42 @@ class S3Connector(RemoteConnector):
     def support_batched_get(self) -> bool:
         return True
 
-    def _update_connection_failures(self, error_msg: str) -> bool:
+    @staticmethod
+    def _failed_status_code(error: Exception, done: dict) -> Optional[int]:
+        """
+        Recover the HTTP status a failed operation completed with.
+
+        Args:
+            error: The exception the operation failed with.
+            done: The dict recorded by the operation's completion callback,
+                holding the HTTP status under "status".
+
+        Returns:
+            The HTTP status if one is known, None otherwise.
+        """
+        # aws-crt carries the status on the `S3ResponseError` it raises; what
+        # the callback recorded is the fallback for locally raised failures.
+        status_code = getattr(error, "status_code", None)
+        if status_code is None:
+            status_code = done["status"]
+        return status_code
+
+    def _update_connection_failures(
+        self, error_msg: str, status_code: Optional[int] = None
+    ) -> bool:
+        """
+        Count a failed operation against the circuit breaker.
+
+        Args:
+            error_msg: The error message the operation failed with.
+            status_code: The HTTP status the operation completed with, if
+                one is known.
+
+        Returns:
+            True if the failure was a connection-level error, False
+            otherwise. A False return does not mean the failure was ignored:
+            a non-retryable HTTP status counts toward the breaker too.
+        """
         # Check if it's a connection error
         is_connection_error = (
             "CONNECTION_REFUSED" in error_msg
@@ -682,15 +787,25 @@ class S3Connector(RemoteConnector):
             or "DNS" in error_msg
             or "TIMEOUT" in error_msg
         )
+        is_non_retryable_status = status_code in NON_RETRYABLE_STATUS_CODES
 
-        if is_connection_error:
+        if is_connection_error or is_non_retryable_status:
             self.connection_failures += 1
-            logger.error(
-                "S3 connection error (%s/%s): %s",
-                self.connection_failures,
-                self.max_connection_failures,
-                error_msg,
-            )
+            if is_connection_error:
+                logger.error(
+                    "S3 connection error (%s/%s): %s",
+                    self.connection_failures,
+                    self.max_connection_failures,
+                    error_msg,
+                )
+            else:
+                logger.error(
+                    "S3 request rejected with non-retryable status %s (%s/%s): %s",
+                    status_code,
+                    self.connection_failures,
+                    self.max_connection_failures,
+                    error_msg,
+                )
 
             if self.connection_failures >= self.max_connection_failures:
                 self.connection_disabled = True
