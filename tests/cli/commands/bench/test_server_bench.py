@@ -9,7 +9,6 @@ Covers:
 
 # Standard
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from types import SimpleNamespace
 from typing import Any
 import argparse
 import json
@@ -22,7 +21,6 @@ import torch
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
-from lmcache.cli.commands.bench.server_bench.config import WorkerSpec
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _allocate_kv_cache,
     _build_token_ids,
@@ -123,6 +121,72 @@ class TestCommandMetadata:
         # Public command surface mirrors the sibling subpackages.
         assert callable(sv_cmd.add_server_arguments)
         assert callable(sv_cmd.run_server_bench)
+
+
+class TestClientDelegation:
+    def test_cold_warm_flow_uses_one_client_and_closes(
+        self,
+        cmd: BenchCommand,
+        parser: argparse.ArgumentParser,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Standard
+        from unittest.mock import MagicMock, call
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import command as sv_cmd
+        from lmcache.cli.commands.bench.server_bench.client import (
+            LookupResult,
+            RequestContext,
+            TransferResult,
+        )
+
+        client = MagicMock()
+        cold_request = RequestContext(0, "req-0-cold", "cold", (1, 2), 2, 1, 2, 0, 1)
+        warm_request = RequestContext(0, "req-0-warm", "warm", (1, 2), 2, 1, 2, 0, 1)
+        client.create_request.side_effect = [cold_request, warm_request]
+        client.lookup.side_effect = [
+            LookupResult(0, 1, 0.0),
+            LookupResult(1, 1, 0.0),
+        ]
+        client.compute_checksums.side_effect = [["same"], ["same"]]
+        client.store.return_value = TransferResult("store", 2, 0.0, (0,), (0,), ())
+        client.retrieve.return_value = TransferResult(
+            "retrieve", 2, 0.0, (0,), (0,), ()
+        )
+        monkeypatch.setattr(sv_cmd, "ServerBenchClient", lambda *_args: client)
+        args = parser.parse_args(
+            [
+                "bench",
+                "server",
+                "--mode",
+                "cpu",
+                "--start",
+                "0",
+                "--end",
+                "1",
+                "--interval",
+                "0",
+                "--quiet",
+            ]
+        )
+
+        sv_cmd.run_server_bench(cmd, args)
+
+        client.start.assert_called_once_with()
+        assert client.create_request.call_args_list == [
+            call(0, request_id="req-0-cold", label="cold"),
+            call(0, request_id="req-0-warm", label="warm"),
+        ]
+        assert client.lookup.call_count == 2
+        client.zero_destination.assert_called_once_with(
+            warm_request, start_token=0, token_count=2
+        )
+        assert client.end_session.call_args_list == [
+            call(cold_request),
+            call(warm_request),
+        ]
+        client.close.assert_called_once_with()
 
 
 # ------------------------------------------------------------------ #
@@ -946,129 +1010,237 @@ class TestAllocShapeContract:
 # ------------------------------------------------------------------ #
 
 
-class TestProcessRequestMultiWorker:
-    """LOOKUP is scheduler-scoped (single call, worker_id=None) while
-    STORE / RETRIEVE fan out per-rank, mirroring how
-    ``LMCacheMPWorkerAdapter`` routes requests in a real vLLM
-    deployment. MLA marks only rank 0 as a KV writer (matching
-    ``ParallelStrategy.is_kv_writer``); non-MLA writes on every rank.
-    """
+class TestClientMultiWorker:
+    """Test scheduler LOOKUP and per-rank STORE/RETRIEVE fan-out."""
 
-    def _run(self, is_mla: bool, tp_size: int):
-        """Drive ``_process_request`` against a mocked ``_call`` and return
-        the sequence of ``(RpcMethod, worker_id, instance_id)`` tuples
-        for the fan-out ops (STORE / RETRIEVE)."""
+    class _FakeRpc:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __call__(self, *_args: Any) -> None:
+            raise AssertionError("_call should be mocked in this test")
+
+    class _FakeGrpcClient:
+        def __init__(self) -> None:
+            self.closed = False
+            self.get_chunk_size = TestClientMultiWorker._FakeRpc("GET_CHUNK_SIZE")
+            self.register_kv_cache = TestClientMultiWorker._FakeRpc("REGISTER_KV_CACHE")
+            self.register_kv_cache_engine_driven_context = (
+                TestClientMultiWorker._FakeRpc(
+                    "REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT"
+                )
+            )
+            self.unregister_kv_cache = TestClientMultiWorker._FakeRpc(
+                "UNREGISTER_KV_CACHE"
+            )
+            self.unregister_kv_cache_engine_driven_context = (
+                TestClientMultiWorker._FakeRpc(
+                    "UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT"
+                )
+            )
+            self.lookup = TestClientMultiWorker._FakeRpc("LOOKUP")
+            self.query_prefetch_status = TestClientMultiWorker._FakeRpc(
+                "QUERY_PREFETCH_STATUS"
+            )
+            self.store = TestClientMultiWorker._FakeRpc("STORE")
+            self.retrieve = TestClientMultiWorker._FakeRpc("RETRIEVE")
+            self.prepare_store = TestClientMultiWorker._FakeRpc("PREPARE_STORE")
+            self.commit_store = TestClientMultiWorker._FakeRpc("COMMIT_STORE")
+            self.prepare_retrieve = TestClientMultiWorker._FakeRpc("PREPARE_RETRIEVE")
+            self.commit_retrieve = TestClientMultiWorker._FakeRpc("COMMIT_RETRIEVE")
+            self.end_session = TestClientMultiWorker._FakeRpc("END_SESSION")
+
+        def close(self) -> None:
+            self.closed = True
+
+    def test_start_rolls_back_partial_registration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         # Standard
-        from unittest.mock import patch
+        import gc
+        import weakref
 
         # First Party
         from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _INSTANCE_ID_BASE,
-            WorkerContext,
-            _process_request,
-        )
+        from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
+        from lmcache.cli.commands.bench.server_bench.config import BenchConfig
+        from lmcache.v1.multiprocess.transport.grpc_impl import grpc as grpc_transport
 
-        calls: list[tuple] = []
+        fake_client = self._FakeGrpcClient()
+        calls: list[tuple[Any, list[Any]]] = []
+        tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+        register_results = iter([None, sv_helpers._TIMEOUT])
+        unregistered: list[int] = []
 
-        # Stand-in for the two-phase PREPARE reply. ``success=True``
-        # plus an empty ``context`` sends the flow down the classical
-        # path (no slot views, no server_pool needed).
-        class _FakePrep:
-            success = True
-            context: dict = {}
+        def fake_allocate(
+            *, groups: Any, shm_prefix: str
+        ) -> tuple[list, list, list, list]:
+            del groups, shm_prefix
+            tensor = torch.ones(1)
+            tensor_refs.append(weakref.ref(tensor))
+            return [tensor], [object()], [], []
 
-        class _FakeRpc:
-            def __init__(self, name: str) -> None:
-                self.name = name
-
-            def __call__(self, *_args):
-                raise AssertionError("_call should be mocked in this test")
-
-        client = SimpleNamespace(
-            lookup=_FakeRpc("LOOKUP"),
-            query_prefetch_status=_FakeRpc("QUERY_PREFETCH_STATUS"),
-            store=_FakeRpc("STORE"),
-            retrieve=_FakeRpc("RETRIEVE"),
-            prepare_store=_FakeRpc("PREPARE_STORE"),
-            commit_store=_FakeRpc("COMMIT_STORE"),
-            prepare_retrieve=_FakeRpc("PREPARE_RETRIEVE"),
-            commit_retrieve=_FakeRpc("COMMIT_RETRIEVE"),
-            end_session=_FakeRpc("END_SESSION"),
-        )
-
-        # ``_call`` returns different shapes per RPC method:
-        #   LOOKUP -> None (void)
-        #   QUERY_PREFETCH_STATUS -> hit_chunks (int) or None
-        #   STORE / RETRIEVE (handle) -> (worker_id, True)
-        #   PREPARE_* -> _FakePrep()
-        #   COMMIT_* -> True
-        #   END_SESSION -> None
-        def fake_call(rpc, payloads):
+        def fake_call(rpc: Any, payloads: list[Any]) -> Any:
             calls.append((rpc, payloads))
             name = rpc.name
+            if name == "GET_CHUNK_SIZE":
+                return 16
+            if name == "REGISTER_KV_CACHE":
+                return next(register_results)
+            if name == "UNREGISTER_KV_CACHE":
+                unregistered.append(payloads[0])
+                return None
+            return None
+
+        monkeypatch.setattr(
+            grpc_transport,
+            "MultiprocessGrpcClient",
+            lambda _url: fake_client,
+        )
+        monkeypatch.setattr(sv_helpers, "_call", fake_call)
+        monkeypatch.setattr(
+            sv_helpers,
+            "_allocate_cpu_shm_kv_cache",
+            fake_allocate,
+        )
+
+        bench_client = ServerBenchClient(
+            BenchConfig(
+                rpc_url="grpc://127.0.0.1:1",
+                http_url="",
+                mode="cpu",
+                transfer_mode="lmcache_driven",
+                tp_size=2,
+                use_mla=False,
+                num_tokens=31,
+                kvcache_shape_spec="(2,64,16,1,1):float16:1",
+                num_blocks=64,
+                block_size=16,
+                start=0,
+                end=1,
+                quiet=True,
+            ),
+            lambda _message: None,
+        )
+
+        with pytest.raises(RuntimeError, match="rank 1"):
+            bench_client.start()
+
+        gc.collect()
+        assert unregistered == [1000]
+        assert fake_client.closed
+        assert all(ref() is None for ref in tensor_refs)
+
+    def _run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        is_mla: bool,
+        tp_size: int,
+    ) -> tuple[list[tuple[Any, list[Any]]], tuple[Any, Any]]:
+        """Run public client operations against mocked typed gRPC methods."""
+        # Standard
+        from unittest.mock import MagicMock
+        import gc
+        import weakref
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+        from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
+        from lmcache.cli.commands.bench.server_bench.config import BenchConfig
+        from lmcache.v1.multiprocess.transport.grpc_impl import grpc as grpc_transport
+
+        fake_client = self._FakeGrpcClient()
+        calls: list[tuple[Any, list[Any]]] = []
+        tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+
+        class _FakePrep:
+            success = True
+
+        def fake_allocate(
+            *, groups: Any, shm_prefix: str
+        ) -> tuple[list, list, list, list]:
+            del groups, shm_prefix
+            tensor = torch.ones(1)
+            tensor_refs.append(weakref.ref(tensor))
+            return [tensor], [object()], [], []
+
+        def fake_call(rpc: Any, payloads: list[Any]) -> Any:
+            calls.append((rpc, payloads))
+            name = rpc.name
+            if name == "GET_CHUNK_SIZE":
+                return 16
             if name == "QUERY_PREFETCH_STATUS":
                 # No cache hits -> only STORE side fires.
                 return 0
+            if name == "REGISTER_KV_CACHE":
+                return True
             if name in ("STORE", "RETRIEVE"):
-                return (0, True)
+                return (b"", True)
             if name.startswith("PREPARE_"):
                 return _FakePrep()
             if name.startswith("COMMIT_"):
                 return True
             return None
 
-        workers = []
-        kv_world_size = 1 if is_mla else tp_size
-        for rank in range(tp_size):
-            workers.append(
-                WorkerContext(
-                    spec=WorkerSpec(
-                        rank=rank,
-                        kv_worker_id=0 if is_mla else rank,
-                        kv_world_size=kv_world_size,
-                        instance_id=_INSTANCE_ID_BASE + rank,
-                        store_enabled=(rank == 0) if is_mla else True,
-                        retrieve_enabled=True,
-                    ),
-                    client_tensors=None,
-                    server_pool=None,
-                )
-            )
+        monkeypatch.setattr(
+            grpc_transport,
+            "MultiprocessGrpcClient",
+            lambda _url: fake_client,
+        )
+        monkeypatch.setattr(sv_helpers, "_call", fake_call)
+        monkeypatch.setattr(
+            sv_helpers,
+            "_allocate_cpu_shm_kv_cache",
+            fake_allocate,
+        )
 
-        # ``_make_event_handle`` creates a real CUDA-IPC event via
-        # ``check_interprocess_event_support()``, which requires a
-        # backend that supports ``Event(interprocess=True)`` (e.g.
-        # CUDA). This test only exercises the STORE/RETRIEVE
-        # fan-out/dispatch logic, so stub it out to keep the test
-        # backend-agnostic -- it would otherwise fail on XPU/CPU-only
-        # runners with "Backend '<device>' does not support
-        # interprocess=True parameter for Events".
-        with (
-            patch.object(sv_helpers, "_call", side_effect=fake_call),
-            patch.object(sv_helpers, "_make_event_handle", return_value=b""),
-        ):
-            result = _process_request(
-                client=client,  # type: ignore[arg-type]
-                seq_no=0,
-                num_tokens=32,
-                chunk_size=16,
-                pass_label="cold",
-                http_base="",
+        kv_size = 1 if is_mla else 2
+        bench_client = ServerBenchClient(
+            BenchConfig(
+                rpc_url="grpc://127.0.0.1:1",
+                http_url="",
+                mode="cpu",
+                transfer_mode="lmcache_driven",
+                tp_size=tp_size,
+                use_mla=is_mla,
+                num_tokens=31,
+                kvcache_shape_spec=("(%d,64,16,1,1):float16:1" % kv_size),
+                num_blocks=64,
                 block_size=16,
-                total_blocks=64,
-                num_engine_group_infos=1,
-                use_gpu=True,  # handle mode: single-shot STORE / RETRIEVE
-                use_handle=True,
-                workers=workers,
-                world_size=kv_world_size,
+                start=0,
+                end=1,
+                quiet=True,
+            ),
+            MagicMock(),
+        )
+        bench_client.start()
+        gc.collect()
+        assert all(ref() is not None for ref in tensor_refs)
+        try:
+            request = bench_client.create_request(0, "req-0-test", "test")
+            assert request is not None
+            lookup = bench_client.lookup(request)
+            store = bench_client.store(
+                request,
+                start_token=0,
+                token_count=request.num_full_tokens,
             )
+            bench_client.end_session(request)
+            result = (lookup, store)
+        finally:
+            bench_client.close()
+        gc.collect()
+        assert all(ref() is None for ref in tensor_refs)
 
-        assert result is not None
         return calls, result
 
-    def test_mla_tp2_store_only_from_rank0(self) -> None:
-        calls, result = self._run(is_mla=True, tp_size=2)
+    def test_mla_tp2_store_only_from_rank0(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls, result = self._run(monkeypatch, is_mla=True, tp_size=2)
+        lookup, store_result = result
         # Extract STORE + RETRIEVE calls with their instance_id argument.
         stores = [c for c in calls if c[0].name == "STORE"]
         retrieves = [c for c in calls if c[0].name == "RETRIEVE"]
@@ -1091,14 +1263,18 @@ class TestProcessRequestMultiWorker:
         )
         # No hits in the fake -> RETRIEVE is skipped entirely.
         assert retrieves == []
-        assert result.lookup.is_full_miss
-        assert result.store is not None
-        assert result.store.attempted_worker_ranks == (0,)
-        assert result.store.successful_worker_ranks == (0,)
-        assert result.store.succeeded
+        assert lookup.is_full_miss
+        assert store_result is not None
+        assert store_result.attempted_worker_ranks == (0,)
+        assert store_result.successful_worker_ranks == (0,)
+        assert store_result.succeeded
 
-    def test_non_mla_tp2_store_on_every_rank(self) -> None:
-        calls, result = self._run(is_mla=False, tp_size=2)
+    def test_non_mla_tp2_store_on_every_rank(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls, result = self._run(monkeypatch, is_mla=False, tp_size=2)
+        _lookup, store_result = result
         stores = [c for c in calls if c[0].name == "STORE"]
         # Non-MLA: every rank stores.
         assert len(stores) == 2
@@ -1115,25 +1291,26 @@ class TestProcessRequestMultiWorker:
             )
         worker_ids = sorted(c[1][0].worker_id for c in stores)
         assert worker_ids == [0, 1]
-        assert result.store is not None
-        assert result.store.attempted_worker_ranks == (0, 1)
-        assert result.store.successful_worker_ranks == (0, 1)
-        assert result.store.succeeded
+        assert store_result is not None
+        assert store_result.attempted_worker_ranks == (0, 1)
+        assert store_result.successful_worker_ranks == (0, 1)
+        assert store_result.succeeded
 
-    def test_lookup_called_once_regardless_of_tp(self) -> None:
+    def test_lookup_called_once_regardless_of_tp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         for is_mla in (True, False):
             for tp in (1, 2, 4):
-                calls, _result = self._run(is_mla=is_mla, tp_size=tp)
+                calls, _result = self._run(monkeypatch, is_mla=is_mla, tp_size=tp)
                 lookups = [c for c in calls if c[0].name == "LOOKUP"]
                 assert len(lookups) == 1, (
                     "LOOKUP should fire exactly once regardless of tp_size "
                     "(is_mla=%s, tp=%d)" % (is_mla, tp)
                 )
-                # LOOKUP payload is ``[key, tp_size]``. The server
-                # reserves ``key.num_kv_readers`` read locks per chunk
-                # (see IPCCacheServerKey.require_num_kv_readers);
-                # tp_size is a legacy wire field kept for
-                # compatibility, so assert it still travels intact.
+                # LOOKUP payload is ``[key, tp_size]``. gRPC gives this
+                # field a named protobuf method contract instead of an
+                # out-of-band request enum.
                 assert lookups[0][1][1] == tp, (
                     "LOOKUP payload tp_size must equal simulated tp "
                     "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])

@@ -73,6 +73,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.services import (
     P2PServiceImpl,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 logger = init_logger(__name__)
 
@@ -397,6 +398,11 @@ def run_cache_server(
         If return_engine is True: tuple of (MultiprocessGrpcServer, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
+    # The IPC backend selector is process-global and is consulted while
+    # constructing cache contexts and IPC wrappers below. Apply it before any
+    # module can resolve the backend so the daemon matches isolated workers.
+    set_isolated_ipc(mp_config.isolated_ipc)
+
     # mp_config.instance_id is this server's single source of identity (set via
     # --instance-id, else a random UUID v4). Project it onto the OTel
     # service.instance.id unless observability set that attribute explicitly, so
