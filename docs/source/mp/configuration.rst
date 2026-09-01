@@ -8,6 +8,47 @@ server.  Arguments are grouped by the config module that defines them.
    :local:
    :depth: 2
 
+Configuration File (TOML)
+------------------------
+
+In addition to CLI flags, the MP server accepts a TOML file of defaults.
+Any flag set explicitly on the command line overrides the file; an absent
+flag lets the file win over the argparse default. With no file, behavior is
+unchanged (argparse-only).
+
+Point the server at a file with ``--config-file`` or the
+``LMCACHE_MP_CONFIG`` environment variable (the flag wins over the env var).
+A missing or unparsable file logs a warning and falls back to argparse-only
+behavior — it never aborts startup.
+
+Keys mirror the ``MPServerConfig`` field names; both ``max-gpu-workers`` and
+``max_gpu_workers`` are accepted (hyphens map to underscores). Unknown keys
+are warned about and skipped. Example ``mp.toml``:
+
+.. code-block:: toml
+
+   host = "0.0.0.0"
+   port = 5555
+   chunk-size = 256
+   max-workers = 4
+   max-gpu-workers = 2
+   hash-algorithm = "blake3"
+   engine-type = "default"
+   supported-transfer-mode = "auto"
+   worker-reap-timeout-seconds = 120.0
+   worker-registration-grace-seconds = 3600.0
+
+   # runtime-plugin-config accepts a TOML inline table; it is serialized to the
+   # JSON string the CLI flag expects.
+   # runtime-plugin-config = {plugin.frontend.heartbeat_url = "http://localhost:5000/heartbeat"}
+
+.. code-block:: bash
+
+   LMCACHE_MP_CONFIG=/etc/lmcache/mp.toml lmcache server --port 6000
+
+The ``--port 6000`` flag above overrides ``port = 5555`` from the file; every
+other value is read from the file because the matching flag was not passed.
+
 MP Server
 ---------
 

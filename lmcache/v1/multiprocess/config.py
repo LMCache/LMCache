@@ -13,6 +13,12 @@ import math
 import os
 import uuid
 
+try:
+    # Standard
+    import tomllib  # Python 3.11+ stdlib
+except ModuleNotFoundError:  # pragma: no cover (Python 3.10 only)
+    import tomli as tomllib  # type: ignore[no-redef, import-not-found]
+
 # First Party
 from lmcache.logging import init_logger
 
@@ -432,6 +438,16 @@ def add_mp_server_args(
         "Options: transfer_query (see lmcache.v1.multiprocess.modules."
         "experimental.__init___.py).",
     )
+    mp_group.add_argument(
+        "--config-file",
+        type=str,
+        default=None,
+        help="Path to a TOML file providing MP server defaults (any flag set "
+        "explicitly on the command line overrides the file). Also read from "
+        "the LMCACHE_MP_CONFIG environment variable; the flag wins over the "
+        "env var. Missing or unparsable files warn and fall back to "
+        "argparse-only behavior (never aborts startup).",
+    )
     return parser
 
 
@@ -480,6 +496,135 @@ def parse_args_to_mp_server_config(
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
     )
+
+
+# Dest names the TOML file must not set (the config-file path itself; setting
+# it from inside the file would be circular and meaningless).
+_MP_CONFIG_FILE_EXCLUDED_DESTS = frozenset({"config_file"})
+
+# Memoized argparse defaults for the MP-server group; built lazily by
+# _mp_server_arg_defaults() and only read by the merge layer.
+_MP_SERVER_DEFAULTS: argparse.Namespace | None = None
+
+
+def _mp_server_arg_defaults() -> argparse.Namespace:
+    """Return a Namespace of the MP-server argparse defaults.
+
+    Built by parsing an empty argv through a fresh parser with
+    ``add_mp_server_args``, so the defaults stay in lockstep with the
+    argparse declarations (single source of truth). Memoized; the merge
+    layer only reads from it.
+    """
+    global _MP_SERVER_DEFAULTS
+    if _MP_SERVER_DEFAULTS is None:
+        parser = argparse.ArgumentParser(add_help=False)
+        add_mp_server_args(parser)
+        _MP_SERVER_DEFAULTS = parser.parse_args([])
+    return _MP_SERVER_DEFAULTS
+
+
+def load_mp_config_from_toml(path: str) -> dict:
+    """Load MP-server defaults from a TOML file.
+
+    Keys are normalized to argparse dest names (``max-gpu-workers`` and
+    ``max_gpu_workers`` both map to ``max_gpu_workers``), and only dests that
+    ``add_mp_server_args`` actually registers are kept. The returned dict is
+    keyed by dest name with values shaped to match what argparse would store
+    (e.g. ``runtime_plugin_config`` is flattened to a JSON string when given
+    as a TOML table).
+
+    Missing files, unreadable files, and invalid TOML all warn and return an
+    empty dict — the caller falls back to argparse-only behavior. This never
+    raises so server startup is never aborted by a config-file problem.
+
+    Args:
+        path: Path to the TOML config file.
+
+    Returns:
+        A dest-keyed dict of MP-server config values (empty on any failure).
+    """
+    try:
+        with open(path, "rb") as fin:
+            data = tomllib.load(fin)
+    except FileNotFoundError:
+        logger.warning("MP config file %s not found; using CLI defaults", path)
+        return {}
+    except tomllib.TOMLDecodeError as exc:
+        logger.warning(
+            "MP config file %s is invalid TOML (%s); using CLI defaults",
+            path,
+            exc,
+        )
+        return {}
+    except OSError as exc:
+        logger.warning(
+            "MP config file %s could not be read (%s); using CLI defaults",
+            path,
+            exc,
+        )
+        return {}
+
+    if not isinstance(data, dict):
+        logger.warning("MP config file %s is not a mapping; using CLI defaults", path)
+        return {}
+
+    defaults = _mp_server_arg_defaults()
+    out: dict = {}
+    for raw_key, value in data.items():
+        if not isinstance(raw_key, str):
+            continue
+        dest = raw_key.strip().lower().replace("-", "_")
+        if dest in _MP_CONFIG_FILE_EXCLUDED_DESTS:
+            logger.warning(
+                "Ignoring MP config key '%s' from %s (reserved)", raw_key, path
+            )
+            continue
+        if not hasattr(defaults, dest):
+            logger.warning("Ignoring unknown MP config key '%s' from %s", raw_key, path)
+            continue
+        # runtime_plugin_config is a JSON string on the CLI; accept a TOML
+        # table too by serializing it back to JSON so parse_args_to_mp_server
+        # _config's json.loads keeps working.
+        if dest == "runtime_plugin_config" and isinstance(value, dict):
+            value = json.dumps(value)
+        out[dest] = value
+    return out
+
+
+def merge_mp_config_file_into_args(
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    """Merge an MP TOML config file into parsed CLI args (in place).
+
+    The file supplies defaults; a CLI flag wins when its value differs from
+    the argparse default (i.e. it was passed explicitly). An absent flag lets
+    the file win over the argparse default. This preserves backward
+    compatibility: with no file, ``args`` is returned unchanged.
+
+    The file path is resolved from ``--config-file`` (registered by
+    ``add_mp_server_args``) or the ``LMCACHE_MP_CONFIG`` environment variable;
+    the flag wins over the env var. A missing/unreadable file warns and leaves
+    ``args`` untouched.
+
+    Args:
+        args: Parsed argparse Namespace. Merged in place and returned.
+
+    Returns:
+        The same Namespace, with file defaults applied under CLI overrides.
+    """
+    path = getattr(args, "config_file", None) or os.getenv("LMCACHE_MP_CONFIG")
+    if not path:
+        return args
+    file_config = load_mp_config_from_toml(path)
+    if not file_config:
+        return args
+    defaults = _mp_server_arg_defaults()
+    for dest, value in file_config.items():
+        cli_value = getattr(args, dest, getattr(defaults, dest))
+        if cli_value == getattr(defaults, dest):
+            # CLI flag was absent (or equal to default) -> let the file win.
+            setattr(args, dest, value)
+    return args
 
 
 def add_p2p_args(
