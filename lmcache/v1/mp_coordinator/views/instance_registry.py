@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Thread-safe registry of live mp servers known to the coordinator.
 
-The registry is the single source of truth for fleet membership. It is mutated
-and read on the coordinator event loop (register / deregister / heartbeat /
-health-check eviction); access is lock-guarded to stay correct.
+The single source of truth for fleet membership, and a view like any
+other -- whoever needs it asks the view registry rather than being handed
+a copy. Unlike the other views it is fed by the ``/instances`` endpoints
+and the health sweep, not by the cache-event stream: being shared is what
+makes it a view, not what writes it.
+
+It is mutated and read on the coordinator event loop (register / deregister
+/ heartbeat / health-check eviction); access is lock-guarded to stay
+correct.
 
 The registry stores plain membership data only -- ip, http_port, heartbeat
 timestamps, metadata. How to reach an instance for push is derived from its
@@ -18,6 +24,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.views.base import View
 
 logger = init_logger(__name__)
 
@@ -52,11 +59,15 @@ class MPInstance:
     mq_port: int = 0
 
 
-class InstanceRegistry:
+class InstanceRegistry(View):
     """Thread-safe in-memory registry of mp servers.
 
     All public methods acquire an internal lock, so the registry stays
     consistent under concurrent access.
+
+    Holds nothing durable: membership rebuilds from the heartbeats that
+    arrive after a restart, so a captured copy would only resurrect
+    instances that may be gone.
     """
 
     def __init__(self) -> None:

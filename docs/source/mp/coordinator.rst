@@ -104,7 +104,9 @@ keeps the default below.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
-       view or controller looks for them.
+       view or controller looks for them. ``controller_packages`` is read by
+       the coordinator itself: a list of importable paths to load
+       out-of-tree controllers from.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
@@ -121,6 +123,84 @@ keeps the default below.
      - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
        mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
        local ``/metrics`` endpoint returns 404.
+
+Loading your own controllers
+----------------------------
+
+A **controller** gives the coordinator behaviour of its own — fleet-wide L2
+eviction is one, warm-prefetch dispatch is another. Add yours by putting it in
+any importable package and naming that package in ``--extra-config``. The
+package imports from lmcache; nothing in lmcache imports it.
+
+.. code-block:: python
+
+    # acme_controllers/reaper.py
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from fastapi import APIRouter
+    from lmcache.v1.mp_coordinator.controllers.base import Controller
+    from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+
+
+    class ReaperController(Controller):
+        @classmethod
+        def from_config(cls, config, views):
+            obj = cls()
+            obj.registry = views.get(InstanceRegistry)                  # a shared view
+            obj.interval = config.extra_config.get("acme.interval", 30.0)
+            obj.last_seen = 0
+            return obj
+
+        @asynccontextmanager
+        async def run(self, runtime):                    # background work
+            task = asyncio.create_task(self._sweep())    # 1. start
+            try:
+                yield                                    # 2. serve
+            finally:
+                task.cancel()                            # 3. stop
+
+        def get_routers(self):                           # your endpoints
+            router = APIRouter()
+
+            @router.get("/acme/reaper")
+            async def status():
+                return {"last_seen": self.last_seen}
+
+            return (router,)
+
+        async def _sweep(self):
+            while True:
+                await asyncio.sleep(self.interval)
+                self.last_seen = len(self.registry.all_instances())
+
+``run`` is an async context manager and must do three things, in order:
+
+1. **Start** the background work.
+2. ``yield`` **exactly once** — the coordinator serves for the duration of
+   that yield.
+3. **Stop** the work in a ``finally``, so teardown runs whether shutdown was
+   clean or an exception unwound the stack.
+
+The same JSON names the package and carries the controller's own settings:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "acme.interval": 10
+    }'
+
+    curl -s http://localhost:9300/acme/reaper
+    # -> {"last_seen": 2}
+
+Every hook is optional: write only ``run``, only ``get_routers``, or add
+``consume`` to receive the cache-event stream and ``get_durable_components`` to
+have your state checkpointed. Name a package — scanned entire, so a controller
+that outgrows one file can be a directory — or a single module. A name that
+does not import raises at startup; a controller that raises while starting is
+logged and skipped. Views cannot be added this way: they are the coordinator's
+own shared state, which your controller reads.
 
 Coordinator metrics export
 --------------------------
