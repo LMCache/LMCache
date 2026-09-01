@@ -1448,6 +1448,32 @@ class NixlStaticStorageBackend(NixlStorageBackend):
                 return cast(list[MemoryObj], obj_list[:i])
         return cast(list[MemoryObj], obj_list)
 
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """
+        Async existence check for the static NIXL backend.
+
+        ``contains`` here is a fast, purely in-memory ``key_dict`` lookup (under
+        ``key_lock``) with no blocking I/O, so keys are checked sequentially and
+        synchronously — avoiding thread-pool overhead — stopping at the first
+        miss so a long run of absent keys fails fast.
+
+        :param str lookup_id: Unique id for the lookup request (unused).
+        :param list[CacheEngineKey] keys: Keys to check, in prefix order.
+        :param bool pin: Whether to pin matching keys.
+        :return: Number of contiguous keys present from the start of ``keys``.
+        """
+        if not keys:
+            return 0
+        for i, k in enumerate(keys):
+            if not self.contains(k, pin):
+                return i
+        return len(keys)
+
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """
         Remove the key from the storage backend.
