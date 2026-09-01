@@ -142,6 +142,22 @@ The on-device format is intentionally unchanged by the MP adapter work.
 Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
 so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
 
+## Startup Discard
+
+Raw block deployments sometimes intentionally start with an empty in-memory
+index instead of loading an on-device checkpoint. In that mode, bytes from a
+previous run may still exist on the device even though LMCache will not index or
+load them. `BLKDISCARD` is the Linux block-device discard/TRIM operation used to
+tell the storage stack that a byte range is no longer in use. On SSDs and NVMe
+devices, this can let the device drop old physical mappings and prepare the
+range for fresh writes.
+
+`blkdiscard_on_init=true` performs that discard over the configured raw-block
+range during startup. It is a cleanup hint, not a durable overwrite guarantee:
+device support and read-after-discard behavior are driver dependent. For that
+reason, failures are logged as warnings and startup continues with the empty
+index.
+
 ## Configuration
 
 The MP adapter is configured through `--l2-adapter` JSON:
@@ -161,6 +177,7 @@ The MP adapter is configured through `--l2-adapter` JSON:
   "meta_checkpoint_interval_sec": 60,
   "meta_enable_periodic": true,
   "load_checkpoint_on_init": true,
+  "blkdiscard_on_init": false,
   "meta_verify_on_load": true,
   "num_store_workers": 2,
   "num_lookup_workers": 1,
@@ -181,6 +198,10 @@ Important validation rules:
 - `per_tp_device_paths` is rejected in MP mode
 - `load_checkpoint_on_init=false` starts with an empty in-memory index instead
   of loading the latest on-device metadata checkpoint
+- `blkdiscard_on_init=true` issues a `BLKDISCARD` ioctl to discard/TRIM the
+  full device range on startup; requires `load_checkpoint_on_init=false`
+  (combining the two raises `ValueError`). The discard is split automatically
+  using the kernel `discard_max_bytes` limit when available.
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
 - with `use_odirect=true`, raw-block I/O rejects offsets and total I/O lengths

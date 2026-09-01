@@ -177,6 +177,8 @@ const NVME_IOCTL_ID: libc::c_ulong = 0x4e40;
 // Linux ioctl for block device size in bytes.
 // Defined in <linux/fs.h>: BLKGETSIZE64 _IOR(0x12,114,size_t)
 const BLKGETSIZE64: libc::c_ulong = 0x8008_1272; // ioctl op to query block size
+const BLKDISCARD: libc::c_ulong = 0x1277; // _IO(0x12,119)
+const DEFAULT_BLKDISCARD_CHUNK_BYTES: u64 = 1 << 30;
 
 // Buffer protocol flags (from CPython C-API).
 const PYBUF_WRITABLE: i32 = 0x0001; // buffer must be writable
@@ -663,6 +665,36 @@ struct NvmeCmdData {
     dspec: u16,     // Directive Specific
 }
 
+#[cfg(target_os = "linux")]
+fn read_positive_u64(path: &std::path::Path) -> Option<u64> {
+    use std::fs;
+
+    let text = fs::read_to_string(path).ok()?;
+    let value = text.trim().parse::<u64>().ok()?;
+    (value > 0).then_some(value)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_blkdiscard_max_bytes(path: &str) -> Option<u64> {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    let real_path = fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let block_name = real_path.file_name()?.to_str()?;
+    let mut sysfs_path = fs::canonicalize(Path::new("/sys/class/block").join(block_name)).ok()?;
+    let sys_root = Path::new("/sys");
+
+    while sysfs_path.starts_with(sys_root) {
+        if let Some(value) = read_positive_u64(&sysfs_path.join("queue/discard_max_bytes")) {
+            return Some(value);
+        }
+        if !sysfs_path.pop() {
+            break;
+        }
+    }
+    None
+}
+
 /// Aligned buffer for O_DIRECT I/O.
 /// Allocated with posix_memalign so the pointer satisfies alignment requirements.
 /// Automatically freed on drop.
@@ -1046,6 +1078,7 @@ impl Default for IoSubmission {
 /// Higher-level policies (slotting, manifests, etc.) live in Python.
 #[pyclass]
 struct RawBlockDevice {
+    path: String,        // original device path, used for sysfs discard limits
     fd: RawFd,           // raw file descriptor
     size: u64,           // cached device size in bytes
     closed: AtomicBool,  // avoid double-close
@@ -1968,6 +2001,7 @@ impl RawBlockDevice {
         let fd = fd_guard.disarm();
 
         Ok(Self {
+            path,
             fd,
             size,
             closed: AtomicBool::new(false),
@@ -3277,6 +3311,67 @@ impl RawBlockDevice {
         });
         release_pybuffer(view);
         res?;
+        Ok(())
+    }
+
+    /// Issue a BLKDISCARD ioctl to zero/trim a byte range on the block device.
+    ///
+    /// The request is split internally using the kernel's discard_max_bytes
+    /// limit when available. This avoids driver rejections for very large
+    /// discard ranges while keeping the Python API simple.
+    ///
+    /// Raises ``OSError`` on any failure, including:
+    /// - ``EOPNOTSUPP`` / ``ENOTTY``: device or driver does not support BLKDISCARD.
+    /// - ``EOPNOTSUPP``: called on a non-Linux platform.
+    ///
+    /// Args:
+    ///     offset: Byte offset of the range to discard.
+    ///     length: Number of bytes to discard.
+    #[pyo3(signature = (offset, length))]
+    fn discard(&self, offset: u64, length: u64) -> PyResult<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if length == 0 {
+            return Ok(());
+        }
+        // BLKDISCARD = _IO(0x12, 119) from <linux/fs.h>
+        #[cfg(target_os = "linux")]
+        {
+            let total_len = length;
+            let chunk_bytes =
+                detect_blkdiscard_max_bytes(&self.path).unwrap_or(DEFAULT_BLKDISCARD_CHUNK_BYTES);
+
+            let mut discarded = 0_u64;
+            while discarded < total_len {
+                let chunk_len = chunk_bytes.min(total_len - discarded);
+                let chunk_offset = offset
+                    .checked_add(discarded)
+                    .ok_or_else(|| PyValueError::new_err("offset overflow"))?;
+                let range: [u64; 2] = [chunk_offset, chunk_len];
+                // SAFETY: ioctl expects a pointer to a [u64; 2] range argument
+                // for BLKDISCARD and does not retain it after the call returns.
+                let rc = unsafe { libc::ioctl(self.fd, BLKDISCARD, range.as_ptr()) };
+                if rc != 0 {
+                    return Err(PyOSError::new_err((
+                        errno(),
+                        format!(
+                            "BLKDISCARD ioctl failed at offset={} length={}",
+                            chunk_offset, chunk_len
+                        ),
+                    )));
+                }
+                discarded += chunk_len;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (offset, length);
+            return Err(PyOSError::new_err((
+                libc::EOPNOTSUPP,
+                "BLKDISCARD is not supported on this platform",
+            )));
+        }
         Ok(())
     }
 
