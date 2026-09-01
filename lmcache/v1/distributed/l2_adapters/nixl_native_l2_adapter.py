@@ -90,11 +90,11 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("num_workers must be a positive integer")
 
         max_capacity_gb = d.get("max_capacity_gb", 0)
-        if isinstance(max_capacity_gb, bool) or not isinstance(
-            max_capacity_gb, (int, float)
+        if (
+            isinstance(max_capacity_gb, bool)
+            or not isinstance(max_capacity_gb, (int, float))
+            or max_capacity_gb < 0
         ):
-            raise ValueError("max_capacity_gb must be a non-negative number")
-        if max_capacity_gb < 0:
             raise ValueError("max_capacity_gb must be a non-negative number")
 
         return cls(
