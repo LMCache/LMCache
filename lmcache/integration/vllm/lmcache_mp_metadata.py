@@ -59,9 +59,9 @@ class LMCacheMPRequestTracker:
     # avoid saving tokens whose KV has not been computed yet.
     num_scheduled_tokens: int = 0
 
-    # Number of tokens stored will be initialized when lookup the external
-    # hit tokens and will be updated when processing new requests and cached
-    # requests.
+    # Length of the token prefix already stored in LMCache. It is initialized
+    # from the lookup hit after slot allocation succeeds, then advanced as
+    # store metadata is produced for new and cached requests.
     num_stored_tokens: int = 0
 
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
@@ -120,9 +120,17 @@ class LMCacheMPRequestTracker:
     def increase_num_scheduled_tokens(self, num_new_tokens: int):
         self.num_scheduled_tokens += num_new_tokens
 
-    def increase_num_stored_tokens(self, num_new_tokens: int):
-        """Increase the number of stored tokens for the current request
-        This function will be called when processing the cached requests.
+    def increase_num_stored_tokens(self, num_new_tokens: int) -> None:
+        """Advance the stored prefix length.
+
+        The connector first calls this after allocation commits a lookup hit.
+        Store metadata calls it again when later chunks become storable.
+
+        Args:
+            num_new_tokens: Number of contiguous stored tokens to add.
+
+        Returns:
+            None.
         """
         self.num_stored_tokens += num_new_tokens
 
@@ -209,8 +217,9 @@ class LMCacheMPRequestMetadata:
         # be summed (that would double-count the overlapping prefix).
         #
         # * num_lmcache_hit_tokens: LMCache-hit tokens are already counted in
-        #   num_stored_tokens (set during lookup), so they must be included
-        #   here to keep the upper bound consistent.  They are NOT re-stored.
+        #   num_stored_tokens when allocation commits the lookup hit, so they
+        #   must be included here to keep the upper bound consistent. They are
+        #   NOT re-stored.
         # * num_vllm_hit_tokens: LMCache stores in units of chunks, so
         #   num_lmcache_hit_tokens is rounded DOWN to the nearest chunk
         #   boundary.  When vLLM APC hits more tokens than that rounded value

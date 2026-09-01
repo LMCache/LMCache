@@ -808,6 +808,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             call. If the cache cannot be loaded for some tokens (e.g., due to
             connectivity issues or eviction), those tokens must not be taken
             into account.
+            Repeated calls do not advance stored-token accounting. The lookup
+            hit is committed only after allocation succeeds.
         """
         tracker = self._get_or_create_request_tracker(request)
         # TODO: support loading KV for preempted requests in the future
@@ -863,9 +865,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
-
         # Save the vllm and lmcache hit tokens. The vLLM hit count is
         # rounded down to a boundary aligned for every engine group (e.g.
         # a full-prompt APC hit reports ``num_prompt_tokens - 1``), so the
@@ -911,7 +910,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
-    ):
+    ) -> None:
         """
         Update KVConnector state after block allocation.
 
@@ -919,13 +918,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request, this function may be called twice for that same request -
         first when blocks are allocated for the connector tokens to be
         asynchronously loaded into, and second when any additional blocks
-        are allocated, after the load/transfer is complete.
+        are allocated, after the load/transfer is complete. The first call
+        commits the lookup hit to stored-token accounting.
 
         Args:
             request (Request): the request object.
             blocks (KVCacheBlocks): the blocks allocated for the request.
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
+
+        Returns:
+            None.
         """
         # NOTE: `blocks` comes from kv_cache_manager.get_blocks(request_id),
         # which returns ALL blocks for the request (not just newly allocated).
@@ -957,6 +960,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         condition = num_external_tokens > 0 and tracker.needs_retrieve()
         if tracker.state == LMCacheMPRequestState.PREFETCHING:
+            # The scheduler may repeat lookup before allocation succeeds.
+            tracker.increase_num_stored_tokens(tracker.num_lmcache_hit_tokens)
             # If need to retrieve, change to WAITING_FOR_LOAD
             # Otherwise, change to READY
             tracker.state = (
