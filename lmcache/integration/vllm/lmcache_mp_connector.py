@@ -165,12 +165,19 @@ def get_group_tokens_per_block(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None",
 ) -> list[int]:
-    """Return each engine group's block span in scheduler token coordinates.
+    """Return each KV cache group's effective block span in tokens.
 
     Attention pages are local DCP shards and therefore cover
     ``spec.block_size * dcp_size`` global tokens. Recurrent-state pages are
     replicated and retain their physical ``spec.block_size`` span. When vLLM
     does not provide group metadata, preserve the legacy single-group rule.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The effective token span of each KV cache group.
     """
     dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
     groups = (
@@ -183,11 +190,22 @@ def get_group_tokens_per_block(
     ] or [vllm_config.cache_config.block_size * dcp_size]
 
 
-def get_lmcache_scheduler_block_size(
+def get_vllm_scheduler_block_size(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None",
 ) -> int:
-    """Resolve the scheduling block shared by every engine KV cache group."""
+    """Return vLLM's scheduler block size for the resolved cache groups.
+
+    The scheduler boundary must align with every cache group, so vLLM uses the
+    least common multiple of their effective block spans.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The scheduler block size in tokens.
+    """
     group_spans = get_group_tokens_per_block(vllm_config, kv_cache_config)
     scheduler_block_size = math.lcm(*group_spans)
     largest_group_span = max(group_spans)
@@ -203,19 +221,18 @@ def get_lmcache_scheduler_block_size(
     return scheduler_block_size
 
 
-def get_lmcache_model_name(vllm_config: VllmConfig) -> str:
-    """Return a cache key namespace that isolates DCP interleave layouts.
+def get_dcp_decorated_model_name(vllm_config: VllmConfig) -> str:
+    """Decorate the model name with its non-trivial DCP interleave layout.
 
-    A DCP rank's page is an opaque byte image whose token-to-slot mapping
-    changes with ``cp_kv_cache_interleave_size``. The existing ``kv_rank``
-    identity distinguishes DCP shard counts but not interleave values, so a
-    deployment changing only interleave could otherwise retrieve incompatible
-    pages left by the earlier deployment. ``model_name`` is also exposed as a
-    label by MP observability subscribers, so metrics use this decorated value;
-    callers can recover the served model name with
-    :func:`get_lmcache_base_model_name`. Keep legacy keys unchanged unless a
-    non-trivial DCP interleave is active. The ``##`` separator follows the SDK
-    cache-kind namespace convention.
+    Embedding the DCP interleave size in the LMCache model name prevents a
+    changed interleave from hitting objects with an incompatible byte layout.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+
+    Returns:
+        The decorated cache model name, or the original model name when DCP or
+        interleaving is inactive.
     """
     model_name = vllm_config.model_config.model
     parallel_config = vllm_config.parallel_config
@@ -224,18 +241,6 @@ def get_lmcache_model_name(vllm_config: VllmConfig) -> str:
     if dcp_size <= 1 or interleave == 1:
         return model_name
     return f"{model_name}{_DCP_LAYOUT_NAMESPACE}d{dcp_size}-interleave{interleave}"
-
-
-def get_lmcache_base_model_name(model_name: str) -> str:
-    """Remove the connector's DCP layout namespace from a cache model name.
-
-    Args:
-        model_name: A served model name or an LMCache-decorated model name.
-
-    Returns:
-        The undecorated model name used by the serving API and model config.
-    """
-    return model_name.partition(_DCP_LAYOUT_NAMESPACE)[0]
 
 
 def get_resolved_attention_block_sizes(
@@ -283,9 +288,14 @@ def validate_mamba_step_alignment(
     Args:
         vllm_config: The vLLM config; only Mamba-hybrid models in ``align``
             cache mode are constrained, others pass.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        None.
 
     Raises:
-        ValueError: If ``max_num_batched_tokens < block_size``.
+        ValueError: If Mamba groups have inconsistent block sizes or
+            ``max_num_batched_tokens < block_size``.
     """
     if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
         return
@@ -325,6 +335,14 @@ def validate_dcp_support(
     These would silently store wrong or incomplete KV, so fail at startup
     instead. ``dcp > tp`` is not re-checked; vLLM's ``ParallelConfig``
     already rejects it.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        n_servers: The number of LMCache servers backing the deployment.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        None.
 
     Raises:
         ValueError: On an unsupported DCP topology (``dcp_size == 1``
@@ -459,10 +477,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
         )
-        scheduler_block_size = get_lmcache_scheduler_block_size(
+        scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
-        cache_model_name = get_lmcache_model_name(vllm_config)
+        cache_model_name = get_dcp_decorated_model_name(vllm_config)
 
         assert vllm_config.kv_transfer_config is not None
 

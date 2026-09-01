@@ -316,16 +316,16 @@ def _import_connector_geometry_helpers():
     """Import helpers lazily because their module imports vLLM."""
     # First Party
     from lmcache.integration.vllm.lmcache_mp_connector import (
+        get_dcp_decorated_model_name,
         get_group_tokens_per_block,
-        get_lmcache_model_name,
-        get_lmcache_scheduler_block_size,
+        get_vllm_scheduler_block_size,
         validate_mamba_step_alignment,
     )
 
     return (
         get_group_tokens_per_block,
-        get_lmcache_model_name,
-        get_lmcache_scheduler_block_size,
+        get_dcp_decorated_model_name,
+        get_vllm_scheduler_block_size,
         validate_mamba_step_alignment,
     )
 
@@ -369,14 +369,32 @@ def test_glm_dcp4_geometry_resolves_physical_mamba_block():
     (
         get_group_tokens_per_block,
         _,
-        get_lmcache_scheduler_block_size,
+        get_vllm_scheduler_block_size,
         _,
     ) = _import_connector_geometry_helpers()
     config = _geometry_config()
     kv_config = _hybrid_kv_cache_config()
 
     assert get_group_tokens_per_block(config, kv_config) == [9216, 2304]
-    assert get_lmcache_scheduler_block_size(config, kv_config) == 9216
+    assert get_vllm_scheduler_block_size(config, kv_config) == 9216
+
+
+@requires_vllm
+def test_scheduler_block_size_is_group_span_lcm():
+    (
+        get_group_tokens_per_block,
+        _,
+        get_vllm_scheduler_block_size,
+        _,
+    ) = _import_connector_geometry_helpers()
+    config = _geometry_config(dcp_size=2)
+    kv_config = _hybrid_kv_cache_config(
+        attention_block_size=6,
+        mamba_block_size=18,
+    )
+
+    assert get_group_tokens_per_block(config, kv_config) == [12, 18]
+    assert get_vllm_scheduler_block_size(config, kv_config) == 36
 
 
 @requires_vllm
@@ -396,39 +414,24 @@ def test_mamba_alignment_uses_resolved_page_not_cli_block_size():
 
 @requires_vllm
 def test_dcp_interleave_participates_in_cache_identity():
-    _, get_lmcache_model_name, _, _ = _import_connector_geometry_helpers()
-    # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import (
-        get_lmcache_base_model_name,
-    )
+    _, get_dcp_decorated_model_name, _, _ = _import_connector_geometry_helpers()
 
-    interleave4 = get_lmcache_model_name(_geometry_config(interleave=4))
-    interleave8 = get_lmcache_model_name(_geometry_config(interleave=8))
+    interleave4 = get_dcp_decorated_model_name(_geometry_config(interleave=4))
+    interleave8 = get_dcp_decorated_model_name(_geometry_config(interleave=8))
     assert interleave4 != interleave8
     assert interleave4.endswith("##lmcache-dcp-layout-v1-d4-interleave4")
-    assert get_lmcache_base_model_name(interleave4) == "org/glm-5.3-flash"
-
-
-@requires_vllm
-def test_base_model_name_preserves_undecorated_names():
-    # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import (
-        get_lmcache_base_model_name,
-    )
-
-    assert get_lmcache_base_model_name("org/glm-5.3-flash") == ("org/glm-5.3-flash")
 
 
 @requires_vllm
 def test_trivial_interleave_preserves_legacy_cache_identity():
-    _, get_lmcache_model_name, _, _ = _import_connector_geometry_helpers()
+    _, get_dcp_decorated_model_name, _, _ = _import_connector_geometry_helpers()
 
     assert (
-        get_lmcache_model_name(_geometry_config(dcp_size=4, interleave=1))
+        get_dcp_decorated_model_name(_geometry_config(dcp_size=4, interleave=1))
         == "org/glm-5.3-flash"
     )
     assert (
-        get_lmcache_model_name(_geometry_config(dcp_size=1, interleave=4))
+        get_dcp_decorated_model_name(_geometry_config(dcp_size=1, interleave=4))
         == "org/glm-5.3-flash"
     )
 
