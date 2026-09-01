@@ -1233,6 +1233,7 @@ class BlendModule(InstanceLivenessTarget):
             PrefetchRequestSpec(
                 keys=uniq_keys,
                 group_layout_descs=layouts,
+                num_kv_readers=key.require_num_kv_readers(),
                 policy=TrimPolicy.SPARSE,
                 attn_desc=_narrow_attn_desc(attn_desc, read.gids),
             ),
