@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 import threading
 import time
 import weakref
-import zlib
 
 if TYPE_CHECKING:
     # First Party
@@ -756,7 +755,7 @@ class BlendModule(InstanceLivenessTarget):
         # Bounded LRU keyed by (request id, WORKER id) -- at TP>1 each worker
         # issues its own retrieve and scatters into its own KV buffers, so the
         # key must include the worker or later ranks skip work they never did.
-        self._cb_applied_match_ranges: "OrderedDict[tuple[str, int | None], set[tuple[bytes, int, int, int]]]" = OrderedDict()  # noqa: E501
+        self._cb_applied_match_ranges: "OrderedDict[tuple[str, int | None], set[tuple[bytes, int, int, tuple]]]" = OrderedDict()  # noqa: E501
 
         # Request-invariant retrieve-plan specs per GPU context (entries die
         # with the context). The cached tuple holds the rope_state it was
@@ -2717,13 +2716,35 @@ class BlendModule(InstanceLivenessTarget):
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
         # vLLM may call retrieve twice (partial- then full-block alloc). KV
         # blocks never move mid-prefill, but connector-injected aux pages can
-        # be reassigned on the repeat, so qualify the applied set with a
-        # fingerprint of the full destination table.
-        dest_fp = zlib.crc32(
-            np.asarray(
-                [b for grp in gpu_block_ids for b in grp], dtype=np.int64
-            ).tobytes()
-        )
+        # be reassigned on the repeat, so qualify the applied set with the
+        # destination blocks each range actually writes into. Hashing the WHOLE
+        # table instead also changed the key on plain allocation growth -- the
+        # very reason vLLM re-calls -- so the skip never matched and every
+        # repeat re-scattered work already done.
+        _staged_kgs = [
+            gpu_context.kv_layer_groups_manager.kernel_groups[i] for i in staged_kernel
+        ]
+
+        def _dest(r: "CBMatchResult") -> tuple:
+            """The destination blocks this range writes into.
+
+            Empty when the geometry is unavailable, which never matches a prior
+            applied entry, so the range re-scatters. Conservative by design:
+            wrongly SKIPPING a needed scatter would leave unpopulated KV, while
+            a redundant re-scatter only costs work.
+            """
+            out: list[int] = []
+            try:
+                for kg in _staged_kgs:
+                    tpb = kg.tokens_per_block
+                    if not tpb:
+                        return ()
+                    blocks = gpu_block_ids[kg.engine_group_idx]
+                    out.extend(blocks[r.cur_st // tpb : (r.cur_ed - 1) // tpb + 1])
+            except (IndexError, TypeError, AttributeError):
+                return ()
+            return tuple(out)
+
         applied_ranges = self._cb_applied_match_ranges
         applied_key = (key.request_id, key.worker_id)
         prior_applied = applied_ranges.get(applied_key)
@@ -2731,11 +2752,11 @@ class BlendModule(InstanceLivenessTarget):
             cb_match_result = [
                 r
                 for r in cb_match_result
-                if (r.hash, r.cur_st, r.cur_ed, dest_fp) not in prior_applied
+                if (r.hash, r.cur_st, r.cur_ed, _dest(r)) not in prior_applied
             ]
             if not cb_match_result:
                 return _noop_success("already_applied")
-        applied_now: "set[tuple[bytes, int, int, int]]" = set()
+        applied_now: "set[tuple[bytes, int, int, tuple]]" = set()
         # Partial-alloc first call: every match can be beyond the allocated
         # slots -> return before the obj-key machinery. Read locks stay held
         # for the full-alloc follow-up, as the in-loop drop path leaves them.
@@ -3094,7 +3115,7 @@ class BlendModule(InstanceLivenessTarget):
                             )
 
                     applied_now = {
-                        (r.hash, r.cur_st, r.cur_ed, dest_fp) for r, _ in pairs
+                        (r.hash, r.cur_st, r.cur_ed, _dest(r)) for r, _ in pairs
                     }
 
                     # Release read locks of the scattered matches (stream-ordered).
