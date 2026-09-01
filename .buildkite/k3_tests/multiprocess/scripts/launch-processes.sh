@@ -17,6 +17,7 @@ MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 
 # Pick the device affinity env var once, then reuse it for all launched processes.
 DEVICE_AFFINITY_VAR="CUDA_VISIBLE_DEVICES"
@@ -31,11 +32,13 @@ if [ "${TORCH_DEVICE_TYPE}" = "xpu" ]; then
     fi
 fi
 
-# K8s assigns exactly 2 GPUs as devices 0 and 1 (overridable for local runs).
+# Device assignments are overridable and may contain comma-separated devices
+# when a benchmark uses tensor parallelism.
 GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
 GPU_FOR_BASELINE="${GPU_FOR_BASELINE:-1}"
-echo "Using CARD $GPU_FOR_VLLM for vLLM with LMCache"
-echo "Using CARD $GPU_FOR_BASELINE for vLLM baseline"
+echo "Using CARD(S) $GPU_FOR_VLLM for vLLM with LMCache"
+echo "Using CARD(S) $GPU_FOR_BASELINE for vLLM baseline"
+echo "Using tensor parallel size $TENSOR_PARALLEL_SIZE"
 
 # Check GPU memory and set gpu-memory-utilization for very large GPUs.
 # Without this, vLLM allocates so much KV cache that APC covers all prefixes
@@ -275,6 +278,7 @@ env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
     PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
         --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
+        --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
         $ATTENTION_BACKEND_ARG \
         --port "$vllm_port" \
         --no-async-scheduling \
@@ -305,6 +309,7 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
         VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
         PYTHONHASHSEED=0 \
         vllm serve "$MODEL" \
+            --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
             $ATTENTION_BACKEND_ARG \
             --port "$vllm_baseline_port" \
             --no-async-scheduling \
