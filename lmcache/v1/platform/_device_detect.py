@@ -237,6 +237,8 @@ def _patch_missing_device_module_methods(torch_module: Any, spec: Any) -> None:
     """
     if torch_module is None:
         return
+    if not hasattr(spec, "device_type") or spec.device_type != "neuron":
+        return
     if not hasattr(torch_module, "set_device"):
         torch_module.set_device = lambda *a, **kw: None
     if not hasattr(torch_module, "device_count"):
