@@ -269,8 +269,8 @@ def send_ping(
     mq_client: MessageQueueClient,
     timeout: float,
     instance_id: int | None = None,
-) -> bool:
-    """Send a PING request and return the result.
+) -> int:
+    """Send a PING request and return the server boot token.
 
     Args:
         mq_client: The message queue client.
@@ -279,16 +279,17 @@ def send_ping(
             liveness, or None for an untracked prober (scheduler adapter).
 
     Returns:
-        True if server is healthy, False on timeout or error.
+        The positive server boot token, or zero on timeout or error. Legacy
+        servers return ``True``, which the protocol decodes as token ``1``.
     """
     try:
         future = send_lmcache_request(mq_client, RequestType.PING, [instance_id])
-        return future.result(timeout=timeout)
+        return int(future.result(timeout=timeout))
     except TimeoutError:
-        return False
+        return 0
     except Exception:
         logger.debug("Ping failed with exception", exc_info=True)
-        return False
+        return 0
 
 
 @dataclass
@@ -441,6 +442,7 @@ class HeartbeatThread(PeriodicThread):
         health_event: threading.Event,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         instance_id: int | None = None,
+        initial_server_boot_token: int | None = None,
     ):
         """
         Args:
@@ -453,6 +455,9 @@ class HeartbeatThread(PeriodicThread):
             instance_id: The worker's instance ID sent with each PING so the
                 server can refresh its liveness, or None for an untracked
                 prober (the scheduler adapter).
+            initial_server_boot_token: Token captured synchronously when the
+                worker adapter connected. A different first-heartbeat token
+                means the server restarted after initialization.
         """
         super().__init__(
             name="lmcache-heartbeat",
@@ -464,15 +469,17 @@ class HeartbeatThread(PeriodicThread):
         self._interval = interval
         self._instance_id = instance_id
 
-        # Optional callback invoked on the unhealthy->healthy edge,
+        # Optional callback invoked on recovery or a boot-token change,
         # before the health event is set. See register_recover_callback.
         def noop() -> bool:
             return True
 
         self._recover_callback: Callable[[], bool] = noop
+        self._server_boot_token = initial_server_boot_token
+        self._initial_check_complete = threading.Event()
 
     def register_recover_callback(self, callback: Callable[[], bool]) -> None:
-        """Register a callback fired on the unhealthy->healthy transition.
+        """Register a callback fired on recovery or server restart.
 
         The callback runs **before** the health event is set. It must
         return ``True`` on success (event will be set) or ``False`` on
@@ -493,6 +500,17 @@ class HeartbeatThread(PeriodicThread):
         """
         self._recover_callback = callback
 
+    def wait_for_initial_check(self, timeout: float | None = None) -> bool:
+        """Wait until the first heartbeat cycle finishes.
+
+        Args:
+            timeout: Maximum seconds to wait, or ``None`` to wait indefinitely.
+
+        Returns:
+            ``True`` if the first check completed, otherwise ``False``.
+        """
+        return self._initial_check_complete.wait(timeout=timeout)
+
     def _execute(self) -> ThreadRunSummary:
         """Run one heartbeat cycle: ping, recover callback, event update.
 
@@ -501,31 +519,41 @@ class HeartbeatThread(PeriodicThread):
         UNREGISTER must not re-register a ghost context.
         """
         was_healthy = self._health_event.is_set()
-        healthy = send_ping(
+        server_boot_token = send_ping(
             self._mq_client, timeout=self._interval, instance_id=self._instance_id
+        )
+        healthy = server_boot_token > 0
+        server_restarted = (
+            healthy
+            and self._server_boot_token is not None
+            and server_boot_token != self._server_boot_token
         )
 
         if self.stop_requested:
+            self._initial_check_complete.set()
             return ThreadRunSummary(
                 success=True,
                 message="stop requested; skipping health update",
             )
 
-        need_trigger_recover = (
-            healthy and not was_healthy and self._recover_callback is not None
-        )
+        need_trigger_recover = healthy and (not was_healthy or server_restarted)
 
-        # Try to call recover callback
         if need_trigger_recover:
-            logger.warning(
-                "LMCache server is healthy again, triggering recovery callback"
-            )
-            # If the callback fails, it should not become healthy
+            self._health_event.clear()
+            if server_restarted:
+                logger.warning(
+                    "LMCache server restart detected, triggering recovery callback"
+                )
+            else:
+                logger.warning(
+                    "LMCache server is healthy again, triggering recovery callback"
+                )
             healthy = self._recover_callback()
 
         if healthy:
+            self._server_boot_token = server_boot_token
             self._health_event.set()
-            if not was_healthy:
+            if not was_healthy or server_restarted:
                 logger.warning(
                     "LMCache server is healthy again — resuming normal operation"
                 )
@@ -534,6 +562,7 @@ class HeartbeatThread(PeriodicThread):
             if was_healthy:
                 logger.warning("LMCache server is unhealthy — entering degraded mode")
 
+        self._initial_check_complete.set()
         return ThreadRunSummary(
             success=True,
             message="healthy" if healthy else "unhealthy",
@@ -1237,9 +1266,21 @@ class LMCacheMPWorkerAdapter:
         )
         self.dispatcher: "Dispatcher | None" = None
 
+        initial_server_boot_token = send_ping(
+            self.mq_client,
+            timeout=heartbeat_interval,
+            instance_id=self.instance_id,
+        )
+        self._initial_server_boot_token = initial_server_boot_token or None
+
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
-        self._health_event.set()
+        if self._initial_server_boot_token is not None:
+            self._health_event.set()
+        else:
+            logger.warning(
+                "Initial LMCache heartbeat failed; starting worker in degraded mode"
+            )
 
         # Heartbeat thread is created but NOT started yet.
         # It will be lazily started on the first store or retrieve
@@ -1401,29 +1442,39 @@ class LMCacheMPWorkerAdapter:
             ) from None
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first store/retrieve.
+        """Start the heartbeat and wait for its first server check.
 
-        The heartbeat starts healthy (the event was set at construction). A
-        live worker pings every interval, refreshing its server-side
-        ``last_seen``, so it is never reaped while alive -- no re-registration
-        is needed at startup, and the first store/retrieve is not gated. The
-        recover callback still re-registers on a genuine unhealthy->healthy
-        edge (server restart).
+        The heartbeat starts lazily on the first store/retrieve, after vLLM
+        initialization. The first cache operation waits for one PING so a
+        server restart between KV registration and heartbeat startup triggers
+        re-registration before that operation reaches the new server.
         """
-        if self._heartbeat is not None:
-            return
-        with self._heartbeat_lock:
-            if self._heartbeat is not None:
-                return
-            heartbeat = HeartbeatThread(
-                mq_client=self.mq_client,
-                health_event=self._health_event,
-                interval=self._heartbeat_interval,
-                instance_id=self.instance_id,
+        heartbeat = self._heartbeat
+        if heartbeat is None:
+            with self._heartbeat_lock:
+                heartbeat = self._heartbeat
+                if heartbeat is None:
+                    heartbeat = HeartbeatThread(
+                        mq_client=self.mq_client,
+                        health_event=self._health_event,
+                        interval=self._heartbeat_interval,
+                        instance_id=self.instance_id,
+                        initial_server_boot_token=self._initial_server_boot_token,
+                    )
+                    heartbeat.register_recover_callback(
+                        self._reregister_kv_caches_callback
+                    )
+                    self._heartbeat = heartbeat
+                    heartbeat.start()
+
+        initial_check_timeout = self._heartbeat_interval + 1.0
+        if not heartbeat.wait_for_initial_check(timeout=initial_check_timeout):
+            self._health_event.clear()
+            logger.warning(
+                "Initial LMCache heartbeat did not finish within %.1fs; "
+                "entering degraded mode",
+                initial_check_timeout,
             )
-            heartbeat.register_recover_callback(self._reregister_kv_caches_callback)
-            heartbeat.start()
-            self._heartbeat = heartbeat
 
     def _heartbeat_stop_requested(self) -> bool:
         """Whether a created heartbeat thread has a stop requested.

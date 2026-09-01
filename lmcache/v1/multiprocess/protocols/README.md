@@ -211,7 +211,7 @@ Core KV cache operations and their split-phase variants:
 Cache management and configuration:
 - `CLEAR`: Clear all caches in the server
 - `GET_CHUNK_SIZE`: Get the chunk size configuration
-- `PING`: Liveness / worker probe (payload: sender's worker instance id or `None`)
+- `PING`: Liveness / worker probe returning a per-process boot token (payload: sender's worker instance id or `None`)
 
 ### Debug Operations (`debug.py`)
 Testing and monitoring:
