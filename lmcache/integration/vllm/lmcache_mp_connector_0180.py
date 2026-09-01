@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
-from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import check_interprocess_event_support, init_logger as lmcache_init_logger
+from lmcache.utils import (
+    check_interprocess_event_support,
+    init_logger as lmcache_init_logger,
+)
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -570,10 +572,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            # Not all backends support interprocess Events (CUDA IPC specific)
-            event = torch_dev.Event(interprocess=True)
-            event.record()
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
 
@@ -633,10 +632,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            # Not all backends support interprocess Events (CUDA IPC specific)
-            event = torch_dev.Event(interprocess=True)
-            event.record()
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
 

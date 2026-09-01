@@ -1475,17 +1475,25 @@ class LMCacheMPWorkerAdapter:
 
         Returns:
             A recorded event for contexts that need stream ordering, or
-            ``None`` for synchronous engine-driven transfer.
+            ``None`` for synchronous engine-driven transfer or while the
+            adapter is unhealthy and requests will be dropped.
 
         Raises:
             RuntimeError: If called before ``register_kv_caches()``.
         """
-        if self.transfer_ctx is None:
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is None:
             raise RuntimeError(
                 "KV caches are not registered. Call register_kv_caches() "
                 "before creating transfer events."
             )
-        return self.transfer_ctx.create_recorded_event()
+        # Heartbeat recovery publishes the replacement context before its
+        # blocking register() finishes, while health remains cleared. Avoid
+        # touching that not-yet-registered context; submit_* will apply the
+        # existing degraded-mode drop behavior.
+        if not self.is_healthy:
+            return None
+        return transfer_ctx.create_recorded_event()
 
     @_lmcache_nvtx_annotate
     def submit_store_request(

@@ -404,6 +404,17 @@ def test_create_recorded_event_before_registration_raises(fake_adapter):
         adapter.create_recorded_event()
 
 
+def test_create_recorded_event_skips_unregistered_recovery_context(fake_adapter):
+    """Degraded-mode forwards must not touch a context still registering."""
+    adapter, _send_mock, _future = fake_adapter
+    recovery_context = MagicMock()
+    adapter.transfer_ctx = recovery_context
+    adapter._health_event.clear()
+
+    assert adapter.create_recorded_event() is None
+    recovery_context.create_recorded_event.assert_not_called()
+
+
 def test_none_event_is_not_retained(fake_adapter, monkeypatch):
     """Synchronous engine-driven requests do not retain a placeholder event."""
     adapter, _send_mock, _future = fake_adapter
