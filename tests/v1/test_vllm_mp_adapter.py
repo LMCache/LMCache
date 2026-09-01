@@ -958,7 +958,7 @@ def test_enabled_feature_receives_reclaim_and_shutdown(fake_adapter):
     adapter.get_finished(set())
     adapter.shutdown()
 
-    dispatcher.reclaim.assert_called_once_with()
+    dispatcher.reclaim.assert_called_once_with(finished_req_ids=set())
     dispatcher.shutdown.assert_called_once_with()
 
 

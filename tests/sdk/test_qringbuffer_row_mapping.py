@@ -49,8 +49,20 @@ class _FakeRequestMeta:
 
 
 @dataclass
+class _FakeQMeta:
+    """Minimal LMCacheMPQRequestMetadata stand-in for one step's window."""
+
+    request_id: str
+    start: int
+    end: int
+    block_ids: list
+    block_start: int
+
+
+@dataclass
 class _FakeConnectorMetadata:
     requests: list
+    q_requests: list = field(default_factory=list)
 
 
 class _Request:
@@ -97,6 +109,21 @@ class _Request:
             op=_FakeOp(block_ids=[op_blocks], start=0, end=self.store_tokens),
         )
 
+    def q_meta(self) -> _FakeQMeta:
+        start = self.computed_offset
+        end = start + self.num_scheduled
+        block_start = (start // BLOCK_SIZE) * BLOCK_SIZE
+        block_end = -(-end // BLOCK_SIZE) * BLOCK_SIZE
+        return _FakeQMeta(
+            request_id=self.request_id,
+            start=start,
+            end=end,
+            block_ids=[
+                self.gpu_blocks[block_start // BLOCK_SIZE : block_end // BLOCK_SIZE]
+            ],
+            block_start=block_start,
+        )
+
     def row_slots(self) -> list[int]:
         """GPU KV slot written by each of this request's rows, in row order."""
         slots = []
@@ -106,7 +133,9 @@ class _Request:
         return slots
 
 
-def _make_capture(num_ring_blocks: int = 64) -> QRingBufferCapture:
+def _make_capture(
+    num_ring_blocks: int = 64, chunk_size: int = BLOCK_SIZE
+) -> QRingBufferCapture:
     ring = QRingBuffer(
         num_layers=NUM_LAYERS,
         num_blocks=num_ring_blocks,
@@ -121,7 +150,9 @@ def _make_capture(num_ring_blocks: int = 64) -> QRingBufferCapture:
             layer_index, query, ring_slots
         ),
     )
-    worker_adapter = SimpleNamespace(is_kv_writer=True)
+    worker_adapter = SimpleNamespace(
+        is_kv_writer=True, lmcache_tokens_per_chunk=chunk_size
+    )
     return QRingBufferCapture(worker_adapter, ring_adapter)  # type: ignore[arg-type]
 
 
@@ -145,7 +176,10 @@ def _build_step(requests: list[_Request], row_order: list[int] | None = None):
     query = torch.empty((num_rows, HIDDEN_DIM), dtype=torch.float32)
     for r, tag in enumerate(row_tags):
         query[r].fill_(tag)
-    metadata = _FakeConnectorMetadata(requests=[r.meta() for r in requests])
+    metadata = _FakeConnectorMetadata(
+        requests=[r.meta() for r in requests],
+        q_requests=[r.q_meta() for r in requests if r.num_scheduled > 0],
+    )
     attn_metadata = SimpleNamespace(
         slot_mapping=torch.tensor(row_slots, dtype=torch.int64)
     )
@@ -213,6 +247,7 @@ def test_unaligned_tail_does_not_shift_next_request():
     got_a = _captured_tokens(capture, state, query, a)
     assert got_a.shape[0] == 288
     assert torch.equal(got_a, query[:288])
+    assert capture.q_blocks["A"].filled == 12
 
 
 def test_batch_row_order_differs_from_metadata_order():
@@ -243,23 +278,59 @@ def test_mixed_store_retrieve_step_still_captures():
     assert torch.equal(got_a, query[:256])
 
 
-def test_op_tokens_from_earlier_step_skips_only_that_op():
-    """A store op whose leading tokens were computed in a previous chunked
-    prefill step is skipped; other requests still capture, no ring leak."""
-    # A: 256-token op but only 200 rows this step (56 computed earlier).
-    a = _Request("A", 200, first_gpu_block=0, store_tokens=256, computed_offset=56)
-    b = _Request("B", 256, first_gpu_block=100)
+# Old implementation: only can capture Q tensor during prefill,
+# if the store op's leading tokens were computed in the same step.
+# def test_op_tokens_from_earlier_step_skips_only_that_op():
+#     """A store op whose leading tokens were computed in a previous chunked
+#     prefill step is skipped; other requests still capture, no ring leak."""
+#     # A: 256-token op but only 200 rows this step (56 computed earlier).
+#     a = _Request("A", 200, first_gpu_block=0, store_tokens=256, computed_offset=56)
+#     b = _Request("B", 256, first_gpu_block=100)
+#     capture = _make_capture()
+#     ring = capture.q_ring_adapter.q_ring
+#     free_before = ring.num_free_blocks()
+#     query, md, am = _build_step([a, b])
+#     state = capture._build_q_step_state(query, md, am)
+#     assert state is not None
+#     assert [s.request_id for s in state.stores] == ["B"]
+#     got_b = _captured_tokens(capture, state, query, b)
+#     assert torch.equal(got_b, query[200:456])
+#     used = sum(len(s.ring_block_ids) for s in state.stores)
+#     assert ring.num_free_blocks() == free_before - used  # nothing leaked
+
+
+def test_op_spanning_two_steps_is_captured():
+    """A store op whose leading tokens were computed in an earlier chunked
+    prefill step is now stored: the ring table carries those rows across."""
     capture = _make_capture()
     ring = capture.q_ring_adapter.q_ring
-    free_before = ring.num_free_blocks()
-    query, md, am = _build_step([a, b])
-    state = capture._build_q_step_state(query, md, am)
-    assert state is not None
-    assert [s.request_id for s in state.stores] == ["B"]
-    got_b = _captured_tokens(capture, state, query, b)
-    assert torch.equal(got_b, query[200:456])
-    used = sum(len(s.ring_block_ids) for s in state.stores)
-    assert ring.num_free_blocks() == free_before - used  # nothing leaked
+
+    # Step 1: A computes 56 tokens; no chunk completes, so no store op.
+    a1 = _Request("A", 56, first_gpu_block=0, store_tokens=0)
+    q1, md1, am1 = _build_step([a1])
+    s1 = capture._build_q_step_state(q1, md1, am1)
+    assert s1 is not None and s1.stores == []
+    ring.scatter(0, q1, s1.ring_slots)
+    assert capture.q_blocks["A"].filled == 56
+
+    # Step 2: 200 more rows complete the op's [0, 256) range.
+    a2 = _Request("A", 200, first_gpu_block=0, store_tokens=256, computed_offset=56)
+    q2, md2, am2 = _build_step([a2])
+    s2 = capture._build_q_step_state(q2, md2, am2)
+    assert [s.request_id for s in s2.stores] == ["A"]
+    ring.scatter(0, q2, s2.ring_slots)
+
+    # The stored chunk holds step 1's 56 rows followed by step 2's 200.
+    store = s2.stores[0]
+    got = torch.stack(
+        [
+            ring._layer_tensors[0][
+                store.ring_block_ids[i // BLOCK_SIZE], i % BLOCK_SIZE
+            ]
+            for i in range(256)
+        ]
+    )
+    assert torch.equal(got, torch.cat([q1, q2]))
 
 
 def test_ring_exhaustion_skips_op_without_leak():
@@ -273,6 +344,7 @@ def test_ring_exhaustion_skips_op_without_leak():
     state = capture._build_q_step_state(query, md, am)
     assert state is not None
     assert [s.request_id for s in state.stores] == ["A"]
+    assert "B" not in capture.q_blocks
     assert ring.num_free_blocks() == 34 - 32
 
 

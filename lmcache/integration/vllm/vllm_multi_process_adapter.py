@@ -1704,7 +1704,11 @@ class LMCacheMPWorkerAdapter:
             IDs that have not been returned before.
         """
         if self.dispatcher is not None:
-            dispatch(self.dispatcher, "reclaim")
+            dispatch(
+                self.dispatcher,
+                "reclaim",
+                finished_req_ids=finished_req_ids_from_engine,
+            )
 
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
@@ -1964,6 +1968,9 @@ class LMCacheMPWorkerAdapter:
         """
         if not need_flush_before_forward:
             return
+        # drop the query table when preemption happens
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "handle_preemptions")
         if not self.is_healthy or self.transfer_ctx is None:
             return
         self.transfer_ctx.flush_inflight_stores()
