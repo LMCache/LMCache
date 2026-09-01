@@ -313,9 +313,114 @@ LMCache, the chunk size is larger than the vLLM block size, so:
 This makes a direct port of vLLM's lazy offload approach infeasible for
 the LMCache MP connector.
 
-## 2. LMCache MP Connector: Threshold-Triggered Lazy Offload
+## 2. LMCache MP Connector implementation
 
-### 2.1 Design Overview
+LMCache MP buffers ready `LMCacheMPRequestMetadata` on the scheduler and
+always returns `False` from `request_finished`, allowing vLLM to return the
+request's blocks to its prefix-cache free queue. The configured policy decides
+when those buffered operations leave the queue.
+
+Scheduler-side lazy-offload integration is isolated behind
+`LazyOffloadManager`. `LMCacheMPConnector` forwards scheduler, request, and
+store-receipt lifecycle events to this facade and applies its explicit
+`LazyOffloadActions` (stores to submit and sessions to end). The manager owns
+policy construction, pressure-signal translation, metadata coalescing, block
+pin/unpin bookkeeping, and failure handling. Consequently a policy change does
+not add policy-specific branches to the connector.
+
+| Layer | Responsibility |
+|-------|----------------|
+| `LMCacheMPConnector` | Forward vLLM lifecycle events and apply returned actions |
+| `LazyOffloadManager` | Own lifecycle interpretation, scheduler-side orchestration, and GPU block side effects |
+| `LazyOffloadRequestRegistry` | Own request phase, epoch, and submitted-store batches |
+| `OffloadPolicy` (`EvictionAwareStoreQueue`, `FIFOOffloadPolicy`) | Make buffering and drain decisions |
+
+Two policies are available:
+
+- `EVICTION_AWARE` (default) reads the free queue in LRU order and releases an
+  operation when one of its blocks enters the pressure-derived danger window,
+  or when the operation passes the configured deferral deadline. It validates
+  admission-time block hashes and preserves prefix closure. Its full queue
+  contract is in
+  [lazy_offload_policy/eviction_aware.md](lazy_offload_policy/eviction_aware.md).
+- `FIFO` remains available as an explicit legacy fallback. It preserves the
+  original count-triggered behavior and drains completed requests after the
+  configured request threshold and
+  validates their block hashes immediately before submission.
+
+Policies do not receive lifecycle events; the manager derives finished and
+blocked request-id sets from the registry and passes those as inputs to one
+`OffloadPolicy.drain()` entry point, which takes one `DrainSignals` and
+returns a policy-neutral `LazyOffloadDrain`: request batches plus ids whose
+buffers became empty. Pressure-aware versus FIFO triggering stays inside the
+policy. Only the manager validates and pins emitted batches and combines
+empty-buffer facts with registry state to authorize session teardown.
+
+For either policy, the manager coalesces each request's released chunks into
+one store operation, calls `BlockPool.touch()` to pin its surviving blocks,
+and records those block ids in the request's controller-owned state until
+every worker rank reports completion. Each request id has an explicit store
+epoch and at most one submitted batch. Preemption reset advances the epoch
+before tracker recreation; finished-id reuse advances it at successor arrival.
+An old batch retains its submission epoch while a successor becomes active, so
+its receipt can release pins without ending the successor's shared session.
+Overlapping emission remains a logic error because worker receipts are keyed
+only by request id. The completion receipt balances the pins with
+`free_blocks()`, returning the blocks to vLLM's own placement for a freed
+cached block. Failed stores are reported alongside completion receipts,
+allowing the scheduler to break the request's prefix chain before considering
+later chunks.
+
+Configuration in `kv_connector_extra_config`:
+
+```text
+lmcache.mp.lazy_offload = true                         # default: false
+lmcache.mp.lazy_offload_policy = EVICTION_AWARE        # default
+lmcache.mp.lazy_offload_horizon_steps = 2.5
+lmcache.mp.lazy_offload_max_drain_per_step = 64
+lmcache.mp.lazy_offload_max_deferral_seconds = 0.0     # 0: no deadline
+
+# Explicit legacy FIFO mode only
+lmcache.mp.lazy_offload_threshold = 100
+lmcache.mp.lazy_offload_select_count = 10
+```
+
+Lazy offload requires vLLM prefix caching. Eviction-aware mode depends on block
+hashes to prove that buffered data still occupies the same GPU blocks; the
+connector therefore fails construction when lazy offload is enabled without
+`enable_prefix_caching=True`.
+
+### 2.1 Scheduler-step flow
+
+1. `GetStoreMetadata` produces each newly storable contiguous token range.
+2. The manager tags it with the request's current store epoch, snapshots its
+   block hashes, and buffers it in the selected policy instead of sending it
+   to the worker immediately; mixing two epochs in one request's pending list
+   is rejected as an invariant violation.
+3. On a token-producing scheduler step, the connector forwards the scheduler
+   output to `LazyOffloadManager`, which observes allocation pressure and
+   drains the selected policy once.
+4. The manager validates, pins, and coalesces released operations per request,
+   then returns them as explicit actions for the connector metadata.
+5. Worker completion and failure metadata returns on later token-producing
+   steps. The scheduler unpins only after all ranks have reported.
+6. A finished request's LMCache session ends when its pending queue is dropped
+   empty or its final in-flight store receipt arrives.
+
+An idle engine deliberately does not emit store metadata because vLLM's
+no-forward path would discard it. Consequently pending stores, receipts, pins,
+and sessions settle on the next token-producing step, not during the idle
+period.
+
+## 3. Historical threshold-ratio proposal (superseded)
+
+The remainder of this document records the initial proposal that preceded the
+implemented FIFO request-count policy and eviction-aware policy. Its
+`threshold_ratio`, `drain_ratio`, `PendingStoreEntry`, and `should_offload`
+examples are **not implemented configuration or current interfaces**; they are
+kept only as design history.
+
+### 3.1 Design Overview
 
 Since LMCache cannot reuse vLLM block hashes and requires token IDs for
 key construction, the lazy offload strategy must **buffer store metadata
@@ -348,7 +453,7 @@ flowchart TB
     Worker -->|"submit_store_request"| Server["LMCache Server"]
 ```
 
-### 2.2 Buffer Queue Design
+### 3.2 Buffer Queue Design
 
 ```python
 @dataclass
@@ -380,7 +485,7 @@ class PendingStoreQueue:
         ...
 ```
 
-### 2.3 Integration with `build_connector_meta`
+### 3.3 Integration with `build_connector_meta`
 
 The modification is in the scheduler-side `build_connector_meta` logic:
 
@@ -413,7 +518,7 @@ if self._pending_store_queue.should_offload:
         store_metas.append(to_request_metadata(entry))
 ```
 
-### 2.4 Threshold Trigger Mechanism
+### 3.4 Threshold Trigger Mechanism
 
 The threshold determines when buffered stores are flushed:
 
@@ -436,7 +541,7 @@ lmcache.mp.lazy_offload_threshold = 0.8       (trigger when 80% of GPU blocks ar
 lmcache.mp.lazy_offload_drain_ratio = 0.5     (drain 50% of queue when triggered)
 ```
 
-### 2.5 Drain Strategy
+### 3.5 Drain Strategy
 
 When the threshold is reached, not all entries need to be drained at
 once. Options:
@@ -463,14 +568,14 @@ def drain(self, target_ratio: float = 0.5) -> list[PendingStoreEntry]:
     return drained
 ```
 
-### 2.6 GPU Block Protection: Touch and Free
+### 3.6 GPU Block Protection: Touch and Free
 
 Following the same pattern as vLLM's `SimpleCPUOffloadConnector`
 (Section 1.3.1), LMCache lazy offload uses **explicit touch/free
 ref_cnt pairs** to protect GPU blocks during in-flight D2H transfers,
 rather than holding blocks via `request_finished`.
 
-#### 2.6.1 `request_finished` Always Returns `False`
+#### 3.6.1 `request_finished` Always Returns `False`
 
 ```python
 # Scheduler-side request_finished (both eager and lazy modes)
@@ -490,7 +595,7 @@ request's blocks when it finishes. The connector does **not** hold
 blocks hostage via the return value — it relies on its own `touch()`
 calls to keep in-flight blocks alive.
 
-#### 2.6.2 Lazy Offload: Touch on Drain, Free on Completion
+#### 3.6.2 Lazy Offload: Touch on Drain, Free on Completion
 
 When the pending store queue reaches the threshold and entries are
 drained for submission, the scheduler **touches** the GPU blocks to
@@ -533,7 +638,7 @@ def _on_store_completion(self, store_id: str):
     self._gpu_block_pool.free_blocks(gpu_blocks)
 ```
 
-#### 2.6.3 ref_cnt Lifecycle
+#### 3.6.3 ref_cnt Lifecycle
 
 This creates the same **balanced ref_cnt lifecycle** as
 SimpleCPUOffloadConnector:
@@ -576,7 +681,7 @@ buffer phase** (between request finish and threshold trigger). When
 After D2H completes, `free_blocks()` decrements `ref_cnt`. If the block
 was reallocated, it stays alive because the new request still holds it.
 
-#### 2.6.4 Handling Block Reallocation: Read-Before-Overwrite Risk
+#### 3.6.4 Handling Block Reallocation: Read-Before-Overwrite Risk
 
 The above ref_cnt lifecycle is correct from a memory management
 perspective, but there is a **data corruption risk**: if a block is
@@ -662,7 +767,7 @@ corruption. Blocks that were reallocated are skipped (logged as dropped
 stores), which is semantically equivalent to never buffering that entry
 in the first place.
 
-#### 2.6.5 Scheduler and Worker Implementation Summary
+#### 3.6.5 Scheduler and Worker Implementation Summary
 
 | Phase | Action |
 |-------|--------|
@@ -672,7 +777,7 @@ in the first place.
 | **Store submission** | Track `store_id -> touched_blocks` mapping |
 | **D2H completion** | `free_blocks()` for the touched blocks |
 
-### 2.7 Summary
+### 3.7 Summary
 
 | Aspect | Description |
 |--------|-------------|
@@ -680,5 +785,5 @@ in the first place.
 | **What to buffer** | `PendingStoreEntry` containing token_ids, block_ids, start/end (all info needed for key construction) |
 | **When to flush** | When total buffered GPU blocks >= threshold (configurable ratio of total GPU blocks) |
 | **How to flush** | FIFO partial drain -> emit as store ops in connector metadata |
-| **Worker changes** | Yes — metadata extension, `_lazy_deferred_requests` tracking, guarded `get_finished`, deferred `request_finished` cleanup |
+| **Worker changes** | Yes — metadata extension, completed/failed store tracking (implemented as `_completed_store_requests` / `_failed_store_requests` in the worker adapter), `get_finished_with_lazy_offload`, deferred `request_finished` cleanup |
 | **Server changes** | None — receives standard STORE requests |
