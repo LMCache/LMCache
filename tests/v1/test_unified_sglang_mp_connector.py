@@ -40,6 +40,14 @@ class _ResultFuture(_Future):
             raise TimeoutError("future is not ready")
         return self.value
 
+    def wait_on_stream(self, stream, timeout=None):
+        del timeout
+        self.waited_stream = stream
+        return self.result()
+
+    def prepare(self, timeout=None):
+        return self.result(timeout)
+
 
 class _TransferContext:
     def __init__(self):
@@ -518,6 +526,37 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(kwargs["skip_first_n_tokens"], 3)
         self.assertEqual(operation.start, 0)
         self.assertEqual(operation.end, 8)
+
+    def test_prepare_load_orders_forward_stream_without_completing_future(self):
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._mq_timeout = 10
+        connector._sync_success = lambda success: success
+        connector._free_lookup_locks = Mock()
+        lookup = LMCacheLookupOperation(
+            request_id="request",
+            token_ids=list(range(8)),
+            local_hit_tokens=0,
+            cache_salt="",
+            total_hit_tokens=8,
+            locks_held=True,
+        )
+        future = _ResultFuture(True, True)
+        operation = LMCacheLoadOperation(
+            request_id="request",
+            token_ids=list(range(8)),
+            start=0,
+            end=8,
+            local_hit_tokens=0,
+            device_indices=torch.arange(8),
+            future=future,
+            lookup=lookup,
+        )
+
+        self.assertTrue(connector.prepare_load_on_stream(operation, "forward"))
+        self.assertEqual(future.waited_stream, "forward")
+        self.assertIsNone(operation.result)
+        self.assertTrue(lookup.locks_held)
+        connector._free_lookup_locks.assert_not_called()
 
     def test_completed_operation_does_not_requery_future(self):
         operation = object.__new__(LMCacheLoadOperation)

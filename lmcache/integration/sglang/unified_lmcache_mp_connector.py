@@ -40,6 +40,13 @@ class _ImmediateFuture:
         del timeout
         return self._result
 
+    def prepare(self, timeout: Optional[float] = None) -> bool:
+        return self.result(timeout)
+
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> bool:
+        del stream
+        return self.result(timeout)
+
     def retain_reference(self, value: object) -> None:
         del value
 
@@ -555,9 +562,10 @@ class UnifiedLMCacheMPConnector:
         )
         self._heartbeat_thread.start()
 
-    def _new_event(self) -> Any:
+    def _new_event(self, stream: Any = None) -> Any:
         event = self._event_backend.create_event(self.device)
-        stream = torch.get_device_module(self.device).current_stream()
+        if stream is None:
+            stream = torch.get_device_module(self.device).current_stream()
         self._event_backend.record_event(event, stream)
         return event
 
@@ -800,6 +808,7 @@ class UnifiedLMCacheMPConnector:
         *,
         local_hit_tokens: int,
         owned_device_indices: Optional[torch.Tensor] = None,
+        producer_stream: Any = None,
     ) -> LMCacheLoadOperation:
         if operation.total_hit_tokens is None or not operation.locks_held:
             raise RuntimeError("LMCache load requires a completed, locked lookup")
@@ -850,7 +859,11 @@ class UnifiedLMCacheMPConnector:
         self._free_lookup_locks(operation, 0, start)
         operation.lock_start = start
         try:
-            event = self._new_event()
+            event = (
+                self._new_event()
+                if producer_stream is None
+                else self._new_event(producer_stream)
+            )
             future = self._transfer_ctx.submit_retrieve(
                 operation.request_id,
                 key,
@@ -887,6 +900,57 @@ class UnifiedLMCacheMPConnector:
             future=future,
             lookup=operation,
         )
+
+    def prepare_load_on_stream(
+        self, operation: LMCacheLoadOperation, stream: Any
+    ) -> bool:
+        """Order a consumer stream after an asynchronous retrieve.
+
+        Args:
+            operation: Retrieve operation returned by :meth:`submit_load`.
+            stream: SGLang forward stream that consumes the loaded KV cache.
+
+        Returns:
+            ``True`` when every TP/PP rank successfully submitted its retrieve;
+            otherwise ``False``.
+
+        Notes:
+            Waiting for the raw MQ response imports the LMCache server's
+            completion event. Device completion is then ordered with a stream
+            wait, so the CPU does not wait for H2D. On a cross-rank failure the
+            successful ranks synchronize their local work before the caller
+            releases destination slots.
+        """
+        local_success = False
+        prepared = False
+        try:
+            local_success = bool(operation.future.prepare(timeout=self._mq_timeout))
+            prepared = True
+            operation.future.wait_on_stream(stream, timeout=0)
+        except Exception:
+            logger.exception(
+                "LMCache retrieve preparation failed for %s", operation.request_id
+            )
+
+        success = self._sync_success(local_success)
+        if success:
+            return True
+
+        # Another rank may have failed after this rank successfully enqueued
+        # H2D. Wait locally before SGLang returns these destination slots to its
+        # allocator; otherwise LMCache could still be writing reused memory.
+        if prepared:
+            try:
+                operation.future.result(timeout=self._mq_timeout)
+            except Exception:
+                logger.exception(
+                    "Failed to drain LMCache retrieve for %s", operation.request_id
+                )
+        if operation.lookup.locks_held:
+            self._free_lookup_locks(operation.lookup, operation.start, operation.end)
+            operation.lookup.locks_held = False
+        operation.result = False
+        return False
 
     def complete_load(
         self, operation: LMCacheLoadOperation, *, synchronize: bool = True
