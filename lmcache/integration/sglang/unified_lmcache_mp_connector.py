@@ -354,6 +354,7 @@ class UnifiedLMCacheMPConnector:
         self.blocks_in_chunk = self.chunk_size
         self.register_kv_cache()
         self._start_heartbeat()
+        logger.info("UnifiedLMCacheMPConnector initialized succeed.")
 
     @staticmethod
     def _resolve_parallel_geometry(
