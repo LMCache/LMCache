@@ -38,8 +38,8 @@ namespace lmcache_mp {
  * 4. The grid will take over (2, NB, NL) dimensions. No matter what the actual
  * layout in memory is, we will calculate the global offset for the start of the
  * block
- * 5. For LMCache, we assume it is always using 2LTD layout, e.g.,
- * [2, L, 256, NH * HS], where 256 means that 256 tokens
+ * 5. For LMCache, the layout is 2LTD [2, L, T, D] by default; when
+ * kv_interleaved is set it becomes L2TD [L, 2, T, D] (per-layer interleaved)
  */
 
 /**
@@ -144,8 +144,7 @@ __device__ inline size_t calculate_engine_local_offset(
  * Calculate the global offset for the current `block` in the LMCache object.
  * The `block` here is the memory region corresponding to a thread-block.
  */
-template <typename ScalarType, EngineKVFormat format,
-          bool allow_interleaved = false>
+template <typename ScalarType, EngineKVFormat format>
 __device__ inline size_t calculate_lmcache_global_offset(
     const int k_or_v,
     const int
@@ -154,18 +153,14 @@ __device__ inline size_t calculate_lmcache_global_offset(
     const int lmcache_chunk_size,  // e.g., 256
     const PageBufferShapeDesc shape_desc) {
   size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  // Only the layer-wise kernels instantiate this with allow_interleaved,
-  // so the per-chunk kernels compile to exactly the 2LTD form below.
-  if constexpr (allow_interleaved) {
-    if (shape_desc.kv_interleaved) {
-      // L2TD layout: [L, 2, T, D] — per-layer interleaved [K0,V0,K1,V1,...]
-      return token_offset_in_lmcache_object * scalars_per_token +
-             k_or_v * lmcache_chunk_size * scalars_per_token +
-             layer_idx * shape_desc.kv_size * lmcache_chunk_size *
-                 scalars_per_token;
-    }
+  if (shape_desc.kv_interleaved) {
+    // L2TD layout: [L, 2, T, D] — per-layer interleaved [K0,V0,K1,V1,...]
+    return token_offset_in_lmcache_object * scalars_per_token +
+           k_or_v * lmcache_chunk_size * scalars_per_token +
+           layer_idx * shape_desc.kv_size * lmcache_chunk_size *
+               scalars_per_token;
   }
-  // LMCache is using 2LTD all the times
+  // 2LTD layout: [2, L, T, D] — K-then-V across all layers
   return token_offset_in_lmcache_object * scalars_per_token +
          layer_idx * lmcache_chunk_size * scalars_per_token +
          k_or_v * shape_desc.nl * lmcache_chunk_size * scalars_per_token;
@@ -226,8 +221,7 @@ __device__ inline void warp_copy(ScalarType* __restrict__ dst,
   }
 }
 
-template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format,
-          bool allow_interleaved = false>
+template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
 __device__ void multi_layer_block_transfer_single_block(
     ScalarType* __restrict__ lmcache_object,
     ScalarType** __restrict__ paged_buffer_ptrs, const int engine_block_idx,
@@ -245,7 +239,7 @@ __device__ void multi_layer_block_transfer_single_block(
       calculate_engine_global_offset<ScalarType, format>(
           k_or_v, engine_block_idx, layer_idx, shape_desc);
   const size_t lmcache_global_offset =
-      calculate_lmcache_global_offset<ScalarType, format, allow_interleaved>(
+      calculate_lmcache_global_offset<ScalarType, format>(
           k_or_v, offset_in_lmcache_block, layer_idx, lmcache_chunk_size,
           shape_desc);
   ScalarType* paged_buffer_layer_ptr;
