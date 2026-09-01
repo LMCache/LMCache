@@ -184,11 +184,11 @@ to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `int`, `int` |
-| `MP_TRANSFER_PHASE_SAMPLES` | `samples` | `list[tuple[int, int, int, float, int, str, float, float]]` — `(phase, direction, device_index, elapsed_ms, nbytes, session_id, start_time_s, end_time_s)` per finished executor section; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value, `session_id` the request the transfer served, `start_time_s`/`end_time_s` its bounds on the EventRecorder wall clock (empty / `0.0` only if the call's anchor event could not be recorded) |
-| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `str`, `int`, `int` |
+| `MP_STORE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `int`, `int`, `str` |
+| `MP_TRANSFER_PHASE_SAMPLES` | `samples` | `list[tuple[int, int, int, float, int, str, float, float]]` — `(phase, direction, device_index, elapsed_ms, nbytes, session_id, start_time_s, end_time_s)` per finished executor section; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value, the `session_id` slot carries the `transfer_key` of the store/retrieve operation (see `next_transfer_key`), `start_time_s`/`end_time_s` its bounds on the EventRecorder wall clock (empty / `0.0` only if the call's anchor event could not be recorded) |
+| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
 | `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |

@@ -458,8 +458,6 @@ class QStoreModule(InstanceLivenessTarget):
                 )
             )
 
-            # One key per store operation; the phase-timing samples echo it
-            # back so they can be matched to the transfer that produced them.
             transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,

@@ -9,16 +9,9 @@ Consumes ``MP_TRANSFER_PHASE_SAMPLES`` events and emits, labeled by
     host<->device DMA staging sections (GPU staging buffers <-> pinned
     host memory)
 
-There is deliberately no kernel counterpart. A section's elapsed is the
-interval between two CUDA events on the transfer stream, and the gather/
-scatter kernel needs SMs, which the co-resident inference engine holds: the
-interval is then mostly the wait for the engine's kernels to finish, not the
-transfer's own work. Measured on one box, that made the figure read ~50x low
-and differ 7x between directions for reasons unrelated to the kernel. Staging
-has no such problem -- DMA rides the copy engine, which the engine does not
-touch, so its sections wait 0.4-6 us and the rate is the real link rate. The
-per-phase span pair in tracing still carries the kernel's section time for
-diagnosis; it is only unfit as an always-on metric.
+There is deliberately no kernel counterpart: a kernel section's elapsed is
+mostly the wait for the co-resident engine's SMs, so its bytes/elapsed reads
+contention as a rate (rationale: docs/design/v1/mp_observability/METRICS.md).
   - ``lmcache_mp.transfer_phase_bytes`` / ``lmcache_mp.transfer_phase_elapsed``
     — cumulative bytes and elapsed seconds per phase (extra ``phase``
     label). ``rate(bytes) / rate(elapsed)`` gives the byte-weighted
@@ -137,8 +130,6 @@ class TransferPhaseMetricsSubscriber(EventSubscriber):
             "direction": _direction_name(direction),
         }
         elapsed_s = elapsed_ms / 1e3
-        # Only staging gets a throughput histogram; see the module docstring
-        # for why the kernel phase does not.
         if phase == TransferPhase.STAGING:
             self._staging_hist.record(nbytes / elapsed_s / 1e9, attributes=attrs)
 

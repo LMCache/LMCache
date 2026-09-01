@@ -73,9 +73,11 @@ class EventType(Enum):
     MP_STORE_END = "mp.store.end"
     # Gather/DMA phase timings popped from the native plan executor by
     # TransferPhaseSampler on MP_*_END. Metadata: ``samples`` (list[tuple]),
-    # one (phase, direction, device_index, elapsed_ms, nbytes, session_id,
+    # one (phase, direction, device_index, elapsed_ms, nbytes, transfer_key,
     # start_time_s, end_time_s) tuple per finished timed section;
-    # phase/direction are TransferPhase / TransferDirection values.
+    # phase/direction are TransferPhase / TransferDirection values and
+    # transfer_key (in the native layer's session_id slot) identifies the
+    # store/retrieve operation, minted by ``next_transfer_key``.
     MP_TRANSFER_PHASE_SAMPLES = "mp.transfer.phase_samples"
     MP_RETRIEVE_START = "mp.retrieve.start"
     MP_RETRIEVE_END = "mp.retrieve.end"
@@ -186,22 +188,16 @@ class Event:
     session_id: str = ""
 
 
-# One store/retrieve *operation* -- the unit an ``mp.store`` / ``mp.retrieve``
-# span covers -- gets one of these. A request issues several: vLLM's chunked
-# prefill stores each prefill step separately, so a 10k-token prompt at a 2048
-# token budget is five stores under one request id. ``session_id`` therefore
-# cannot identify a transfer, and the phase-timing samples that echo it back
-# have to carry this instead.
+# A request issues several store/retrieve operations (one per chunked-prefill
+# step), so session_id cannot identify a transfer; transfer keys do.
 _TRANSFER_SEQ = itertools.count()
 
 
 def next_transfer_key(request_id: str) -> str:
     """Mint a key unique to one store/retrieve operation.
 
-    The request id is kept as a prefix so the key is readable in a log or a
-    span attribute; uniqueness comes from the counter alone. ``next()`` on an
-    ``itertools.count`` is atomic under the GIL, so concurrent publishers
-    cannot collide.
+    Uniqueness comes from the counter (``next()`` is atomic under the GIL);
+    the request id prefix only keeps the key readable.
 
     Args:
         request_id: The request the operation serves.

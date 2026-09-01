@@ -223,22 +223,25 @@ Transfer phase sub-spans
 With tracing enabled, each ``mp.store`` / ``mp.retrieve`` gets two child
 spans, one per GPU transfer phase:
 
-- ``transfer.kernel`` -- gather/scatter kernel (paged KV blocks <-> GPU
-  staging buffers)
-- ``transfer.staging`` -- DMA copy (GPU staging buffers <-> pinned host
-  memory)
+- ``transfer.kernel_interval`` -- gather/scatter kernel sections (paged KV
+  blocks <-> GPU staging buffers). The name says *interval* because the
+  kernel queues behind the co-resident inference engine's SM work: most of
+  this bar is that wait, not the copy itself. Do not read it as a rate.
+- ``transfer.staging`` -- DMA copies (GPU staging buffers <-> pinned host
+  memory) on the copy engine, which does not contend for SMs.
 
 The two bars are a **stacked breakdown, not a timeline**: the phases
 alternate every batch step on one stream, so their real intervals
 interleave. The phase that ran first starts at the transfer's real start
-and lasts its total busy time; the other follows for its own. Their sum is
-the transfer's GPU busy time; the gap to the parent span is idle time.
+and lasts its total elapsed; the other follows for its own. Their sum is
+the transfer's stream time; the gap to the parent span is idle time.
 
-Attributes: ``nbytes``, ``busy_seconds``, ``num_steps``,
-``throughput_GB_per_second`` (``nbytes / busy_seconds``), the real
-``first_start_s`` / ``last_end_s``, ``device_index``, ``session_id``.
-Timings are CUDA-event based, anchored to the same wall clock as the other
-MP events; the children are exported shortly after their parent.
+Attributes: ``nbytes``, ``elapsed_seconds``, ``num_steps``, the real
+``first_start_s`` / ``last_end_s``, ``device_index``, ``session_id``, and
+-- on ``transfer.staging`` only -- ``throughput_GB_per_second``
+(``nbytes / elapsed_seconds``; see above for why the kernel span carries
+none). Timings are CUDA-event based, anchored to the same wall clock as
+the other MP events; the children are exported shortly after their parent.
 
 For the full design rationale see
 

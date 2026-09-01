@@ -318,10 +318,9 @@ def _run_object_group_transfer_plan(
         batch_size: Number of memory objects per batched copy.
         skip_first_n_tokens: Tokens to skip writing at the start of the range.
         direction: H2D (retrieve) or D2H (store).
-        transfer_key: Identity of this store/retrieve operation, echoed back on
-            every phase-timing sample so tracing can match samples to the
-            transfer that produced them. Required: a request issues several
-            transfers, so a missing key would silently drop their phase spans.
+        transfer_key: Identity of this store/retrieve operation, echoed back
+            on every phase-timing sample (a request issues several transfers,
+            so the request id cannot identify one).
 
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
@@ -461,8 +460,7 @@ def _run_object_group_transfer_plan(
         {
             "phase_timing_enabled": is_observability_enabled()
             and get_event_bus().has_subscribers(EventType.MP_TRANSFER_PHASE_SAMPLES),
-            # The native layer only stores and echoes this string back on
-            # each sample; it is the transfer's identity, not the request's.
+            # Echoed back verbatim on each sample; the transfer's identity.
             "session_id": transfer_key,
         }
         if _HAS_TRANSFER_PHASE_TIMING
@@ -1209,9 +1207,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ):
                 self._publish_token_bindings(key, obj_keys_per_obj_group[0])
 
-            # One key per store operation: a request issues several (one per
-            # chunked-prefill step), and the phase-timing samples echo this
-            # back so they can be matched to the transfer that produced them.
             transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
@@ -1395,8 +1390,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
         )
 
-        # One key per retrieve operation; see the store path for why
-        # session_id cannot serve as the transfer's identity.
         transfer_key = next_transfer_key(key.request_id)
         self._ctx.event_bus.publish_on_stream(
             cache_context.cupy_stream,

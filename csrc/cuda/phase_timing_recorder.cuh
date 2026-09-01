@@ -65,9 +65,6 @@ struct PhaseTimingSample {
 // PhaseTimingRecorder on commit(). Without commit() -- an exception, or an
 // early return -- the destructor discards everything, so a transfer that
 // failed mid-plan publishes no partial samples.
-//
-// `stream` must be the stream the transfer work is enqueued on; sections
-// record their events on it.
 class PhaseTimer {
  public:
   // A timed section of work: the constructor records the start event on
@@ -100,11 +97,7 @@ class PhaseTimer {
   PhaseTimer& operator=(const PhaseTimer&) = delete;
 
   // `stream` must be the stream this section's work is actually enqueued
-  // on, which is not always the timer's: a section running under a
-  // CUDAStreamGuard (a staging copy on a dedicated copy stream, say)
-  // records its events there. Recording them on the timer's stream instead
-  // would leave the pair not bracketing the work it claims to time -- and
-  // it fails silently, as a plausible-looking elapsed time.
+  // on (not necessarily the timer's, e.g. under a CUDAStreamGuard).
   Section section(TransferPhase phase, int64_t nbytes, cudaStream_t stream) {
     return Section(*this, phase, nbytes, stream);
   }

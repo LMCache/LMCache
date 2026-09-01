@@ -55,20 +55,6 @@ _SPAN_NAME_BY_PHASE: dict[int, str] = {
     int(TransferPhase.KERNEL): "transfer.kernel_interval",
     int(TransferPhase.STAGING): "transfer.staging",
 }
-# Put the caveat where it is read. A kernel bar is mostly the wait for the
-# co-resident inference engine's SMs, so a reader who does not know that
-# concludes the transfer was slow -- see "Reading the phase bars" in
-# docs/design/observability/request-event-span.md.
-_ELAPSED_MEANING_BY_PHASE: dict[int, str] = {
-    int(TransferPhase.KERNEL): (
-        "stream interval, not execution time: the kernel needs SMs and queues "
-        "behind the co-resident inference engine, so most of this bar is that "
-        "wait. Do not read it as a transfer rate."
-    ),
-    int(TransferPhase.STAGING): (
-        "transfer time: DMA on the copy engine, which does not contend for SMs."
-    ),
-}
 
 
 @dataclass
@@ -112,12 +98,8 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
     def __init__(self, registry: SpanRegistry, parent_ttl_s: float = 120.0) -> None:
         self._registry = registry
         self._transfer_ttl_s = parent_ttl_s
-        # transfer_key -> running totals. The key identifies one store /
-        # retrieve *operation*: a request issues several (vLLM stores each
-        # chunked-prefill step separately), and pop_completed_phase_timings()
-        # is a process-global pop, so a samples batch can span transfers.
-        # Matching by identity is the only thing that survives both; any
-        # ordering scheme silently drops spans under a drain-thread lag.
+        # transfer_key -> running totals; the pop is process-global, so one
+        # samples batch can span transfers.
         self._transfers: dict[str, _TransferTotals] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
@@ -164,10 +146,6 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
         if transfer is None:
             return
         transfer.ended = True
-        # Emission waits for the samples batch this END publishes: the pop is
-        # process-global, so sections of this transfer may have been collected
-        # by an earlier END too, and both halves have to land before the span
-        # is complete (see test_samples_split_across_pops_merge_into_one_span).
 
     # -- Sample accumulation --------------------------------------------------
 
@@ -180,10 +158,8 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
             key = self._accumulate(sample)
             if key is not None:
                 touched.add(key)
-        # Emit only what this batch fed. An already-ended transfer that this
-        # batch did not touch is still waiting for its own samples -- emitting
-        # it here would drop them, which is exactly the bug that order-based
-        # matching had.
+        # Emit only what this batch fed; an untouched ended transfer is
+        # still waiting for its own samples.
         for key in touched:
             transfer = self._transfers.get(key)
             if transfer is not None and transfer.ended:
@@ -251,15 +227,10 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
             span.set_attribute("num_steps", totals.num_steps)
             span.set_attribute("nbytes", totals.nbytes)
             span.set_attribute("elapsed_seconds", totals.elapsed_s)
-            span.set_attribute("elapsed_meaning", _ELAPSED_MEANING_BY_PHASE[phase])
             span.set_attribute("first_start_s", totals.first_start_s)
             span.set_attribute("last_end_s", totals.last_end_s)
-            # Only staging. A kernel section's elapsed is dominated by the
-            # wait for the co-resident engine to release the SMs, so the same
-            # ratio there reports contention, not transfer rate -- see
-            # docs/design/observability/request-event-span.md, "Reading the
-            # phase bars". Kept off the span for the same reason metrics
-            # ships no kernel throughput histogram.
+            # Staging only: the kernel ratio would read SM wait as a rate
+            # (docs/design/observability/request-event-span.md).
             if phase == TransferPhase.STAGING and totals.elapsed_s > 0:
                 span.set_attribute(
                     "throughput_GB_per_second",

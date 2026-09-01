@@ -400,7 +400,12 @@ is on whenever metrics or tracing consume the samples and costs nothing
 otherwise (``--disable-metrics`` without ``--enable-tracing``, or
 ``--disable-observability``).
 
-All four metrics carry ``device_index`` (e.g. ``"0"``) and ``direction``
+There is deliberately **no kernel throughput histogram**: a kernel
+section's elapsed is mostly the wait for the co-resident inference
+engine's SMs, so ``bytes / elapsed`` there reports contention, not a
+transfer rate (full rationale: ``docs/design/v1/mp_observability/METRICS.md``).
+
+All three metrics carry ``device_index`` (e.g. ``"0"``) and ``direction``
 (``"d2h"`` for stores, ``"h2d"`` for retrieves); the two counters
 additionally carry ``phase`` (``"kernel"`` / ``"staging"``).
 
@@ -411,9 +416,6 @@ additionally carry ``phase`` (``"kernel"`` / ``"staging"``).
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.transfer_kernel_throughput``
-     - Histogram
-     - Gather/scatter kernel throughput in GB/s, one sample per batch step.
    * - ``lmcache_mp.transfer_staging_throughput``
      - Histogram
      - DMA staging throughput in GB/s, one sample per batch step.
@@ -425,32 +427,29 @@ additionally carry ``phase`` (``"kernel"`` / ``"staging"``).
        the staging phase counts the whole staged payload. The difference
        between the two is the payload that crossed PCIe without being
        consumed by the kernel.
-   * - ``lmcache_mp.transfer_phase_busy_time``
+   * - ``lmcache_mp.transfer_phase_elapsed``
      - Counter (attr: ``phase``)
-     - Cumulative stream-clocked seconds each phase was busy.
+     - Cumulative stream interval per phase: for ``staging`` the DMA
+       itself, for ``kernel`` mostly the wait for the engine's SMs.
 
-**What it answers:** which phase does a slow transfer path spend its time
-in? A low kernel number with a healthy staging number points at launch
-geometry / batching (SM side); the reverse points at PCIe or pinned-memory
-issues (DMA side). The histograms show the per-step distribution; use the
-counters for aggregate answers, because a mean over per-step histogram
-samples is not byte-weighted:
+**What it answers:** is the DMA side (PCIe / pinned memory) healthy, and
+where does a slow transfer's time go? Use the counters for aggregate
+answers, because a mean over per-step histogram samples is not
+byte-weighted:
 
 .. code-block:: promql
 
-    # Byte-weighted aggregate throughput per phase (bytes/s):
-    rate(lmcache_mp_transfer_phase_bytes_total[1m])
-    / rate(lmcache_mp_transfer_phase_busy_time_seconds_total[1m])
+    # Byte-weighted aggregate DMA rate (bytes/s) -- staging only; the same
+    # ratio for phase="kernel" reports SM contention, not a transfer rate:
+    rate(lmcache_mp_transfer_phase_bytes_total{phase="staging"}[1m])
+    / rate(lmcache_mp_transfer_phase_elapsed_seconds_total{phase="staging"}[1m])
 
-    # Time share of each phase (busy seconds per wall-clock second).
-    # Both shares summing to well below 1 while each phase's throughput
-    # looks healthy means the time goes to per-step serialization, not to
-    # a slow phase:
-    rate(lmcache_mp_transfer_phase_busy_time_seconds_total[1m])
+    # Time share of each phase (stream seconds per wall-clock second):
+    rate(lmcache_mp_transfer_phase_elapsed_seconds_total[1m])
 
-    # Per-step p95 of the kernel phase:
+    # Per-step p95 of the staging phase:
     histogram_quantile(0.95,
-      sum by (le) (rate(lmcache_mp_transfer_kernel_throughput_GB_per_second_bucket[1m])))
+      sum by (le) (rate(lmcache_mp_transfer_staging_throughput_GB_per_second_bucket[1m])))
 
 .. note::
 

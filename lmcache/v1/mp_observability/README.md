@@ -22,45 +22,21 @@ Producers (L1Manager, StorageManager, MPCacheServer)
     ▼
 EventBus  (async queue + drain thread)
     │
-    ├──► TransferPhaseSampler             on MP_*_END: pops finished GPU phase
-    │                                     timings → MP_TRANSFER_PHASE_SAMPLES
-    │
-    │  metrics/  (metrics_enabled)          → OTel counters / histograms / gauges
-    ├──► L1MetricsSubscriber              L1 chunk counters
-    ├──► L1FailureMetricsSubscriber       L1 failure counters
-    ├──► L1LifecycleSubscriber            L1 chunk lifecycle (shadow map)
-    ├──► L1EvictionLoopSubscriber         L1 eviction loop counters
-    ├──► L2MetricsSubscriber              L2 adapter counters
-    ├──► L2FailureMetricsSubscriber       L2 failure counters
-    ├──► L2ThroughputSubscriber           L1<->L2 throughput histograms
-    ├──► L0LifecycleSubscriber            GPU (L0) block lifecycle (shadow map)
-    ├──► L0L1ThroughputSubscriber         L0<->L1 store/load throughput per request
-    ├──► MPTransferCountersSubscriber     submitted/finished GPU transfer counters
-    ├──► TransferPhaseMetricsSubscriber   gather kernel vs DMA throughput per step
-    ├──► SMLifecycleSubscriber            StorageManager real-reuse histograms
-    ├──► EngineMetricsSubscriber          MP server retrieve-path counters
-    ├──► LookupMetricsSubscriber          L1+L2 token-level hit rate
-    ├──► BlendMetricsSubscriber           CacheBlend server counters
-    ├──► TimeoutMetricsSubscriber         lmcache_mp.timeouts counter
-    ├──► EventBusSelfMetricsSubscriber    bus health (queue depth, drain lag,
-    │                                     drops, subscriber exceptions)
-    │
-    │  logging/  (logging_enabled)          → logger.debug(...) / warning
-    ├──► L1LoggingSubscriber
-    ├──► L2LoggingSubscriber
-    ├──► SMLoggingSubscriber
-    ├──► MPServerLoggingSubscriber
-    ├──► BlendLoggingSubscriber
-    ├──► TimeoutLoggingSubscriber
-    ├──► ExtraStatsLoggingSubscriber      opt-in periodic per-GPU L0<->L1 stats
-    │                                     (extra_logging_enabled)
-    ├──► LookupHashLoggingSubscriber      opt-in lookup hash file (output_dir)
-    │
-    │  tracing/  (tracing_enabled)          → OTel spans
-    ├──► MPServerTracingSubscriber        request / mp.store / mp.retrieve / ...
-    ├──► BlendTracingSubscriber           cb.request and children
-    ├──► TimeoutTracingSubscriber         timeout span with exception event
-    └──► TransferPhaseTracingSubscriber   transfer.kernel_interval / transfer.staging
+    ├──► L1MetricsSubscriber          → OTel counter.add(...)
+    ├──► SMMetricsSubscriber          → OTel counter.add(...)
+    ├──► TransferPhaseMetricsSubscriber → DMA staging throughput per step
+    ├──► TransferPhaseSampler         → on MP_*_END: pops finished GPU phase
+    │                                    timings → MP_TRANSFER_PHASE_SAMPLES
+    ├──► EventBusSelfMetricsSubscriber → OTel observable gauges/counters
+    │                                    (bus health: queue depth, drain
+    │                                    lag, drops, subscriber exceptions)
+    ├──► L1LoggingSubscriber          → logger.debug(...)
+    ├──► SMLoggingSubscriber          → logger.debug(...)
+    ├──► MPServerLoggingSubscriber    → logger.debug(...)
+    ├──► ExtraStatsLoggingSubscriber  → logger.info(...) (opt-in periodic
+    │                                    per-GPU L0<->L1 transfer stats)
+    ├──► MPServerTracingSubscriber    → OTel span start/end
+    └──► TransferPhaseTracingSubscriber → transfer phase child spans
                                           under mp.store / mp.retrieve
 
 OTel SDK  (configured at startup)
@@ -125,9 +101,9 @@ CLI, pass the flags below; when embedding programmatically, construct an
 
 Tracing is opt-in (`--enable-tracing`).  When enabled, `MPServerTracingSubscriber`
 creates OTel spans from MP server START/END event pairs (store, retrieve,
-lookup/prefetch), and `TransferPhaseTracingSubscriber` nests a gather-kernel /
-DMA breakdown of each transfer under its store/retrieve span (see
-`docs/source/mp/observability/traces.rst`).  Trace export requires an OTLP endpoint — there is no local
+lookup/prefetch), and ``TransferPhaseTracingSubscriber`` nests a per-phase
+breakdown of each transfer under its store/retrieve span (see
+``docs/source/mp/observability/traces.rst``).  Trace export requires an OTLP endpoint — there is no local
 fallback.  `--enable-tracing` **requires** `--otlp-endpoint`; the server will
 raise a `ValueError` at startup if the endpoint is missing.
 
