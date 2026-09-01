@@ -8,7 +8,7 @@ for all LMCache configuration systems to avoid code duplication.
 
 # Standard
 from dataclasses import make_dataclass
-from typing import Any, Callable, Dict, Optional, Protocol, Union
+from typing import Any, Callable, Dict, Optional, Protocol, Union, get_args
 import ast
 import json
 import os
@@ -25,8 +25,44 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
-def _apply_env_converter_safely(config_definitions, name, value):
-    """Apply env_converter to a value safely."""
+def _allows_none(config: Dict[str, Any]) -> bool:
+    """Check whether a config field's declared type permits None.
+
+    Args:
+        config: A single field definition from ``config_definitions``.
+
+    Returns:
+        True if the declared ``type`` is Optional (or not declared),
+        False otherwise.
+    """
+    declared_type = config.get("type")
+    if declared_type is None:
+        return True
+    return type(None) in get_args(declared_type)
+
+
+def _apply_env_converter_safely(
+    config_definitions: Dict[str, Any],
+    name: str,
+    value: Any,
+    use_default_on_error: bool = False,
+) -> Any:
+    """Apply env_converter to a value safely.
+
+    Args:
+        config_definitions: Mapping of field names to their definitions.
+        name: The configuration field name.
+        value: The raw value to convert.
+        use_default_on_error: If True, fall back to the field's default
+            (instead of None) when conversion fails, or when the value is
+            None but the field's declared type does not allow None. Used by
+            the config loading paths so a bad or empty value never replaces
+            the documented default.
+
+    Returns:
+        The converted value. On failure, the field's default if
+        ``use_default_on_error`` is True, otherwise None.
+    """
     if name not in config_definitions:
         return value
 
@@ -36,9 +72,32 @@ def _apply_env_converter_safely(config_definitions, name, value):
         try:
             # Don't apply converter if value is None
             if value is None:
+                default = config.get("default")
+                if (
+                    use_default_on_error
+                    and default is not None
+                    and not _allows_none(config)
+                ):
+                    logger.warning(
+                        "Config %s has a null value but is not nullable; "
+                        "using default %r",
+                        name,
+                        default,
+                    )
+                    return default
                 return None
             return env_converter(value)
         except (ValueError, json.JSONDecodeError) as e:
+            if use_default_on_error:
+                default = config.get("default")
+                logger.warning(
+                    "Failed to convert value for %s=%r: %s; using default %r",
+                    name,
+                    value,
+                    e,
+                    default,
+                )
+                return default
             log_message = f"Failed to convert value for {name}={value!r}: {e}"
             logger.warning(log_message)
             # Return None if conversion fails
@@ -290,7 +349,7 @@ def create_config_class(
                     value = _parse_quoted_string(raw_value)
                     # Apply env_converter safely
                     config_values[name] = _apply_env_converter_safely(
-                        config_definitions, name, value
+                        config_definitions, name, value, use_default_on_error=True
                     )
                     user_set_keys.add(name)  # Mark as user-set
                 except (ValueError, json.JSONDecodeError) as e:
@@ -339,7 +398,7 @@ def create_config_class(
                 value = config["default"]
             # Apply env_converter safely regardless of whether value is None or not
             config_values[name] = _apply_env_converter_safely(
-                config_definitions, name, value
+                config_definitions, name, value, use_default_on_error=True
             )
 
         instance = cls(**config_values)
