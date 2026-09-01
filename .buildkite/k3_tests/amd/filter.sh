@@ -9,13 +9,22 @@ _path_filter_amd_should_skip() {
     local changed_file="$1"
 
     case "$changed_file" in
-        tests/v1/platform/rocm/*|lmcache/v1/platform/rocm/*|.buildkite/k3_tests/amd/*)
+        .buildkite/k3_tests/amd/*|.buildkite/k3_tests/common_scripts/*)
+            return 1
+            ;;
+        .buildkite/k3_tests/*/*)
+            return 0
+            ;;
+        tests/v1/platform/rocm/*|lmcache/v1/platform/rocm/*)
             return 1
             ;;
         tests/v1/platform/*|lmcache/v1/platform/*)
-            # Keep generic platform roots as non-targets for the ROCm pipeline;
-            # only the ROCm subtree should trigger it.
-            return 0
+            # Direct files at either platform root are shared changes; nested
+            # non-ROCm platform paths are not relevant to this pipeline.
+            if [[ "$changed_file" == tests/v1/platform/*/* || "$changed_file" == lmcache/v1/platform/*/* ]]; then
+                return 0
+            fi
+            return 1
             ;;
         examples/*)
             # Example-only changes are not relevant to the ROCm pipeline.
