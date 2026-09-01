@@ -3,8 +3,9 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol, cast
 import enum
+import math
 import os
 import threading
 import uuid
@@ -19,6 +20,7 @@ from lmcache.integration.request_telemetry.factory import RequestTelemetryFactor
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
+from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -35,6 +37,11 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
+from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 if TYPE_CHECKING:
     # First Party
@@ -65,6 +72,11 @@ class ExtraConfigDefault(enum.Enum):
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
+    # Whether IPC mechanisms must work across isolated containers (no
+    # shared host IPC namespace or /dev/shm); see
+    # lmcache/v1/platform/isolated_ipc.py. Must match the LMCache server's
+    # ``--isolated-ipc`` setting.
+    isolated_ipc = False
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -78,6 +90,27 @@ _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
 # default 10 s heartbeat interval (3 x 10 s); the adapter warns at startup
 # when 3 x heartbeat_interval exceeds it (server timeout must be raised too).
 _SERVER_REAP_TIMEOUT_FLOOR_SECONDS: float = 30.0
+
+
+def _coerce_extra_config_value(default: Any, raw: Any) -> Any:
+    """Coerce a user-provided extra_config value to its default's type.
+
+    Args:
+        default: The :class:`ExtraConfigDefault` member value, defining the
+            target type.
+        raw: The user-provided value (typed when the connector config came
+            from JSON, a string when it came from a CLI passthrough).
+
+    Returns:
+        ``raw`` coerced to ``type(default)``. Booleans accept the usual
+        string spellings (``1/true/yes/on``, case-insensitive) because
+        ``bool("false")`` is ``True``.
+    """
+    if isinstance(default, bool):
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    return type(default)(raw)
 
 
 def _resolve_extra_config(
@@ -111,7 +144,7 @@ def _resolve_extra_config(
     for item in ExtraConfigDefault:
         default = item.value
         raw = stripped.get(item.name)
-        value = type(default)(raw) if raw is not None else default
+        value = _coerce_extra_config_value(default, raw) if raw is not None else default
         if value != default:
             logger.info(
                 "%s%s = %s (overridden, default: %s)",
@@ -132,8 +165,6 @@ def _resolve_extra_config(
 
 
 class _IpcEvent(Protocol):
-    def ipc_handle(self) -> Any: ...
-
     def wait(self, stream: Any = None) -> None: ...
 
 
@@ -286,15 +317,19 @@ class ParallelStrategy:
     n_servers: int
     """Number of LMCache servers backing this deployment"""
 
+    dcp_size: int = 1
+    """Decode-context-parallel size: each chunk's KV is split into
+    ``dcp_size`` token shards instead of one replicated copy."""
+
     @property
     def kv_world_size(self) -> int:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.mla_only:
-            # In this PR we do not support PP + TP + MLA in multi-server mode.
-            # A precondition check enforces pp_size == 1, so kv_world_size for
-            # MLA can be derived as world_size / tp_size.
-            return self.vllm_world_size // self.tp_size
+            # MLA replicates KV across TP; distinct bytes exist only per
+            # pipeline stage and per DCP token shard.
+            pp_stages = self.vllm_world_size // self.tp_size
+            return pp_stages * self.dcp_size
         return self.vllm_world_size // self.n_servers
 
     @property
@@ -303,8 +338,28 @@ class ParallelStrategy:
         that the current worker is responsible for,
         in ``[0, kv_world_size)``."""
         if self.mla_only:
-            return self.vllm_worker_id // self.tp_size
+            # Row-major over (pipeline stage, token shard).
+            pp_stage = self.vllm_worker_id // self.tp_size
+            return pp_stage * self.dcp_size + self._get_dcp_rank()
         return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
+
+    def _get_dcp_rank(self) -> int:
+        """Token shard index in ``[0, dcp_size)``: vLLM builds DCP groups as
+        contiguous runs within each TP group, so ``tp_rank % dcp_size``."""
+        return (self.vllm_worker_id % self.tp_size) % self.dcp_size
+
+    @property
+    def num_kv_readers(self) -> int:
+        """Number of workers that retrieve one stored object.
+
+        Non-MLA: 1. MLA: the same-shard TP ranks of one stage on one
+        server, ``ceil(kv_tp_size / dcp_size)`` -- rounded up so an uneven
+        split never under-reserves (the server takes one read lock per
+        declared reader).
+        """
+        if not self.mla_only:
+            return 1
+        return math.ceil(self.kv_tp_size / self.dcp_size)
 
     @property
     def kv_tp_size(self) -> int:
@@ -316,6 +371,13 @@ class ParallelStrategy:
         """Whether this rank is responsible for storing KV."""
         if not self.mla_only:
             return True
+        if self.dcp_size > 1:
+            # One writer per token shard within every server and every
+            # pipeline stage; both are contiguous rank runs, so the first
+            # dcp_size ranks of the smaller run cover each shard once.
+            ranks_per_server = self.vllm_world_size // self.n_servers
+            block = min(ranks_per_server, self.tp_size)
+            return (self.vllm_worker_id % block) < self.dcp_size
         # MLA-only: only first rank per node is a writer.
         return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
 
@@ -613,9 +675,13 @@ class LMCacheMPSchedulerAdapter:
             )
         self.lmcache_tokens_per_chunk = unique_sizes.pop()
 
-        assert self.lmcache_tokens_per_chunk % vllm_block_size == 0, (
-            "LMCache chunk size should be a multiple of vLLM block size"
-        )
+        if self.lmcache_tokens_per_chunk % vllm_block_size != 0:
+            raise ValueError(
+                f"LMCache chunk size {self.lmcache_tokens_per_chunk} must be a "
+                f"multiple of {vllm_block_size} (the vLLM block size scaled by "
+                f"decode_context_parallel_size). Set --chunk-size to a multiple "
+                f"of {vllm_block_size}."
+            )
         self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state: one Event per server. The adapter is considered healthy
@@ -1000,6 +1066,7 @@ class LMCacheMPSchedulerAdapter:
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
         return IPCCacheServerKey(
+            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -1088,6 +1155,7 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
+            set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
         else:
             self._mp_transfer_mode = None
         self.mq_client = MessageQueueClient(server_url, context)
@@ -1104,7 +1172,12 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self._layout_hints: "LayoutHints | None" = None
         self.engine_group_infos: list[EngineGroupInfo] = []
+        # KV-cache device and event backend, resolved once at registration
+        # so per-request event creation stays off the lookup path.
+        self._kv_device: torch.device | None = None
+        self._event_ipc_backend: EventIPCBackend | None = None
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -1149,9 +1222,13 @@ class LMCacheMPWorkerAdapter:
             self.mq_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
-        assert lmcache_tokens_per_chunk % vllm_block_size == 0, (
-            "LMCache chunk size should be a multiple of vLLM block size"
-        )
+        if lmcache_tokens_per_chunk % vllm_block_size != 0:
+            raise ValueError(
+                f"LMCache chunk size {lmcache_tokens_per_chunk} must be a "
+                f"multiple of {vllm_block_size} (the vLLM block size scaled by "
+                f"decode_context_parallel_size). Set --chunk-size to a multiple "
+                f"of {vllm_block_size}."
+            )
         self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
         # Experimental intermediate tensor transfer
@@ -1236,6 +1313,7 @@ class LMCacheMPWorkerAdapter:
         self,
         kv_caches: dict[str, torch.Tensor],
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        layout_hints: "LayoutHints | None" = None,
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -1244,6 +1322,8 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
+            layout_hints: Engine layout hints forwarded to the server; built
+                here from the ambient vLLM config when not provided.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -1265,6 +1345,10 @@ class LMCacheMPWorkerAdapter:
                 )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
+        # Reused when heartbeat recovery re-registers.
+        self._layout_hints = (
+            layout_hints if layout_hints is not None else vllm_layout_hints()
+        )
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
@@ -1287,8 +1371,10 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
+        self._kv_device = get_device(next(iter(kv_caches.values())))
+        self._event_ipc_backend = get_event_ipc_backend(self._kv_device)
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
-        layout_hints = vllm_layout_hints()
+        layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
         try:
             # Register on the local, not self.transfer_ctx: a concurrent
@@ -1394,6 +1480,25 @@ class LMCacheMPWorkerAdapter:
                 return False
 
         return True
+
+    def create_recorded_event(self) -> _IpcEvent:
+        """Create an IPC event recorded on the current stream with configured backend.
+
+        Returns:
+            An event recorded on the current stream, ready for
+            ``submit_store_request`` / ``submit_retrieve_request``.
+
+        Raises:
+            RuntimeError: If called before ``register_kv_caches()``.
+        """
+        if self._kv_device is None or self._event_ipc_backend is None:
+            raise RuntimeError(
+                "KV caches are not registered. Call register_kv_caches() "
+                "before creating transfer events."
+            )
+        event = self._event_ipc_backend.create_event(self._kv_device)
+        self._event_ipc_backend.record_event(event, torch_dev.current_stream())
+        return cast(_IpcEvent, event)
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
@@ -1652,7 +1757,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
@@ -1660,6 +1765,7 @@ class LMCacheMPWorkerAdapter:
             finished_retrieves.add(request_id)
 
             if not r_result:
+                self.error_block_ids.update(r_block_ids)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -1772,7 +1878,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
@@ -1780,6 +1886,7 @@ class LMCacheMPWorkerAdapter:
             finished_retrieves.add(request_id)
 
             if not r_result:
+                self.error_block_ids.update(r_block_ids)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -1938,6 +2045,7 @@ class LMCacheMPWorkerAdapter:
             IPCCacheServerKey: The constructed key.
         """
         return IPCCacheServerKey(
+            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,

@@ -7,6 +7,7 @@ persist, secondary lookup, and capacity management.
 """
 
 # Standard
+import inspect
 import os
 import select
 import shutil
@@ -26,11 +27,17 @@ from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L2AdapterListener,
 )
 from lmcache.v1.distributed.l2_adapters.config import PersistConfig  # noqa: E402
-from lmcache.v1.distributed.l2_adapters.nixl_store_dynamic_l2_adapter import (  # noqa: E402
-    DynamicNixlStoreL2Adapter,
-    DynamicNixlStoreL2AdapterConfig,
+from lmcache.v1.distributed.l2_adapters.nixl_store_agents.dynamic_nixl_store_agent import (  # noqa: E402, E501
+    DynamicNixlStorageAgent,
     _object_key_to_filename,
     _object_key_to_relpath,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_store_agents.file_dynamic_nixl_store_agent import (  # noqa: E402, E501
+    FileDynamicNixlStorageAgent,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_store_dynamic_l2_adapter import (  # noqa: E402, E501
+    DynamicNixlStoreL2Adapter,
+    DynamicNixlStoreL2AdapterConfig,
 )
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
@@ -45,18 +52,18 @@ _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 class _RecordingListener(L2AdapterListener):
     """Listener that records all events for inspection in tests."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.stored: list[list[ObjectKey]] = []
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         self.stored.append(list(keys))
 
-    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
         self.accessed.append(list(keys))
 
-    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
         self.deleted.append(list(keys))
 
 
@@ -79,6 +86,49 @@ if torch_device_type == "xpu":
         ),
         allow_module_level=True,
     )
+
+
+def test_dynamic_nixl_storage_agent_is_abstract() -> None:
+    """The backend-neutral storage agent must only be used via a subclass."""
+    assert inspect.isabstract(DynamicNixlStorageAgent)
+    assert issubclass(FileDynamicNixlStorageAgent, DynamicNixlStorageAgent)
+    assert not inspect.isabstract(FileDynamicNixlStorageAgent)
+
+
+def test_file_agent_creates_directory_before_nixl_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory creation failure must not initialize NIXL resources."""
+    base_initialized = False
+
+    def fake_base_init(
+        self: DynamicNixlStorageAgent,
+        device: str,
+        backend: str,
+        backend_params: dict[str, str],
+        l1_memory_desc: L1MemoryDesc,
+    ) -> None:
+        del self, device, backend, backend_params, l1_memory_desc
+        nonlocal base_initialized
+        base_initialized = True
+
+    def raise_permission_error(path: str, exist_ok: bool) -> None:
+        del path, exist_ok
+        raise PermissionError("cannot create storage directory")
+
+    monkeypatch.setattr(DynamicNixlStorageAgent, "__init__", fake_base_init)
+    monkeypatch.setattr(os, "makedirs", raise_permission_error)
+
+    with pytest.raises(PermissionError, match="cannot create storage directory"):
+        FileDynamicNixlStorageAgent(
+            device="cpu",
+            backend="POSIX",
+            backend_params={"file_path": "/unwritable", "use_direct_io": "false"},
+            l1_memory_desc=L1MemoryDesc(ptr=0, size=0, align_bytes=1),
+        )
+
+    assert not base_initialized
+
 
 # =============================================================================
 # Test Helpers
@@ -203,6 +253,32 @@ def adapter_with_persist():
     yield adpt, buffer, tmp_dir, l1_memory, config
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# =============================================================================
+# Dynamic Storage Agent Tests
+# =============================================================================
+
+
+class TestDynamicStorageAgent:
+    """Tests for storage-agent selection and common agent behavior."""
+
+    def test_file_backend_creates_file_storage_agent(self, adapter) -> None:
+        """A file backend selects the file-specific storage agent."""
+        adpt, _, _ = adapter
+
+        assert isinstance(adpt.nixl_agent, FileDynamicNixlStorageAgent)
+
+    def test_storage_agent_calculates_and_validates_page_indices(self, adapter) -> None:
+        """The shared agent validates ranges and returns their page indices."""
+        adpt, _, _ = adapter
+
+        assert adpt.nixl_agent.get_memory_indices(PAGE_SIZE, PAGE_SIZE * 2) == [1, 2]
+
+        with pytest.raises(ValueError, match="not aligned"):
+            adpt.nixl_agent.get_memory_indices(PAGE_SIZE + 1, PAGE_SIZE)
+        with pytest.raises(ValueError, match="not a multiple"):
+            adpt.nixl_agent.get_memory_indices(PAGE_SIZE, PAGE_SIZE + 1)
 
 
 # =============================================================================

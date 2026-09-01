@@ -12,6 +12,7 @@ import os
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
@@ -161,25 +162,35 @@ class L1MemoryManagerConfig:
 
 @dataclass
 class GdsL1Config:
-    """Configuration for the GDS slab-file L1 tier.
+    """Configuration for the GDS L1 tier.
 
     When present on :class:`L1ManagerConfig`, the L1 medium becomes an NVMe
-    slab file accessed via GPUDirect Storage DMA (cuFile on NVIDIA, hipFile on
-    AMD ROCm) instead of pinned DRAM (mutually exclusive with the pinned-DRAM
-    tier in ``memory_config``). Carries the slab location, capacity, and DMA
-    mode.
+    slab accessed via GPUDirect Storage DMA instead of pinned DRAM (mutually
+    exclusive with the pinned-DRAM tier in ``memory_config``). cuFile and
+    hipFile use a filesystem slab; uGDS uses a raw device. Phoenix uses a
+    filesystem slab on any VFS-mounted storage: local NVMe for the DMA fast
+    path, NFS / NVMe-oF mounts with degraded (non-DMA) performance. Carries
+    the slab location, capacity, backend, and DMA mode.
     """
 
     file_location: str
-    """Directory for the slab file (one shared slab per process, used by all
-    GPU instances)."""
+    """Directory for a cuFile/hipFile/phx slab, or an ``ugds_drv``
+    character-device path for uGDS."""
 
     size_in_bytes: int
-    """Slab capacity in bytes (from ``--l1-size-gb``). Sizes both the
-    preallocated slab file and the GDS tier's address space."""
+    """Slab capacity in bytes (from ``--l1-size-gb``). For uGDS, this reserves
+    the corresponding leading range of the dedicated raw character device and
+    must not exceed its reported namespace capacity."""
 
     use_direct_io: bool = True
-    """Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path)."""
+    """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""
+
+    backend: Literal["auto", "cufile", "hipfile", "ugds", "phx"] = "auto"
+    """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on
+    ROCm; ``ugds`` can be used on either platform with a matching
+    ``libugds.so`` and treats ``file_location`` as a character-device path;
+    ``phx`` uses the Phoenix phxfs DMA path with a filesystem slab and a
+    matching ``libphoenix.so``."""
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
@@ -203,6 +214,52 @@ class L1ManagerConfig:
 
     read_ttl_seconds: int = field(default=300)
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
+
+
+def get_configured_capacity_bytes(
+    config: L1ManagerConfig,
+) -> dict[L1BackendType, int]:
+    """Return the configured L1 capacity of each backing medium.
+
+    The single source for "how large is L1". Unlike
+    ``L1Manager.get_memory_usage()``, whose total is the grown heap on the
+    lazy tier, this is stable from boot. Keyed per medium because a hybrid
+    Device-DAX tier spans two, matching how L1 events tag placements.
+    Reports the *configured* topology, so devices added later via
+    ``add_device`` are not counted.
+
+    Expects a **normalized** config: ``normalize_storage_manager_config``
+    back-fills ``devdax_size_in_bytes`` from a matching DAX L2 adapter,
+    without which a hybrid deployment reads as pure Device-DAX. A config
+    from a constructed ``StorageManagerConfig`` satisfies this already.
+
+    Args:
+        config: The L1 manager configuration.
+
+    Returns:
+        Configured bytes per medium, omitting any sized zero.
+    """
+    if config.gds_l1_config is not None:
+        size = config.gds_l1_config.size_in_bytes
+        return {L1BackendType.GDS: size} if size > 0 else {}
+
+    memory_config = config.memory_config
+    if memory_config.devdax_path:
+        # Mirrors DevDaxL1MemoryManager.__init__: an unset devdax size means
+        # the whole tier is Device-DAX, else size_in_bytes is the DRAM half.
+        devdax_size = memory_config.devdax_size_in_bytes or memory_config.size_in_bytes
+        local_size = (
+            memory_config.size_in_bytes if memory_config.devdax_size_in_bytes else 0
+        )
+        capacities: dict[L1BackendType, int] = {}
+        if devdax_size > 0:
+            capacities[L1BackendType.DEVDAX] = devdax_size
+        if local_size > 0:
+            capacities[L1BackendType.DRAM] = local_size
+        return capacities
+
+    size = memory_config.size_in_bytes
+    return {L1BackendType.DRAM: size} if size > 0 else {}
 
 
 @dataclass
@@ -408,17 +465,18 @@ def add_storage_manager_args(
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
     gds_group = parser.add_argument_group(
         "GDS L1 tier",
-        "Configuration for the GDS slab-file L1 tier. Setting --gds-l1-path "
-        "makes the L1 medium an NVMe slab accessed via GPUDirect Storage DMA "
-        "(cuFile on NVIDIA, hipFile on AMD ROCm) instead of pinned DRAM; "
-        "--l1-size-gb then sizes the slab. Disable byte-array L2 adapters when "
-        "this is on.",
+        "Configuration for the GDS L1 tier. Setting --gds-l1-path makes the "
+        "L1 medium an NVMe slab accessed via GPUDirect Storage DMA instead of "
+        "pinned DRAM; --l1-size-gb then sizes the slab. cuFile, hipFile, and "
+        "phx use a slab file, while uGDS uses a dedicated raw device. "
+        "Disable byte-array L2 adapters when this is on.",
     )
     gds_group.add_argument(
         "--gds-l1-path",
         type=str,
         default=None,
-        help="NVMe directory path for the GDS L1 slab. Setting this enables GDS L1.",
+        help="NVMe directory for cuFile/hipFile/phx, or /dev/ugds_drvX for "
+        "uGDS. Setting this enables GDS L1.",
     )
     gds_group.add_argument(
         "--gds-l1-use-direct-io",
@@ -426,6 +484,15 @@ def add_storage_manager_args(
         default=True,
         help="Open the slab file with O_DIRECT (required for the GDS DMA fast "
         "path on ext4). Default True.",
+    )
+    gds_group.add_argument(
+        "--gds-l1-backend",
+        choices=("auto", "cufile", "hipfile", "ugds", "phx"),
+        default="auto",
+        help="GDS implementation. auto selects cuFile on CUDA or hipFile on ROCm; "
+        "ugds can be used on either platform with a matching libugds.so and "
+        "treats --gds-l1-path as /dev/ugds_drvX; phx uses the Phoenix phxfs "
+        "DMA path with a matching libphoenix.so.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
@@ -581,6 +648,7 @@ def parse_args_to_config(
             file_location=args.gds_l1_path,
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
             use_direct_io=args.gds_l1_use_direct_io,
+            backend=args.gds_l1_backend,
         )
 
     l1_manager_config = L1ManagerConfig(

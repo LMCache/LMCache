@@ -220,7 +220,95 @@ count_retrieves() {
     grep -c "Retrieved" "$LMCACHE_LOG" 2>/dev/null || true
 }
 
-# ── 0. Provision DeepGEMM (SM120 only) ──────────────────────
+# ── 0a. Probe the ambient vLLM, downgrade only if it is broken ──
+# The 0.28.1rc1 nightlies break DeepSeek-V4-Flash sparse decode on SM120
+# ("eidx must be contiguous", flashinfer _sparse_mla_sm120) during engine
+# start. That is a pure-vLLM fault -- it reproduces with no connector
+# configured -- so probe for it instead of hardcoding "nightlies are bad":
+# boot vLLM alone with dummy weights and see whether the engine comes up.
+# Healthy keeps the ambient (nightly) vLLM, so this test returns to nightly
+# coverage on its own once upstream fixes the kernel, with no code change.
+# Broken installs the last release that passes. Same torch (2.13.0+cu130)
+# either way, so the LMCache native build stays valid.
+#
+# Dummy weights keep the probe cheap: the crash is a stride/contiguity check
+# in the warmup decode, which runs regardless of weight *values*. Every
+# ambiguous outcome (timeout, launch failure) is treated as broken, since
+# falling back to the pinned version still produces a valid test run.
+DSV4_FALLBACK_VLLM_VERSION="${DSV4_FALLBACK_VLLM_VERSION-0.27.1}"
+DSV4_PROBE_PORT="${DSV4_PROBE_PORT:-8971}"
+DSV4_PROBE_TIMEOUT="${DSV4_PROBE_TIMEOUT:-900}"
+
+# Wait for every process in $1's process group to disappear, so the probe
+# cannot leave workers holding GPU memory when the real run starts.
+wait_for_pgid_exit() {
+    local pgid="$1" deadline=$((SECONDS + 120))
+    [ -n "$pgid" ] || return 0
+    kill -TERM -"$pgid" 2>/dev/null || true
+    while kill -0 -"$pgid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            kill -KILL -"$pgid" 2>/dev/null || true
+            break
+        fi
+        sleep 2
+    done
+    sleep 10  # let the driver release device memory
+}
+
+# Boot vLLM alone (no LMCache connector) on dummy weights.
+# Returns 0 if the engine serves, 1 if it crashes / never comes up.
+probe_ambient_vllm() {
+    local probe_log="$TP_DIR/vllm_probe.log"
+    echo "=== Probing ambient vLLM $(python3 -c 'import vllm; print(vllm.__version__)') ==="
+    echo "Probe log: $probe_log"
+    # Model-shaping flags mirror the real launch below (they select the
+    # kernels); the connector, prefix caching and dev mode are omitted.
+    setsid env -u VLLM_PORT vllm serve "$MODEL" \
+        --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
+        --enable-expert-parallel \
+        --kv-cache-dtype fp8_ds_mla \
+        --tokenizer-mode deepseek_v4 \
+        --trust-remote-code \
+        --enforce-eager \
+        --load-format dummy \
+        --max-model-len auto \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --port "$DSV4_PROBE_PORT" \
+        > "$probe_log" 2>&1 &
+    local probe_pid=$! probe_pgid rc=1 verdict="timed out after ${DSV4_PROBE_TIMEOUT}s"
+    probe_pgid="$(ps -o pgid= -p "$probe_pid" | tr -d ' ')"
+    echo "$probe_pid" >> "$PID_FILE"
+
+    local deadline=$((SECONDS + DSV4_PROBE_TIMEOUT))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if curl -sf "http://localhost:${DSV4_PROBE_PORT}/v1/models" >/dev/null 2>&1; then
+            rc=0 verdict="serves"
+            break
+        fi
+        if ! kill -0 "$probe_pid" 2>/dev/null; then
+            verdict="died during startup"
+            tail -n 25 "$probe_log"
+            break
+        fi
+        sleep 5
+    done
+    echo "Probe verdict: ambient vLLM ${verdict}."
+
+    wait_for_pgid_exit "$probe_pgid"
+    return "$rc"
+}
+
+if [ -z "$DSV4_FALLBACK_VLLM_VERSION" ]; then
+    echo "=== DSV4_FALLBACK_VLLM_VERSION empty: using ambient vLLM unprobed ==="
+elif ! probe_ambient_vllm; then
+    echo "=== Installing vLLM ${DSV4_FALLBACK_VLLM_VERSION} for this test ==="
+    uv pip install "vllm[runai,tensorizer,flashinfer]==${DSV4_FALLBACK_VLLM_VERSION}" \
+        --extra-index-url https://download.pytorch.org/whl/cu130 \
+        --index-strategy unsafe-best-match
+    python3 -c "import vllm; print('vLLM for this test:', vllm.__version__)"
+fi
+
+# ── 0b. Provision DeepGEMM (SM120 only) ──────────────────────
 # vLLM's _import_deep_gemm() prefers a `deep_gemm` in site-packages over the
 # copy bundled in the wheel, so installing one overrides the arch-incomplete
 # bundled build without rebuilding vLLM. Build steps mirror vLLM's own

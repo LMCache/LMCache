@@ -27,6 +27,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 
 
 class FakeCudaEvent:
@@ -234,6 +235,28 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     assert len(args[2]) == 1
 
 
+def test_register_kv_caches_tuple_caches_extract_device(fake_adapter, monkeypatch):
+    """Per-layer (K, V) tuple caches register and yield the tensor device."""
+    adapter, send_mock, _ = fake_adapter
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.vllm_layout_hints",
+        lambda: {},
+        raising=False,
+    )
+    # NL_X_TWO_X_NB_BS_NH_HS layout: [NB, BS, NH, HS] per plane.
+    k = torch.randn(2, 8, 4, 8)
+    v = torch.randn(2, 8, 4, 8)
+    tuple_kv = {"layer.0": (k, v), "layer.1": (k, v)}
+
+    adapter.register_kv_caches(tuple_kv)
+
+    assert adapter._kv_device == k.device
+    assert adapter.kv_caches is tuple_kv
+    assert send_mock.call_count == 1
+    args, _kwargs = send_mock.call_args
+    assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+
+
 def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     """submit_store_request stores the returned future in store_futures."""
     adapter, _send_mock, _ = fake_adapter
@@ -325,6 +348,75 @@ def test_load_store_op_accepts_per_group_block_ids():
     assert op.flat_block_ids == [0, 1, 10, 11]
 
 
+@pytest.fixture
+def restore_isolated_ipc():
+    """Restore the process-global isolated-IPC switch after the test."""
+    previous = is_isolated_ipc()
+    yield
+    set_isolated_ipc(previous)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(False, False), (True, True), ("false", False), ("true", True)],
+)
+def test_isolated_ipc_extra_config_sets_process_switch(
+    fake_adapter, restore_isolated_ipc, raw, expected
+):
+    """The lmcache.mp.isolated_ipc key drives the process-global switch,
+    accepting both JSON booleans and their string spellings."""
+    _make_worker_adapter(extra_config={"lmcache.mp.isolated_ipc": raw})
+    assert is_isolated_ipc() is expected
+
+
+def test_isolated_ipc_untouched_without_extra_config(
+    fake_adapter, restore_isolated_ipc
+):
+    """Legacy callers passing no extra_config leave the process switch alone."""
+    set_isolated_ipc(True)
+    _make_worker_adapter(extra_config=None)
+    assert is_isolated_ipc() is True
+
+
+def test_create_recorded_event_routes_through_backend(fake_adapter, monkeypatch):
+    """create_recorded_event uses the backend resolved once at registration."""
+    adapter, _send_mock, _future = fake_adapter
+    _patch_transfer_context_factory(monkeypatch)
+    kv = torch.zeros(1)
+
+    backend = MagicMock(name="event_backend")
+    created_event = MagicMock(name="event")
+    backend.create_event.return_value = created_event
+    resolve_calls: list[object] = []
+
+    def fake_get_backend(device: object) -> MagicMock:
+        resolve_calls.append(device)
+        return backend
+
+    monkeypatch.setattr(adapter_mod, "get_event_ipc_backend", fake_get_backend)
+    current_stream = MagicMock(name="current_stream")
+    fake_torch_dev = MagicMock(name="torch_dev")
+    fake_torch_dev.current_stream.return_value = current_stream
+    monkeypatch.setattr(adapter_mod, "torch_dev", fake_torch_dev)
+
+    adapter.register_kv_caches({"layer.0": kv})
+    event = adapter.create_recorded_event()
+    adapter.create_recorded_event()
+
+    assert event is created_event
+    # Backend lookup happens once at registration, not per event.
+    assert resolve_calls == [kv.device]
+    backend.create_event.assert_called_with(kv.device)
+    assert backend.create_event.call_count == 2
+    backend.record_event.assert_called_with(created_event, current_stream)
+
+
+def test_create_recorded_event_before_registration_raises(fake_adapter):
+    adapter, _send_mock, _future = fake_adapter
+    with pytest.raises(RuntimeError, match="register_kv_caches"):
+        adapter.create_recorded_event()
+
+
 def test_store_keeps_event_until_future_finishes(fake_adapter):
     """Store requests keep the exported CUDA event alive while pending."""
     adapter, _send_mock, _future = fake_adapter
@@ -383,6 +475,93 @@ def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
     transfer_ctx.reset_mock()
     gc.collect()
     assert event_ref() is None
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_failed_retrieve_marks_blocks_for_recompute(
+    fake_adapter,
+    lazy_offload: bool,
+) -> None:
+    """A terminal False retrieve never exposes unloaded KV to vLLM."""
+    adapter, _send_mock, _future = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    retrieve_future = MagicMock(name="retrieve_future")
+    retrieve_future.query.return_value = True
+    retrieve_future.result.return_value = False
+    adapter.retrieve_futures["req-1"] = (retrieve_future, [7, 8])
+
+    if lazy_offload:
+        finished_stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+        assert finished_stores is None
+    else:
+        finished_stores, finished_retrieves = adapter.get_finished(set())
+        assert finished_stores == set()
+
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == {7, 8}
+    assert "req-1" not in adapter.retrieve_futures
+
+
+def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> None:
+    """A failed full async load must not re-enter remote wait forever."""
+    pytest.importorskip("vllm")
+
+    # Third Party
+    from vllm.v1.request import RequestStatus
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
+        LMCacheMPRequestState,
+        LMCacheMPRequestTracker,
+    )
+
+    class _Request:
+        def __init__(self) -> None:
+            self.request_id = "req-1"
+            self.status = RequestStatus.WAITING
+            self.num_computed_tokens = 0
+            self.num_preemptions = 0
+            self.cache_salt = ""
+            self.prompt_token_ids = [1, 2, 3, 4]
+            self.all_token_ids = [1, 2, 3, 4]
+            self.mm_features: list[object] = []
+
+    request = _Request()
+    tracker = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
+    tracker.state = LMCacheMPRequestState.READY
+    tracker.num_lmcache_hit_tokens = 4
+    tracker.num_stored_tokens = 4
+    tracker.allocated_block_ids = {0: [7]}
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {request.request_id: tracker}
+    connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
+
+    matched_tokens, load_async = connector.get_num_new_matched_tokens(
+        request,
+        num_computed_tokens=0,  # type: ignore[arg-type]
+    )
+    second_result = connector.get_num_new_matched_tokens(
+        request,
+        num_computed_tokens=0,  # type: ignore[arg-type]
+    )
+
+    assert (matched_tokens, load_async) == (0, False)
+    assert second_result == (0, False)
+    connector.scheduler_adapter.maybe_submit_lookup_request.assert_not_called()
+    connector.scheduler_adapter.free_lookup_locks.assert_not_called()
+    connector.scheduler_adapter.cleanup_lookup_result.assert_called_once_with("req-1")
+    assert tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE
+    assert tracker.allocated_block_ids == {}
+    assert tracker.num_stored_tokens == 0
+    assert tracker.num_vllm_hit_tokens == 0
+    assert tracker.num_lmcache_hit_tokens == 0
+
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ([7],)
+    connector.update_state_after_alloc(request, blocks, num_external_tokens=0)
+    assert tracker.state == LMCacheMPRequestState.READY
 
 
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:

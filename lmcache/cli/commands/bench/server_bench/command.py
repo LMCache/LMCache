@@ -32,17 +32,22 @@ Usage examples::
 from __future__ import annotations
 
 # Standard
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import argparse
 import itertools
 import math
-import mmap
 import os
 import sys
 import time
 
 # First Party
-from lmcache import torch_dev
+from lmcache.cli.commands.bench.server_bench.client import (
+    LookupResult,
+    ServerBenchClient,
+    TransferResult,
+)
+from lmcache.cli.commands.bench.server_bench.config import parse_args_to_config
 
 # Heavy imports reused by the orchestrator. ``DTYPE_MAP`` is required
 # for the ``--kvcache-shape-spec`` help string at parser-registration
@@ -51,18 +56,8 @@ from lmcache import torch_dev
 # orchestration safe.
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
-    _INSTANCE_ID_BASE,
     DTYPE_MAP,
-    WorkerContext,
-    _allocate_cpu_shm_kv_cache,
-    _allocate_gpu_kv_cache,
-    _get_chunk_size,
-    _is_mla_kv_size,
-    _process_request,
     _require_full_install,
-    _send_register_kv_cache,
-    _send_unregister_kv_cache,
-    shm_open_pool_as_mmap,
 )
 
 if TYPE_CHECKING:
@@ -72,7 +67,6 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
     from lmcache.cli.profiling import FlameProfiler
-    from lmcache.v1.multiprocess.custom_types import KVCache
 
 
 # Stash the original (full-install) ImportError so the parser-stub
@@ -81,6 +75,16 @@ __all__ = (
     "add_server_arguments",
     "run_server_bench",
 )
+
+
+@dataclass
+class _RequestPassResult:
+    """Results for one baseline pass."""
+
+    lookup: LookupResult
+    checksums: list[str] | None = None
+    retrieve: TransferResult | None = None
+    store: TransferResult | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -376,46 +380,12 @@ def run_server_bench(
         args: Parsed CLI arguments for ``lmcache bench server``.
     """
     _require_full_install()
-
-    # Heavy imports — safe now that _require_full_install passed.
-    # Third Party
-    import zmq
-
-    # First Party
-    from lmcache.v1.kv_layer_groups import (
-        format_kvcache_shape_spec,
-        parse_kvcache_shape_spec,
-    )
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
-
-    quiet = getattr(args, "quiet", False)
+    config = parse_args_to_config(args)
 
     def log(msg: str) -> None:
         """Print progress messages; suppressed by --quiet."""
-        if not quiet:
+        if not config.quiet:
             print(msg)
-
-    use_gpu = args.mode == "gpu"
-    if use_gpu and not torch_dev.is_available():
-        print("ERROR: --mode gpu requires CUDA")
-        sys.exit(1)
-
-    # Resolve transfer mode. ``auto`` reproduces the historical
-    # behaviour: gpu -> lmcache_driven path, cpu -> engine_driven path.
-    # ``lmcache_driven`` / ``engine_driven`` are explicit overrides.
-    transfer_mode = getattr(args, "transfer_mode", "auto")
-    if transfer_mode == "auto":
-        use_handle = use_gpu
-    elif transfer_mode == "lmcache_driven":
-        use_handle = True
-    else:
-        use_handle = False
-    if use_handle and not use_gpu:
-        log(
-            "  [info] --transfer-mode=lmcache_driven on cpu mode: "
-            "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
-        )
 
     # The profiler targets the server process (--profile-server-pid), not
     # this benchmark client. Build it before opening any connection so a
@@ -434,330 +404,37 @@ def run_server_bench(
     warm_lookup_ms: list[float] = []
     warm_retrieve_ms: list[float] = []
 
-    url = args.rpc_url
-    log(
-        "Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, args.mode),
-    )
-
-    ctx = zmq.Context()
-    client = MessageQueueClient(url, ctx)
-
-    # Tracks whether REGISTER_KV_CACHE succeeded so the ``finally`` block
-    # only deregisters a context that was actually registered.
-    registered = False
-
+    bench_client = ServerBenchClient(config, log)
     try:
-        # Query chunk size from server
-        chunk_size = _get_chunk_size(client)
-        log("Server chunk_size = %d" % chunk_size)
-
-        # Parse KV shape spec
-        layer_groups = parse_kvcache_shape_spec(args.kvcache_shape_spec)
-        # One block-id list is sent per LMCache KV group; each shape-spec
-        # group becomes its own group server-side.
-        num_engine_group_infos = len(layer_groups) or 1
-        # Echo the resolved spec so operators can verify that their
-        # input was interpreted as intended. The echoed string is a
-        # valid ``--kvcache-shape-spec`` itself.
-        log(
-            "Resolved KV shape spec: %s" % format_kvcache_shape_spec(layer_groups),
-        )
-        # Paged KV demands identical ``NB`` / ``BS`` across all groups
-        # (block_id -> slot maths is shared), but ``kv_size`` / ``NH`` /
-        # ``HS`` / ``dtype`` may vary per group. ``_allocate_gpu_kv_cache(
-        # groups=...)`` honours each group's own shape; ``_process_request``
-        # only needs a single ``block_size`` / ``total_blocks``.
-        first = layer_groups[0]
-        nb_vals = {g.shape_desc.nb for g in layer_groups}
-        bs_vals = {g.shape_desc.bs for g in layer_groups}
-        if len(nb_vals) > 1 or len(bs_vals) > 1:
-            raise ValueError(
-                "All groups must share NB and BS (paged KV "
-                "requires uniform block geometry). Got NB=%s BS=%s"
-                % (sorted(nb_vals), sorted(bs_vals))
-            )
-        num_layers = sum(g.num_layers for g in layer_groups)
-        spec_nb = getattr(first.shape_desc, "nb", 0) or 0
-        spec_bs = getattr(first.shape_desc, "bs", 0) or 0
-        num_blocks = spec_nb if spec_nb > 0 else args.num_blocks
-        block_size = spec_bs if spec_bs > 0 else args.block_size
-        if spec_nb and spec_nb != args.num_blocks:
-            log(
-                "  [info] spec nb=%d overrides --num-blocks=%d"
-                % (spec_nb, args.num_blocks)
-            )
-        if spec_bs and spec_bs != args.block_size:
-            log(
-                "  [info] spec bs=%d overrides --block-size=%d"
-                % (spec_bs, args.block_size)
-            )
-        # For display / legacy hint fields only: collapse to the first
-        # group when homogeneous, otherwise report "mixed".
-        heads_set = {g.shape_desc.nh for g in layer_groups}
-        hs_set = {g.shape_desc.hs for g in layer_groups}
-        kv_size_set = {g.shape_desc.kv_size for g in layer_groups}
-        dtype_set = {g.dtype for g in layer_groups}
-        num_heads_disp: int | str = (
-            first.shape_desc.nh if len(heads_set) == 1 else "mixed"
-        )
-        head_size_disp: int | str = first.shape_desc.hs if len(hs_set) == 1 else "mixed"
-        kv_size_disp: int | str = (
-            first.shape_desc.kv_size if len(kv_size_set) == 1 else "mixed"
-        )
-        if len(dtype_set) == 1:
-            dtype_str = next(
-                (k for k, v in DTYPE_MAP.items() if v == first.dtype),
-                "float16",
-            )
-        else:
-            dtype_str = "mixed"
-
-        # Build layout_hints. dtype is sent as a string ("float16")
-        # because torch.dtype is not msgpack-serializable. For
-        # heterogeneous multi-group specs, per-layer fields (heads /
-        # head_size / dtype / kv_size) are reported as "mixed" —
-        # ``layout_hints`` is only consumed by the server to pick a
-        # ``kv_layout``; the real per-layer shape is discovered from
-        # the tensors themselves.
-        layout_hints = {
-            "num_layers": num_layers,
-            "num_heads": num_heads_disp,
-            "head_size": head_size_disp,
-            "num_blocks": num_blocks,
-            "block_size": block_size,
-            "dtype": dtype_str,
-            # kv_size == 1 marks an MLA group (single-plane KV); the
-            # data-mode register path reads this to set ``use_mla`` on
-            # the server payload. For "mixed" specs the server has no
-            # single plane count, so the bench falls back to first
-            # group's ``kv_size`` in ``_send_register_kv_cache``.
-            "kv_size": kv_size_disp,
-        }
-        # Tell the server each group's true tokens-per-paged-chunk
-        # explicitly. Otherwise the server falls back to the block size
-        # discovered from the tensors (``shape_desc.bs``), which on the
-        # CPU/HND path can be the per-block ``num_heads`` value instead
-        # of the real ``block_size`` (HND swaps NH and BS in the tensor
-        # shape), and STORE/RETRIEVE would then expect twice as many
-        # block IDs as the bench client actually sends.
-        engine_group_infos = [
-            EngineGroupInfo(
-                engine_group_id=group_idx,
-                layer_indices=tuple(group.layer_indices),
-                tokens_per_block=block_size,
-            )
-            for group_idx, group in enumerate(layer_groups)
-        ]
-
-        num_tokens = args.num_tokens
-        log(
-            "Each request: %d tokens (%d full chunks)"
-            % (
-                num_tokens + 1,
-                (num_tokens + 1) // chunk_size,
-            )
-        )
-        log(
-            "KV shape: %d layers, %s heads x %s, "
-            "dtype=%s, blocks=%dx%d, kv=%s"
-            % (
-                num_layers,
-                num_heads_disp,
-                head_size_disp,
-                dtype_str,
-                num_blocks,
-                block_size,
-                kv_size_disp,
-            )
-        )
-
-        # Allocate KV tensors and register the cache once per simulated
-        # TP rank. Each rank gets its own SHM prefix / CUDA tensors so
-        # the server holds one context per (instance_id) — mirroring the
-        # multi-process worker layout in vLLM. shm_names aggregates every
-        # rank's per-layer SHM segments for a best-effort cleanup on
-        # shutdown.
-        tp_size = max(1, int(getattr(args, "tp_size", 1)))
-        # Explicit --use-mla wins; otherwise infer MLA from the shape
-        # spec via ``_is_mla_kv_size`` (kv_size == 1 marks an MLA
-        # single-plane group). Routing all shape-derived MLA checks
-        # through ``_is_mla_kv_size`` keeps this file, the helpers
-        # module, and the server detector agreeing on one contract.
-        use_mla = bool(getattr(args, "use_mla", False)) or (
-            isinstance(kv_size_disp, int) and _is_mla_kv_size(kv_size_disp)
-        )
-        # Fail fast when --use-mla is set but the shape spec still
-        # declares a two-plane KV group: allocation would build rank-5
-        # classical tensors while the server expects the MLA single-
-        # plane layout, and the mismatch only surfaces mid-run.
-        if (
-            use_mla
-            and isinstance(kv_size_disp, int)
-            and not _is_mla_kv_size(kv_size_disp)
-        ):
-            raise ValueError(
-                "--use-mla requires --kvcache-shape-spec with kv_size=1 "
-                "(single-plane MLA group), got kv_size=%s" % kv_size_disp
-            )
-        # ``ParallelStrategy.kv_world_size`` folds all TP ranks into a
-        # single kv_worker under MLA; non-MLA keeps one kv_worker per
-        # rank. Bench mirrors that so ``IPCCacheServerKey.worker_id``
-        # and ``.world_size`` line up with what LMCacheMPWorkerAdapter
-        # produces in a real deployment (otherwise LOOKUP expands to
-        # kv_ranks the STORE side never wrote).
-        kv_world_size = 1 if use_mla else tp_size
-        shm_names: list[str] = []
-        workers: list[WorkerContext] = []
-        registered_instance_ids: list[int] = []
-
-        # Import the wrapper class once per mode, outside the per-rank
-        # loop: importing ``CudaIPCWrapper`` on a non-CUDA host pulls in
-        # CUDA-specific symbols from torch and can crash, so it must stay
-        # behind the ``use_gpu`` gate; keeping it in the loop just paid
-        # the same cost every rank without adding any safety.
-        if use_gpu:
-            # First Party
-            from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
-        else:
-            # First Party
-            from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
-
-        for rank in range(tp_size):
-            instance_id = _INSTANCE_ID_BASE + rank
-            # MLA: every vLLM rank folds into kv_worker_id 0.
-            # Non-MLA: kv_worker_id == vLLM rank.
-            kv_worker_id = 0 if use_mla else rank
-            if use_gpu:
-                allocated = _allocate_gpu_kv_cache(groups=layer_groups)
-                log(
-                    "[rank %d] Allocated %d GPU tensors on %s"
-                    % (rank, len(allocated), allocated[0].device)
-                )
-                kv_wrappers: KVCache = [CudaIPCWrapper(t) for t in allocated]
-                client_kv_tensors = allocated
-            else:
-                shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + "%s_r%d" % (
-                    os.getpid(),
-                    rank,
-                )
-                cpu_tensors, cpu_wrappers, rank_shm_names = _allocate_cpu_shm_kv_cache(
-                    groups=layer_groups, shm_prefix=shm_prefix
-                )
-                shm_names.extend(rank_shm_names)
-                log(
-                    "[rank %d] Allocated %d CPU SHM tensors (prefix=%s)"
-                    % (rank, len(cpu_tensors), shm_prefix)
-                )
-                kv_wrappers = list(cpu_wrappers)
-                client_kv_tensors = cpu_tensors
-
-            # Register KV cache before any store/retrieve. Handle mode
-            # (GPU CUDA-IPC / CPU POSIX-SHM) shares REGISTER_KV_CACHE;
-            # data mode falls through to the engine-driven register.
-            register_result = _send_register_kv_cache(
-                client,
-                instance_id=instance_id,
-                world_size=kv_world_size,
-                layout_hints=layout_hints,
-                kv_caches=kv_wrappers if use_handle else None,
-                use_gpu=use_gpu,
-                use_handle=use_handle,
-                engine_group_infos=engine_group_infos,
-            )
-            log(
-                "[rank %d] REGISTER_KV_CACHE: %s"
-                % (rank, "OK" if register_result else "FAIL")
-            )
-            if not register_result:
-                continue
-            registered_instance_ids.append(instance_id)
-
-            # Data-mode register replies with the server's SHM pool name
-            # for this instance; each rank mmaps its own pool so PREPARE
-            # / COMMIT can hand out zero-copy slot views per worker.
-            rank_server_pool: "mmap.mmap | None" = None
-            if not use_handle and not isinstance(register_result, bool):
-                shm_name = getattr(register_result, "shm_name", "")
-                pool_size = getattr(register_result, "pool_size", 0)
-                if shm_name and pool_size > 0:
-                    rank_server_pool = shm_open_pool_as_mmap(shm_name, pool_size)
-
-            workers.append(
-                WorkerContext(
-                    kv_worker_id=kv_worker_id,
-                    kv_world_size=kv_world_size,
-                    instance_id=instance_id,
-                    client_tensors=None if use_handle else client_kv_tensors,
-                    server_pool=rank_server_pool,
-                    # MLA: only rank 0 stores; non-MLA: every rank stores.
-                    is_kv_writer=(rank == 0) if use_mla else True,
-                )
-            )
-        log("")
-        # ``registered`` retained purely as a boolean summary for a
-        # possible future log line; the ``finally`` block iterates the
-        # concrete instance-id list to send matching UNREGISTERs.
-        registered = bool(registered_instance_ids)
-
-        if args.end is not None:
-            seq_iter: itertools.count | range = range(args.start, args.end)
-        else:
-            seq_iter = itertools.count(args.start)
-
-        http_base = args.url.rstrip("/")
+        bench_client.start()
 
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
             profiler.start(log)
 
+        if config.end is not None:
+            seq_iter: itertools.count | range = range(config.start, config.end)
+        else:
+            seq_iter = itertools.count(config.start)
+
         for seq_no in seq_iter:
             log("=== Request seq=%d ===" % seq_no)
 
             # Pass 1: cold (miss -> store)
-            cold_result = _process_request(
-                client,
-                seq_no,
-                num_tokens,
-                chunk_size,
-                "cold",
-                http_base=http_base,
-                block_size=block_size,
-                total_blocks=num_blocks,
-                num_engine_group_infos=num_engine_group_infos,
-                use_gpu=use_gpu,
-                use_handle=use_handle,
-                workers=workers,
-                world_size=kv_world_size,
-            )
+            cold_result = _run_request_pass(bench_client, seq_no, "cold")
             if cold_result is not None:
-                if cold_result.lookup_ms is not None:
-                    cold_lookup_ms.append(cold_result.lookup_ms)
-                if cold_result.store_ms is not None:
-                    cold_store_ms.append(cold_result.store_ms)
+                cold_lookup_ms.append(cold_result.lookup.latency_ms)
+                if cold_result.store is not None:
+                    cold_store_ms.append(cold_result.store.latency_ms)
 
             time.sleep(args.interval)
 
             # Pass 2: warm (hit -> retrieve)
-            warm_result = _process_request(
-                client,
-                seq_no,
-                num_tokens,
-                chunk_size,
-                "warm",
-                http_base=http_base,
-                block_size=block_size,
-                total_blocks=num_blocks,
-                num_engine_group_infos=num_engine_group_infos,
-                use_gpu=use_gpu,
-                use_handle=use_handle,
-                workers=workers,
-                world_size=kv_world_size,
-            )
+            warm_result = _run_request_pass(bench_client, seq_no, "warm")
             if warm_result is not None:
-                if warm_result.lookup_ms is not None:
-                    warm_lookup_ms.append(warm_result.lookup_ms)
-                if warm_result.retrieve_ms is not None:
-                    warm_retrieve_ms.append(warm_result.retrieve_ms)
+                warm_lookup_ms.append(warm_result.lookup.latency_ms)
+                if warm_result.retrieve is not None:
+                    warm_retrieve_ms.append(warm_result.retrieve.latency_ms)
 
             # Compare checksums
             total_requests += 1
@@ -789,54 +466,16 @@ def run_server_bench(
 
             log("")
             time.sleep(args.interval)
+    except RuntimeError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        raise SystemExit(1) from None
     except KeyboardInterrupt:
         log("\nStopping...")
     finally:
         # Stop recording once load ends, before teardown
         if profiler is not None:
             profiler.stop(log)
-        # Deregister every rank we managed to register before tearing
-        # down the client. Otherwise the server keeps each rank's
-        # registration (and the CUDA-IPC / POSIX-SHM mappings it holds)
-        # alive forever, leaking one context entry per rank per bench
-        # run. Must run while the client is still connected, hence
-        # before ``client.close()``.
-        for _instance_id in locals().get("registered_instance_ids", []) or []:
-            try:
-                ok = _send_unregister_kv_cache(
-                    client,
-                    instance_id=_instance_id,
-                    use_handle=use_handle,
-                )
-                log(
-                    "[iid %d] UNREGISTER_KV_CACHE: %s"
-                    % (_instance_id, "OK" if ok else "FAIL")
-                )
-            except zmq.ZMQError as exc:
-                log(
-                    "  [warning] UNREGISTER_KV_CACHE failed for "
-                    "iid %d: %s" % (_instance_id, exc)
-                )
-        # Release the bench-side mmap of every worker's SHM pool
-        # (data mode only; ``server_pool`` stays ``None`` otherwise).
-        for _w in locals().get("workers", []) or []:
-            if _w.server_pool is None:
-                continue
-            try:
-                _w.server_pool.close()
-            except (BufferError, ValueError):
-                pass
-        client.close()
-        ctx.term()
-        # Best-effort SHM cleanup so segments don't linger.
-        for _name in shm_names if "shm_names" in locals() else []:
-            try:
-                # First Party
-                from lmcache.v1.platform.cpu.shm import shm_unlink
-
-                shm_unlink(_name)
-            except OSError:
-                pass
+        bench_client.close()
 
     # Emit structured metrics summary.
     _emit_server_bench_metrics(
@@ -851,6 +490,71 @@ def run_server_bench(
         warm_retrieve_ms=warm_retrieve_ms,
     )
     log("Done.")
+
+
+def _run_request_pass(
+    bench_client: ServerBenchClient,
+    seq_no: int,
+    pass_label: str,
+) -> _RequestPassResult | None:
+    """Run one cold or warm baseline pass."""
+    if pass_label not in ("cold", "warm"):
+        raise ValueError("unsupported baseline pass: %s" % pass_label)
+
+    request = bench_client.create_request(
+        seq_no,
+        request_id="req-%d-%s" % (seq_no, pass_label),
+        label=pass_label,
+    )
+    if request is None:
+        return None
+
+    lookup = bench_client.lookup(request)
+    if not lookup.succeeded:
+        return None
+
+    hit_tokens = lookup.hit_chunks * request.chunk_size
+    miss_tokens = request.num_full_tokens - hit_tokens
+
+    checksums: list[str] | None = None
+    if pass_label == "cold" and miss_tokens > 0:
+        checksums = bench_client.compute_checksums(
+            request,
+            start_token=hit_tokens,
+            token_count=miss_tokens,
+        )
+    if pass_label == "warm" and hit_tokens > 0:
+        bench_client.zero_destination(
+            request,
+            start_token=0,
+            token_count=hit_tokens,
+        )
+
+    retrieve = bench_client.retrieve(
+        request,
+        start_token=0,
+        token_count=hit_tokens,
+    )
+    store = bench_client.store(
+        request,
+        start_token=hit_tokens,
+        token_count=miss_tokens,
+    )
+
+    if pass_label == "warm" and hit_tokens > 0:
+        checksums = bench_client.compute_checksums(
+            request,
+            start_token=0,
+            token_count=hit_tokens,
+        )
+
+    bench_client.end_session(request)
+    return _RequestPassResult(
+        lookup=lookup,
+        checksums=checksums,
+        retrieve=retrieve,
+        store=store,
+    )
 
 
 def _emit_server_bench_metrics(

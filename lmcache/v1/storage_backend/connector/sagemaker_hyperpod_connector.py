@@ -155,9 +155,13 @@ class SageMakerHyperPodConnector(RemoteConnector):
         }
 
         logger.info(
-            f"SageMaker HyperPod Connector initialized: url={self.base_url}, "
-            f"bucket={self.bucket_name}, shared_memory={self.shared_memory_name}, "
-            f"connections={self.max_connections}, lease_ttl={lease_ttl_s}s"
+            "SageMaker HyperPod Connector initialized: url=%s, bucket=%s, "
+            "shared_memory=%s, connections=%s, lease_ttl=%ss",
+            self.base_url,
+            self.bucket_name,
+            self.shared_memory_name,
+            self.max_connections,
+            lease_ttl_s,
         )
 
     def _init_shared_memory(self):
@@ -169,17 +173,18 @@ class SageMakerHyperPodConnector(RemoteConnector):
             self.shared_memory_map = memoryview(self.shared_memory_obj.buf)
             size_mb = len(self.shared_memory_map) / (1024**2)
             logger.info(
-                f"Shared memory opened: {self.shared_memory_name} ({size_mb:.2f} MB)"
+                "Shared memory opened: %s (%.2f MB)", self.shared_memory_name, size_mb
             )
         except FileNotFoundError:
             logger.error(
-                f"Shared memory segment '{self.shared_memory_name}' not found. "
-                "Ensure ai-toolkit daemon is running."
+                "Shared memory segment '%s' not found. "
+                "Ensure ai-toolkit daemon is running.",
+                self.shared_memory_name,
             )
             self.shared_memory_map = None
             raise
         except Exception as e:
-            logger.error(f"Failed to initialize shared memory: {e}")
+            logger.error("Failed to initialize shared memory: %s", e)
             self.shared_memory_map = None
             raise
 
@@ -209,8 +214,8 @@ class SageMakerHyperPodConnector(RemoteConnector):
                         headers={"User-Agent": "LMCache-SageMaker-HyperPod/1.0"},
                     )
                     logger.info(
-                        f"HTTP session created with {self.max_connections} "
-                        f"max connections"
+                        "HTTP session created with %s max connections",
+                        self.max_connections,
                     )
 
         return self.http_session
@@ -265,16 +270,22 @@ class SageMakerHyperPodConnector(RemoteConnector):
                         body_json = await response.json()
                     except aiohttp.ContentTypeError as e:
                         logger.warning(
-                            f"JSON parsing failed for {method} {url}:"
-                            f"invalid content-type - {e}"
+                            "JSON parsing failed for %s %s:invalid content-type - %s",
+                            method,
+                            url,
+                            e,
                         )
                     except json.JSONDecodeError as e:
                         logger.warning(
-                            f"JSON parsing failed for {method} {url}:"
-                            f"malformed JSON - {e}"
+                            "JSON parsing failed for %s %s:malformed JSON - %s",
+                            method,
+                            url,
+                            e,
                         )
                     except Exception as e:
-                        logger.warning(f"JSON parsing failed for {method} {url}: {e}")
+                        logger.warning(
+                            "JSON parsing failed for %s %s: %s", method, url, e
+                        )
 
                 return {
                     "status": response.status,
@@ -282,13 +293,13 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 }
 
         except asyncio.TimeoutError:
-            logger.warning(f"HTTP {method} timeout: {url}")
+            logger.warning("HTTP %s timeout: %s", method, url)
             return None
         except aiohttp.ClientError as e:
-            logger.error(f"HTTP {method} client error: {url} - {e}")
+            logger.error("HTTP %s client error: %s - %s", method, url, e)
             return None
         except Exception as e:
-            logger.error(f"HTTP {method} failed: {url} - {e}")
+            logger.error("HTTP %s failed: %s - %s", method, url, e)
             return None
 
     def _key_to_string(self, key: CacheEngineKey) -> str:
@@ -320,21 +331,23 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
             if result and result["status"] == HTTP_OK:
                 self.stats["lease_released"] += 1
-                logger.debug(f"Lease released: key={key_str}, lease_id={lease_id}")
+                logger.debug("Lease released: key=%s, lease_id=%s", key_str, lease_id)
                 return True
             else:
                 status = result["status"] if result else "TIMEOUT"
                 self.stats["lease_release_failed"] += 1
                 logger.warning(
-                    f"Lease release failed: key={key_str}, lease_id={lease_id}, "
-                    f"status={status}"
+                    "Lease release failed: key=%s, lease_id=%s, status=%s",
+                    key_str,
+                    lease_id,
+                    status,
                 )
                 return False
 
         except Exception as e:
             self.stats["lease_release_failed"] += 1
             logger.warning(
-                f"Lease release error: key={key_str}, lease_id={lease_id} - {e}"
+                "Lease release error: key=%s, lease_id=%s - %s", key_str, lease_id, e
             )
             return False
 
@@ -367,14 +380,14 @@ class SageMakerHyperPodConnector(RemoteConnector):
         )
 
         if not result or result["status"] != HTTP_OK or not result["json"]:
-            logger.debug(f"Lease acquisition failed: key={key_str}")
+            logger.debug("Lease acquisition failed: key=%s", key_str)
             return None
 
         lease_data = result["json"]
         offsets = [(o["offset"], o["len"]) for o in lease_data.get("offsets", [])]
 
         if not offsets:
-            logger.debug(f"Lease has no offsets: key={key_str}")
+            logger.debug("Lease has no offsets: key=%s", key_str)
             return None
 
         lease_info = LeaseInfo(
@@ -389,8 +402,9 @@ class SageMakerHyperPodConnector(RemoteConnector):
             and total_size > self.max_lease_size_bytes
         ):
             logger.warning(
-                f"Lease size {total_size / 1024:.2f} KB exceeds limit "
-                f"{self.max_lease_size_bytes / 1024:.2f} KB, releasing"
+                "Lease size %.2f KB exceeds limit %.2f KB, releasing",
+                total_size / 1024,
+                self.max_lease_size_bytes / 1024,
             )
             await self._release_lease(key, lease_info.lease_id)
             return None
@@ -398,8 +412,11 @@ class SageMakerHyperPodConnector(RemoteConnector):
         self.stats["lease_acquired"] += 1
 
         logger.debug(
-            f"Lease acquired: key={key_str}, lease_id={lease_info.lease_id}, "
-            f"size={total_size / 1024:.2f} KB, blocks={len(offsets)}"
+            "Lease acquired: key=%s, lease_id=%s, size=%.2f KB, blocks=%s",
+            key_str,
+            lease_info.lease_id,
+            total_size / 1024,
+            len(offsets),
         )
 
         return lease_info
@@ -442,13 +459,15 @@ class SageMakerHyperPodConnector(RemoteConnector):
         for offset, length in lease_info.offsets:
             if offset < 0 or length < 0:
                 logger.error(
-                    f"Invalid offset or length: offset={offset}, length={length}"
+                    "Invalid offset or length: offset=%s, length=%s", offset, length
                 )
                 return None
             if offset + length > shm_size:
                 logger.error(
-                    f"Offset out of bounds: offset={offset}, length={length}, "
-                    f"shm_size={shm_size}"
+                    "Offset out of bounds: offset=%s, length=%s, shm_size=%s",
+                    offset,
+                    length,
+                    shm_size,
                 )
                 return None
 
@@ -457,7 +476,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
             # Validate total size
             total_size = sum(length for _, length in lease_info.offsets)
             if total_size < METADATA_SIZE_BYTES:
-                logger.error(f"Insufficient data for metadata: {total_size} bytes")
+                logger.error("Insufficient data for metadata: %s bytes", total_size)
                 return None
 
             # Read metadata header (may span multiple blocks)
@@ -471,7 +490,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
             # Parse metadata
             metadata = RemoteMetadata.deserialize(header)
             if metadata.length <= 0:
-                logger.error(f"Invalid payload length: {metadata.length}")
+                logger.error("Invalid payload length: %s", metadata.length)
                 return None
 
             # Restore original shape (remove padding zeros)
@@ -484,7 +503,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 metadata.fmt,
             )
             if memory_obj is None:
-                logger.error(f"Failed to allocate memory for key {key.to_string()}")
+                logger.error("Failed to allocate memory for key %s", key.to_string())
                 return None
 
             # Get writable view
@@ -497,7 +516,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
             if copied != metadata.length:
                 logger.error(
-                    f"Data size mismatch: expected {metadata.length}, got {copied}"
+                    "Data size mismatch: expected %s, got %s", metadata.length, copied
                 )
                 memory_obj.ref_count_down()
                 return None
@@ -514,7 +533,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
         except Exception as e:
             logger.error(
-                f"Error reading from shared memory: key={key.to_string()} - {e}"
+                "Error reading from shared memory: key=%s - %s", key.to_string(), e
             )
             if memory_obj is not None:
                 memory_obj.ref_count_down()
@@ -552,12 +571,17 @@ class SageMakerHyperPodConnector(RemoteConnector):
             take = min(read_bytes - filled, length)
 
             if offset < 0 or take <= 0:
-                logger.error(f"Invalid read parameters: offset={offset}, take={take}")
+                logger.error(
+                    "Invalid read parameters: offset=%s, take=%s", offset, take
+                )
                 break
             if offset + take > shm_size:
                 logger.error(
-                    f"Read would exceed shared memory bounds: "
-                    f"offset={offset}, take={take}, shm_size={shm_size}"
+                    "Read would exceed shared memory bounds: "
+                    "offset=%s, take=%s, shm_size=%s",
+                    offset,
+                    take,
+                    shm_size,
                 )
                 break
 
@@ -603,12 +627,17 @@ class SageMakerHyperPodConnector(RemoteConnector):
             take = min(copy_bytes - copied, length)
 
             if offset < 0 or take <= 0:
-                logger.error(f"Invalid copy parameters: offset={offset}, take={take}")
+                logger.error(
+                    "Invalid copy parameters: offset=%s, take=%s", offset, take
+                )
                 break
             if offset + take > shm_size:
                 logger.error(
-                    f"Copy would exceed shared memory bounds: "
-                    f"offset={offset}, take={take}, shm_size={shm_size}"
+                    "Copy would exceed shared memory bounds: "
+                    "offset=%s, take=%s, shm_size=%s",
+                    offset,
+                    take,
+                    shm_size,
                 )
                 break
 
@@ -682,7 +711,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
         if lease_info is None:
             self.stats["get_failure"] += 1
-            logger.debug(f"GET failed (no lease): key={key.to_string()}")
+            logger.debug("GET failed (no lease): key=%s", key.to_string())
             return None
 
         try:
@@ -700,21 +729,23 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
                 self.stats["get_success"] += 1
                 logger.debug(
-                    f"GET success: key={key.to_string()}, "
-                    f"shape={memory_obj.get_shape()}, "
-                    f"size={obj_size / 1e6:.3f} MBytes in {(end - begin) * 1000:.3f}ms"
+                    "GET success: key=%s, shape=%s, size=%.3f MBytes in %.3fms",
+                    key.to_string(),
+                    memory_obj.get_shape(),
+                    obj_size / 1e6,
+                    (end - begin) * 1000,
                 )
             else:
                 self.stats["get_failure"] += 1
                 logger.error(
-                    f"Failed to read from shared memory: key={key.to_string()}"
+                    "Failed to read from shared memory: key=%s", key.to_string()
                 )
 
             return memory_obj
 
         except Exception as e:
             self.stats["get_failure"] += 1
-            logger.error(f"GET error: key={key.to_string()} - {e}")
+            logger.error("GET error: key=%s - %s", key.to_string(), e)
             return None
 
         finally:
@@ -761,8 +792,10 @@ class SageMakerHyperPodConnector(RemoteConnector):
             payload_len, payload_iter = self._build_put_stream(memory_obj)
 
             logger.debug(
-                f"PUT: key={key_str}, size={payload_len / 1024:.2f} KB, "
-                f"shape={memory_obj.get_shape()}"
+                "PUT: key=%s, size=%.2f KB, shape=%s",
+                key_str,
+                payload_len / 1024,
+                memory_obj.get_shape(),
             )
 
             # Send HTTP PUT request with streaming
@@ -787,8 +820,10 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 self._stats_monitor.update_interval_remote_write_metrics(payload_len)
 
                 logger.info(
-                    f"PUT success: key={key_str}, size={payload_len / 1024:.2f} KB "
-                    f"in {(end - begin) * 1000:.3f}ms"
+                    "PUT success: key=%s, size=%.2f KB in %.3fms",
+                    key_str,
+                    payload_len / 1024,
+                    (end - begin) * 1000,
                 )
             elif result and result["status"] == HTTP_CONFLICT:
                 # 409 Conflict = key already exists (not an error)
@@ -800,15 +835,15 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 )
                 self._stats_monitor.update_interval_remote_write_metrics(payload_len)
 
-                logger.debug(f"PUT skipped (already exists): key={key_str}")
+                logger.debug("PUT skipped (already exists): key=%s", key_str)
             else:
                 status = result["status"] if result else "TIMEOUT"
                 self.stats["put_failure"] += 1
-                logger.error(f"PUT failed: key={key_str}, status={status}")
+                logger.error("PUT failed: key=%s, status=%s", key_str, status)
 
         except Exception as e:
             self.stats["put_failure"] += 1
-            logger.error(f"PUT exception: key={key_str} - {e}")
+            logger.error("PUT exception: key=%s - %s", key_str, e)
 
     def _build_put_stream(self, memory_obj: MemoryObj) -> Tuple[int, AsyncIterator]:
         """
@@ -884,7 +919,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 num_hits += 1
 
             except Exception as exc:
-                logger.debug(f"Lease acquisition failed for {key}: {exc}")
+                logger.debug("Lease acquisition failed for %s: %s", key, exc)
                 break
             finally:
                 if lease is not None:
@@ -952,25 +987,30 @@ class SageMakerHyperPodConnector(RemoteConnector):
         """Clean up all resources and log statistics."""
         # Log final statistics
         logger.info(
-            f"SageMaker HyperPod Connector Statistics: "
-            f"GET(ok/fail)={self.stats['get_success']}/{self.stats['get_failure']}, "
-            f"PUT(ok/fail)={self.stats['put_success']}/{self.stats['put_failure']}, "
-            f"leases(acq/rel/fail)={self.stats['lease_acquired']}/"
-            f"{self.stats['lease_released']}/{self.stats['lease_release_failed']}"
+            "SageMaker HyperPod Connector Statistics: "
+            "GET(ok/fail)=%s/%s, PUT(ok/fail)=%s/%s, "
+            "leases(acq/rel/fail)=%s/%s/%s",
+            self.stats["get_success"],
+            self.stats["get_failure"],
+            self.stats["put_success"],
+            self.stats["put_failure"],
+            self.stats["lease_acquired"],
+            self.stats["lease_released"],
+            self.stats["lease_release_failed"],
         )
 
         # Shutdown priority queue executor
         try:
             await self.pq_executor.shutdown(wait=True)
         except Exception as e:
-            logger.warning(f"Error shutting down executor: {e}")
+            logger.warning("Error shutting down executor: %s", e)
 
         # Close HTTP session
         if self.http_session is not None:
             try:
                 await self.http_session.close()
             except Exception as e:
-                logger.warning(f"Error closing HTTP session: {e}")
+                logger.warning("Error closing HTTP session: %s", e)
             self.http_session = None
 
         # Release shared memory
@@ -981,7 +1021,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
             try:
                 self.shared_memory_obj.close()
             except Exception as e:
-                logger.warning(f"Error closing shared memory object: {e}")
+                logger.warning("Error closing shared memory object: %s", e)
             self.shared_memory_obj = None
 
         logger.info("SageMaker HyperPod connector closed")

@@ -47,9 +47,8 @@ class MPServerConfig:
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
     engine_type: str = "default"
-    """Cache engine backend type
-    ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
-    """
+    """Cache engine backend type: 'default' for standard prefix caching,
+    'blend' to compose the blend module (non-prefix KV reuse)."""
 
     separate_object_groups: bool = False
     """When True, split kernel groups into one object group per
@@ -62,12 +61,22 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
+    enable_dedup_content: bool = False
+    """engine_type='blend' only: skip fingerprint registration for a chunk whose
+    content is already indexed, so the same text stored behind two prefixes is
+    indexed once. No effect for other engines."""
+
     supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
         "lmcache_driven"
     )
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
+
+    isolated_ipc: bool = False
+    """Whether IPC mechanisms must work across isolated containers (no shared
+    host IPC namespace or /dev/shm); see lmcache/v1/platform/isolated_ipc.py.
+    Must match the engine workers' ``lmcache.mp.isolated_ipc`` setting."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
@@ -229,6 +238,14 @@ class CoordinatorConfig:
     event_flush_interval: float = 1.0
     """Seconds between cache-event flush attempts to the coordinator."""
 
+    blend_timeout: float = 1.0
+    """Seconds a fleet CacheBlend lookup may take: both the per-request HTTP
+    timeout and the per-lookup match budget of the blend coordinator client."""
+
+    blend_match_concurrency: int = 8
+    """Max fleet CacheBlend match round-trips the blend coordinator client keeps
+    in flight at once. Must be strictly positive."""
+
 
 DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
 
@@ -308,10 +325,10 @@ def add_mp_server_args(
         "--engine-type",
         type=str,
         default="default",
-        choices=["default", "blend", "blend_legacy"],
+        choices=["default", "blend"],
         help="Cache engine backend type. 'default' uses standard prefix caching; "
-        "'blend' selects CacheBlend V3 (the current implementation); "
-        "'blend_legacy' selects the original CacheBlend. Default is 'default'.",
+        "'blend' composes the blend module for non-prefix KV reuse. "
+        "Default is 'default'.",
     )
     mp_group.add_argument(
         "--supported-transfer-mode",
@@ -323,6 +340,16 @@ def add_mp_server_args(
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
         "or 'auto' to enable both transfer paths. "
         "Default is 'lmcache_driven'.",
+    )
+    mp_group.add_argument(
+        "--isolated-ipc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Assume engine workers and this server run in containers that "
+        "share no host IPC namespace or /dev/shm, and use IPC mechanisms "
+        "that work there (CUDA: timeline-semaphore events instead of "
+        "interprocess event handles). Must match the engine workers' "
+        "lmcache.mp.isolated_ipc setting. (Default is False)",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -390,6 +417,13 @@ def add_mp_server_args(
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
     mp_group.add_argument(
+        "--enable-dedup-content",
+        action="store_true",
+        help="--engine-type blend only: skip fingerprint registration for a "
+        "chunk whose content is already indexed, so the same text stored "
+        "behind different prefixes is indexed once. No effect otherwise.",
+    )
+    mp_group.add_argument(
         "--enable",
         type=str,
         nargs="*",
@@ -432,7 +466,9 @@ def parse_args_to_mp_server_config(
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
+        enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,
+        isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,
@@ -568,9 +604,10 @@ def add_coordinator_args(
 ) -> argparse.ArgumentParser:
     """Add MP coordinator registration arguments to an existing parser.
 
-    Each flag falls back to its ``LMCACHE_COORDINATOR_*`` environment variable
-    so the server can be configured either way (the env var is convenient for
-    the Kubernetes downward API); an explicit flag wins over the env var.
+    The registration flags fall back to their ``LMCACHE_COORDINATOR_*``
+    environment variables so the server can be configured either way (the env
+    var is convenient for the Kubernetes downward API); an explicit flag wins
+    over the env var. The blend client flags have no env fallback.
 
     Args:
         parser: The argument parser to add arguments to.
@@ -619,6 +656,21 @@ def add_coordinator_args(
         help="Seconds between cache-event flush attempts (must be > 0). "
         "Defaults to LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL, then 1.0.",
     )
+    group.add_argument(
+        "--coordinator-blend-timeout",
+        type=float,
+        default=DEFAULT_COORDINATOR_CONFIG.blend_timeout,
+        help="Seconds a fleet CacheBlend lookup to the coordinator may take, "
+        "used as both the HTTP timeout and the per-lookup match budget "
+        f"(default: {DEFAULT_COORDINATOR_CONFIG.blend_timeout}).",
+    )
+    group.add_argument(
+        "--coordinator-blend-match-concurrency",
+        type=int,
+        default=DEFAULT_COORDINATOR_CONFIG.blend_match_concurrency,
+        help="Max fleet CacheBlend match round-trips in flight at once "
+        f"(default: {DEFAULT_COORDINATOR_CONFIG.blend_match_concurrency}).",
+    )
     # Deprecated pre-v0.5.3 aliases, hidden from --help. Released deployers
     # (operator <= v0.5.2, charts) still render these names into server args,
     # and rejecting them crashes the pod on startup. Remove once those
@@ -645,9 +697,11 @@ def parse_args_to_coordinator_config(
 ) -> CoordinatorConfig:
     """Convert parsed command line arguments to a CoordinatorConfig.
 
-    A flag value takes precedence over its environment variable. The heartbeat
-    interval is validated here so a malformed value fails fast at startup
-    (runtime best-effort only covers coordinator *reachability*, not config).
+    For the registration settings a flag value takes precedence over its
+    environment variable; the blend client settings come from their flags
+    alone. Timing values are validated here so a malformed one fails fast at
+    startup (runtime best-effort only covers coordinator *reachability*, not
+    config).
 
     The event-reporting flags also accept their deprecated pre-v0.5.3
     spellings (``--coordinator-l2-event-*``), logging a deprecation warning
@@ -661,8 +715,9 @@ def parse_args_to_coordinator_config(
         The configuration object.
 
     Raises:
-        ValueError: If the heartbeat interval or the event flush interval
-            is not a positive finite number.
+        ValueError: If the heartbeat interval, the event flush interval or the
+            blend timeout is not a positive finite number, or if the blend
+            match concurrency is less than 1.
     """
     url = (
         args.coordinator_url
@@ -736,10 +791,25 @@ def parse_args_to_coordinator_config(
             "got %s" % event_flush_interval
         )
 
+    blend_timeout = args.coordinator_blend_timeout
+    if not math.isfinite(blend_timeout) or blend_timeout <= 0:
+        raise ValueError(
+            "coordinator blend timeout must be a finite number > 0, "
+            "got %s" % blend_timeout
+        )
+    blend_match_concurrency = args.coordinator_blend_match_concurrency
+    if blend_match_concurrency < 1:
+        raise ValueError(
+            "coordinator blend match concurrency must be >= 1, "
+            "got %s" % blend_match_concurrency
+        )
+
     return CoordinatorConfig(
         url=url,
         advertise_ip=advertise_ip,
         heartbeat_interval=heartbeat_interval,
         event_reporting=event_reporting,
         event_flush_interval=event_flush_interval,
+        blend_timeout=blend_timeout,
+        blend_match_concurrency=blend_match_concurrency,
     )
