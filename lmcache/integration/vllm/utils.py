@@ -35,7 +35,13 @@ _config_lock = threading.Lock()
 
 def is_false(value: str) -> bool:
     """Check if the given string value is equivalent to 'false'."""
-    return value.lower() in ("false", "0", "no", "n", "off")
+    return value.strip().lower() in ("false", "0", "no", "n", "off")
+
+
+def is_env_var_enabled(name: str) -> bool:
+    """Return whether a boolean-like environment variable is enabled."""
+    value = os.environ.get(name)
+    return bool(value and value.strip() and not is_false(value))
 
 
 def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
