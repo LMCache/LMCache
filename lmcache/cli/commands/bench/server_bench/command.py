@@ -32,22 +32,20 @@ Usage examples::
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import argparse
-import itertools
 import math
 import os
 import sys
-import time
 
 # First Party
-from lmcache.cli.commands.bench.server_bench.client import (
-    LookupResult,
-    ServerBenchClient,
-    TransferResult,
+from lmcache.cli.commands.bench.server_bench.case import BenchResult
+from lmcache.cli.commands.bench.server_bench.cases import BaselineBenchCase
+from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
+from lmcache.cli.commands.bench.server_bench.config import (
+    BenchRunSpec,
+    parse_args_to_config,
 )
-from lmcache.cli.commands.bench.server_bench.config import parse_args_to_config
 
 # Heavy imports reused by the orchestrator. ``DTYPE_MAP`` is required
 # for the ``--kvcache-shape-spec`` help string at parser-registration
@@ -75,16 +73,6 @@ __all__ = (
     "add_server_arguments",
     "run_server_bench",
 )
-
-
-@dataclass
-class _RequestPassResult:
-    """Results for one baseline pass."""
-
-    lookup: LookupResult
-    checksums: list[str] | None = None
-    retrieve: TransferResult | None = None
-    store: TransferResult | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -381,10 +369,18 @@ def run_server_bench(
     """
     _require_full_install()
     config = parse_args_to_config(args)
+    run_spec = BenchRunSpec(
+        config=config,
+        case=BaselineBenchCase(
+            start=args.start,
+            end=args.end,
+            interval=args.interval,
+        ),
+    )
 
     def log(msg: str) -> None:
         """Print progress messages; suppressed by --quiet."""
-        if not config.quiet:
+        if not args.quiet:
             print(msg)
 
     # The profiler targets the server process (--profile-server-pid), not
@@ -393,79 +389,17 @@ def run_server_bench(
     # benchmark has already run. ``None`` when --flamegraph is off.
     profiler = _build_server_profiler(args, log)
 
-    total_requests = 0
-    total_checksum_ok = 0
-    total_checksum_fail = 0
-
-    # Latency collectors: keyed by (pass_label, op_type).
-    # Each entry is a list of latency values in ms.
-    cold_lookup_ms: list[float] = []
-    cold_store_ms: list[float] = []
-    warm_lookup_ms: list[float] = []
-    warm_retrieve_ms: list[float] = []
-
-    bench_client = ServerBenchClient(config, log)
+    result = BenchResult(case_name=run_spec.case.name)
+    bench_client = ServerBenchClient(run_spec.config, log)
     try:
         bench_client.start()
 
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
             profiler.start(log)
-
-        if config.end is not None:
-            seq_iter: itertools.count | range = range(config.start, config.end)
-        else:
-            seq_iter = itertools.count(config.start)
-
-        for seq_no in seq_iter:
-            log("=== Request seq=%d ===" % seq_no)
-
-            # Pass 1: cold (miss -> store)
-            cold_result = _run_request_pass(bench_client, seq_no, "cold")
-            if cold_result is not None:
-                cold_lookup_ms.append(cold_result.lookup.latency_ms)
-                if cold_result.store is not None:
-                    cold_store_ms.append(cold_result.store.latency_ms)
-
-            time.sleep(args.interval)
-
-            # Pass 2: warm (hit -> retrieve)
-            warm_result = _run_request_pass(bench_client, seq_no, "warm")
-            if warm_result is not None:
-                warm_lookup_ms.append(warm_result.lookup.latency_ms)
-                if warm_result.retrieve is not None:
-                    warm_retrieve_ms.append(warm_result.retrieve.latency_ms)
-
-            # Compare checksums
-            total_requests += 1
-            cold_checksums = cold_result.checksums if cold_result else None
-            warm_checksums = warm_result.checksums if warm_result else None
-            if cold_checksums and warm_checksums:
-                if cold_checksums == warm_checksums:
-                    total_checksum_ok += 1
-                    log("  [seq %d] CHECKSUM MATCH OK" % seq_no)
-                else:
-                    total_checksum_fail += 1
-                    log("  [seq %d] CHECKSUM MISMATCH!" % seq_no)
-                    for i, (c, w) in enumerate(
-                        zip(
-                            cold_checksums,
-                            warm_checksums,
-                            strict=False,
-                        )
-                    ):
-                        log(
-                            "    chunk %d: cold=%s warm=%s %s"
-                            % (
-                                i,
-                                c[:12],
-                                w[:12],
-                                ("OK" if c == w else "FAIL"),
-                            )
-                        )
-
-            log("")
-            time.sleep(args.interval)
+        result = run_spec.case.run(bench_client, log)
+        if result.interrupted:
+            log("\nStopping...")
     except RuntimeError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
         raise SystemExit(1) from None
@@ -481,108 +415,28 @@ def run_server_bench(
     _emit_server_bench_metrics(
         command=command,
         args=args,
-        total_requests=total_requests,
-        total_checksum_ok=total_checksum_ok,
-        total_checksum_fail=total_checksum_fail,
-        cold_lookup_ms=cold_lookup_ms,
-        cold_store_ms=cold_store_ms,
-        warm_lookup_ms=warm_lookup_ms,
-        warm_retrieve_ms=warm_retrieve_ms,
+        result=result,
     )
     log("Done.")
-
-
-def _run_request_pass(
-    bench_client: ServerBenchClient,
-    seq_no: int,
-    pass_label: str,
-) -> _RequestPassResult | None:
-    """Run one cold or warm baseline pass."""
-    if pass_label not in ("cold", "warm"):
-        raise ValueError("unsupported baseline pass: %s" % pass_label)
-
-    request = bench_client.create_request(
-        seq_no,
-        request_id="req-%d-%s" % (seq_no, pass_label),
-        label=pass_label,
-    )
-    if request is None:
-        return None
-
-    lookup = bench_client.lookup(request)
-    if not lookup.succeeded:
-        return None
-
-    hit_tokens = lookup.hit_chunks * request.chunk_size
-    miss_tokens = request.num_full_tokens - hit_tokens
-
-    checksums: list[str] | None = None
-    if pass_label == "cold" and miss_tokens > 0:
-        checksums = bench_client.compute_checksums(
-            request,
-            start_token=hit_tokens,
-            token_count=miss_tokens,
-        )
-    if pass_label == "warm" and hit_tokens > 0:
-        bench_client.zero_destination(
-            request,
-            start_token=0,
-            token_count=hit_tokens,
-        )
-
-    retrieve = bench_client.retrieve(
-        request,
-        start_token=0,
-        token_count=hit_tokens,
-    )
-    store = bench_client.store(
-        request,
-        start_token=hit_tokens,
-        token_count=miss_tokens,
-    )
-
-    if pass_label == "warm" and hit_tokens > 0:
-        checksums = bench_client.compute_checksums(
-            request,
-            start_token=0,
-            token_count=hit_tokens,
-        )
-
-    bench_client.end_session(request)
-    return _RequestPassResult(
-        lookup=lookup,
-        checksums=checksums,
-        retrieve=retrieve,
-        store=store,
-    )
 
 
 def _emit_server_bench_metrics(
     command: "BaseCommand",
     args: argparse.Namespace,
-    total_requests: int,
-    total_checksum_ok: int,
-    total_checksum_fail: int,
-    cold_lookup_ms: list[float] | None = None,
-    cold_store_ms: list[float] | None = None,
-    warm_lookup_ms: list[float] | None = None,
-    warm_retrieve_ms: list[float] | None = None,
+    result: BenchResult,
 ) -> None:
     """Emit server bench summary using the CLI metrics system.
 
     Args:
         command: The owning :class:`BaseCommand` instance.
         args: Parsed CLI arguments.
-        total_requests: Total number of request pairs processed.
-        total_checksum_ok: Number of requests with matching checksums.
-        total_checksum_fail: Number of requests with mismatched checksums.
-        cold_lookup_ms: Per-request cold lookup latencies (ms).
-        cold_store_ms: Per-request cold store latencies (ms).
-        warm_lookup_ms: Per-request warm lookup latencies (ms).
-        warm_retrieve_ms: Per-request warm retrieve latencies (ms).
+        result: Structured result from the executed bench case.
     """
-    if total_requests == 0:
+    if result.completed_runs == 0:
         return
+
+    total_checksum_ok = result.passed_count("checksum_match")
+    total_checksum_fail = result.failed_count("checksum_match")
 
     metrics = command.create_metrics("Server Bench Result", args, width=64)
 
@@ -596,21 +450,39 @@ def _emit_server_bench_metrics(
     cfg_section.add("interval", "Interval (s)", args.interval)
 
     result_section = metrics.add_section("results", "Results")
-    result_section.add("total_requests", "Total requests", total_requests)
+    result_section.add("total_requests", "Total requests", result.completed_runs)
     result_section.add("checksum_ok", "Checksum OK", total_checksum_ok)
     result_section.add("checksum_fail", "Checksum FAIL", total_checksum_fail)
-    if total_requests > 0:
-        pass_rate = total_checksum_ok / total_requests * 100
+    if result.completed_runs > 0:
+        pass_rate = total_checksum_ok / result.completed_runs * 100
         result_section.add("pass_rate", "Pass rate (%)", round(pass_rate, 2))
 
     # Per-operation latency summary (cold pass).
-    _add_latency_section(metrics, "cold_lookup", "Cold Lookup (ms)", cold_lookup_ms)
-    _add_latency_section(metrics, "cold_store", "Cold Store (ms)", cold_store_ms)
+    _add_latency_section(
+        metrics,
+        "cold_lookup",
+        "Cold Lookup (ms)",
+        result.latencies_ms.get("cold.lookup"),
+    )
+    _add_latency_section(
+        metrics,
+        "cold_store",
+        "Cold Store (ms)",
+        result.latencies_ms.get("cold.store"),
+    )
 
     # Per-operation latency summary (warm pass).
-    _add_latency_section(metrics, "warm_lookup", "Warm Lookup (ms)", warm_lookup_ms)
     _add_latency_section(
-        metrics, "warm_retrieve", "Warm Retrieve (ms)", warm_retrieve_ms
+        metrics,
+        "warm_lookup",
+        "Warm Lookup (ms)",
+        result.latencies_ms.get("warm.lookup"),
+    )
+    _add_latency_section(
+        metrics,
+        "warm_retrieve",
+        "Warm Retrieve (ms)",
+        result.latencies_ms.get("warm.retrieve"),
     )
 
     metrics.emit()
@@ -622,17 +494,7 @@ def _add_latency_section(
     section_title: str,
     latencies: list[float] | None,
 ) -> None:
-    """Add a latency summary section to the metrics report.
-
-    Computes count, mean, min, max, p50, and p99 from the raw
-    latency list. Skipped if the list is empty or None.
-
-    Args:
-        metrics: The :class:`Metrics` instance.
-        section_id: Unique section identifier.
-        section_title: Human-readable section title.
-        latencies: Raw latency values in milliseconds.
-    """
+    """Add count and latency statistics when samples are available."""
     if not latencies:
         return
 

@@ -589,14 +589,7 @@ class ServerBenchClient:
         return checksums
 
     def end_session(self, request: RequestContext) -> None:
-        """End one Server-side request session.
-
-        Args:
-            request: Request whose session should end.
-
-        Raises:
-            RuntimeError: If the client is not started.
-        """
+        """End the request's Server-side session."""
         mq_client = self._require_started()
 
         # First Party
