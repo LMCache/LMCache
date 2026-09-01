@@ -125,10 +125,15 @@ class _ChunkTokens:
     Attributes:
         token_ids: The chunk's token ids.
         token_offset: Position of its first token in the stored sequence.
+        parent_hash: Chunk hash of the chunk preceding it in the same
+            token-binding event; empty for the event's first chunk (the
+            sequence start, or a predecessor stored by an earlier request
+            and therefore unknown here).
     """
 
     token_ids: tuple[int, ...]
     token_offset: int
+    parent_hash: bytes = b""
 
 
 # Stands in for a chunk the binding cache does not know, so a STORE entry
@@ -351,13 +356,15 @@ class CacheEventSubscriber(EventSubscriber):
         chunk_hashes: list[bytes] = event.metadata["chunk_hashes"]
         token_chunks: list[list[int]] = event.metadata["token_chunks"]
         token_offsets: list[int] = event.metadata["token_offsets"]
+        parent_hash = b""
         for chunk_hash, chunk, offset in zip(
             chunk_hashes, token_chunks, token_offsets, strict=True
         ):
             self._token_bindings[chunk_hash] = _ChunkTokens(
-                token_ids=tuple(chunk), token_offset=offset
+                token_ids=tuple(chunk), token_offset=offset, parent_hash=parent_hash
             )
             self._token_bindings.move_to_end(chunk_hash)
+            parent_hash = chunk_hash
         if len(self._token_bindings) <= _TOKEN_BINDING_CACHE_SIZE:
             return
         # Evict in one batch down to half the bound: the next eviction is
@@ -419,6 +426,7 @@ class CacheEventSubscriber(EventSubscriber):
             size_bytes=size_bytes,
             token_ids=list(binding.token_ids),
             token_offset=binding.token_offset,
+            parent_hash_hex=binding.parent_hash.hex(),
         )
 
     def _record(

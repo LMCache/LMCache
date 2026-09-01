@@ -926,3 +926,59 @@ def test_a_declaration_survives_a_publish_failure():
     # Re-emitted at a fresh revision; the coordinator takes the newer one.
     subscriber.flush()
     assert [b.capacity_revision for b in sink.published[0]] == [2]
+
+
+# -- Parent chain ----------------------------------------------------------------
+
+
+def test_tokens_event_chains_parent_hashes():
+    """Within one binding event each chunk's parent is the chunk before
+    it; the first chunk has none (sequence start, or a predecessor stored
+    by an earlier request)."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    keys = [_key(1), _key(2), _key(3)]
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_TOKENS,
+            metadata={
+                "chunk_hashes": [key.chunk_hash for key in keys],
+                "token_chunks": [[1], [2], [3]],
+                "token_offsets": [256, 512, 768],
+            },
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": keys, "meta": [_meta(100)] * 3},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    assert [e.parent_hash_hex for e in batches[-1].entries] == [
+        "",
+        _key(1).chunk_hash.hex(),
+        _key(2).chunk_hash.hex(),
+    ]
+
+
+def test_unknown_binding_has_no_parent():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(1)], "meta": [_meta(100)]},
+        ),
+    )
+    subscriber.flush()
+    [batches] = sink.published
+    assert batches[0].entries[0].parent_hash_hex == ""
+
+
+def test_parent_hash_hex_must_be_hex():
+    with pytest.raises(ValueError, match="parent_hash_hex"):
+        CacheEventEntry(key=_key(1).to_encoded_object_key(), parent_hash_hex="zz")

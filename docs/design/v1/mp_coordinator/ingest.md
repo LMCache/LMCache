@@ -17,6 +17,7 @@ source                    ingest layer                     consumers
 POST /events ──────────▶ EventGate.ingest ──▶ CacheEventBroadcaster
   (live emitter stream)    fence / dedup /      .broadcast(batch) ────▶ KeyDirectory
                            gap detect           .fence_instance(id) ──▶ FleetEvictionController
+                                                                    ──▶ ZmqKVEventPublisher (optional)
 ```
 
 ## Why a gate separate from the directory
@@ -92,7 +93,10 @@ Consumers implement two hooks:
 
 Registration order is invocation order. Today: the key directory
 (placements and token bindings, the source of truth), then the eviction
-controller (per-salt usage and the LRU). The two are independent — the
+controller (per-salt usage and the LRU), then — when
+`--kv-events-endpoint` is set — the engine-format KV event publisher
+(see [cache_events.md](cache_events.md)), last so a router hears of a
+placement only after the directory holds it. The two are independent — the
 controller's own read-after-write ordering is internal to it (see
 [usage_and_eviction.md](usage_and_eviction.md)), not a property of
 registration order.

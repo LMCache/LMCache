@@ -59,6 +59,13 @@ class MPCoordinatorConfig:
             is one file; without this, giving it a setting would still
             mean editing this class, the CLI, and the docs.
         metrics_enabled: Whether to initialize OpenTelemetry metrics.
+        kv_events_endpoint: ZMQ PUB bind address (e.g. ``tcp://*:5557``) on
+            which gate-admitted cache events are re-published in vLLM
+            KV-event wire format for KV-cache-aware routers (llm-d, Dynamo).
+            Empty (default) disables the publisher.
+        kv_events_replay_port: TCP port of the ZMQ ROUTER socket answering
+            vLLM-style KV-event replay requests from a ring of recent
+            messages; ``0`` (default) disables replay.
         otlp_endpoint: OTLP gRPC endpoint for metrics push mode. When unset,
             metrics use Prometheus pull mode on the coordinator HTTP port.
     """
@@ -81,12 +88,15 @@ class MPCoordinatorConfig:
     timeout_keep_alive: int = 10
     metrics_enabled: bool = True
     otlp_endpoint: str | None = None
+    kv_events_endpoint: str = ""
+    kv_events_replay_port: int = 0
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
 
         Raises:
-            ValueError: If a timing parameter is non-positive/negative.
+            ValueError: If a timing parameter is non-positive/negative, or
+                the KV-events replay port is outside ``[0, 65535]``.
         """
         if self.instance_timeout <= 0:
             raise ValueError("instance_timeout must be positive")
@@ -110,3 +120,5 @@ class MPCoordinatorConfig:
             raise ValueError("checkpoint_interval must be non-negative")
         if self.timeout_keep_alive <= 0:
             raise ValueError("timeout_keep_alive must be positive")
+        if not 0 <= self.kv_events_replay_port <= 65535:
+            raise ValueError("kv_events_replay_port must be in [0, 65535]")

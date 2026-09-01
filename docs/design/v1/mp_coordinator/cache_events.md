@@ -167,13 +167,71 @@ records per `L1BackendType`, so it stamps `shared` on the pooled
 backend's runs — the vocabulary, batching identity, and directory
 semantics need no change.
 
+## Engine-format KV event publisher
+
+Module: `lmcache/v1/mp_coordinator/kv_event_publisher.py` (coordinator side)
+
+KV-cache-aware routers (llm-d's EPP, Dynamo's KV router; see the RFC in
+[issue #4770](https://github.com/LMCache/LMCache/issues/4770)) learn
+placements only from engine KV events: vLLM `KVEventBatch` msgpack over
+a ZMQ PUB socket, topic `kv@<emitter_id>@<model>`. In MP mode the MP
+connectors emit nothing there, so LMCache tiers are invisible to such a
+router. `ZmqKVEventPublisher` is a `CacheEventConsumer` (see
+[ingest.md](ingest.md)) mounted behind the coordinator's gate: every
+admitted `store`/`delete` batch is re-published in that wire format, so
+an unmodified vLLM adapter indexes LMCache's tiers next to the engines'
+GPU tier. Mounting on the coordinator rather than on each MP server
+means one stream for the whole fleet, already seq-deduplicated and
+incarnation-fenced, with the directory as the source of truth behind it.
+
+Translation (vLLM positional layout, tag first; HMA fields never set):
+
+| vLLM wire | Source |
+|---|---|
+| topic `kv@<emitter_id>@<model>` | private placement: the batch's `instance_id`; shared placement: `pool:<backend>`. `model` from the entry's `ObjectKey` |
+| `BlockStored.block_hashes` | `[chunk_hash]` (raw bytes; routers truncate to the last 8) |
+| `BlockStored.parent_block_hash` | `CacheEventEntry.parent_hash_hex`: the previous chunk in the same `mp.tokens` binding event, `nil` for the first (sequence start or a predecessor stored by an earlier request) |
+| `BlockStored.token_ids` / `block_size` | the entry's `token_ids` / their count (the chunk size) |
+| `medium` | `lmcache-l1` for L1, `lmcache-l2-<backend>` for L2 — identical on store and delete (routers refcount per medium) |
+| `BlockRemoved` | `delete` batches (L1 evictions, L2 deletes), one event per batch |
+| `AllBlocksCleared` | `fence_instance` (restart, departure): one per model the instance published private placements under |
+| `access`, `config` | not forwarded |
+
+The emitter identity is a deployment convention: an MP server is per
+node and serves every engine on it, so run it with `--instance-id
+node:<nodeName>` and a router that understands node pseudo-pods
+(llm-d-router#2586) credits every engine on that node; `pool:<backend>`
+is credited to every engine of the model. A router without that notion
+still indexes the stream — it credits the identity as one opaque pod.
+The coordinator adds nothing of its own to the identity, and nothing in
+the wire format is specific to one router: it is vLLM's, verified
+against llm-d's adapter.
+
+A tokenless `store` entry (token-binding cache miss) is skipped: routers
+derive their own keys from the tokens and cannot index an unknown hash
+without them. A `delete` is never skipped. The `seq` frame is one counter
+across all topics, numbered from 0 like vLLM; with
+`--kv-events-replay-port` a ROUTER socket answers vLLM-style replay
+requests (`[b"", start_seq:8]` → the buffered `[topic, seq, payload]`
+frames from `start_seq` on, then `[b"", -1:8, b""]`) from a bounded
+ring of recent messages. Sends are non-blocking (PUB drops at its
+high-water mark) and send errors are logged, never raised: the publisher
+is the last consumer and must not fail the ingest path.
+
+Known limits, tracked in the RFC: a shared placement is re-published
+once per reporting node (routers refcount it per `pool:` identity, so a
+`delete` reported by one node leaves the entry until the others report
+theirs — validate-on-use covers the gap); replay answers from the
+message ring, not from the directory.
+
 ## Wiring and configuration
 
 Enabled in the MP HTTP server lifespan when a coordinator URL is set
 and `--coordinator-event-reporting` (or
 `LMCACHE_COORDINATOR_EVENT_REPORTING`) is on;
 `--coordinator-event-flush-interval` paces the subscriber's
-event-driven flushes (default 1s).
+event-driven flushes (default 1s). The coordinator's engine-format
+publisher is enabled there with `lmcache coordinator --kv-events-endpoint`.
 
 ## Known limitations (follow-ups)
 

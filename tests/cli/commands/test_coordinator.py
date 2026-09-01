@@ -137,6 +137,8 @@ class TestCoordinatorCommandExecute:
             timeout_keep_alive=None,
             disable_metrics=True,
             otlp_endpoint="http://collector:4317",
+            kv_events_endpoint="tcp://*:5557",
+            kv_events_replay_port=5558,
         )
 
         captured = {}
@@ -167,6 +169,8 @@ class TestCoordinatorCommandExecute:
         assert captured["config"].extra_config == {"my_view.window": 8}
         assert captured["config"].metrics_enabled is False
         assert captured["config"].otlp_endpoint == "http://collector:4317"
+        assert captured["config"].kv_events_endpoint == "tcp://*:5557"
+        assert captured["config"].kv_events_replay_port == 5558
         # Unset flags keep the config defaults.
         assert captured["config"].host == MPCoordinatorConfig.host
         assert captured["config"].port == MPCoordinatorConfig.port
@@ -200,6 +204,8 @@ class TestCoordinatorCommandExecute:
             timeout_keep_alive=None,
             disable_metrics=None,
             otlp_endpoint=None,
+            kv_events_endpoint=None,
+            kv_events_replay_port=None,
         )
 
         captured = {}

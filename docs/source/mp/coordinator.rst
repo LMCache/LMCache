@@ -121,6 +121,21 @@ keeps the default below.
      - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
        mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
        local ``/metrics`` endpoint returns 404.
+   * - ``--kv-events-endpoint``
+     - (empty)
+     - ZMQ PUB bind address (e.g. ``tcp://*:5557``) on which admitted cache
+       events are re-published in vLLM KV-event wire format for KV-cache-aware
+       routers (llm-d, Dynamo): ``BlockStored`` (with token ids and the
+       predecessor chunk as ``parent_block_hash``) for every L1/L2 store,
+       ``BlockRemoved`` for every eviction/delete, ``AllBlocksCleared`` when
+       an instance is fenced; medium ``lmcache-l1`` / ``lmcache-l2-<backend>``.
+       Topic identity is the reporting server's ``--instance-id`` (deploy as
+       ``node:<nodeName>``) or ``pool:<backend>`` for shared L2. Empty
+       disables it.
+   * - ``--kv-events-replay-port``
+     - ``0``
+     - TCP port of a ZMQ ROUTER socket answering vLLM-style replay requests
+       from a ring of recent messages; ``0`` disables replay.
 
 Coordinator metrics export
 --------------------------
@@ -177,7 +192,6 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
        ``1``).
-
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
 random UUID v4 at startup and registers under that.

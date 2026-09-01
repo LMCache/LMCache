@@ -203,6 +203,22 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
 
+        parser.add_argument(
+            "--kv-events-endpoint",
+            type=str,
+            default=None,
+            help="ZMQ PUB bind address (e.g. tcp://*:5557) on which admitted "
+            "cache events are re-published in vLLM KV-event wire format for "
+            "KV-cache-aware routers (llm-d, Dynamo) (default: off).",
+        )
+        parser.add_argument(
+            "--kv-events-replay-port",
+            type=int,
+            default=None,
+            help="TCP port of the ZMQ ROUTER socket answering KV-event replay "
+            "requests from a ring of recent messages (default: 0, off).",
+        )
+
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
 
@@ -255,6 +271,8 @@ class CoordinatorCommand(BaseCommand):
                 ("metadata_path", args.metadata_path),
                 ("timeout_keep_alive", args.timeout_keep_alive),
                 ("otlp_endpoint", args.otlp_endpoint),
+                ("kv_events_endpoint", args.kv_events_endpoint),
+                ("kv_events_replay_port", args.kv_events_replay_port),
             )
             if value is not None
         }

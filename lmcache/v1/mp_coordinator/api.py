@@ -75,22 +75,36 @@ class CacheEventEntry:
         token_offset: Token position of the chunk's first token in the
             sequence it was stored under; prefix-chained chunk hashes do
             not reveal it. :data:`UNKNOWN_TOKEN_OFFSET` when unreported.
+        parent_hash_hex: Hex-encoded chunk hash of the chunk stored
+            immediately before this one in the same sequence (``store``
+            only); empty for a sequence's first chunk or when the emitter
+            does not know the predecessor. Lets engine-format KV event
+            consumers chain blocks the way vLLM's ``parent_block_hash``
+            does.
     """
 
     key: EncodedObjectKey
     size_bytes: int = 0
     token_ids: list[int] = field(default_factory=list)
     token_offset: int = UNKNOWN_TOKEN_OFFSET
+    parent_hash_hex: str = ""
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.
 
         Raises:
-            ValueError: If ``size_bytes`` is negative, or ``token_offset``
-                is negative and not :data:`UNKNOWN_TOKEN_OFFSET`.
+            ValueError: If ``size_bytes`` is negative, ``token_offset``
+                is negative and not :data:`UNKNOWN_TOKEN_OFFSET`, or
+                ``parent_hash_hex`` is not valid hex.
         """
         if self.size_bytes < 0:
             raise ValueError(f"size_bytes must be >= 0 (got {self.size_bytes})")
+        try:
+            bytes.fromhex(self.parent_hash_hex)
+        except ValueError as e:
+            raise ValueError(
+                f"parent_hash_hex must be hex (got {self.parent_hash_hex!r})"
+            ) from e
         if self.token_offset < 0 and self.token_offset != UNKNOWN_TOKEN_OFFSET:
             raise ValueError(
                 f"token_offset must be >= 0 or UNKNOWN_TOKEN_OFFSET "
