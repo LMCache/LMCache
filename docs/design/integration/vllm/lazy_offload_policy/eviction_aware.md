@@ -14,12 +14,12 @@ operation whose blocks come under eviction pressure.
 
 ## Objects
 
-- **`BlockPoolReader`** (protocol) -- read-only pool view:
+- **`GPUBlockPoolView`** -- read-only view of the `BlockPool` bound via the
+  vLLM `bind_gpu_block_pool` hook, and the policy's only pool access:
   `free_queue_block_ids()` (a *lazy* iterator over the free queue from the
   eviction head; a block's position is its LRU rank, rank 0 = next victim),
   `is_free(block_id)` (O(1) queue membership), and `block_hash(block_id)`.
-  Production impl `GPUBlockPoolView` wraps the `BlockPool` bound via the vLLM
-  `bind_gpu_block_pool` hook; both must never mutate pool state.
+  None of them may mutate pool state.
 
   Laziness is contractual, not an optimisation detail: the walk runs on the
   scheduler's critical path once per step and the full queue is O(free

@@ -10,7 +10,7 @@ deadline. Pure policy: it decides, ``LazyOffloadManager`` acts. See
 
 # Standard
 from dataclasses import asdict, dataclass, field, replace
-from typing import TYPE_CHECKING, Iterable, Iterator, Protocol, cast
+from typing import TYPE_CHECKING, Iterable, Iterator, cast
 import math
 import time
 
@@ -20,6 +20,7 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
     ConfigValue,
     DrainSignals,
     LazyOffloadDrain,
+    OffloadPolicy,
     PendingStoreItem,
 )
 from lmcache.utils import init_logger
@@ -56,36 +57,8 @@ _COST_SENSOR_FIELDS = frozenset(
 )
 
 
-class BlockPoolReader(Protocol):
-    """Read-only, side-effect-free view of the GPU block pool.
-
-    Production implementation is :class:`GPUBlockPoolView`; tests fake it.
-    """
-
-    def free_queue_block_ids(self) -> Iterator[int]:
-        """Iterate the free queue lazily from the eviction head.
-
-        Block ids come in eviction order, next victim first; a block's
-        position is its rank. One walk per step covers the whole free pool,
-        on the scheduler's critical path, so it must stay lazy.
-        """
-        ...
-
-    def is_free(self, block_id: int) -> bool:
-        """Whether the block currently sits in the free queue.
-
-        O(1) where walking to its rank is O(rank); a pin shifts the queue
-        whether or not the block was inside the window the step read.
-        """
-        ...
-
-    def block_hash(self, block_id: int) -> "BlockHashWithGroupId | None":
-        """Return the block's prefix-cache hash, None if uncached or recycled."""
-        ...
-
-
 class GPUBlockPoolView:
-    """Production :class:`BlockPoolReader` over a vLLM ``BlockPool``."""
+    """Read-only, side-effect-free view of a vLLM ``BlockPool``."""
 
     def __init__(self, block_pool: "BlockPool") -> None:
         """Wrap a block pool obtained via ``bind_gpu_block_pool``."""
@@ -105,11 +78,12 @@ class GPUBlockPoolView:
             block = block.next_free_block
 
     def is_free(self, block_id: int) -> bool:
-        """Whether the block is an eviction candidate.
+        """Whether the block is an eviction candidate, in O(1).
 
         vLLM keeps exactly the unreferenced blocks in the free queue, so the
-        reference count answers membership. A hybrid model's null block is
-        excluded: popped out at construction, its count is not maintained.
+        reference count answers membership without the O(rank) walk. A hybrid
+        model's null block is excluded: popped out of the queue at
+        construction, its count is not maintained.
         """
         block = self._block_pool.blocks[block_id]
         return block.ref_cnt == 0 and not block.is_null
@@ -381,7 +355,7 @@ class _PendingOperations:
         }
 
 
-class EvictionAwareStoreQueue:
+class EvictionAwareStoreQueue(OffloadPolicy):
     """Buffers store operations and releases them by eviction imminence.
 
     An operation is emitted when one of its blocks sits within the *danger
@@ -391,7 +365,7 @@ class EvictionAwareStoreQueue:
     come due are dropped, never stored stale. Scheduler thread only.
     """
 
-    def __init__(self, config: LazyOffloadPolicyConfig, pool: BlockPoolReader) -> None:
+    def __init__(self, config: LazyOffloadPolicyConfig, pool: GPUBlockPoolView) -> None:
         """Create an empty queue over ``pool`` with the tunables in ``config``."""
         self._config = config
         self._pool = pool

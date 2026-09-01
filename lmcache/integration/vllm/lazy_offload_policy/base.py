@@ -2,8 +2,9 @@
 """Base types for lazy-offload policies."""
 
 # Standard
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Third Party
@@ -61,7 +62,7 @@ class LazyOffloadDrain:
     emptied_request_ids: list[str] = field(default_factory=list)
 
 
-class OffloadPolicy(Protocol):
+class OffloadPolicy(ABC):
     """Scheduler-side decision logic for deferring cache stores.
 
     Implementations buffer store metadata by request and decide, once per
@@ -69,6 +70,7 @@ class OffloadPolicy(Protocol):
     connector side effect and calls these from the scheduler thread only.
     """
 
+    @abstractmethod
     def add(
         self,
         meta: "LMCacheMPRequestMetadata",
@@ -86,48 +88,47 @@ class OffloadPolicy(Protocol):
             RuntimeError: If the request already has a different epoch
                 buffered.
         """
-        ...
 
+    @abstractmethod
     def drain(self, signals: DrainSignals) -> LazyOffloadDrain:
         """Decide which buffered operations one scheduler step releases.
 
         Returns:
             The stores to submit and the requests left with nothing buffered.
         """
-        ...
 
+    @abstractmethod
     def has_pending_request(self, request_id: str) -> bool:
         """Whether the request currently owns buffered operations."""
-        ...
 
+    @abstractmethod
     def drop_request(self, request_id: str) -> int:
         """Discard operations invalidated by a preemption reset.
 
         Returns:
             The number of buffered operations discarded.
         """
-        ...
 
+    @abstractmethod
     def discard_for_reuse(self, request_id: str) -> int:
         """Discard a predecessor's state before its id is reused.
 
         Returns:
             The number of buffered operations discarded.
         """
-        ...
 
+    @abstractmethod
     def release_request(self, request_id: str) -> None:
         """Forget non-pending state after current-session teardown."""
-        ...
 
+    @abstractmethod
     def mark_store_failed(self, request_id: str) -> int:
         """Break the request's stored prefix chain after a failed store.
 
         Returns:
             The number of buffered operations dropped.
         """
-        ...
 
+    @abstractmethod
     def log_final_stats(self) -> None:
         """Write the policy's final counters at connector shutdown."""
-        ...

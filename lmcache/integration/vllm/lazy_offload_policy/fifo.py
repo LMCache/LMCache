@@ -10,6 +10,7 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
     ConfigValue,
     DrainSignals,
     LazyOffloadDrain,
+    OffloadPolicy,
     PendingStoreItem,
 )
 from lmcache.utils import init_logger as lmcache_init_logger
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 
-class FIFOOffloadPolicy:
+class FIFOOffloadPolicy(OffloadPolicy):
     """Buffer by request and drain controller-eligible ids in FIFO order.
 
     Legacy placeholder policy: a drain happens once enough finished requests
