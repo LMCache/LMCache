@@ -43,23 +43,6 @@ x-pod-2xpu: &pod-2xpu
     - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 40Gi } }
 
-x-pod-4xpu: &pod-4xpu
-  containers:
-    - name: container-0
-      image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu
-      imagePullPolicy: IfNotPresent
-      resources:
-        requests:
-          deviceclass.resource.kubernetes.io/gpu.intel.com: "4"
-        limits:
-          deviceclass.resource.kubernetes.io/gpu.intel.com: "4"
-      volumeMounts:
-        - { name: hf-cache, mountPath: /root/.cache/huggingface }
-        - { name: dshm, mountPath: /dev/shm }
-  volumes:
-    - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 40Gi } }
-
 steps:
   - group: ":xpu: Multiprocess (1-pod)"
     steps:
@@ -86,15 +69,16 @@ steps:
           export VLLM_USE_STANDALONE_COMPILE="0"
           export CPU_BUFFER_SIZE="32"
           export VLLM_DISABLE_PREFIX_CACHING="true"
-          export MODEL="Qwen/Qwen3-14B"
-          export TENSOR_PARALLEL_SIZE="2"
-          export GPU_FOR_VLLM="0,1"
-          export GPU_FOR_BASELINE="2,3"
+          export MODEL="Qwen/Qwen3-4B"
+          export TENSOR_PARALLEL_SIZE="1"
+          export GPU_FOR_VLLM="0"
+          export GPU_FOR_BASELINE="1"
+          export NUM_PROMPTS="8"
           export RANDOM_INPUT_LEN="10000"
           export MAX_WAIT_SECONDS="900"
           .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 45
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
-        plugins: [{ kubernetes: { podSpec: *pod-4xpu } }]
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
