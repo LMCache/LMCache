@@ -30,15 +30,7 @@ class FIFOOffloadPolicy:
     """
 
     def __init__(self, configs: dict[str, ConfigValue]) -> None:
-        """Read the FIFO trigger and batch size from the connector config.
-
-        Args:
-            configs: vLLM connector extra configuration. Recognized here:
-                ``lmcache.mp.lazy_offload_threshold`` (finished requests
-                needed to trigger a drain) and
-                ``lmcache.mp.lazy_offload_select_count`` (requests released
-                per drain).
-        """
+        """Read ``lazy_offload_threshold`` and ``_select_count`` from configs."""
         self._pending_items: dict[str, PendingStoreItem] = {}
         self._threshold = int(
             cast(int, configs.get("lmcache.mp.lazy_offload_threshold", 100))
@@ -77,7 +69,6 @@ class FIFOOffloadPolicy:
         )
         if eligible_count < self._threshold:
             return LazyOffloadDrain()
-
         items: list[PendingStoreItem] = []
         for request_id in list(self._pending_items):
             if request_id not in eligible_ids:

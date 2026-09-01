@@ -35,15 +35,10 @@ class PendingStoreItem:
 class DrainSignals:
     """One scheduler step's inputs to a drain decision.
 
-    Attributes:
-        new_blocks_allocated: Gross GPU blocks allocated by the step that
-            just finished scheduling.
-        est_next_step_blocks: Blocks the next step is estimated to allocate.
-        allocated_block_ids: Block ids allocated or resurrected this step;
-            the operations they cover are revalidated during the drain.
-        finished_request_ids: Requests the controller has seen finish.
-        blocked_request_ids: Requests with a store batch still in flight.
-            They stay buffered until the receipt arrives.
+    The two block counts are the step's gross allocation and the next step's
+    estimate; ``allocated_block_ids`` are the ids allocated or resurrected
+    this step, whose operations the drain revalidates. Requests in
+    ``blocked_request_ids`` have a batch in flight and stay buffered.
     """
 
     new_blocks_allocated: int
@@ -57,11 +52,9 @@ class DrainSignals:
 class LazyOffloadDrain:
     """Policy-neutral output consumed by the lazy-offload controller.
 
-    Attributes:
-        items: Store metadata to submit now, one entry per request.
-        emptied_request_ids: Requests whose buffer became empty in this
-            drain. The controller combines this with request phase and
-            batch state before ending a session.
+    ``items`` is the metadata to submit now, one entry per request;
+    ``emptied_request_ids`` are the requests whose buffer became empty, which
+    the controller weighs against phase and batch state before teardown.
     """
 
     items: list[PendingStoreItem] = field(default_factory=list)
@@ -72,9 +65,8 @@ class OffloadPolicy(Protocol):
     """Scheduler-side decision logic for deferring cache stores.
 
     Implementations buffer store metadata by request and decide, once per
-    scheduler step, which buffered operations to release. ``LazyOffloadManager``
-    owns every GPU and connector side effect and calls these methods only from
-    the scheduler thread.
+    step, what to release. ``LazyOffloadManager`` owns every GPU and
+    connector side effect and calls these from the scheduler thread only.
     """
 
     def add(
@@ -85,27 +77,19 @@ class OffloadPolicy(Protocol):
     ) -> None:
         """Buffer one store operation instead of submitting it.
 
-        An operation the policy cannot take custody of (a covered block with
-        no prefix-cache hash, or a request whose stored chain is already
-        broken) is dropped here and logged.
-
-        Args:
-            meta: STORE metadata from ``GetStoreMetadata``.
-            block_hashes: Hash of every GPU block covering the operation's
-                token range, snapshotted now.
-            epoch: Store epoch that produced the metadata.
+        ``block_hashes`` snapshots every block covering ``meta``'s token
+        range now, and ``epoch`` is the store epoch that produced it. An
+        operation the policy cannot take custody of -- an unhashed block, or
+        a request whose stored chain is already broken -- is dropped here.
 
         Raises:
-            RuntimeError: If the request already has operations buffered
-                under a different store epoch.
+            RuntimeError: If the request already has a different epoch
+                buffered.
         """
         ...
 
     def drain(self, signals: DrainSignals) -> LazyOffloadDrain:
         """Decide which buffered operations one scheduler step releases.
-
-        Args:
-            signals: The step's block-consumption and lifecycle inputs.
 
         Returns:
             The stores to submit and the requests left with nothing buffered.
@@ -119,19 +103,13 @@ class OffloadPolicy(Protocol):
     def drop_request(self, request_id: str) -> int:
         """Discard operations invalidated by a preemption reset.
 
-        Args:
-            request_id: The request whose tracker restarts from token zero.
-
         Returns:
             The number of buffered operations discarded.
         """
         ...
 
     def discard_for_reuse(self, request_id: str) -> int:
-        """Discard a predecessor's state before its id is reused; see above.
-
-        Args:
-            request_id: The reused request id.
+        """Discard a predecessor's state before its id is reused.
 
         Returns:
             The number of buffered operations discarded.
@@ -144,9 +122,6 @@ class OffloadPolicy(Protocol):
 
     def mark_store_failed(self, request_id: str) -> int:
         """Break the request's stored prefix chain after a failed store.
-
-        Args:
-            request_id: The request whose store failed.
 
         Returns:
             The number of buffered operations dropped.

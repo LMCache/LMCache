@@ -29,12 +29,7 @@ POLICY_CONFIG_KEY = "lmcache.mp.lazy_offload_policy"
 
 
 class LazyOffloadMode(enum.Enum):
-    """Which drain policy buffers and releases store operations.
-
-    Attributes:
-        FIFO: Count-triggered whole-request drain; the legacy placeholder.
-        EVICTION_AWARE: Pressure-triggered drain in free-queue LRU order.
-    """
+    """FIFO is the legacy count-triggered drain; see the design doc."""
 
     FIFO = "FIFO"
     EVICTION_AWARE = "EVICTION_AWARE"
@@ -44,21 +39,13 @@ def create_offload_policy(
     configs: dict[str, ConfigValue],
     gpu_block_pool: "BlockPool",
 ) -> OffloadPolicy:
-    """Build the configured lazy-offload policy.
+    """Build the policy ``POLICY_CONFIG_KEY`` names, EVICTION_AWARE default.
 
-    Args:
-        configs: vLLM connector extra configuration. ``POLICY_CONFIG_KEY``
-            selects the policy (``"EVICTION_AWARE"`` by default); the
-            remaining keys are read by the selected policy itself.
-        gpu_block_pool: The scheduler's GPU block pool, which the
-            eviction-aware policy reads to rank blocks by eviction order.
-
-    Returns:
-        The policy instance the manager drives.
+    The remaining config keys are read by the selected policy itself; the
+    eviction-aware one ranks ``gpu_block_pool`` by eviction order.
 
     Raises:
-        ValueError: If the configured policy name is unknown, or a policy
-            tunable is outside its documented range.
+        ValueError: If the name is unknown or a tunable is out of range.
     """
     name = cast(
         str, configs.get(POLICY_CONFIG_KEY, LazyOffloadMode.EVICTION_AWARE.value)

@@ -155,15 +155,13 @@ in-flight stores (idempotent under content-addressed keys) -- and
   or the queue can never work off a backlog and buffered ops are lost to
   eviction instead of stored -- a cap near 1 is a steady-state loss setting,
   not a burst-shaping one. There is no static validation (the break-even
-  depends on runtime prefill concurrency); the sensors are
-  `throttled_drains` (drains that found an op due and could not emit it -- a
-  lower bound, since candidates the loop never reached are uncounted),
-  `throttled_drains` (drains that held anything back), and one WARNING per
-  process once `throttled_drains` and `dropped_evicted` are both nonzero
-  **cumulatively** -- the pair separates a cap merely delaying a burst from
-  one below the admission rate, and the two land on different steps (the cap
-  builds the backlog; a later step's allocation kills it), so requiring them
-  in the same drain would turn the warning into a coincidence.
+  depends on runtime prefill concurrency). The sensor is `throttled_drains`,
+  counting drains that held a due op back -- a lower bound, since candidates
+  the loop never reached are uncounted. Read it against `dropped_evicted`:
+  both nonzero cumulatively separates a cap below the admission rate from one
+  merely delaying a burst. They land on different steps (the cap builds the
+  backlog, a later step's allocation kills it), so they are not expected in
+  the same drain.
 - **Idle consequences**: receipts travel in worker metadata, which only
   flows on token-producing steps. Pins, in-flight sessions, and finished
   requests whose ops never come due all settle on the next activity --

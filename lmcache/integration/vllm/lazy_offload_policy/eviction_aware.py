@@ -2,15 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Eviction-aware lazy offload policy.
 
-Store operations are buffered instead of being submitted as soon as their
-tokens are computed, and are released when the GPU blocks holding their data
-approach the free queue's eviction head, or when they hit the configured
-deferral deadline. See ``docs/design/integration/vllm/lazy_offload_policy/
-eviction_aware.md``.
-
-This module is pure policy: vLLM types appear only in annotations and it
-decides without acting. ``LazyOffloadManager`` owns execution -- pinning the
-blocks of emitted operations and submitting them.
+Store operations are buffered and released when the GPU blocks holding their
+data approach the free queue's eviction head, or when they hit the deferral
+deadline. Pure policy: it decides, ``LazyOffloadManager`` acts. See
+``docs/design/integration/vllm/lazy_offload_policy/eviction_aware.md``.
 """
 
 # Standard
@@ -43,70 +38,49 @@ logger = init_logger(__name__)
 
 DEFAULT_HORIZON_STEPS = 2.5
 
-# Smoothing factor for the per-step block-consumption EMA. Not a config
-# knob: the horizon (in steps) is the tunable quantity, the EMA only
-# smooths noise.
+# Smooths the per-step block-consumption EMA; the horizon is the tunable.
 _EMA_ALPHA = 0.3
 
-# Rank given to a request released by the deferral deadline rather than by
-# proximity to the free-queue head. It sorts ahead of every real rank (free
-# queue positions, never negative) and is always below the emission
-# threshold, so an overdue request is decided first and is due even on a
-# step whose danger depth is zero.
+# Rank of a request released by the deferral deadline. Sorts ahead of every
+# real rank (free-queue positions, never negative) and below every emission
+# threshold, so it is due even on a step whose danger depth is zero.
 _OVERDUE_RANK = -1
 
-#: Minimum seconds between periodic counter-ledger log lines.
-_STATS_LOG_INTERVAL_S = 5.0
+_STATS_LOG_INTERVAL_S = 5.0  # Minimum seconds between ledger log lines.
+_DROP_LOG_SAMPLE_OPS = 8  # Dropped ops named in the drop line; rest counted.
 
-#: Most dropped ops named in the aggregate drop line; the rest are counted.
-_DROP_LOG_SAMPLE_OPS = 8
-
-#: Counters that advance on every drain whether or not the policy decided
-#: anything, so a change watcher has to skip them.
+#: Counters that advance on every drain whatever the policy decided, so a
+#: change watcher has to skip them.
 _COST_SENSOR_FIELDS = frozenset(
-    {
-        "drain_steps",
-        "free_queue_blocks_read",
-        "requests_validated",
-        "blocks_validated",
-    }
+    {"drain_steps", "free_queue_blocks_read", "requests_validated", "blocks_validated"}
 )
 
 
 class BlockPoolReader(Protocol):
-    """Read-only view over the GPU block pool required by the policy.
+    """Read-only, side-effect-free view of the GPU block pool.
 
-    The production implementation is :class:`GPUBlockPoolView`; tests
-    provide a fake. Both must be side-effect free.
+    Production implementation is :class:`GPUBlockPoolView`; tests fake it.
     """
 
     def free_queue_block_ids(self) -> Iterator[int]:
-        """Iterate the free queue from the eviction head, lazily.
+        """Iterate the free queue lazily from the eviction head.
 
-        Must stay lazy: it runs on the scheduler's critical path once per
-        step while the queue holds every free block in the pool.
-
-        Returns:
-            Block ids in eviction order, the next victim first. A block's
-            position is its rank.
+        Block ids come in eviction order, next victim first; a block's
+        position is its rank. One walk per step covers the whole free pool,
+        on the scheduler's critical path, so it must stay lazy.
         """
         ...
 
     def is_free(self, block_id: int) -> bool:
         """Whether the block currently sits in the free queue.
 
-        Answers in O(1) what walking to the block's rank would answer in
-        O(rank): pinning a block shifts every block behind it toward the
-        head, and that shift counts whether or not the block was inside the
-        window the step read.
+        O(1) where walking to its rank is O(rank); a pin shifts the queue
+        whether or not the block was inside the window the step read.
         """
         ...
 
     def block_hash(self, block_id: int) -> "BlockHashWithGroupId | None":
-        """Return the block's prefix-cache hash, or None if it holds none.
-
-        None means never completed, or evicted and reallocated.
-        """
+        """Return the block's prefix-cache hash, None if uncached or recycled."""
         ...
 
 
@@ -118,24 +92,15 @@ class GPUBlockPoolView:
         self._block_pool = block_pool
 
     def free_queue_block_ids(self) -> Iterator[int]:
-        """Walk the free queue's links from the eviction head, lazily.
+        """Walk the free queue's links lazily, yielding ids in eviction order.
 
-        Yields ids rather than calling ``get_all_free_blocks()``, which
-        materialises the whole queue on every step.
-
-        Yields:
-            Block ids in eviction order, the next victim first.
-
-        Raises:
-            RuntimeError: If the free list's fake head has no successor,
-                i.e. the queue is not in the shape vLLM maintains.
+        Avoids ``get_all_free_blocks()``, which materialises the whole queue
+        every step. Raises RuntimeError if the fake head has no successor.
         """
         block = self._block_pool.free_block_queue.fake_free_list_head.next_free_block
         if block is None:
             raise RuntimeError("free_block_queue.fake_free_list_head has no successor")
-        # The fake tail is the one node with no successor, so this stops
-        # before reaching it.
-        while block.next_free_block is not None:
+        while block.next_free_block is not None:  # The fake tail has none.
             yield block.block_id
             block = block.next_free_block
 
@@ -143,9 +108,8 @@ class GPUBlockPoolView:
         """Whether the block is an eviction candidate.
 
         vLLM keeps exactly the unreferenced blocks in the free queue, so the
-        reference count answers queue membership without walking the list.
-        The null block of a hybrid-attention model is excluded: it is popped
-        out of the queue at construction and its count is not maintained.
+        reference count answers membership. A hybrid model's null block is
+        excluded: popped out at construction, its count is not maintained.
         """
         block = self._block_pool.blocks[block_id]
         return block.ref_cnt == 0 and not block.is_null
@@ -158,33 +122,21 @@ class GPUBlockPoolView:
 class _FreeQueueWindow:
     """The head of the free queue, materialised only as deep as it is used.
 
-    A drain compares ranks against the danger depth, extended by the blocks
-    the drain itself pins out of the queue. How deep that reaches is not
-    known before the drain runs, so the window opens at the danger depth and
-    is extended as emissions actually widen the threshold.
+    Emissions pin blocks out of the queue and so widen the threshold a drain
+    compares against, by an amount not known before the drain runs.
     """
 
     def __init__(self, block_ids: Iterator[int]) -> None:
-        """Open an empty window over a lazy free-queue walk.
-
-        Args:
-            block_ids: Free-queue block ids in eviction order, consumed on
-                demand. An empty iterator opens a window that never grows.
-        """
+        """Open an empty window over ``block_ids``, consumed on demand."""
         self._block_ids = block_ids
         self._exhausted = False
         self.ranks: dict[int, int] = {}
 
     def extend_to(self, depth: int) -> dict[int, int]:
-        """Walk the queue until the window holds ``depth`` blocks.
-
-        Args:
-            depth: Target depth from the eviction head; at or below the
-                current depth this reads nothing.
+        """Walk the queue until the window holds ``depth`` blocks, at most.
 
         Returns:
-            The entries this call revealed, block id -> rank, empty when the
-            target was already met or the queue ended first.
+            The entries this call revealed, block id -> rank.
         """
         revealed: dict[int, int] = {}
         while not self._exhausted and len(self.ranks) < depth:
@@ -202,21 +154,9 @@ class _FreeQueueWindow:
 class PendingStoreOp:
     """A deferred store operation with the state needed to validate it.
 
-    Attributes:
-        request_id: The vLLM request this operation belongs to.
-        store_metadata: Ready-to-send store metadata from
-            ``LMCacheMPRequestMetadata.GetStoreMetadata``; opaque here.
-        block_hashes: Hash of every GPU block covering the operation's token
-            range, snapshotted at admission. :meth:`EvictionAwareStoreQueue
-            .add` rejects any None value, so a later mismatch against the
-            pool means the block was recycled.
-        prefix_start_tokens: Token index of the start of this range.
-        prefix_end_tokens: Token index one past the end of this range.
-        epoch: Store epoch that produced this operation.
-        admitted_at_drain: Drain counter at admission. Its distance from the
-            drain counter at emission is the deferral the policy achieved.
-        admitted_at_time: Wall clock of the admitting step, read by the
-            last :meth:`EvictionAwareStoreQueue.drain`.
+    ``block_hashes`` snapshots every covered block at admission and never
+    holds a None, so a later mismatch means the block was recycled; the
+    ``admitted_at_*`` stamps measure the deferral the policy achieved.
     """
 
     request_id: str
@@ -230,15 +170,7 @@ class PendingStoreOp:
 
 
 def _format_drop_sample(dropped: list[PendingStoreOp]) -> str:
-    """Render dropped ops for the aggregate drop line, truncating the tail.
-
-    Args:
-        dropped: The operations dropped by one drain, in drop order.
-
-    Returns:
-        ``request (prefix N)`` for at most ``_DROP_LOG_SAMPLE_OPS`` ops, with
-        a ``+N more`` suffix when the list was truncated.
-    """
+    """Render up to ``_DROP_LOG_SAMPLE_OPS`` dropped ops, then ``+N more``."""
     sample = ", ".join(
         f"{op.request_id} (prefix {op.prefix_end_tokens})"
         for op in dropped[:_DROP_LOG_SAMPLE_OPS]
@@ -253,23 +185,8 @@ def _format_drop_sample(dropped: list[PendingStoreOp]) -> str:
 class LazyOffloadPolicyConfig:
     """Tunables of the eviction-aware drain policy.
 
-    Attributes:
-        horizon_steps: How many scheduler steps of estimated block
-            consumption count as "imminent eviction". Larger values drain
-            earlier (closer to eager, fewer drops); smaller values drain
-            later (longer deferral, more drops).
-        max_drain_per_step: Upper bound on operations emitted per step, to
-            bound the device-to-host burst. Must be >= 1. A prefilling
-            request buffers about one operation per step, so a cap below the
-            number of concurrently prefilling requests loses the backlog to
-            eviction instead of merely delaying it; the sensor for having
-            sized it wrong is ``LazyOffloadCounters.throttled_drains``.
-        max_deferral_seconds: Upper bound on how long an operation may wait
-            between admission and emission; 0.0 (the default) leaves emission
-            entirely to the danger window. The window says when the block
-            dies on the GPU, not when the content is asked for again, so set
-            this below the reuse interval the workload has to beat. Sensor:
-            ``LazyOffloadCounters.emitted_overdue`` against ``emitted``.
+    Each field is documented for users, with its sensor counter and the
+    effect of raising it, in ``docs/source/mp/configuration.rst``.
     """
 
     horizon_steps: float = DEFAULT_HORIZON_STEPS
@@ -278,15 +195,9 @@ class LazyOffloadPolicyConfig:
 
     @classmethod
     def from_configs(cls, configs: dict[str, ConfigValue]) -> "LazyOffloadPolicyConfig":
-        """Read the tunables from vLLM's ``kv_connector_extra_config``.
+        """Read the tunables from ``lmcache.mp.lazy_offload_<field name>``.
 
-        Args:
-            configs: Connector extra configuration. Each field is read from
-                the key ``lmcache.mp.lazy_offload_<field name>``; missing
-                keys keep the field default.
-
-        Returns:
-            The parsed configuration.
+        Missing keys keep the field default.
 
         Raises:
             ValueError: If a value is outside its documented range.
@@ -303,11 +214,7 @@ class LazyOffloadPolicyConfig:
         )
 
     def __post_init__(self) -> None:
-        """Validate field ranges.
-
-        Raises:
-            ValueError: If any field is outside its documented range.
-        """
+        """Validate field ranges, raising ValueError on any out of range."""
         if self.horizon_steps <= 0:
             raise ValueError(f"horizon_steps must be > 0, got {self.horizon_steps}")
         if self.max_drain_per_step < 1:
@@ -326,15 +233,8 @@ class LazyOffloadCounters:
 
     The operation counts close as a ledger: ``admitted`` equals the pending
     depth plus ``emitted`` plus every drop counter. The rest are weights and
-    sensors beside that equation: ``dropped_evicted_tokens`` measures the
-    losses in the unit the cache is sized in; ``emitted_overdue`` against
-    ``emitted`` says whether the deferral deadline or the danger window is
-    the binding clock; the ``*_deferral_drains`` sums divided by ``emitted``
-    and ``dropped_evicted`` give the mean deferral in drains, the direct
-    measure of what the policy buys; ``throttled_drains`` counts drains that
-    left a due operation unemitted because ``max_drain_per_step`` ran out;
-    and ``_COST_SENSOR_FIELDS`` names the sensors for the per-step decision's
-    own cost, paid on the scheduler's critical path.
+    sensors beside it, ``_COST_SENSOR_FIELDS`` being the ones that measure
+    the per-step decision's own cost. The design doc reads them one by one.
     """
 
     admitted: int = 0
@@ -356,11 +256,7 @@ class LazyOffloadCounters:
     blocks_validated: int = 0
 
     def decisions(self) -> tuple[int, ...]:
-        """The counters that only a policy decision moves.
-
-        Returns:
-            Every counter except the cost sensors, in declaration order.
-        """
+        """Every counter but the cost sensors, in declaration order."""
         return tuple(
             value
             for name, value in asdict(self).items()
@@ -372,17 +268,10 @@ class LazyOffloadCounters:
 class DrainResult:
     """Internal outcome of one drain, before it is shaped for the caller.
 
-    Attributes:
-        to_store: Operations to submit now, ordered by eviction imminence
-            across requests and by prefix order within a request. The
-            connector must pin (``touch``) their blocks before the store and
-            unpin after completion.
-        dropped_evicted: Operations whose data was lost (block evicted or
-            reallocated before drain), including later same-request
-            operations dropped for prefix closure.
-        emptied_requests: Requests whose pending operations became empty in
-            this drain. The controller combines this with request phase and
-            batch state before ending a session.
+    ``to_store`` is ordered by eviction imminence across requests and by
+    prefix within one; its blocks must be pinned before the store and
+    unpinned after. ``dropped_evicted`` covers ops whose blocks were recycled
+    before the drain, prefix-closure victims included.
     """
 
     to_store: list[PendingStoreOp] = field(default_factory=list)
@@ -394,9 +283,8 @@ class _PendingOperations:
     """Own pending operations and every index derived from them."""
 
     def __init__(self) -> None:
-        # Insertion order is admission order, and a request re-enters at the
-        # back when it comes back after emptying, so the dict is also the
-        # tie-break order the drain sorts by.
+        # Insertion order is admission order (a re-entering request goes to
+        # the back), so the dict is also the drain's tie-break order.
         self._by_request: dict[str, list[PendingStoreOp]] = {}
         self._requests_by_block: dict[int, set[str]] = {}
         self._requests_to_validate: set[str] = set()
@@ -419,9 +307,8 @@ class _PendingOperations:
     def _reindex(self, request_id: str, departed: list[PendingStoreOp]) -> None:
         """Drop the request from the blocks no surviving op still covers.
 
-        Call after installing the surviving list: ops of one request share
-        blocks across chunk boundaries, so a departed op's block is only
-        forgotten when nothing left of the request covers it.
+        Call after installing the survivors: ops of one request share blocks
+        across chunk boundaries.
         """
         kept = {
             block_id
@@ -481,18 +368,10 @@ class _PendingOperations:
         return {request_id: order for order, request_id in enumerate(self._by_request)}
 
     def overdue_requests(self, now: float, max_age: float) -> set[str]:
-        """Requests whose oldest pending operation has passed the deadline.
+        """Requests whose oldest pending op is ``max_age`` seconds old or more.
 
-        Every pending request is examined: emission takes from the front, so
-        a request admitted early may already have a young front, and the scan
-        cannot stop at the first one still inside the deadline.
-
-        Args:
-            now: Current time in the caller's clock, in seconds.
-            max_age: Deadline in seconds; the caller checks it is enabled.
-
-        Returns:
-            The ids of the requests at or past the deadline.
+        Every pending request is scanned: emission takes from the front, so
+        one admitted early may already have a young front.
         """
         cutoff = now - max_age
         return {
@@ -505,39 +384,28 @@ class _PendingOperations:
 class EvictionAwareStoreQueue:
     """Buffers store operations and releases them by eviction imminence.
 
-    An operation is emitted when any of its blocks sits within the *danger
-    depth* of the free queue -- the blocks the engine is expected to consume
-    within ``horizon_steps`` steps -- or when its request passes
-    ``max_deferral_seconds``. An idle engine never drains. Operations whose
-    blocks are evicted before they come due are dropped, never stored stale.
-
-    Not thread-safe: all methods must be called from the scheduler thread.
+    An operation is emitted when one of its blocks sits within the *danger
+    depth* of the free queue -- what the engine is expected to consume within
+    ``horizon_steps`` -- or when its request passes the deferral deadline. An
+    idle engine never drains; operations whose blocks are evicted before they
+    come due are dropped, never stored stale. Scheduler thread only.
     """
 
     def __init__(self, config: LazyOffloadPolicyConfig, pool: BlockPoolReader) -> None:
-        """Create an empty queue.
-
-        Args:
-            config: Policy tunables.
-            pool: Read-only view of the GPU block pool.
-        """
+        """Create an empty queue over ``pool`` with the tunables in ``config``."""
         self._config = config
         self._pool = pool
-        # Primary pending storage and every derived index share one owner so
-        # departure paths cannot update one without the other.
+        # Pending ops and every index derived from them share one owner, so a
+        # departure path cannot update one without the other.
         self._pending_ops = _PendingOperations()
-        # Prefix validity is a policy concern. Request phase, epochs, and
-        # submitted batches are owned by the controller.
+        # Prefix validity is policy; phase, epochs and batches are the
+        # controller's.
         self._broken_prefixes: set[str] = set()
         self._blocks_per_step_ema: float = 0.0
         self._ema_initialized = False
         self._next_step_estimate = 0
-        # This step's clock, read once per drain and used to stamp
-        # admissions; 0.0 until the first drain, which only matters when
-        # max_deferral_seconds is enabled.
-        self._now = 0.0
+        self._now = 0.0  # This step's clock, read once per drain.
         self._counters = LazyOffloadCounters()
-        # Periodic ledger logging: the last snapshot written and when.
         self._last_logged_decisions = LazyOffloadCounters().decisions()
         self._last_stats_log_time = 0.0
 
@@ -567,9 +435,8 @@ class EvictionAwareStoreQueue:
             )
             return
         if any(block_hash is None for block_hash in block_hashes.values()):
-            # The caller's tracker has already advanced past this range, so
-            # the request's later chunks would be stored without their
-            # prefix (unreachable): reject them like any other broken chain.
+            # The tracker has advanced past this range, so later chunks would
+            # be stored without their prefix: treat the chain as broken.
             self._broken_prefixes.add(meta.request_id)
             self._counters.rejected_unhashed += 1
             logger.warning(
@@ -623,8 +490,8 @@ class EvictionAwareStoreQueue:
     def mark_store_failed(self, request_id: str) -> int:
         """Break the request's prefix chain; see ``OffloadPolicy``.
 
-        The controller calls this only for a batch from the current store
-        epoch: a failure from a stale epoch cannot break the current prefix.
+        Called only for a current-epoch batch: a stale failure cannot break
+        the current prefix.
         """
         dropped = self._pending_ops.pop_request(request_id)
         self._counters.dropped_failed_store += len(dropped)
@@ -642,9 +509,6 @@ class EvictionAwareStoreQueue:
     def drain(self, signals: DrainSignals) -> LazyOffloadDrain:
         """Record the step's block pressure and release what it made due.
 
-        Args:
-            signals: The scheduler step's consumption and lifecycle inputs.
-
         Returns:
             The stores to submit and the requests left with nothing buffered.
         """
@@ -659,13 +523,12 @@ class EvictionAwareStoreQueue:
             self._blocks_per_step_ema = float(signals.new_blocks_allocated)
             self._ema_initialized = True
         self._next_step_estimate = signals.est_next_step_blocks
-
         result = self._collect_due(signals.blocked_request_ids)
         self._log_drain(result)
         items: dict[str, PendingStoreItem] = {}
         for op in result.to_store:
-            # add() rejects a second epoch while a request has ops buffered,
-            # so every op of one request in one drain shares its epoch.
+            # add() rejects a second epoch while ops are buffered, so all of
+            # one request's ops in one drain share an epoch.
             item = items.setdefault(
                 op.request_id,
                 PendingStoreItem(request_id=op.request_id, epoch=op.epoch),
@@ -679,32 +542,19 @@ class EvictionAwareStoreQueue:
     def _collect_due(self, blocked_request_ids: set[str]) -> DrainResult:
         """Release the operations whose blocks face imminent eviction.
 
-        Per request, the suffix from the first operation whose data is
-        already lost is dropped, then the surviving front up to the last due
-        operation is released (prefix closure). Emitting pins blocks out of
-        the free queue and moves every block behind them toward the head, so
-        each later candidate is tested against the danger depth extended by
-        the blocks already emitted here, and the queue read follows the same
-        threshold. A request past ``max_deferral_seconds`` is due regardless
-        of the window and is decided first. See the design doc for the full
-        contract.
-
-        Args:
-            blocked_request_ids: Requests that already have a store batch in
-                flight. They are left pending, and any validation this step's
-                allocations asked for stays pending with them.
-
-        Returns:
-            The operations to store and to drop this step.
+        Per request: the suffix from the first lost op is dropped, then the
+        front up to the last due op is released (prefix closure). Emitting
+        pins blocks out of the free queue, so each later candidate is tested
+        against a danger depth extended by what this drain already emitted.
+        Requests in ``blocked_request_ids`` stay pending, validation with
+        them. See the design doc for the full contract.
         """
         result = DrainResult()
         if not self._pending_ops:
             return result
         self._counters.drain_steps += 1
-
-        # Requests past the deferral deadline are due regardless of where
-        # their blocks sit in the free queue: the deadline tracks when the
-        # content is needed again, the danger depth when the block dies.
+        # Past the deadline is due wherever the blocks sit: the deadline
+        # tracks when the content is wanted, the depth when the block dies.
         overdue: set[str] = (
             self._pending_ops.overdue_requests(
                 self._now, self._config.max_deferral_seconds
@@ -714,32 +564,27 @@ class EvictionAwareStoreQueue:
         )
 
         danger_depth = self._danger_depth()
-        # A zero danger depth makes nothing due, so the free queue is not
-        # walked at all -- the loss check below reads block hashes, not
-        # ranks, and still runs.
+        # Depth zero makes nothing due, so the queue is not walked; the loss
+        # check below reads hashes, not ranks, and still runs.
         window = _FreeQueueWindow(
             self._pool.free_queue_block_ids() if danger_depth > 0 else iter(())
         )
         window.extend_to(danger_depth)
 
-        # Requests due now, ascending by eviction imminence, and the cursor
-        # of the first one this drain has not decided yet.
+        # Due now, ascending by imminence, plus the cursor of the first one
+        # this drain has not decided yet.
         candidates: list[tuple[int, str, list[PendingStoreOp]]] = []
         cursor = 0
         candidate_ids: set[str] = set()
-        # Survivors of the loss check, kept so that a request the window
-        # reveals later is not validated a second time in the same step.
+        # Loss-check survivors, so a request the window reveals later is not
+        # validated twice in one step.
         surviving_by_request: dict[str, list[PendingStoreOp]] = {}
         admission_order = self._pending_ops.admission_order()
 
         def discover(request_ids: set[str]) -> None:
             """Validate these requests and queue the ones now due.
 
-            Args:
-                request_ids: Requests whose outcome may have changed --
-                    touched by this step's allocations, or holding a block
-                    the window just revealed. Ones already queued as
-                    candidates are skipped.
+            Requests already queued as candidates are skipped.
             """
             fresh: list[tuple[int, str, list[PendingStoreOp]]] = []
             for request_id in request_ids:
@@ -753,11 +598,10 @@ class EvictionAwareStoreQueue:
                         surviving_by_request[request_id] = []
                         continue
                     if request_id in blocked_request_ids:
-                        # One in-flight store batch per request (worker
-                        # constraint). Keep an allocation-triggered
-                        # validation pending: after the receipt, the
-                        # held-back ops still need their snapshots checked
-                        # even if their recycled blocks are no longer free.
+                        # One in-flight batch per request (worker constraint).
+                        # The allocation-triggered validation stays pending:
+                        # after the receipt the held-back ops still need their
+                        # snapshots checked.
                         continue
                     surviving = self._drop_evicted_suffix(request_id, ops, result)
                     self._pending_ops.validation_complete(request_id)
@@ -775,9 +619,7 @@ class EvictionAwareStoreQueue:
                 elif in_window:
                     rank = min(in_window)
                 else:
-                    # No block inside the window: not due yet. A later
-                    # widening can still bring one into view.
-                    continue
+                    continue  # Not in the window; a widening may reveal it.
                 fresh.append((rank, request_id, surviving))
                 candidate_ids.add(request_id)
             if not fresh:
@@ -790,16 +632,14 @@ class EvictionAwareStoreQueue:
                 key=lambda cand: (cand[0], admission_order[cand[1]]),
             )
 
-        # Only requests touched by this step's allocations or represented in
-        # the window can have changed outcome. The reverse index avoids a
-        # full pending-queue scan on every scheduler step.
+        # Only requests touched by this step's allocations or shown in the
+        # window can have changed outcome; the reverse index spares a full
+        # pending scan per step.
         discover(self._pending_ops.requests_to_check(window.ranks) | overdue)
-
         ops_left = self._config.max_drain_per_step
-        # Blocks this drain has pinned out of the free queue, and so the
-        # distance every block behind them moves toward the head. A shared
-        # block shifts the queue only on its first pin; a block that was
-        # already out of the queue does not shift it at all.
+        # Blocks pinned out of the queue by this drain, and so the distance
+        # every block behind them moves headward. A shared block shifts only
+        # on its first pin; one already out of the queue does not shift.
         shift_blocks = 0
         held_back = 0
         pinned_free_blocks: set[int] = set()
@@ -818,10 +658,9 @@ class EvictionAwareStoreQueue:
                 break
             cursor += 1
             if min_rank == _OVERDUE_RANK:
-                # Past the deadline: the whole surviving front is due, with
-                # no reference to the window. The drain budget still bounds
-                # the burst -- an expired backlog is spread over steps, not
-                # dumped in one.
+                # Past the deadline the whole surviving front is due, window
+                # or not; the budget still spreads an expired backlog over
+                # steps rather than dumping it in one.
                 due_ops = surviving
             else:
                 due_ops = self._due_front_segment(surviving, window.ranks, threshold)
@@ -853,9 +692,8 @@ class EvictionAwareStoreQueue:
     def _danger_depth(self) -> int:
         """Free-queue depth considered at risk within the horizon.
 
-        Expected consumption below half a block over the whole horizon is
-        treated as idle (depth 0): the EMA decays asymptotically after a
-        burst and would otherwise keep a ceil'd depth of 1 forever.
+        Below half a block over the whole horizon counts as idle (depth 0):
+        the EMA decays asymptotically and would else pin a ceil'd 1 forever.
         """
         per_step = max(self._blocks_per_step_ema, float(self._next_step_estimate))
         horizon_blocks = per_step * self._config.horizon_steps
@@ -874,9 +712,8 @@ class EvictionAwareStoreQueue:
     ) -> list[PendingStoreOp]:
         """Drop ops from the first one whose data was lost; return survivors.
 
-        A hash mismatch on any covered block means the block was evicted (or
-        reallocated); the op and every later op of the request are dropped
-        for prefix closure, and further admissions are rejected.
+        A hash mismatch means the block was recycled; that op and every later
+        op of the request go, and further admissions are rejected.
         """
         self._counters.requests_validated += 1
         first_lost = len(ops)
@@ -904,14 +741,11 @@ class EvictionAwareStoreQueue:
         ranks: dict[int, int],
         threshold: int,
     ) -> list[PendingStoreOp]:
-        """Find the front segment of ops to release for one request.
+        """The front segment up to the last op due within ``threshold``.
 
-        An op is due when any of its blocks sits within ``threshold`` of the
-        free-queue head. The segment runs from the front to the last due op,
-        so a stored chunk never lacks its stored prefix.
-
-        Returns:
-            The segment, empty when no op of the request is due.
+        An op is due when one of its blocks sits that close to the free-queue
+        head. Taking from the front keeps a stored chunk's prefix stored;
+        the segment is empty when no op of the request is due.
         """
         last_due = -1
         for index, op in enumerate(ops):
@@ -923,11 +757,7 @@ class EvictionAwareStoreQueue:
         return ops[: last_due + 1]
 
     def _snapshot_intact(self, op: PendingStoreOp) -> bool:
-        """Whether every covered block still holds its admission-time hash.
-
-        A mismatch on any block means it was evicted (or reallocated): the
-        operation's data is lost and it must not be stored.
-        """
+        """Whether every covered block still holds its admission-time hash."""
         for block_id, snapshot in op.block_hashes.items():
             self._counters.blocks_validated += 1
             if self._pool.block_hash(block_id) != snapshot:
@@ -947,23 +777,19 @@ class EvictionAwareStoreQueue:
             result.emptied_requests.append(request_id)
 
     def log_final_stats(self) -> None:
-        """Log the cumulative counters as one INFO ``key=value`` line.
+        """Log the cumulative counters at shutdown as one INFO line.
 
-        Called at connector shutdown so the drop ledger (notably
-        ``dropped_evicted``, the quality sensor) closes with an exact final
-        value. Best-effort: a force-killed engine may die before reaching it,
-        which is why :meth:`drain` also logs the ledger periodically.
+        Best-effort: a force-killed engine may not reach it, which is why
+        :meth:`drain` also logs the ledger periodically.
         """
         logger.info("Lazy offload final counters: %s", self._format_ledger())
 
     def _log_drain(self, result: DrainResult) -> None:
         """Report one drain's evicted operations and the periodic ledger."""
         if result.dropped_evicted:
-            # INFO, not DEBUG: each drop is one unit of cache-quality loss
-            # and production logs rarely run at DEBUG. One aggregate line per
-            # drain -- a burst that evicts a large pending queue at once must
-            # not emit thousands of synchronous lines on the scheduler hot
-            # path.
+            # INFO, not DEBUG: each drop is a unit of cache-quality loss and
+            # production rarely runs at DEBUG. One line per drain, so a burst
+            # evicting a large queue cannot flood the scheduler hot path.
             logger.info(
                 "Lazy offload: dropped %d store op(s): blocks evicted "
                 "before drain (%s)",
@@ -975,12 +801,8 @@ class EvictionAwareStoreQueue:
     def _maybe_log_stats(self) -> None:
         """Log the counter ledger if it changed and the throttle allows.
 
-        Runs on every drain, so the log converges to the true ledger whenever
-        the engine takes a step at least ``_STATS_LOG_INTERVAL_S`` after the
-        last change -- the shutdown hook alone is unreliable under a
-        force-killed engine. The change test looks at the decision counters
-        only: the cost sensors advance on every drain, so gating on them
-        would log a line every interval for the life of the engine.
+        The change test reads the decision counters only: the cost sensors
+        advance every drain and would log a line for the engine's lifetime.
         """
         decisions = self._counters.decisions()
         if decisions == self._last_logged_decisions:
@@ -995,10 +817,8 @@ class EvictionAwareStoreQueue:
     def _format_ledger(self) -> str:
         """Render the ledger as one greppable ``key=value`` line body.
 
-        Returns:
-            Every counter followed by the pending depth, so the line closes
-            as ``admitted == pending + emitted + every drop counter`` (over
-            operation counts only; the token weight is not a term in it).
+        Ends with the pending depth, so the operation counts close as
+        ``admitted == pending + emitted + every drop counter``.
         """
         fields = " ".join(
             f"{name}={value}" for name, value in asdict(self._counters).items()

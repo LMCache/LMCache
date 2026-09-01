@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Scheduler-side orchestration for lazy cache offload.
 
-This module is the integration boundary between ``LMCacheMPConnector`` and the
-lazy-offload policies.  It owns policy dispatch, GPU block pinning, store-batch
-coalescing, completion handling, and deferred session-release decisions.  The
-connector only forwards lifecycle events and applies the returned actions.
+The boundary between ``LMCacheMPConnector`` and the lazy-offload policies: it
+owns policy dispatch, GPU block pinning, store-batch coalescing, completion
+handling and deferred session release. The connector only forwards events.
 """
 
 # Standard
@@ -38,15 +37,10 @@ class StoreCompletionTracker(Protocol):
     """Aggregate per-worker completion counts for one submitted store."""
 
     def update_pending_store_count(self, request_id: str, count: int) -> bool:
-        """Record receipts and report whether all expected workers completed.
-
-        Args:
-            request_id: Request whose store workers reported completion.
-            count: Number of newly completed workers.
+        """Record ``count`` new worker receipts for ``request_id``.
 
         Returns:
-            True when the submitted batch has received every expected worker
-            completion; False while more receipts remain outstanding.
+            True once the submitted batch has every expected completion.
         """
         ...
 
@@ -55,12 +49,8 @@ class StoreCompletionTracker(Protocol):
 class LazyOffloadActions:
     """Explicit connector effects produced by one lazy-offload event.
 
-    Attributes:
-        stores_to_submit: Coalesced store metadata to append to the current
-            connector metadata. Blocks referenced by these stores have
-            already been pinned by :class:`LazyOffloadManager`.
-        sessions_to_end: Request sessions whose pending and in-flight lazy
-            stores have settled and can now be released by the connector.
+    ``stores_to_submit`` is coalesced metadata whose blocks this class has
+    already pinned; ``sessions_to_end`` have settled and may be released.
     """
 
     stores_to_submit: list[LMCacheMPRequestMetadata] = field(default_factory=list)
@@ -70,13 +60,9 @@ class LazyOffloadActions:
 def _new_blocks(scheduler_output: "SchedulerOutput") -> tuple[int, set[int]]:
     """Summarise the GPU blocks one scheduler step handed out.
 
-    Args:
-        scheduler_output: The vLLM scheduler output for the step.
-
     Returns:
-        The gross count of block ids given to new and cached requests, which
-        drives the consumption EMA, and the unique ids among them, which tell
-        the policy which pending operations to revalidate.
+        The gross count of ids given to new and cached requests, driving the
+        consumption EMA, and the unique ids, naming what to revalidate.
     """
     count = 0
     block_ids: set[int] = set()
@@ -96,20 +82,14 @@ def _new_blocks(scheduler_output: "SchedulerOutput") -> tuple[int, set[int]]:
 def _coalesce_store_metadata(
     request_metas: list[LMCacheMPRequestMetadata],
 ) -> LMCacheMPRequestMetadata:
-    """Merge one request's contiguous store operations into one operation.
+    """Merge one request's contiguous STORE metadata, in prefix order, into one.
 
     The worker tracks one in-flight store future per request, so a drained
-    batch must be submitted as one operation.
-
-    Args:
-        request_metas: Non-empty STORE metadata in request-prefix order.
-
-    Returns:
-        One store metadata covering the complete contiguous input range.
+    batch must be submitted as a single operation.
 
     Raises:
-        ValueError: If the input is empty, contains non-contiguous ranges, or
-            changes the number of cache groups within the batch.
+        ValueError: If the input is empty, non-contiguous, or changes cache
+            group count mid-batch.
     """
     if not request_metas:
         raise ValueError("cannot coalesce an empty store batch")
@@ -150,11 +130,10 @@ def _coalesce_store_metadata(
 class LazyOffloadManager:
     """Own scheduler-side lazy-offload integration and side effects.
 
-    The only lazy-offload object exposed to the connector. Policies stay pure
-    decision logic; this class translates scheduler events into policy
-    signals, pins and unpins vLLM GPU blocks, and returns connector actions.
-
-    Not thread-safe. All methods must run on the vLLM scheduler thread.
+    The only lazy-offload object exposed to the connector: it turns scheduler
+    events into policy signals, pins and unpins vLLM GPU blocks, and returns
+    connector actions. Every method other than :meth:`bind_block_pool` raises
+    ``ValueError`` until the pool is bound. Scheduler thread only.
     """
 
     def __init__(
@@ -166,12 +145,10 @@ class LazyOffloadManager:
         """Create an unbound scheduler-side manager.
 
         Args:
-            configs: vLLM connector extra configuration. The lazy-offload
-                keys are read by the policy, which is built at bind time.
-            group_tokens_per_block: Token capacity for each KV-cache group,
-                used to estimate the next scheduler step's block pressure.
-            completion_tracker: Scheduler adapter view that aggregates
-                per-worker completion receipt counts.
+            configs: Connector extra config, read by the policy at bind time.
+            group_tokens_per_block: Token capacity per KV-cache group, used
+                to estimate the next step's block pressure.
+            completion_tracker: Adapter view aggregating per-worker receipts.
         """
         self._configs = dict(configs or {})
         self._group_tokens_per_block = list(group_tokens_per_block)
@@ -184,16 +161,12 @@ class LazyOffloadManager:
     def bind_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the scheduler's GPU block pool and build the policy.
 
-        Idempotent for the same pool. Rebinding a different one would
-        silently invalidate every buffered operation's hash snapshot.
-
-        Args:
-            gpu_block_pool: The vLLM block pool used for validation and
-                pin/unpin operations.
+        Idempotent for the same pool; rebinding a different one would
+        silently invalidate every buffered hash snapshot.
 
         Raises:
-            ValueError: If a different pool is already bound, or the
-                configured policy name or tunables are invalid.
+            ValueError: If a different pool is bound, or the policy name or
+                tunables are invalid.
         """
         if self._gpu_block_pool is gpu_block_pool:
             return
@@ -206,14 +179,7 @@ class LazyOffloadManager:
         self._policy = create_offload_policy(self._configs, gpu_block_pool)
 
     def add_store_candidate(self, metadata: LMCacheMPRequestMetadata) -> None:
-        """Buffer one store candidate produced by the request tracker.
-
-        Args:
-            metadata: STORE metadata to defer.
-
-        Raises:
-            ValueError: If the GPU block pool has not been bound.
-        """
+        """Buffer one STORE metadata produced by the request tracker."""
         pool = self._require_block_pool()
         block_hashes: BlockHashes = {
             block_id: pool.blocks[block_id].block_hash
@@ -227,17 +193,11 @@ class LazyOffloadManager:
     ) -> LazyOffloadActions:
         """Drain stores made due by one token-producing scheduler step.
 
-        Zero-token steps return no actions because vLLM takes its no-forward
-        path and would discard connector metadata produced by that step.
-
-        Args:
-            scheduler_output: The completed scheduler decision for the step.
+        A zero-token step returns no actions: vLLM takes its no-forward path
+        and would discard metadata produced by that step.
 
         Returns:
             Stores to submit and sessions made releasable by the drain.
-
-        Raises:
-            ValueError: If the GPU block pool has not been bound.
         """
         if not scheduler_output.total_num_scheduled_tokens:
             return LazyOffloadActions()
@@ -250,30 +210,20 @@ class LazyOffloadManager:
     ) -> LazyOffloadActions:
         """Apply failed stores and fully aggregated completion receipts.
 
-        Failures are processed before completions so dropping a finished
-        request's held-back suffix can make it releasable by the accompanying
-        completion receipt.
-
-        Args:
-            failed_request_ids: Requests for which at least one worker
-                reported the current store batch failed.
-            completed_store_counts: Newly reported worker completion counts
-                keyed by request; stale receipts are filtered here.
+        Failures go first, so dropping a finished request's held-back suffix
+        can make it releasable by the accompanying receipt. Stale receipts in
+        ``completed_store_counts`` are filtered here.
 
         Returns:
             Sessions made releasable by completed batches.
-
-        Raises:
-            ValueError: If the GPU block pool has not been bound.
         """
         pool = self._require_block_pool()
         for request_id in failed_request_ids:
             if not self._requests.has_in_flight(request_id):
                 continue
             if not self._requests.in_flight_is_current(request_id):
-                # A reset or id reuse advanced the store epoch. The old
-                # batch still owns pins, but its failure cannot break the
-                # current generation's prefix chain.
+                # A reset or id reuse advanced the epoch: the old batch still
+                # owns pins, but cannot break the current prefix chain.
                 continue
             dropped = self._require_policy().mark_store_failed(request_id)
             logger.warning(
@@ -282,7 +232,6 @@ class LazyOffloadManager:
                 request_id,
                 dropped,
             )
-
         actions = LazyOffloadActions()
         for request_id, count in completed_store_counts.items():
             if not self._requests.has_in_flight(request_id):
@@ -308,12 +257,9 @@ class LazyOffloadManager:
     def on_request_finished(self, request_id: str) -> LazyOffloadActions:
         """Record request completion and decide whether its session can end.
 
-        Args:
-            request_id: The request that finished generation.
-
         Returns:
-            An immediate session-release action only when no store is pending
-            or in flight; otherwise an empty action.
+            A session-release action only when no store is pending or in
+            flight; otherwise an empty action.
         """
         self._requests.finish(request_id)
         if self._require_policy().has_pending_request(request_id):
@@ -324,15 +270,7 @@ class LazyOffloadManager:
         return LazyOffloadActions(sessions_to_end=[request_id])
 
     def on_request_reset(self, request_id: str) -> int:
-        """Drop buffered operations invalidated by a preemption reset.
-
-        Args:
-            request_id: The preempted request whose tracker restarts from
-                token zero.
-
-        Returns:
-            Number of buffered operations discarded.
-        """
+        """Drop the operations a preemption reset invalidated; count them."""
         self._requests.reset(request_id)
         dropped = self._require_policy().drop_request(request_id)
         if dropped:
@@ -346,12 +284,9 @@ class LazyOffloadManager:
     def on_request_arrived(self, request_id: str) -> LazyOffloadActions:
         """Reclaim residual state if a new request reuses a finished id.
 
-        Args:
-            request_id: Identifier of the newly arrived request.
-
         Returns:
             A predecessor session-release action when no in-flight batch is
-            carrying that release; otherwise an empty action.
+            already carrying that release; otherwise an empty action.
         """
         reused_finished_id = self._requests.is_finished(request_id)
         predecessor_in_flight = self._requests.has_in_flight(request_id)
@@ -431,7 +366,6 @@ class LazyOffloadManager:
                 continue
             actions.stores_to_submit.append(_coalesce_store_metadata(valid_metas))
             self._requests.register_batch(item.request_id, valid_block_ids)
-
         for request_id in drain.emptied_request_ids:
             if self._requests.can_end_session(request_id):
                 actions.sessions_to_end.append(request_id)

@@ -34,10 +34,9 @@ class RequestSlot:
 class LazyOffloadRequestRegistry:
     """Own request epochs and the single submitted batch allowed per id.
 
-    vLLM may recreate a tracker after preemption and may reuse a finished
-    request id while its previous store receipt is outstanding. Epochs make
-    those generations explicit. Worker receipts are still keyed by request id,
-    so the registry permits only one submitted batch at a time.
+    vLLM may recreate a tracker after preemption, and may reuse a finished id
+    while its store receipt is outstanding; epochs make those generations
+    explicit. Receipts are keyed by id, so only one batch may be open.
     """
 
     def __init__(self) -> None:
@@ -55,9 +54,7 @@ class LazyOffloadRequestRegistry:
             self._slots[request_id] = RequestSlot()
             return 0
         if slot.awaiting_rearrival:
-            # on_request_reset already advanced the epoch before vLLM
-            # recreated the tracker.
-            slot.awaiting_rearrival = False
+            slot.awaiting_rearrival = False  # on_request_reset advanced it.
         elif slot.phase is RequestPhase.FINISHED:
             # A distinct client request reused a finished predecessor's id.
             slot.epoch += 1
