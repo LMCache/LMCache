@@ -68,7 +68,8 @@ steps:
           export VLLM_USE_STANDALONE_COMPILE="0"
           export CPU_BUFFER_SIZE="32"
           export VLLM_DISABLE_PREFIX_CACHING="true"
-          export RANDOM_INPUT_LEN="2000"
+          export MODEL="Qwen/Qwen3-8B"
+          export RANDOM_INPUT_LEN="10000"
           .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 45
         retry: *flaky-retry
