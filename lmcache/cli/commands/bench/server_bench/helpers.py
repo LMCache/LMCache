@@ -23,6 +23,7 @@ import ctypes
 import hashlib
 import json
 import mmap
+import pickle
 import sys
 import time
 import urllib.error
@@ -863,24 +864,27 @@ def _send_store(
     prep = _call(client, RequestType.PREPARE_STORE, [key, instance_id])
     if prep is _TIMEOUT:
         return "timeout"
-    if server_pool is not None and client_tensors is not None and chunk_size > 0:
+    commit_payload = b""
+    if client_tensors is not None and chunk_size > 0:
         ctx = prep.context if isinstance(prep.context, dict) else {}
         slots = ctx.get("slots", []) or []
         chunk_indices = ctx.get("chunk_indices", []) or []
-        if slots and chunk_indices:
-            num_blocks = (key.end - key.start) // block_size
-            full_chunks = _gather_paged_to_flat_chunks(
-                client_tensors,
-                block_offset,
-                num_blocks,
-                block_size,
-                chunk_size,
-            )
+        num_blocks = (key.end - key.start) // block_size
+        full_chunks = _gather_paged_to_flat_chunks(
+            client_tensors,
+            block_offset,
+            num_blocks,
+            block_size,
+            chunk_size,
+        )
+        if server_pool is not None and slots and chunk_indices:
             slot_views = _build_server_slot_views(server_pool, slots)
             for slot_view, chunk_idx in zip(slot_views, chunk_indices, strict=False):
                 if 0 <= chunk_idx < len(full_chunks):
                     slot_view.copy_(full_chunks[chunk_idx].view(slot_view.shape))
-    commit = _call(client, RequestType.COMMIT_STORE, [key, instance_id, b""])
+        else:
+            commit_payload = pickle.dumps(full_chunks)
+    commit = _call(client, RequestType.COMMIT_STORE, [key, instance_id, commit_payload])
     if commit is _TIMEOUT:
         return "timeout"
     return "stored" if commit else "store_failed"
@@ -936,10 +940,10 @@ def _send_retrieve(
         return "timeout"
     if not prep.success:
         return "retrieve_failed"
-    if server_pool is not None and client_tensors is not None:
+    if client_tensors is not None:
         ctx = prep.context if isinstance(prep.context, dict) else {}
         slots = ctx.get("slots", []) or []
-        if slots:
+        if slots and server_pool is not None:
             try:
                 slot_views = _build_server_slot_views(server_pool, slots)
                 _scatter_flat_chunks_to_paged(
@@ -951,6 +955,18 @@ def _send_retrieve(
                 )
             except (RuntimeError, ValueError) as exc:
                 print("  [WARNING] retrieve scatter failed: %s" % exc)
+        elif prep.data:
+            try:
+                chunks = pickle.loads(prep.data)
+                _scatter_flat_chunks_to_paged(
+                    client_tensors,
+                    chunks,
+                    block_offset,
+                    block_size,
+                    chunk_size,
+                )
+            except (pickle.UnpicklingError, RuntimeError, ValueError) as exc:
+                print("  [WARNING] retrieve pickle load failed: %s" % exc)
     commit = _call(client, RequestType.COMMIT_RETRIEVE, [key, instance_id])
     if commit is _TIMEOUT:
         return "timeout"

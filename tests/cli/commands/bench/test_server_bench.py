@@ -11,6 +11,7 @@ Covers:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import argparse
 import json
+import pickle
 import threading
 import time
 
@@ -30,6 +31,8 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _poll_prefetch_status,
     _query_checksum,
     _send_lookup,
+    _send_retrieve,
+    _send_store,
     _send_unregister_kv_cache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -1153,3 +1156,218 @@ class TestProcessRequestMultiWorker:
                     "LOOKUP payload tp_size must equal simulated tp "
                     "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])
                 )
+
+
+# ------------------------------------------------------------------ #
+#  _send_store / _send_retrieve pickle fallback (engine-driven)       #
+# ------------------------------------------------------------------ #
+
+
+class _EngineDrivenStoreRouter:
+    """Fake ROUTER for the engine-driven PREPARE/COMMIT store protocol.
+
+    Replies to ``PREPARE_STORE`` with an empty ``slots`` context — the
+    pickle transfer strategy — and records the ``COMMIT_STORE`` payload
+    so tests can assert the bench sends serialised chunks instead of an
+    empty payload.
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        # First Party
+        from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
+
+        self.last_commit_payload: bytes | None = None
+        self._prepare_store_type = PrepareStoreResponse
+        self._ctx = zmq.Context.instance()
+        self._router = self._ctx.socket(zmq.ROUTER)
+        self._router.bind(endpoint)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._router.close(linger=0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if not self._router.poll(100, zmq.POLLIN):
+                continue
+            frames = self._router.recv_multipart()
+            identity, uid_f, type_f, *payload = frames
+            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
+            if req_type == RequestType.PREPARE_STORE:
+                # Pickle strategy: no SHM slots are advertised.
+                body = msgspec.msgpack.encode(self._prepare_store_type(context={}))
+                self._router.send_multipart([identity, uid_f, type_f, body])
+            elif req_type == RequestType.COMMIT_STORE:
+                # The client msgpack-encodes every payload frame; the third
+                # frame is the serialised chunk bytes.
+                self.last_commit_payload = msgspec.msgpack.decode(
+                    payload[2], type=bytes
+                )
+                body = msgspec.msgpack.encode(True)
+                self._router.send_multipart([identity, uid_f, type_f, body])
+
+
+class TestEngineDrivenStorePickleFallback:
+    """Regression tests for empty COMMIT_STORE payloads on pickle strategy.
+
+    When the server runs the pickle transfer strategy (no SHM slots), the
+    bench must serialise the gathered chunks into the COMMIT_STORE payload.
+    It previously sent ``b""``, so the server raised ``EOFError`` on
+    ``pickle.loads(b"")`` and every STORE timed out (LMCache #4811).
+    """
+
+    def _make_client(self, endpoint: str) -> MessageQueueClient:
+        ctx = zmq.Context.instance()
+        return MessageQueueClient(endpoint, ctx)
+
+    def test_store_pickle_fallback_sends_serialized_chunks(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        router = _EngineDrivenStoreRouter(router_endpoint)
+        router.start()
+        try:
+            client = self._make_client(router_endpoint)
+            key = _make_key((1, 9906, 9906), request_id="req-store", end=256)
+            tensors = _allocate_kv_cache(
+                num_layers=1,
+                num_heads=4,
+                head_size=64,
+                num_blocks=128,
+                block_size=16,
+                dtype=torch.float16,
+                device="cpu",
+                kv_size=2,
+            )
+            status = _send_store(
+                client,
+                key,
+                block_offset=0,
+                block_size=16,
+                use_gpu=False,
+                use_handle=False,
+                client_tensors=tensors,
+                chunk_size=256,
+                server_pool=None,
+                instance_id=1000,
+            )
+            assert status == "stored"
+            assert router.last_commit_payload is not None
+            assert router.last_commit_payload != b""
+            chunks = pickle.loads(router.last_commit_payload)
+            assert isinstance(chunks, list)
+            assert len(chunks) == 1
+            client.close()
+        finally:
+            router.stop()
+
+
+class _EngineDrivenRetrieveRouter:
+    """Fake ROUTER for the engine-driven PREPARE/COMMIT retrieve protocol.
+
+    Replies to ``PREPARE_RETRIEVE`` with an inline pickled payload and no
+    SHM slots (pickle transfer strategy), so the bench must scatter the
+    inline chunks back into the client tensors.
+    """
+
+    def __init__(self, endpoint: str, chunks: "list[torch.Tensor]") -> None:
+        # First Party
+        from lmcache.v1.multiprocess.protocols.engine import PrepareRetrieveResponse
+
+        self._prepare_retrieve_type = PrepareRetrieveResponse
+        self._data = pickle.dumps(chunks)
+        self._ctx = zmq.Context.instance()
+        self._router = self._ctx.socket(zmq.ROUTER)
+        self._router.bind(endpoint)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._router.close(linger=0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if not self._router.poll(100, zmq.POLLIN):
+                continue
+            frames = self._router.recv_multipart()
+            identity, uid_f, type_f, *payload = frames
+            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
+            if req_type == RequestType.PREPARE_RETRIEVE:
+                body = msgspec.msgpack.encode(
+                    self._prepare_retrieve_type(
+                        success=True,
+                        data=self._data,
+                        context={},
+                    )
+                )
+                self._router.send_multipart([identity, uid_f, type_f, body])
+            elif req_type == RequestType.COMMIT_RETRIEVE:
+                body = msgspec.msgpack.encode(True)
+                self._router.send_multipart([identity, uid_f, type_f, body])
+
+
+class TestEngineDrivenRetrievePickleFallback:
+    """Regression tests for dropped inline retrieve payloads.
+
+    With the pickle transfer strategy, PREPARE_RETRIEVE returns the chunks
+    inline in ``data``; the bench previously ignored them (no SHM slots),
+    so warm-pass checksums could never see the retrieved bytes.
+    """
+
+    def _make_client(self, endpoint: str) -> MessageQueueClient:
+        ctx = zmq.Context.instance()
+        return MessageQueueClient(endpoint, ctx)
+
+    def test_retrieve_pickle_fallback_scatters_inline_chunks(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        tensors = _allocate_kv_cache(
+            num_layers=1,
+            num_heads=4,
+            head_size=64,
+            num_blocks=128,
+            block_size=16,
+            dtype=torch.float16,
+            device="cpu",
+            kv_size=2,
+        )
+        # One flat chunk: (kv, NL, chunk_size, hidden).
+        chunk = torch.randn(2, 1, 256, 256, dtype=torch.float16)
+        router = _EngineDrivenRetrieveRouter(router_endpoint, [chunk])
+        router.start()
+        try:
+            client = self._make_client(router_endpoint)
+            key = _make_key((1, 9906, 9906), request_id="req-retr", end=256)
+            status = _send_retrieve(
+                client,
+                key,
+                chunk_size=256,
+                hit_chunks=1,
+                block_offset=0,
+                block_size=16,
+                use_gpu=False,
+                use_handle=False,
+                client_tensors=tensors,
+                server_pool=None,
+                instance_id=1000,
+            )
+            assert status == "retrieved"
+            # The first 16 blocks (one 256-token chunk at block_size 16)
+            # must equal the inline chunk scattered into the paged layout.
+            expected = chunk[:, 0].reshape(2, 16, 16, 4, 64)
+            assert torch.equal(tensors[0][:, 0:16], expected)
+            client.close()
+        finally:
+            router.stop()
