@@ -12,7 +12,10 @@ import os
 import sys
 
 LOCALE_DIR = Path("docs/source/locale/zh_CN/LC_MESSAGES")
-MAX_ENTRIES = int(os.environ.get("TRANSLATION_MAX_ENTRIES", "500"))
+try:
+    MAX_ENTRIES = int(os.environ.get("TRANSLATION_MAX_ENTRIES", "500"))
+except ValueError:
+    MAX_ENTRIES = 500
 
 SYSTEM_PROMPT = (
     "You translate Sphinx gettext entries from English to Simplified Chinese. "
@@ -291,7 +294,7 @@ def endpoint_url() -> str:
 
 
 def translate_text(user_message: str) -> str:
-    """Send a pre-built user message to the endpoint and return the cleaned translation.
+    """Send a pre-built user message to the endpoint and return a cleaned translation.
 
     Raises:
         RuntimeError: If the response has no message content.
@@ -321,7 +324,9 @@ def translate_text(user_message: str) -> str:
     try:
         raw = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as exc:
-        raise RuntimeError("Translation endpoint returned no message content") from exc
+      raise RuntimeError(
+          "Translation endpoint response is missing choices/message/content fields"
+      ) from exc
     return clean_translation_response(raw)
 
 
