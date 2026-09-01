@@ -64,6 +64,9 @@ class LMCacheMPRequestTracker:
     # requests.
     num_stored_tokens: int = 0
 
+    # Whether the cached lookup result has been included in num_stored_tokens.
+    _lookup_result_accounted: bool = False
+
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
@@ -81,6 +84,7 @@ class LMCacheMPRequestTracker:
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
+        self._lookup_result_accounted = False
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
@@ -119,6 +123,24 @@ class LMCacheMPRequestTracker:
     ####
     def increase_num_scheduled_tokens(self, num_new_tokens: int):
         self.num_scheduled_tokens += num_new_tokens
+
+    def account_lookup_result(self, num_stored_tokens: int) -> None:
+        """Include an external lookup result in the stored-token watermark.
+
+        Args:
+            num_stored_tokens: Number of prefix tokens found by the lookup.
+
+        Returns:
+            None.
+
+        Notes:
+            Only the first call affects the watermark. Later calls are ignored
+            because the scheduler may poll the same cached result repeatedly
+            before it can allocate request blocks.
+        """
+        if not self._lookup_result_accounted:
+            self.increase_num_stored_tokens(num_stored_tokens)
+            self._lookup_result_accounted = True
 
     def increase_num_stored_tokens(self, num_new_tokens: int):
         """Increase the number of stored tokens for the current request
