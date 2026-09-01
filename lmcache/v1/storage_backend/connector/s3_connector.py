@@ -710,4 +710,6 @@ class S3Connector(RemoteConnector):
             self.connection_failures = 0
 
     async def close(self):
-        await self.pq_executor.shutdown(wait=True)
+        # `shutdown` is synchronous and blocks on a coroutine scheduled on this
+        # same loop, so awaiting it here would deadlock. Await the async form.
+        await self.pq_executor.shutdown_async(wait=True)
