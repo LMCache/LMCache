@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+import hashlib
 import math
 import os
 import sys
@@ -95,7 +96,15 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
-def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
+def _cache_salt_tag_value(cache_salt: str) -> str:
+    """Convert a request cache salt into a backend-safe LMCache tag value."""
+    return hashlib.sha256(cache_salt.encode("utf-8")).hexdigest()
+
+
+def extract_request_configs(
+    sampling_params: SamplingParams,
+    cache_salt: Optional[str] = None,
+) -> Optional[dict]:
     request_configs = None
     if sampling_params and sampling_params.extra_args is not None:
         if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
@@ -104,6 +113,10 @@ def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
                     if request_configs is None:
                         request_configs = {}
                     request_configs[k] = v
+    if cache_salt is not None:
+        if request_configs is None:
+            request_configs = {}
+        request_configs["lmcache.tag.cachesalt"] = _cache_salt_tag_value(cache_salt)
     return request_configs
 
 
@@ -152,6 +165,7 @@ class RequestTracker:
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
         skip_save: bool,
+        cache_salt: Optional[str] = None,
     ) -> "RequestTracker":
         """Create the request tracker from a new request.
 
@@ -165,6 +179,8 @@ class RequestTracker:
                 cached in LMCache.
             request_priority (int): the priority of the request
             skip_save (bool): whether the request cache should be saved
+            cache_salt (Optional[str]): request-specific cache salt used
+                to scope LMCache cache identity.
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
         # tuple[list[int]]
@@ -188,7 +204,10 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        request_configs = extract_request_configs(new_request.sampling_params)
+        request_configs = extract_request_configs(
+            new_request.sampling_params,
+            cache_salt,
+        )
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
@@ -841,6 +860,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                        request_configs=request.request_configs,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -849,6 +869,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                        request_configs=request.request_configs,
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -1091,6 +1112,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
                     sync=is_first,
+                    request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
                 self._layerwise_save_storers[request.req_id] = layerwise_storer
@@ -1421,7 +1443,10 @@ class LMCacheConnectorV1Impl:
                 apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
                 token_ids = token_ids.tolist()
 
-            request_configs = extract_request_configs(request.sampling_params)
+            request_configs = extract_request_configs(
+                request.sampling_params,
+                request.cache_salt,
+            )
             if self.skip_last_n_tokens > 0:
                 token_ids = token_ids[: -self.skip_last_n_tokens]
 
@@ -1659,12 +1684,16 @@ class LMCacheConnectorV1Impl:
                 and request_priority > self.config.priority_limit
             )
 
+            req = self._unfinished_requests.get(request.req_id)
+            cache_salt = req.cache_salt if req is not None else None
+
             request_tracker = RequestTracker.from_new_request(
                 self.config,
                 request,
                 num_tokens_to_compute,
                 lmcache_cached_tokens,
                 skip_save,
+                cache_salt=cache_salt,
             )
             self._request_trackers[request.req_id] = request_tracker
 
