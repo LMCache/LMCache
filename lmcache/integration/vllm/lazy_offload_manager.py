@@ -57,26 +57,17 @@ class LazyOffloadActions:
     sessions_to_end: list[str] = field(default_factory=list)
 
 
-def _new_blocks(scheduler_output: "SchedulerOutput") -> tuple[int, set[int]]:
-    """Summarise the GPU blocks one scheduler step handed out.
-
-    Returns:
-        The gross count of ids given to new and cached requests, driving the
-        consumption EMA, and the unique ids, naming what to revalidate.
-    """
-    count = 0
-    block_ids: set[int] = set()
+def _new_blocks(scheduler_output: "SchedulerOutput") -> int:
+    """Gross block ids handed out this step, driving the consumption EMA."""
     groups = [request.block_ids for request in scheduler_output.scheduled_new_reqs]
     groups.extend(
         request_block_ids
         for request_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids
         if request_block_ids
     )
-    for request_groups in groups:
-        for group_ids in request_groups:
-            count += len(group_ids)
-            block_ids.update(group_ids)
-    return count, block_ids
+    return sum(
+        len(group_ids) for request_groups in groups for group_ids in request_groups
+    )
 
 
 def _coalesce_store_metadata(
@@ -314,15 +305,13 @@ class LazyOffloadManager:
         pool: "BlockPool",
     ) -> LazyOffloadActions:
         """Apply one policy-neutral drain plan and its GPU side effects."""
-        new_blocks_allocated, allocated_block_ids = _new_blocks(scheduler_output)
         drain = self._require_policy().drain(
             DrainSignals(
-                new_blocks_allocated=new_blocks_allocated,
+                new_blocks_allocated=_new_blocks(scheduler_output),
                 est_next_step_blocks=sum(
                     -(-scheduler_output.total_num_scheduled_tokens // tokens_per_block)
                     for tokens_per_block in self._group_tokens_per_block
                 ),
-                allocated_block_ids=allocated_block_ids,
                 finished_request_ids=self._requests.finished_request_ids(),
                 blocked_request_ids=self._requests.in_flight_request_ids(),
             )

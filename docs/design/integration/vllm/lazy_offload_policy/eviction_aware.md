@@ -14,24 +14,15 @@ operation whose blocks come under eviction pressure.
 
 ## Objects
 
-- **`GPUBlockPoolView`** -- read-only view of the `BlockPool` bound via the
-  vLLM `bind_gpu_block_pool` hook, and the policy's only pool access:
-  `free_queue_block_ids()` (a *lazy* iterator over the free queue from the
-  eviction head; a block's position is its LRU rank, rank 0 = next victim),
-  `is_free(block_id)` (O(1) queue membership), and `block_hash(block_id)`.
-  None of them may mutate pool state.
-
-  Laziness is contractual, not an optimisation: the walk runs on the
-  scheduler's critical path once per step and the full queue is O(free
-  blocks). The drain consumes the iterator through `_FreeQueueWindow`, which
-  opens at `danger_depth` and widens only by the blocks an emission pinned out
-  of the queue (see pin cascade), so a step reads exactly the ranks its
-  decisions compare -- nothing at danger depth 0. `is_free` exists so pin
-  accounting asks the pool, not the window: a pin deeper than the window still
-  shifts the queue.
+- The **`BlockPool`** bound via the vLLM `bind_gpu_block_pool` hook is only
+  ever read: the free queue's links from the eviction head (a block's
+  position is its LRU rank, rank 0 = next victim) and block hashes. The walk
+  runs on the scheduler's critical path once per step, so it follows the
+  queue's links and stops at the danger depth instead of materialising the
+  whole queue -- nothing at danger depth 0.
 - **`PendingStoreOp`** -- one deferred store: opaque `store_metadata` (the
   ready `LMCacheMPRequestMetadata`), the covered blocks' hash snapshot taken
-  at admission, the op's token range, and its admission drain and timestamp.
+  at admission, the op's token range, and its admission timestamp.
 - **`EvictionAwareStoreQueue`** -- the policy object, one per connector.
 
 ## Per-step protocol (policy-caller obligations)
@@ -53,10 +44,9 @@ lifecycle events to it.
      this one would be unreachable on retrieval.
 2. Once per step call `drain(signals)` with that step's `DrainSignals`.
    Pending ops of finished requests wait out their eviction clock -- that is
-   the point of lazy offload. Validation is incremental: the queue keeps a
-   block-to-request reverse index and revalidates only requests touched by
-   this step's allocations or represented in the free-queue window. Requests
-   blocked by a submitted batch are skipped until their receipt.
+   the point of lazy offload. Every drain revalidates every pending request's
+   hash snapshots; requests blocked by a submitted batch are skipped whole,
+   validation included, until their receipt.
 3. For every item in `LazyOffloadDrain.items` (already ordered): pin
    (`touch`) its blocks, coalesce each request's released ops into one store
    op, register the submitted batch and its epoch, and put it into this
@@ -101,16 +91,10 @@ the true vLLM hit instead of 0.
   alone is never a trigger -- an idle engine never drains.
 - An op is **due** when any covered block's rank < danger depth. Blocks not in
   the free queue (in use / resurrected) are not at risk.
-- **Pin cascade.** Emitting a segment pins its blocks out of the free queue,
-  moving every block behind them toward the head before the next step's
-  allocation runs. Within one drain, each later candidate is therefore tested
-  against `danger_depth` plus the unique emitted blocks that were in the queue
-  so far (an in-use block does not leave the queue; a shared block counts
-  once), and the window widens by the same amount to reveal the next
-  candidates. The first emission still needs a plain danger-depth hit, so the
-  extension never opens the gate on an idle system; the alternation terminates
-  because each round either emits (the cap is finite) or finds nothing due.
-  Dropped (unpinned) segments do not extend the shift.
+- Emitting a segment pins its blocks out of the free queue, moving every
+  block behind them toward the head. The drain does not correct for this
+  shift within the step: a candidate it pushes into danger is caught by the
+  next step's walk, one step later, inside the horizon's margin.
 - **Deferral deadline (`max_deferral_seconds`)**: the danger window is a
   *spatial* signal -- how close a block sits to the free-queue head -- which
   answers when the block dies on the GPU, not when the conversation comes
@@ -131,10 +115,9 @@ the true vLLM hit instead of 0.
 - Cross-request drain order = min due rank ascending; `max_drain_per_step`
   bounds the per-step D2H burst in operations. The cap may split a request's
   due segment but only ever emits a front slice of it, so within-request
-  prefix order is preserved. Sized below the concurrent prefill admission rate
-  it becomes a steady-state loss setting rather than burst shaping;
-  `configuration.rst` states the rule and `throttled_drains` is the sensor,
-  read against `dropped_evicted`.
+  prefix order is preserved. Sized below the concurrent prefill admission
+  rate it becomes a steady-state loss setting rather than burst shaping;
+  `configuration.rst` states the rule.
 - **Idle consequences**: receipts travel in worker metadata, which only flows
   on token-producing steps. Pins, in-flight sessions, and finished requests
   whose ops never come due all settle on the next activity -- nothing leaks
@@ -142,12 +125,10 @@ the true vLLM hit instead of 0.
 
 ## Scheduler-path complexity
 
-`_PendingOperations` owns the per-request lists and the block-to-request
-reverse index together; admission, replacement, and departure update both
-through one atomic API. A drain therefore walks only the bounded free-queue
-window and the requests represented in it or touched by this step's
-allocations: cost proportional to the pressure window and the drain cap, not
-to total pending depth.
+A drain walks the free queue to the danger depth and re-checks every pending
+request's hash snapshots: cost proportional to the pressure window plus the
+buffered blocks, both small -- pending depth is bounded by concurrent
+requests, and each check is a dict lookup and a comparison.
 
 Request lifecycle is not policy state. The controller registry owns request
 phase, epoch, and submitted batches; the policy receives blocked request ids
@@ -161,11 +142,9 @@ completed request ids do not accumulate.
 Counters are cumulative and surface in the scheduler process log, not in
 vLLM's `get_kv_connector_stats` plumbing (that hook is polled worker-side,
 where the policy does not live). `dropped_evicted` is the quality sensor --
-data lost before we drained, meaning the horizon is too tight -- weighed by
-token range in `dropped_evicted_tokens`. `emitted_deferral_drains / emitted`
-is the mean deferral in drains, the direct measure of what the policy buys,
-and `emitted_overdue` how much of that the deadline rather than the window
-released. `drain_steps` is the denominator for both.
+data lost before we drained, meaning the horizon is too tight -- and
+`emitted_overdue` is how much of `emitted` the deadline rather than the
+window released.
 
 Two log hooks:
 
@@ -182,9 +161,8 @@ Two log hooks:
   ```
 
   `rejected_unhashed` and `rejected_prefix_broken` stay out (those ops are
-  turned away before `admitted`); token- and event-valued counters
-  (`dropped_evicted_tokens`, `*_deferral_drains`, `emitted_overdue`,
-  `throttled_drains`) are weights beside the equation, not terms of it.
+  turned away before `admitted`), and `emitted_overdue` is a weight beside
+  the equation, not a term of it.
 - Connector `shutdown()` calls `log_final_stats()`, which emits the exact
   final ledger. Best-effort: `vllm serve` under SIGINT can beat scheduler
   shutdown to it -- that is why the periodic line exists. A log reader takes

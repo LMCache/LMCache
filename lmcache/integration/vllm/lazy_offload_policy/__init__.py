@@ -12,7 +12,6 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
 )
 from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (
     EvictionAwareStoreQueue,
-    GPUBlockPoolView,
     LazyOffloadPolicyConfig,
 )
 from lmcache.integration.vllm.lazy_offload_policy.fifo import FIFOOffloadPolicy
@@ -58,4 +57,4 @@ def create_offload_policy(
         return FIFOOffloadPolicy(configs)
     config = LazyOffloadPolicyConfig.from_configs(configs)
     logger.info("lazy offload enabled with EVICTION_AWARE policy: %s", config)
-    return EvictionAwareStoreQueue(config, GPUBlockPoolView(gpu_block_pool))
+    return EvictionAwareStoreQueue(config, gpu_block_pool)

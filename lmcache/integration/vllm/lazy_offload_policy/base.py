@@ -37,14 +37,12 @@ class DrainSignals:
     """One scheduler step's inputs to a drain decision.
 
     The two block counts are the step's gross allocation and the next step's
-    estimate; ``allocated_block_ids`` are the ids allocated or resurrected
-    this step, whose operations the drain revalidates. Requests in
-    ``blocked_request_ids`` have a batch in flight and stay buffered.
+    estimate. Requests in ``blocked_request_ids`` have a batch in flight and
+    stay buffered.
     """
 
     new_blocks_allocated: int
     est_next_step_blocks: int
-    allocated_block_ids: set[int]
     finished_request_ids: set[str]
     blocked_request_ids: set[str]
 
