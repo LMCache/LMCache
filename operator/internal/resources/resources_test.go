@@ -1458,6 +1458,41 @@ func TestBuildDaemonSet_GPUVendorAMD(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_RuntimeClassNameOverride(t *testing.T) {
+	cases := []struct {
+		name      string
+		vendor    *string
+		override  *string
+		wantClass *string // nil => no runtimeClassName on the pod
+	}{
+		{"nvidia default keeps the nvidia RuntimeClass", nil, nil, ptr(nvidiaRuntimeClass)},
+		{"empty override clears it on nvidia (default runtime)", nil, ptr(""), nil},
+		{"non-empty override wins on nvidia", nil, ptr("customrc"), ptr("customrc")},
+		{"non-empty override wins on amd", ptr(lmcachev1alpha1.GPUVendorAMD), ptr("customrc"), ptr("customrc")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := minimalEngine()
+			if tc.vendor != nil {
+				engine.Spec.GPUVendor = tc.vendor
+			}
+			engine.Spec.RuntimeClassName = tc.override
+			engine.SetDefaults()
+
+			got := BuildDaemonSet(engine).Spec.Template.Spec.RuntimeClassName
+			if tc.wantClass == nil {
+				if got != nil {
+					t.Fatalf("expected no RuntimeClassName, got %q", *got)
+				}
+				return
+			}
+			if got == nil || *got != *tc.wantClass {
+				t.Fatalf("expected RuntimeClassName=%q, got %v", *tc.wantClass, got)
+			}
+		})
+	}
+}
+
 func TestBuildDaemonSet_HostNetworkEnabled(t *testing.T) {
 	engine := minimalEngine()
 	engine.Spec.HostNetwork = ptr(true)

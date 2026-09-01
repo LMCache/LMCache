@@ -117,6 +117,18 @@ func buildDaemonSetCore(
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
+	// An explicit spec.RuntimeClassName overrides the vendor-derived default; an
+	// empty string clears it so pods use the default container runtime. This is
+	// needed on NVIDIA clusters without the GPU Operator, where the "nvidia"
+	// RuntimeClass object is absent and the pods would otherwise be admission-rejected.
+	if spec.RuntimeClassName != nil {
+		if *spec.RuntimeClassName == "" {
+			runtimeClassName = nil
+		} else {
+			rc := *spec.RuntimeClassName
+			runtimeClassName = &rc
+		}
+	}
 	privileged := derefBool(spec.Privileged, false)
 	hostIPC := derefBool(spec.HostIPC, false)
 
