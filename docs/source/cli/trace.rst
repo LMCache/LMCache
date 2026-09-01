@@ -35,7 +35,7 @@ record counts.
    Trace file: path/to/trace.lct
      level:                storage
      format_version:       1
-     trace_schema_version: 1
+     trace_schema_version: 2
      duration:             12.345s
      sm_config_digest:     a1b2c3d4
      total_records:        2048
@@ -44,6 +44,10 @@ record counts.
        StorageManager.retrieve: 1024
 
 The only argument is the positional ``FILE`` (path to a ``.lct`` trace file).
+Current readers can inspect schema versions 1 and 2; other versions are
+rejected. Replay accepts only schema version 2 because version-1 traces may
+have omitted ``ObjectKey.cache_salt`` and cannot reconstruct salted key
+identity.
 
 
 replay

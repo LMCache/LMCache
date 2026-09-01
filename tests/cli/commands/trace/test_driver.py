@@ -42,6 +42,12 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
+from lmcache.v1.mp_observability.trace.format import (
+    FORMAT_VERSION,
+    MAGIC,
+    Header,
+    encode_header,
+)
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
 import lmcache.v1.mp_observability.event_bus as _bus_module
 
@@ -106,6 +112,23 @@ def trace_path(tmp_path):
 def _flush(bus: EventBus) -> None:
     time.sleep(0.25)
     bus._drain_all()
+
+
+def _write_header_only_trace(trace_path: str, trace_schema_version: int) -> None:
+    """Write a header-only trace with the requested schema version."""
+    header = Header(
+        magic=MAGIC,
+        format_version=FORMAT_VERSION,
+        level="storage",
+        trace_schema_version=trace_schema_version,
+        t_mono_start=0.0,
+        t_wall_start=0.0,
+        sm_config_json="",
+        sm_config_digest="",
+    )
+    frame = encode_header(header)
+    with open(trace_path, "wb") as fh:
+        fh.write(len(frame).to_bytes(4, "big") + frame)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +249,13 @@ class TestRecordReplayRoundtrip:
 
 
 class TestMismatchHandling:
+    def test_legacy_schema_is_not_replayed(self, trace_path: str) -> None:
+        _write_header_only_trace(trace_path, trace_schema_version=1)
+
+        with pytest.raises(ValueError, match="not replay-safe.*cache_salt"):
+            with StorageReplayDriver(_make_sm_config(), trace_path):
+                pass
+
     def test_unknown_qualname_is_skipped(self, trace_path):
         """An empty dispatcher with no matching handlers skips every
         record without raising."""

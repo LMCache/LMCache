@@ -273,7 +273,7 @@ Length-prefixed frames keep the reader simple and let truncated tails
 | `magic` | `bytes` (`LMCT`) | Sanity check; reader rejects non-matching files |
 | `format_version` | `int` (1) | Bumped on incompatible **framing** layout changes (length prefix, struct shape). Reader rejects unknown versions |
 | `level` | `str` (`storage`) | Trace level discriminator. Future `mq` / `gpu` levels will share this format and use this field for replay-driver dispatch |
-| `trace_schema_version` | `int` (1) | Bumped on incompatible changes to the captured API surface (e.g. a traced method's args change, a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; reader rejects mismatches |
+| `trace_schema_version` | `int` (2) | Bumped on changes that older readers would decode or replay incorrectly (e.g. a traced method's args change, a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; readers reject unsupported versions |
 | `t_mono_start` | `float` | `time.monotonic()` at recorder construction; record `t_mono` is relative to this |
 | `t_wall_start` | `float` | `time.time()` at construction, for absolute correlation with external logs |
 | `sm_config_json` | `str` | JSON dump of `StorageManagerConfig` at record time, or empty string if attach was skipped |
@@ -317,6 +317,19 @@ exact type **before** the generic `isinstance(v, tuple)` branch.
 Unknown types fail loudly (`TypeError`) rather than silently dropping
 fields — silent drops would let bugs masquerade as test successes at
 replay time.
+
+### `ObjectKey` identity and compatibility
+
+The `ObjectKey` codec records every field that contributes to key identity:
+`chunk_hash`, `model_name`, `kv_rank`, `object_group_id`, and `cache_salt`.
+The decoder defaults a missing `object_group_id` to `0` and a missing
+`cache_salt` to an empty string so traces written before either field was added
+remain readable. Writers use `trace_schema_version=2` after adding `cache_salt`;
+current readers can inspect versions 1 and 2. Replay accepts only version 2:
+version-1 recorders could receive salted keys but did not store the salt, so
+their original identity cannot be reconstructed. Conversely, version-1 readers
+reject version-2 headers before decoding, preventing them from silently
+dropping the salt during replay.
 
 ---
 
@@ -501,10 +514,11 @@ file format:
    likely, the same `TRACE_CALL` mapping with a different `level`
    passed to the base).
 4. **Codec registry** — new arg types slot in by calling
-   `register_codec`. No format bump. Keep newly-traced argument types
-   in `lmcache/v1/distributed/api.py` (or another leaf module) so
-   `codecs.py` can import them without pulling in modules that import
-   the trace decorator.
+   `register_codec`. No framing-format bump is needed; bump the trace schema
+   when an older reader would decode or replay the new value incorrectly. Keep
+   newly-traced argument types in `lmcache/v1/distributed/api.py` (or another
+   leaf module) so `codecs.py` can import them without pulling in modules that
+   import the trace decorator.
 
 ---
 
