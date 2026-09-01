@@ -163,6 +163,33 @@ def _mock_client(worker: AtomMPWorkerAdapter) -> MagicMock:
     return cast(MagicMock, worker._client)
 
 
+def test_atom_lookup_submits_valid_reader_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduler lookups declare one reader for each rank-local object."""
+    client = MagicMock(name="mq_client")
+    future: MessagingFuture[None] = MessagingFuture()
+    future.set_result(None)
+    client.submit_request.return_value = future
+    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
+    scheduler = AtomMPSchedulerAdapter(
+        server_url="tcp://127.0.0.1:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="atom-test-model",
+        block_size=64,
+        parallel_config=AtomMPParallelConfig(2, 1, 2),
+    )
+
+    scheduler.maybe_submit_lookup_request("request-1", list(range(300)))
+
+    lookup_call = client.submit_request.call_args
+    assert lookup_call.args[0] is RequestType.LOOKUP
+    key = lookup_call.args[1][0]
+    assert key.require_num_kv_readers() == 1
+    assert lookup_call.args[1][1] == 2
+
+
 def test_atom_worker_registers_native_engine_type(
     worker_with_transfer_context: tuple[
         AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]
@@ -216,6 +243,7 @@ def test_atom_submit_returns_future_and_expands_physical_groups(
     assert returned is future
     assert event in returned._retained_references
     submit_call = getattr(transfer_context, submit_name).call_args
+    assert submit_call.args[1].require_num_kv_readers() == 1
     assert submit_call.args[4] == [[7, 8, 9, 10], [7, 8, 9, 10]]
 
     future.set_result(True)
