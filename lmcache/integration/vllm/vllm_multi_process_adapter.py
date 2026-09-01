@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import math
 import os
@@ -20,7 +20,7 @@ from lmcache.integration.request_telemetry.factory import RequestTelemetryFactor
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
-from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -37,10 +37,6 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
-from lmcache.v1.platform.base.event_ipc import (
-    EventIPCBackend,
-    get_event_ipc_backend,
-)
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 if TYPE_CHECKING:
@@ -1174,11 +1170,6 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._layout_hints: "LayoutHints | None" = None
         self.engine_group_infos: list[EngineGroupInfo] = []
-        # KV-cache device and event backend, resolved once at registration
-        # so per-request event creation stays off the lookup path.
-        self._kv_device: torch.device | None = None
-        self._event_ipc_backend: EventIPCBackend | None = None
-
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
 
@@ -1371,8 +1362,6 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        self._kv_device = get_device(next(iter(kv_caches.values())))
-        self._event_ipc_backend = get_event_ipc_backend(self._kv_device)
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
@@ -1481,31 +1470,29 @@ class LMCacheMPWorkerAdapter:
 
         return True
 
-    def create_recorded_event(self) -> _IpcEvent:
-        """Create an IPC event recorded on the current stream with configured backend.
+    def create_recorded_event(self) -> _IpcEvent | None:
+        """Create the ordering event required by the active transfer context.
 
         Returns:
-            An event recorded on the current stream, ready for
-            ``submit_store_request`` / ``submit_retrieve_request``.
+            A recorded event for contexts that need stream ordering, or
+            ``None`` for synchronous engine-driven transfer.
 
         Raises:
             RuntimeError: If called before ``register_kv_caches()``.
         """
-        if self._kv_device is None or self._event_ipc_backend is None:
+        if self.transfer_ctx is None:
             raise RuntimeError(
                 "KV caches are not registered. Call register_kv_caches() "
                 "before creating transfer events."
             )
-        event = self._event_ipc_backend.create_event(self._kv_device)
-        self._event_ipc_backend.record_event(event, torch_dev.current_stream())
-        return cast(_IpcEvent, event)
+        return self.transfer_ctx.create_recorded_event()
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salt: str = "",
     ):
         """
@@ -1514,8 +1501,8 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the store operation.
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
@@ -1549,14 +1536,15 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
         )
         self.store_futures[request_id] = future
-        self.store_events[request_id] = event
+        if event is not None:
+            self.store_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salt: str = "",
     ) -> None:
         """
@@ -1569,8 +1557,8 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the retrieve operation.
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
@@ -1604,14 +1592,15 @@ class LMCacheMPWorkerAdapter:
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
-        self.retrieve_events[request_id] = event
+        if event is not None:
+            self.retrieve_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1621,8 +1610,8 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the store operations. Should have
                 the same length as request_ids
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be the same as
                 request_ids.
@@ -1637,7 +1626,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1647,8 +1636,8 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the retrieve operations. Should have
                 the same length as request_ids
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be same as
                 request_ids.

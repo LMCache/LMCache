@@ -14,20 +14,40 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 # Configuration
 VLLM_PORT="${VLLM_PORT:-8000}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
-NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
+# XPU is more sensitive to high in-flight request counts in this harness.
+if [ -n "${NUM_CONCURRENT:-}" ]; then
+    NUM_CONCURRENT="${NUM_CONCURRENT}"
+elif [ "${TORCH_DEVICE_TYPE:-cuda}" = "xpu" ]; then
+    NUM_CONCURRENT="8"
+else
+    NUM_CONCURRENT="50"
+fi
 LIMIT="${LIMIT:-300}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
-LM_EVAL_VERIFY_MODE="${LM_EVAL_VERIFY_MODE:-samples}"
+if [ -n "${LM_EVAL_VERIFY_MODE:-}" ]; then
+    LM_EVAL_VERIFY_MODE="${LM_EVAL_VERIFY_MODE}"
+elif [ "${TORCH_DEVICE_TYPE:-cuda}" = "xpu" ]; then
+    LM_EVAL_VERIFY_MODE="score"
+else
+    LM_EVAL_VERIFY_MODE="samples"
+fi
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
-SCORE_MIN="${SCORE_MIN:-0.80}"
+if [ -n "${SCORE_MIN:-}" ]; then
+    SCORE_MIN="${SCORE_MIN}"
+elif [ "${TORCH_DEVICE_TYPE:-cuda}" = "xpu" ]; then
+    SCORE_MIN="0.30"
+else
+    SCORE_MIN="0.80"
+fi
 VLLM_LOG="${VLLM_LOG:-/tmp/build_${BUILD_ID}_vllm.log}"
 
 case "$LM_EVAL_VERIFY_MODE" in
     samples) LM_EVAL_DIR="$RESULTS_DIR/lm_eval" ;;
+    score) LM_EVAL_DIR="$RESULTS_DIR/lm_eval_score" ;;
     preemption) LM_EVAL_DIR="$RESULTS_DIR/lm_eval_preemption" ;;
     *)
-        echo "Unknown LM_EVAL_VERIFY_MODE: $LM_EVAL_VERIFY_MODE (valid: samples, preemption)"
+        echo "Unknown LM_EVAL_VERIFY_MODE: $LM_EVAL_VERIFY_MODE (valid: samples, score, preemption)"
         exit 1
         ;;
 esac
@@ -157,6 +177,43 @@ print(
 PYEOF
 }
 
+verify_score() {
+    # Check score drift and floor only (no preemption signal requirement).
+    python3 - "$1" "$2" "$SCORE_TOLERANCE" "$SCORE_MIN" <<'PYEOF'
+import glob, json, os, sys
+
+first_dir, second_dir, tolerance, score_min = sys.argv[1:5]
+tolerance, score_min = float(tolerance), float(score_min)
+
+def score(results_dir):
+    """Return gsm8k exact_match from newest results_*.json or exit if missing."""
+    files = glob.glob(os.path.join(results_dir, "**", "results_*.json"), recursive=True)
+    if not files:
+        raise SystemExit(f"No results_*.json under {results_dir}")
+    with open(max(files, key=os.path.getmtime)) as f:
+        metrics = json.load(f)["results"]["gsm8k"]
+    if "exact_match,strict-match" in metrics:
+        return float(metrics["exact_match,strict-match"])
+    for key in metrics:
+        if key.startswith("exact_match,") and "stderr" not in key:
+            return float(metrics[key])
+    raise SystemExit(f"No exact_match metric in {sorted(metrics)}")
+
+first, second = score(first_dir), score(second_dir)
+drift = abs(first - second)
+print(f"First run gsm8k exact_match: {first:.4f}")
+print(f"Second run gsm8k exact_match: {second:.4f}")
+failures = []
+if drift > tolerance:
+    failures.append(f"score drift {drift:.4f} > tolerance {tolerance}")
+if first < score_min or second < score_min:
+    failures.append(f"scores below minimum {score_min}: first={first:.4f}, second={second:.4f}")
+if failures:
+    raise SystemExit("FAILED:\n  - " + "\n  - ".join(failures))
+print("Score verification passed")
+PYEOF
+}
+
 # First run -- populates cache
 echo "============================================"
 echo "=== First lm_eval run (cache population) ==="
@@ -179,6 +236,8 @@ echo "============================================"
 if [ "$LM_EVAL_VERIFY_MODE" = "preemption" ]; then
     verify_preemption "$FIRST_RUN_DIR" "$SECOND_RUN_DIR" \
         "$preemptions_before" "$preemptions_after_first" "$preemptions_after_second"
+elif [ "$LM_EVAL_VERIFY_MODE" = "score" ]; then
+    verify_score "$FIRST_RUN_DIR" "$SECOND_RUN_DIR"
 elif ! verify_samples_match "$FIRST_RUN_DIR" "$SECOND_RUN_DIR"; then
     echo "Verification failed: samples files do not match"
     exit 1

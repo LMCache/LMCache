@@ -16,7 +16,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${REPO_ROOT}"
 
 # ── Environment setup ────────────────────────────────────────
-source .buildkite/k3_harness/setup-env.sh
+SETUP_ENV_SCRIPT="${BK_SETUP_ENV_SCRIPT:-.buildkite/k3_harness/setup-env.sh}"
+source "${SETUP_ENV_SCRIPT}"
 
 # Install test extras (lm-eval for eval workload, openai/pandas/matplotlib for benchmarks)
 uv pip install 'lm-eval[api]' openai pandas matplotlib
