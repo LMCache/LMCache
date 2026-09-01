@@ -145,6 +145,44 @@ def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
     return False
 
 
+def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[Any]:
+    """Yield leaf KV cache specs without depending on a vLLM helper API."""
+    if kv_cache_config is None:
+        return
+    for group in kv_cache_config.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        per_layer_specs = getattr(group_spec, "kv_cache_specs", None)
+        if isinstance(per_layer_specs, dict):
+            yield from per_layer_specs.values()
+        else:
+            yield group_spec
+
+
+def _has_recurrent_cache(kv_cache_config: "KVCacheConfig | None") -> bool:
+    """Return whether the resolved cache contains recurrent-state pages."""
+    if kv_cache_config is None:
+        return False
+    if bool(getattr(kv_cache_config, "has_mamba_layers", False)):
+        return True
+    return any(
+        any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+        for spec in _iter_kv_cache_specs(kv_cache_config)
+    )
+
+
+def _should_suppress_mixed_recurrent_retrieve(
+    has_recurrent_cache: bool,
+    num_computed_tokens: int,
+    num_lmcache_hit_tokens: int,
+) -> bool:
+    """Reject an external tail spliced onto existing local recurrent state."""
+    return (
+        has_recurrent_cache
+        and num_computed_tokens > 0
+        and num_lmcache_hit_tokens > num_computed_tokens
+    )
+
+
 def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
     """Reject scheduler configs whose steps cannot advance a whole Mamba block.
 
@@ -300,8 +338,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         # Fail fast, before the server handshake below.
+        kv_cache_config = getattr(self, "_kv_cache_config", None)
         validate_mamba_step_alignment(vllm_config)
-        validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
+        validate_kv_cache_groups(kv_cache_config)
+        self._has_recurrent_cache = _has_recurrent_cache(kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
 
@@ -821,6 +861,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
             return 0, False
 
+        # Once this request has selected the recurrent-safe local-recompute
+        # path, scheduler polling must be idempotent. Reprocessing the same
+        # completed lookup would double-count num_stored_tokens and retain a
+        # second logical ownership of the same lookup result.
+        if tracker.suppress_mixed_recurrent_retrieve:
+            return 0, False
+
         # A completed async load normally leaves num_computed_tokens > 0, so
         # the scheduler does not call this method again.  If vLLM reset the
         # request to zero after the worker reported invalid blocks, however,
@@ -876,6 +923,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             * self._hit_alignment_tokens
         )
         tracker.num_lmcache_hit_tokens = ret
+
+        # A local APC prefix and a deeper external tail are not composable for
+        # recurrent groups in this connector. Keep the completed lookup and
+        # its locks until update_state_after_alloc releases the full range,
+        # then recompute the tail from trusted local state.
+        if _should_suppress_mixed_recurrent_retrieve(
+            self._has_recurrent_cache,
+            num_computed_tokens,
+            ret,
+        ):
+            tracker.suppress_mixed_recurrent_retrieve = True
+            logger.warning(
+                "Suppressing mixed recurrent LMCache retrieve for request %s: "
+                "local_tokens=%d, external_tokens=%d; recomputing the tail",
+                request.request_id,
+                num_computed_tokens,
+                ret,
+            )
+            return 0, False
 
         need_to_load = max(0, ret - num_computed_tokens)
 
@@ -1395,9 +1461,30 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Clean up request tracker and associated lookup future for a request.
         This should be called when a request is finished to prevent memory leak.
         """
-        # Clean up request tracker
-        if self.request_trackers.pop(request_id, None):
-            logger.debug(
-                "[KVConnector] Cleaned up request_tracker for request %s",
-                request_id,
-            )
+        tracker = self.request_trackers.get(request_id)
+        if tracker is None:
+            return
+
+        # The normal allocation callback owns lookup cleanup. A request can be
+        # cancelled after the scheduler accepted the recurrent-safe fallback
+        # but before allocation; release the retained result and every lock in
+        # that exceptional window. READY means allocation already did so.
+        if (
+            tracker.suppress_mixed_recurrent_retrieve
+            and tracker.state == LMCacheMPRequestState.PREFETCHING
+        ):
+            self.scheduler_adapter.cleanup_lookup_result(request_id)
+            if tracker.num_lmcache_hit_tokens > 0:
+                self.scheduler_adapter.free_lookup_locks(
+                    token_ids=tracker.get_token_ids(),
+                    start=0,
+                    end=tracker.num_lmcache_hit_tokens,
+                    request_id=request_id,
+                    cache_salt=tracker.cache_salt,
+                )
+
+        self.request_trackers.pop(request_id)
+        logger.debug(
+            "[KVConnector] Cleaned up request_tracker for request %s",
+            request_id,
+        )

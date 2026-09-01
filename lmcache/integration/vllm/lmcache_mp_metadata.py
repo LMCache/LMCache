@@ -67,6 +67,7 @@ class LMCacheMPRequestTracker:
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
+    suppress_mixed_recurrent_retrieve: bool = False
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
@@ -83,6 +84,7 @@ class LMCacheMPRequestTracker:
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
+        self.suppress_mixed_recurrent_retrieve = False
         self.state = LMCacheMPRequestState.PREFETCHING
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
@@ -98,7 +100,8 @@ class LMCacheMPRequestTracker:
         """Check whether the current request needs retrieve, will be used
         update_stage_after_alloc"""
         return (
-            self.num_lmcache_hit_tokens > self.num_vllm_hit_tokens
+            not self.suppress_mixed_recurrent_retrieve
+            and self.num_lmcache_hit_tokens > self.num_vllm_hit_tokens
             and self.state
             not in (
                 LMCacheMPRequestState.READY,
