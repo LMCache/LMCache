@@ -7,6 +7,9 @@ env:
   # Small deterministic model preloaded in both MUSA serving images.
   MUSA_E2E_MODEL: "/models/Qwen3-0.6B"
   MUSA_E2E_ENABLE_SGLANG: "1"
+  # Keep correctness E2E within the preloaded model's small resource budget.
+  MUSA_SGLANG_MAX_TOTAL_TOKENS: "16384"
+  MUSA_SGLANG_MEM_FRACTION_STATIC: "0.50"
   MUSA_VISIBLE_DEVICES: "0"
   TRANSFORMERS_OFFLINE: "1"
 
@@ -57,6 +60,8 @@ steps:
 
     env:
       MUSA_CI_ARTIFACT_DIR: "musa-ci-artifacts/sglang-e2e"
+      # Leave room for first-start kernel initialization on the MUSA runner.
+      MUSA_E2E_STARTUP_TIMEOUT: "900"
 
     artifact_paths:
       - "musa-ci-artifacts/sglang-e2e/**/*"

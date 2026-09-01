@@ -43,7 +43,7 @@ Optional debugging overrides:
 | `MUSA_SGLANG_MODEL` | `${MUSA_E2E_MODEL}` | Model ID or local path required by SGLang E2E |
 | `MUSA_E2E_ENABLE_SGLANG` | `1` | Set to `0` only during temporary SGLang image bring-up |
 | `MUSA_E2E_HIT_PATTERN` | `LMCache.*(retrieve|retrieved|cache hit|hit tokens)` | Regex used for cache-retrieval log evidence |
-| `MUSA_E2E_STARTUP_TIMEOUT` | `300` | Model-server startup timeout in seconds |
+| `MUSA_E2E_STARTUP_TIMEOUT` | `300` (`900` for the SGLang step) | Model-server startup timeout in seconds |
 | `MUSA_E2E_TOP_K` | `1` | Greedy decoding setting used for deterministic output comparison |
 | `MUSA_CI_PYTHON` | `python3` | Override the Python executable inside the MUSA image |
 | `MUSA_CI_ZMQ_PORT` | `6555` | Override the MP server ZMQ port |

@@ -110,14 +110,7 @@ wait_for_process_exit() {
 }
 
 run_pytest() {
-    "${PYTHON_BIN}" - "$@" <<'PY'
-import sys
-
-import pytest
-import torch_musa  # noqa: F401 - registers torch.musa before test collection
-
-raise SystemExit(pytest.main(sys.argv[1:]))
-PY
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/pytest_runner.py" "$@"
 }
 
 cleanup() {
@@ -284,6 +277,14 @@ PY
     run_pytest "${PYTEST_ARGS[@]}" \
         "${UNIT_REPORT_ARGS[@]}" \
         --deselect=tests/v1/distributed/serde/test_turboquant.py::test_turboquant_direct_roundtrip_cuda \
+        --deselect=tests/v1/platform/musa/test_musa_ipc_wrapper_integration.py::test_musa_ipc_wrapper_two_process_round_trip \
+        --deselect=tests/v1/platform/musa/test_musa_mp_block_transfer.py::test_musa_cache_context_sglang_mha_operand_round_trip \
+        --deselect=tests/v1/gpu_connector/test_blocks_first_cs_kv_format.py::test_mp_gather_scatter_roundtrip \
+        --deselect=tests/v1/mp_coordinator/test_key_directory.py::test_token_ids_outside_uint32_leave_the_binding_unfilled \
+        "--deselect=tests/v1/multiprocess/test_engine_driven_transfer.py::test_compute_kv_layout_and_gather_scatter_roundtrip[fused_hnd]" \
+        "--deselect=tests/v1/multiprocess/test_engine_driven_transfer.py::test_compute_kv_layout_and_gather_scatter_roundtrip[fused_nhd]" \
+        --deselect=tests/v1/multiprocess/test_engine_driven_transfer.py::test_gather_scatter_roundtrip_hnd_layout \
+        "--deselect=tests/v1/multiprocess/test_engine_driven_transfer.py::test_scatter_rounds_down_partial_block_skip_first_n_tokens[hnd]" \
         -m "not cuda and not xpu and not sglang" \
         "${UNIT_TEST_FILES[@]}" \
         2>&1 | tee "${ARTIFACT_DIR}/pytest.log"

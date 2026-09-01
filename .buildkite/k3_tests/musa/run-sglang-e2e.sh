@@ -14,6 +14,8 @@ fi
 MODEL="${MUSA_SGLANG_MODEL:-${MUSA_E2E_MODEL:-}}"
 SGLANG_PORT="${MUSA_SGLANG_PORT:-18083}"
 SGLANG_DEVICE="${MUSA_SGLANG_DEVICE:-musa}"
+SGLANG_MAX_TOTAL_TOKENS="${MUSA_SGLANG_MAX_TOTAL_TOKENS:-16384}"
+SGLANG_MEM_FRACTION_STATIC="${MUSA_SGLANG_MEM_FRACTION_STATIC:-0.50}"
 LMCACHE_DAEMON_PORT="${MUSA_SGLANG_LMCACHE_PORT:-6200}"
 LMCACHE_DAEMON_HTTP_PORT="${MUSA_SGLANG_LMCACHE_HTTP_PORT:-7200}"
 LMCACHE_CONFIG_FILE="${ARTIFACT_DIR}/lmcache-sglang.yaml"
@@ -39,11 +41,24 @@ import importlib
 import torch
 import torch_musa  # noqa: F401 - registers torch.musa
 
+# First Party
+from lmcache.v1.platform.musa import ipc_wrapper as musa_ipc
+
 assert torch.musa.is_available(), "TorchMUSA is unavailable"
 sglang = importlib.import_module("sglang")
+capabilities = {
+    "handle_transfer_enabled": musa_ipc.is_musa_handle_transfer_enabled(),
+    "memory_ipc_available": musa_ipc.is_musa_memory_ipc_available(),
+    "event_ipc_available": musa_ipc.is_musa_event_ipc_available(),
+    "block_transfer_available": musa_ipc.is_musa_block_transfer_available(),
+}
 print("torch=", torch.__version__)
 print("sglang=", getattr(sglang, "__version__", "unknown"))
 print("musa_device_count=", torch.musa.device_count())
+for capability, available in capabilities.items():
+    print(f"{capability}=", available)
+missing = [name for name, available in capabilities.items() if not available]
+assert not missing, f"MUSA SGLang MP prerequisites are unavailable: {missing}"
 PY
 
 cat > "${LMCACHE_CONFIG_FILE}" <<EOF
@@ -72,16 +87,21 @@ launch_daemon() {
 launch_sglang() {
     local mode="$1"
     local log_file="$2"
+    local launch_args
     local args=(
         --model-path "${MODEL}"
         --host 127.0.0.1
         --port "${SGLANG_PORT}"
         --device "${SGLANG_DEVICE}"
+        --max-total-tokens "${SGLANG_MAX_TOTAL_TOKENS}"
+        --mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC}"
+        --disable-cuda-graph
     )
     if [[ "${mode}" == "lmcache" ]]; then
         args+=(--enable-lmcache --lmcache-config-file "${LMCACHE_CONFIG_FILE}")
     fi
-    log "Launching SGLang (${mode})"
+    printf -v launch_args '%q ' "${args[@]}"
+    log "Launching SGLang (${mode}) with ${launch_args% }"
     if [[ "${mode}" == "lmcache" ]]; then
         env MUSA_VISIBLE_DEVICES="${MUSA_VISIBLE_DEVICES}" \
             LMCACHE_DEVICE_BACKEND=musa \

@@ -54,6 +54,7 @@ case "${MODE}" in
         INNER_SCRIPT=".buildkite/k3_tests/musa/run.sh"
         IMAGE="${SGLANG_IMAGE}"
         DOCKER_ENV_ARGS+=("-e" "MUSA_CI_E2E_KIND=sglang")
+        DOCKER_ENV_ARGS+=("-e" "LMCACHE_MUSA_HANDLE_TRANSFER=1")
         ;;
     *)
         fail "usage: $0 {unit|smoke|vllm-e2e|sglang-e2e}"
@@ -90,6 +91,8 @@ for optional_variable in \
     MUSA_SGLANG_PORT \
     MUSA_SGLANG_DEVICE \
     MUSA_SGLANG_LAUNCHER \
+    MUSA_SGLANG_MAX_TOTAL_TOKENS \
+    MUSA_SGLANG_MEM_FRACTION_STATIC \
     MUSA_SGLANG_LMCACHE_PORT \
     MUSA_SGLANG_LMCACHE_HTTP_PORT; do
     if [[ -n "${!optional_variable:-}" ]]; then
