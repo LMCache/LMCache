@@ -146,7 +146,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
     def test_submitted_lookup_tracks_server_session(self):
         self.connector.chunk_size = 4
-        self.connector.world_size = 1
+        self.connector.kv_world_size = 1
         self.connector._lookups = {}
         self.connector._active_sessions = set()
         self.connector._lookup_leader = True
