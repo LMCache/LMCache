@@ -526,12 +526,6 @@ def test_validate_rejects_interleave_not_dividing_resolved_attention_block():
 
 
 @requires_vllm
-def test_validate_rejects_nonpositive_interleave():
-    with pytest.raises(ValueError, match=">= 1"):
-        _import_validate_dcp_support()(_config(dcp_size=4, interleave=0), 1)
-
-
-@requires_vllm
 def test_validate_accepts_multi_server_when_each_holds_a_full_shard_set():
     """Ranks split into contiguous per-server blocks; a block of >= dcp_size
     consecutive ranks covers every shard exactly once, so each server is

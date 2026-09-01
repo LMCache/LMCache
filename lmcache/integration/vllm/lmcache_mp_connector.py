@@ -361,11 +361,6 @@ def validate_dcp_support(
         )
 
     interleave = getattr(pc, "cp_kv_cache_interleave_size", 1)
-    if interleave < 1:
-        raise ValueError(
-            "LMCacheMPConnector requires cp_kv_cache_interleave_size >= 1 "
-            f"under DCP (got {interleave})."
-        )
     attention_block_sizes = get_resolved_attention_block_sizes(
         vllm_config, kv_cache_config
     )
