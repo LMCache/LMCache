@@ -190,6 +190,7 @@ const O_DIRECT: i32 = libc::O_DIRECT;
 #[cfg(not(target_os = "linux"))]
 const O_DIRECT: i32 = 0;
 const RING_SIZE: usize = 256;
+const MAX_FIXED_BUFFER_REGION_SIZE: usize = 1 << 30;
 
 fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<bool> {
     match io_engine {
@@ -208,6 +209,102 @@ fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<b
 type BatchTracking = (Arc<AtomicU64>, Arc<Condvar>);
 type IoUringCompletionErrors = Vec<(usize, String)>;
 type IoUringBatchResults = (Vec<bool>, IoUringCompletionErrors);
+
+/// One kernel-registered fixed-buffer region.
+///
+/// Regions are stored in ascending `start` order and use half-open address
+/// ranges: `[start, end)`. `index` remains the index assigned by the original
+/// iovec order passed to io_uring, even when the userspace region list is
+/// sorted for lookup.
+#[derive(Clone, Copy, Debug)]
+struct FixedBufferRegion {
+    start: usize,
+    end: usize,
+    index: u16,
+}
+
+/// Resolve a request to one registered fixed-buffer index.
+///
+/// Fixed I/O is safe only when the complete half-open request range fits in a
+/// single region. Requests that are empty, overflow the address space, cross a
+/// region boundary, or are not covered fall back to ordinary io_uring I/O.
+fn resolve_fixed_buffer_idx(regions: &[FixedBufferRegion], ptr: usize, len: usize) -> Option<u16> {
+    if len == 0 {
+        return None;
+    }
+
+    let request_end = ptr.checked_add(len)?;
+    let insertion = regions.partition_point(|region| region.start <= ptr);
+    if insertion == 0 {
+        return None;
+    }
+
+    let region = &regions[insertion - 1];
+    (request_end <= region.end).then_some(region.index)
+}
+
+/// Validate fixed-buffer inputs and return sorted lookup regions.
+fn build_fixed_buffer_regions(
+    buffer_ptrs: &[usize],
+    buffer_sizes: &[usize],
+) -> PyResult<Vec<FixedBufferRegion>> {
+    if buffer_ptrs.len() != buffer_sizes.len() {
+        return Err(PyValueError::new_err(
+            "buffer_ptrs and buffer_sizes must have same length",
+        ));
+    }
+    if buffer_ptrs.is_empty() {
+        return Err(PyValueError::new_err(
+            "at least one buffer must be provided",
+        ));
+    }
+    if buffer_ptrs.len() > usize::from(u16::MAX) + 1 {
+        return Err(PyValueError::new_err(format!(
+            "too many fixed buffers: {} exceeds the u16 index space",
+            buffer_ptrs.len()
+        )));
+    }
+
+    let mut regions = Vec::with_capacity(buffer_ptrs.len());
+    for (idx, (&ptr, &size)) in buffer_ptrs.iter().zip(buffer_sizes).enumerate() {
+        if ptr == 0 {
+            return Err(PyValueError::new_err(format!(
+                "fixed buffer {idx} has a null pointer"
+            )));
+        }
+        if size == 0 {
+            return Err(PyValueError::new_err(format!(
+                "fixed buffer {idx} has zero size"
+            )));
+        }
+        if size > MAX_FIXED_BUFFER_REGION_SIZE {
+            return Err(PyValueError::new_err(format!(
+                "fixed buffer {idx} size {size} exceeds the 1 GiB limit"
+            )));
+        }
+        let end = ptr.checked_add(size).ok_or_else(|| {
+            PyValueError::new_err(format!("fixed buffer {idx} address range overflows"))
+        })?;
+        let index = u16::try_from(idx)
+            .map_err(|_| PyValueError::new_err("fixed buffer index exceeds u16"))?;
+        regions.push(FixedBufferRegion {
+            start: ptr,
+            end,
+            index,
+        });
+    }
+
+    regions.sort_unstable_by_key(|region| region.start);
+    for pair in regions.windows(2) {
+        if pair[0].end > pair[1].start {
+            return Err(PyValueError::new_err(format!(
+                "fixed buffer regions overlap: [{:#x}, {:#x}) and [{:#x}, {:#x})",
+                pair[0].start, pair[0].end, pair[1].start, pair[1].end
+            )));
+        }
+    }
+    Ok(regions)
+}
 
 /// Round up to nearest multiple of alignment (required for O_DIRECT).
 #[allow(clippy::manual_div_ceil)]
@@ -1038,9 +1135,8 @@ struct RawBlockDevice {
     worker: Option<thread::JoinHandle<()>>,
     // Shutdown signal for worker thread
     shutdown: Option<Arc<AtomicBool>>,
-    // Map from buffer pointer address to registered fixed buffer index
-    // Used for zero-copy I/O with pre-registered buffers
-    fixed_buffer_map: Arc<Mutex<HashMap<usize, (u16, usize)>>>,
+    // Sorted, non-overlapping fixed-buffer regions used for containment lookup.
+    fixed_buffer_regions: Arc<Mutex<Vec<FixedBufferRegion>>>,
     // Flag indicating if fixed buffers have been registered
     fixed_buffers_registered: Arc<AtomicBool>,
     // Count of currently in-flight I/O operations (global)
@@ -1954,7 +2050,7 @@ impl RawBlockDevice {
             queue: queue_opt,
             worker: worker_opt,
             shutdown: shutdown_opt,
-            fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
+            fixed_buffer_regions: Arc::new(Mutex::new(Vec::new())),
             fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
             in_flight_count: in_flight_count_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(0))),
             in_flight_cvar: in_flight_cvar_opt.unwrap_or_else(|| Arc::new(Condvar::new())),
@@ -2077,6 +2173,7 @@ impl RawBlockDevice {
     ///
     /// Registration must happen BEFORE any I/O using these buffers.
     /// The buffers must remain valid (not freed) until unregistered.
+    /// Registration is one-shot for the lifetime of the device.
     #[pyo3(signature = (buffer_ptrs, buffer_sizes))]
     fn register_fixed_buffers(
         &self,
@@ -2086,57 +2183,53 @@ impl RawBlockDevice {
         if !self.use_iouring {
             return Err(PyRuntimeError::new_err("io_uring not enabled"));
         }
-        if buffer_ptrs.len() != buffer_sizes.len() {
-            return Err(PyValueError::new_err(
-                "buffer_ptrs and buffer_sizes must have same length",
-            ));
+        let regions = build_fixed_buffer_regions(&buffer_ptrs, &buffer_sizes)?;
+        let iovecs = buffer_ptrs
+            .iter()
+            .zip(&buffer_sizes)
+            .map(|(&ptr, &size)| libc::iovec {
+                iov_base: ptr as *mut libc::c_void,
+                iov_len: size,
+            })
+            .collect::<Vec<_>>();
+
+        // Serialize registration and userspace publication. The region table is
+        // published only after the kernel has accepted the matching iovec table.
+        let mut published_regions = self.fixed_buffer_regions.lock().unwrap();
+        if self.closed.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err("device is closed"));
         }
-        if buffer_ptrs.is_empty() {
-            return Err(PyValueError::new_err(
-                "at least one buffer must be provided",
+        if self.fixed_buffers_registered.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err(
+                "fixed buffers are already registered",
             ));
         }
 
-        {
-            let mut map = self.fixed_buffer_map.lock().unwrap();
-            map.clear();
-            for (idx, (ptr, size)) in buffer_ptrs.iter().zip(buffer_sizes.iter()).enumerate() {
-                map.insert(*ptr, (idx as u16, *size));
-            }
-        }
-
-        if let Some(ring) = &self.ring {
-            let mut iovecs: Vec<libc::iovec> = Vec::new();
-            for (ptr, size) in buffer_ptrs.iter().zip(buffer_sizes.iter()) {
-                iovecs.push(libc::iovec {
-                    iov_base: *ptr as *mut libc::c_void,
-                    iov_len: *size,
-                });
-            }
-            unsafe {
-                let result = match ring {
-                    IoUringWrapper::Standard(ring) => {
-                        let ring = ring.lock().unwrap();
-                        ring.submitter().register_buffers(&iovecs)
-                    }
-                    IoUringWrapper::Big(ring) => {
-                        let ring = ring.lock().unwrap();
-                        ring.submitter().register_buffers(&iovecs)
-                    }
-                };
-                match result {
-                    Ok(_) => {
-                        self.fixed_buffers_registered.store(true, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "register_buffers failed: {}",
-                            e
-                        )))
-                    }
+        let ring = self
+            .ring
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("io_uring ring is unavailable"))?;
+        let result = unsafe {
+            match ring {
+                IoUringWrapper::Standard(ring) => {
+                    let ring = ring.lock().unwrap();
+                    ring.submitter().register_buffers(&iovecs)
+                }
+                IoUringWrapper::Big(ring) => {
+                    let ring = ring.lock().unwrap();
+                    ring.submitter().register_buffers(&iovecs)
                 }
             }
+        };
+        if let Err(e) = result {
+            return Err(PyRuntimeError::new_err(format!(
+                "register_buffers failed: {}",
+                e
+            )));
         }
+
+        *published_regions = regions;
+        self.fixed_buffers_registered.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -2234,13 +2327,13 @@ impl RawBlockDevice {
         let use_odirect = self.use_odirect;
         let alignment = self.alignment;
         let use_uring_cmd = self.use_uring_cmd;
-        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
-        // Clone the fixed buffer map before releasing GIL to avoid lock contention
-        let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
-            let map = self.fixed_buffer_map.lock().unwrap();
-            map.clone()
+        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Acquire);
+        // Clone the fixed-buffer regions before releasing the GIL to avoid lock contention.
+        let fixed_buffer_regions = if fixed_buffers_registered {
+            let regions = self.fixed_buffer_regions.lock().unwrap();
+            regions.clone()
         } else {
-            HashMap::new()
+            Vec::new()
         };
 
         let nvme_cmd_data_base = if use_uring_cmd {
@@ -2276,7 +2369,7 @@ impl RawBlockDevice {
                 let comp = Arc::new(IoCompletion::new());
 
                 // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                let fixed_idx = resolve_fixed_buffer_idx(&fixed_buffer_regions, ptrs[i], total_len);
 
                 if use_odirect {
                     #[allow(clippy::manual_is_multiple_of)]
@@ -2529,11 +2622,11 @@ impl RawBlockDevice {
         };
 
         // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-        let use_fixed = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        let use_fixed = self.fixed_buffers_registered.load(Ordering::Acquire);
         let fixed_idx = if use_fixed && ptr_aligned {
-            let map = self.fixed_buffer_map.lock().unwrap();
+            let regions = self.fixed_buffer_regions.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            resolve_fixed_buffer_idx(&regions, ptr_addr, total_len)
         } else {
             None
         };
@@ -2665,11 +2758,11 @@ impl RawBlockDevice {
         };
 
         // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-        let use_fixed = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        let use_fixed = self.fixed_buffers_registered.load(Ordering::Acquire);
         let fixed_idx = if use_fixed && ptr_aligned {
-            let map = self.fixed_buffer_map.lock().unwrap();
+            let regions = self.fixed_buffer_regions.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            resolve_fixed_buffer_idx(&regions, ptr_addr, total_len)
         } else {
             None
         };
@@ -2843,13 +2936,13 @@ impl RawBlockDevice {
         let use_odirect = self.use_odirect;
         let use_uring_cmd = self.use_uring_cmd;
         let alignment = self.alignment;
-        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
-        // Clone the fixed buffer map before releasing GIL to avoid lock contention
-        let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
-            let map = self.fixed_buffer_map.lock().unwrap();
-            map.clone()
+        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Acquire);
+        // Clone the fixed-buffer regions before releasing the GIL to avoid lock contention.
+        let fixed_buffer_regions = if fixed_buffers_registered {
+            let regions = self.fixed_buffer_regions.lock().unwrap();
+            regions.clone()
         } else {
-            HashMap::new()
+            Vec::new()
         };
         // Get NVMe data for io_uring_cmd
         let nvme_cmd_data = self._build_nvme_cmd_data(0, 0)?;
@@ -2920,7 +3013,8 @@ impl RawBlockDevice {
                     } else {
                         // Fixed buffers are pre-registered with io_uring,
                         // enabling true zero-copy I/O.
-                        let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                        let fixed_idx =
+                            resolve_fixed_buffer_idx(&fixed_buffer_regions, ptrs[i], total_len);
                         (ptrs[i], fixed_idx, None, None, None)
                     };
 
@@ -3254,6 +3348,12 @@ impl RawBlockDevice {
 
     /// Internal function to perform the cleanup operation.
     fn do_close(&mut self) -> Result<(), PyErr> {
+        // Serialize close with fixed-buffer registration. Holding this guard
+        // until `closed` is published prevents a concurrent registration from
+        // succeeding after the ring has already been torn down.
+        let fixed_regions_state = Arc::clone(&self.fixed_buffer_regions);
+        let mut published_regions = fixed_regions_state.lock().unwrap();
+
         if self.use_iouring {
             if let Some(shutdown) = &self.shutdown {
                 shutdown.store(true, Ordering::Relaxed);
@@ -3272,7 +3372,7 @@ impl RawBlockDevice {
                 guard = g;
             }
 
-            if self.fixed_buffers_registered.load(Ordering::Relaxed) {
+            if self.fixed_buffers_registered.load(Ordering::Acquire) {
                 if let Some(ring) = &self.ring {
                     let _ = match ring {
                         IoUringWrapper::Standard(ring) => {
@@ -3286,8 +3386,8 @@ impl RawBlockDevice {
                     };
                 }
                 self.fixed_buffers_registered
-                    .store(false, Ordering::Relaxed);
-                self.fixed_buffer_map.lock().unwrap().clear();
+                    .store(false, Ordering::Release);
+                published_regions.clear();
             }
         }
 

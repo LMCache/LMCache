@@ -1087,6 +1087,7 @@ class _FakeRawDevice:
         self.batched_write_calls: list[
             tuple[list[int], list[int], list[int | None] | None]
         ] = []
+        self.fixed_buffer_calls: list[tuple[list[int], list[int]]] = []
         self.write_uring_calls: list[tuple[int, int, int, int | None]] = []
         self._batch_results: dict[int, list[bool]] = {}
 
@@ -1115,6 +1116,13 @@ class _FakeRawDevice:
     def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
         assert batch_id == 123
         return self._batch_results.pop(batch_id), []
+
+    def register_fixed_buffers(
+        self,
+        buffer_ptrs: list[int],
+        buffer_sizes: list[int],
+    ) -> None:
+        self.fixed_buffer_calls.append((list(buffer_ptrs), list(buffer_sizes)))
 
     def write_uring(
         self,
@@ -1195,6 +1203,27 @@ def _make_fake_io_uring_core(
         key_namespace="object",
     )
     return core, raw_devices[0]
+
+
+def test_raw_block_core_register_fixed_range_splits_at_one_gib(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    base_ptr = 0x4000
+    one_gib = 1 << 30
+
+    try:
+        core.register_fixed_buffer_range(base_ptr, 2 * one_gib + 4096)
+
+        assert raw_device.fixed_buffer_calls == [
+            (
+                [base_ptr, base_ptr + one_gib, base_ptr + 2 * one_gib],
+                [one_gib, one_gib, 4096],
+            )
+        ]
+    finally:
+        core.close()
 
 
 def test_raw_block_core_checkpoint_uses_metadata_placement_id(tmp_path, monkeypatch):
