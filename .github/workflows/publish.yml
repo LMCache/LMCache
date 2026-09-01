@@ -613,6 +613,7 @@ jobs:
             - name: Build lmcache/vllm-openai:lightweight
               run: |
                 docker build \
+                --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
                 --tag lmcache/vllm-openai:lightweight --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight \
                 --file docker/Dockerfile.lightweight .
 
