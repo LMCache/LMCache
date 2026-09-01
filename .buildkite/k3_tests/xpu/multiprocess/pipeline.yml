@@ -53,7 +53,6 @@ steps:
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
           export CPU_BUFFER_SIZE="32"
-          export LM_EVAL_VERIFY_MODE="samples"
           .buildkite/k3_tests/xpu/multiprocess/run.sh lm_eval
         timeout_in_minutes: 45
         retry: *flaky-retry
