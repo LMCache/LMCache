@@ -56,7 +56,7 @@ steps:
           .buildkite/k3_tests/xpu/multiprocess/run.sh lm_eval
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "xpu" }
+        agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log"]
 
@@ -70,6 +70,6 @@ steps:
           .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 45
         retry: *flaky-retry
-        agents: { queue: "xpu" }
+        agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log"]
