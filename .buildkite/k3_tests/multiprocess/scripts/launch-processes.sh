@@ -138,6 +138,12 @@ if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
     MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
 fi
 
+# Chunked-prefill policy. Default behavior remains controlled by vLLM.
+CHUNKED_PREFILL_ARG=""
+if [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "1" ] || [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "true" ]; then
+    CHUNKED_PREFILL_ARG="--no-enable-chunked-prefill"
+fi
+
 # Maximum number of requests in a scheduler batch. Empty -> vLLM default.
 MAX_NUM_SEQS_ARG=""
 if [ -n "${MAX_NUM_SEQS:-}" ]; then
@@ -294,6 +300,7 @@ env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
         $MAMBA_ARGS \
         $PREFIX_CACHING_ARG \
         $MAX_NUM_BATCHED_TOKENS_ARG \
+        $CHUNKED_PREFILL_ARG \
         $MAX_NUM_SEQS_ARG \
         > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
@@ -324,6 +331,8 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
             $ENFORCE_EAGER_ARG \
             $GPU_MEMORY_UTIL_ARG \
             $PREFIX_CACHING_ARG \
+            $MAX_NUM_BATCHED_TOKENS_ARG \
+            $CHUNKED_PREFILL_ARG \
             $MAX_NUM_SEQS_ARG \
             > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 

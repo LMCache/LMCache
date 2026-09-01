@@ -24,7 +24,7 @@ x-pod-1xpu: &pod-1xpu
         - { name: dshm, mountPath: /dev/shm }
   volumes:
     - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 40Gi } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 90Gi } }
 
 x-pod-2xpu: &pod-2xpu
   containers:
@@ -41,7 +41,7 @@ x-pod-2xpu: &pod-2xpu
         - { name: dshm, mountPath: /dev/shm }
   volumes:
     - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 40Gi } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 90Gi } }
 
 steps:
   - group: ":xpu: Multiprocess (1-pod)"
@@ -52,8 +52,11 @@ steps:
           export L1_USE_LAZY="false"
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
-          export CPU_BUFFER_SIZE="32"
-          export MAX_NUM_SEQS="1"
+          export CPU_BUFFER_SIZE="80"
+          export VLLM_DISABLE_CHUNKED_PREFILL="true"
+          export VLLM_DISABLE_PREFIX_CACHING="true"
+          export MAX_NUM_BATCHED_TOKENS="40960"
+          export MAX_NUM_SEQS="64"
           .buildkite/k3_tests/xpu/multiprocess/run.sh lm_eval
         timeout_in_minutes: 45
         retry: *flaky-retry
@@ -67,8 +70,11 @@ steps:
           export L1_USE_LAZY="false"
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
-          export CPU_BUFFER_SIZE="32"
+          export CPU_BUFFER_SIZE="80"
+          export VLLM_DISABLE_CHUNKED_PREFILL="true"
           export VLLM_DISABLE_PREFIX_CACHING="true"
+          export MAX_NUM_BATCHED_TOKENS="40960"
+          export MAX_NUM_SEQS="64"
           export MODEL="Qwen/Qwen3-0.6B"
           export TENSOR_PARALLEL_SIZE="1"
           export GPU_FOR_VLLM="0"
