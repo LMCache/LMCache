@@ -149,11 +149,10 @@ and using deterministic file names derived from `ObjectKey`.
 | Batching | One DMA transfer per batch of keys | One DMA transfer per key (each key = separate file) |
 
 For compatibility, keys with an empty `cache_salt` retain the legacy filename
-and chunk-hash shard. Keys with a non-empty salt use
-`salted-v1_<sha256>.bin`, where the digest covers every `ObjectKey` field using
-a domain-separated, length-delimited encoding. This keeps filenames bounded,
-does not expose the raw salt, and gives flat and sharded layouts the same key
-identity.
+and chunk-hash shard. Keys with a non-empty salt append `@<cache_salt>` before
+the `.bin` extension, matching the trailing-salt representation used by the S3
+and filesystem L2 adapters. Sharded layouts continue to use the chunk hash for
+the directory levels; the filename provides the salt isolation.
 
 ### Key Components
 

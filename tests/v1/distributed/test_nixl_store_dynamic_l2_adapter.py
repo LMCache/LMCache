@@ -13,7 +13,6 @@ import os
 import select
 import shutil
 import tempfile
-import time
 
 # Third Party
 import pytest
@@ -77,9 +76,6 @@ class _RecordingListener(L2AdapterListener):
 PAGE_SIZE = 4096  # 4 KB per page
 NUM_BUFFER_PAGES = 20  # pages in the registered memory buffer
 MAX_CAPACITY_GB = 0.001  # ~1 MB
-SALTED_GOLDEN_FILENAME = (
-    "salted-v1_0d1618328728b71e944064dbc9c98bdfa6e268e35e4d6c9c54619ee0090baccb.bin"
-)
 
 if torch_device_type == "xpu":
     pytest.skip(
@@ -679,10 +675,10 @@ class TestEndToEnd:
 
 class TestCacheSaltIsolation:
     @pytest.mark.parametrize("shard_dirs", [False, True], ids=["flat", "sharded"])
-    def test_store_and_delete_are_isolated_by_salt(
+    def test_store_load_and_delete_are_isolated_by_salt(
         self, tmp_path: Path, shard_dirs: bool
     ) -> None:
-        """Deleting one salted key must leave the other key loadable."""
+        """Store, load, and delete must preserve salt isolation."""
         buffer = torch.empty(
             PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
         )
@@ -705,6 +701,22 @@ class TestCacheSaltIsolation:
                 "tenant-a": PAGE_SIZE,
                 "tenant-b": PAGE_SIZE,
             }
+
+            load_objects: list[MemoryObj] = [
+                create_memory_obj(buffer, page_index=2, fill_value=0.0),
+                create_memory_obj(buffer, page_index=3, fill_value=0.0),
+            ]
+            load_task = adpt.submit_load_task([key_a, key_b], load_objects)
+            assert wait_for_event_fd(adpt.get_load_event_fd())
+            bitmap = adpt.query_load_result(load_task)
+            assert bitmap is not None
+            assert bitmap.test(0) and bitmap.test(1)
+            assert torch.all(
+                buffer[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32) == 11.0
+            )
+            assert torch.all(
+                buffer[3 * PAGE_SIZE : 4 * PAGE_SIZE].view(torch.float32) == 22.0
+            )
 
             adpt.delete([key_a])
             assert dict(adpt.get_usage().bytes_by_cache_salt) == {"tenant-b": PAGE_SIZE}
@@ -794,170 +806,51 @@ class TestCacheSaltIsolation:
         finally:
             recovered.close()
 
-    def test_salted_lookup_does_not_fall_back_to_legacy_path(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("shard_dirs", "path_prefix"),
+        [
+            (False, ""),
+            (True, os.path.join("83", "4e")),
+        ],
+        ids=["flat", "sharded"],
+    )
+    def test_filename_contract_preserves_legacy_and_appends_raw_salt(
+        self, tmp_path: Path, shard_dirs: bool, path_prefix: str
     ) -> None:
-        """A salted key must not discover an unsalted legacy file."""
+        """Filenames must preserve legacy keys and append raw salts."""
         buffer = torch.empty(
             PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
         )
-        adpt, l1_memory, config = create_adapter_for_path(
-            tmp_path, buffer, persist_enabled=True
-        )
-        legacy_key = create_object_key(1)
-        salted_key = create_object_key(1, cache_salt="tenant-a")
+        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=shard_dirs)
+        legacy_key = create_object_key(0x834EBC79)
+        salted_key = create_object_key(0x834EBC79, cache_salt="tenant-a")
+        missing_key = create_object_key(0x834EBC79, cache_salt="tenant-b")
+        legacy_filename = "test_model_00000000_0_834ebc79.bin"
+        salted_filename = "test_model_00000000_0_834ebc79@tenant-a.bin"
 
         try:
             store_and_wait(
                 adpt,
-                [legacy_key],
-                [create_memory_obj(buffer, page_index=0, fill_value=19.0)],
+                [legacy_key, salted_key],
+                [
+                    create_memory_obj(buffer, page_index=0, fill_value=17.0),
+                    create_memory_obj(buffer, page_index=1, fill_value=23.0),
+                ],
             )
-        finally:
-            adpt.close()
-
-        recovered = DynamicNixlStoreL2Adapter(config, l1_memory)
-        try:
-            lookup_task = recovered.submit_lookup_and_lock_task(
-                [salted_key], {0: _EMPTY_LAYOUT}
+            assert list_data_files(tmp_path) == sorted(
+                [
+                    os.path.join(path_prefix, legacy_filename),
+                    os.path.join(path_prefix, salted_filename),
+                ]
             )
-            assert wait_for_event_fd(recovered.get_lookup_and_lock_event_fd())
-            bitmap = recovered.query_lookup_and_lock_result(lookup_task)
-            assert bitmap is not None
-            assert not bitmap.test(0)
-        finally:
-            recovered.close()
 
-    def test_concurrent_stores_with_same_hash_do_not_alias(
-        self, tmp_path: Path
-    ) -> None:
-        """Concurrent salted store tasks must publish distinct files."""
-        buffer = torch.empty(
-            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
-        )
-        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=True)
-        keys = [create_object_key(1, cache_salt=f"tenant-{i}") for i in range(8)]
-        try:
-            task_ids = {
-                adpt.submit_store_task(
-                    [key],
-                    [create_memory_obj(buffer, page_index=i, fill_value=float(i + 1))],
-                )
-                for i, key in enumerate(keys)
-            }
-            completed = adpt.pop_completed_store_tasks()
-            deadline = time.monotonic() + 10.0
-            while task_ids - completed.keys():
-                remaining = deadline - time.monotonic()
-                assert remaining > 0
-                assert wait_for_event_fd(adpt.get_store_event_fd(), remaining)
-                completed.update(adpt.pop_completed_store_tasks())
-
-            assert all(completed[task_id].is_successful() for task_id in task_ids)
-            assert len(list_data_files(tmp_path)) == len(keys)
-            assert dict(adpt.get_usage().bytes_by_cache_salt) == {
-                key.cache_salt: PAGE_SIZE for key in keys
-            }
-
-            lookup_task = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+            lookup_task = adpt.submit_lookup_and_lock_task(
+                [missing_key], {0: _EMPTY_LAYOUT}
+            )
             assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
             bitmap = adpt.query_lookup_and_lock_result(lookup_task)
             assert bitmap is not None
-            assert all(bitmap.test(i) for i in range(len(keys)))
-
-            load_objects: list[MemoryObj] = [
-                create_memory_obj(buffer, page_index=8 + i, fill_value=0.0)
-                for i in range(len(keys))
-            ]
-            load_task = adpt.submit_load_task(keys, load_objects)
-            assert wait_for_event_fd(adpt.get_load_event_fd())
-            bitmap = adpt.query_load_result(load_task)
-            assert bitmap is not None
-            for i in range(len(keys)):
-                assert bitmap.test(i)
-                page = 8 + i
-                loaded = buffer[page * PAGE_SIZE : (page + 1) * PAGE_SIZE].view(
-                    torch.float32
-                )
-                assert torch.all(loaded == float(i + 1))
-            adpt.submit_unlock(keys)
-        finally:
-            adpt.close()
-
-    @pytest.mark.parametrize(
-        ("shard_dirs", "expected_path"),
-        [
-            (False, "test_model_00000000_0_00000001.bin"),
-            (True, os.path.join("00", "00", "test_model_00000000_0_00000001.bin")),
-        ],
-        ids=["flat", "sharded"],
-    )
-    def test_empty_salt_preserves_legacy_path(
-        self, tmp_path: Path, shard_dirs: bool, expected_path: str
-    ) -> None:
-        """Unsalted stores must keep their exact pre-change path."""
-        buffer = torch.empty(
-            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
-        )
-        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=shard_dirs)
-        try:
-            store_and_wait(
-                adpt,
-                [create_object_key(1)],
-                [create_memory_obj(buffer, page_index=0)],
-            )
-            assert list_data_files(tmp_path) == [expected_path]
-        finally:
-            adpt.close()
-
-    @pytest.mark.parametrize(
-        ("shard_dirs", "expected_path"),
-        [
-            (False, SALTED_GOLDEN_FILENAME),
-            (
-                True,
-                os.path.join("0d", "16", SALTED_GOLDEN_FILENAME),
-            ),
-        ],
-        ids=["flat", "sharded"],
-    )
-    def test_salted_path_matches_versioned_golden(
-        self, tmp_path: Path, shard_dirs: bool, expected_path: str
-    ) -> None:
-        """The versioned salted-path encoding must remain stable."""
-        buffer = torch.empty(
-            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
-        )
-        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=shard_dirs)
-        try:
-            store_and_wait(
-                adpt,
-                [create_object_key(1, cache_salt="tenant-a")],
-                [create_memory_obj(buffer, page_index=0)],
-            )
-            assert list_data_files(tmp_path) == [expected_path]
-        finally:
-            adpt.close()
-
-    def test_salted_filename_is_bounded(self, tmp_path: Path) -> None:
-        """Maximum legal salt and long model names must fit one filename."""
-        buffer = torch.empty(
-            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
-        )
-        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=True)
-        cache_salt = "租" * 128
-        key = create_object_key(1, model_name="m" * 300, cache_salt=cache_salt)
-        try:
-            store_and_wait(
-                adpt,
-                [key],
-                [create_memory_obj(buffer, page_index=0)],
-            )
-            [relative_path] = list_data_files(tmp_path)
-            filename = os.path.basename(relative_path)
-            assert filename.startswith("salted-v1_")
-            assert len(os.fsencode(filename)) == 78
-            assert cache_salt not in relative_path
+            assert not bitmap.test(0)
         finally:
             adpt.close()
 

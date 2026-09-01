@@ -112,11 +112,10 @@ per-operation instead of pre-allocating them at init. This enables:
   controller to compute usage.
 - ``shard_dirs``: ``"true"`` or ``"false"`` (default ``"false"``). When
   ``"true"``, data files are spread across a two-level subdirectory tree
-  under ``file_path`` instead of all living in one flat directory. Unsalted
-  keys use the first four hex characters of the chunk hash. Salted keys use
-  the first four characters of the versioned full-key digest also embedded in
-  ``salted-v1_<digest>.bin``. Both layouts provide up to 256 × 256
-  subdirectories. Leaving ``shard_dirs`` unset preserves the flat layout.
+  under ``file_path`` instead of all living in one flat directory. The two
+  levels use the first four hex characters of the chunk hash for both salted
+  and unsalted keys, providing up to 256 × 256 subdirectories. Leaving
+  ``shard_dirs`` unset preserves the flat layout.
 
   Large flat directories slow down metadata operations on many filesystems,
   so sharding helps once a single cache directory holds a large number of
@@ -135,6 +134,10 @@ per-operation instead of pre-allocating them at init. This enables:
      to salt-blind legacy paths. Those files cannot be safely attributed to a
      salt and are not used as a fallback. Clear or quarantine that cache
      directory when upgrading a deployment that used non-empty salts.
+
+For both flat and sharded layouts, a non-empty ``cache_salt`` is appended to
+the filename as ``@<cache_salt>`` before ``.bin``. An empty salt retains the
+legacy filename.
 
 **Optional fields (for persist):**
 

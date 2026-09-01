@@ -8,7 +8,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 import asyncio
-import hashlib
 import os
 import uuid
 
@@ -22,44 +21,13 @@ from nixl._api import nixlBind
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 
-_SALTED_KEY_DOMAIN = b"lmcache.dynamic-nixl.object-key.v1\x00"
-_SALTED_FILENAME_PREFIX = "salted-v1_"
-_FILE_EXTENSION = ".bin"
-
-
-def _salted_object_key_digest(key: ObjectKey) -> str:
-    """Return a stable SHA-256 digest covering every ``ObjectKey`` field."""
-    digest = hashlib.sha256(_SALTED_KEY_DOMAIN)
-    fields = (
-        key.model_name.encode("utf-8"),
-        str(key.kv_rank).encode("ascii"),
-        str(key.object_group_id).encode("ascii"),
-        key.chunk_hash,
-        key.cache_salt.encode("utf-8"),
-    )
-    for field in fields:
-        digest.update(len(field).to_bytes(8, byteorder="big"))
-        digest.update(field)
-    return digest.hexdigest()
-
-
-def _object_key_storage_components(key: ObjectKey) -> tuple[str, str]:
-    """Return the sharding token and deterministic filename for ``key``."""
-    if key.cache_salt:
-        digest = _salted_object_key_digest(key)
-        return digest, f"{_SALTED_FILENAME_PREFIX}{digest}{_FILE_EXTENSION}"
-
-    safe_model_name = key.model_name.replace("/", "--")
-    chunk_hex = key.chunk_hash.hex()
-    filename = (
-        f"{safe_model_name}_{key.kv_rank:08x}_"
-        f"{key.object_group_id:x}_{chunk_hex}{_FILE_EXTENSION}"
-    )
-    return chunk_hex, filename
-
 
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Derive a deterministic storage object name from an object key.
+
+    A non-empty ``cache_salt`` is appended as a trailing ``@``-delimited
+    field, matching the S3 and filesystem L2 adapters. An empty salt retains
+    the exact legacy filename.
 
     Args:
         key: Key identifying the stored cache object.
@@ -67,17 +35,23 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     Returns:
         A deterministic object name that is safe to use as a file name.
     """
-    return _object_key_storage_components(key)[1]
+    safe_model_name = key.model_name.replace("/", "--")
+    chunk_hex = key.chunk_hash.hex()
+    salt_suffix = f"@{key.cache_salt}" if key.cache_salt else ""
+    return (
+        f"{safe_model_name}_{key.kv_rank:08x}_"
+        f"{key.object_group_id:x}_{chunk_hex}{salt_suffix}.bin"
+    )
 
 
 def _object_key_to_relpath(key: ObjectKey) -> str:
-    """Return a two-level sharded path for ``key``.
+    """Return a two-level chunk-hash-sharded path for ``key``.
 
-    Unsalted keys retain the legacy chunk-hash shard. Salted keys use the
-    complete-key digest for both the shard and filename.
+    The shard remains independent of ``cache_salt``; salted keys with the same
+    chunk hash have distinct filenames inside the same shard.
     """
-    shard, filename = _object_key_storage_components(key)
-    return os.path.join(shard[:2], shard[2:4], filename)
+    chunk_hex = key.chunk_hash.hex()
+    return os.path.join(chunk_hex[:2], chunk_hex[2:4], _object_key_to_filename(key))
 
 
 class DynamicNixlStorageAgent(ABC):
