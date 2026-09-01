@@ -606,10 +606,6 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.v1.multiprocess.protocol import RequestType
 
-        # A chunked-prefill request can look up the same request_id again.
-        # Retire only the preceding lookup; the server session also owns any
-        # in-flight stores and must live until finish_request().
-        self.end_lookup(request_id)
         operation = LMCacheLookupOperation(
             request_id=request_id,
             token_ids=list(token_ids),
@@ -769,23 +765,6 @@ class UnifiedLMCacheMPConnector:
         ]
         return self._expand_engine_group_block_ids(per_engine_group)
 
-    def _free_lookup_locks(
-        self, operation: LMCacheLookupOperation, start: int, end: int
-    ) -> None:
-        if not self.is_lookup_leader or start >= end:
-            return
-        # First Party
-        from lmcache.v1.multiprocess.protocol import RequestType
-
-        key = self._create_key(operation, start=start, end=end, worker_id=None)
-        self._track_control_future(
-            self._send_request(
-                self._mq_client,
-                RequestType.FREE_LOOKUP_LOCKS,
-                [key, self.kv_world_size],
-            )
-        )
-
     def _track_control_future(self, future: Any) -> None:
         # Keep fire-and-forget control RPCs alive and bound the local list.
         self._control_futures = [f for f in self._control_futures if not f.query()]
@@ -856,8 +835,14 @@ class UnifiedLMCacheMPConnector:
         key = self._create_key(
             operation, start=start, end=total_hit, worker_id=self.kv_worker_id
         )
-        self._free_lookup_locks(operation, 0, start)
-        operation.lock_start = start
+        if operation.lock_start != start:
+            logger.warning(
+                "LMCache lookup lock boundary %d does not "
+                "match retrieve start %d for %s",
+                operation.lock_start,
+                start,
+                operation.request_id,
+            )
         try:
             event = (
                 self._new_event()
@@ -946,10 +931,9 @@ class UnifiedLMCacheMPConnector:
                 logger.exception(
                     "Failed to drain LMCache retrieve for %s", operation.request_id
                 )
-        if operation.lookup.locks_held:
-            self._free_lookup_locks(operation.lookup, operation.start, operation.end)
-            operation.lookup.locks_held = False
+        operation.lookup.locks_held = False
         operation.result = False
+        self._cleanup_lookup_result(operation.lookup)
         return False
 
     def complete_load(
@@ -964,10 +948,9 @@ class UnifiedLMCacheMPConnector:
             logger.exception("LMCache retrieve failed for %s", operation.request_id)
         if synchronize:
             success = self._sync_success(success)
-        if not success and operation.lookup.locks_held:
-            self._free_lookup_locks(operation.lookup, operation.start, operation.end)
         operation.lookup.locks_held = False
         operation.result = success
+        self._cleanup_lookup_result(operation.lookup)
         return success
 
     def submit_store(
@@ -1085,15 +1068,48 @@ class UnifiedLMCacheMPConnector:
             self._store_submitted_tokens[operation.request_id] = operation.start
         return operation.result
 
-    def end_lookup(self, request_id: str) -> None:
-        operation = self._lookups.pop(request_id, None)
-        if operation is None:
+    def _cleanup_lookup_result(self, operation: LMCacheLookupOperation) -> None:
+        """Forget client-side lookup state without releasing server read locks.
+
+        A successful retrieve releases the locks it consumed from the LMCache
+        server's H2D completion callback.  At that point only the local lookup
+        bookkeeping must be removed.
+        """
+        if self._lookups.get(operation.request_id) is operation:
+            self._lookups.pop(operation.request_id, None)
+
+    def free_lookup_locks(self, request_id: str, start: int, end: int) -> None:
+        """Release one lookup-locked prefix range before retrieve submission."""
+        operation = self._lookups.get(request_id)
+        if operation is None or not operation.locks_held:
             return
-        if operation.locks_held and operation.total_hit_tokens:
-            self._free_lookup_locks(
-                operation, operation.lock_start, operation.total_hit_tokens
+        if operation.total_hit_tokens is None:
+            raise RuntimeError(f"LMCache lookup for {request_id} is not complete")
+        if start != operation.lock_start:
+            raise RuntimeError(
+                f"LMCache lookup lock boundary {operation.lock_start} does not "
+                f"match release start {start} for {request_id}"
             )
+        end = min(end, operation.total_hit_tokens)
+        if start >= end:
+            return
+
+        if self.is_lookup_leader:
+            # First Party
+            from lmcache.v1.multiprocess.protocol import RequestType
+
+            key = self._create_key(operation, start=start, end=end, worker_id=None)
+            self._track_control_future(
+                self._send_request(
+                    self._mq_client,
+                    RequestType.FREE_LOOKUP_LOCKS,
+                    [key, self.kv_world_size],
+                )
+            )
+        operation.lock_start = end
+        if end == operation.total_hit_tokens:
             operation.locks_held = False
+            self._lookups.pop(request_id, None)
 
     def end_session(self, request_id: str) -> None:
         # First Party
@@ -1103,7 +1119,7 @@ class UnifiedLMCacheMPConnector:
         # which no LOOKUP RPC was sent. Only _active_sessions proves that a
         # LOOKUP or STORE reached the server and requires END_SESSION.
         was_active = request_id in self._active_sessions
-        self.end_lookup(request_id)
+        self._lookups.pop(request_id, None)
         if was_active and self.is_lookup_leader:
             self._track_control_future(
                 self._send_request(

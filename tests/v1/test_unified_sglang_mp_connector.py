@@ -72,6 +72,7 @@ class _RequestType:
     LOOKUP = object()
     QUERY_PREFETCH_STATUS = object()
     WAIT_PREFETCH_STATUS = object()
+    FREE_LOOKUP_LOCKS = object()
     END_SESSION = object()
 
 
@@ -505,7 +506,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._transfer_ctx = _TransferContext()
         connector._new_event = lambda: object()
         connector._create_key = lambda *args, **kwargs: object()
-        connector._free_lookup_locks = lambda *args, **kwargs: None
         lookup = LMCacheLookupOperation(
             request_id="request",
             token_ids=list(range(8)),
@@ -531,7 +531,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector._mq_timeout = 10
         connector._sync_success = lambda success: success
-        connector._free_lookup_locks = Mock()
         lookup = LMCacheLookupOperation(
             request_id="request",
             token_ids=list(range(8)),
@@ -556,7 +555,71 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(future.waited_stream, "forward")
         self.assertIsNone(operation.result)
         self.assertTrue(lookup.locks_held)
+
+    def test_free_lookup_locks_sends_one_leader_prefix_range(self):
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._lookup_leader = True
+        connector.kv_world_size = 2
+        connector._mq_client = object()
+        connector._track_control_future = Mock()
+        connector._send_request = Mock(return_value=_Future(True))
+        connector._create_key = Mock(return_value="prefix-key")
+        lookup = LMCacheLookupOperation(
+            request_id="request",
+            token_ids=list(range(8)),
+            local_hit_tokens=4,
+            cache_salt="",
+            total_hit_tokens=8,
+            locks_held=True,
+        )
+        connector._lookups = {lookup.request_id: lookup}
+        protocol = ModuleType("lmcache.v1.multiprocess.protocol")
+        protocol.RequestType = _RequestType
+
+        with patch.dict("sys.modules", {"lmcache.v1.multiprocess.protocol": protocol}):
+            connector.free_lookup_locks("request", start=0, end=4)
+
+        connector._create_key.assert_called_once_with(
+            lookup, start=0, end=4, worker_id=None
+        )
+        connector._send_request.assert_called_once_with(
+            connector._mq_client,
+            _RequestType.FREE_LOOKUP_LOCKS,
+            ["prefix-key", 2],
+        )
+        self.assertEqual(lookup.lock_start, 4)
+        self.assertTrue(lookup.locks_held)
+        self.assertIs(connector._lookups["request"], lookup)
+
+    def test_complete_load_relies_on_retrieve_to_release_read_locks(self):
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._sync_success = lambda success: success
+        connector._free_lookup_locks = Mock()
+        lookup = LMCacheLookupOperation(
+            request_id="request",
+            token_ids=list(range(8)),
+            local_hit_tokens=0,
+            cache_salt="",
+            total_hit_tokens=8,
+            locks_held=True,
+        )
+        connector._lookups = {lookup.request_id: lookup}
+        operation = LMCacheLoadOperation(
+            request_id="request",
+            token_ids=list(range(8)),
+            start=0,
+            end=8,
+            local_hit_tokens=0,
+            device_indices=torch.arange(8),
+            future=_ResultFuture(True, True),
+            lookup=lookup,
+        )
+
+        self.assertTrue(connector.complete_load(operation))
+
         connector._free_lookup_locks.assert_not_called()
+        self.assertFalse(lookup.locks_held)
+        self.assertNotIn("request", connector._lookups)
 
     def test_completed_operation_does_not_requery_future(self):
         operation = object.__new__(LMCacheLoadOperation)
