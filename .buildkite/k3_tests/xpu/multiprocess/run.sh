@@ -6,8 +6,6 @@ export TORCH_DEVICE_TYPE="xpu"
 export VLLM_TARGET_DEVICE="xpu"
 export BK_SETUP_ENV_SCRIPT=".buildkite/k3_harness/setup-lmcache-only-env.sh"
 
-# XPU path for this phase is single-instance benchmark only (no baseline server).
-export LAUNCH_BASELINE="false"
 # Force explicit backend on XPU to avoid auto fallback to Flash Attention.
 export ATTENTION_BACKEND="${ATTENTION_BACKEND:-TRITON_ATTN}"
 # Keep low-level env override for debugging parity.
