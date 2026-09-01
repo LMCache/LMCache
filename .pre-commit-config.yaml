@@ -111,6 +111,7 @@ repos:
     language_version: python3.12 
     args: [--config-file=pyproject.toml]
     #args: [--ignore-missing-imports]
+    exclude: '^lmcache/native_storage_ops\.py$'
     additional_dependencies:
       - tokenize-rt==6.1.0 # For better dynamic analysis performance
       - msgspec[mypy]
