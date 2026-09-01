@@ -209,14 +209,18 @@ coordinator the endpoints that belong to no controller, nor the controllers
 that did start. Whatever the failed one does is then simply not happening,
 and the log is the only notice of that.
 
+Three steps, in this order: start the work, `yield` exactly once, and shut it
+down in a `finally` -- so teardown runs whether shutdown was clean or an
+exception unwound the stack.
+
 ```python
 @asynccontextmanager
 async def run(self, runtime: ControllerRuntime) -> AsyncIterator[None]:
-    task = asyncio.create_task(self._loop(runtime.http_client))
+    task = asyncio.create_task(self._loop(runtime.http_client))   # 1. start
     try:
-        yield
+        yield                                                     # 2. serve
     finally:
-        task.cancel()
+        task.cancel()                                             # 3. stop
 ```
 
 The lifespan owns only what is not any one controller's: the health-check

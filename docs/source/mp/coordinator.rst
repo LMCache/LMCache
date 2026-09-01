@@ -154,11 +154,11 @@ package imports from lmcache; nothing in lmcache imports it.
 
         @asynccontextmanager
         async def run(self, runtime):                    # background work
-            task = asyncio.create_task(self._sweep())
+            task = asyncio.create_task(self._sweep())    # 1. start
             try:
-                yield
+                yield                                    # 2. serve
             finally:
-                task.cancel()
+                task.cancel()                            # 3. stop
 
         def get_routers(self):                           # your endpoints
             router = APIRouter()
@@ -173,6 +173,14 @@ package imports from lmcache; nothing in lmcache imports it.
             while True:
                 await asyncio.sleep(self.interval)
                 self.last_seen = len(self.registry.all_instances())
+
+``run`` is an async context manager and must do three things, in order:
+
+1. **Start** the background work.
+2. ``yield`` **exactly once** — the coordinator serves for the duration of
+   that yield.
+3. **Stop** the work in a ``finally``, so teardown runs whether shutdown was
+   clean or an exception unwound the stack.
 
 The same JSON names the package and carries the controller's own settings:
 

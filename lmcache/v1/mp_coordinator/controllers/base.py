@@ -69,11 +69,21 @@ class Controller:
     async def run(self, runtime: ControllerRuntime) -> AsyncIterator[None]:
         """Run background work for as long as the app is serving.
 
-        Entered once inside the lifespan, so tasks may be created here;
-        the app serves during the ``yield`` and the exit half tears the
-        work down. A context manager rather than a start/stop pair so a
-        controller that fails to enter cannot leave the ones before it
-        running, and one that never entered is never torn down.
+        Start the work, ``yield`` exactly once -- the app serves for the
+        duration of that yield -- then shut it down in a ``finally``, so
+        teardown runs whether shutdown was clean or an exception unwound
+        the stack::
+
+            task = asyncio.create_task(self._loop())
+            try:
+                yield
+            finally:
+                task.cancel()
+
+        Entered once inside the lifespan, so tasks may be created here. A
+        context manager rather than a start/stop pair so a controller that
+        fails to enter cannot leave the ones before it running, and one
+        that never entered is never torn down.
 
         Yielding without starting anything is how configuration switches
         the work off. Defaults to no work at all.

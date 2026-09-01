@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-PACKAGES_KEY = "controller_packages"
+_PACKAGES_KEY = "controller_packages"
 
 
 def build_controllers(
@@ -44,7 +44,7 @@ def build_controllers(
         A registry with every discovered controller built.
 
     Raises:
-        ValueError: If ``extra_config[PACKAGES_KEY]`` is not a list of
+        ValueError: If ``extra_config["controller_packages"]`` is not a list of
             importable names.
         ModuleNotFoundError: If one of those names does not import.
     """
@@ -80,19 +80,19 @@ def _named_packages(extra_config: Mapping[str, object]) -> Sequence[str]:
             JSON from the command line, so its shape is the operator's to
             get wrong and worth naming precisely.
     """
-    named = extra_config.get(PACKAGES_KEY, ())
+    named = extra_config.get(_PACKAGES_KEY, ())
     if isinstance(named, str) or not isinstance(named, (list, tuple)):
         raise ValueError(
-            f"extra_config[{PACKAGES_KEY!r}] must be a list of importable "
+            f"extra_config[{_PACKAGES_KEY!r}] must be a list of importable "
             f"package names, got {type(named).__name__}"
         )
     for name in named:
         if not isinstance(name, str):
             raise ValueError(
-                f"extra_config[{PACKAGES_KEY!r}] must contain strings, "
+                f"extra_config[{_PACKAGES_KEY!r}] must contain strings, "
                 f"got {type(name).__name__}"
             )
     return tuple(named)
 
 
-__all__ = ["PACKAGES_KEY", "Controller", "build_controllers"]
+__all__ = ["Controller", "build_controllers"]
