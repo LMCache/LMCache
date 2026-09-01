@@ -16,7 +16,8 @@ source                    ingest layer                     consumers
 ─────────────────────────────────────────────────────────────────────────
 POST /events ──────────▶ EventGate.ingest ──▶ CacheEventBroadcaster
   (live emitter stream)    fence / dedup /      .broadcast(batch) ────▶ KeyDirectory
-                           gap detect           .fence_instance(id) ──▶ FleetEvictionController
+                           gap detect           .fence_instance(id) ──▶ CacheUsageManager
+                                                                   └──▶ eviction controllers
 ```
 
 ## Why a gate separate from the directory
@@ -85,17 +86,20 @@ Consumers implement two hooks:
   irrelevant tiers and event types is the consumer's own job.
 - `fence_instance(instance_id)` — discard what that instance held in
   its own memory. **L1 only**: `KeyDirectory` drops the L1 placements
-  the instance reported (its per-instance reverse index makes this
-  proportional to that instance's keys, not a full scan);
-  `FleetEvictionController` no-ops, because the L2 bytes it accounts
-  outlive the process and leave only via `DELETE`.
+  the instance reported and `CacheUsageManager` its L1 bytes (each keeps
+  a per-instance reverse index, so this is proportional to that
+  instance's keys, not a full scan); `FleetEvictionController` drops
+  the keys it was the last holder of. `FleetEvictionController` no-ops,
+  because the L2 bytes it accounts outlive the process and leave only
+  via `DELETE`.
 
-Registration order is invocation order. Today: the key directory
-(placements and token bindings, the source of truth), then the eviction
-controller (per-salt usage and the LRU). The two are independent — the
-controller's own read-after-write ordering is internal to it (see
-[usage_and_eviction.md](usage_and_eviction.md)), not a property of
-registration order.
+Registration order is invocation order, and it is load-bearing: views
+first (the key directory's placements and the usage view's bytes, the
+source of truth), then the controllers, each of which reads the view
+for the batch it is consuming — a delete drops a key from an LRU only
+once the view says its last placement on that tier is gone, and a fence
+tells a last copy from a surviving one the same way. See
+[usage_and_eviction.md](usage_and_eviction.md).
 
 ## Where the state is
 
@@ -103,7 +107,8 @@ registration order.
 | --- | --- |
 | Is this batch a replay? What incarnation is this emitter on? Did we lose events? | `EventGate.stats()` |
 | Where does this key live? What tokens does this chunk hold? | `KeyDirectory` |
-| How many bytes is this salt using? What should be evicted? | `FleetEvictionController` |
+| How many bytes is this salt using, on which tier? | `CacheUsageManager` |
+| What should be evicted, and where should the delete go? | `FleetEvictionController` (both tiers) |
 
 `EventGate.stats()` has **no HTTP endpoint yet** — `GET /directory/stats`
 deliberately reports directory contents only. So `gap_detected` is

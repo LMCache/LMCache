@@ -9,13 +9,15 @@ import json
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.persistence.store import LocalArtifactStore
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 
@@ -24,7 +26,11 @@ def _key(chunk_id: int) -> ObjectKey:
 
 
 def _controller() -> FleetEvictionController:
-    return FleetEvictionController(usage_manager=CacheUsageManager())
+    return FleetEvictionController(
+        usage_manager=CacheUsageManager(),
+        key_directory=KeyDirectory(),
+        registry=InstanceRegistry(),
+    )
 
 
 class TestRoundTrip:
@@ -34,32 +40,32 @@ class TestRoundTrip:
         store = LocalArtifactStore(tmp_path / "metadata.json")
         live = _controller()
         live.pin([_key(1)])
-        live.quota.set_quota("tenant-a", 4096)
-        live.quota.set_default_limit_bytes(8192)
+        live.quota(Tier.L2).set_quota("tenant-a", 4096)
+        live.quota(Tier.L2).set_default_limit_bytes(8192)
         persister = MetadataPersister(store)
         persister.register(live)
-        persister.register(live.quota)
+        persister.register(live.quota(Tier.L2))
 
         persister.save()
 
         restored = _controller()
         restarted = MetadataPersister(store)
         restarted.register(restored)
-        restarted.register(restored.quota)
+        restarted.register(restored.quota(Tier.L2))
         restarted.load()
 
         assert restored.filter_unpinned([_key(1)]) == []
-        assert restored.quota.get_limit_bytes("tenant-a") == 4096
-        assert restored.quota.get_default_limit_bytes() == 8192
+        assert restored.quota(Tier.L2).get_limit_bytes("tenant-a") == 4096
+        assert restored.quota(Tier.L2).get_default_limit_bytes() == 8192
 
     def test_the_document_is_readable_json(self, tmp_path: Path):
         """The one person likely to open this file is the operator whose
         intent it holds."""
         store = LocalArtifactStore(tmp_path / "metadata.json")
         controller = _controller()
-        controller.quota.set_quota("tenant-a", 4096)
+        controller.quota(Tier.L2).set_quota("tenant-a", 4096)
         persister = MetadataPersister(store)
-        persister.register(controller.quota)
+        persister.register(controller.quota(Tier.L2))
 
         persister.save()
 
@@ -111,7 +117,7 @@ class TestRegistration:
         persister = MetadataPersister(LocalArtifactStore(tmp_path / "metadata.json"))
 
         with pytest.raises(ValueError, match="checkpoint state"):
-            persister.register(_controller().policy)
+            persister.register(_controller().policy(Tier.L2))
 
     def test_a_quota_manager_alone_is_enough(self, tmp_path: Path):
         """Components are independent: registering one does not require

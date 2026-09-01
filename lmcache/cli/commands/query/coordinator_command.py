@@ -56,6 +56,13 @@ class CoordinatorQueryCommand(BaseCommand):
             "empty string for un-salted traffic.",
         )
         parser.add_argument(
+            "--tier",
+            default="l2",
+            choices=("l1", "l2"),
+            help="Cache tier for --api quota and --api quota-config. The two "
+            "tiers hold independent budgets (default: l2).",
+        )
+        parser.add_argument(
             "--request-id",
             default=None,
             help="Prefetch request id, required by --api prefetch.",

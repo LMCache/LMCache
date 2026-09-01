@@ -224,12 +224,14 @@ def _render_quota(body: Any, metrics: Metrics) -> None:
     if "by_cache_salt" not in body:  # single-salt reply
         for key, label in (
             ("cache_salt", "Cache salt"),
+            ("tier", "Tier"),
             ("quota_limit_gb", "Quota (GiB)"),
             ("quota_exists", "Quota set"),
             ("usage_gb", "Usage (GiB)"),
         ):
             metrics.add(key, label, body.get(key))
         return
+    metrics.add("tier", "Tier", body.get("tier"))
     metrics.add("total_gb", "Total usage (GiB)", body.get("total_gb"))
     table = metrics.add_table(
         "by_cache_salt",
@@ -250,6 +252,7 @@ def _render_quota(body: Any, metrics: Metrics) -> None:
 
 def _render_quota_config(body: Any, metrics: Metrics) -> None:
     """The default quota applied to salts with no explicit entry."""
+    metrics.add("tier", "Tier", body.get("tier"))
     limit = body.get("default_limit_gb")
     metrics.add(
         "default_limit_gb",
@@ -315,13 +318,15 @@ APIS: dict[str, CoordinatorApi] = {
     "quota": CoordinatorApi(
         summary="per-salt usage against quota",
         path=lambda a: (
-            f"/quota/{a.cache_salt}" if a.cache_salt is not None else "/quota"
+            f"/quota/{a.cache_salt}?tier={a.tier}"
+            if a.cache_salt is not None
+            else f"/quota?tier={a.tier}"
         ),
         render=_render_quota,
     ),
     "quota-config": CoordinatorApi(
         summary="default quota for salts with no explicit entry",
-        path=lambda a: "/quota/config",
+        path=lambda a: f"/quota/config?tier={a.tier}",
         render=_render_quota_config,
     ),
     "prefetch": CoordinatorApi(

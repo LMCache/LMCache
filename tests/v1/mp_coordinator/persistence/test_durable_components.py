@@ -28,6 +28,7 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
     PersistenceType,
 )
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from tests.v1.mp_coordinator.persistence.conftest import capture_consistently
@@ -43,7 +44,11 @@ def _pipeline() -> tuple[
     """The real path: the usage view consumes before the controller, which
     reads it for the same batch (as ``create_app`` orders them)."""
     usage_manager = CacheUsageManager()
-    controller = FleetEvictionController(usage_manager=usage_manager)
+    controller = FleetEvictionController(
+        usage_manager=usage_manager,
+        key_directory=KeyDirectory(),
+        registry=InstanceRegistry(),
+    )
     broadcaster = CacheEventBroadcaster()
     broadcaster.register_consumer(usage_manager)
     broadcaster.register_consumer(controller)
@@ -81,6 +86,11 @@ class TestTheContract:
             "pins": PersistenceType.METADATA,
             "quotas": PersistenceType.METADATA,
             "lru_order": PersistenceType.CHECKPOINT,
+            # The l1 tier budgets and orders separately, and needs to know
+            # who held what to tell a fenced key's last copy from a survivor.
+            "l1_quotas": PersistenceType.METADATA,
+            "l1_lru_order": PersistenceType.CHECKPOINT,
+            "l1_placement_owners": PersistenceType.CHECKPOINT,
         }
 
 
@@ -118,7 +128,7 @@ class TestGroupConsistency:
                 # Short, so a barrier that stops excluding batches fails
                 # fast rather than stalling the suite.
                 captured = capture_consistently(
-                    quiesce, [usage_manager, controller.policy], timeout=1.0
+                    quiesce, [usage_manager, controller.policy(Tier.L2)], timeout=1.0
                 )
                 placements = cast(
                     "list[tuple[str, ObjectKey, str, str, int]]",
@@ -160,7 +170,7 @@ class TestTheCaptureContract:
         gate, quiesce, usage_manager, controller = _pipeline()
         gate.ingest(_batch(seq=1, key=_key(1)))
         controller.pin([_key(1)])
-        controller.quota.set_quota("tenant-a", 4096)
+        controller.quota(Tier.L2).set_quota("tenant-a", 4096)
         directory = KeyDirectory()
         directory.consume(_batch(seq=2, key=_key(2)))
 

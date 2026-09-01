@@ -58,12 +58,10 @@ lmcache/v1/mp_coordinator/
   app.py                # create_app + lifespan + router discovery + health/eviction loops
   __main__.py           # uvicorn entrypoint (`python -m lmcache.v1.mp_coordinator`)
   config.py             # MPCoordinatorConfig (CLI flags only, no env vars)
-  registry.py           # InstanceRegistry + MPInstance (pure membership)
   schemas.py            # Pydantic request/response models (shared wire contract)
   registrar.py          # mp-server-side register/heartbeat/deregister helpers
   blend_index.py      # BlendIndex: fragment (blend) lookup over those bindings
   blend_client.py       # mp-server-side fragment-lookup query client
-  server_config.py      # ServerConfigRegistry: per-server module capacities (from registration)
   ingest/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
@@ -72,13 +70,16 @@ lmcache/v1/mp_coordinator/
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
     base.py             # View: the marker; may depend on other views only
+    instance_registry.py  # InstanceRegistry + MPInstance: fleet membership
     key_directory.py    # KeyDirectory: placements + token bindings (a consumer)
+    server_config.py    # ServerConfigRegistry: per-server capacities (from registration)
     usage_manager.py    # per-tier usage view, by salt and by instance (a consumer)
   controllers/          # policy: loops and request handling, reading the views
-    __init__.py         # build_controllers: scans this package
-    base.py             # Controller: the marker; may depend on views and peers
+    __init__.py         # build_controllers: scans this package + named ones
+    base.py             # Controller: construction + run(); views only
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
     prefetch_manager.py # dispatches warm prefetch to a named MP server
+  http_routes.py        # HttpRoutes: a controller registering its own endpoints
   http_apis/
     __init__.py
     dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
@@ -185,25 +186,26 @@ it. It holds no cache state itself. See [ingest.md](ingest.md).
   emitter stream, `reconcile()` for a scan that has no stream position.
 - `event_broadcaster.py` — fans admitted batches (and fence
   notifications) to its registered `CacheEventConsumer`s: the key
-  directory and the eviction manager. Adding a consumer is a wiring
-  change in `app.py`, not a router or gate change.
+  directory, the usage view, and the per-tier eviction controllers.
+  Adding a consumer is a wiring change in `app.py`, not a router or
+  gate change.
 
 ## Controllers (`controllers/`)
 
 Where the coordinator's fleet-level *doing* lives — the counterpart to
 `distributed/storage_controllers/` one scope down.
 
-- `eviction_controller.py` — `FleetEvictionController`, the fleet L2
-  control loop: it holds the target (`QuotaManager` budgets), observes
-  the value (`CacheUsageManager` byte totals, on the `l2` tier), and
-  acts to close the gap.
-  Its `run()` wakes every `EVICTION_CHECK_INTERVAL` seconds, walks salts
-  over their trigger watermark, and dispatches `DELETE /cache/objects`
-  requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
-  mp server (all servers share the backing L2, so one dispatch evicts the
-  fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
-  are excluded from eviction and delete. Reachable as
-  `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
+- `eviction_controller.py` — `FleetEvictionController`, the per-`cache_salt`
+  quota → usage → evict machine for **both tiers**: it holds the target
+  (a `QuotaManager` per tier), observes the value (`CacheUsageManager` byte
+  totals on that tier), and acts to close the gap. Its `run()` wakes every
+  `EVICTION_CHECK_INTERVAL` seconds, walks each tier's salts over their
+  trigger watermark, and dispatches `DELETE /cache/objects` (chunked at
+  `MAX_DELETE_BATCH`). One controller, because only two answers differ by
+  tier: L2 deletes go to any registered member and a restart voids nothing,
+  while L1 deletes go to every node `KeyDirectory` says holds the key and a
+  restart drops what that node last held. It also tracks the pins taken via
+  `POST /cache/pins`, which hold L2 keys back from eviction and delete.
 - `views/usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
   up per `cache_salt` (the tenant axis the eviction controller enforces
   against) and per `(instance_id, backend)` (the capacity axis: how full
@@ -276,12 +278,12 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
 - The health-check loop is an asyncio task started in the app lifespan; it
   evicts instances whose heartbeat lapsed (`instance_timeout`) and is cancelled
   on shutdown. `HEALTH_CHECK_INTERVAL = 0` disables the stale-instance loop
-  (it does not affect the L2 eviction loop, which is gated separately by
+  (it does not affect the eviction loops, which are gated separately by
   `EVICTION_CHECK_INTERVAL`).
-- The L2 eviction loop is a second asyncio task started in the lifespan,
-  running `FleetEvictionController.run` (the controller owns its own
-  cadence); it is cancelled on shutdown. `EVICTION_CHECK_INTERVAL = 0`
-  disables it.
+- The eviction loops are the controllers' own, not the app's: the lifespan
+  enters every controller's `run` and names none of them.
+  `EVICTION_CHECK_INTERVAL = 0` makes both the L2 and the L1 controller
+  create no task.
 - Registration is idempotent: re-registering replaces the entry. The registry
   is ephemeral — rebuilt from heartbeats after a coordinator restart. Durable
   state (registered quotas) belongs in an external store, not here. The

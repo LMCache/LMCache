@@ -44,6 +44,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "url": "http://127.0.0.1:9300",
         "instance": None,
         "cache_salt": None,
+        "tier": "l2",
         "request_id": None,
         "limit": 20,
     }
@@ -259,9 +260,18 @@ class TestPaths:
         assert APIS["usage"].path(_args(instance="mp-1")) == "/instances/mp-1/usage"
 
     def test_quota_narrows_to_one_salt(self) -> None:
-        assert APIS["quota"].path(_args()) == "/quota"
+        assert APIS["quota"].path(_args()) == "/quota?tier=l2"
         # An empty salt is a real tenant, not "unset".
-        assert APIS["quota"].path(_args(cache_salt="")) == "/quota/"
+        assert APIS["quota"].path(_args(cache_salt="")) == "/quota/?tier=l2"
+
+    def test_quota_paths_carry_the_requested_tier(self) -> None:
+        """The two tiers hold independent budgets, so a read that dropped
+        the tier would silently report the wrong one."""
+        assert APIS["quota"].path(_args(tier="l1")) == "/quota?tier=l1"
+        assert (
+            APIS["quota"].path(_args(cache_salt="t", tier="l1")) == "/quota/t?tier=l1"
+        )
+        assert APIS["quota-config"].path(_args(tier="l1")) == "/quota/config?tier=l1"
 
     def test_every_api_builds_a_path(self) -> None:
         args = _args(instance="mp-1", request_id="r1", cache_salt="s")

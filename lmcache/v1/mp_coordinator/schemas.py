@@ -129,7 +129,9 @@ class SetQuotaRequest(BaseModel):
 
     Attributes:
         limit_gb: Non-negative byte budget in GiB.
-        tier: Cache tier the quota applies to (only ``l2`` is supported today).
+        tier: Cache tier the quota applies to (``l1`` or ``l2``). Each
+            tier has its own budget: a key resident in both spends
+            against both.
     """
 
     limit_gb: float = Field(ge=0.0)
@@ -143,11 +145,13 @@ class QuotaResponse(BaseModel):
         cache_salt: The tenant identifier (``_default`` for empty salt).
         limit_gb: The current limit in GiB (0.0 after deletion).
         status: ``"ok"`` or ``"removed"`` or ``"not_found"``.
+        tier: The cache tier the entry belongs to.
     """
 
     cache_salt: str
     limit_gb: float
     status: str
+    tier: Tier = Tier.L2
 
 
 class QuotaConfigRequest(BaseModel):
@@ -157,7 +161,8 @@ class QuotaConfigRequest(BaseModel):
         default_limit_gb: Byte budget in GiB applied to salts with no
             explicit quota entry. ``None`` (default) leaves unquota'd
             salts exempt from eviction.
-        tier: Cache tier the config applies to (only ``l2`` today).
+        tier: Cache tier the config applies to (``l1`` or ``l2``); each
+            keeps its own default.
     """
 
     default_limit_gb: float | None = Field(default=None, ge=0.0)
@@ -170,9 +175,11 @@ class QuotaConfigResponse(BaseModel):
     Attributes:
         default_limit_gb: Current default limit in GiB, or ``None``
             when unquota'd salts are exempt from eviction.
+        tier: The cache tier this default governs.
     """
 
     default_limit_gb: float | None
+    tier: Tier = Tier.L2
 
 
 # -- Usage / quota status ----------------------------------------------------
@@ -181,10 +188,9 @@ class QuotaConfigResponse(BaseModel):
 class StatusResponse(BaseModel):
     """Combined quota and usage for a single ``cache_salt``, on one tier.
 
-    Every field describes the tier the request asked for. Quotas are
-    enforced on L2 only, so an ``l1`` request reports L1 usage with
-    ``quota_exists=False`` — never the L2 quota, which governs different
-    bytes.
+    Every field describes the tier the request asked for. Each tier has
+    its own quota registry, so a salt can be budgeted on one and not the
+    other; the two govern different bytes and are never mixed.
 
     Attributes:
         cache_salt: The tenant identifier.
@@ -193,12 +199,14 @@ class StatusResponse(BaseModel):
         quota_exists: Whether an explicit quota is registered for the
             requested tier.
         usage_gb: Current usage in GiB on the requested tier.
+        tier: The cache tier every other field describes.
     """
 
     cache_salt: str
     quota_limit_gb: float
     quota_exists: bool
     usage_gb: float
+    tier: Tier = Tier.L2
 
 
 class StatusListResponse(BaseModel):
@@ -207,12 +215,14 @@ class StatusListResponse(BaseModel):
     Attributes:
         total_gb: Aggregate usage in GiB on the requested tier.
         by_cache_salt: Per-tenant breakdown with quota and usage. Rows
-            come from the tier's usage plus the quotas that apply to it,
-            so an ``l1`` listing holds only salts with L1 usage.
+            come from the tier's usage plus the quotas registered for
+            it.
+        tier: The cache tier every row describes.
     """
 
     total_gb: float
     by_cache_salt: list[StatusResponse]
+    tier: Tier = Tier.L2
 
 
 # -- Memory pressure ---------------------------------------------------------

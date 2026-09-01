@@ -33,6 +33,7 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
 )
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.persistence.store import LocalArtifactStore
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
@@ -43,7 +44,11 @@ class _Coordinator:
     def __init__(self) -> None:
         self.directory = KeyDirectory()
         self.usage = CacheUsageManager()
-        self.controller = FleetEvictionController(usage_manager=self.usage)
+        self.controller = FleetEvictionController(
+            usage_manager=self.usage,
+            key_directory=self.directory,
+            registry=InstanceRegistry(),
+        )
         broadcaster = CacheEventBroadcaster()
         broadcaster.register_consumer(self.directory)
         broadcaster.register_consumer(self.usage)
@@ -260,7 +265,7 @@ class TestCapturesAreCopies:
         live = _Coordinator()
         live.gate.ingest(_store(seq=1, keys=[_key(1)]))
         live.controller.pin([_key(1)])
-        live.controller.quota.set_quota("tenant-a", 4096)
+        live.controller.quota(Tier.L2).set_quota("tenant-a", 4096)
         every_component = [
             live.directory,
             live.usage,
@@ -275,7 +280,7 @@ class TestCapturesAreCopies:
         live.gate.ingest(_store(seq=2, keys=[_key(2), _key(3)]))
         live.controller.pin([_key(2)])
         live.controller.unpin([_key(1)])
-        live.controller.quota.set_quota("tenant-b", 8192)
+        live.controller.quota(Tier.L2).set_quota("tenant-b", 8192)
         live.gate.drop_instance("node-a")
 
         assert len(captured["key_directory"]["keys"]) == 1

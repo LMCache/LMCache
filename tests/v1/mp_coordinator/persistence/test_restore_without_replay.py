@@ -19,6 +19,7 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from tests.v1.mp_coordinator.persistence.conftest import capture_consistently
@@ -30,7 +31,11 @@ class _Coordinator:
     def __init__(self) -> None:
         self.directory = KeyDirectory()
         self.usage = CacheUsageManager()
-        self.controller = FleetEvictionController(usage_manager=self.usage)
+        self.controller = FleetEvictionController(
+            usage_manager=self.usage,
+            key_directory=self.directory,
+            registry=InstanceRegistry(),
+        )
         self.broadcaster = CacheEventBroadcaster()
         self.broadcaster.register_consumer(self.directory)
         self.broadcaster.register_consumer(self.usage)
@@ -97,7 +102,7 @@ class TestRestoreWithoutReplay:
         live.gate.ingest(_store(seq=1, keys=[_key(1), _key(2)]))
         live.gate.ingest(_store(seq=2, keys=[_key(3)], tier=Tier.L1))
         live.controller.pin([_key(1)])
-        live.controller.quota.set_quota("tenant-a", 8192)
+        live.controller.quota(Tier.L2).set_quota("tenant-a", 8192)
 
         captured = live.capture()
         restarted = _Coordinator()
@@ -149,7 +154,14 @@ class TestRestoreWithoutReplay:
         restarted.restore(captured)
 
         for component in restarted.components():
-            if component.name in ("pins", "quotas", "lru_order"):
+            if component.name in (
+                "pins",
+                "quotas",
+                "lru_order",
+                "l1_quotas",
+                "l1_lru_order",
+                "l1_placement_owners",
+            ):
                 continue  # replacing these is idempotent by construction
             try:
                 component.restore(captured[component.name])  # type: ignore[arg-type]
