@@ -152,7 +152,11 @@ def transfer_kv_layerwise(
             single_layer_sd.hs = sd.hs
             single_layer_sd.element_size = sd.element_size
             single_layer_sd.block_stride_elems = sd.block_stride_elems
-            single_layer_sd.kv_interleaved = False
+            # Inert at nl=1: the staging slot this describes holds a single
+            # layer, so layer_idx is pinned to 0 and the interleaved and
+            # non-interleaved offset formulas are the same expression. Kept
+            # True to read uniformly with the merged path's n_layer_sd.
+            single_layer_sd.kv_interleaved = True
 
             group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                 kernel_group_id
