@@ -24,7 +24,7 @@ x-pod-1xpu: &pod-1xpu
         - { name: dshm, mountPath: /dev/shm }
   volumes:
     - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 40Gi } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
 
 x-pod-2xpu: &pod-2xpu
   containers:
@@ -41,7 +41,7 @@ x-pod-2xpu: &pod-2xpu
         - { name: dshm, mountPath: /dev/shm }
   volumes:
     - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 40Gi } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
 
 steps:
   - group: ":xpu: Multiprocess (1-pod)"
@@ -52,7 +52,7 @@ steps:
           export L1_USE_LAZY="false"
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
-          export CPU_BUFFER_SIZE="32"
+          export CPU_BUFFER_SIZE="80"
           .buildkite/k3_tests/xpu/multiprocess/run.sh lm_eval
         timeout_in_minutes: 45
         retry: *flaky-retry
@@ -66,7 +66,8 @@ steps:
           export L1_USE_LAZY="false"
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
-          export CPU_BUFFER_SIZE="32"
+          export CPU_BUFFER_SIZE="80"
+          export NUM_PROMPTS="16"
           export VLLM_DISABLE_PREFIX_CACHING="true"
           .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 45
