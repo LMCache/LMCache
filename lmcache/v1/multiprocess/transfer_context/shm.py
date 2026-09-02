@@ -7,6 +7,8 @@ from multiprocessing import shared_memory
 from multiprocessing.resource_tracker import unregister
 from typing import Any
 import ctypes
+import mmap
+import os
 
 # Third Party
 import torch
@@ -98,19 +100,32 @@ class EngineDrivenContextShm(EngineDrivenContext):
         self._shm_name = shm_name
         self._pool_size = pool_size
         self._shm: shared_memory.SharedMemory | None = None
+        self._hugetlb_mmap: mmap.mmap | None = None
         self._shm_buffer: memoryview | None = None
         self._pinned = False
         self._pinned_ptr = 0
         self._pinned_size = 0
         try:
-            self._shm = shared_memory.SharedMemory(
-                name=shm_name.lstrip("/"), create=False
-            )
-            # The SHM segment is owned by the server process. Unregister it
-            # from this worker's resource tracker so that Python does not
-            # unlink the segment when this worker exits.
-            unregister(f"/{self._shm.name}", "shared_memory")
-            self._shm_buffer = self._shm.buf
+            hugetlbfs_path = os.getenv("LMCACHE_HUGETLBFS_PATH")
+            if hugetlbfs_path:
+                path = os.path.join(hugetlbfs_path, shm_name.lstrip("/"))
+                fd = os.open(path, os.O_RDWR)
+                try:
+                    self._hugetlb_mmap = mmap.mmap(
+                        fd, pool_size, access=mmap.ACCESS_WRITE
+                    )
+                finally:
+                    os.close(fd)
+                self._shm_buffer = memoryview(self._hugetlb_mmap)
+            else:
+                self._shm = shared_memory.SharedMemory(
+                    name=shm_name.lstrip("/"), create=False
+                )
+                # The SHM segment is owned by the server process. Unregister it
+                # from this worker's resource tracker so that Python does not
+                # unlink the segment when this worker exits.
+                unregister(f"/{self._shm.name}", "shared_memory")
+                self._shm_buffer = self._shm.buf
             # pin memory is per process
             # the shm might be pinned on lmcache server side already
             # pin memory here is for worker side for fast DMA copy
@@ -226,14 +241,18 @@ class EngineDrivenContextShm(EngineDrivenContext):
             return False
 
     def close(self) -> None:
-        if self._shm is None:
+        if self._shm is None and self._hugetlb_mmap is None:
             return
         self._unpin_shm_buffer()
+        self._shm_buffer = None
         try:
-            self._shm.close()
+            if self._shm is not None:
+                self._shm.close()
+            if self._hugetlb_mmap is not None:
+                self._hugetlb_mmap.close()
         finally:
             self._shm = None
-            self._shm_buffer = None
+            self._hugetlb_mmap = None
 
     def _pin_shm_buffer(self) -> None:
         """Pin the SHM buffer as page-locked host memory via cudaHostRegister.

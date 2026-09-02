@@ -12,8 +12,10 @@ from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Optional, Tuple
 import ctypes
 import ctypes.util
+import mmap
 import os
 import threading
+import time
 import warnings
 
 # Third Party
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
 # outside the scope of this file
 _tensor_registry: dict[int, torch.Tensor] = {}
 _shm_registry: dict[int, shared_memory.SharedMemory] = {}
+_hugetlb_registry: dict[int, mmap.mmap] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
 _pinned_ptr_registry: dict[int, int] = {}  # ptr -> size, for cudaHostUnregister
 
@@ -454,29 +457,45 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     Attempts to pin the buffer via cudaHostRegister for async D2H;
     if pinning fails, continues without pinning."""
 
-    # Strip leading '/' for SharedMemory name
     name = shm_name.lstrip("/") if shm_name else None
+    hugetlbfs_path = os.getenv("LMCACHE_HUGETLBFS_PATH")
 
-    # Clean up stale shm segment if it exists
-    if name:
+    if name and hugetlbfs_path:
+        path = os.path.join(hugetlbfs_path, name)
         try:
-            stale = shared_memory.SharedMemory(name=name, create=False)
-            stale.close()
-            stale.unlink()
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        try:
+            os.ftruncate(fd, size)
+            mm = mmap.mmap(fd, size, access=mmap.ACCESS_WRITE)
+        finally:
+            os.close(fd)
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_buffer(mm)
+        ptr = ctypes.addressof(buf)
+        _hugetlb_registry[ptr] = mm
+    else:
+        # Clean up stale shm segment if it exists
+        try:
+            if name:
+                stale = shared_memory.SharedMemory(name=name, create=False)
+                stale.close()
+                stale.unlink()
         except FileNotFoundError:
             pass
 
-    shm = shared_memory.SharedMemory(name=name, create=True, size=size)
-
-    array_type = ctypes.c_uint8 * size
-    buf = array_type.from_buffer(shm.buf)
-    ptr = ctypes.addressof(buf)
+        shm = shared_memory.SharedMemory(name=name, create=True, size=size)
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_buffer(shm.buf)
+        ptr = ctypes.addressof(buf)
+        _shm_registry[ptr] = shm
 
     # Store references to keep them alive
     tensor = torch.frombuffer(buf, dtype=torch.uint8)
     _tensor_registry[ptr] = tensor
     _buf_registry[ptr] = buf
-    _shm_registry[ptr] = shm
 
     # Try to pin the SHM buffer for async D2H copies
     if current_device_spec().pin_memory(ptr, size):
@@ -501,6 +520,16 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
     if shm is not None:
         shm.close()
         shm.unlink()
+    mm = _hugetlb_registry.pop(ptr, None)
+    if mm is not None:
+        mm.close()
+        hugetlbfs_path = os.getenv("LMCACHE_HUGETLBFS_PATH")
+        name = shm_name.lstrip("/") if shm_name else ""
+        if hugetlbfs_path and name:
+            try:
+                os.unlink(os.path.join(hugetlbfs_path, name))
+            except FileNotFoundError:
+                pass
 
 
 # Hugepage variants: non-CUDA platforms do not support hugepages, so these
@@ -1761,8 +1790,27 @@ def _transfer_per_layer_fused(
     if not layer_tensors or not object_tensors:
         return
 
+    profile_gather = (
+        is_d2h
+        and layer_tensors[0].device.type == "xpu"
+        and os.environ.get("LMCACHE_PROFILE_PAGED_GATHER_DETAIL") == "1"
+    )
+    profile_started = time.perf_counter()
+    allocation_seconds = 0.0
+    select_seconds = 0.0
+    pack_seconds = 0.0
+    d2h_seconds = 0.0
+
+    def _profile_sync() -> None:
+        if profile_gather:
+            torch.xpu.synchronize()
+
     target_device = layer_tensors[0].device
+    _profile_sync()
+    index_started = time.perf_counter()
     block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
+    _profile_sync()
+    index_seconds = time.perf_counter() - index_started
 
     # Callers pass either the raw 4-D registration ([NB, NH, BS, 2*HS] or
     # [NB, BS, NH, 2*HS]) or the canonical 5-D split with the size-2 axis
@@ -1799,6 +1847,8 @@ def _transfer_per_layer_fused(
         obj_view = obj.reshape(nl, chunk_tokens, nh0 * hs0)
 
         if is_d2h:
+            _profile_sync()
+            allocation_started = time.perf_counter()
             chunk_gpu = torch.empty(
                 nl,
                 n_valid * block_size,
@@ -1806,13 +1856,26 @@ def _transfer_per_layer_fused(
                 dtype=first.dtype,
                 device=target_device,
             )
+            _profile_sync()
+            allocation_seconds += time.perf_counter() - allocation_started
             for layer_idx, layer in enumerate(layers):
+                _profile_sync()
+                select_started = time.perf_counter()
                 selected = layer.index_select(0, eff_idx)
+                _profile_sync()
+                select_seconds += time.perf_counter() - select_started
                 if is_hnd:
                     # [n, NH, BS, 2*HS] -> tokens-major [n, BS, NH, 2*HS]
                     selected = selected.permute(0, 2, 1, 3)
+                pack_started = time.perf_counter()
                 chunk_gpu[layer_idx].view(n_valid, block_size, nh0, hs0).copy_(selected)
+                _profile_sync()
+                pack_seconds += time.perf_counter() - pack_started
+            _profile_sync()
+            d2h_started = time.perf_counter()
             obj_view[:, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
+            _profile_sync()
+            d2h_seconds += time.perf_counter() - d2h_started
         else:
             chunk_gpu = obj_view[:, offset_in_object:token_end].to(
                 target_device, non_blocking=True
@@ -1822,6 +1885,30 @@ def _transfer_per_layer_fused(
                 if is_hnd:
                     blocks = blocks.permute(0, 2, 1, 3)
                 layer.index_copy_(0, eff_idx, blocks)
+
+    if profile_gather:
+        total_seconds = time.perf_counter() - profile_started
+        accounted_seconds = (
+            index_seconds
+            + allocation_seconds
+            + select_seconds
+            + pack_seconds
+            + d2h_seconds
+        )
+        logger.info(
+            "Fused paged gather profile: chunks=%d layers=%d index=%.3fs "
+            "allocation=%.3fs select=%.3fs pack=%.3fs d2h=%.3fs "
+            "other=%.3fs total=%.3fs",
+            len(object_tensors),
+            len(layer_tensors),
+            index_seconds,
+            allocation_seconds,
+            select_seconds,
+            pack_seconds,
+            d2h_seconds,
+            total_seconds - accounted_seconds,
+            total_seconds,
+        )
 
 
 def _transfer_per_layer_nhd(
@@ -1839,8 +1926,27 @@ def _transfer_per_layer_nhd(
     if not layer_tensors or not object_tensors:
         return
 
+    profile_gather = (
+        is_d2h
+        and layer_tensors[0].device.type == "xpu"
+        and os.environ.get("LMCACHE_PROFILE_PAGED_GATHER_DETAIL") == "1"
+    )
+    profile_started = time.perf_counter()
+    allocation_seconds = 0.0
+    select_seconds = 0.0
+    pack_seconds = 0.0
+    d2h_seconds = 0.0
+
+    def _profile_sync() -> None:
+        if profile_gather:
+            torch.xpu.synchronize()
+
     target_device = layer_tensors[0].device
+    _profile_sync()
+    index_started = time.perf_counter()
     block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
+    _profile_sync()
+    index_seconds = time.perf_counter() - index_started
 
     # Two-major keeps K and V as separate leading planes ([2, NB, BS, NH, HS]);
     # otherwise the size-2 axis sits after the blocks ([NB, 2, BS, NH, HS]).
@@ -1868,6 +1974,8 @@ def _transfer_per_layer_nhd(
         eff_idx = block_ids_dev[idx_start:idx_end]
 
         if is_d2h:
+            _profile_sync()
+            allocation_started = time.perf_counter()
             chunk_gpu = torch.empty(
                 2,
                 len(layer_tensors),
@@ -1876,9 +1984,13 @@ def _transfer_per_layer_nhd(
                 dtype=first_k.dtype,
                 device=target_device,
             )
+            _profile_sync()
+            allocation_seconds += time.perf_counter() - allocation_started
             for layer_idx, layer in enumerate(layer_tensors):
                 if is_two_major:
                     k_t, v_t = layer[0], layer[1]
+                    _profile_sync()
+                    select_started = time.perf_counter()
                     torch.index_select(
                         k_t,
                         0,
@@ -1891,19 +2003,32 @@ def _transfer_per_layer_nhd(
                         eff_idx,
                         out=chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0),
                     )
+                    _profile_sync()
+                    select_seconds += time.perf_counter() - select_started
                 else:
                     # FlashInfer NHD stores KV as [NB, 2, BS, NH, HS].
                     # Gather on dim=0 first to avoid index_select from
                     # non-contiguous layer[:, 0]/layer[:, 1] views, which
                     # trigger slower element-wise gather reads.
+                    _profile_sync()
+                    select_started = time.perf_counter()
                     selected = layer.index_select(0, eff_idx)
+                    _profile_sync()
+                    select_seconds += time.perf_counter() - select_started
+                    pack_started = time.perf_counter()
                     chunk_gpu[0, layer_idx].copy_(
                         selected[:, 0].reshape(n_valid * block_size, nh0 * hs0)
                     )
                     chunk_gpu[1, layer_idx].copy_(
                         selected[:, 1].reshape(n_valid * block_size, nh0 * hs0)
                     )
+                    _profile_sync()
+                    pack_seconds += time.perf_counter() - pack_started
+            _profile_sync()
+            d2h_started = time.perf_counter()
             obj[:, :, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
+            _profile_sync()
+            d2h_seconds += time.perf_counter() - d2h_started
         else:
             chunk_gpu = obj[:, :, offset_in_object:token_end].to(
                 target_device, non_blocking=True
@@ -1931,6 +2056,30 @@ def _transfer_per_layer_nhd(
                     layer.index_copy_(
                         0, eff_idx, torch.stack([k_blocks, v_blocks], dim=1)
                     )
+
+    if profile_gather:
+        total_seconds = time.perf_counter() - profile_started
+        accounted_seconds = (
+            index_seconds
+            + allocation_seconds
+            + select_seconds
+            + pack_seconds
+            + d2h_seconds
+        )
+        logger.info(
+            "Paged gather profile: chunks=%d layers=%d index=%.3fs "
+            "allocation=%.3fs select=%.3fs pack=%.3fs d2h=%.3fs "
+            "other=%.3fs total=%.3fs",
+            len(object_tensors),
+            len(layer_tensors),
+            index_seconds,
+            allocation_seconds,
+            select_seconds,
+            pack_seconds,
+            d2h_seconds,
+            total_seconds - accounted_seconds,
+            total_seconds,
+        )
 
 
 def single_layer_kv_transfer(

@@ -4,7 +4,9 @@
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+import os
 import threading
+import time
 
 # Third Party
 import torch
@@ -77,6 +79,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         """
         super().__init__()
         self._commit_workers = max(1, int(commit_workers))
+        self._use_separate_copy_streams = (
+            os.environ.get("LMCACHE_ENGINE_DRIVEN_SEPARATE_COPY_STREAMS") == "1"
+        )
         self._copy_stream: Any = torch_dev.Stream()
         self._commit_executor: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=self._commit_workers,
@@ -220,6 +225,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         # Signals when this task has recorded its CUDA event (or exited early),
         # allowing flush_inflight_stores to safely proceed.
         gather_launched = threading.Event()
+        profile_store = os.environ.get("LMCACHE_PROFILE_PAGED_GATHER") == "1"
+        submitted_at = time.perf_counter()
         try:
             with self._inflight_lock:
                 if self._is_closing:
@@ -230,6 +237,12 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             full_block_ids = _single_group_block_ids(block_ids)
 
             def _prepare_gather_and_commit() -> None:
+                task_started = time.perf_counter()
+                copy_stream = (
+                    torch_dev.Stream()
+                    if self._use_separate_copy_streams
+                    else self._copy_stream
+                )
                 gather_done: Any | None = None
                 ok = False
                 # Whether we gathered directly into SHM views (True) or into
@@ -241,6 +254,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     # In pickle mode this is the costliest step (sync RPC
                     # round-trip).  Running it here keeps the forward thread free.
                     result = engine_driven_context.prepare_store(key, instance_id)
+                    prepare_finished = time.perf_counter()
                     out_buffers, chunk_indices = (
                         result if result is not None else (None, None)
                     )
@@ -280,8 +294,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         gather_target = staged_chunks
 
                     # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
-                    with torch.inference_mode(), torch_dev.stream(self._copy_stream):
-                        _event.wait(stream=self._copy_stream)
+                    with torch.inference_mode(), torch_dev.stream(copy_stream):
+                        _event.wait(stream=copy_stream)
 
                         gather_paged_kv_to_cpu(
                             kv_caches,
@@ -292,9 +306,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             out=gather_target,
                             chunk_indices=chunk_indices,
                         )
+                        gather_enqueued = time.perf_counter()
 
                         gather_done = torch_dev.Event()
-                        gather_done.record(self._copy_stream)
+                        gather_done.record(copy_stream)
 
                     with self._inflight_lock:
                         if gather_done is not None:
@@ -304,11 +319,27 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
                     if gather_done is not None:
                         gather_done.synchronize()
+                    gather_finished = time.perf_counter()
 
                     # --- Phase 3: commit ---
                     with self._commit_lock:
                         ok = engine_driven_context.commit_store(
                             key, instance_id, gather_target
+                        )
+                    commit_finished = time.perf_counter()
+
+                    if profile_store:
+                        logger.info(
+                            "Async store profile: request_id=%s queue=%.3fs "
+                            "prepare=%.3fs gather_enqueue=%.3fs "
+                            "gather_sync=%.3fs commit=%.3fs total=%.3fs",
+                            _request_id,
+                            task_started - submitted_at,
+                            prepare_finished - task_started,
+                            gather_enqueued - prepare_finished,
+                            gather_finished - gather_enqueued,
+                            commit_finished - gather_finished,
+                            commit_finished - submitted_at,
                         )
 
                     if not ok:

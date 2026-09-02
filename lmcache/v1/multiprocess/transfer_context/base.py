@@ -20,6 +20,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import inspect
+import os
+import time
 
 # Third Party
 import numpy as np
@@ -355,6 +357,9 @@ def gather_paged_kv_to_cpu(
         ValueError: If ``out`` is provided with fewer buffers than the number
             of gathered chunks.
     """
+    profile_gather = os.environ.get("LMCACHE_PROFILE_PAGED_GATHER") == "1"
+    profile_started = time.perf_counter()
+
     # First Party
     from lmcache import device_ops
     from lmcache.v1.gpu_connector.utils import (
@@ -375,6 +380,7 @@ def gather_paged_kv_to_cpu(
     fmt, normalized = normalize_kv_and_discover_format(
         tensors, EngineType.VLLM, layout_hints=layout_hints
     )
+    normalize_finished = time.perf_counter()
     if engine_kv_format is None:
         engine_kv_format = fmt
 
@@ -467,12 +473,14 @@ def gather_paged_kv_to_cpu(
                 chunks = out
             else:
                 chunks = out[: len(iter_indices)]
+    buffer_finished = time.perf_counter()
 
     selected_block_ids: list[int] = []
     for chunk_idx in iter_indices:
         selected_block_ids.extend(
             block_ids[chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk]
         )
+    block_ids_finished = time.perf_counter()
 
     if selected_block_ids:
         if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR:
@@ -493,7 +501,6 @@ def gather_paged_kv_to_cpu(
                 engine_kv_format,
                 0,
             )
-
         else:
             # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
             _ptrs_np = np.array(
@@ -539,6 +546,7 @@ def gather_paged_kv_to_cpu(
                     engine_kv_format,
                     0,
                 )
+    transfer_finished = time.perf_counter()
 
     # --- Final reconciliation ---
     # If we used a staging buffer to protect unpinned shared memory,
@@ -557,6 +565,23 @@ def gather_paged_kv_to_cpu(
             chunks = out
         else:
             chunks = _target_out
+    reconciliation_finished = time.perf_counter()
+
+    if profile_gather:
+        logger.info(
+            "Gather wrapper profile: mode=%s chunks=%d blocks=%d "
+            "normalize=%.3fs buffers=%.3fs block_ids=%.3fs "
+            "transfer=%.3fs reconciliation=%.3fs total=%.3fs",
+            "tensor" if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR else "ptr",
+            len(iter_indices),
+            len(selected_block_ids),
+            normalize_finished - profile_started,
+            buffer_finished - normalize_finished,
+            block_ids_finished - buffer_finished,
+            transfer_finished - block_ids_finished,
+            reconciliation_finished - transfer_finished,
+            reconciliation_finished - profile_started,
+        )
 
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
