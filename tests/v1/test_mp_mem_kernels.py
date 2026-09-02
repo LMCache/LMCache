@@ -251,6 +251,7 @@ def call_block_kernel(
     is_mla: bool,
     tokens_per_object: int,
     skip_prefix_n_blocks: int = 0,
+    block_stride_elems: int = 0,
 ) -> None:
     device = vllm_tensors[0].device
 
@@ -262,6 +263,7 @@ def call_block_kernel(
     shape_desc.nh = nh
     shape_desc.hs = hs
     shape_desc.element_size = vllm_tensors[0].element_size()
+    shape_desc.block_stride_elems = block_stride_elems
 
     ptrs = [t.data_ptr() for t in vllm_tensors]
     paged_buffer_ptrs_tensor = torch.tensor(ptrs, dtype=torch.int64, device=device)
