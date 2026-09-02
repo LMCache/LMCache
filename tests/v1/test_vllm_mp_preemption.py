@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
-from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
+from lmcache import torch_dev
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
 )
@@ -35,7 +35,7 @@ def test_handle_preemptions_delegates_without_device_wide_sync(
     """
     adapter, transfer_ctx = _healthy_adapter()
     synchronize = MagicMock(name="synchronize")
-    monkeypatch.setattr(adapter_mod.torch_dev, "synchronize", synchronize)
+    monkeypatch.setattr(torch_dev, "synchronize", synchronize)
 
     LMCacheMPWorkerAdapter.handle_preemptions(adapter, True)
 
