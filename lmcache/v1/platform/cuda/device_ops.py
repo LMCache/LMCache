@@ -12,6 +12,7 @@ from __future__ import annotations
 
 # Standard
 from typing import ClassVar
+import os
 
 # First Party
 from lmcache.logging import init_logger
@@ -27,6 +28,12 @@ class CudaDeviceOps(DeviceOps):
         if self._native_bound:
             return
         self._native_bound = True  # set early to prevent repeated attempts
+        if os.environ.get("LMCACHE_FORCE_TORCH_FALLBACK") == "1":
+            logger.warning(
+                "LMCACHE_FORCE_TORCH_FALLBACK=1; "
+                "CudaDeviceOps stays on the torch baseline for all ops."
+            )
+            return
         try:
             # First Party
             import lmcache.cuda_ops as native
