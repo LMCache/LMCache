@@ -727,65 +727,73 @@ class StorageManager:
         tier_expected_chunks = []
         # we also keep track of the keys for each tier and each chunk
         loading_task_keys: list[list[CacheEngineKey]] = []
-        for backend_name, backend in self.get_active_storage_backends(
-            search_range=search_range
-        ):
-            num_hit_keys_raw = await backend.batched_async_contains(
-                lookup_id, keys, pin
-            )
-            # Round down to a whole-chunk boundary. If a backend has only
-            # some of a chunk's per-layer keys (e.g., partial eviction),
-            # we treat the chunk as a miss to keep the chunk-level
-            # invariant required by the prefix-match retrieval pattern.
-            num_hit_chunks = num_hit_keys_raw // keys_per_chunk
-            num_hit_keys = num_hit_chunks * keys_per_chunk
-
-            # `pin=True` pins every matching key inside batched_async_contains.
-            # The rounded-off tail (keys[num_hit_keys:num_hit_keys_raw]) is
-            # dropped from backend_keys and never retrieved, so release those
-            # pins here to avoid leaking refcount budget.
-            if pin and num_hit_keys < num_hit_keys_raw:
-                for k in keys[num_hit_keys:num_hit_keys_raw]:
-                    backend.unpin(k)
-
-            if num_hit_chunks == 0:
-                continue
-
-            num_total_hit_chunks += num_hit_chunks
-            tier_expected_chunks.append(num_hit_chunks)
-
-            backend_keys = keys[:num_hit_keys]
-            loading_task_keys.append(backend_keys)
-
-            assert self.async_serializer is not None, (
-                "Async serializer must be initialized via post_init before using "
-                "async_lookup_and_prefetch."
-            )
-            # num_hit_chunks is only used for the multi serializer
-            get_coro = self.async_serializer.run(
-                backend.batched_get_non_blocking(
-                    lookup_id,
-                    backend_keys,
-                    {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
-                ),
-                num_hit_chunks,
-            )
-            loading_task = asyncio.create_task(get_coro)
-            loading_task.add_done_callback(
-                functools.partial(
-                    self.prefetch_single_done_callback,
-                    keys=keys,
-                    backend_name=backend_name,
+        try:
+            for backend_name, backend in self.get_active_storage_backends(
+                search_range=search_range
+            ):
+                num_hit_keys_raw = await backend.batched_async_contains(
+                    lookup_id, keys, pin
                 )
-            )
+                # Round down to a whole-chunk boundary. If a backend has only
+                # some of a chunk's per-layer keys (e.g., partial eviction),
+                # we treat the chunk as a miss to keep the chunk-level
+                # invariant required by the prefix-match retrieval pattern.
+                num_hit_chunks = num_hit_keys_raw // keys_per_chunk
+                num_hit_keys = num_hit_chunks * keys_per_chunk
 
-            loading_tasks.append(loading_task)
+                # `pin=True` pins every matching key inside batched_async_contains.
+                # The rounded-off tail (keys[num_hit_keys:num_hit_keys_raw]) is
+                # dropped from backend_keys and never retrieved, so release those
+                # pins here to avoid leaking refcount budget.
+                if pin and num_hit_keys < num_hit_keys_raw:
+                    for k in keys[num_hit_keys:num_hit_keys_raw]:
+                        backend.unpin(k)
 
-            cum_chunk_lengths = cum_chunk_lengths[num_hit_chunks:]
+                if num_hit_chunks == 0:
+                    continue
 
-            if num_total_hit_chunks == num_total_chunks:
-                break
-            keys = keys[num_hit_keys:]
+                num_total_hit_chunks += num_hit_chunks
+                tier_expected_chunks.append(num_hit_chunks)
+
+                backend_keys = keys[:num_hit_keys]
+                loading_task_keys.append(backend_keys)
+
+                assert self.async_serializer is not None, (
+                    "Async serializer must be initialized via post_init before using "
+                    "async_lookup_and_prefetch."
+                )
+                # num_hit_chunks is only used for the multi serializer
+                get_coro = self.async_serializer.run(
+                    backend.batched_get_non_blocking(
+                        lookup_id,
+                        backend_keys,
+                        {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
+                    ),
+                    num_hit_chunks,
+                )
+                loading_task = asyncio.create_task(get_coro)
+                loading_task.add_done_callback(
+                    functools.partial(
+                        self.prefetch_single_done_callback,
+                        keys=keys,
+                        backend_name=backend_name,
+                    )
+                )
+
+                loading_tasks.append(loading_task)
+
+                cum_chunk_lengths = cum_chunk_lengths[num_hit_chunks:]
+
+                if num_total_hit_chunks == num_total_chunks:
+                    break
+                keys = keys[num_hit_keys:]
+        finally:
+            # Record LRU hits for this request's pin=True contains. Must run
+            # even when there were zero hits, and must be request-scoped
+            # (ContextVar in local backends) so concurrent lookups cannot
+            # clear each other's keys (#4137).
+            if pin:
+                self.touch_cache()
 
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:
