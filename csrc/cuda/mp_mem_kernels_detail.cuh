@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Internals shared by the per-chunk and layer-wise multi-layer block KV
-// transfer kernels.
+// transfer kernels. The per-chunk kernels live in mp_mem_kernels.cu and
+// the layer-wise ones in mp_mem_kernels_layerwise.cu. Included only by
+// those two .cu files -- nothing here is part of a public header or the
+// pybind surface.
 //
-// The per-chunk kernels live in mp_mem_kernels.cu and the layer-wise ones in
-// mp_mem_kernels_layerwise.cu; neither translation unit includes the other.
-// What they genuinely share lives here: the device-side offset and copy
-// helpers, the launch geometry, and the host-side driver that walks a batch
-// plan. Everything is a template or marked inline, so including it from
-// several translation units is ODR-safe.
+// The file is separated by a banner comment:
 //
-// Included only by those two .cu files -- nothing here is part of a public
-// header or the pybind surface.
+//   Part 1  Code moved verbatim out of mp_mem_kernels.cu. Reviewable as a
+//           pure relocation. Only one exception as below.
+//   Part 2  Pre-feature logic extracted and parameterised so both entry
+//           points can share it.
 
 #pragma once
 
@@ -24,6 +24,13 @@
 #include <algorithm>
 
 namespace lmcache_mp {
+
+// ===========================================================================
+// Part 1: moved verbatim from mp_mem_kernels.cu
+//
+// Exactly one function here is NOT verbatim: calculate_lmcache_global_offset
+// gained the kv_interleaved branch. It is flagged inline at its definition.
+// ===========================================================================
 
 /**
  * Key logic in the kernel implementation:
@@ -143,6 +150,10 @@ __device__ inline size_t calculate_engine_local_offset(
 /**
  * Calculate the global offset for the current `block` in the LMCache object.
  * The `block` here is the memory region corresponding to a thread-block.
+ *
+ * NOT VERBATIM -- the one behavioural change in Part 1. The pre-feature
+ * version had only the 2LTD branch below; the kv_interleaved (L2TD) branch
+ * is new. The two coincide whenever kv_size == 1 or nl == 1.
  */
 template <typename ScalarType, EngineKVFormat format>
 __device__ inline size_t calculate_lmcache_global_offset(
@@ -305,38 +316,82 @@ __device__ void multi_layer_block_transfer_single_block(
   }
 }
 
+// ===========================================================================
+// Part 2: generalised for reuse by both entry points
+//
+// Every item below is pre-feature logic from mp_mem_kernels.cu. The change
+// noted per item is the entire delta -- all other checks, arithmetic, case
+// order and comments are verbatim.
+//
+//   calculate_num_blocks_per_object  <- "Validation" preamble of
+//       multi_layer_block_kv_transfer_templated. Body verbatim; gained only a
+//       signature and a return.
+//
+//   make_thread_block_dim            <- its "Grid and block dimensions" block.
+//       Body verbatim; sizeof(ScalarType) now arrives as scalar_bytes and the
+//       trailing dim3 block(...) became the return.
+//
+//   LAUNCH_KERNEL / DISPATCH_FORMAT  <- the same macros. KERNEL and FIRST_ARG
+//       replace the hardcoded multi_layer_block_transfer_kernel and
+//       lmcache_obj4; all cases and the default arm are untouched and in
+//       the original order.
+//
+//   dispatch_by_transfer_unit        <- the LAUNCH_TEMPLATED ladder inside
+//       multi_layer_block_kv_transfer. Checks and the 16/4/2-byte ladder are
+//       verbatim; each LAUNCH_TEMPLATED(T) became fn(TransferUnit<T>{}), so
+//       the caller names the launch instead of the macro.
+//
+//   execute_object_group_transfer_impl
+//                                    <- body of execute_object_group_transfer.
+//       Plan walk, validation and tensor views verbatim; the tail that built
+//       lmcache_objects_ptrs and called multi_layer_block_kv_transfer became
+//       launch_fn(...) and moved unchanged into each caller's lambda.
+//
+// ===========================================================================
+
 /**
- * Launch geometry for the multi-layer block transfer kernels.
+ * Validate the block_ids / num_objects / chunk-size relationship and return the
+ * number of blocks belonging to each object.
  *
- * Shared by the per-chunk launcher in mp_mem_kernels.cu and the layer-wise
- * launcher in mp_mem_kernels_layerwise.cu so the two can never drift apart:
- * retuning the grid/block math here retunes both paths at once.
+ * Lifted from the "Validation" preamble of
+ * multi_layer_block_kv_transfer_templated so the per-chunk launcher
+ * (mp_mem_kernels.cu) and the layer-wise one (mp_mem_kernels_layerwise.cu)
+ * enforce exactly the same invariants.
  */
-struct MultiLayerLaunchConfig {
-  int total_blocks;
-  int num_blocks_per_object;
-  dim3 block;
-  dim3 grid;
-};
+inline int calculate_num_blocks_per_object(
+    int total_blocks, int num_objects, const PageBufferShapeDesc& shape_desc,
+    int lmcache_chunk_size) {
+  TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
+              total_blocks, ") must be divisible by num_objects (", num_objects,
+              ")");
+  int num_blocks_per_object = total_blocks / num_objects;
 
-template <typename ScalarType>
-inline MultiLayerLaunchConfig make_multi_layer_launch_config(
-    const torch::Tensor& block_ids, int num_objects,
-    const PageBufferShapeDesc& shape_desc, int lmcache_chunk_size) {
-  MultiLayerLaunchConfig cfg;
-  cfg.total_blocks = static_cast<int>(block_ids.size(0));
-  TORCH_CHECK(cfg.total_blocks % num_objects == 0, "block_ids length (",
-              cfg.total_blocks, ") must be divisible by num_objects (",
-              num_objects, ")");
-  cfg.num_blocks_per_object = cfg.total_blocks / num_objects;
-
-  TORCH_CHECK(cfg.num_blocks_per_object * shape_desc.bs == lmcache_chunk_size,
+  TORCH_CHECK(num_blocks_per_object * shape_desc.bs == lmcache_chunk_size,
               "blocks_per_object * block_size (",
-              cfg.num_blocks_per_object * shape_desc.bs,
+              num_blocks_per_object * shape_desc.bs,
               ") must equal lmcache_chunk_size (", lmcache_chunk_size, ")");
+  return num_blocks_per_object;
+}
 
-  int elements_per_head = shape_desc.hs * shape_desc.element_size /
-                          static_cast<int>(sizeof(ScalarType));
+/**
+ * Thread-block shape for the multi-layer block transfer kernels.
+ *
+ * Lifted from the "Grid and block dimensions" block of
+ * multi_layer_block_kv_transfer_templated so the two launchers can never drift
+ * apart: retuning the thread geometry here retunes both paths at once.
+ *
+ * scalar_bytes is sizeof(ScalarType) at the call site; passing it as a plain
+ * int keeps this an ordinary function rather than a template.
+ *
+ * The matching grid is a single dim3 constructor with no tuning knob in it, so
+ * it stays at each call site exactly as the pre-feature code had it:
+ *
+ *     dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
+ */
+inline dim3 make_thread_block_dim(const PageBufferShapeDesc& shape_desc,
+                                  int scalar_bytes) {
+  int elements_per_head =
+      shape_desc.hs * shape_desc.element_size / scalar_bytes;
   int thread_dim_x = std::min(elements_per_head, 32);
   int thread_dim_y = shape_desc.nh;
   TORCH_CHECK(thread_dim_y <= 32, "Number of heads (", thread_dim_y,
@@ -346,9 +401,7 @@ inline MultiLayerLaunchConfig make_multi_layer_launch_config(
       std::min(shape_desc.bs, 1024 / (thread_dim_x * thread_dim_y));
   thread_dim_z = std::min(thread_dim_z, 64);  // max threads per block in z-dim
 
-  cfg.block = dim3(thread_dim_x, thread_dim_y, thread_dim_z);
-  cfg.grid = dim3(shape_desc.kv_size, cfg.total_blocks, shape_desc.nl);
-  return cfg;
+  return dim3(thread_dim_x, thread_dim_y, thread_dim_z);
 }
 
 }  // namespace lmcache_mp
@@ -426,19 +479,29 @@ inline MultiLayerLaunchConfig make_multi_layer_launch_config(
                   static_cast<int>(engine_kv_format));                         \
   }
 
+namespace lmcache_mp {
+
 /**
  * Transfer-unit (vectorisation width) selection, shared by both kernel entry
  * points.
  *
- * Picks the widest scalar type a head row can be copied in and invokes ``fn``
- * with a ``TransferUnit<T>`` tag carrying that choice, so the caller recovers
- * the type via ``typename decltype(tag)::type``. A tag is used rather than an
- * explicit template argument because C++17 has no templated lambdas.
+ * The selection rule below is pre-feature code. Only the way the chosen type
+ * is handed back changed, in two steps:
  *
- * Centralised deliberately: this ladder used to be duplicated in both entry
- * points, where adding an EngineKVFormat or changing the vectorisation rule in
- * only one place left the other silently copying at the old width -- a wrong
- * answer at runtime rather than a build failure.
+ *  - Pre-feature, the LAUNCH_TEMPLATED(T) macro pasted one hardcoded call to
+ *    multi_layer_block_kv_transfer_templated<T>. The two entry points need
+ *    different calls -- the layer-wise one targets
+ *    multi_layer_block_kv_transfer_layerwise_templated, with a different
+ *    argument list -- so the call now arrives as the `fn` callback.
+ *  - `fn` is a lambda taken by const reference, and a C++17 lambda accepts no
+ *    explicit template argument, so the chosen type travels as an empty
+ *    TransferUnit<T> tag. Both callers recover it with
+ *    `using ScalarType = typename decltype(transfer_unit)::type;`.
+ *
+ * Keeping the rule in one place matters: were it copied per entry point,
+ * adding an EngineKVFormat or retuning the vectorisation rule in only one copy
+ * would leave the other silently copying at the old width -- a wrong answer at
+ * runtime rather than a build failure.
  */
 template <typename T>
 struct TransferUnit {
@@ -448,7 +511,7 @@ struct TransferUnit {
 template <typename Fn>
 void dispatch_by_transfer_unit(const PageBufferShapeDesc& shape_desc,
                                EngineKVFormat engine_kv_format, const Fn& fn) {
-  const int head_bytes = shape_desc.hs * shape_desc.element_size;
+  int head_bytes = shape_desc.hs * shape_desc.element_size;
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");
 
@@ -482,11 +545,9 @@ void dispatch_by_transfer_unit(const PageBufferShapeDesc& shape_desc,
  * ``launch_fn(group, launch, paged_buffer_ptrs_tensor, block_ids)``. It is
  * taken by const reference, not forwarded, because it is re-invoked in a loop.
  *
- * Only those two translation units include this header, so nothing here
- * reaches a public header or the pybind surface.
  */
 template <typename LaunchFn>
-void execute_object_group_transfer_common(
+void execute_object_group_transfer_impl(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
@@ -560,3 +621,5 @@ void execute_object_group_transfer_common(
     }
   }
 }
+
+}  // namespace lmcache_mp

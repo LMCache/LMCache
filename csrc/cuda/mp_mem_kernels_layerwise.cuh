@@ -45,7 +45,7 @@ void multi_layer_block_kv_transfer_layerwise(
  * Dispatches every launch to multi_layer_block_kv_transfer_layerwise, which
  * supports more than four objects per launch and the interleaved KV layout.
  * A separate entry point so the per-chunk signature stays untouched; shares
- * the plan-walking driver via execute_object_group_transfer_common.
+ * the plan-walking driver via execute_object_group_transfer_impl.
  */
 void execute_object_group_transfer_layerwise(
     TransferDirection direction, const torch::Device& device,
