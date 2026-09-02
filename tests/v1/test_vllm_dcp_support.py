@@ -459,7 +459,6 @@ def test_exact_fit_recurrent_page_uses_one_opaque_slot():
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["recurrent"], spec)],
-        kv_cache_layout="NHD",
     )
 
     edited = apply_kv_cache_group_edits(
@@ -503,7 +502,9 @@ def test_padded_attention_page_preserves_declared_opaque_tail():
         KVCacheGroupSpec,
     )
     from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    from vllm.v1.kv_cache_interface import (
+        MLAAttentionSpec,
+    )
 
     # First Party
     from lmcache.integration.vllm.kv_cache_group_edits import (
@@ -545,7 +546,6 @@ def test_padded_attention_page_preserves_declared_opaque_tail():
             KVCacheGroupSpec(["attention"], attention_spec),
             KVCacheGroupSpec(["recurrent"], recurrent_spec),
         ],
-        kv_cache_layout="NHD",
     )
 
     edited = apply_kv_cache_group_edits(
@@ -573,7 +573,9 @@ def test_packed_attention_page_uses_one_opaque_physical_slot():
         KVCacheGroupSpec,
     )
     from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    from vllm.v1.kv_cache_interface import (
+        MLAAttentionSpec,
+    )
 
     # First Party
     from lmcache.integration.vllm.kv_cache_group_edits import (
@@ -622,7 +624,6 @@ def test_packed_attention_page_uses_one_opaque_physical_slot():
             KVCacheGroupSpec(["attention"], attention_spec),
             KVCacheGroupSpec(["recurrent"], recurrent_spec),
         ],
-        kv_cache_layout="NHD",
     )
 
     edited = apply_kv_cache_group_edits(
@@ -714,7 +715,6 @@ def test_subpaged_attention_excludes_incomplete_logical_page_tail(
             KVCacheGroupSpec(["attention"], attention_spec),
             KVCacheGroupSpec(["recurrent"], recurrent_spec),
         ],
-        kv_cache_layout="NHD",
     )
 
     edited = apply_kv_cache_group_edits(
