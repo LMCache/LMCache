@@ -757,6 +757,7 @@ class EngineDrivenTransferContext(TransferContext):
                     hidden_dim_size=hidden_dim_size,
                     dtype_str=dtype_str,
                     use_mla=use_mla_flag,
+                    num_physical_slots=blocks_in_chunk * block_size,
                 )
             ],
         )
@@ -786,6 +787,23 @@ class EngineDrivenTransferContext(TransferContext):
             supported_transfer_mode,
         )
         self._after_register()
+
+    def create_recorded_event(self) -> IPCEvent | None:
+        """Return no event for the synchronous engine-driven transfer path.
+
+        Returns:
+            ``None`` because store and retrieve synchronize the active device
+            before accessing or releasing KV-cache buffers.
+
+        Raises:
+            RuntimeError: If :meth:`register` has not completed.
+        """
+        if self._engine_driven_context is None:
+            raise RuntimeError(
+                "Engine-driven transfer context is not registered. "
+                "Call register() before creating transfer events."
+            )
+        return None
 
     def create_recorded_event(self) -> IPCEvent | None:
         """Return no event for the synchronous engine-driven transfer path.

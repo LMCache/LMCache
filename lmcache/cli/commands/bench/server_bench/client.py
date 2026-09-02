@@ -903,6 +903,7 @@ class ServerBenchClient:
                 use_gpu=use_gpu,
                 use_handle=use_handle,
                 engine_group_infos=engine_group_infos,
+                num_physical_slots=self._chunk_size,
             )
             self._log(
                 "[rank %d] REGISTER_KV_CACHE: %s"

@@ -343,6 +343,36 @@ def test_lookup_keys_form_returns_placements_and_tokens():
         assert results[1]["placements"] == []
 
 
+def test_lookup_and_listing_report_access_counts():
+    def _access(seq: int) -> dict:
+        return _batch(
+            seq=seq, event_type="access", backend="", entries=[{"key": _key(h="aa")}]
+        )
+
+    with _client() as client:
+        _post_events(
+            client,
+            [
+                _batch(
+                    seq=1,
+                    entries=[
+                        {"key": _key(h="aa"), "size_bytes": 1},
+                        {"key": _key(h="bb"), "size_bytes": 1},
+                    ],
+                ),
+                _access(seq=2),
+                _access(seq=3),
+            ],
+        )
+
+        results = _lookup(client, [_key(h="aa"), _key(h="bb"), _key(h="ff")])["results"]
+        assert [r["access_count"] for r in results] == [2, 0, 0]
+
+        listed = client.get("/directory/keys").json()["keys"]
+        by_hash = {row["key"]["chunk_hash_hex"]: row["access_count"] for row in listed}
+        assert by_hash == {"aa": 2, "bb": 0}
+
+
 def test_lookup_malformed_key_is_rejected():
     with _client() as client:
         resp = client.post("/directory/lookup", json={"keys": [_key(h="zz")]})

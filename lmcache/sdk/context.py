@@ -278,6 +278,7 @@ class LMCacheSDKContext:
         request_id: str,
         token_ids: list[int],
         cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
     ) -> None:
         """Submit a LOOKUP request for the given token IDs.
         Modification from lmcache/integration/vllm/vllm_multi_process_adapter.py.
@@ -288,6 +289,8 @@ class LMCacheSDKContext:
             request_id: Unique ID for this lookup request.
             token_ids: List of token IDs to look up.
             cache_salt: Optional cache salt string for the lookup.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
         """
         if request_id in self._pending_lookups:
             # Skip if there is already a lookup request
@@ -301,6 +304,7 @@ class LMCacheSDKContext:
             end=aligned_end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         ).no_worker_id_version()
 
         future = self._mq_client.submit_request(
@@ -386,12 +390,15 @@ class LMCacheSDKContext:
         self,
         tokens: Sequence[int],
         cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
     ) -> torch.Tensor | None:
         """Retrieve KV cache tensors for the given token IDs.
 
         Args:
             tokens: The list of token IDs to retrieve KV cache for.
             cache_salt: Optional cache salt string for the lookup.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             A contiguous CPU tensor containing the retrieved KV cache for
@@ -420,6 +427,7 @@ class LMCacheSDKContext:
             request_id,
             token_ids=list(tokens[:total_tokens]),
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
 
         start_time = time.time()
@@ -452,6 +460,7 @@ class LMCacheSDKContext:
             end=num_prefetched_tokens,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
             worker_id=0,
         )
         try:
@@ -464,6 +473,7 @@ class LMCacheSDKContext:
         kv: torch.Tensor,
         tokens: Sequence[int],
         cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
     ) -> bool:
         """Store KV cache tensors for the given token IDs.
 
@@ -471,6 +481,8 @@ class LMCacheSDKContext:
             kv: The KV cache tensor to store, of shape [2, L, T, D].
             tokens: The list of token IDs corresponding to the KV cache tensor.
             cache_salt: Optional cache salt string for the store.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             True if the store operation is successful, False otherwise.
@@ -493,6 +505,7 @@ class LMCacheSDKContext:
             end=total_tokens,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
             worker_id=0,
         )
 
@@ -510,6 +523,7 @@ class LMCacheSDKContext:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
         worker_id: int | None = None,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
@@ -520,6 +534,8 @@ class LMCacheSDKContext:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
             worker_id: Optional worker ID for the key.
                 If None, the key will be created without a worker ID (for lookups).
 
@@ -536,4 +552,5 @@ class LMCacheSDKContext:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
