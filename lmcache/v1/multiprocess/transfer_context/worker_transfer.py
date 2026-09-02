@@ -5,7 +5,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import Enum
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 import os
 
 # Third Party
@@ -288,6 +288,20 @@ class TransferContext(ABC):
             "Q ring registration is not supported by this transfer context"
         )
 
+    @abstractmethod
+    def create_recorded_event(self) -> IPCEvent | None:
+        """Create the event needed to order the next transfer.
+
+        Returns:
+            A recorded device event when the transfer context needs stream
+            ordering, or ``None`` when the context orders transfers
+            synchronously without an event.
+
+        Raises:
+            RuntimeError: If the context has not been registered or cannot
+                create the event required by its transfer protocol.
+        """
+
     def submit_q_store(
         self,
         request_id: str,
@@ -329,7 +343,7 @@ class TransferContext(ABC):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
         """Submit a store request and return a completion future.
@@ -340,7 +354,8 @@ class TransferContext(ABC):
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
             block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
-            event: Synchronization event object.
+            event: Synchronization event object, or ``None`` when the concrete
+                context does not require one.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
 
         Returns:
@@ -358,7 +373,7 @@ class TransferContext(ABC):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
@@ -371,7 +386,8 @@ class TransferContext(ABC):
             kv_caches: Worker KV cache tensors keyed by layer name.
             block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
                 group id.
-            event: Synchronization event object.
+            event: Synchronization event object, or ``None`` when the concrete
+                context does not require one.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
 
@@ -468,6 +484,24 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._device = device
         self._event_backend = event_backend
 
+    def create_recorded_event(self) -> IPCEvent:
+        """Create and record an exportable event for handle-based transfer.
+
+        Returns:
+            An interprocess-capable event recorded on the current stream.
+
+        Raises:
+            RuntimeError: If :meth:`register` has not completed.
+        """
+        if self._device is None or self._event_backend is None:
+            raise RuntimeError(
+                "LMCache-driven transfer context is not registered. "
+                "Call register() before creating transfer events."
+            )
+        event = self._event_backend.create_event(self._device)
+        self._event_backend.record_event(event, torch_dev.current_stream())
+        return cast(IPCEvent, event)
+
     def register_q(
         self,
         instance_id: int,
@@ -505,7 +539,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
         """Submit a handle-based store ordered by ``event``.
@@ -537,6 +571,8 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
+        if event is None:
+            raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._send_request(
             self._mq_client,
@@ -578,7 +614,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
@@ -612,6 +648,8 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
+        if event is None:
+            raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._send_request(
             self._mq_client,
@@ -749,6 +787,23 @@ class EngineDrivenTransferContext(TransferContext):
             supported_transfer_mode,
         )
 
+    def create_recorded_event(self) -> IPCEvent | None:
+        """Return no event for the synchronous engine-driven transfer path.
+
+        Returns:
+            ``None`` because store and retrieve synchronize the active device
+            before accessing or releasing KV-cache buffers.
+
+        Raises:
+            RuntimeError: If :meth:`register` has not completed.
+        """
+        if self._engine_driven_context is None:
+            raise RuntimeError(
+                "Engine-driven transfer context is not registered. "
+                "Call register() before creating transfer events."
+            )
+        return None
+
     def submit_store(
         self,
         _request_id: str,
@@ -756,7 +811,7 @@ class EngineDrivenTransferContext(TransferContext):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent,
+        _event: IPCEvent | None,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
         if self._engine_driven_context is None:
@@ -798,7 +853,7 @@ class EngineDrivenTransferContext(TransferContext):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent,
+        _event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:

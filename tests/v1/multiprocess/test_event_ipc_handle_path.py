@@ -58,13 +58,6 @@ class _FakeEventBackend:
         self.calls.append(("synchronize", event, device))
 
 
-class _WorkerEvent:
-    """Worker event without a direct ``ipc_handle`` method."""
-
-    def wait(self, stream: object | None = None) -> None:
-        return None
-
-
 class _NoopDispatcher:
     """Avoid starting native callback threads in the server unit test."""
 
@@ -147,6 +140,9 @@ def test_worker_exports_events_through_platform_backend(
         1.0,
         send_request,
     )
+    stream = MagicMock(name="current_stream")
+    monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
+    event = context.create_recorded_event()
 
     store_future = context.submit_store(
         "request",
@@ -154,7 +150,7 @@ def test_worker_exports_events_through_platform_backend(
         1,
         kv_caches,
         [[0]],
-        _WorkerEvent(),
+        event,
         1,
     )
     retrieve_future = context.submit_retrieve(
@@ -163,7 +159,7 @@ def test_worker_exports_events_through_platform_backend(
         1,
         kv_caches,
         [[0]],
-        _WorkerEvent(),
+        event,
         1,
         skip_first_n_tokens=2,
     )
@@ -180,10 +176,16 @@ def test_worker_exports_events_through_platform_backend(
     )
     assert [call[0] for call in backend.calls] == [
         "check",
+        "create",
+        "record",
         "export",
         "export",
     ]
-    assert all(call[-1] == torch.device("cpu") for call in backend.calls)
+    assert backend.calls[2][2] is stream
+    device = torch.device("cpu")
+    assert backend.calls[0][1] == device
+    assert backend.calls[1][1] == device
+    assert all(call[-1] == device for call in backend.calls[3:])
 
 
 def test_server_store_and_retrieve_delegate_event_ordering(
