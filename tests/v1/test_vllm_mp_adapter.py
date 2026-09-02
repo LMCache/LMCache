@@ -385,10 +385,18 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
 
-    adapter.submit_store_request("req-1", op, event=MagicMock())
+    adapter.submit_store_request(
+        "req-1",
+        op,
+        event=MagicMock(),
+        request_configs={"lmcache.skip_save": True},
+    )
 
     assert transfer_ctx.submit_store.called
     assert transfer_ctx.submit_store.call_args.kwargs == {}
+    assert transfer_ctx.submit_store.call_args.args[1].request_configs == {
+        "lmcache.skip_save": True
+    }
     assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
     assert adapter.store_futures["req-1"] is fake_future
 
@@ -443,12 +451,42 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
         skip_first_n_tokens=1,
     )
 
-    adapter.submit_retrieve_request("req-1", op, event=MagicMock())
+    adapter.submit_retrieve_request(
+        "req-1",
+        op,
+        event=MagicMock(),
+        request_configs={"lmcache.skip_save": True},
+    )
 
     assert transfer_ctx.submit_retrieve.called
     assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
+    assert transfer_ctx.submit_retrieve.call_args.args[1].request_configs == {
+        "lmcache.skip_save": True
+    }
     assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["batched_submit_store_requests", "batched_submit_retrieve_requests"],
+)
+def test_batched_submit_rejects_mismatched_parallel_lists(
+    fake_adapter, method_name: str
+) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    method = getattr(adapter, method_name)
+
+    with pytest.raises(ValueError, match="must have the same length"):
+        method(["req-1"], [], MagicMock())
+
+    with pytest.raises(ValueError, match="must have the same length"):
+        method(
+            ["req-1"],
+            [_op([[0]])],
+            MagicMock(),
+            request_configs_list=[],
+        )
 
 
 def test_load_store_op_accepts_per_group_block_ids():

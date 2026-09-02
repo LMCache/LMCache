@@ -653,7 +653,9 @@ class LMCacheMPSchedulerAdapter:
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
-        self._lookup_params: dict[str, tuple[list[int], str]] = {}
+        self._lookup_params: dict[
+            str, tuple[list[int], str, dict[str, Any] | None]
+        ] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -746,6 +748,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         token_ids: list[int],
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ):
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -760,6 +763,8 @@ class LMCacheMPSchedulerAdapter:
             token_ids: Token IDs to lookup from LMCache
             cache_salt: Per-user isolation salt. Requests with different
                 cache_salt values produce separate cache entries.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             None
@@ -790,6 +795,7 @@ class LMCacheMPSchedulerAdapter:
             end=aligned_end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         ).no_worker_id_version()
 
         futures: dict[str, MessagingFuture[Any]] = {
@@ -815,7 +821,7 @@ class LMCacheMPSchedulerAdapter:
                 return
 
         self._pending_lookups.add(request_id)
-        self._lookup_params[request_id] = (token_ids, cache_salt)
+        self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -835,7 +841,9 @@ class LMCacheMPSchedulerAdapter:
             per_server: Per-server hit chunk counts.
             min_chunks: Minimum hit chunk count across all servers.
         """
-        token_ids_l, cs = self._lookup_params.pop(request_id, (None, None))
+        token_ids_l, cs, request_configs = self._lookup_params.pop(
+            request_id, (None, None, None)
+        )
         if token_ids_l is not None:
             for url, hit_chunks in per_server.items():
                 if hit_chunks <= min_chunks:
@@ -849,6 +857,7 @@ class LMCacheMPSchedulerAdapter:
                     end=tail_end,
                     request_id=request_id,
                     cache_salt=cs or "",
+                    request_configs=request_configs,
                 ).no_worker_id_version()
                 send_lmcache_request(
                     self.mq_clients[url],
@@ -968,6 +977,7 @@ class LMCacheMPSchedulerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -988,6 +998,8 @@ class LMCacheMPSchedulerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
         """
         if not self.is_healthy:
             return
@@ -999,6 +1011,7 @@ class LMCacheMPSchedulerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         ).no_worker_id_version()
         for url in self._server_urls:
             send_lmcache_request(
@@ -1054,6 +1067,7 @@ class LMCacheMPSchedulerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -1063,6 +1077,8 @@ class LMCacheMPSchedulerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             IPCCacheServerKey: The constructed key.
@@ -1079,6 +1095,7 @@ class LMCacheMPSchedulerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
 
     def update_pending_store_count(self, req_id: str, count: int) -> bool:
@@ -1529,6 +1546,7 @@ class LMCacheMPWorkerAdapter:
         op: LoadStoreOp,
         event: IPCEvent,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ):
         """
         Submit a KV cache store request to LMCache
@@ -1539,6 +1557,8 @@ class LMCacheMPWorkerAdapter:
             event: The device event that is recorded after the current model
                 inference step.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
         """
         self._ensure_heartbeat_started()
 
@@ -1555,6 +1575,7 @@ class LMCacheMPWorkerAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -1580,6 +1601,7 @@ class LMCacheMPWorkerAdapter:
         op: LoadStoreOp,
         event: IPCEvent,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> None:
         """
         Submit a KV cache retrieve request to LMCache
@@ -1594,6 +1616,8 @@ class LMCacheMPWorkerAdapter:
             event: The device event that is recorded after the current model
                 inference step.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
         """
         self._ensure_heartbeat_started()
 
@@ -1609,6 +1633,7 @@ class LMCacheMPWorkerAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -1635,6 +1660,7 @@ class LMCacheMPWorkerAdapter:
         ops: list[LoadStoreOp],
         event: IPCEvent,
         cache_salts: list[str] | None = None,
+        request_configs_list: list[dict[str, Any] | None] | None = None,
     ):
         """
         Submit a batched store request to LMCache
@@ -1648,11 +1674,33 @@ class LMCacheMPWorkerAdapter:
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be the same as
                 request_ids.
+            request_configs_list: Optional LMCache request configs, one per
+                request.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
-        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
-            self.submit_store_request(request_id, op, event, cache_salt=salt)
+        if request_configs_list is None:
+            request_configs_list = [None] * len(request_ids)
+        if not (
+            len(request_ids)
+            == len(ops)
+            == len(cache_salts)
+            == len(request_configs_list)
+        ):
+            raise ValueError(
+                "request_ids, ops, cache_salts, and request_configs_list "
+                "must have the same length"
+            )
+        for request_id, op, salt, request_configs in zip(
+            request_ids, ops, cache_salts, request_configs_list, strict=True
+        ):
+            self.submit_store_request(
+                request_id,
+                op,
+                event,
+                cache_salt=salt,
+                request_configs=request_configs,
+            )
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
@@ -1661,6 +1709,7 @@ class LMCacheMPWorkerAdapter:
         ops: list[LoadStoreOp],
         event: IPCEvent,
         cache_salts: list[str] | None = None,
+        request_configs_list: list[dict[str, Any] | None] | None = None,
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -1674,11 +1723,33 @@ class LMCacheMPWorkerAdapter:
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be same as
                 request_ids.
+            request_configs_list: Optional LMCache request configs, one per
+                request.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
-        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
-            self.submit_retrieve_request(request_id, op, event, cache_salt=salt)
+        if request_configs_list is None:
+            request_configs_list = [None] * len(request_ids)
+        if not (
+            len(request_ids)
+            == len(ops)
+            == len(cache_salts)
+            == len(request_configs_list)
+        ):
+            raise ValueError(
+                "request_ids, ops, cache_salts, and request_configs_list "
+                "must have the same length"
+            )
+        for request_id, op, salt, request_configs in zip(
+            request_ids, ops, cache_salts, request_configs_list, strict=True
+        ):
+            self.submit_retrieve_request(
+                request_id,
+                op,
+                event,
+                cache_salt=salt,
+                request_configs=request_configs,
+            )
 
     def _process_finished_stores(
         self,
@@ -2053,6 +2124,7 @@ class LMCacheMPWorkerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -2062,6 +2134,8 @@ class LMCacheMPWorkerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             IPCCacheServerKey: The constructed key.
@@ -2076,4 +2150,5 @@ class LMCacheMPWorkerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
