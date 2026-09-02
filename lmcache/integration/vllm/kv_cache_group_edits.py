@@ -431,15 +431,16 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         padding, and any sibling layers on a shared pool, live between
         row and S).
 
-        Output for NHD: [num_blocks, block_size, 1, head_size] with
+        Preferred output for NHD: [num_blocks, block_size, 1, head_size] with
         strides (S, head_size, head_size, 1). HND swaps dims 1 and 2:
         [num_blocks, 1, block_size, head_size] with strides
         (S, block_size * head_size, head_size, 1).
 
         head_size = ceil(row / block_size), rounded up to the kernels'
-        vector alignment, and block_size * head_size may exceed the row
-        by at most this layer's own page padding
-        (spec.page_size_bytes), never reaching sibling bytes.
+        vector alignment. If that aligned shape does not fit in the declared
+        page, the complete page is exposed as one opaque physical slot. Group
+        metadata retains the independent logical token count, so scheduling
+        and cache identity do not change.
         """
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
@@ -469,19 +470,36 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
             if candidate * block_size * elem <= page_bytes:
                 head_size = candidate
                 break
-        if head_size == 0:
-            raise ValueError(
-                f"cannot tile a {row}-element state row into {block_size} "
-                f"aligned tokens within the {page_bytes}-byte page"
+        if head_size != 0:
+            if kv_layout == "NHD":
+                inner = (block_size, 1, head_size)
+                inner_strides = (head_size, head_size, 1)
+            else:
+                inner = (1, block_size, head_size)
+                inner_strides = (block_size * head_size, head_size, 1)
+            return kv_cache.as_strided(
+                (num_blocks, *inner), (kv_cache.stride(0), *inner_strides)
             )
-        if kv_layout == "NHD":
-            inner = (block_size, 1, head_size)
-            inner_strides = (head_size, head_size, 1)
-        else:
-            inner = (1, block_size, head_size)
-            inner_strides = (block_size * head_size, head_size, 1)
+
+        if page_bytes % elem:
+            raise ValueError(
+                f"declared Mamba page size {page_bytes} bytes is not aligned "
+                f"to tensor element size {elem}"
+            )
+        page_elems = page_bytes // elem
+        if page_elems < row:
+            raise ValueError(
+                f"declared Mamba page has {page_elems} elements but the state "
+                f"row requires {row}"
+            )
+        if page_elems > block_step:
+            raise ValueError(
+                f"declared Mamba page has {page_elems} elements but the "
+                f"physical block stride is only {block_step}"
+            )
         return kv_cache.as_strided(
-            (num_blocks, *inner), (kv_cache.stride(0), *inner_strides)
+            (num_blocks, 1, page_elems),
+            (kv_cache.stride(0), page_elems, 1),
         )
 
 

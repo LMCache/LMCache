@@ -423,6 +423,78 @@ def test_mamba_alignment_uses_resolved_page_not_cli_block_size():
 
 
 @requires_vllm
+def test_exact_fit_recurrent_page_uses_one_opaque_slot():
+    """A valid page remains transferable when token rows cannot be aligned."""
+    # Third Party
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import (
+        apply_kv_cache_group_edits,
+    )
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    import lmcache.lmcache_native as lmcache_native
+
+    num_blocks = 3
+    logical_block_size = 4096
+    page_elems = 1_085_440
+    block_stride = 2 * page_elems
+    pool = torch.zeros(num_blocks * block_stride, dtype=torch.uint8)
+    recurrent = pool.as_strided(
+        (num_blocks, 1, 1, page_elems),
+        (block_stride, page_elems, page_elems, 1),
+        storage_offset=page_elems,
+    )
+    recurrent[1, 0, 0, :32] = torch.arange(32, dtype=torch.uint8)
+    spec = VllmMambaSpec(
+        block_size=logical_block_size,
+        shapes=((page_elems,),),
+        dtypes=(torch.uint8,),
+        page_size_padded=page_elems,
+        mamba_cache_mode="align",
+    )
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["recurrent"], spec)],
+        kv_cache_layout="NHD",
+    )
+
+    edited = apply_kv_cache_group_edits(
+        config,
+        {"recurrent": recurrent},
+        {"kv_layout": "NHD"},
+    )["recurrent"]
+
+    assert isinstance(edited, torch.Tensor)
+    assert edited.shape == (num_blocks, 1, page_elems)
+    assert edited.stride() == (block_stride, page_elems, 1)
+    assert edited.data_ptr() == recurrent.data_ptr()
+    assert torch.equal(edited[1, 0], recurrent[1, 0, 0])
+
+    manager = KVLayerGroupsManager(
+        [edited],
+        engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_NB_BS_HS],
+        engine_group_infos=[
+            EngineGroupInfo(
+                engine_group_id=0,
+                layer_indices=(0,),
+                tokens_per_block=logical_block_size,
+            )
+        ],
+        lmcache_tokens_per_chunk=logical_block_size,
+    )
+    group = manager.kernel_groups[0]
+    assert group.slots_per_block == 1
+    assert group.tokens_per_block == logical_block_size
+    assert group.calculate_slots(logical_block_size) == 1
+    assert group.shape_desc.hs == page_elems
+    assert group.shape_desc.block_stride_elems == block_stride
+
+
+@requires_vllm
 def test_padded_attention_page_preserves_declared_opaque_tail():
     """Registration exposes all declared bytes and preserves block stride."""
     # Third Party
