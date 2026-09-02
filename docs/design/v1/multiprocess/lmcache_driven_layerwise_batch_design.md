@@ -164,17 +164,27 @@ This interleaved layout is carried by `PageBufferShapeDesc.kv_interleaved`
 (`lmcache/v1/platform/ops_types.py`).
 
 The flag is a **deployment-wide invariant**, not a per-call argument: it
-is set once in `register_kv_cache()` on every kernel group's
-`shape_desc` when `layerwise_loading` (i.e. `layerwise_batch > 0`) is
-true.  Both the store (D2H) and retrieve (H2D) paths then simply read
-it.  Configuring it at registration — rather than latching it on the
-first store — also keeps cold-start retrieves correct when a process
+is latched once in `LMCacheLayerwiseTransferModule._ensure_event_pool()`
+on every kernel group's `shape_desc`, guarded by
+`layerwise_batch > 0`.  That runs from the
+`REGISTER_LAYERWISE_IPC_EVENT_POOL` handler, which the worker issues
+immediately after `REGISTER_KV_CACHE` (see 6.1), so it is in place
+before any transfer.  Both the store (D2H) and retrieve (H2D) paths
+then simply read it.  Configuring it at registration — rather than latching
+it on the first store — also keeps cold-start retrieves correct when a process
 reads chunks written by a previous run before storing anything itself.
 
 Consequently the per-chunk transfer helpers
 (`_run_object_group_transfer_plan`, `transfer_kv_per_object_group`)
 take no layout parameter and are byte-identical to the pre-layerwise
 implementation.
+
+**The flag is a no-op when `kv_size == 1`.**  Both layouts are produced
+by the same expression in `calculate_lmcache_global_offset`, differing only
+in where the layer stride sits relative to the K/V stride.
+
+A layout mismatch between the D2H writer and the H2D reader is only observable
+when `kv_size == 2`.
 
 ### 4.2 Interleaved Enables Contiguous Batch Memcpy
 
@@ -376,29 +386,119 @@ In practice this is a non-issue: mixed deployments offer no benefit,
 and old chunks are naturally evicted.  If rolling upgrades are needed,
 flushing L2 between mode changes is sufficient.
 
-**Future alternative:** store a `kv_interleaved` flag in each chunk's
-`MemoryObjMetadata` at D2H time.  The token database lookup can then
-compare the chunk's stored layout against the server's current setting
-and treat a mismatch as a cache miss — the stale entry is never read,
-and a subsequent store overwrites it in the correct layout.  This
-avoids both silent corruption and wasted L2 read I/O, and lets the
+**Exposure is per kernel group**  `kv_size` is a per-group property
+-- one `PageBufferShapeDesc` per group spec -- so a single registration
+can mix exposed and inert groups.  if model pairs a `kv_size == 2` main
+K/V group with a `kv_size == 1` key-only indexer. Chunks from a `kv_size == 1`
+group are always reusable whatever the flag says; only `kv_size == 2` groups
+can observe a mismatch. `kv_size == 1` may be about fused K/V, MLA or key-only
+side caches.
+
+**Future alternative:** store `kv_interleaved` in each chunk's
+`MemoryObjMetadata` at D2H time and have the token database lookup treat
+`kv_size == 2 and stored != current` as a cache miss -- the stale entry is
+never read, and a subsequent store overwrites it in the correct layout.
+This avoids both silent corruption and wasted L2 read I/O, and lets the
 system self-heal without a manual flush.
 
 ---
 
 ## 8. Multi-Frame ZMQ Responses
 
-### 8.1 Request Types
+### 8.1 Protocol Surface
 
-| Request Type | Frames per request | Used By |
-|---|---|---|
-| `RETRIEVE` | 1 | Per-chunk retrieve (existing path; unchanged) |
-| `RETRIEVE_LAYERWISE` | ceil(L/N) + 1 | Layerwise retrieve |
+Three additions to the protocol layer; none of them modifies an existing
+definition.
 
-Both share identical `payload_classes`.  A dedicated request type keeps the
+- **`HandlerType.STREAMING`** (`protocols/base.py`) -- a fourth handler
+  type alongside `SYNC`, `BLOCKING` and `NON_BLOCKING`.  Declaring it on
+  a request is what makes `add_handler` route to the streaming path.
+- **Two `RequestType` members** (`protocols/base.py`):
+  `REGISTER_LAYERWISE_IPC_EVENT_POOL` and `RETRIEVE_LAYERWISE`.
+- **`protocols/layerwise.py`** -- a new module holding both definitions,
+  so `protocols/engine.py` is untouched and the per-chunk protocol is
+  byte-for-byte identical when layer-wise is disabled.
+
+| Request Type | Handler type | Frames / request | Response class |
+|---|---|---|---|
+| `RETRIEVE` | `BLOCKING` | 1 | `tuple[bytes, bool]` |
+| `RETRIEVE_LAYERWISE` | `STREAMING` | ceil(L/N) + 1 | `tuple[bytes, bool, bool]` |
+| `REGISTER_LAYERWISE_IPC_EVENT_POOL` | `SYNC` | 1 | `tuple[int, list[bytes]]` |
+
+`RETRIEVE_LAYERWISE` declares exactly the same `payload_classes` as
+`RETRIEVE` (`[KeyType, int, list[list[int]], bytes, int]`); only the
+response widens, from `(handle, succeeded)` to
+`(payload, is_final, succeeded)`.  A dedicated request type keeps the
 plain `RETRIEVE` dispatch path completely untouched.
 
+One response class is declared per request type, and
+`get_response_class(RETRIEVE_LAYERWISE)` is what
+`_call_streaming_handler` encodes *every* frame with.  Intermediate and
+closing frames are therefore the same msgspec type on the wire; the
+transport never learns that some of them are partial.  `is_final` is the
+only field that distinguishes them -- see 8.3.
+
+`REGISTER_LAYERWISE_IPC_EVENT_POOL` is an ordinary `SYNC` request, kept
+off `REGISTER_KV_CACHE` so registration keeps its plain `None` response
+for every non-layer-wise deployment (see 6.1).
+
 ### 8.2 How the Message Queue Stays Neutral
+
+Both file pairs follow the same shape: the layer-wise module subclasses
+the default one, and is imported only when `--layerwise-batch > 0`.
+
+```
+  mq.py                          mq_streaming.py
+  -------------------------      ------------------------------------------
+  MessageQueueServer        <--  StreamingMessageQueueServer
+    _call_handler()                _call_handler()  -> STREAMING? else super()
+    add_handler()                  add_handler()    -> STREAMING? else super()
+                                   _call_streaming_handler()           [new]
+                                   add_streaming_handler()             [new]
+
+  BlockingRequestHandler    <--  StreamingRequestHandler
+    __call__(payloads,             __call__(payloads,
+             affinity_key)                  affinity_key,
+                                            response_channel)      [+1 kwarg]
+
+  MessageQueueClient
+    .submit_request()          ~   submit_streaming_request(client, .., future)
+    .process_inbound()             (reused verbatim; not overridden)
+
+
+  futures.py                     futures_layerwise.py
+  -------------------------      ------------------------------------------
+  MessagingFuture           <--  LayerwiseRawFuture
+    set_result()             |     set_result()  -> buffer + re-arm, or finish
+    wait() / result()        |     bind_registry()                     [new]
+       ^                     |
+       |                     +-- LayerwiseDeviceMessagingFuture
+       |                            owns raw_future_: LayerwiseRawFuture
+       |                            _layer_event_map, wait_for_layer()
+       |
+  DeviceMessagingFuture  (sibling: one completion event, per-chunk retrieve)
+```
+
+`<--` is subclassing, `~` a sibling helper with no inheritance
+relationship.  `server.py` picks the server class at construction:
+
+```python
+server_cls: type[MessageQueueServer] = MessageQueueServer
+if mp_config.layerwise_batch > 0:
+    from lmcache.v1.multiprocess.mq_streaming import StreamingMessageQueueServer
+    server_cls = StreamingMessageQueueServer
+```
+
+so a deployment that never registers a streaming handler never imports
+`mq_streaming.py` at all.  Registration itself is unchanged:
+`add_handler_helper` reads `get_handler_type(request_type)` from the
+protocol table and passes it to `server.add_handler`, which the
+subclass intercepts.
+
+`response_channel` must be **keyword-only** on the handler.
+`_inspect_handler_signature` matches a handler's *positional* parameters
+against the declared `payload_classes`, so a positional
+`response_channel` would fail validation before dispatch.
 
 `mq.py` has no notion of a partial result, and none of its existing
 classes were modified.  Two additions carry the whole mechanism:
