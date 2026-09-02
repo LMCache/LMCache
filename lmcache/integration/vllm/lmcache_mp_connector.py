@@ -749,6 +749,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request_ids = []
         ops = []
         cache_salts = []
+        request_configs_list = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
@@ -756,6 +757,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            request_configs_list.append(meta.request_configs)
 
         if len(request_ids) == 0:
             return
@@ -763,7 +765,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_retrieve_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids,
+            ops,
+            event,
+            cache_salts=cache_salts,
+            request_configs_list=request_configs_list,
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -823,12 +829,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request_ids = []
         ops = []
         cache_salts = []
+        request_configs_list = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            request_configs_list.append(meta.request_configs)
 
         if len(request_ids) == 0:
             if self.dispatcher is not None:
@@ -838,7 +846,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_store_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids,
+            ops,
+            event,
+            cache_salts=cache_salts,
+            request_configs_list=request_configs_list,
         )
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
@@ -1026,6 +1038,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
+            request_configs=tracker.request_configs,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -1081,6 +1094,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request.request_id,
             token_ids=list(request.all_token_ids),
             cache_salt=tracker.cache_salt,
+            request_configs=tracker.request_configs,
         )
 
     def update_state_after_alloc(
@@ -1163,6 +1177,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                         end=free_end,
                         request_id=request.request_id,
                         cache_salt=tracker.cache_salt,
+                        request_configs=tracker.request_configs,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",
