@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 import threading
 import time
 import weakref
-import zlib
 
 if TYPE_CHECKING:
     # First Party
@@ -72,12 +71,6 @@ logger = init_logger(__name__)
 #: Distinct no-op-success reasons already reported (bounded: a fixed set of
 #: call sites), so the log costs nothing after the first occurrence of each.
 _NOOP_REASONS_SEEN: set[str] = set()
-
-#: No-op reasons that dropped nothing: the ranges were scattered by an earlier
-#: retrieve for this worker, so reuse is intact. These are logged but never
-#: published as CB_RETRIEVE_NOOP, keeping that event (and the metric it feeds)
-#: a signal that reuse was actually lost.
-_BENIGN_NOOP_REASONS = frozenset({"already_applied"})
 
 
 class _DeviceEvent(Protocol):
@@ -756,7 +749,7 @@ class BlendModule(InstanceLivenessTarget):
         # Bounded LRU keyed by (request id, WORKER id) -- at TP>1 each worker
         # issues its own retrieve and scatters into its own KV buffers, so the
         # key must include the worker or later ranks skip work they never did.
-        self._cb_applied_match_ranges: "OrderedDict[tuple[str, int | None], set[tuple[bytes, int, int, int]]]" = OrderedDict()  # noqa: E501
+        self._cb_applied_match_ranges: "OrderedDict[tuple[str, int | None], set[tuple[bytes, int, int, tuple]]]" = OrderedDict()  # noqa: E501
 
         # Request-invariant retrieve-plan specs per GPU context (entries die
         # with the context). The cached tuple holds the rope_state it was
@@ -2619,8 +2612,9 @@ class BlendModule(InstanceLivenessTarget):
         the shifted (non-prefix) subset, then writes per-token via the slot
         kernel — so non-block-aligned matches and partial vLLM blocks shared
         with recomputed tokens are written correctly (no block-alignment trim).
-        Only matches past the currently allocated slots are dropped (vLLM may
-        call this twice: partial- then full-block alloc).
+        Scatter is all-or-nothing: defer while the allocation covers no
+        matched token (vLLM calls this per block-alloc round), fail with
+        scatter_ran=False when it covers only part. Never a partial scatter.
 
         Args:
             key (IPCCacheServerKey): The request key.
@@ -2634,7 +2628,8 @@ class BlendModule(InstanceLivenessTarget):
 
         Returns:
             tuple[bytes, bool]: The scatter-complete event handle and whether
-            the scatter ran (False if the prefetched objects were unavailable).
+            the scatter ran (False if the prefetched objects were unavailable
+            or the allocation covered only part of the matched ranges).
 
         Raises:
             ValueError: If the instance has no registered KV cache or rope
@@ -2660,35 +2655,55 @@ class BlendModule(InstanceLivenessTarget):
 
         _retrieve_t0 = time.perf_counter()
 
-        def _noop_success(reason: str = "?", detail: str = "") -> tuple[bytes, bool]:
-            """Return a zero-work success, publishing CB_RETRIEVE_NOOP.
+        def _no_scatter(
+            reason: str,
+            detail: str = "",
+            *,
+            scatter_ran: bool = True,
+            publish: bool = True,
+        ) -> tuple[bytes, bool]:
+            """Return a zero-work result, publishing CB_RETRIEVE_NOOP.
 
-            The request silently falls back to a full recompute, so the event is
-            the only signal that reuse was lost; it is skipped for the reasons
-            in ``_BENIGN_NOOP_REASONS``, which dropped nothing. Exports a freshly
-            recorded event from THIS process -- echoing the caller's own handle
-            back makes the worker re-import it (CUDA "invalid device context").
+            On True the request silently falls back to a full recompute, so
+            the event is the only signal that reuse was lost. On False the
+            client degrades the request itself. Exports a freshly recorded
+            event from THIS process -- echoing the caller's own handle back
+            makes the worker re-import it (CUDA "invalid device context").
 
             Args:
                 reason: Fixed low-cardinality code, published as a metric
                     attribute and logged once per distinct value.
                 detail: Per-request specifics; log-only, never a metric
                     attribute.
+                scatter_ran: The bool handed back to the client.
+                publish: False for reasons that lost no reuse (nothing
+                    dropped), keeping CB_RETRIEVE_NOOP a true lost-reuse
+                    signal.
 
             Returns:
-                tuple[bytes, bool]: A fresh scatter-complete handle, and True.
+                tuple[bytes, bool]: A fresh scatter-complete handle, and
+                ``scatter_ran``.
             """
             if reason not in _NOOP_REASONS_SEEN:
                 _NOOP_REASONS_SEEN.add(reason)
                 logger.info(
-                    "CB retrieve: no-op success (%s%s) — %d match(es) dropped, "
-                    "request falls back to full recompute. Logged once per "
-                    "distinct reason.",
+                    "CB retrieve: no scatter (%s%s) — %d match(es) affected. "
+                    "Logged once per distinct reason.",
                     reason,
                     f": {detail}" if detail else "",
                     len(cb_match_result),
                 )
-            if reason not in _BENIGN_NOOP_REASONS:
+
+            with (
+                torch_dev.device(gpu_context.device),
+                torch_dev.stream(gpu_context.stream),
+            ):
+                check_interprocess_event_support()
+                done_event = torch_dev.Event(interprocess=True)
+                done_event.record()
+                handle = done_event.ipc_handle()
+
+            if publish:
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.CB_RETRIEVE_NOOP,
@@ -2699,32 +2714,42 @@ class BlendModule(InstanceLivenessTarget):
                         },
                     )
                 )
-            with (
-                torch_dev.device(gpu_context.device),
-                torch_dev.stream(gpu_context.stream),
-            ):
-                check_interprocess_event_support()
-                done_event = torch_dev.Event(interprocess=True)
-                done_event.record()
-                handle = done_event.ipc_handle()
             self._event_bus.publish(
                 Event(
                     event_type=EventType.CB_REQUEST_END,
                     session_id=key.request_id,
                 )
             )
-            return handle, True
+            return handle, scatter_ran
 
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
-        # vLLM may call retrieve twice (partial- then full-block alloc). KV
-        # blocks never move mid-prefill, but connector-injected aux pages can
-        # be reassigned on the repeat, so qualify the applied set with a
-        # fingerprint of the full destination table.
-        dest_fp = zlib.crc32(
-            np.asarray(
-                [b for grp in gpu_block_ids for b in grp], dtype=np.int64
-            ).tobytes()
-        )
+
+        # vLLM re-calls retrieve as the block table grows. Key the applied
+        # set by the blocks each range writes into: table growth keeps a
+        # range applied, a reassigned destination re-scatters. Keying on the
+        # whole table never matched, so every repeat re-read already-released
+        # keys and degraded the request.
+        def _dest(r: "CBMatchResult") -> tuple:
+            """The destination blocks this range writes into.
+
+            Empty when the geometry is unavailable, which never matches a prior
+            applied entry, so the range re-scatters. Conservative by design:
+            wrongly SKIPPING a needed scatter would leave unpopulated KV, while
+            a redundant re-scatter only costs work.
+            """
+            out: list[int] = []
+            try:
+                kgm = gpu_context.kv_layer_groups_manager
+                for kg in (kgm.kernel_groups[i] for i in staged_kernel):
+                    tpb = kg.tokens_per_block
+                    if not tpb:
+                        return ()
+                    blocks = gpu_block_ids[kg.engine_group_idx]
+                    out.extend(blocks[r.cur_st // tpb : (r.cur_ed - 1) // tpb + 1])
+            except (IndexError, TypeError, AttributeError):
+                return ()
+            return tuple(out)
+
         applied_ranges = self._cb_applied_match_ranges
         applied_key = (key.request_id, key.worker_id)
         prior_applied = applied_ranges.get(applied_key)
@@ -2732,14 +2757,13 @@ class BlendModule(InstanceLivenessTarget):
             cb_match_result = [
                 r
                 for r in cb_match_result
-                if (r.hash, r.cur_st, r.cur_ed, dest_fp) not in prior_applied
+                if (r.hash, r.cur_st, r.cur_ed, _dest(r)) not in prior_applied
             ]
             if not cb_match_result:
-                return _noop_success("already_applied")
-        applied_now: "set[tuple[bytes, int, int, int]]" = set()
-        # Partial-alloc first call: every match can be beyond the allocated
-        # slots -> return before the obj-key machinery. Read locks stay held
-        # for the full-alloc follow-up, as the in-loop drop path leaves them.
+                return _no_scatter("already_applied", publish=False)
+        applied_now: "set[tuple[bytes, int, int, tuple]]" = set()
+        # Partial-alloc first call: matches can be beyond the allocated
+        # slots -> settle it before the obj-key machinery.
         if cb_match_result:
             try:
                 slot_bound = min(
@@ -2751,11 +2775,29 @@ class BlendModule(InstanceLivenessTarget):
                 )
             except (IndexError, TypeError):
                 slot_bound = None
-            if slot_bound is not None and all(
+            # All-or-nothing: never leave a request with partially
+            # applied / partially released state.
+            if slot_bound is not None and any(
                 r.cur_ed > slot_bound for r in cb_match_result
             ):
-                return _noop_success(
-                    "beyond_slot_bound", f"every match beyond slot_bound={slot_bound}"
+                if all(r.cur_st >= slot_bound for r in cb_match_result):
+                    # No matched token is forwarded this step; the follow-up
+                    # full-alloc call scatters everything, locks stay held.
+                    return _no_scatter(
+                        "awaiting_full_alloc",
+                        f"all {len(cb_match_result)} match(es) beyond "
+                        f"slot_bound={slot_bound}",
+                        publish=False,
+                    )
+                # Some matched tokens ARE forwarded this step, and the client
+                # blends its own match list on any True return -- deferring
+                # would read unpopulated KV. Fail -> full recompute.
+                return _no_scatter(
+                    "partial_alloc",
+                    f"{sum(1 for r in cb_match_result if r.cur_ed > slot_bound)}"
+                    f"/{len(cb_match_result)} match(es) beyond "
+                    f"slot_bound={slot_bound}",
+                    scatter_ran=False,
                 )
         # L2 opt: reuse lookup's obj_keys cache; fall back to re-resolve.
         with self._lookup_obj_keys_lock:
@@ -2804,7 +2846,7 @@ class BlendModule(InstanceLivenessTarget):
         if not all_obj_keys:
             # Same latent hazard as the guards above: this used to echo the
             # caller's own event handle back.
-            return _noop_success("no_object_keys")
+            return _no_scatter("no_object_keys")
 
         logger.debug("CB retrieving object keys: %s", all_obj_keys)
 
@@ -2966,15 +3008,14 @@ class BlendModule(InstanceLivenessTarget):
                         cb_match_result, grouped_objs, strict=True
                     ):
                         if r.cur_ed > num_slots:
-                            logger.warning(
-                                "Dropping CB match cur_st=%d cur_ed=%d: exceeds "
-                                "%d slots. Request %s.",
-                                r.cur_st,
-                                r.cur_ed,
-                                num_slots,
-                                key.request_id,
+                            raise RuntimeError(
+                                f"CB scatter: match cur_st={r.cur_st} "
+                                f"cur_ed={r.cur_ed} exceeds {num_slots} slots "
+                                f"for request {key.request_id}; the full-alloc "
+                                f"gate should have deferred or failed this "
+                                f"retrieve (gpu vs cpu block-table "
+                                f"disagreement?)"
                             )
-                            continue
                         pairs.append((r, chunk_objs))
 
                     # cb.scatter span (GPU): the L1->paged write of every
@@ -3095,7 +3136,7 @@ class BlendModule(InstanceLivenessTarget):
                             )
 
                     applied_now = {
-                        (r.hash, r.cur_st, r.cur_ed, dest_fp) for r, _ in pairs
+                        (r.hash, r.cur_st, r.cur_ed, _dest(r)) for r, _ in pairs
                     }
 
                     # Release read locks of the scattered matches (stream-ordered).
