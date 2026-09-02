@@ -410,6 +410,13 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
             key = self._create_key(spec.tokens, req_id)
             try:
+                # The key ends at the last complete LMCache chunk.  TRT-LLM
+                # may still report the request's trailing partial block; it
+                # must not reach the server's chunk downsampler.  The server
+                # retains its own underflow checks for short block-id lists.
+                block_ids = spec.block_ids[: key.end // self._block_size]
+                if not block_ids:
+                    continue
                 success = (
                     _send_request(
                         self._mq_client,
@@ -417,7 +424,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                         [
                             key,
                             self._instance_id,
-                            [spec.block_ids],
+                            [block_ids],
                             event.ipc_handle(),
                             0,  # skip_first_n_tokens
                         ],
@@ -473,6 +480,11 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
             key = self._create_key(spec.tokens, req_id)
             try:
+                # Match the STORE block IDs to the complete chunks in key;
+                # the server still validates that the list is not too short.
+                block_ids = spec.block_ids[: key.end // self._block_size]
+                if not block_ids:
+                    continue
                 success = (
                     _send_request(
                         self._mq_client,
@@ -480,7 +492,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                         [
                             key,
                             self._instance_id,
-                            [spec.block_ids],
+                            [block_ids],
                             event.ipc_handle(),
                         ],
                     )
