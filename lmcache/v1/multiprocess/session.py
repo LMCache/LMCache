@@ -323,10 +323,11 @@ class SessionManager:
         now = time.time()
         expired: list[Session] = []
         with self._lock:
-            for rid, session in list(self._sessions.items()):
+            for session in self._sessions.values():
                 if now - session.created_at > self._ttl:
                     expired.append(session)
-                    del self._sessions[rid]
+            for session in expired:
+                del self._sessions[session.request_id]
 
         for session in expired:
             self._notify_destroyed(session)

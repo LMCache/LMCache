@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for blend load/store optimizations: L1 (batched rope), L2
-(obj_keys cache), S1 (async fingerprint).
+(obj_keys cache and its sparse-prefetch read-lock lifecycle), S1 (async
+fingerprint).
 
 These tests exercise the wiring/state changes without touching CUDA or
 the storage controller. The CUDA kernel inside ``_apply_cb_rope_batched``
-is mocked; the matcher inside the async fingerprint worker is mocked.
+is mocked; the matcher inside the async fingerprint worker is mocked. The
+lock-lifecycle section drives the real module against a lock-counting fake
+storage manager.
 """
 
 # Standard
@@ -285,6 +288,227 @@ def test_release_applied_read_locks_selects_by_identity():
 
     assert n == 1
     assert cb.call_args.args[2] == [keys[1]]
+
+
+# ---------------------------------------------------------------------------
+# L2: sparse-prefetch read-lock release when the request never retrieves
+# ---------------------------------------------------------------------------
+#
+# The unified lookup read-locks every found chunk's object keys and stashes
+# them on the session (``Session.extras``) for the retrieve. A client that
+# drops all its matches -- e.g. every match falls inside vLLM's local prefix
+# cache coverage -- never sends ``CB_RETRIEVE_PRE_COMPUTED``, and before this
+# fix nothing released those locks: the retrieve's orphan sweep never ran, and
+# ``free_lookup_locks`` covers only the prefix leg's lock model. The chunks
+# stayed pinned in L1 for the server's lifetime, with counts stacking on every
+# repeat lookup.
+#
+# The fix: ``BlendModule`` registers a ``SessionManager`` destroy listener that
+# releases whatever the request never consumed -- covering END_SESSION removal
+# at request end and the TTL reaper for clients that died without one.
+#
+# Unlike the mocked sections above, these drive the real ``BlendModule``,
+# ``BlendTokenRangeMatcher``, ``SessionManager`` and key expansion; only the
+# storage manager is a lock-counting fake, so the assertions are on actual
+# lock accounting.
+
+_UNRETRIEVED_CHUNK = 256
+_UNRETRIEVED_N_CHUNKS = 4
+# A TTL no test can reach, so only the explicit ttl=0.0 case reaps.
+_UNRETRIEVED_TTL_NEVER = 3600.0
+
+
+class _LockCountingStorageManager:
+    """Counts read locks per key: the sparse prefetch locks every submitted
+    key; ``finish_read_prefetched`` is the only release. Over-release raises.
+    """
+
+    def __init__(self) -> None:
+        self.locks: dict = {}
+
+    def submit_prefetch_task(self, spec, external_request_id=None):
+        # First Party
+        from lmcache.v1.distributed.api import TrimPolicy
+
+        if spec.policy == TrimPolicy.SPARSE:
+            for key in spec.keys:
+                self.locks[key] = self.locks.get(key, 0) + 1
+        handle = MagicMock()
+        handle.keys = list(spec.keys)
+        handle.l2_orig_indices = []
+        return handle
+
+    def query_prefetch_status(self, handle):
+        bitmap = MagicMock()
+        bitmap.get_indices_list.return_value = list(range(len(handle.keys)))
+        return bitmap
+
+    def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
+        for key in keys:
+            held = self.locks.get(key, 0)
+            if held < read_locks:
+                raise AssertionError(f"over-release on {key}")
+            if held == read_locks:
+                del self.locks[key]
+            else:
+                self.locks[key] = held - read_locks
+
+    def outstanding(self) -> int:
+        return sum(self.locks.values())
+
+
+def _unretrieved_ctx(
+    storage_manager: _LockCountingStorageManager,
+    ttl: float = _UNRETRIEVED_TTL_NEVER,
+) -> MagicMock:
+    """Mock server context with a REAL SessionManager (no cleanup thread)."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.session import SessionManager
+
+    ctx = MagicMock()
+    ctx.chunk_size = _UNRETRIEVED_CHUNK
+    ctx.storage_manager = storage_manager
+    ctx.event_bus.has_subscribers.return_value = False
+    # Prefix leg: no full chunk hashes -> handle None -> 0 coverage.
+    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    # One registered attention-only object group.
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1], world_size=1, group_kinds=("attention",)
+    )
+    ctx.session_manager = SessionManager(
+        hasher=MagicMock(), ttl=ttl, cleanup_interval=None
+    )
+    return ctx
+
+
+def _unretrieved_blend(ctx: MagicMock):
+    """The real BlendModule under the mocked context."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend import BlendModule
+
+    return BlendModule(ctx, lmcache_driven_transfer=MagicMock())
+
+
+def _run_unretrieved_lookup(blend, request_id: str) -> None:
+    """Register ``_UNRETRIEVED_N_CHUNKS`` fingerprints and run a lookup that
+    finds them all shifted (prefix coverage 0), i.e. the sparse leg locks
+    every chunk."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    n_tokens = _UNRETRIEVED_N_CHUNKS * _UNRETRIEVED_CHUNK
+    stored_tokens = list(range(1000, 1000 + n_tokens))
+    token_hashes = [
+        f"{request_id}-hash{i}".encode() for i in range(_UNRETRIEVED_N_CHUNKS)
+    ]
+    indexed = blend._token_range_matcher.on_new_token_hashes(
+        stored_tokens, token_hashes, start_chunk_idx=0, position_offset=0
+    )
+    assert indexed == _UNRETRIEVED_N_CHUNKS
+
+    query = list(range(50_000, 50_128)) + stored_tokens
+    key = IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        num_kv_readers=1,
+        worker_id=None,
+        token_ids=tuple(query),
+        start=0,
+        end=len(query),
+        request_id=request_id,
+    )
+    result = blend.cb_unified_lookup(key, tp_size=1)
+    assert result is not None
+    assert result.prefix_coverage_tokens == 0
+    assert len(result.non_prefix_segments) == _UNRETRIEVED_N_CHUNKS
+
+
+def test_session_end_releases_unretrieved_sparse_locks():
+    """The leak scenario: lookup locks N chunks, the client never retrieves
+    (all matches shadowed by its local prefix cache), the request ends.
+    END_SESSION's session removal must release every sparse read lock."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+
+    _run_unretrieved_lookup(blend, "req-shadowed")
+    assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS
+
+    # No retrieve. Request ends: END_SESSION removes the session.
+    ctx.session_manager.remove("req-shadowed")
+    assert storage.outstanding() == 0
+
+
+def test_retrieve_take_prevents_double_release_at_session_end():
+    """A consumed stash releases nothing at session end: the retrieve's
+    take empties it, so the destroy listener is a no-op (the counting fake
+    raises on any over-release)."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend import BlendModule
+
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+
+    _run_unretrieved_lookup(blend, "req-retrieved")
+
+    # Emulate the retrieve's consumption + release of the taken keys.
+    session = ctx.session_manager.get("req-retrieved")
+    assert session is not None
+    cached = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    assert cached is not None and len(cached) == _UNRETRIEVED_N_CHUNKS
+    storage.finish_read_prefetched([key for keys in cached.values() for key in keys])
+    assert storage.outstanding() == 0
+
+    # Session end must not release again.
+    ctx.session_manager.remove("req-retrieved")
+    assert storage.outstanding() == 0
+
+
+def test_ttl_cleanup_releases_unretrieved_sparse_locks():
+    """A session reaped by TTL cleanup (client died without END_SESSION)
+    releases its unretrieved locks through the same destroy listener."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage, ttl=0.0)
+    blend = _unretrieved_blend(ctx)
+
+    _run_unretrieved_lookup(blend, "req-abandoned")
+    assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS
+
+    assert ctx.session_manager.cleanup_expired() == 1
+    assert storage.outstanding() == 0
+
+
+def test_close_unregisters_the_destroy_listener():
+    """After BlendModule.close(), destroying sessions calls nothing on the
+    (now torn down) module."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+
+    _run_unretrieved_lookup(blend, "req-late")
+    blend.close()
+    # The stash is still on the session; with the listener gone, removal
+    # releases nothing (server shutdown path -- locks die with the process).
+    ctx.session_manager.remove("req-late")
+    assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS
+
+
+def test_destroy_listener_failure_does_not_break_removal():
+    """A raising listener is logged and swallowed; removal still completes."""
+    # First Party
+    from lmcache.v1.multiprocess.session import Session, SessionManager
+
+    def _boom(session: Session) -> None:
+        raise RuntimeError("listener failure")
+
+    manager = SessionManager(hasher=MagicMock(), cleanup_interval=None)
+    manager.destroy_listeners.append(_boom)
+    manager.get_or_create("req-x")
+    assert manager.remove("req-x") is not None
+    assert manager.get("req-x") is None
 
 
 # ---------------------------------------------------------------------------
