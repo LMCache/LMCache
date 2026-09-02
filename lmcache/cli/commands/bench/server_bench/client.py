@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.client import RequestClient
 
 
 @dataclass(frozen=True)
@@ -160,7 +160,7 @@ class ServerBenchClient:
         self._config = config
         self._log = log
         self._zmq_context: Any | None = None
-        self._mq_client: "MessageQueueClient | None" = None
+        self._mq_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
         self._registered_instance_ids: list[int] = []
         self._shm_names: list[str] = []
@@ -704,6 +704,7 @@ class ServerBenchClient:
             format_kvcache_shape_spec,
             parse_kvcache_shape_spec,
         )
+        from lmcache.v1.multiprocess.client import ZmqMultiprocessClient
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo
         from lmcache.v1.multiprocess.mq import MessageQueueClient
 
@@ -723,7 +724,9 @@ class ServerBenchClient:
             % (config.rpc_url, config.mode)
         )
         self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(config.rpc_url, self._zmq_context)
+        self._mq_client = ZmqMultiprocessClient(
+            MessageQueueClient(config.rpc_url, self._zmq_context)
+        )
 
         self._chunk_size = _get_chunk_size(self._mq_client)
         self._log("Server chunk_size = %d" % self._chunk_size)
@@ -926,8 +929,8 @@ class ServerBenchClient:
 
         self._log("")
 
-    def _require_started(self) -> "MessageQueueClient":
-        """Return the live MessageQueueClient or raise before startup."""
+    def _require_started(self) -> "RequestClient":
+        """Return the live multiprocess client or raise before startup."""
         if not self._started or self._mq_client is None:
             raise RuntimeError("ServerBenchClient must be started before use")
         return self._mq_client

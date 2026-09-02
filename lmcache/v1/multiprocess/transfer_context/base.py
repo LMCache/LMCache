@@ -31,8 +31,8 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.client import RequestClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -137,7 +137,7 @@ class EngineDrivenContext(ABC):
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
-        mq_client: MessageQueueClient,
+        mq_client: RequestClient,
         mq_timeout: float,
     ) -> None:
         self.metadata = metadata
@@ -198,7 +198,7 @@ class EngineDrivenContext(ABC):
 
 def create_engine_driven_context(
     metadata: EngineDrivenContextMetadata,
-    mq_client: MessageQueueClient,
+    mq_client: RequestClient,
     mq_timeout: float,
     shm_name: str,
     pool_size: int,

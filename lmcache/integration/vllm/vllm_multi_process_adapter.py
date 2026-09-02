@@ -21,6 +21,7 @@ from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.client import ZmqMultiprocessClient
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -30,7 +31,6 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
@@ -164,31 +164,8 @@ class _IpcEvent(Protocol):
     def wait(self, stream: Any = None) -> None: ...
 
 
-def send_lmcache_request(
-    mq_client: MessageQueueClient,
-    request_type: RequestType,
-    payloads: list[Any],
-) -> MessagingFuture[Any]:
-    """
-    Helper function to send the request to the LMCache multiprocess server
-
-    Args:
-        mq_client: The LMCache multiprocess mode message queue client
-        request_type: The request type
-        payloads: The request payloads
-
-    Returns:
-        A messaging future for the request
-    """
-
-    future = mq_client.submit_request(
-        request_type, payloads, get_response_class(request_type)
-    )
-    return future
-
-
 def get_lmcache_chunk_size(
-    mq_client: MessageQueueClient,
+    mq_client: ZmqMultiprocessClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
 ) -> int:
     """
@@ -201,13 +178,13 @@ def get_lmcache_chunk_size(
     Returns:
         An integer representing the LMCache chunk size
     """
-    future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
+    future = mq_client.get_chunk_size()
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
 
 
 def get_experimental(
-    mq_client: MessageQueueClient,
+    mq_client: ZmqMultiprocessClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
 ) -> set[str]:
     """Query the experimental capabilities a server advertises.
@@ -219,7 +196,7 @@ def get_experimental(
     Returns:
         Experimental features built into the server (now `transfer_query`).
     """
-    future = send_lmcache_request(mq_client, RequestType.GET_EXPERIMENTAL, [])
+    future = mq_client.get_experimental()
     try:
         return set(future.result(timeout=timeout))
     except TimeoutError:
@@ -262,7 +239,7 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
 
 
 def send_ping(
-    mq_client: MessageQueueClient,
+    mq_client: ZmqMultiprocessClient,
     timeout: float,
     instance_id: int | None = None,
 ) -> bool:
@@ -278,7 +255,7 @@ def send_ping(
         True if server is healthy, False on timeout or error.
     """
     try:
-        future = send_lmcache_request(mq_client, RequestType.PING, [instance_id])
+        future = mq_client.ping(instance_id)
         return future.result(timeout=timeout)
     except TimeoutError:
         return False
@@ -433,7 +410,7 @@ class HeartbeatThread(PeriodicThread):
 
     def __init__(
         self,
-        mq_client: MessageQueueClient,
+        mq_client: ZmqMultiprocessClient,
         health_event: threading.Event,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         instance_id: int | None = None,
@@ -626,8 +603,9 @@ class LMCacheMPSchedulerAdapter:
         )
         assert len(server_urls) >= 1, "At least one server url required"
         self._server_urls: list[str] = list(server_urls)
-        self.mq_clients: dict[str, MessageQueueClient] = {
-            url: MessageQueueClient(url, context) for url in self._server_urls
+        self.mq_clients: dict[str, ZmqMultiprocessClient] = {
+            url: ZmqMultiprocessClient(MessageQueueClient(url, context))
+            for url in self._server_urls
         }
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
@@ -791,11 +769,7 @@ class LMCacheMPSchedulerAdapter:
         ).no_worker_id_version()
 
         futures: dict[str, MessagingFuture[Any]] = {
-            url: send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.LOOKUP,
-                [key, self.tp_size],
-            )
+            url: self.mq_clients[url].lookup(key, self.tp_size)
             for url in self._server_urls
         }
 
@@ -851,11 +825,7 @@ class LMCacheMPSchedulerAdapter:
                     cache_salt=cs or "",
                     request_configs=request_configs,
                 ).no_worker_id_version()
-                send_lmcache_request(
-                    self.mq_clients[url],
-                    RequestType.FREE_LOOKUP_LOCKS,
-                    [tail_key, self.tp_size],
-                )
+                self.mq_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -895,11 +865,7 @@ class LMCacheMPSchedulerAdapter:
         unresolved_urls = [u for u in self._server_urls if u not in per_server]
 
         futures: dict[str, MessagingFuture[Any]] = {
-            url: send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.QUERY_PREFETCH_STATUS,
-                [request_id],
-            )
+            url: self.mq_clients[url].query_prefetch_status(request_id)
             for url in unresolved_urls
         }
 
@@ -1006,11 +972,7 @@ class LMCacheMPSchedulerAdapter:
             request_configs=request_configs,
         ).no_worker_id_version()
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.FREE_LOOKUP_LOCKS,
-                [base_key, self.tp_size],
-            )
+            self.mq_clients[url].free_lookup_locks(base_key, self.tp_size)
 
     def end_session(self, request_id: str) -> None:
         """
@@ -1022,11 +984,7 @@ class LMCacheMPSchedulerAdapter:
             return
 
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.END_SESSION,
-                [request_id],
-            )
+            self.mq_clients[url].end_session(request_id)
 
     def report_block_allocations(
         self,
@@ -1045,10 +1003,8 @@ class LMCacheMPSchedulerAdapter:
             return
 
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.REPORT_BLOCK_ALLOCATION,
-                [os.getpid(), self.model_name, records],
+            self.mq_clients[url].report_block_allocation(
+                os.getpid(), self.model_name, records
             )
 
     # Helper functions
@@ -1171,7 +1127,7 @@ class LMCacheMPWorkerAdapter:
             set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
         else:
             self._mp_transfer_mode = None
-        self.mq_client = MessageQueueClient(server_url, context)
+        self.mq_client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
         self._mq_timeout = mq_timeout
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
@@ -1394,7 +1350,6 @@ class LMCacheMPWorkerAdapter:
                 self.blocks_in_chunk,
                 self.mq_client,
                 self._mq_timeout,
-                send_request=send_lmcache_request,
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
@@ -2048,16 +2003,13 @@ class LMCacheMPWorkerAdapter:
 
         logger.info("Unregistering kv caches")
         try:
-            unregister_type = (
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
-                if isinstance(self.transfer_ctx, EngineDrivenTransferContext)
-                else RequestType.UNREGISTER_KV_CACHE
-            )
-            send_lmcache_request(
-                self.mq_client,
-                unregister_type,
-                [self.instance_id],
-            ).result(timeout=self._mq_timeout)
+            if isinstance(self.transfer_ctx, EngineDrivenTransferContext):
+                future = self.mq_client.unregister_kv_cache_engine_driven_context(
+                    self.instance_id
+                )
+            else:
+                future = self.mq_client.unregister_kv_cache(self.instance_id)
+            future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "LMCache server did not respond to unregister within %ss. "

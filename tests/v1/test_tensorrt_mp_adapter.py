@@ -80,8 +80,7 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     device_future.result.return_value = False
     raw_future = MagicMock(name="raw_future")
     raw_future.to_device_future.return_value = device_future
-    send_request = MagicMock(return_value=raw_future)
-    monkeypatch.setattr(module, "_send_request", send_request)
+    worker._mq_client.retrieve.return_value = raw_future
 
     with pytest.raises(RuntimeError, match="refusing to use unloaded KV blocks"):
         worker.start_load_kv(MagicMock(name="stream"))

@@ -149,8 +149,7 @@ def fake_adapter(monkeypatch):
     """Build an adapter with the network boundary stubbed. Returns
     ``(adapter, send_mock, future)``; ``future.result()`` defaults to succeed.
     ``HeartbeatThread`` is replaced by ``FakeHeartbeatThread``."""
-    # Stub the MQ boundary so __init__'s chunk-size query and any later
-    # send_lmcache_request call don't touch a real socket.
+    # Stub the raw ZMQ boundary so facade calls do not touch a real socket.
     fake_client = MagicMock(name="mq_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
@@ -158,8 +157,8 @@ def fake_adapter(monkeypatch):
 
     future = MagicMock(name="future")
     future.result.return_value = None
-    send_mock = MagicMock(name="send_lmcache_request", return_value=future)
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_mock)
+    send_mock = MagicMock(name="submit_request", return_value=future)
+    fake_client.submit_request = send_mock
 
     FakeHeartbeatThread.instances.clear()
     FakeHeartbeatThread.start_hook = None
@@ -200,7 +199,7 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     assert adapter.kv_caches is new_caches
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
-    assert args[1] == RequestType.REGISTER_KV_CACHE
+    assert args[0] == RequestType.REGISTER_KV_CACHE
 
 
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
@@ -235,8 +234,8 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     assert adapter.kv_caches is cpu_kv
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
-    assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
-    assert len(args[2]) == 1
+    assert args[0] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+    assert len(args[1]) == 1
     assert adapter.create_recorded_event() is None
 
 
@@ -264,7 +263,7 @@ def test_register_kv_caches_tuple_caches_use_engine_driven_context(
     assert adapter.kv_caches is tuple_kv
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
-    assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+    assert args[0] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
     assert adapter.create_recorded_event() is None
 
 
@@ -775,7 +774,9 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     stop_state_at_unregister: list[bool] = []
 
     def record_send(
-        mq_client: object, request_type: RequestType, payloads: list[object]
+        request_type: RequestType,
+        payloads: list[object],
+        _response_cls: object,
     ) -> MagicMock:
         if request_type == RequestType.UNREGISTER_KV_CACHE:
             stop_state_at_unregister.append(heartbeat.stop_requested)
@@ -800,8 +801,8 @@ def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
     assert FakeHeartbeatThread.instances == []
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
-    assert args[1] == RequestType.UNREGISTER_KV_CACHE
-    assert args[2] == [adapter.instance_id]
+    assert args[0] == RequestType.UNREGISTER_KV_CACHE
+    assert args[1] == [adapter.instance_id]
 
 
 def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> None:
@@ -895,7 +896,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
     future = MagicMock(name="future")
     future.result.return_value = None
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", lambda *a, **kw: future)
+    fake_client.submit_request.return_value = future
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
     # First Party
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
