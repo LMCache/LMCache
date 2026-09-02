@@ -144,6 +144,7 @@ class P2PController:
             self._ctx.storage_manager.l1_memory_desc,
             listen_url=self._p2p_config.effective_listen_url,
             advertise_url=self._p2p_config.advertise_url,
+            mr_slice_bytes=self._p2p_config.nixl_mr_slice_bytes,
         )
         self._instances_url = coordinator_config.url.rstrip("/") + "/instances"
         timeout = max(1.0, coordinator_config.heartbeat_interval)
