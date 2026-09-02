@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Configuration for the multiprocess server and HTTP frontend.
-"""
+"""Configuration for the multiprocess cache server and HTTP frontend."""
 
 # Standard
 from dataclasses import dataclass, field
@@ -24,8 +22,7 @@ class MPServerConfig:
     """Configuration for the multiprocess cache server."""
 
     transport: Literal["zmq", "grpc"] = "zmq"
-    """Request transport. gRPC is configurable for forward-compatible test
-    plumbing, but its runtime server is not available yet."""
+    """Request transport exposed by the cache server."""
 
     host: str = "localhost"
     """Request server host."""
@@ -280,11 +277,9 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--transport",
-        type=str,
-        choices=["zmq", "grpc"],
+        choices=("zmq", "grpc"),
         default="zmq",
-        help="Request transport. gRPC is reserved for the upcoming runtime "
-        "implementation. Default is zmq.",
+        help="Request transport exposed by the cache server. Default is zmq.",
     )
     mp_group.add_argument(
         "--host",
@@ -296,7 +291,7 @@ def add_mp_server_args(
         "--port",
         type=int,
         default=5555,
-        help="Port to bind the ZMQ server. Default is 5555.",
+        help="Port to bind the request server. Default is 5555.",
     )
     mp_group.add_argument(
         "--chunk-size",

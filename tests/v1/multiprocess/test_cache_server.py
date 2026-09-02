@@ -8,7 +8,6 @@ import time
 # Third Party
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -33,7 +32,7 @@ from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 # Configuration constants
 SERVER_HOST = "localhost"
 SERVER_PORT = 5599
-SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
+SERVER_URL = f"grpc://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
 DEFAULT_TIMEOUT = 20.0
@@ -230,7 +229,13 @@ def retrieve_keys(
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
         block_ids = gpu_block_ids[start:end]
-        future = client.retrieve(key, instance_id, [block_ids], event_handle, 0)
+        future = client.retrieve(
+            key,
+            instance_id,
+            [block_ids],
+            event_handle,
+            0,
+        )
         result = future.to_device_future().result(timeout=timeout)
         results.append(result)
     return results
@@ -288,24 +293,14 @@ def server_process() -> Generator[mp.Process, None, None]:
             process.join()
 
 
-@pytest.fixture(scope="module")
-def zmq_context() -> Generator[zmq.Context, None, None]:
-    """
-    Fixture that provides a ZMQ context for the test module.
-    """
-    context = zmq.Context.instance()
-    yield context
-    # Context cleanup is handled by ZMQ
-
-
 @pytest.fixture(scope="function")
 def client(
-    server_process: mp.Process, zmq_context: zmq.Context
+    server_process: mp.Process,
 ) -> Generator[RequestClient, None, None]:
     """
     Fixture that provides a message queue client for each test function.
     """
-    client = RequestClientFactory.create(SERVER_URL, context=zmq_context)
+    client = RequestClientFactory.create(SERVER_URL)
     yield client
     # Client cleanup
     client.close()
