@@ -145,6 +145,11 @@ class EngineDrivenContextShm(EngineDrivenContext):
         )
         return tensor_1d.view(torch.Size(shape))
 
+    @property
+    def is_pinned(self) -> bool:
+        """Return whether this process registered the SHM buffer as pinned."""
+        return self._pinned
+
     def _build_slot_tensors(self, slots: list[dict[str, Any]]) -> list[torch.Tensor]:
         descriptors = [ShmSlotDescriptor.from_dict(slot) for slot in slots]
         return [
