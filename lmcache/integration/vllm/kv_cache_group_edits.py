@@ -164,6 +164,37 @@ def _synthetic_attention_shape(elems_per_page: int, block_size: int) -> tuple[in
     return _SYNTHETIC_NUM_HEADS, elems_per_page // denom
 
 
+def _complete_kernel_pages(
+    kv_cache: torch.Tensor,
+    logical_to_kernel_ratio: int,
+) -> tuple[torch.Tensor, int]:
+    """Return the zero-copy prefix covered by complete logical pages.
+
+    A shared pool may be sized in kernel-page units even when a cache group
+    consumes several kernel pages per logical page. The remainder cannot be
+    addressed by the scheduler, so it must be excluded from registration.
+
+    Args:
+        kv_cache: Contiguous tensor whose first dimension is kernel pages.
+        logical_to_kernel_ratio: Kernel pages in one logical page.
+
+    Returns:
+        The prefix containing complete logical pages and its logical page
+        count.
+
+    Raises:
+        ValueError: If the pool cannot hold one complete logical page.
+    """
+    logical_pages = kv_cache.shape[0] // logical_to_kernel_ratio
+    if logical_pages == 0:
+        raise ValueError(
+            f"kernel page count {kv_cache.shape[0]} cannot hold one logical "
+            f"page requiring {logical_to_kernel_ratio} kernel pages"
+        )
+    complete_kernel_pages = logical_pages * logical_to_kernel_ratio
+    return kv_cache[:complete_kernel_pages], logical_pages
+
+
 class KVCacheGroupEdit(ABC):
     """One structural edit rule for a KV cache group's registered cache.
 
@@ -319,7 +350,7 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
 
         Raises:
             ValueError: If the layout is not the expected kernel-paged shape,
-                the sizes do not divide evenly, or the kernel pages of one
+                one logical page cannot be formed, or the kernel pages of one
                 logical block do not tile its page bytes exactly (which would
                 indicate an undeclared packed layout that must not be edited).
         """
@@ -342,12 +373,6 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
             )
         ratio = logical_block_size // kernel_block_size
 
-        num_kernel_pages = kv_cache.shape[0]
-        if num_kernel_pages % ratio != 0:
-            raise ValueError(
-                f"kernel page count {num_kernel_pages} is not a multiple of "
-                f"the logical/kernel block ratio {ratio}"
-            )
         kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
         if kernel_page_bytes * ratio != spec.page_size_bytes:
             raise ValueError(
@@ -360,12 +385,14 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
                 "re-view as logical pages"
             )
 
-        num_blocks = num_kernel_pages // ratio
+        complete_cache, num_blocks = _complete_kernel_pages(kv_cache, ratio)
         elems_per_page = spec.page_size_bytes // kv_cache.element_size()
         num_heads, head_size = _synthetic_attention_shape(
             elems_per_page, logical_block_size
         )
-        return kv_cache.view(num_blocks, 2, logical_block_size, num_heads, head_size)
+        return complete_cache.view(
+            num_blocks, 2, logical_block_size, num_heads, head_size
+        )
 
 
 ######################
@@ -458,6 +485,79 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         )
 
 
+class _PaddedAttentionPageViewEdit(KVCacheGroupEdit):
+    """Expose a padded attention allocation as opaque logical pages.
+
+    The semantic tensor may occupy only a prefix of the page declared by the
+    engine. LMCache must transfer the complete declared page while preserving
+    the authoritative stride between physical blocks. The returned dimensions
+    describe addressing only; they do not reinterpret the bytes as semantic
+    K/V axes.
+
+    Pages with a uniform token width retain one physical slot per logical
+    token. Packed pages use one physical slot for the entire opaque page;
+    logical tokens remain represented independently by the group metadata.
+    """
+
+    name = "padded-attention-page-view"
+
+    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+        """Return whether an attention tensor has a padded physical stride."""
+        kind = get_kv_cache_spec_kind(spec)
+        return (
+            (
+                kind == KVCacheSpecKind.MLA_ATTENTION
+                or kind in _SUBPAGEABLE_ATTENTION_KINDS
+            )
+            and not _declares_slot_compression(spec)
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.ndim == 4
+            and kv_cache[0].is_contiguous()
+            and kv_cache.stride(0) > kv_cache.shape[1:].numel()
+        )
+
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _layout_hints: LayoutHints,
+    ) -> torch.Tensor:
+        """Return a stride-preserving ``[blocks, slots, width]`` page view.
+
+        Raises:
+            ValueError: If the declared page is not element-aligned, is
+                smaller than the semantic tensor page, or exceeds the physical
+                stride between blocks.
+        """
+        assert isinstance(kv_cache, torch.Tensor)
+        element_size = kv_cache.element_size()
+        page_bytes = spec.page_size_bytes
+        if page_bytes % element_size:
+            raise ValueError(
+                f"declared attention page size {page_bytes} bytes is not "
+                f"aligned to tensor element size {element_size}"
+            )
+        page_elems = page_bytes // element_size
+        semantic_page_elems = kv_cache.shape[1:].numel()
+        if page_elems < semantic_page_elems:
+            raise ValueError(
+                f"declared attention page has {page_elems} elements but the "
+                f"semantic tensor page requires {semantic_page_elems}"
+            )
+        if page_elems > kv_cache.stride(0):
+            raise ValueError(
+                f"declared attention page has {page_elems} elements but the "
+                f"physical block stride is only {kv_cache.stride(0)}"
+            )
+
+        physical_slots = spec.block_size if page_elems % spec.block_size == 0 else 1
+        slot_width = page_elems // physical_slots
+        return kv_cache.as_strided(
+            (kv_cache.shape[0], physical_slots, slot_width),
+            (kv_cache.stride(0), slot_width, 1),
+        )
+
+
 class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
     """Re-view a kernel-paged attention tensor as logical-block pages.
 
@@ -494,7 +594,7 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
 
         Raises:
             ValueError: If the layout is not the expected kernel-paged shape,
-                the sizes do not divide evenly, or the kernel pages of one
+                one logical page cannot be formed, or the kernel pages of one
                 logical block do not tile its page bytes exactly (which would
                 indicate an undeclared packed layout that must not be edited).
         """
@@ -508,12 +608,6 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
             )
         ratio = logical_block_size // kernel_block_size
 
-        num_kernel_pages = kv_cache.shape[0]
-        if num_kernel_pages % ratio != 0:
-            raise ValueError(
-                f"kernel page count {num_kernel_pages} is not a multiple of "
-                f"the logical/kernel block ratio {ratio}"
-            )
         kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
         if kernel_page_bytes * ratio != spec.page_size_bytes:
             raise ValueError(
@@ -526,13 +620,15 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
                 "re-view as logical pages"
             )
 
-        return kv_cache.view(num_kernel_pages // ratio, logical_block_size, -1)
+        complete_cache, num_blocks = _complete_kernel_pages(kv_cache, ratio)
+        return complete_cache.view(num_blocks, logical_block_size, -1)
 
 
 # Rule registry, in match priority order.
 _EDITS: tuple[KVCacheGroupEdit, ...] = (
     _MambaUnifiedViewEdit(),
     _MambaPageViewEdit(),
+    _PaddedAttentionPageViewEdit(),
     _SubpagedMLAAttentionViewEdit(),
     _SubpagedAttentionViewEdit(),
 )
