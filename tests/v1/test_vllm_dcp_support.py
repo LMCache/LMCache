@@ -501,9 +501,9 @@ def test_padded_attention_page_preserves_declared_opaque_tail():
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
         KVCacheGroupSpec,
-        MLAAttentionSpec,
     )
     from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     # First Party
     from lmcache.integration.vllm.kv_cache_group_edits import (
@@ -571,9 +571,9 @@ def test_packed_attention_page_uses_one_opaque_physical_slot():
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
         KVCacheGroupSpec,
-        MLAAttentionSpec,
     )
     from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     # First Party
     from lmcache.integration.vllm.kv_cache_group_edits import (
@@ -667,13 +667,10 @@ def test_subpaged_attention_excludes_incomplete_logical_page_tail(
 ):
     """A kernel-page pool registers every complete logical page."""
     # Third Party
-    from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec as VllmFullAttentionSpec,
-        KVCacheConfig,
-        KVCacheGroupSpec,
-        MLAAttentionSpec,
-    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec as VllmFullAttentionSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
     from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     # First Party
     from lmcache.integration.vllm.kv_cache_group_edits import (
