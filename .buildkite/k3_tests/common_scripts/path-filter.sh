@@ -75,9 +75,10 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
                 lmcache/v1/platform/*)
                     # For CUDA unit, platform implementation changes under
-                    # lmcache/v1/platform/cuda/ are relevant and should trigger the
-                    # pipeline; keep other nested device directories as non-targets.
-                    if [[ "$changed_file" == lmcache/v1/platform/cuda/* ]]; then
+                    # lmcache/v1/platform/{base,cuda}/ are relevant and should
+                    # trigger the pipeline; keep other nested device directories
+                    # as non-targets.
+                    if [[ "$changed_file" == lmcache/v1/platform/base/* || "$changed_file" == lmcache/v1/platform/cuda/* ]]; then
                         return 1
                     fi
                     if [[ "$changed_file" == lmcache/v1/platform/*/* ]]; then
