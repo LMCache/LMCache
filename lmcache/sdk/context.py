@@ -83,6 +83,8 @@ class LMCacheSDKContext:
             LMCacheSDKContext instance.
         """
         self._kind = kind
+        self._closed = False
+        self._engine_transfer_ctx: EngineDrivenTransferContext | None = None
         self._zmq_context = zmq.Context()
         self._mq_client = MessageQueueClient(url, self._zmq_context)
         self._mq_timeout = timeout
@@ -220,6 +222,11 @@ class LMCacheSDKContext:
             }
 
         transfer_ctx = create_transfer_context(self._kv_caches)
+        if not isinstance(transfer_ctx, EngineDrivenTransferContext):
+            raise LMCacheSDKError(
+                "SDK requires an engine-driven transfer context, got "
+                f"{type(transfer_ctx).__name__}."
+            )
         self.blocks_in_chunk = self._chunk_size // block_size
         layout_hints = LayoutHints(
             kv_layout="HND",
@@ -245,11 +252,9 @@ class LMCacheSDKContext:
             layout_hints=layout_hints,
         )
 
-        if not isinstance(transfer_ctx, EngineDrivenTransferContext):
-            raise LMCacheSDKError(
-                "SDK requires an engine-driven transfer context, got "
-                f"{type(transfer_ctx).__name__}."
-            )
+        # The wrapper borrows the inner context; retain its outer owner so
+        # close() can release SHM state and any async transfer resources.
+        self._engine_transfer_ctx = transfer_ctx
         self._transfer_ctx = ContiguousTransferWrapper(
             transfer_ctx.engine_driven_context, self._chunk_size
         )
@@ -270,8 +275,43 @@ class LMCacheSDKContext:
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the MQ client and ZMQ context."""
-        self._mq_client.close()
+        """Unregister the SDK context and release all owned resources.
+
+        This method is idempotent. If the server does not acknowledge the
+        unregister request within the configured MQ timeout, local transfer,
+        MQ, and ZMQ resources are still released.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        transfer_ctx = self._engine_transfer_ctx
+        try:
+            if transfer_ctx is not None:
+                try:
+                    self._mq_client.submit_request(
+                        RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+                        [self.instance_id],
+                        get_response_class(
+                            RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+                        ),
+                    ).result(timeout=self._mq_timeout)
+                except TimeoutError:
+                    logger.warning(
+                        "LMCache server did not respond to SDK context unregister "
+                        "within %ss. Proceeding with shutdown.",
+                        self._mq_timeout,
+                    )
+        finally:
+            try:
+                self._engine_transfer_ctx = None
+                if transfer_ctx is not None:
+                    transfer_ctx.close()
+            finally:
+                try:
+                    self._mq_client.close()
+                finally:
+                    self._zmq_context.term()
 
     def maybe_submit_lookup_request(
         self,
