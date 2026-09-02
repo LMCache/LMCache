@@ -273,12 +273,13 @@ class UnifiedLMCacheMPConnector:
                 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
             )
         )
-        if any(group.recurrent_state for group in wire_groups):
+        if any(
+            group.recurrent_state or group.sliding_window_size >= 0
+            for group in wire_groups
+        ):
             logger.warning(
-                "LMCache Mamba/recurrent groups require the LMCache MP server "
-                "to be started with --separate-object-groups; otherwise a "
-                "partial-prefix lookup can observe a recurrent state from the "
-                "wrong checkpoint."
+                "LMCache sparse SWA/recurrent groups require the LMCache MP "
+                "server to be started with --separate-object-groups."
             )
 
         self.model_name = model_name
@@ -960,6 +961,32 @@ class UnifiedLMCacheMPConnector:
         self._cleanup_lookup_result(operation.lookup)
         return success
 
+    def _store_group_blocks_are_valid(
+        self, group: LMCacheKVGroup, blocks: list[int]
+    ) -> bool:
+        """Validate null blocks after applying LMCache's per-chunk SWA cut."""
+        if group.recurrent_state:
+            return True
+        if group.sliding_window_size < 0:
+            return 0 not in blocks
+
+        blocks_per_chunk = self.chunk_size // group.tokens_per_block
+        kept_blocks_per_chunk = (
+            min(self.chunk_size, group.sliding_window_size) // group.tokens_per_block
+        )
+        if kept_blocks_per_chunk <= 0:
+            return False
+
+        for chunk_start in range(0, len(blocks), blocks_per_chunk):
+            chunk = blocks[chunk_start : chunk_start + blocks_per_chunk]
+            kept = chunk[-kept_blocks_per_chunk:]
+            # An all-null historical SWA chunk is intentionally absent and the
+            # separated LMCache object group will skip it. A partly missing
+            # retained window would copy the null page together with real KV.
+            if any(kept) and 0 in kept:
+                return False
+        return True
+
     def submit_store(
         self,
         request_id: str,
@@ -1000,20 +1027,19 @@ class UnifiedLMCacheMPConnector:
                     allow_dummy_page=True,
                 )
             )
-        # Slot/page zero is SGLang's padding sink. For attention a zero means
-        # the SWA page has already been tombstoned, so defer the store. Mamba is
-        # deliberately sparse: only the final checkpoint is real and LMCache's
-        # recurrent object group skips all-null earlier chunks.
-        can_submit = not any(
-            0 in blocks
+        # Slot/page zero is SGLang's padding sink. FULL attention must always
+        # be complete. SWA may legitimately have all-null historical chunks;
+        # with --separate-object-groups LMCache skips those chunks and stores
+        # the independently complete FULL prefix.
+        can_submit = all(
+            self._store_group_blocks_are_valid(group, blocks)
             for group, blocks in zip(self._kv_groups, engine_group_blocks, strict=True)
-            if not group.recurrent_state
         )
         if not self._sync_success(can_submit):
             if not can_submit:
                 logger.debug(
                     "LMCache store deferred for %s: transfer range contains an "
-                    "unmapped component page",
+                    "incomplete retained component page",
                     request_id,
                 )
             return None

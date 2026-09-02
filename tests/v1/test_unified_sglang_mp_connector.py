@@ -413,13 +413,64 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertTrue(connector.complete_store(operation))
         self.assertIn("request", connector._active_sessions)
 
-    def test_submit_store_defers_unmapped_swa_page(self):
+    def test_submit_store_accepts_all_null_historical_swa_chunk(self):
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.page_size = 4
+        connector.chunk_size = 8
+        connector.blocks_in_chunk = 2
+        connector.sglang_worker_id = 0
+        connector.kv_worker_id = 0
+        connector.instance_id = 1
+        connector._kv_groups = (
+            LMCacheKVGroup("full", (), tokens_per_block=4, slots_per_block=4),
+            LMCacheKVGroup(
+                "swa",
+                (),
+                sliding_window_size=8,
+                tokens_per_block=4,
+                slots_per_block=4,
+            ),
+        )
+        connector._kernel_group_to_engine_group = (0, 1)
+        connector._store_submitted_tokens = {}
+        connector._active_sessions = set()
+        connector._kv_caches = {}
+        connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = True
+        connector._new_event = lambda: object()
+        connector._create_key = Mock(return_value=object())
+        connector._sync_success = lambda success: success
+        connector._sync_leader_int = lambda value: value
+
+        operation = connector.submit_store(
+            "request",
+            list(range(16)),
+            [
+                torch.arange(4, 20),
+                torch.tensor([0] * 8 + list(range(12, 20))),
+            ],
+            cache_salt="",
+        )
+
+        self.assertIsNotNone(operation)
+        self.assertEqual(
+            connector._transfer_ctx.store_args[4],
+            [[1, 2, 3, 4], [0, 0, 3, 4]],
+        )
+
+    def test_submit_store_defers_partly_unmapped_retained_swa_chunk(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4
         connector.chunk_size = 8
         connector._kv_groups = (
             LMCacheKVGroup("full", (), tokens_per_block=4, slots_per_block=4),
-            LMCacheKVGroup("swa", (), tokens_per_block=4, slots_per_block=4),
+            LMCacheKVGroup(
+                "swa",
+                (),
+                sliding_window_size=8,
+                tokens_per_block=4,
+                slots_per_block=4,
+            ),
         )
         connector._kernel_group_to_engine_group = (0, 1)
         connector._store_submitted_tokens = {}
@@ -431,7 +482,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             "request",
             list(range(8)),
             [
-                torch.tensor([4, 5, 6, 7, 8, 9, 10, 11]),
+                torch.arange(4, 12),
                 torch.tensor([0, 0, 0, 0, 12, 13, 14, 15]),
             ],
             cache_salt="",
