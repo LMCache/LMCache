@@ -716,7 +716,8 @@ class BlendModule(InstanceLivenessTarget):
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
-    #: ``Session.extras`` key: read-locked obj_keys per found chunk hash,
+    #: ``Session.extras`` key: ``{"read_locks": N, "per_hash": {hash: keys}}``
+    #: — the sparse lookup's reservation (N read locks per key, per #4866),
     #: written by the sparse classify and consumed by exactly one
     #: ``extras.pop`` — the retrieve, or :meth:`_release_unretrieved_locks`.
     UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
@@ -872,11 +873,15 @@ class BlendModule(InstanceLivenessTarget):
         Args:
             session: The session being destroyed.
         """
-        per_hash = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
-        if not per_hash:
+        stash = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+        if not stash:
             return
-        keys = [key for hash_keys in per_hash.values() for key in hash_keys]
-        self._ctx.storage_manager.finish_read_prefetched(keys)
+        keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
+        # Whole-reservation role: no retrieve consumed anything, so the full
+        # reservation (N locks per key, per #4866) is still held.
+        self._ctx.storage_manager.finish_read_prefetched(
+            keys, read_locks=stash["read_locks"]
+        )
         logger.info(
             "Released %d unretrieved read lock(s) for ended request %s",
             len(keys),
@@ -1347,9 +1352,20 @@ class BlendModule(InstanceLivenessTarget):
                 for r in found_cb_match_result
                 if r.hash in per_hash_obj_keys
             }
-            self._ctx.session_manager.get_or_create(key.request_id).extras[
-                self.UNRETRIEVED_KEYS_EXTRA
-            ] = cache_entry
+            session = self._ctx.session_manager.get_or_create(key.request_id)
+            # A repeat lookup for the same request (e.g. re-issued after a
+            # preemption) replaces the stash; release the superseded
+            # reservation first or its locks leak.
+            prev = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+            if prev:
+                self._ctx.storage_manager.finish_read_prefetched(
+                    [k for ks in prev["per_hash"].values() for k in ks],
+                    read_locks=prev["read_locks"],
+                )
+            session.extras[self.UNRETRIEVED_KEYS_EXTRA] = {
+                "read_locks": key.require_num_kv_readers(),
+                "per_hash": cache_entry,
+            }
 
         return found_cb_match_result
 
@@ -2837,11 +2853,13 @@ class BlendModule(InstanceLivenessTarget):
         # re-resolve). ``get``, not ``get_or_create``: a retrieve after
         # session end must not recreate ownership state.
         session = self._ctx.session_manager.get(key.request_id)
-        cached = (
+        _stash = (
             session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
             if session is not None
             else None
         )
+        cached = _stash["per_hash"] if _stash else None
+        stash_read_locks = _stash["read_locks"] if _stash else 1
         if cached is not None and all(r.hash in cached for r in cb_match_result):
             # The lookup cached all-ranks obj keys (group-major, rank-minor).
             # Select THIS rank's key per read group, else the pairing mispairs
@@ -2872,7 +2890,11 @@ class BlendModule(InstanceLivenessTarget):
                 k for h, ks in cached.items() if h not in retrieved_hashes for k in ks
             ]
             if orphan_keys:
-                self._ctx.storage_manager.finish_read_prefetched(orphan_keys)
+                # Whole-reservation role: nothing will read these keys, so
+                # release every lock the lookup took (per #4866, N per key).
+                self._ctx.storage_manager.finish_read_prefetched(
+                    orphan_keys, read_locks=stash_read_locks
+                )
                 logger.debug(
                     "CB released %d prefetched-but-unretrieved keys (req=%s)",
                     len(orphan_keys),

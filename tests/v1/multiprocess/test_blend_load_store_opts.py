@@ -160,13 +160,17 @@ def test_obj_keys_cache_round_trip_tp1():
     # Simulate what the lookup's classify stores.
     chunk_hashes = [b"h1", b"h2", b"h3"]
     obj_keys_per_chunk = {h: [_fake_obj_key(h, 0)] for h in chunk_hashes}
-    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = obj_keys_per_chunk
+    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
+        "read_locks": 1,
+        "per_hash": obj_keys_per_chunk,
+    }
 
     # Simulate retrieve consuming the stash (take-once).
     matches_sorted = [
         SimpleNamespace(hash=h, cur_st=i) for i, h in enumerate(chunk_hashes)
     ]
-    cached = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    cached = stash["per_hash"] if stash else None
 
     assert cached is not None
     assert all(r.hash in cached for r in matches_sorted)
@@ -190,12 +194,16 @@ def test_obj_keys_cache_round_trip_tp_expanded():
     ws = 4
     chunk_hashes = [b"h1", b"h2"]
     per_hash = {h: [_fake_obj_key(h, w) for w in range(ws)] for h in chunk_hashes}
-    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = per_hash
+    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
+        "read_locks": 1,
+        "per_hash": per_hash,
+    }
 
     matches_sorted = [
         SimpleNamespace(hash=h, cur_st=i) for i, h in enumerate(chunk_hashes)
     ]
-    cached = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    cached = stash["per_hash"] if stash else None
     assert cached is not None
     rebuilt = [k for r in matches_sorted for k in cached[r.hash]]
     # Length = 2 chunks × 4 workers.
@@ -331,8 +339,9 @@ class _LockCountingStorageManager:
         from lmcache.v1.distributed.api import TrimPolicy
 
         if spec.policy == TrimPolicy.SPARSE:
+            n = int(getattr(spec, "num_kv_readers", 1) or 1)
             for key in spec.keys:
-                self.locks[key] = self.locks.get(key, 0) + 1
+                self.locks[key] = self.locks.get(key, 0) + n
         handle = MagicMock()
         handle.keys = list(spec.keys)
         handle.l2_orig_indices = []
@@ -391,10 +400,10 @@ def _unretrieved_blend(ctx: MagicMock):
     return BlendModule(ctx, lmcache_driven_transfer=MagicMock())
 
 
-def _run_unretrieved_lookup(blend, request_id: str) -> None:
+def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
     """Register ``_UNRETRIEVED_N_CHUNKS`` fingerprints and run a lookup that
     finds them all shifted (prefix coverage 0), i.e. the sparse leg locks
-    every chunk."""
+    every chunk with ``num_kv_readers`` locks each. Returns the lookup key."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
@@ -412,7 +421,7 @@ def _run_unretrieved_lookup(blend, request_id: str) -> None:
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=1,
+        num_kv_readers=num_kv_readers,
         worker_id=None,
         token_ids=tuple(query),
         start=0,
@@ -423,6 +432,7 @@ def _run_unretrieved_lookup(blend, request_id: str) -> None:
     assert result is not None
     assert result.prefix_coverage_tokens == 0
     assert len(result.non_prefix_segments) == _UNRETRIEVED_N_CHUNKS
+    return key
 
 
 def test_session_end_releases_unretrieved_sparse_locks():
@@ -438,6 +448,41 @@ def test_session_end_releases_unretrieved_sparse_locks():
 
     # No retrieve. Request ends: END_SESSION removes the session.
     ctx.session_manager.remove("req-shadowed")
+    assert storage.outstanding() == 0
+
+
+def test_session_end_releases_whole_reservation_mla():
+    """MLA-style lookup (num_kv_readers=8) reserves 8 locks per key; the
+    destroy listener must release the whole reservation, not 1 per key."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+
+    _run_unretrieved_lookup(blend, "req-mla", num_kv_readers=8)
+    assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS * 8
+
+    ctx.session_manager.remove("req-mla")
+    assert storage.outstanding() == 0
+
+
+def test_repeat_lookup_releases_superseded_stash():
+    """A second lookup for the same request (e.g. re-issued after a
+    preemption) replaces the stash; the superseded reservation must be
+    released at overwrite, and the live one at session end."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+
+    key = _run_unretrieved_lookup(blend, "req-repeat", num_kv_readers=2)
+    assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS * 2
+
+    # Repeat lookup: a fresh reservation is taken and the previous stash's
+    # reservation is released at overwrite — never both held.
+    result = blend.cb_unified_lookup(key, tp_size=1)
+    assert result is not None
+    assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS * 2
+
+    ctx.session_manager.remove("req-repeat")
     assert storage.outstanding() == 0
 
 
@@ -457,9 +502,12 @@ def test_retrieve_take_prevents_double_release_at_session_end():
     # Emulate the retrieve's consumption + release of the taken keys.
     session = ctx.session_manager.get("req-retrieved")
     assert session is not None
-    cached = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
-    assert cached is not None and len(cached) == _UNRETRIEVED_N_CHUNKS
-    storage.finish_read_prefetched([key for keys in cached.values() for key in keys])
+    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    assert stash is not None and len(stash["per_hash"]) == _UNRETRIEVED_N_CHUNKS
+    storage.finish_read_prefetched(
+        [key for keys in stash["per_hash"].values() for key in keys],
+        read_locks=stash["read_locks"],
+    )
     assert storage.outstanding() == 0
 
     # Session end must not release again.
