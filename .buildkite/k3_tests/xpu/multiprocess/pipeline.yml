@@ -69,6 +69,7 @@ steps:
       - label: ":xpu: vllm_bench"
         command: |
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export LMCACHE_ENGINE_DRIVEN_PINNED_STAGING="1"
           export L1_USE_LAZY="false"
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
