@@ -393,6 +393,85 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     assert isinstance(context, LMCacheDrivenTransferContext)
 
 
+def test_lmcache_driven_preemption_retains_each_store_event_and_waits() -> None:
+    """Two stores for one request retain both events until remote completion."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        LMCacheDrivenTransferContext,
+        worker_transfer,
+    )
+
+    context = LMCacheDrivenTransferContext()
+    registration_future = MagicMock(name="registration_future")
+    raw_store_futures = [
+        MagicMock(name="raw_store_future_1"),
+        MagicMock(name="raw_store_future_2"),
+    ]
+    pending = [
+        MagicMock(name="pending_store_future_1"),
+        MagicMock(name="pending_store_future_2"),
+    ]
+    for pending_future in pending:
+        pending_future.query.return_value = False
+    for raw_future, pending_future in zip(raw_store_futures, pending, strict=True):
+        raw_future.to_device_future.return_value = pending_future
+    send_request = MagicMock(
+        name="send_request", side_effect=[registration_future, *raw_store_futures]
+    )
+    event_backend = MagicMock(name="event_backend")
+    event_backend.export_event.side_effect = [b"event-1", b"event-2"]
+    events = [MagicMock(name="event_1"), MagicMock(name="event_2")]
+
+    with (
+        patch.object(
+            worker_transfer,
+            "get_event_ipc_backend",
+            return_value=event_backend,
+        ),
+        patch.object(worker_transfer, "wrap_kv_caches", return_value=[]),
+    ):
+        context.register(
+            instance_id=1,
+            kv_caches={"layer_0": torch.zeros(1)},
+            model_name="model",
+            world_size=1,
+            _blocks_in_chunk=1,
+            mq_client=MagicMock(name="mq_client"),
+            mq_timeout=2.5,
+            send_request=send_request,
+        )
+        for index, event in enumerate(events):
+            context.submit_store(
+                _request_id="request",
+                key=f"key-{index}",
+                instance_id=1,
+                kv_caches={},
+                block_ids=[[index]],
+                event=event,
+                _blocks_in_chunk=1,
+            )
+
+    pending[0].retain_reference.assert_called_once_with(events[0])
+    pending[1].retain_reference.assert_called_once_with(events[1])
+
+    context.flush_inflight_stores()
+
+    for pending_future in pending:
+        pending_future.result.assert_called_once_with(timeout=2.5)
+    context.flush_inflight_stores()
+    for pending_future in pending:
+        pending_future.result.assert_called_once()
+
+
+def test_lmcache_driven_preemption_without_stores_is_noop() -> None:
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import LMCacheDrivenTransferContext
+
+    context = LMCacheDrivenTransferContext()
+
+    context.flush_inflight_stores()
+
+
 def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
     """``mode='engine_driven'`` on CPU returns EngineDrivenTransferContext
     (data path; no wrapper-factory capability check is performed)."""

@@ -16,6 +16,7 @@ class MessagingFuture(Generic[T]):
     def __init__(self) -> None:
         self.is_done_ = threading.Event()
         self.result_: T | None = None
+        self.exception_: BaseException | None = None
         self._retained_references: list[object] = []
 
     def query(self) -> bool:
@@ -57,6 +58,8 @@ class MessagingFuture(Generic[T]):
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError("Future result not available within timeout")
+        if self.exception_ is not None:
+            raise self.exception_
         return cast(T, self.result_)
 
     def set_result(self, result: T) -> None:
@@ -69,6 +72,20 @@ class MessagingFuture(Generic[T]):
             result (T): The result to set.
         """
         self.result_ = result
+        self.is_done_.set()
+
+    def set_exception(self, exception: BaseException) -> None:
+        """Complete this future with an exception.
+
+        Args:
+            exception: Failure to raise from :meth:`result`.
+
+        Raises:
+            TypeError: If ``exception`` is not a ``BaseException`` instance.
+        """
+        if not isinstance(exception, BaseException):
+            raise TypeError("exception must derive from BaseException")
+        self.exception_ = exception
         self.is_done_.set()
 
     def retain_reference(self, value: object) -> None:
@@ -146,7 +163,15 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         if self._raw_response_processed:
             return
 
-        event_bytes, result = self.raw_future_.result()
+        try:
+            event_bytes, result = self.raw_future_.result()
+        except BaseException as exc:
+            # ``query`` follows the standard Future contract and reports a
+            # terminal failure as done. Preserve the exception for result()
+            # instead of raising from a non-blocking readiness check.
+            self.exception_ = exc
+            self._raw_response_processed = True
+            return
         event = None
         if event_bytes:
             event = self._event_backend.import_event(event_bytes, self.device_)
@@ -208,6 +233,9 @@ class DeviceMessagingFuture(MessagingFuture[T]):
             raise LMCacheTimeoutError(
                 "DeviceMessagingFuture result not available within timeout"
             )
+
+        if self.exception_ is not None:
+            raise self.exception_
 
         assert self.result_ is not None
         return self.result_
