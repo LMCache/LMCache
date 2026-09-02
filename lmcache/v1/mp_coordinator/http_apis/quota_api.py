@@ -21,7 +21,10 @@ from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
+from lmcache.v1.mp_coordinator.http_apis.dependencies import (
+    get_context,
+    require_controller,
+)
 from lmcache.v1.mp_coordinator.schemas import (
     QuotaConfigRequest,
     QuotaConfigResponse,
@@ -117,7 +120,7 @@ async def set_quota_config(
         None if body.default_limit_gb is None else int(body.default_limit_gb * _GB)
     )
     ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
+    eviction = require_controller(request, FleetEvictionController)
     eviction.quota.set_default_limit_bytes(default_limit_bytes)
     ctx.metadata_persister.save()
     return QuotaConfigResponse(default_limit_gb=body.default_limit_gb)
@@ -137,7 +140,7 @@ async def get_quota_config(
         unquota'd salts are exempt from eviction (the boot default).
     """
     _require_quota_tier(tier)
-    quota = get_context(request).controllers.get(FleetEvictionController).quota
+    quota = require_controller(request, FleetEvictionController).quota
     default_limit = quota.get_default_limit_bytes()
     return QuotaConfigResponse(
         default_limit_gb=None if default_limit is None else _gb(default_limit)
@@ -164,7 +167,7 @@ async def set_quota(
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     limit_bytes = int(body.limit_gb * _GB)
     ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
+    eviction = require_controller(request, FleetEvictionController)
     try:
         eviction.quota.set_quota(cache_salt, limit_bytes)
     except ValueError:
@@ -189,7 +192,7 @@ async def delete_quota(
     _require_quota_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
+    eviction = require_controller(request, FleetEvictionController)
     removed = eviction.quota.delete_quota(cache_salt)
     ctx.metadata_persister.save()
     return QuotaResponse(
@@ -221,7 +224,7 @@ async def get_status(
     _require_accounted_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     ctx = get_context(request)
-    quota = ctx.controllers.get(FleetEvictionController).quota
+    quota = require_controller(request, FleetEvictionController).quota
     usage = ctx.views.get(CacheUsageManager).get_salt_bytes(tier, cache_salt)
     exists = tier == _QUOTA_TIER and quota.has_quota(cache_salt)
     limit = quota.get_limit_bytes(cache_salt) if exists else 0
@@ -249,7 +252,7 @@ async def list_status(request: Request, tier: Tier = Tier.L2) -> StatusListRespo
     _require_accounted_tier(tier)
     ctx = get_context(request)
     usage = ctx.views.get(CacheUsageManager)
-    eviction = ctx.controllers.get(FleetEvictionController)
+    eviction = require_controller(request, FleetEvictionController)
     usage_view = usage
     by_salt = usage_view.get_bytes_by_salt(tier)
     total = usage_view.get_total_bytes(tier)

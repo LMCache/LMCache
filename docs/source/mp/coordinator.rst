@@ -104,9 +104,12 @@ keeps the default below.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
-       view or controller looks for them. ``controller_packages`` is read by
-       the coordinator itself: a list of importable paths to load
-       out-of-tree controllers from.
+       view or controller looks for them. Two keys are read by the
+       coordinator itself: ``controller_packages``, a list of importable
+       paths to load out-of-tree controllers from, and
+       ``disabled_controllers``, a list of class names to leave unbuilt --
+       which is how one of those takes a built-in controller's place
+       instead of running beside it.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
@@ -201,6 +204,26 @@ that outgrows one file can be a directory — or a single module. A name that
 does not import raises at startup; a controller that raises while starting is
 logged and skipped. Views cannot be added this way: they are the coordinator's
 own shared state, which your controller reads.
+
+**Replacing a built-in controller.** Loading yours does not displace the
+built-in one — this tree is always scanned, so both would be built, holding
+state under the same artifact sections and answering for the same endpoints.
+Name it in ``disabled_controllers`` and it is not built at all:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "disabled_controllers": ["FleetEvictionController"]
+    }'
+
+Endpoints belonging to a disabled controller then answer ``404`` naming it,
+rather than failing on an unbuilt collaborator. Endpoints that merely consult
+one carry on without it: ``POST /cache/delete`` holds back L2-pinned keys when
+there is an eviction controller to ask, and deletes everything requested when
+there is not. A name that matches no discovered controller raises at startup,
+so a typo cannot quietly leave the built-in one running against its
+replacement.
 
 Coordinator metrics export
 --------------------------
