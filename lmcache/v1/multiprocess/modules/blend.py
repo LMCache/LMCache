@@ -57,6 +57,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
     chunk_hash_windows_numba,
@@ -715,6 +716,12 @@ class BlendModule(InstanceLivenessTarget):
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
+    #: ``Session.extras`` key: ``{"read_locks": N, "per_hash": {hash: keys}}``
+    #: — the sparse lookup's reservation (N read locks per key, per #4866),
+    #: written by the sparse classify and consumed by exactly one
+    #: ``extras.pop`` — the retrieve, or :meth:`_release_unretrieved_locks`.
+    UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
+
     def __init__(
         self,
         ctx: MPCacheServerContext,
@@ -740,9 +747,9 @@ class BlendModule(InstanceLivenessTarget):
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
-        # L2 opt: cache TP-expanded obj_keys at lookup, pop at retrieve.
-        self._lookup_obj_keys_cache: dict[str, dict[bytes, list]] = {}
-        self._lookup_obj_keys_lock = threading.Lock()
+        # Backstop for locks the retrieve never consumed (see
+        # UNRETRIEVED_KEYS_EXTRA / _release_unretrieved_locks).
+        ctx.session_manager.destroy_listeners.append(self._release_unretrieved_locks)
 
         # vLLM may call retrieve twice per request (partial- then full-block
         # alloc): ranges already scattered, so the repeat call skips them.
@@ -854,7 +861,37 @@ class BlendModule(InstanceLivenessTarget):
             "active_cb_lookups": len(self._cb_jobs),
         }
 
+    def _release_unretrieved_locks(self, session: Session) -> None:
+        """Release read locks the request's retrieve never consumed.
+
+        A client whose matches are all covered by its own prefix cache sends
+        no ``CB_RETRIEVE_PRE_COMPUTED``, so the retrieve's orphan sweep never
+        runs and the sparse-prefetch locks would pin those chunks in L1 for
+        the server's lifetime. Session destruction is the safe release point:
+        no retrieve for the request can arrive afterwards.
+
+        Args:
+            session: The session being destroyed.
+        """
+        stash = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+        if not stash:
+            return
+        keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
+        # Whole-reservation role: no retrieve consumed anything, so the full
+        # reservation (N locks per key, per #4866) is still held.
+        self._ctx.storage_manager.finish_read_prefetched(
+            keys, read_locks=stash["read_locks"]
+        )
+        logger.info(
+            "Released %d unretrieved read lock(s) for ended request %s",
+            len(keys),
+            session.request_id,
+        )
+
     def close(self) -> None:
+        listeners = self._ctx.session_manager.destroy_listeners
+        if self._release_unretrieved_locks in listeners:
+            listeners.remove(self._release_unretrieved_locks)
         self._fingerprint_stop.set()
         if self._coordinator is not None:
             # Joins the client's daemon thread and closes its httpx.Client;
@@ -1307,15 +1344,28 @@ class BlendModule(InstanceLivenessTarget):
                 )
             )
 
-        # Stash per-hash obj_keys for retrieve (L2 opt).
+        # Stash per-hash obj_keys for the retrieve (L2 opt); whatever it
+        # never consumes is released by _release_unretrieved_locks.
         if found_cb_match_result:
             cache_entry = {
                 r.hash: per_hash_obj_keys[r.hash]
                 for r in found_cb_match_result
                 if r.hash in per_hash_obj_keys
             }
-            with self._lookup_obj_keys_lock:
-                self._lookup_obj_keys_cache[key.request_id] = cache_entry
+            session = self._ctx.session_manager.get_or_create(key.request_id)
+            # A repeat lookup for the same request (e.g. re-issued after a
+            # preemption) replaces the stash; release the superseded
+            # reservation first or its locks leak.
+            prev = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+            if prev:
+                self._ctx.storage_manager.finish_read_prefetched(
+                    [k for ks in prev["per_hash"].values() for k in ks],
+                    read_locks=prev["read_locks"],
+                )
+            session.extras[self.UNRETRIEVED_KEYS_EXTRA] = {
+                "read_locks": key.require_num_kv_readers(),
+                "per_hash": cache_entry,
+            }
 
         return found_cb_match_result
 
@@ -2799,9 +2849,17 @@ class BlendModule(InstanceLivenessTarget):
                     f"slot_bound={slot_bound}",
                     scatter_ran=False,
                 )
-        # L2 opt: reuse lookup's obj_keys cache; fall back to re-resolve.
-        with self._lookup_obj_keys_lock:
-            cached = self._lookup_obj_keys_cache.pop(key.request_id, None)
+        # L2 opt: take the lookup's obj_keys stash (once; later calls
+        # re-resolve). ``get``, not ``get_or_create``: a retrieve after
+        # session end must not recreate ownership state.
+        session = self._ctx.session_manager.get(key.request_id)
+        _stash = (
+            session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+            if session is not None
+            else None
+        )
+        cached = _stash["per_hash"] if _stash else None
+        stash_read_locks = _stash["read_locks"] if _stash else 1
         if cached is not None and all(r.hash in cached for r in cb_match_result):
             # The lookup cached all-ranks obj keys (group-major, rank-minor).
             # Select THIS rank's key per read group, else the pairing mispairs
@@ -2832,7 +2890,11 @@ class BlendModule(InstanceLivenessTarget):
                 k for h, ks in cached.items() if h not in retrieved_hashes for k in ks
             ]
             if orphan_keys:
-                self._ctx.storage_manager.finish_read_prefetched(orphan_keys)
+                # Whole-reservation role: nothing will read these keys, so
+                # release every lock the lookup took (per #4866, N per key).
+                self._ctx.storage_manager.finish_read_prefetched(
+                    orphan_keys, read_locks=stash_read_locks
+                )
                 logger.debug(
                     "CB released %d prefetched-but-unretrieved keys (req=%s)",
                     len(orphan_keys),
