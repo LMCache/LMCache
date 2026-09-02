@@ -70,6 +70,24 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     assert violations == []
 
 
+def test_production_callers_create_clients_through_factory() -> None:
+    """Transport implementations must not leak into business callers."""
+    repo_root = Path(__file__).parents[3]
+    transport_root = repo_root / "lmcache/v1/multiprocess/transport"
+    violations: list[str] = []
+    for path in (repo_root / "lmcache").rglob("*.py"):
+        if path.is_relative_to(transport_root):
+            continue
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if node.module.startswith("lmcache.v1.multiprocess.transport.zmq_impl"):
+                violations.append(f"{path.relative_to(repo_root)}:{node.lineno}")
+
+    assert violations == []
+
+
 def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
     transport = _RecordingMessageQueueClient()
     client = ZmqMultiprocessClient(transport)

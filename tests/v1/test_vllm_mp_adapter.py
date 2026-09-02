@@ -27,6 +27,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.transport import zmq_impl
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 
 
@@ -151,7 +152,7 @@ def fake_adapter(monkeypatch):
     ``HeartbeatThread`` is replaced by ``FakeHeartbeatThread``."""
     # Stub the raw ZMQ boundary so facade calls do not touch a real socket.
     fake_client = MagicMock(name="req_client")
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(zmq_impl, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
@@ -891,7 +892,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
             pass
 
     fake_client = MagicMock(name="req_client")
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(zmq_impl, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
     future = MagicMock(name="future")

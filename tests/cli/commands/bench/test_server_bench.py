@@ -34,6 +34,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.transport import zmq_impl
 from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
@@ -1067,7 +1068,6 @@ class TestClientMultiWorker:
         from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import mq
 
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
         register_results = iter([True, False])
@@ -1100,7 +1100,7 @@ class TestClientMultiWorker:
             return True
 
         monkeypatch.setattr(zmq, "Context", lambda: context)
-        monkeypatch.setattr(mq, "MessageQueueClient", lambda *_args: transport)
+        monkeypatch.setattr(zmq_impl, "MessageQueueClient", lambda *_args: transport)
         monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda _client: 16)
         monkeypatch.setattr(
             sv_helpers,
@@ -1164,7 +1164,6 @@ class TestClientMultiWorker:
             ServerBenchClient,
         )
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import mq
 
         calls: list[tuple] = []
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -1224,7 +1223,7 @@ class TestClientMultiWorker:
             fake_allocate,
         )
         monkeypatch.setattr(zmq, "Context", FakeContext)
-        monkeypatch.setattr(mq, "MessageQueueClient", lambda *_args: FakeClient())
+        monkeypatch.setattr(zmq_impl, "MessageQueueClient", lambda *_args: FakeClient())
 
         kv_size = 1 if is_mla else 2
         bench_client = ServerBenchClient(

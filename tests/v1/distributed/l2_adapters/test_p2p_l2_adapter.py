@@ -21,6 +21,7 @@ from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelReadResult,
 )
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.transport import zmq_impl
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -57,7 +58,7 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
     notifier = MagicMock()
 
     with (
-        patch.object(p2p_mod, "MessageQueueClient", return_value=mq),
+        patch.object(zmq_impl, "MessageQueueClient", return_value=mq),
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=tc_ctx),
         patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
     ):
@@ -132,7 +133,7 @@ def test_factory_creates_adapter():
     from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 
     with (
-        patch.object(p2p_mod, "MessageQueueClient", return_value=MagicMock()),
+        patch.object(zmq_impl, "MessageQueueClient", return_value=MagicMock()),
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=MagicMock()),
         patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
     ):
