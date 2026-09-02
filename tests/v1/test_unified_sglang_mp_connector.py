@@ -181,6 +181,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.connector._lookup_leader = True
         self.connector._mq_client = object()
         self.connector._sync_leader_int = lambda value: value
+        self.connector._store_submitted_tokens = {}
         pending_query = _ResultFuture(False, None)
         completed_query = _ResultFuture(True, 3)
         self.connector._send_request = Mock(
@@ -215,6 +216,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             self.assertIs(call.args[1], _RequestType.QUERY_PREFETCH_STATUS)
             self.assertEqual(call.args[2], ["lookup-request"])
         self.assertTrue(operation.locks_held)
+        self.assertEqual(self.connector._store_submitted_tokens["lookup-request"], 12)
 
     def test_slots_to_blocks_rejects_partial_page(self):
         with self.assertRaisesRegex(ValueError, "complete SGLang pages"):

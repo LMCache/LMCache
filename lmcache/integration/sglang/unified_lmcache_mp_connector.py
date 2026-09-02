@@ -689,6 +689,13 @@ class UnifiedLMCacheMPConnector:
         aligned_end = len(operation.token_ids) // self.chunk_size * self.chunk_size
         operation.total_hit_tokens = min(max(result, 0), aligned_end)
         operation.locks_held = operation.total_hit_tokens > 0
+        previous_store_end = self._store_submitted_tokens.get(operation.request_id, 0)
+        if operation.total_hit_tokens > previous_store_end:
+            # The lookup proves this aligned prefix already exists in LMCache;
+            # later stores for this request only need to cover its suffix.
+            self._store_submitted_tokens[operation.request_id] = (
+                operation.total_hit_tokens
+            )
         return operation.total_hit_tokens
 
     def _slots_to_blocks(
