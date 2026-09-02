@@ -68,6 +68,20 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.server import (
+    GrpcMultiprocessServer,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.services import (
+    BlendServiceImpl,
+    ControllerServiceImpl,
+    DebugServiceImpl,
+    EngineDrivenServiceImpl,
+    LMCacheDrivenServiceImpl,
+    LookupServiceImpl,
+    ObservabilityServiceImpl,
+    P2PServiceImpl,
+    QStoreServiceImpl,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
@@ -320,6 +334,109 @@ def _build_modules(
     ]
 
 
+def _build_zmq_request_server(
+    modules: list[EngineModule],
+    mp_config: MPServerConfig,
+) -> MessageQueueServer:
+    """Build the existing ZMQ server from module handler specifications."""
+    server = MessageQueueServer(
+        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
+        context=zmq.Context.instance(),
+    )
+    all_specs: list[HandlerSpec] = []
+    for module in modules:
+        all_specs.extend(module.get_handlers())
+    for spec in all_specs:
+        add_handler_helper(server, spec.request_type, spec.handler)
+
+    affinity_types = [
+        spec.request_type for spec in all_specs if spec.pool is ThreadPoolType.AFFINITY
+    ]
+    normal_types = [
+        spec.request_type for spec in all_specs if spec.pool is ThreadPoolType.NORMAL
+    ]
+    if affinity_types:
+        server.add_affinity_thread_pool(
+            affinity_types, max_workers=mp_config.max_gpu_workers
+        )
+    if normal_types:
+        server.add_normal_thread_pool(
+            normal_types, max_workers=mp_config.max_cpu_workers
+        )
+    return server
+
+
+def _build_grpc_request_server(
+    modules: list[EngineModule],
+    mp_config: MPServerConfig,
+) -> GrpcMultiprocessServer:
+    """Build the gRPC server from concrete module-backed services."""
+    lookup_module = next(
+        module for module in modules if isinstance(module, LookupModule)
+    )
+    management_module = next(
+        module for module in modules if isinstance(module, ManagementModule)
+    )
+    p2p_controller = next(
+        module for module in modules if isinstance(module, P2PController)
+    )
+    lmcache_driven_module = next(
+        (
+            module
+            for module in modules
+            if isinstance(module, LMCacheDrivenTransferModule)
+        ),
+        None,
+    )
+    engine_driven_module = next(
+        (
+            module
+            for module in modules
+            if isinstance(module, EngineDrivenTransferModule)
+        ),
+        None,
+    )
+    qstore_module = next(
+        (module for module in modules if isinstance(module, QStoreModule)),
+        None,
+    )
+    blend_module = None
+    if mp_config.engine_type == "blend":
+        # First Party
+        from lmcache.v1.multiprocess.modules.blend import BlendModule
+
+        blend_module = next(
+            module for module in modules if isinstance(module, BlendModule)
+        )
+
+    server = GrpcMultiprocessServer(
+        bind_url=f"grpc://{mp_config.host}:{mp_config.port}",
+        max_gpu_workers=mp_config.max_gpu_workers,
+        max_cpu_workers=mp_config.max_cpu_workers,
+    )
+    server.add_service(
+        "LMCacheDrivenService",
+        LMCacheDrivenServiceImpl(
+            lmcache_driven_module,
+            blend_module if blend_module is not None else lmcache_driven_module,
+        ),
+    )
+    server.add_service(
+        "EngineDrivenService",
+        EngineDrivenServiceImpl(engine_driven_module),
+    )
+    server.add_service("LookupService", LookupServiceImpl(lookup_module))
+    server.add_service("QStoreService", QStoreServiceImpl(qstore_module))
+    server.add_service("ControllerService", ControllerServiceImpl(management_module))
+    server.add_service("DebugService", DebugServiceImpl(management_module))
+    server.add_service(
+        "ObservabilityService", ObservabilityServiceImpl(management_module)
+    )
+    server.add_service("P2PService", P2PServiceImpl(p2p_controller))
+    server.add_service("BlendService", BlendServiceImpl(blend_module))
+    return server
+
+
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
@@ -327,11 +444,11 @@ def run_cache_server(
     return_engine: bool = False,
     start_prometheus_http_server: bool = True,
     coordinator_config: CoordinatorConfig = DEFAULT_COORDINATOR_CONFIG,
-) -> tuple[MessageQueueServer, MPCacheServer] | None:
-    """Run the LMCache cache server with ZMQ message queue.
+) -> tuple[GrpcMultiprocessServer | MessageQueueServer, MPCacheServer] | None:
+    """Run the LMCache cache server with the selected request transport.
 
     Args:
-        mp_config: Configuration for the ZMQ multiprocess server.
+        mp_config: Configuration for the multiprocess server.
         storage_manager_config: Configuration for the storage manager.
         obs_config: Configuration for the observability stack.
         coordinator_config: Coordinator connection used by the P2P controller
@@ -344,7 +461,7 @@ def run_cache_server(
             ``/metrics`` to avoid port conflicts or redundant servers.
 
     Returns:
-        If return_engine is True: tuple of (MessageQueueServer, MPCacheServer).
+        If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
     # Before any event IPC backend is resolved (KV-cache registration), so
@@ -413,36 +530,17 @@ def run_cache_server(
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
-    zmq_context = zmq.Context.instance()
-    server = MessageQueueServer(
-        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
-        context=zmq_context,
-    )
-
-    all_specs: list[HandlerSpec] = []
-    for module in modules:
-        all_specs.extend(module.get_handlers())
-
-    for spec in all_specs:
-        add_handler_helper(server, spec.request_type, spec.handler)
-
-    affinity_types = [
-        s.request_type for s in all_specs if s.pool == ThreadPoolType.AFFINITY
-    ]
-    normal_types = [
-        s.request_type for s in all_specs if s.pool == ThreadPoolType.NORMAL
-    ]
-    if affinity_types:
-        server.add_affinity_thread_pool(
-            affinity_types, max_workers=mp_config.max_gpu_workers
+    transport = mp_config.transport
+    if transport == "grpc":
+        server: GrpcMultiprocessServer | MessageQueueServer = (
+            _build_grpc_request_server(modules, mp_config)
         )
-    if normal_types:
-        server.add_normal_thread_pool(
-            normal_types, max_workers=mp_config.max_cpu_workers
-        )
+    else:
+        server = _build_zmq_request_server(modules, mp_config)
 
     logger.info(
-        "LMCache ZMQ cache server is running on tcp://%s:%d",
+        "LMCache %s cache server is running on %s:%d",
+        transport,
         mp_config.host,
         mp_config.port,
     )
@@ -480,9 +578,7 @@ def parse_args():
     Returns:
         Parsed arguments namespace.
     """
-    parser = argparse.ArgumentParser(
-        description="LMCache ZMQ Cache Server (without HTTP)"
-    )
+    parser = argparse.ArgumentParser(description="LMCache Cache Server (without HTTP)")
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
     add_observability_args(parser)

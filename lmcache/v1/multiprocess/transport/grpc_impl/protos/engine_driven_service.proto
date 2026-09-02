@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Engine-driven transfer wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+import "lmcache/v1/multiprocess/transport/grpc_impl/protos/common.proto";
+
+message RegisterKvCacheEngineDrivenContextRequest {
+  int64 instance_id = 1;
+  string model_name = 2;
+  int64 world_size = 3;
+  int64 block_size = 4;
+  int64 num_layers = 5;
+  int64 hidden_dim_size = 6;
+  string dtype_str = 7;
+  bool use_mla = 8;
+  optional int64 num_physical_slots = 9;
+}
+
+message RegisterKvCacheEngineDrivenContextResponse {
+  string shm_name = 1;
+  int64 pool_size = 2;
+}
+
+message UnregisterKvCacheEngineDrivenContextRequest {
+  int64 instance_id = 1;
+}
+
+message UnregisterKvCacheEngineDrivenContextResponse {}
+
+message PrepareStoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message PrepareStoreResponse {
+  bytes encoded_context = 1;
+}
+
+message CommitStoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  bytes data = 3;
+}
+
+message CommitStoreResponse {
+  bool success = 1;
+}
+
+message PrepareRetrieveRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message PrepareRetrieveResponse {
+  bool success = 1;
+  bytes data = 2;
+  bytes encoded_context = 3;
+}
+
+message CommitRetrieveRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message CommitRetrieveResponse {
+  bool success = 1;
+}
+
+service EngineDrivenService {
+  rpc RegisterKvCacheEngineDrivenContext(
+      RegisterKvCacheEngineDrivenContextRequest)
+      returns (RegisterKvCacheEngineDrivenContextResponse);
+  rpc UnregisterKvCacheEngineDrivenContext(
+      UnregisterKvCacheEngineDrivenContextRequest)
+      returns (UnregisterKvCacheEngineDrivenContextResponse);
+  rpc PrepareStore(PrepareStoreRequest) returns (PrepareStoreResponse);
+  rpc CommitStore(CommitStoreRequest) returns (CommitStoreResponse);
+  rpc PrepareRetrieve(PrepareRetrieveRequest) returns (PrepareRetrieveResponse);
+  rpc CommitRetrieve(CommitRetrieveRequest) returns (CommitRetrieveResponse);
+}
