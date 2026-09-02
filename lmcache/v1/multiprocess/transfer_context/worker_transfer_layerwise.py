@@ -134,7 +134,7 @@ class LMCacheLayerwiseTransferContext(LMCacheDrivenTransferContext):
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
@@ -149,7 +149,9 @@ class LMCacheLayerwiseTransferContext(LMCacheDrivenTransferContext):
             A future whose per-layer completions can be awaited individually.
 
         Raises:
-            RuntimeError: If the context is not registered.
+            RuntimeError: If the context is not registered, or ``event`` is
+                ``None``; the layer-wise path always needs one to order the
+                engine-side writes.
         """
         if (
             self._mq_client is None
@@ -161,6 +163,8 @@ class LMCacheLayerwiseTransferContext(LMCacheDrivenTransferContext):
                 "Layerwise transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
+        if event is None:
+            raise RuntimeError("Layer-wise transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         # The server answers a layer-wise retrieve with one message per
         # layer batch, so the future has to exist, and know how to re-arm

@@ -47,10 +47,9 @@ void multi_layer_block_kv_transfer_templated(
   TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
               "Expected 1-4 LMCache objects, got ", num_objects);
 
-  const MultiLayerLaunchConfig launch_cfg =
-      make_multi_layer_launch_config<ScalarType>(
-          block_ids, num_objects, shape_desc, lmcache_chunk_size);
-  const int num_blocks_per_object = launch_cfg.num_blocks_per_object;
+  int total_blocks = block_ids.size(0);
+  int num_blocks_per_object = calculate_num_blocks_per_object(
+      total_blocks, num_objects, shape_desc, lmcache_chunk_size);
 
   // --- Build MemoryObj4 ---
   MemoryObj4<ScalarType> lmcache_obj4;
@@ -72,9 +71,10 @@ void multi_layer_block_kv_transfer_templated(
   // --- block_ids is a GPU int64 tensor, read directly ---
   const int64_t* block_ids_ptr = block_ids.data_ptr<int64_t>();
 
-  // --- Grid and block dimensions (shared with the other path) ---
-  const dim3 block = launch_cfg.block;
-  const dim3 grid = launch_cfg.grid;
+  // --- Grid and block dimensions ---
+  dim3 block =
+      make_thread_block_dim(shape_desc, static_cast<int>(sizeof(ScalarType)));
+  dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
 
   if (direction == TransferDirection::H2D) {
     DISPATCH_FORMAT(multi_layer_block_transfer_kernel, true, lmcache_obj4);
@@ -109,7 +109,7 @@ void execute_object_group_transfer(
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
     const std::vector<BatchStep>& batch_steps) {
-  execute_object_group_transfer_common(
+  execute_object_group_transfer_impl(
       direction, device, host_buffer_alignment, kernel_group_specs, batch_steps,
       [&](const KernelGroupSpec& group, const LaunchVar& launch,
           const at::Tensor& paged_buffer_ptrs_tensor,
