@@ -104,10 +104,12 @@ class DirectoryStats:
 
 @dataclass
 class _KeyRecord:
-    """Directory value for one key: its placements plus recency."""
+    """Directory value for one key: its placements, recency, and
+    number of accesses applied to it."""
 
     placements: list[Placement] = field(default_factory=list)
     last_access: float = 0.0
+    access_count: int = 0
 
 
 @dataclass
@@ -251,6 +253,23 @@ class KeyDirectory(View):
                 for chunk_hash in chunk_hashes
             ]
 
+    def get_access_counts(self, keys: list[ObjectKey]) -> list[int]:
+        """Return the number of ``ACCESS`` entries applied to each key.
+
+        Args:
+            keys: The keys to look up.
+
+        Returns:
+            One count per requested key, in request order.
+        """
+        with self._lock:
+            return [
+                record.access_count
+                if (record := self._directory.get(key)) is not None
+                else 0
+                for key in keys
+            ]
+
     def blend_match(self, tokens: np.ndarray) -> list[BlendMatch]:
         """Find cached chunks contained anywhere in ``tokens``.
 
@@ -368,7 +387,7 @@ class KeyDirectory(View):
         """Return the directory's contents.
 
         Returns:
-            ``{"keys": [(key, last_access, [placement, ...]), ...],
+            ``{"keys": [(key, last_access, access_count, [placement, ...]), ...],
             "bindings": [(chunk_hash, token_offset, token bytes), ...],
             "l1_keys_by_instance": {instance_id: [key index, ...]}}``.
             The blend index is derived, so it is absent.
@@ -378,6 +397,7 @@ class KeyDirectory(View):
                 (
                     encode_key(key),
                     record.last_access,
+                    record.access_count,
                     [_encode_placement(p) for p in record.placements],
                 )
                 for key, record in self._directory.items()
@@ -415,7 +435,9 @@ class KeyDirectory(View):
             ValueError: If the directory already holds keys, or the
                 reverse index cites a key position that does not exist.
         """
-        captured_keys = cast("list[tuple[object, float, list[object]]]", state["keys"])
+        captured_keys = cast(
+            "list[tuple[object, float, int, list[object]]]", state["keys"]
+        )
         bindings = cast("list[tuple[bytes, int, bytes]]", state["bindings"])
         l1_by_instance = cast("Mapping[str, list[int]]", state["l1_keys_by_instance"])
         with self._lock:
@@ -426,12 +448,13 @@ class KeyDirectory(View):
                     f"{len(self._l1_keys_by_instance)} instances)"
                 )
             key_table = []
-            for encoded_key, last_access, placements in captured_keys:
+            for encoded_key, last_access, access_count, placements in captured_keys:
                 key = decode_key(encoded_key)
                 key_table.append(key)
                 self._directory[key] = _KeyRecord(
                     placements=[_decode_placement(p) for p in placements],
                     last_access=last_access,
+                    access_count=access_count,
                 )
                 self._add_token_binding(key)
             for chunk_hash, token_offset, raw_tokens in bindings:
@@ -529,6 +552,7 @@ class KeyDirectory(View):
             record = self._directory.get(key)
             if record is not None:
                 record.last_access = max(record.last_access, batch.ts)
+                record.access_count += 1
 
     @staticmethod
     def _find_placement(

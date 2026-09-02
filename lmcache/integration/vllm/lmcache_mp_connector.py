@@ -81,7 +81,7 @@ try:
         )
 except ImportError:
     # Third Party
-    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (  # type: ignore[no-redef]
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (  # type: ignore[assignment,no-redef]
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         ParallelStrategy,
@@ -108,6 +108,9 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
+
+_DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
+_MAX_LCM_EXPANSION_FACTOR = 4
 
 
 # Helper functions
@@ -145,7 +148,129 @@ def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
     return False
 
 
-def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
+def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[Any]:
+    """Yield leaf KV cache specs without depending on a vLLM helper API."""
+    if kv_cache_config is None:
+        return
+    for group in kv_cache_config.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        per_layer_specs = getattr(group_spec, "kv_cache_specs", None)
+        if isinstance(per_layer_specs, dict):
+            yield from per_layer_specs.values()
+        else:
+            yield group_spec
+
+
+def get_group_tokens_per_block(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None",
+) -> list[int]:
+    """Return each KV cache group's effective block span in tokens.
+
+    Attention pages are local DCP shards and therefore cover
+    ``spec.block_size * dcp_size`` global tokens. Recurrent-state pages are
+    replicated and retain their physical ``spec.block_size`` span. When vLLM
+    does not provide group metadata, preserve the legacy single-group rule.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The effective token span of each KV cache group.
+    """
+    dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
+    groups = (
+        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+        if kv_cache_config is not None
+        else ()
+    )
+    return [
+        get_tokens_per_block(group.kv_cache_spec, dcp_size) for group in groups
+    ] or [vllm_config.cache_config.block_size * dcp_size]
+
+
+def get_vllm_scheduler_block_size(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None",
+) -> int:
+    """Return vLLM's scheduler block size for the resolved cache groups.
+
+    The scheduler boundary must align with every cache group, so vLLM uses the
+    least common multiple of their effective block spans.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The scheduler block size in tokens.
+    """
+    group_spans = get_group_tokens_per_block(vllm_config, kv_cache_config)
+    scheduler_block_size = math.lcm(*group_spans)
+    largest_group_span = max(group_spans)
+    if scheduler_block_size > largest_group_span * _MAX_LCM_EXPANSION_FACTOR:
+        logger.warning(
+            "LMCache resolved a scheduler block of %d tokens from group spans "
+            "%s (%0.1fx the largest span). Near-coprime group geometry can "
+            "make cache chunks too coarse to be useful.",
+            scheduler_block_size,
+            group_spans,
+            scheduler_block_size / largest_group_span,
+        )
+    return scheduler_block_size
+
+
+def get_dcp_decorated_model_name(vllm_config: VllmConfig) -> str:
+    """Decorate the model name with its non-trivial DCP interleave layout.
+
+    Embedding the DCP interleave size in the LMCache model name prevents a
+    changed interleave from hitting objects with an incompatible byte layout.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+
+    Returns:
+        The decorated cache model name, or the original model name when DCP or
+        interleaving is inactive.
+    """
+    model_name = vllm_config.model_config.model
+    parallel_config = vllm_config.parallel_config
+    dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
+    interleave = getattr(parallel_config, "cp_kv_cache_interleave_size", 1)
+    if dcp_size <= 1 or interleave == 1:
+        return model_name
+    return f"{model_name}{_DCP_LAYOUT_NAMESPACE}d{dcp_size}-interleave{interleave}"
+
+
+def get_resolved_attention_block_sizes(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None",
+) -> set[int]:
+    """Return physical block sizes for resolved attention cache groups.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The resolved attention block sizes. Falls back to vLLM's cache block
+        size when group metadata is unavailable.
+    """
+    block_sizes = {
+        spec.block_size
+        for spec in _iter_kv_cache_specs(kv_cache_config)
+        if any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
+    }
+    if block_sizes:
+        return block_sizes
+    return {vllm_config.cache_config.block_size}
+
+
+def validate_mamba_step_alignment(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None" = None,
+) -> None:
     """Reject scheduler configs whose steps cannot advance a whole Mamba block.
 
     In ``mamba_cache_mode="align"`` vLLM snapshots the recurrent state only at
@@ -163,13 +288,32 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
     Args:
         vllm_config: The vLLM config; only Mamba-hybrid models in ``align``
             cache mode are constrained, others pass.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        None.
 
     Raises:
-        ValueError: If ``max_num_batched_tokens < block_size``.
+        ValueError: If Mamba groups have inconsistent block sizes or
+            ``max_num_batched_tokens < block_size``.
     """
     if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
         return
-    block_size = vllm_config.cache_config.block_size
+    mamba_block_sizes = {
+        spec.block_size
+        for spec in _iter_kv_cache_specs(kv_cache_config)
+        if any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+    }
+    if len(mamba_block_sizes) > 1:
+        raise ValueError(
+            "All Mamba KV cache groups must use one physical block size; got "
+            f"{sorted(mamba_block_sizes)}."
+        )
+    block_size = (
+        next(iter(mamba_block_sizes))
+        if mamba_block_sizes
+        else vllm_config.cache_config.block_size
+    )
     max_batched = vllm_config.scheduler_config.max_num_batched_tokens
     if max_batched < block_size:
         raise ValueError(
@@ -181,12 +325,24 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
         )
 
 
-def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
+def validate_dcp_support(
+    vllm_config: VllmConfig,
+    n_servers: int,
+    kv_cache_config: "KVCacheConfig | None" = None,
+) -> None:
     """Reject decode-context-parallel topologies this connector cannot serve.
 
     These would silently store wrong or incomplete KV, so fail at startup
     instead. ``dcp > tp`` is not re-checked; vLLM's ``ParallelConfig``
     already rejects it.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        n_servers: The number of LMCache servers backing the deployment.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        None.
 
     Raises:
         ValueError: On an unsupported DCP topology (``dcp_size == 1``
@@ -204,13 +360,20 @@ def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
             f"together with DCP (got pcp={pcp_size}, dcp={dcp_size})."
         )
 
-    # Fail-closed, not fundamental: the interleave sets each object's byte
-    # layout but is absent from cache identity, and k != 1 is unvalidated.
     interleave = getattr(pc, "cp_kv_cache_interleave_size", 1)
-    if interleave != 1:
+    attention_block_sizes = get_resolved_attention_block_sizes(
+        vllm_config, kv_cache_config
+    )
+    incompatible_block_sizes = sorted(
+        block_size
+        for block_size in attention_block_sizes
+        if interleave > block_size or block_size % interleave != 0
+    )
+    if incompatible_block_sizes:
         raise ValueError(
-            "LMCacheMPConnector requires cp_kv_cache_interleave_size == 1 "
-            f"under DCP (got {interleave})."
+            f"cp_kv_cache_interleave_size ({interleave}) must be no greater "
+            "than and evenly divide every resolved attention block size; "
+            f"incompatible sizes: {incompatible_block_sizes}."
         )
 
     ranks_per_server = pc.world_size // n_servers
@@ -297,11 +460,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig | None" = None,
     ):
-        super().__init__(vllm_config, role, kv_cache_config)
+        # Older supported vLLM releases allow connectors to omit this value,
+        # while current vLLM's type declaration requires it.
+        super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
 
         # Fail fast, before the server handshake below.
-        validate_mamba_step_alignment(vllm_config)
-        validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
+        kv_cache_config = getattr(self, "_kv_cache_config", None)
+        validate_mamba_step_alignment(vllm_config, kv_cache_config)
+        validate_kv_cache_groups(kv_cache_config)
+
+        group_tokens_per_block = get_group_tokens_per_block(
+            vllm_config, kv_cache_config
+        )
+        scheduler_block_size = get_vllm_scheduler_block_size(
+            vllm_config, kv_cache_config
+        )
+        cache_model_name = get_dcp_decorated_model_name(vllm_config)
 
         assert vllm_config.kv_transfer_config is not None
 
@@ -340,7 +514,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
 
-        validate_dcp_support(vllm_config, n_servers)
+        validate_dcp_support(vllm_config, n_servers, kv_cache_config)
+
+        logger.info(
+            "Resolved LMCache MP geometry: group_tokens_per_block=%s, "
+            "scheduler_block_size=%d, cache_model_name=%s",
+            group_tokens_per_block,
+            scheduler_block_size,
+            cache_model_name,
+        )
 
         assert vllm_config.parallel_config.world_size % n_servers == 0, (
             f"world_size ({vllm_config.parallel_config.world_size}) must be "
@@ -394,8 +576,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self.scheduler_adapter = LMCacheMPSchedulerAdapter(
                 server_urls=server_urls,
                 context=zmq_context,
-                model_name=vllm_config.model_config.model,
-                vllm_block_size=vllm_config.cache_config.block_size * dcp_size,
+                model_name=cache_model_name,
+                vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
@@ -421,8 +603,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self.worker_adapter = LMCacheMPWorkerAdapter(
                 server_url=local_server_url,
                 context=zmq_context,
-                model_name=vllm_config.model_config.model,
-                vllm_block_size=vllm_config.cache_config.block_size * dcp_size,
+                model_name=cache_model_name,
+                vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
@@ -446,21 +628,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
-        kv_cache_config = getattr(self, "_kv_cache_config", None)
-        vllm_groups = (
-            getattr(kv_cache_config, "kv_cache_groups", ()) or ()
-            if kv_cache_config is not None
-            else ()
-        )
         # Tokens covered by one paged chunk (one block ID) of each engine
         # group, from the group's KV cache spec. Hybrid models can mix
         # different values (e.g. gemma-4: sliding-window groups 32,
         # full-attention groups 16; DeepSeek V4: 256/64/8/4). Falls back to
         # the engine's base block size when no group metadata is available
         # (single non-hybrid group).
-        self._group_tokens_per_block: list[int] = [
-            get_tokens_per_block(group.kv_cache_spec, dcp_size) for group in vllm_groups
-        ] or [vllm_config.cache_config.block_size * dcp_size]
+        self._group_tokens_per_block = group_tokens_per_block
         for engine_group_idx, tokens_per_block in enumerate(
             self._group_tokens_per_block
         ):
@@ -575,6 +749,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request_ids = []
         ops = []
         cache_salts = []
+        request_configs_list = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
@@ -582,6 +757,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            request_configs_list.append(meta.request_configs)
 
         if len(request_ids) == 0:
             return
@@ -589,7 +765,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_retrieve_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids,
+            ops,
+            event,
+            cache_salts=cache_salts,
+            request_configs_list=request_configs_list,
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -649,12 +829,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request_ids = []
         ops = []
         cache_salts = []
+        request_configs_list = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            request_configs_list.append(meta.request_configs)
 
         if len(request_ids) == 0:
             if self.dispatcher is not None:
@@ -664,7 +846,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_store_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids,
+            ops,
+            event,
+            cache_salts=cache_salts,
+            request_configs_list=request_configs_list,
         )
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
@@ -852,6 +1038,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
+            request_configs=tracker.request_configs,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -907,6 +1094,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request.request_id,
             token_ids=list(request.all_token_ids),
             cache_salt=tracker.cache_salt,
+            request_configs=tracker.request_configs,
         )
 
     def update_state_after_alloc(
@@ -989,6 +1177,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                         end=free_end,
                         request_id=request.request_id,
                         cache_salt=tracker.cache_salt,
+                        request_configs=tracker.request_configs,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",
@@ -1115,14 +1304,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """Prefer the head-contiguous layout; None (MLA) defers to vLLM."""
-        model_config = getattr(vllm_config, "model_config", None)
-        if model_config is None or model_config.use_mla:
-            return None
-        if not hasattr(vllm_config.cache_config, "get_resolved_kv_cache_layout"):
-            return "HND"
-        # Not "HND": MultiConnector compares preference strings verbatim.
-        return "LBHNC"
+        """Defer to vLLM; a connector preference is unsafe for now.
+
+        Connector preferences outrank the default in vLLM's layout
+        resolution, but backends that assume a layout without declaring it
+        via ``supported_kv_cache_layouts`` (e.g. the DeepSeek V4 sparse
+        attention, which hardcodes NHD) silently read a pool laid out
+        differently. LMCache handles every resolved layout, so express no
+        preference until such backends declare theirs.
+        """
+        return None
 
     def get_finished_count(self) -> int | None:
         """

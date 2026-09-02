@@ -17,7 +17,6 @@ torch / zmq.
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from typing import Any
 import ctypes
 import hashlib
@@ -128,51 +127,6 @@ _INSTANCE_ID_BASE = 1000
 # Default KV shape spec matching the original defaults:
 # 32 layers, (2, num_blocks=1024, block_size=16, 8 heads, 128 head_size)
 _DEFAULT_SHAPE_SPEC = "(2,1024,16,8,128):float16:32"
-
-
-@dataclass
-class WorkerContext:
-    """Per-rank state for a single simulated TP worker.
-
-    Mirrors what ``LMCacheMPWorkerAdapter`` holds per vLLM worker in a
-    real deployment. Two identifiers matter here and they are *not* the
-    same as the vLLM rank:
-
-    * ``kv_worker_id`` is the identifier used in ``IPCCacheServerKey``.
-      In vLLM this is ``ParallelStrategy.kv_worker_id`` --
-      ``vllm_worker_id // tp_size`` under MLA (all TP ranks fold into
-      one kv_worker) and ``vllm_worker_id`` otherwise.
-    * ``kv_world_size`` is the world_size the server uses to index
-      cache entries. Also from ``ParallelStrategy``: for MLA it is
-      ``vllm_world_size // tp_size`` (typically 1 for pure TP-MLA)
-      and ``vllm_world_size`` otherwise.
-
-    ``instance_id`` stays per-simulated-rank so each vLLM process still
-    gets its own ``REGISTER_KV_CACHE`` context; multiple TP ranks
-    inside the same MLA kv_worker share the same ``kv_worker_id`` but
-    keep distinct ``instance_id`` values.
-
-    Attributes:
-        kv_worker_id: The KV worker id (``ParallelStrategy.kv_worker_id``).
-        kv_world_size: The KV world size (``ParallelStrategy.kv_world_size``).
-        instance_id: Unique server-side context id for this simulated
-            vLLM rank; matches what would be ``os.getpid()`` in a real
-            deployment.
-        client_tensors: Paged KV tensors owned by this worker (data-mode
-            self-check source/sink). ``None`` in handle mode.
-        server_pool: mmap of the server's SHM pool for this worker's
-            engine-driven context. ``None`` outside data mode.
-        is_kv_writer: Whether this worker participates in STORE. For MLA
-            only ranks with ``vllm_worker_id % tp_size == 0`` write; non-
-            MLA writes on every rank. RETRIEVE runs on every rank.
-    """
-
-    kv_worker_id: int
-    kv_world_size: int
-    instance_id: int
-    client_tensors: "list[torch.Tensor] | None" = None
-    server_pool: "mmap.mmap | None" = None
-    is_kv_writer: bool = True
 
 
 # ------------------------------------------------------------------ #
@@ -373,7 +327,12 @@ _allocate_kv_cache = _allocate_gpu_kv_cache
 def _allocate_cpu_shm_kv_cache(
     groups: list[KVLayerGroupInfo],
     shm_prefix: str,
-) -> tuple[list[torch.Tensor], list[CpuShmTensorWrapper], list[str]]:
+) -> tuple[
+    list[torch.Tensor],
+    list[CpuShmTensorWrapper],
+    list[str],
+    list[tuple[int, int]],
+]:
     """Allocate paged CPU KV cache tensors backed by POSIX SHM.
 
     For each (group, layer) we ``shm_open`` a fresh segment and
@@ -384,8 +343,7 @@ def _allocate_cpu_shm_kv_cache(
     zero-copy across processes (matching the GPU CUDA-IPC path).
 
     Returns:
-        ``(tensors, wrappers, shm_names)``. ``shm_names`` is kept
-        so the caller can ``shm_unlink`` on shutdown.
+        Tensors, wrappers, SHM names, and ``(address, size)`` mappings.
     """
     # Fixed seed so the deterministic random fill below produces
     # reproducible checksums across cold/warm bench iterations.
@@ -393,6 +351,7 @@ def _allocate_cpu_shm_kv_cache(
     tensors: list[torch.Tensor] = []
     wrappers: list[CpuShmTensorWrapper] = []
     shm_names: list[str] = []
+    shm_mappings: list[tuple[int, int]] = []
     layer_idx = 0
     for g_idx, g in enumerate(groups):
         sd = g.shape_desc
@@ -419,8 +378,9 @@ def _allocate_cpu_shm_kv_cache(
             tensors.append(t)
             wrappers.append(CpuShmTensorWrapper(t, name))
             shm_names.append(name)
+            shm_mappings.append((addr, nbytes))
             layer_idx += 1
-    return tensors, wrappers, shm_names
+    return tensors, wrappers, shm_names, shm_mappings
 
 
 def _send_register_kv_cache(
@@ -1041,345 +1001,6 @@ def _query_checksum(
     except (urllib.error.URLError, OSError) as exc:
         print("  [WARNING] Checksum query failed: %s" % exc)
     return None
-
-
-# ------------------------------------------------------------------ #
-#  Per-request flow                                                    #
-# ------------------------------------------------------------------ #
-
-
-@dataclass
-class RequestResult:
-    """Result of a single request pass (cold or warm).
-
-    Carries both the checksum list (for correctness verification) and
-    per-operation latency measurements (for metrics aggregation).
-    """
-
-    checksums: list[str] | None = None
-    lookup_ms: float | None = None
-    retrieve_ms: float | None = None
-    store_ms: float | None = None
-    hit_chunks: int = 0
-    total_chunks: int = 0
-    store_tokens: int = 0
-    retrieve_tokens: int = 0
-
-
-def _process_request(
-    client: MessageQueueClient,
-    seq_no: int,
-    num_tokens: int,
-    chunk_size: int,
-    pass_label: str,
-    http_base: str = "",
-    block_size: int = 16,
-    total_blocks: int = 1024,
-    num_engine_group_infos: int = 1,
-    use_gpu: bool = True,
-    use_handle: bool | None = None,
-    client_tensors: list["torch.Tensor"] | None = None,
-    server_pool: "mmap.mmap | None" = None,
-    workers: "list[WorkerContext] | None" = None,
-    world_size: int = _WORLD_SIZE,
-) -> RequestResult | None:
-    """Run the full lookup -> retrieve/store flow.
-
-    When ``client_tensors`` is provided (data-mode self-check), the
-    flow gains two extra steps:
-
-    * cold pass: hash the paged block range *before* ``STORE``, so
-      the digest captures the ground-truth KV bytes.
-    * warm pass: zero-fill the same block range *before*
-      ``RETRIEVE``, then hash *after* ``RETRIEVE``. cold == warm
-      proves the server returned the exact bytes we sent.
-
-    Handle mode keeps the historical server-side
-    ``/cache/checksums`` path; client tensors are not consulted (in
-    handle mode the client and server share the same SHM/IPC
-    pages, so a client-side hash equals itself by construction).
-
-    ``workers`` (optional) drives multi-rank TP simulation: LOOKUP
-    stays scheduler-scoped (single call, worker_id=None) while
-    STORE fans out to every ``is_kv_writer`` rank and RETRIEVE fans
-    out to every rank -- mirroring how ``LMCacheMPWorkerAdapter``
-    routes requests in a real vLLM deployment. When ``None`` the
-    bench synthesises a single worker from ``client_tensors`` /
-    ``server_pool`` so single-rank runs stay unchanged.
-    """
-    # Materialise a single-worker context when the caller passed the
-    # legacy client_tensors / server_pool pair. Keeps the fan-out loop
-    # below oblivious to how many workers there are.
-    if workers is None:
-        workers = [
-            WorkerContext(
-                kv_worker_id=0,
-                kv_world_size=world_size,
-                instance_id=_INSTANCE_ID,
-                client_tensors=client_tensors,
-                server_pool=server_pool,
-                is_kv_writer=True,
-            )
-        ]
-    # ``client_tensors is not None`` gates client-side self-check (data
-    # mode); use any worker's tensors as the flag since either all or
-    # none of them carry tensors.
-    any_client_tensors = workers[0].client_tensors is not None
-
-    token_ids = _build_token_ids(seq_no, num_tokens)
-    request_id = "req-%d-%s" % (seq_no, pass_label)
-
-    # Align end to chunk_size (only full chunks)
-    num_full_tokens = (len(token_ids) // chunk_size) * chunk_size
-    if num_full_tokens == 0:
-        print(
-            "  [seq %d/%s] SKIP: %d tokens < chunk_size %d"
-            % (seq_no, pass_label, len(token_ids), chunk_size)
-        )
-        return None
-
-    # Key for lookup (worker_id=None)
-    lookup_key = _make_key(
-        token_ids,
-        request_id,
-        start=0,
-        end=num_full_tokens,
-        world_size=world_size,
-    )
-
-    # 1. LOOKUP
-    # ``tp_size = len(workers)`` so MLA runs (kv_world_size==1,
-    # tp_size>1) get ``tp_size-1`` extra read locks per chunk on the
-    # server; without those every subsequent-rank RETRIEVE would
-    # release a lock the first rank already dropped.
-    t0 = time.monotonic()
-    if not _send_lookup(client, lookup_key, tp_size=len(workers)):
-        print("  [seq %d/%s] LOOKUP timeout" % (seq_no, pass_label))
-        return None
-
-    # 2. QUERY_PREFETCH_STATUS (poll by request_id)
-    hit_chunks = _poll_prefetch_status(client, lookup_key.request_id)
-    if hit_chunks is None:
-        hit_chunks = 0
-
-    total_chunks = num_full_tokens // chunk_size
-    miss_chunks = total_chunks - hit_chunks
-    hit_tokens = hit_chunks * chunk_size
-    lookup_ms = (time.monotonic() - t0) * 1000
-
-    print(
-        "  [seq %d/%s] LOOKUP: %d/%d chunks hit "
-        "(%.1f ms)"
-        % (
-            seq_no,
-            pass_label,
-            hit_chunks,
-            total_chunks,
-            lookup_ms,
-        )
-    )
-
-    # Block offset: each request uses a different block
-    # range so that different requests touch different data.
-    # Wrap with modulo and clamp so the entire range
-    # [block_offset, block_offset + num_blocks) stays
-    # within [0, total_blocks).
-    num_blocks = num_full_tokens // block_size
-    usable = max(total_blocks - num_blocks, 1)
-    block_offset = (seq_no * num_blocks) % usable
-
-    # Client-side self-check (data mode only): cold pass captures
-    # per-rank ground truth before STORE; warm pass zero-fills so
-    # a successful RETRIEVE must overwrite every byte on each rank.
-    cold_ground_truth: list[str] | None = None
-    if any_client_tensors:
-        if pass_label == "cold" and miss_chunks > 0:
-            store_block_off = block_offset + (hit_tokens // block_size)
-            store_num_blocks = (num_full_tokens - hit_tokens) // block_size
-            cold_parts: list[str] = []
-            for w in workers:
-                if not w.is_kv_writer or w.client_tensors is None:
-                    continue
-                cold_parts.extend(
-                    _compute_client_checksums(
-                        w.client_tensors,
-                        store_block_off,
-                        store_num_blocks,
-                        block_size,
-                        chunk_size,
-                    )
-                )
-            cold_ground_truth = cold_parts or None
-        if pass_label == "warm" and hit_chunks > 0:
-            retr_num_blocks = hit_tokens // block_size
-            for w in workers:
-                if w.client_tensors is not None:
-                    _zero_fill_client_blocks(
-                        w.client_tensors,
-                        block_offset,
-                        retr_num_blocks,
-                    )
-
-    # 3. RETRIEVE hit portion — every rank retrieves its own KV shard.
-    retrieve_ms: float = 0.0
-    store_ms: float = 0.0
-    if hit_chunks > 0:
-        t1 = time.monotonic()
-        status = "retrieved"
-        for w in workers:
-            retrieve_key = _make_key(
-                token_ids,
-                request_id,
-                start=0,
-                end=hit_tokens,
-                worker_id=w.kv_worker_id,
-                world_size=world_size,
-            )
-            w_status = _send_retrieve(
-                client,
-                retrieve_key,
-                chunk_size,
-                hit_chunks,
-                block_offset=block_offset,
-                block_size=block_size,
-                num_engine_group_infos=num_engine_group_infos,
-                use_gpu=use_gpu,
-                use_handle=use_handle,
-                client_tensors=w.client_tensors,
-                server_pool=w.server_pool,
-                instance_id=w.instance_id,
-            )
-            if w_status != "retrieved":
-                status = w_status
-        retrieve_ms = (time.monotonic() - t1) * 1000
-        print(
-            "  [seq %d/%s] RETRIEVE: %s "
-            "(%d tokens, %.1f ms, %d workers)"
-            % (
-                seq_no,
-                pass_label,
-                status,
-                hit_tokens,
-                retrieve_ms,
-                len(workers),
-            )
-        )
-
-    # 4. STORE miss portion — only KV writers (all ranks non-MLA,
-    # rank 0 only under MLA) send STORE.
-    if miss_chunks > 0:
-        store_start = hit_tokens
-        store_end = num_full_tokens
-        t2 = time.monotonic()
-        store_block_off = block_offset + (hit_tokens // block_size)
-        status = "stored"
-        n_store_workers = 0
-        for w in workers:
-            if not w.is_kv_writer:
-                continue
-            n_store_workers += 1
-            store_key = _make_key(
-                token_ids,
-                request_id,
-                start=store_start,
-                end=store_end,
-                worker_id=w.kv_worker_id,
-                world_size=world_size,
-            )
-            w_status = _send_store(
-                client,
-                store_key,
-                block_offset=store_block_off,
-                block_size=block_size,
-                num_engine_group_infos=num_engine_group_infos,
-                use_gpu=use_gpu,
-                use_handle=use_handle,
-                client_tensors=w.client_tensors,
-                chunk_size=chunk_size,
-                server_pool=w.server_pool,
-                instance_id=w.instance_id,
-            )
-            if w_status != "stored":
-                status = w_status
-        store_ms = (time.monotonic() - t2) * 1000
-        print(
-            "  [seq %d/%s] STORE: %s "
-            "(%d tokens, %.1f ms, %d writers)"
-            % (
-                seq_no,
-                pass_label,
-                status,
-                store_end - store_start,
-                store_ms,
-                n_store_workers,
-            )
-        )
-
-    # 5. Compute checksums.
-    #   * data mode (workers have client_tensors):
-    #       cold -> ground truth captured pre-STORE (writer ranks only,
-    #               matching what the server actually receives)
-    #       warm -> hash post-RETRIEVE on writer ranks so cold == warm
-    #               proves each writer's bytes made a lossless round trip.
-    #   * handle mode: query /cache/checksums on the server, which
-    #     reads the shared SHM/IPC pages directly.
-    checksums: list[str] | None = None
-    if any_client_tensors and num_full_tokens > 0:
-        if pass_label == "cold":
-            checksums = cold_ground_truth
-        elif pass_label == "warm" and hit_chunks > 0:
-            retr_num_blocks = hit_tokens // block_size
-            warm_parts: list[str] = []
-            for w in workers:
-                if not w.is_kv_writer or w.client_tensors is None:
-                    continue
-                warm_parts.extend(
-                    _compute_client_checksums(
-                        w.client_tensors,
-                        block_offset,
-                        retr_num_blocks,
-                        block_size,
-                        chunk_size,
-                    )
-                )
-            checksums = warm_parts or None
-    elif http_base and num_full_tokens > 0:
-        # Handle-mode server-side hash. All ranks share the same paged
-        # bytes for a given block range (each rank stored the same
-        # data), so any registered instance_id gives the same digest;
-        # pick the first worker's for simplicity.
-        checksums = _query_checksum(
-            http_base,
-            block_offset,
-            num_blocks,
-            block_size,
-            chunk_size,
-            instance_id=workers[0].instance_id,
-        )
-    if checksums:
-        digest = hashlib.md5("".join(checksums).encode()).hexdigest()[:16]
-        print(
-            "  [seq %d/%s] CHECKSUM: %s (%d chunks)"
-            % (
-                seq_no,
-                pass_label,
-                digest,
-                len(checksums),
-            )
-        )
-
-    # 6. END_SESSION
-    _send_end_session(client, request_id)
-    return RequestResult(
-        checksums=checksums,
-        lookup_ms=lookup_ms,
-        retrieve_ms=retrieve_ms if hit_chunks > 0 else None,
-        store_ms=store_ms if miss_chunks > 0 else None,
-        hit_chunks=hit_chunks,
-        total_chunks=total_chunks,
-        store_tokens=(num_full_tokens - hit_tokens) if miss_chunks > 0 else 0,
-        retrieve_tokens=hit_tokens if hit_chunks > 0 else 0,
-    )
 
 
 # ------------------------------------------------------------------ #
