@@ -9,6 +9,15 @@ spec. Everything the classification predicates answer today (``is_mla``,
 ``is_hnd``, the structural shape, ...) is derived from that structure instead
 of being declared per format.
 
+The single-letter axes are the letters of vLLM's standardized ``KVCacheLayout``
+names, which ``lmcache.v1.gpu_connector.kv_format.types.KVLayoutName`` adopts
+(``LBHNC``, ``BLNHC``, ...): a standardized name spells one ordering of these
+axes, see :func:`kv_layout_axes`. Its blocks-first members (``BLHNC`` /
+``BLNHC``) are not new structures: a per-layer view into a blocks-first pool
+has the unified-cache dims with ``B``'s stride spanning every layer's bytes,
+which is one ``dim_strides`` entry here (:func:`with_block_stride`) and
+``block_stride_elems`` on the transfer path.
+
 This module is **additive**: ``EngineKVFormat`` stays the authoritative
 currency everywhere in LMCache, and nothing existing changes behavior. The
 compat shim is the bijection at the bottom -- ``from_engine_kv_format`` /
@@ -26,7 +35,7 @@ stays usable in contexts where the native extension is absent.
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -39,6 +48,9 @@ if TYPE_CHECKING:
 class Axis(Enum):
     """Logical KV-cache axes (RFC #3560 coordinates plus ``KV``).
 
+    ``L``, ``B``, ``H``, ``N``, ``C`` are the letters of vLLM's standardized
+    layout names (``LBHNC`` is layers, blocks, heads, tokens, content), so a
+    standardized name spells an ordering of these axes.
     ``N`` is the addressing unit inside a block: tokens per block for paged
     attention caches, number of recurrent states (1) for state-space caches.
     ``C`` is the per-head state content: ``head_size`` for split K/V,
@@ -53,17 +65,70 @@ class Axis(Enum):
     C = "C"  # per-head state content
 
 
+# The five axes a standardized layout name orders (``KV`` is never spelled).
+_TENSOR_AXES: frozenset[Axis] = frozenset({Axis.L, Axis.B, Axis.H, Axis.N, Axis.C})
+
+# LMCache's pre-standardization names, as vLLM's standardized spellings.
+_KV_LAYOUT_ALIASES: Mapping[str, str] = MappingProxyType(
+    {"NHD": "LBNHC", "HND": "LBHNC"}
+)
+
+
+def kv_layout_axes(kv_layout: str) -> tuple[Axis, ...]:
+    """Return the axis order a KV layout name spells, outermost first.
+
+    Accepts vLLM's standardized ``KVCacheLayout`` names, i.e. every ordering
+    of the letters ``L``, ``B``, ``H``, ``N``, ``C``, and LMCache's
+    ``KVLayoutName`` aliases ``NHD`` (``LBNHC``) and ``HND`` (``LBHNC``).
+    Whether LMCache can transfer a layout is a separate question answered by
+    ``lmcache.integration.vllm.utils.translate_vllm_kv_cache_layout``; this
+    only reads the name.
+
+    Args:
+        kv_layout: A standardized layout name or one of the two aliases.
+
+    Returns:
+        The five axes in the order the name lists them.
+
+    Raises:
+        ValueError: If the name is not an ordering of the five letters.
+    """
+    spelled = _KV_LAYOUT_ALIASES.get(kv_layout, kv_layout)
+    try:
+        axes = tuple(Axis(letter) for letter in spelled)
+    except ValueError:
+        axes = ()
+    if len(axes) != len(_TENSOR_AXES) or set(axes) != _TENSOR_AXES:
+        raise ValueError(
+            f"KV layout name {kv_layout!r} is not an ordering of L, B, H, N, C "
+            "(or the NHD / HND aliases)"
+        )
+    return axes
+
+
 class Grouping(Enum):
     """How the layout groups tensors outside the per-tensor dims.
 
     The list levels carry logical axes that therefore must not appear in
     ``dims``: ``PER_LAYER`` carries ``L``; ``KV_LISTS`` carries ``KV`` and
-    ``L``.
+    ``L``; ``PER_LAYER_KV_PAIRS`` carries ``L`` and ``KV``.
     """
 
     SINGLE_TENSOR = "single_tensor"  # everything in one tensor
     PER_LAYER = "per_layer"  # list[NL] of per-layer tensors
     KV_LISTS = "kv_lists"  # [key_layers, value_layers] two-list form
+    PER_LAYER_KV_PAIRS = "per_layer_kv_pairs"  # list[NL] of (K, V) tensor pairs
+
+
+# Axes each grouping carries at its list levels.
+_CARRIED_AXES: Mapping[Grouping, frozenset[Axis]] = MappingProxyType(
+    {
+        Grouping.SINGLE_TENSOR: frozenset(),
+        Grouping.PER_LAYER: frozenset({Axis.L}),
+        Grouping.KV_LISTS: frozenset({Axis.KV, Axis.L}),
+        Grouping.PER_LAYER_KV_PAIRS: frozenset({Axis.L, Axis.KV}),
+    }
+)
 
 
 class KVPacking(Enum):
@@ -139,7 +204,8 @@ class KVLayoutDescriptor:
         dim_strides: Sparse per-dim physical strides in storage elements,
             keyed by index into ``dims``. A missing key means tight. This
             generalizes the transfer path's ``block_stride_elems`` (dim-0
-            padding for pool-sharing layouts) to any padded dim.
+            padding for pool-sharing layouts, see :func:`with_block_stride`)
+            to any padded dim.
         quant: Quantization facts, or ``None`` for plain caches.
 
     Raises:
@@ -179,11 +245,7 @@ class KVLayoutDescriptor:
         if Axis.C not in seen:
             raise ValueError("the content axis C must be materialized in dims")
 
-        carried = {
-            Grouping.SINGLE_TENSOR: frozenset[Axis](),
-            Grouping.PER_LAYER: frozenset({Axis.L}),
-            Grouping.KV_LISTS: frozenset({Axis.KV, Axis.L}),
-        }[self.grouping]
+        carried = _CARRIED_AXES[self.grouping]
         overlap = carried & seen
         if overlap:
             raise ValueError(
@@ -191,13 +253,16 @@ class KVLayoutDescriptor:
                 "the list level; the axis must not also appear in dims"
             )
 
-        if self.kv_packing is KVPacking.SHARED and Axis.KV in seen:
-            raise ValueError("SHARED packing must not materialize a KV axis")
-        if self.kv_packing is KVPacking.SPLIT:
-            if self.grouping is not Grouping.KV_LISTS and Axis.KV not in seen:
-                raise ValueError(
-                    "SPLIT packing needs a KV axis in dims (or KV_LISTS grouping)"
-                )
+        has_kv = Axis.KV in seen or Axis.KV in carried
+        if self.kv_packing is KVPacking.SHARED and has_kv:
+            raise ValueError(
+                "SHARED packing must not carry a KV axis, in dims or at a list level"
+            )
+        if self.kv_packing is KVPacking.SPLIT and not has_kv:
+            raise ValueError(
+                "SPLIT packing needs a KV axis in dims or at a list level "
+                "(KV_LISTS or PER_LAYER_KV_PAIRS grouping)"
+            )
         if self.kv_packing is KVPacking.FUSED:
             kv_dim = self.axis_dim(Axis.KV)
             if kv_dim is None:
@@ -297,8 +362,8 @@ class KVLayoutDescriptor:
 
     @property
     def is_layer_list(self) -> bool:
-        """One list entry per layer."""
-        return self.grouping is Grouping.PER_LAYER
+        """One list entry per layer (a tensor or a (K, V) pair)."""
+        return self.grouping in (Grouping.PER_LAYER, Grouping.PER_LAYER_KV_PAIRS)
 
     @property
     def is_mla(self) -> bool:
@@ -332,9 +397,59 @@ class KVLayoutDescriptor:
         return any(Axis.B in fold and Axis.N in fold for fold in self.dims)
 
     @property
+    def is_kv_second_tuple(self) -> bool:
+        """Each per-layer list entry is a (K, V) pair of tensors."""
+        return self.grouping is Grouping.PER_LAYER_KV_PAIRS
+
+    @property
     def kv_size(self) -> int:
         """Number of separately addressed K/V planes: 2 for SPLIT, else 1."""
         return 2 if self.kv_packing is KVPacking.SPLIT else 1
+
+
+# ── Stride overrides ───────────────────────────────────────────────────
+
+
+def with_block_stride(
+    desc: KVLayoutDescriptor, block_stride_elems: int
+) -> KVLayoutDescriptor:
+    """Return *desc* with the block axis's physical stride overridden.
+
+    This is the descriptor form of the transfer path's ``block_stride_elems``
+    (``resolve_block_stride_and_log_layout`` reads it from a per-layer view's
+    ``stride(0)``): a view into a pool that packs other layers or groups
+    between consecutive blocks -- vLLM's blocks-first ``BLHNC`` / ``BLNHC``
+    layouts, HMA-shared pools, kvcached -- keeps its canonical structure and
+    therefore its ``EngineKVFormat`` member; only ``B``'s stride changes.
+
+    Args:
+        desc: A descriptor that materializes ``B`` as a plain dim.
+        block_stride_elems: Storage elements between consecutive blocks.
+            ``0`` means tight, as on the transfer path, and removes any
+            existing override.
+
+    Returns:
+        A new descriptor equal to *desc* except for ``B``'s ``dim_strides``
+        entry.
+
+    Raises:
+        ValueError: If *desc* folds ``B`` with another axis (the SGLang
+            page-buffer dim), does not materialize ``B``, or
+            ``block_stride_elems`` is negative.
+    """
+    if block_stride_elems < 0:
+        raise ValueError(
+            f"block_stride_elems must be non-negative: {block_stride_elems}"
+        )
+    b_dim = desc.axis_dim(Axis.B)
+    if b_dim is None or desc.dims[b_dim] != (Axis.B,):
+        raise ValueError(f"with_block_stride needs B as a plain dim, got {desc.dims}")
+    strides = dict(desc.dim_strides)
+    if block_stride_elems == 0:
+        strides.pop(b_dim, None)
+    else:
+        strides[b_dim] = block_stride_elems
+    return replace(desc, dim_strides=strides)
 
 
 # ── Bijection with EngineKVFormat ──────────────────────────────────────
@@ -472,6 +587,12 @@ ENGINE_KV_FORMAT_DESCRIPTORS: Mapping[str, KVLayoutDescriptor] = MappingProxyTyp
         # backend-required singleton between heads and tokens.
         "NL_X_TWO_NB_NH_ONE_BS_HS": _split(
             ((_KV,), (_B,), (_H,), (), (_N,), (_C,)), Grouping.PER_LAYER
+        ),
+        # vLLM-Ascend per-layer (K, V) tuples: NL x 2 x [NB, BS, NH, HS]. The
+        # pair is a list level, so KV precedes B outside the tensor and
+        # is_two_major stays False.
+        "NL_X_TWO_X_NB_BS_NH_HS": _split(
+            ((_B,), (_N,), (_H,), (_C,)), Grouping.PER_LAYER_KV_PAIRS
         ),
     }
 )
