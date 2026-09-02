@@ -28,6 +28,9 @@ trap 'rm -rf "${LMCACHE_TEST_TMPDIR}" 2>/dev/null || true' EXIT
 # ── Environment setup ────────────────────────────────────────
 source .buildkite/k3_harness/setup-lmcache-only-env.sh
 uv pip install -r requirements/test.txt
+# Generated gRPC bindings are intentionally not tracked. Generate them only
+# after the test dependencies have installed grpcio-tools.
+python lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py
 
 # ── Run unit tests with coverage ─────────────────────────────
 LMCACHE_TRACK_USAGE="false" \

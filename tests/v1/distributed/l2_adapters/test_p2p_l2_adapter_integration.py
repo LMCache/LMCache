@@ -2,8 +2,8 @@
 """In-process, real-NIXL integration test for the P2P L2 adapter.
 
 Stands up a peer side (a real ``StorageManager`` with objects in L1, a NIXL
-transfer-channel context registered against that L1, and an MQ server hosting a
-``P2PController``) and a local side (the global NIXL context over a destination
+transfer-channel context registered against that L1, and a gRPC server hosting
+a ``P2PController``) and a local side (the global NIXL context over a destination
 buffer + a ``P2PL2Adapter``). It then drives the adapter through the full
 lookup -> load (loopback RDMA read) -> unlock lifecycle and verifies the pulled
 bytes match the peer's.
@@ -57,12 +57,14 @@ from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E4
 )
 from lmcache.v1.multiprocess.config import (  # noqa: E402
     CoordinatorConfig,
-    MPServerConfig,
     P2PConfig,
 )
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
-from lmcache.v1.multiprocess.transport.server_factory import (  # noqa: E402
-    create_request_server,
+from lmcache.v1.multiprocess.transport.grpc_impl.server import (  # noqa: E402
+    GrpcMultiprocessServer,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.services.p2p import (  # noqa: E402
+    P2PServiceImpl,
 )
 
 _PAGE = 4096
@@ -123,7 +125,7 @@ def test_p2p_adapter_end_to_end():
 
     peer_sm = _make_storage_manager(64 * 1024 * 1024)
     peer_tc_ctx = None
-    mq_server = None
+    grpc_server = None
     adapter = None
     local_buf = torch.zeros((_NUM_KEYS + 1) * _PAGE, dtype=torch.uint8)
 
@@ -145,25 +147,21 @@ def test_p2p_adapter_end_to_end():
             peer_l1_desc, listen_url=peer_tc_url, advertise_url=peer_tc_url
         )
 
-        # --- Peer side: MQ server hosting the P2P controller ---
+        # --- Peer side: gRPC server hosting the P2P controller ---
         controller = P2PController(
             _PeerContext(peer_sm),
             P2PConfig(),
             CoordinatorConfig(),
             instance_id="peer",
         )
-        peer_mq_host_port = _next_url()
-        peer_mq_url = f"tcp://{peer_mq_host_port}"
-        peer_mq_host, peer_mq_port = peer_mq_host_port.rsplit(":", maxsplit=1)
-        mq_server = create_request_server(
-            [controller],
-            MPServerConfig(
-                host=peer_mq_host,
-                port=int(peer_mq_port),
-                max_cpu_workers=4,
-            ),
+        peer_mq_url = f"grpc://{_next_url()}"
+        grpc_server = GrpcMultiprocessServer(
+            bind_url=peer_mq_url,
+            max_cpu_workers=4,
+            max_gpu_workers=4,
         )
-        mq_server.start()
+        grpc_server.add_service("P2PService", P2PServiceImpl(controller))
+        grpc_server.start()
 
         # --- Local side: global NIXL context over the destination buffer ---
         local_tc_url = _next_url()
@@ -210,8 +208,8 @@ def test_p2p_adapter_end_to_end():
     finally:
         if adapter is not None:
             adapter.close()
-        if mq_server is not None:
-            mq_server.close()
+        if grpc_server is not None:
+            grpc_server.close()
         delete_transfer_channel_context()
         if peer_tc_ctx is not None:
             peer_tc_ctx.close()

@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Lookup wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+import "lmcache/v1/multiprocess/transport/grpc_impl/protos/common.proto";
+
+message LookupRequest {
+  IpcCacheServerKey key = 1;
+  int64 tp_size = 2;
+}
+
+message LookupResponse {}
+
+message QueryPrefetchStatusRequest {
+  string request_id = 1;
+}
+
+message QueryPrefetchStatusResponse {
+  optional int64 chunk_count = 1;
+}
+
+message WaitPrefetchStatusRequest {
+  string request_id = 1;
+  double timeout = 2;
+}
+
+message WaitPrefetchStatusResponse {
+  optional int64 chunk_count = 1;
+}
+
+message QueryPrefetchLookupHitsRequest {
+  string request_id = 1;
+}
+
+message QueryPrefetchLookupHitsResponse {
+  optional int64 chunk_count = 1;
+}
+
+message FreeLookupLocksRequest {
+  IpcCacheServerKey key = 1;
+  int64 tp_size = 2;
+}
+
+message FreeLookupLocksResponse {}
+
+message EndSessionRequest {
+  string request_id = 1;
+}
+
+message EndSessionResponse {}
+
+service LookupService {
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+  rpc QueryPrefetchStatus(QueryPrefetchStatusRequest)
+      returns (QueryPrefetchStatusResponse);
+  rpc WaitPrefetchStatus(WaitPrefetchStatusRequest)
+      returns (WaitPrefetchStatusResponse);
+  rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest)
+      returns (QueryPrefetchLookupHitsResponse);
+  rpc FreeLookupLocks(FreeLookupLocksRequest) returns (FreeLookupLocksResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+}

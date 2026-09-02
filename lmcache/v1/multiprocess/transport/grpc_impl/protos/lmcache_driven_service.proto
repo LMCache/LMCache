@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// LMCache-driven transfer wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+import "lmcache/v1/multiprocess/transport/grpc_impl/protos/common.proto";
+
+message RegisterKvCacheRequest {
+  int64 instance_id = 1;
+  repeated DeviceIpcWrapper kv_cache = 2;
+  string model_name = 3;
+  int64 world_size = 4;
+  string engine_type = 5;
+  bytes encoded_layout_hints = 6;
+  repeated EngineGroupInfo engine_group_infos = 7;
+}
+
+message RegisterKvCacheResponse {}
+
+message UnregisterKvCacheRequest {
+  int64 instance_id = 1;
+}
+
+message UnregisterKvCacheResponse {}
+
+message StoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  repeated BlockIdGroup gpu_block_ids = 3;
+  bytes event_ipc_handle = 4;
+}
+
+message StoreResponse {
+  EventIpcHandleResult result = 1;
+}
+
+message RetrieveRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  repeated BlockIdGroup gpu_block_ids = 3;
+  bytes event_ipc_handle = 4;
+  int64 skip_first_n_tokens = 5;
+}
+
+message RetrieveResponse {
+  EventIpcHandleResult result = 1;
+}
+
+service LMCacheDrivenService {
+  rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
+  rpc UnregisterKvCache(UnregisterKvCacheRequest)
+      returns (UnregisterKvCacheResponse);
+  rpc Store(StoreRequest) returns (StoreResponse);
+  rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
+}
