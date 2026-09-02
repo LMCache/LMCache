@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Public-API unit tests for ``LMCacheMPConnector.store_kv_async``. The MQ and
-GPU boundaries are stubbed; no live daemon or CUDA device needed. Covers the
-async store contract added for SGLang MP mode: ``store_kv_async`` always
-returns a pollable future -- an already-completed one on the no-op paths
-(unhealthy connector / no chunk-aligned range), and the daemon's real
-completion future on the happy path -- and never blocks on the result."""
+"""Public-API unit tests for the SGLang multi-process connector.
+
+The MQ and GPU boundaries are stubbed; no live daemon or CUDA device is needed.
+The suite covers the async store contract and per-request cache-salt isolation
+across lookup, retrieve, lock cleanup, and store operations.
+"""
 
 # Standard
 from collections.abc import Callable
@@ -127,6 +127,112 @@ class _FakeTorchDev:
     @staticmethod
     def current_stream():
         return object()
+
+
+class _WireResponse:
+    """Minimal response supporting synchronous and device-future consumers."""
+
+    def __init__(
+        self,
+        raw_result: object = None,
+        device_result: bool = True,
+    ) -> None:
+        self.raw_result = raw_result
+        self.device_result = device_result
+
+    def result(self, timeout: float | None = None) -> object:
+        return self.raw_result
+
+    def to_device_future(self, device: object = None) -> MessagingFuture[bool]:
+        future: MessagingFuture[bool] = MessagingFuture()
+        future.set_result(self.device_result)
+        return future
+
+
+class _FakeMQClient:
+    """Message queue stand-in used by public connector tests."""
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeHeartbeatThread:
+    """Heartbeat stand-in that avoids starting a background thread."""
+
+    def __init__(
+        self,
+        mq_client: object,
+        health_event: threading.Event,
+        interval: float,
+        instance_id: int | None,
+    ) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
+def _make_public_connector(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    retrieve_succeeds: bool = True,
+    matched_chunks: int = 1,
+) -> tuple[Any, list[tuple[object, list[object]]]]:
+    """Create a connector through its public constructor with stubbed I/O."""
+    adapter_mod, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+    requests: list[tuple[object, list[object]]] = []
+    mq_client = _FakeMQClient()
+
+    def send_request(
+        _client: object,
+        request_type: object,
+        payload: list[object],
+    ) -> _WireResponse:
+        requests.append((request_type, payload))
+        if request_type is adapter_mod.RequestType.WAIT_PREFETCH_STATUS:
+            return _WireResponse(raw_result=matched_chunks)
+        if request_type is adapter_mod.RequestType.RETRIEVE:
+            return _WireResponse(
+                raw_result=(b"completion-event", retrieve_succeeds),
+                device_result=retrieve_succeeds,
+            )
+        return _WireResponse()
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "zmq",
+        SimpleNamespace(Context=SimpleNamespace(instance=lambda: object())),
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "MessageQueueClient",
+        lambda _endpoint, _context: mq_client,
+    )
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda _client: 4)
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", _FakeHeartbeatThread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "get_device_spec",
+        lambda _device_type: SimpleNamespace(is_handle_transfer_available=lambda: True),
+    )
+    monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", lambda tensor: tensor)
+    monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_request)
+    monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
+
+    connector = LMCacheMPConnector(
+        sgl_config=SimpleNamespace(model_path="test-model"),
+        tp_size=1,
+        rank=0,
+        page_size=2,
+        host="127.0.0.1",
+        port=5556,
+        k_pool=[torch.empty(4, 1, 8)],
+        v_pool=[torch.empty(4, 1, 8)],
+    )
+    return connector, requests
 
 
 def test_completed_future_resolves_to_given_result() -> None:
@@ -421,6 +527,7 @@ def test_retrieve_failure_uses_single_cleanup_owner(
             token_ids=list(range(2 * _CHUNK_SIZE)),
             matched_token_num=2 * _CHUNK_SIZE,
             locks_held=True,
+            cache_salt="",
         )
     }
     connector._pending_lookups_lock = threading.Lock()
@@ -488,3 +595,199 @@ def test_layerwise_load_forwards_partial_slot_mapping_offset() -> None:
         retrieve_kwargs["slot_mapping"].cpu(),
         metadata.slot_mapping.cpu(),
     )
+
+
+def test_mp_connector_advertises_cache_salt_capability() -> None:
+    """Callers can detect salt-aware connectors before sending salted keys."""
+    _, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+
+    assert LMCacheMPConnector.supports_cache_salt is True
+
+
+@pytest.mark.parametrize("cleanup_method", ["release_pending", "end_session"])
+def test_lookup_cleanup_preserves_cache_salt(
+    cleanup_method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock cleanup uses the same tenant salt as the originating lookup."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    connector, requests = _make_public_connector(monkeypatch)
+    token_ids = list(range(8))
+
+    assert connector.lookup_kv(token_ids, "request-1", cache_salt="tenant-a") == 4
+    getattr(connector, cleanup_method)("request-1")
+
+    lookup_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.LOOKUP
+    ]
+    free_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.FREE_LOOKUP_LOCKS
+    ]
+    assert [key.cache_salt for key in lookup_keys] == ["tenant-a"]
+    assert [key.cache_salt for key in free_keys] == ["tenant-a"]
+
+
+def test_rescheduled_lookup_releases_locks_with_original_cache_salt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing pending state cannot free old locks under the new salt."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    connector, requests = _make_public_connector(monkeypatch)
+    token_ids = list(range(8))
+
+    assert connector.lookup_kv(token_ids, "request-1", cache_salt="tenant-a") == 4
+    assert connector.lookup_kv(token_ids, "request-1", cache_salt="tenant-b") == 4
+
+    lookup_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.LOOKUP
+    ]
+    free_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.FREE_LOOKUP_LOCKS
+    ]
+    assert [key.cache_salt for key in lookup_keys] == ["tenant-a", "tenant-b"]
+    assert [key.cache_salt for key in free_keys] == ["tenant-a"]
+
+
+def test_retrieve_and_failure_cleanup_preserve_lookup_cache_salt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrieve and its failure cleanup share lookup's saved tenant salt."""
+    adapter_mod, _, _, _, LoadMetadata, _ = _import_adapter_symbols()
+    connector, requests = _make_public_connector(
+        monkeypatch,
+        retrieve_succeeds=False,
+    )
+    token_ids = list(range(8))
+    connector.lookup_kv(token_ids, "request-1", cache_salt="tenant-a")
+
+    with pytest.raises(RuntimeError, match="LMCache MP retrieve failed"):
+        connector.retrieve_kv(
+            LoadMetadata(
+                token_ids=token_ids,
+                slot_mapping=torch.arange(4),
+                offset=0,
+                request_id="request-1",
+            )
+        )
+
+    retrieve_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.RETRIEVE
+    ]
+    free_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.FREE_LOOKUP_LOCKS
+    ]
+    assert [key.cache_salt for key in retrieve_keys] == ["tenant-a"]
+    assert [key.cache_salt for key in free_keys] == ["tenant-a"]
+
+
+def test_retrieve_prefix_cleanup_preserves_lookup_cache_salt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prefix lock release and retrieve share lookup's saved tenant salt."""
+    adapter_mod, _, _, _, LoadMetadata, _ = _import_adapter_symbols()
+    connector, requests = _make_public_connector(monkeypatch, matched_chunks=2)
+    token_ids = list(range(8))
+
+    assert connector.lookup_kv(token_ids, "request-1", cache_salt="tenant-a") == 8
+    assert (
+        connector.retrieve_kv(
+            LoadMetadata(
+                token_ids=token_ids,
+                slot_mapping=torch.arange(8),
+                offset=4,
+                request_id="request-1",
+            )
+        )
+        == 4
+    )
+
+    free_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.FREE_LOOKUP_LOCKS
+    ]
+    retrieve_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.RETRIEVE
+    ]
+    assert [(key.start, key.end, key.cache_salt) for key in free_keys] == [
+        (0, 4, "tenant-a")
+    ]
+    assert [(key.start, key.end, key.cache_salt) for key in retrieve_keys] == [
+        (4, 8, "tenant-a")
+    ]
+
+
+@pytest.mark.parametrize("store_method", ["store_kv", "store_kv_async"])
+def test_store_key_uses_metadata_cache_salt(
+    store_method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both synchronous and asynchronous stores isolate keys by metadata salt."""
+    adapter_mod, _, _, _, _, StoreMetadata = _import_adapter_symbols()
+    connector, requests = _make_public_connector(monkeypatch)
+    metadata = StoreMetadata(
+        last_node=None,
+        token_ids=list(range(8)),
+        kv_indices=torch.arange(8),
+        offset=0,
+        request_id="request-1",
+        cache_salt="tenant-a",
+    )
+
+    result = getattr(connector, store_method)(metadata)
+    if isinstance(result, MessagingFuture):
+        assert result.result(timeout=0) is True
+
+    store_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.STORE
+    ]
+    assert [key.cache_salt for key in store_keys] == ["tenant-a"]
+
+
+def test_cache_salt_defaults_preserve_unsalted_callers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing callers that omit cache_salt continue using the empty salt."""
+    adapter_mod, _, _, _, _, StoreMetadata = _import_adapter_symbols()
+    connector, requests = _make_public_connector(monkeypatch)
+    token_ids = list(range(8))
+
+    connector.lookup_kv(token_ids, "request-1")
+    connector.release_pending("request-1")
+    connector.store_kv_async(
+        StoreMetadata(
+            last_node=None,
+            token_ids=token_ids,
+            kv_indices=torch.arange(8),
+            offset=0,
+            request_id="request-1",
+        )
+    ).result(timeout=0)
+
+    keyed_request_types = {
+        adapter_mod.RequestType.LOOKUP,
+        adapter_mod.RequestType.FREE_LOOKUP_LOCKS,
+        adapter_mod.RequestType.STORE,
+    }
+    keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type in keyed_request_types
+    ]
+    assert [key.cache_salt for key in keys] == ["", "", ""]

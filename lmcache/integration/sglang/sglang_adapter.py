@@ -48,11 +48,25 @@ def _model_uses_mla(model_config: ModelConfig) -> bool:
 
 @dataclass
 class StoreMetadata:
+    """Describe an SGLang request whose KV cache should be stored.
+
+    Attributes:
+        last_node: Last radix-tree node associated with the request.
+        token_ids: Complete token sequence used to build the cache key.
+        kv_indices: GPU KV slot indices corresponding to ``token_ids``.
+        offset: First token index eligible for storage.
+        request_id: Request identifier used for LMCache session tracking.
+        cache_salt: Per-tenant isolation salt. The empty string preserves the
+            historical unsalted key behavior. Non-empty values must be at most
+            128 characters and must not contain ``@``, ``/``, ``\\``, or NUL.
+    """
+
     last_node: object
     token_ids: List[int]
     kv_indices: torch.Tensor
     offset: int
     request_id: str = ""
+    cache_salt: str = ""
 
 
 @dataclass
