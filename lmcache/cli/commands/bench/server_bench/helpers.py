@@ -52,7 +52,6 @@ try:
         DTYPE_MAP,
         KVLayerGroupInfo,
     )
-    from lmcache.v1.multiprocess.client import RequestClient
     from lmcache.v1.multiprocess.custom_types import (
         IPCCacheServerKey,
         KVCache,
@@ -65,6 +64,7 @@ try:
         RegisterEngineDrivenContextResponse,
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
+    from lmcache.v1.multiprocess.transport.base import RequestClient
     from lmcache.v1.platform.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,
@@ -506,7 +506,7 @@ def _send_unregister_kv_cache(
     reply, so success is distinguished from an RPC timeout only.
 
     Args:
-        client: The MP message-queue client.
+        client: The MP request client.
         instance_id: The instance ID used at registration time. Must match
             the ``instance_id`` passed to :func:`_send_register_kv_cache`.
         use_handle: ``True`` for the handle path (GPU CUDA-IPC / CPU SHM),

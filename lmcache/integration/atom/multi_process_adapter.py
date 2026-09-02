@@ -20,7 +20,6 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType, init_logger
-from lmcache.v1.multiprocess.client import RequestClient, ZmqMultiprocessClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
@@ -32,6 +31,8 @@ from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)

@@ -630,7 +630,7 @@ class QRingBufferAdapter:
                 self.q_model_name,
                 self._adapter.world_size,
                 self._adapter.blocks_in_chunk,
-                self._adapter.mq_client,
+                self._adapter.req_client,
                 self._adapter._mq_timeout,
                 layout_hints=vllm_layout_hints(),
                 engine_group_infos=self.q_engine_group_infos,
@@ -749,7 +749,7 @@ class QRingBufferAdapter:
         if not self.q_ring:
             return
         try:
-            self._adapter.mq_client.unregister_q_cache(
+            self._adapter.req_client.unregister_q_cache(
                 self._adapter.instance_id
             ).result(timeout=self._adapter._mq_timeout)
         except TimeoutError:

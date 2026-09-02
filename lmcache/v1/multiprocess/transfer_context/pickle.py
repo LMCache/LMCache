@@ -8,12 +8,12 @@ import pickle
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.client import RequestClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
 class EngineDrivenContextPickle(EngineDrivenContext):
@@ -31,16 +31,16 @@ class EngineDrivenContextPickle(EngineDrivenContext):
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
-        mq_client: RequestClient,
+        req_client: RequestClient,
         mq_timeout: float,
     ) -> None:
-        super().__init__(metadata, mq_client, mq_timeout)
+        super().__init__(metadata, req_client, mq_timeout)
 
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         """Send PREPARE_STORE RPC. For pickle, returns no pre-allocated buffers."""
-        future = self.mq_client.prepare_store(key, instance_id)
+        future = self.req_client.prepare_store(key, instance_id)
         try:
             future.result(timeout=self.mq_timeout)
         except TimeoutError:
@@ -56,7 +56,7 @@ class EngineDrivenContextPickle(EngineDrivenContext):
             ``True`` on success, ``False`` on failure or timeout.
         """
         serialised = pickle.dumps(chunks)
-        future = self.mq_client.commit_store(key, instance_id, serialised)
+        future = self.req_client.commit_store(key, instance_id, serialised)
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:
@@ -70,7 +70,7 @@ class EngineDrivenContextPickle(EngineDrivenContext):
         Returns:
             Chunks on hit, or None on miss/timeout.
         """
-        future = self.mq_client.prepare_retrieve(key, instance_id)
+        future = self.req_client.prepare_retrieve(key, instance_id)
         try:
             response = future.result(timeout=self.mq_timeout)
         except TimeoutError:
@@ -82,7 +82,7 @@ class EngineDrivenContextPickle(EngineDrivenContext):
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Send COMMIT_RETRIEVE (no-op for pickle path)."""
-        future = self.mq_client.commit_retrieve(key, instance_id)
+        future = self.req_client.commit_retrieve(key, instance_id)
         try:
             future.result(timeout=self.mq_timeout)
         except TimeoutError:

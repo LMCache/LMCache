@@ -15,12 +15,12 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
-from lmcache.v1.multiprocess.client import RequestClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
@@ -85,12 +85,12 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
-        mq_client: RequestClient,
+        req_client: RequestClient,
         mq_timeout: float,
         shm_name: str,
         pool_size: int,
     ) -> None:
-        super().__init__(metadata, mq_client, mq_timeout)
+        super().__init__(metadata, req_client, mq_timeout)
         if not shm_name or pool_size <= 0:
             raise ValueError("shm_name must be non-empty and pool_size must be > 0")
 
@@ -159,7 +159,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
-        future = self.mq_client.prepare_store(key, instance_id)
+        future = self.req_client.prepare_store(key, instance_id)
         # wait() first so a timeout raises exactly one LMCacheTimeoutError
         # (one event); result() then returns without its own timeout.
         if not future.wait(timeout=self.mq_timeout):
@@ -182,7 +182,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
     ) -> bool:
-        future = self.mq_client.commit_store(key, instance_id, b"")
+        future = self.req_client.commit_store(key, instance_id, b"")
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:
@@ -191,7 +191,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def prepare_retrieve(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> list[torch.Tensor] | None:
-        future = self.mq_client.prepare_retrieve(key, instance_id)
+        future = self.req_client.prepare_retrieve(key, instance_id)
         try:
             response = future.result(timeout=self.mq_timeout)
         except TimeoutError:
@@ -202,7 +202,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
         return self._build_slot_tensors(slots) if slots else None
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        future = self.mq_client.commit_retrieve(key, instance_id)
+        future = self.req_client.commit_retrieve(key, instance_id)
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:

@@ -31,8 +31,8 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.client import RequestClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.transport.base import RequestClient
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -124,24 +124,24 @@ class EngineDrivenContextMetadata:
 class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
 
-    All concrete implementations share a common message-queue client and
+    All concrete implementations share a common request client and
     expose a uniform two-phase ``prepare/commit`` interface so that the
     worker adapter is implementation-agnostic.
 
     Args:
         metadata: Layout metadata describing the chunk format.
-        mq_client: Message-queue client used for server communication.
+        req_client: Transport-neutral client used for server requests.
         mq_timeout: Timeout in seconds for blocking MQ requests.
     """
 
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
-        mq_client: RequestClient,
+        req_client: RequestClient,
         mq_timeout: float,
     ) -> None:
         self.metadata = metadata
-        self.mq_client = mq_client
+        self.req_client = req_client
         self.mq_timeout = mq_timeout
 
     @property
@@ -198,7 +198,7 @@ class EngineDrivenContext(ABC):
 
 def create_engine_driven_context(
     metadata: EngineDrivenContextMetadata,
-    mq_client: RequestClient,
+    req_client: RequestClient,
     mq_timeout: float,
     shm_name: str,
     pool_size: int,
@@ -214,7 +214,7 @@ def create_engine_driven_context(
 
     Args:
         metadata: Layout metadata for the non-GPU context.
-        mq_client: Message-queue client for server communication.
+        req_client: Transport-neutral client used for server requests.
         mq_timeout: Timeout in seconds for blocking MQ requests.
         shm_name: Shared-memory segment name. Empty values force pickle mode.
         pool_size: Shared-memory pool size in bytes. Non-positive values force
@@ -239,7 +239,7 @@ def create_engine_driven_context(
                 pool_size,
             )
             return EngineDrivenContextShm(
-                metadata, mq_client, mq_timeout, shm_name, pool_size
+                metadata, req_client, mq_timeout, shm_name, pool_size
             )
         except Exception:
             logger.warning(
@@ -253,7 +253,7 @@ def create_engine_driven_context(
     from .pickle import EngineDrivenContextPickle
 
     logger.info("Creating EngineDrivenContextPickle (pickle transport)")
-    return EngineDrivenContextPickle(metadata, mq_client, mq_timeout)
+    return EngineDrivenContextPickle(metadata, req_client, mq_timeout)
 
 
 # ---------------------------------------------------------------------------

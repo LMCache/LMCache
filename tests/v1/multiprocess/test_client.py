@@ -5,10 +5,11 @@ from typing import Any
 import ast
 
 # First Party
-from lmcache.v1.multiprocess.client import ZmqMultiprocessClient
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 
 
 class _RecordingMessageQueueClient(MessageQueueClient):
@@ -34,6 +35,9 @@ class _RecordingMessageQueueClient(MessageQueueClient):
 
 
 def test_all_request_types_have_explicit_named_methods() -> None:
+    contract_names = {
+        name for name, value in RequestClient.__dict__.items() if callable(value)
+    }
     method_names = {
         name
         for name, value in ZmqMultiprocessClient.__dict__.items()
@@ -41,6 +45,7 @@ def test_all_request_types_have_explicit_named_methods() -> None:
     }
     expected_names = {name.lower() for name in RequestType.__members__}
 
+    assert expected_names <= contract_names
     assert expected_names <= method_names
     assert "__getattr__" not in ZmqMultiprocessClient.__dict__
     assert "submit_request" not in ZmqMultiprocessClient.__dict__
@@ -50,8 +55,8 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     """Business callers must use named methods instead of ZMQ envelopes."""
     repo_root = Path(__file__).parents[3]
     allowed = {
-        repo_root / "lmcache/v1/multiprocess/client.py",
         repo_root / "lmcache/v1/multiprocess/mq.py",
+        repo_root / "lmcache/v1/multiprocess/transport/zmq_impl/client.py",
     }
     violations: list[str] = []
     for path in (repo_root / "lmcache").rglob("*.py"):

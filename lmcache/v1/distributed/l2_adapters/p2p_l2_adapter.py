@@ -37,8 +37,9 @@ from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_facto
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.client import ZmqMultiprocessClient
 from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 
 logger = init_logger(__name__)
@@ -132,7 +133,7 @@ class P2PL2Adapter(L2AdapterInterface):
         super().__init__(max_capacity_bytes=0)
         self._config = config
 
-        self._mq_client = ZmqMultiprocessClient(
+        self._req_client: RequestClient = ZmqMultiprocessClient(
             MessageQueueClient(config.peer_mq_server_url, zmq.Context.instance())
         )
         self._tc_context = get_transfer_channel_context()
@@ -224,7 +225,7 @@ class P2PL2Adapter(L2AdapterInterface):
             )
             return task_id
 
-        future = self._mq_client.p2p_lookup_and_lock(keys, group_layout_descs)
+        future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
         failed = False
         remote_task_id = -1
         try:
@@ -256,7 +257,7 @@ class P2PL2Adapter(L2AdapterInterface):
             logger.warning("P2P lookup task %d timed out; treating as a miss", task_id)
             return Bitmap(len(task.keys))
 
-        future = self._mq_client.p2p_query_lookup_results(task.remote_task_id)
+        future = self._req_client.p2p_query_lookup_results(task.remote_task_id)
         try:
             addresses = future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
         except TimeoutError:
@@ -276,7 +277,7 @@ class P2PL2Adapter(L2AdapterInterface):
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         if not keys:
             return
-        self._mq_client.p2p_unlock_objects(keys)
+        self._req_client.p2p_unlock_objects(keys)
         for key in keys:
             self._remote_addresses.pop(key, None)
 
@@ -361,7 +362,7 @@ class P2PL2Adapter(L2AdapterInterface):
         self._tc_context.remove_transfer_channel_client(
             self._config.peer_transfer_channel_server_url
         )
-        self._mq_client.close()
+        self._req_client.close()
         self._store_efd.close()
         self._lookup_efd.close()
         self._load_efd.close()

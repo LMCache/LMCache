@@ -32,9 +32,9 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
     _send_unregister_kv_cache,
 )
-from lmcache.v1.multiprocess.client import ZmqMultiprocessClient
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 

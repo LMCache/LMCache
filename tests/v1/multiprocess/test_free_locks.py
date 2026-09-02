@@ -10,7 +10,6 @@ import threading
 
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
-from lmcache.v1.multiprocess.client import ZmqMultiprocessClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -20,6 +19,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -312,7 +312,7 @@ def test_adapter_free_lookup_locks_sends_request():
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
     mock_client.submit_request.return_value = mock_future
-    adapter.mq_clients = {"tcp://test:0": ZmqMultiprocessClient(mock_client)}
+    adapter.req_clients = {"tcp://test:0": ZmqMultiprocessClient(mock_client)}
     adapter._pending_lookups = set()
 
     token_ids = list(range(512))
@@ -369,7 +369,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_future = MagicMock()
     mock_future.result.return_value = None  # LOOKUP returns None
     mock_client.submit_request.return_value = mock_future
-    adapter.mq_clients = {"tcp://test:0": ZmqMultiprocessClient(mock_client)}
+    adapter.req_clients = {"tcp://test:0": ZmqMultiprocessClient(mock_client)}
     adapter._pending_lookups = set()
     adapter._lookup_params = {}
 

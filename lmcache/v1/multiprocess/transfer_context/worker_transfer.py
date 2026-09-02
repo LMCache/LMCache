@@ -16,7 +16,6 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
-from lmcache.v1.multiprocess.client import RequestClient
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -29,6 +28,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -213,7 +213,7 @@ class TransferContext(ABC):
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        mq_client: RequestClient,
+        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
@@ -227,7 +227,7 @@ class TransferContext(ABC):
             model_name: Model name used by cache keys.
             world_size: KV world size.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
-            mq_client: Message queue client used to communicate with server.
+            req_client: Transport-neutral client used for server requests.
             mq_timeout: Timeout in seconds for synchronous request wait.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -250,7 +250,7 @@ class TransferContext(ABC):
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        mq_client: RequestClient,
+        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
@@ -264,7 +264,7 @@ class TransferContext(ABC):
             model_name: Model name used by cache keys (model_name##query).
             world_size: KV world size.
             blocks_in_chunk: Number of Q ring blocks per LMCache chunk.
-            mq_client: Message queue client used to communicate with server.
+            req_client: Transport-neutral client used for server requests.
             mq_timeout: Timeout in seconds for synchronous request wait.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -415,7 +415,7 @@ class LMCacheDrivenTransferContext(TransferContext):
     """
 
     def __init__(self) -> None:
-        self._mq_client: RequestClient | None = None
+        self._req_client: RequestClient | None = None
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
 
@@ -426,7 +426,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
-        mq_client: RequestClient,
+        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
@@ -440,7 +440,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             model_name: Model identifier used by the server.
             world_size: Tensor-parallel world size.
             _blocks_in_chunk: Engine blocks per LMCache chunk.
-            mq_client: Message-queue client used for requests.
+            req_client: Transport-neutral client used for server requests.
             mq_timeout: Timeout for the registration response.
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
@@ -454,8 +454,8 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
 
-        self._mq_client = mq_client
-        future = mq_client.register_kv_cache(
+        self._req_client = req_client
+        future = req_client.register_kv_cache(
             instance_id,
             wrap_kv_caches(kv_caches),
             model_name,
@@ -493,13 +493,13 @@ class LMCacheDrivenTransferContext(TransferContext):
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
-        mq_client: RequestClient,
+        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
-        self._mq_client = mq_client
-        future = mq_client.register_q_cache(
+        self._req_client = req_client
+        future = req_client.register_q_cache(
             instance_id,
             wrap_kv_caches(q_caches),
             model_name,
@@ -540,7 +540,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 unsupported.
         """
         if (
-            self._mq_client is None
+            self._req_client is None
             or self._device is None
             or self._event_backend is None
         ):
@@ -551,7 +551,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._mq_client.store(
+        return self._req_client.store(
             key, instance_id, block_ids, event_ipc_handle
         ).to_device_future(device=self._device)
 
@@ -566,7 +566,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
         if (
-            self._mq_client is None
+            self._req_client is None
             or self._device is None
             or self._event_backend is None
         ):
@@ -575,7 +575,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "Call register() before submit_q_store()."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._mq_client.store_q(
+        return self._req_client.store_q(
             key, instance_id, block_ids, event_ipc_handle
         ).to_device_future(device=self._device)
 
@@ -611,7 +611,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 unsupported.
         """
         if (
-            self._mq_client is None
+            self._req_client is None
             or self._device is None
             or self._event_backend is None
         ):
@@ -622,7 +622,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._mq_client.retrieve(
+        return self._req_client.retrieve(
             key,
             instance_id,
             block_ids,
@@ -632,7 +632,7 @@ class LMCacheDrivenTransferContext(TransferContext):
 
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""
-        self._mq_client = None
+        self._req_client = None
         self._device = None
         self._event_backend = None
 
@@ -673,7 +673,7 @@ class EngineDrivenTransferContext(TransferContext):
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        mq_client: RequestClient,
+        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
@@ -715,7 +715,7 @@ class EngineDrivenTransferContext(TransferContext):
         dtype = getattr(torch, dtype_str)
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
 
-        future = mq_client.register_kv_cache_engine_driven_context(
+        future = req_client.register_kv_cache_engine_driven_context(
             RegisterEngineDrivenContextPayload(
                 instance_id=instance_id,
                 model_name=model_name,
@@ -742,7 +742,7 @@ class EngineDrivenTransferContext(TransferContext):
         )
         self._engine_driven_context = create_engine_driven_context(
             metadata,
-            mq_client,
+            req_client,
             mq_timeout,
             shm_name=shm_name,
             pool_size=pool_size,

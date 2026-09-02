@@ -95,7 +95,7 @@ def worker_with_transfer_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]]:
     """Construct a worker with its MQ and transfer boundaries stubbed."""
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     transfer_context = MagicMock(name="transfer_context")
     monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
@@ -172,7 +172,7 @@ def test_atom_lookup_submits_valid_reader_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Scheduler lookups declare one reader for each rank-local object."""
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     future: MessagingFuture[None] = MessagingFuture()
     future.set_result(None)
     client.lookup.return_value = future
@@ -340,7 +340,7 @@ def test_atom_adapter_constructor_closes_client_on_failure(
     failure_kind: str,
 ) -> None:
     """GET_CHUNK_SIZE and validation failures do not leak the MQ client."""
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
     if failure_kind == "chunk_query":
         monkeypatch.setattr(
@@ -365,7 +365,7 @@ def test_atom_constructor_preserves_error_when_client_close_fails(
     adapter_kind: str,
 ) -> None:
     """Cleanup errors cannot replace the constructor's original failure."""
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     client.close.side_effect = RuntimeError("close failed")
     monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
     monkeypatch.setattr(
@@ -660,7 +660,7 @@ def test_atom_shutdown_discards_late_recovery_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A callback returning after shutdown cannot republish context or health."""
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     initial_context = MagicMock(name="initial_context")
     recovery_context = MagicMock(name="recovery_context")
     recovery_entered = threading.Event()
@@ -741,7 +741,7 @@ def test_atom_heartbeat_publish_and_start_are_one_lifecycle_transition(
             assert release_start.wait(timeout=5.0)
             super().start()
 
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     transfer_context = MagicMock(name="transfer_context")
     monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
