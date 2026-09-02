@@ -1504,10 +1504,6 @@ class LMCacheMPWorkerAdapter:
                 "KV caches are not registered. Call register_kv_caches() "
                 "before creating transfer events."
             )
-        # Heartbeat recovery publishes the replacement context before its
-        # blocking register() finishes, while health remains cleared. Avoid
-        # touching that not-yet-registered context; submit_* will apply the
-        # existing degraded-mode drop behavior.
         if not self.is_healthy:
             return None
         return transfer_ctx.create_recorded_event()
