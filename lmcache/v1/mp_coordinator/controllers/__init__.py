@@ -8,7 +8,9 @@ state it advertises.
 
 A controller that ships elsewhere is named in
 ``MPCoordinatorConfig.extra_config`` under ``controller_packages`` and
-scanned the same way.
+scanned the same way. One that should not be built is named under
+``disabled_controllers`` -- the other half of the same idea, so replacing a
+built-in controller does not mean forking the tree it lives in.
 """
 
 # Standard
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _PACKAGES_KEY = "controller_packages"
+_DISABLED_KEY = "disabled_controllers"
 
 
 def build_controllers(
@@ -37,20 +40,24 @@ def build_controllers(
 
     Args:
         config: Passed to each ``from_config``, and read for the
-            out-of-tree packages to scan alongside this one.
+            out-of-tree packages to scan alongside this one and for any
+            controller to leave unbuilt.
         views: The fleet's read models, which a controller may depend on.
 
     Returns:
-        A registry with every discovered controller built.
+        A registry with every discovered controller built, less those
+        disabled.
 
     Raises:
-        ValueError: If ``extra_config["controller_packages"]`` is not a list of
-            importable names.
-        ModuleNotFoundError: If one of those names does not import.
+        ValueError: If ``extra_config["controller_packages"]`` or
+            ``extra_config["disabled_controllers"]`` is not a list of names,
+            or if a disabled name matches nothing discovered.
+        ModuleNotFoundError: If one of the package names does not import.
     """
-    packages = (__name__, *_named_packages(config.extra_config))
+    packages = (__name__, *_named_packages(config.extra_config, _PACKAGES_KEY))
+    discovered = list(discover(packages, Controller))
     registry: Registry[Controller] = Registry(
-        list(discover(packages, Controller)),
+        _without_disabled(discovered, config.extra_config),
         # A controller cannot reach a peer, so the registry it is
         # handed for that is ignored here.
         build=lambda controller_type, _peers: controller_type.from_config(
@@ -66,11 +73,12 @@ def build_controllers(
     return registry
 
 
-def _named_packages(extra_config: Mapping[str, object]) -> Sequence[str]:
-    """Return the out-of-tree packages an operator named, validated.
+def _named_packages(extra_config: Mapping[str, object], key: str) -> Sequence[str]:
+    """Return the names an operator listed under ``key``, validated.
 
     Args:
         extra_config: The coordinator's untyped settings.
+        key: Which list to read.
 
     Returns:
         The names in the order given, empty when the key is absent.
@@ -80,19 +88,54 @@ def _named_packages(extra_config: Mapping[str, object]) -> Sequence[str]:
             JSON from the command line, so its shape is the operator's to
             get wrong and worth naming precisely.
     """
-    named = extra_config.get(_PACKAGES_KEY, ())
+    named = extra_config.get(key, ())
     if isinstance(named, str) or not isinstance(named, (list, tuple)):
         raise ValueError(
-            f"extra_config[{_PACKAGES_KEY!r}] must be a list of importable "
-            f"package names, got {type(named).__name__}"
+            f"extra_config[{key!r}] must be a list of names, got {type(named).__name__}"
         )
     for name in named:
         if not isinstance(name, str):
             raise ValueError(
-                f"extra_config[{_PACKAGES_KEY!r}] must contain strings, "
-                f"got {type(name).__name__}"
+                f"extra_config[{key!r}] must contain strings, got {type(name).__name__}"
             )
     return tuple(named)
+
+
+def _without_disabled(
+    discovered: Sequence[type[Controller]], extra_config: Mapping[str, object]
+) -> list[type[Controller]]:
+    """Drop the controllers an operator asked not to be built.
+
+    Naming a class here is how a built-in controller gets out of the way of
+    one that has taken over its job: the built-in package is always scanned,
+    so without this the two would both be built, both hold state under the
+    same artifact sections, and both answer for the same endpoints.
+
+    Args:
+        discovered: Every controller class found by scanning.
+        extra_config: The coordinator's untyped settings.
+
+    Returns:
+        The classes to build, in discovery order.
+
+    Raises:
+        ValueError: If the setting is malformed, or names a class that was
+            not discovered -- an operator believing they disabled something
+            they did not is worse than a boot failure that says so.
+    """
+    disabled = _named_packages(extra_config, _DISABLED_KEY)
+    if not disabled:
+        return list(discovered)
+    by_name = {controller.__name__: controller for controller in discovered}
+    unknown = [name for name in disabled if name not in by_name]
+    if unknown:
+        raise ValueError(
+            f"extra_config[{_DISABLED_KEY!r}] names {unknown}, which "
+            f"{'was' if len(unknown) == 1 else 'were'} not discovered; "
+            f"available: {sorted(by_name)}"
+        )
+    logger.info("Disabled controller(s): %s", ", ".join(disabled))
+    return [c for c in discovered if c.__name__ not in set(disabled)]
 
 
 __all__ = ["Controller", "build_controllers"]

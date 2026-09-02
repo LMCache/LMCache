@@ -28,6 +28,7 @@ from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManag
 from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
     get_outbound_client,
+    require_controller,
 )
 from lmcache.v1.mp_coordinator.schemas import (
     DeleteRequest,
@@ -165,7 +166,7 @@ async def request_pin(body: PinRequest, request: Request) -> PinResponse:
         HTTPException: 400 if the token cap is exceeded or a key field is invalid.
     """
     ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
+    eviction = require_controller(request, FleetEvictionController)
     try:
         resolved, chunks = resolve_object_keys(
             ctx.token_hasher,
@@ -203,7 +204,7 @@ async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
         HTTPException: 400 if the token cap is exceeded or a key field is invalid.
     """
     ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
+    eviction = require_controller(request, FleetEvictionController)
     try:
         resolved, chunks = resolve_object_keys(
             ctx.token_hasher,
@@ -238,7 +239,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
     Returns:
         ``DeleteResponse`` with ``requested`` chunks, ``affected`` keys removed,
         and ``skipped`` keys refused (L1 locks reported by the node, plus L2 pins
-        held back by the coordinator).
+        held back by the coordinator; none, if it runs no eviction controller).
 
     Raises:
         HTTPException: 400 if the token cap is exceeded or a key field is invalid;
@@ -246,7 +247,10 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
             unreachable or rejects the delete.
     """
     ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
+    # Consulted, not spoken for: deleting is a cache operation, and a
+    # coordinator with no eviction controller simply holds no pins to
+    # respect. So this degrades rather than 404s the way ``/cache/pins`` does.
+    eviction = ctx.controllers.find(FleetEvictionController)
     target = ctx.views.get(InstanceRegistry).get(body.instance_id)
     if target is None:
         raise HTTPException(
@@ -277,7 +281,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
     # dropped from the delete set entirely, so a pinned key is retained in both
     # tiers; ``force`` deletes them and clears the pins.
     touches_l2 = body.tier in (Tier.L2, Tier.ALL)
-    if touches_l2 and not body.force:
+    if touches_l2 and not body.force and eviction is not None:
         delete_keys = eviction.filter_unpinned(resolved)
         pin_skipped = len(resolved) - len(delete_keys)
     else:
@@ -307,7 +311,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
         node_deleted = result.get("deleted", 0)
         node_skipped = result.get("skipped", 0)
 
-    if touches_l2 and body.force:
+    if touches_l2 and body.force and eviction is not None:
         eviction.drop_pins(resolved)
         ctx.metadata_persister.save()
 

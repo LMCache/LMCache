@@ -96,6 +96,24 @@ class Registry(Generic[MemberT]):
         self._built[wanted] = instance
         return cast(LookupT, instance)
 
+    def find(self, member_type: type[LookupT]) -> LookupT | None:
+        """Return the instance of ``member_type``, or ``None`` if absent.
+
+        For a caller that must work either way -- a route whose collaborator
+        an operator may have disabled. Use :meth:`get` where absence is a
+        bug, so it stays an error rather than a quiet ``None``.
+
+        Args:
+            member_type: The class to look up.
+
+        Returns:
+            The single instance of that class, built if needed, or ``None``
+            if it was not discovered.
+        """
+        if cast("type[MemberT]", member_type) not in self._types:
+            return None
+        return self.get(member_type)
+
     def all(self) -> list[MemberT]:
         """Return every member, building any not built yet.
 

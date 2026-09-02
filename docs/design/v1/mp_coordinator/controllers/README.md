@@ -155,6 +155,39 @@ or a single module. A name that does not import raises rather than being
 skipped -- an operator asked for it, so a silent skip would look like a
 controller that loaded and did nothing.
 
+## Replacing a built-in controller
+
+Loading one is not enough to replace one. This package is always scanned, so a
+built-in controller is built whether or not something else now does its job --
+and two controllers doing the same job is not a redundancy, it is a conflict:
+they hold state under the same artifact sections (a document is keyed by
+section name, so the last writer wins, decided by class-name ordering) and
+answer for the same endpoints.
+
+Name it, and it is not built:
+
+```bash
+lmcache coordinator --extra-config '{
+  "controller_packages": ["acme_controllers"],
+  "disabled_controllers": ["FleetEvictionController"]
+}'
+```
+
+A name that matches nothing discovered raises, for the same reason a package
+that does not import does: an operator believing they disabled something they
+did not is worse than a boot failure that says so -- a typo would silently
+leave the built-in controller running against whatever replaced it.
+
+The endpoints that speak for a disabled controller answer `404` naming it,
+through `require_controller` in `http_apis/dependencies.py`. One that merely
+*consults* a controller resolves it with `Registry.find` and carries on
+without: `/cache/delete` holds back pinned keys when there is an eviction
+controller to ask, and deletes everything asked for when there is not.
+
+A controller replacing a built-in one inherits its durable state, because the
+sections are named by the component rather than by its owner -- so a swap keeps
+the pins and quotas the previous one held, provided only one of them is built.
+
 **Controllers only.** There is no `--view-package`: a view is shared fleet
 state, so which views exist is the coordinator's contract. An out-of-tree
 controller reads the in-tree views like any other, and whatever it needs
