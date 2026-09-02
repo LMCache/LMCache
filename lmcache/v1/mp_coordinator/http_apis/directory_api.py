@@ -53,8 +53,8 @@ async def lookup_placements(
 
     Returns:
         Chunk count plus one result per resolved key, in request order,
-        each with its known placements and the chunk's token ids
-        (both empty when the directory knows nothing about the key).
+        each with its known placements, the chunk's token ids, and the
+        key's access count. Unknown keys get empty lists and ``0``.
 
     Raises:
         HTTPException: 400 when the token sequence exceeds the
@@ -80,14 +80,18 @@ async def lookup_placements(
     directory = ctx.views.get(KeyDirectory)
     placements = directory.lookup(obj_keys)
     token_ids = directory.get_token_ids([key.chunk_hash for key in obj_keys])
+    access_counts = directory.get_access_counts(obj_keys)
     return DirectoryLookupResponse(
         chunks=chunks,
         results=[
             DirectoryKeyPlacements(
-                key=encoded, placements=key_placements, token_ids=list(tokens)
+                key=encoded,
+                placements=key_placements,
+                token_ids=list(tokens),
+                access_count=access_count,
             )
-            for encoded, key_placements, tokens in zip(
-                encoded_keys, placements, token_ids, strict=True
+            for encoded, key_placements, tokens, access_count in zip(
+                encoded_keys, placements, token_ids, access_counts, strict=True
             )
         ],
     )
@@ -156,8 +160,8 @@ async def list_directory_keys(
 
     Returns:
         The number of keys matching the filters plus the requested page,
-        each key with its matching placements and the number of token
-        ids known for its chunk.
+        each key with its matching placements, the number of token ids
+        known for its chunk, and its access count.
     """
     directory = get_context(request).views.get(KeyDirectory)
 
@@ -165,6 +169,7 @@ async def list_directory_keys(
         """Page the directory and shape the rows for the wire."""
         total, page = directory.list_keys(tier, instance_id, backend, offset, limit)
         token_ids = directory.get_token_ids([key.chunk_hash for key in page])
+        access_counts = directory.get_access_counts(list(page))
         return DirectoryListResponse(
             total=total,
             keys=[
@@ -172,9 +177,10 @@ async def list_directory_keys(
                     key=key.to_encoded_object_key(),
                     placements=placements,
                     num_tokens=len(tokens),
+                    access_count=access_count,
                 )
-                for (key, placements), tokens in zip(
-                    page.items(), token_ids, strict=True
+                for (key, placements), tokens, access_count in zip(
+                    page.items(), token_ids, access_counts, strict=True
                 )
             ],
         )

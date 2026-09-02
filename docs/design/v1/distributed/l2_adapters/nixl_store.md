@@ -141,12 +141,18 @@ and using deterministic file names derived from `ObjectKey`.
 | Aspect | Static | Dynamic |
 |---|---|---|
 | File lifecycle | All opened at init, closed at shutdown | Opened per store/load, closed after each transfer |
-| File naming | Random UUID (`obj_{i}_{uuid}.bin`) | Deterministic from ObjectKey (`{model}_{rank}_{hash}.bin`) |
+| File naming | Random UUID (`obj_{i}_{uuid}.bin`) | Readable fields (`{model}_{rank}_{group}_{hash}[@{cache_salt}].bin`) |
 | Nixl registration | Single prepped dlist for all storage | Per-operation register → transfer → deregister |
 | Pool / page indices | `NixlObjPool` manages fixed slots | No pool; `NixlStoreObj.page_indices` unused (`[]`) |
 | Capacity control | Pool size (slot count) | `max_capacity_gb` (byte-based) |
 | Persist/recover | Not supported | Supported |
 | Batching | One DMA transfer per batch of keys | One DMA transfer per key (each key = separate file) |
+
+For compatibility, keys with an empty `cache_salt` retain the legacy filename
+and chunk-hash shard. Keys with a non-empty salt append `@<cache_salt>` before
+the `.bin` extension, matching the trailing-salt representation used by the S3
+and filesystem L2 adapters. Sharded layouts continue to use the chunk hash for
+the directory levels; the filename provides the salt isolation.
 
 ### Key Components
 
@@ -252,6 +258,12 @@ In `close()`, after the event loop has stopped:
 
 No metadata JSON is written — the deterministic `ObjectKey → filename`
 mapping is sufficient to rediscover each file on restart.
+
+Files created by older releases for non-empty salts are ambiguous because the
+legacy filename did not record the salt. Salted lookup does not fall back to
+that path. Clear or quarantine the old cache directory before upgrading a
+deployment that previously used salted dynamic-NIXL traffic; unsalted paths
+remain compatible.
 
 #### Secondary Lookup (lazy disk recovery)
 

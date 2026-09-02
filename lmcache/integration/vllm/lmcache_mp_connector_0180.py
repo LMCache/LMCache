@@ -8,9 +8,14 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
-from lmcache import torch_dev, torch_device_type
-from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import check_interprocess_event_support, init_logger as lmcache_init_logger
+from lmcache.integration.vllm.utils import (
+    extract_request_configs_from_request,
+    mla_enabled,
+)
+from lmcache.utils import (
+    check_interprocess_event_support,
+    init_logger as lmcache_init_logger,
+)
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -202,9 +207,11 @@ class LMCacheMPRequestTracker:
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
+    request_configs: dict[str, Any] | None = None
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
+        self.request_configs = extract_request_configs_from_request(request)
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
@@ -277,6 +284,7 @@ class LMCacheMPRequestMetadata:
     request_id: str
     direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
+    request_configs: dict[str, Any] | None = None
 
     @staticmethod
     def GetStoreMetadata(
@@ -343,6 +351,7 @@ class LMCacheMPRequestMetadata:
                 request_id=tracker.request_id,
                 direction="STORE",
                 op=op,
+                request_configs=tracker.request_configs,
             )
 
             # Update the request tracker
@@ -409,6 +418,7 @@ class LMCacheMPRequestMetadata:
                 request_id=tracker.request_id,
                 direction="RETRIEVE",
                 op=op,
+                request_configs=tracker.request_configs,
             )
             return ret
 
@@ -560,22 +570,26 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         request_ids = []
         ops = []
+        request_configs_list = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
+            request_configs_list.append(meta.request_configs)
 
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            # Not all backends support interprocess Events (CUDA IPC specific)
-            event = torch_dev.Event(interprocess=True)
-            event.record()
+        event = self.worker_adapter.create_recorded_event()
 
-        self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
+        self.worker_adapter.batched_submit_retrieve_requests(
+            request_ids,
+            ops,
+            event,
+            request_configs_list=request_configs_list,
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -624,21 +638,25 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         request_ids = []
         ops = []
+        request_configs_list = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
+            request_configs_list.append(meta.request_configs)
 
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            # Not all backends support interprocess Events (CUDA IPC specific)
-            event = torch_dev.Event(interprocess=True)
-            event.record()
+        event = self.worker_adapter.create_recorded_event()
 
-        self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
+        self.worker_adapter.batched_submit_store_requests(
+            request_ids,
+            ops,
+            event,
+            request_configs_list=request_configs_list,
+        )
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -740,6 +758,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=list(request.all_token_ids),
+            request_configs=tracker.request_configs,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -838,6 +857,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
+                        request_configs=tracker.request_configs,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",
