@@ -84,6 +84,22 @@ class LocalDiskWorker:
             else:
                 logger.warning("Key %s not found in put tasks.", key)
 
+    def try_insert_put_task(self, key: CacheEngineKey) -> bool:
+        """Register a put task unless the key is already active.
+
+        Args:
+            key: Cache key for the pending disk write.
+
+        Returns:
+            True when the key was registered, or False when another put task
+            for the same key is already active.
+        """
+        with self.put_lock:
+            if key in self.put_tasks:
+                return False
+            self.put_tasks.append(key)
+            return True
+
     def insert_put_task(self, key: CacheEngineKey):
         with self.put_lock:
             self.put_tasks.append(key)
@@ -338,42 +354,65 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.cache_policy.update_on_hit(key, self.dict)
                 return None
 
-        # skip repeated save
-        if self.exists_in_put_tasks(key):
+        # TODO(Jiayi): Fragmentation is not considered here.
+        required_size = memory_obj.get_physical_size()
+        if required_size > self.max_cache_size:
+            logger.warning(
+                "Put task for %s requires %s bytes, exceeding disk cache "
+                "capacity %s bytes.",
+                key,
+                required_size,
+                self.max_cache_size,
+            )
+            return None
+
+        if not self.disk_worker.try_insert_put_task(key):
             logger.debug("Put task for %s is already in progress.", key)
             return None
 
-        self.disk_worker.insert_put_task(key)
-
-        # TODO(Jiayi): Fragmentation is not considered here.
-        required_size = memory_obj.get_physical_size()
-        all_evict_keys = []
-        evict_success = True
-        with self.disk_lock:
-            while self.current_cache_size + required_size > self.max_cache_size:
-                evict_keys = self.cache_policy.get_evict_candidates(
-                    self.dict, num_candidates=1
+        admission_succeeded = False
+        try:
+            with self.disk_lock:
+                required_eviction = (
+                    self.current_cache_size + required_size - self.max_cache_size
                 )
-                if not evict_keys:
-                    logger.warning(
-                        "No eviction candidates found. Disk space under pressure."
+                if required_eviction > 0:
+                    evictable_size = sum(
+                        metadata.size
+                        for metadata in self.dict.values()
+                        if metadata.can_evict
                     )
-                    evict_success = False
-                    break
+                    if evictable_size < required_eviction:
+                        logger.warning(
+                            "Insufficient evictable disk cache space for %s: "
+                            "need %s bytes, have %s bytes.",
+                            key,
+                            required_eviction,
+                            evictable_size,
+                        )
+                        return None
 
-                for evict_key in evict_keys:
-                    self.current_cache_size -= self.dict[evict_key].size
+                while self.current_cache_size + required_size > self.max_cache_size:
+                    evict_keys = self.cache_policy.get_evict_candidates(
+                        self.dict, num_candidates=1
+                    )
+                    if not evict_keys:
+                        logger.warning(
+                            "No eviction candidates found. Disk space under pressure."
+                        )
+                        return None
 
-                self.batched_remove(evict_keys, force=False)
+                    for evict_key in evict_keys:
+                        self.current_cache_size -= self.dict[evict_key].size
 
-                all_evict_keys.extend(evict_keys)
-            if evict_success:
+                    self.batched_remove(evict_keys, force=False)
+
                 self.current_cache_size += required_size
                 self.cache_policy.update_on_put(key)
-
-        if not evict_success:
-            return None
-
+            admission_succeeded = True
+        finally:
+            if not admission_succeeded:
+                self.disk_worker.remove_put_task(key)
         memory_obj.ref_count_up()
 
         asyncio.run_coroutine_threadsafe(
