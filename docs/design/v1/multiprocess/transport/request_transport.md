@@ -19,7 +19,7 @@ MP integration / SDK / benchmark
          RequestClient     -- named request methods
           /       \
          v         v
-   ZMQ facade   gRPC client (planned)
+   ZMQ facade   gRPC client
          |
          v
  MessageQueueClient
@@ -38,12 +38,11 @@ scheme:
 | Scheme | Implementation |
 |---|---|
 | no scheme, `tcp`, `ipc`, `inproc` | ZMQ |
-| `grpc`, `grpc+unix` | gRPC (not implemented yet) |
+| `grpc`, `grpc+unix` | gRPC |
 
 A bare `host:port` endpoint is normalized to `tcp://host:port`. Invalid or
-unknown schemes fail before a client is created. The gRPC schemes are reserved
-so gRPC support can land without changing business callers; selecting one
-currently raises `NotImplementedError`.
+unknown schemes fail before a client is created. The server selects the matching
+implementation through `--transport zmq` or `--transport grpc`.
 
 This abstraction covers MP request RPCs only. It does not select the mechanism
 used to move KV data between an engine worker and the server.

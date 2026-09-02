@@ -60,11 +60,6 @@ def test_factory_selects_grpc_by_scheme(
     create.assert_called_once_with(normalized_url, context=context)
 
 
-def test_factory_reports_unavailable_grpc_implementation() -> None:
-    with pytest.raises(NotImplementedError, match="not available yet"):
-        RequestClientFactory.create("grpc://localhost:5555")
-
-
 @pytest.mark.parametrize("server_url", ["", "grpc://", "http://localhost:5555"])
 def test_factory_rejects_invalid_or_unsupported_urls(server_url: str) -> None:
     with pytest.raises(ValueError):
