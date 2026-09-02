@@ -127,6 +127,12 @@ four lifecycle and transfer operations.
 and block-id flattening), then submits all three phases to a background
 `ThreadPoolExecutor` (`commit_executor`) and returns an unresolved
 `MessagingFuture`
+- **optional pinned SHM staging**: when enabled for an unpinned SHM mapping, gather
+  targets reusable pinned CPU chunks. The worker future resolves after the
+  GPU-to-pinned transfer completes, allowing the engine to release source KV
+  blocks. LMCache then copies pinned chunks to SHM, commits the store, and returns
+  the chunks to its internal pool without exposing a second completion to the
+  engine.
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
 During `register`, worker receives `RegisterEngineDrivenContextResponse(shm_name, pool_size)`

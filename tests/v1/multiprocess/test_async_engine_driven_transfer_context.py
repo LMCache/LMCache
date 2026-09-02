@@ -475,3 +475,48 @@ def test_prepare_store_runs_on_background_thread_not_forward_thread(
     prepare_gate.set()
     t.join(timeout=1)
     ctx.close()
+
+
+def test_pinned_shm_staging_releases_engine_before_internal_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned SHM staging releases source blocks before the internal commit."""
+    monkeypatch.setenv("LMCACHE_ENGINE_DRIVEN_PINNED_STAGING", "1")
+    gather_gate = threading.Event()
+    gather_gate.set()
+    commit_started = threading.Event()
+    commit_gate = threading.Event()
+    destination = torch.zeros((2, 1, 1, 1), dtype=torch.float32)
+
+    def _commit(chunks: list[torch.Tensor]) -> bool:
+        assert chunks == [destination]
+        commit_started.set()
+        commit_gate.wait(timeout=2)
+        return True
+
+    ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
+    ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]
+        commit_impl=_commit,
+        prepare_result=([destination], [0]),
+    )
+
+    future = ctx.submit_store(
+        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+    )
+
+    assert future.result(timeout=1) is True
+    assert commit_started.wait(timeout=1)
+    assert torch.equal(destination, torch.ones_like(destination))
+
+    closed = threading.Event()
+
+    def _close() -> None:
+        ctx.close()
+        closed.set()
+
+    close_thread = threading.Thread(target=_close, daemon=True)
+    close_thread.start()
+    assert not closed.wait(timeout=0.05)
+    commit_gate.set()
+    close_thread.join(timeout=1)
+    assert closed.is_set()
