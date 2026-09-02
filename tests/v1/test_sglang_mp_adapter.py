@@ -197,8 +197,44 @@ def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
         )
 
 
-def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
-    """Registration identifies flat single-head pools as split K/V MHA."""
+def test_validate_sglang_kv_pools_accepts_fused_mla_empty_v_pool() -> None:
+    """Fused MLA registers latent buffers as K with an empty V pool."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    k_pool = [torch.zeros(4, 1, 8)]
+    assert adapter_mod._validate_sglang_kv_pools(k_pool, []) == k_pool[0].device
+
+
+def test_wrap_sglang_kv_caches_fused_mla_emits_n_not_2n(monkeypatch) -> None:
+    """Fused MLA wire payload is N latent buffers (depth-1), never 2N."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    k_pool = [torch.zeros(4, 1, 8), torch.zeros(4, 1, 8)]
+    seen: list[torch.Tensor] = []
+
+    def wrap_one(tensor: torch.Tensor) -> object:
+        seen.append(tensor)
+        return SimpleNamespace(tensor=tensor)
+
+    monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", wrap_one, raising=False)
+
+    wrapped = adapter_mod._wrap_sglang_kv_caches(k_pool, [])
+
+    assert len(wrapped) == len(k_pool)  # N, not 2N
+    assert seen == k_pool
+
+
+@pytest.mark.parametrize(
+    ("has_v_pool", "expected_layout_hints"),
+    [
+        (True, {"tokens_per_block": 2, "kv_list_layout": "k_v"}),
+        (False, {"tokens_per_block": 2}),
+    ],
+)
+def test_mp_connector_registration_marks_only_split_kv_layout(
+    monkeypatch,
+    has_v_pool: bool,
+    expected_layout_hints: dict[str, int | str],
+) -> None:
+    """Only split K/V MHA registrations carry the explicit list-layout hint."""
     adapter_mod, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
     mq_client = object()
     requests: list[tuple[object, list[object]]] = []
@@ -244,7 +280,7 @@ def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_request)
 
     k_pool = [torch.empty(4, 1, 8) for _ in range(2)]
-    v_pool = [torch.empty(4, 1, 8) for _ in range(2)]
+    v_pool = [torch.empty(4, 1, 8) for _ in range(2)] if has_v_pool else []
     LMCacheMPConnector(
         sgl_config=SimpleNamespace(model_path="test-model"),
         tp_size=1,
@@ -259,14 +295,13 @@ def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
     assert len(requests) == 1
     request_type, payload = requests[0]
     assert request_type == adapter_mod.RequestType.REGISTER_KV_CACHE
-    assert payload[5] == {"tokens_per_block": 2, "kv_list_layout": "k_v"}
+    assert payload[5] == expected_layout_hints
 
 
 @pytest.mark.parametrize(
     ("k_pool", "v_pool", "message"),
     [
-        ([], [torch.tensor([1])], "non-empty K and V pools"),
-        ([torch.tensor([1])], [], "non-empty K and V pools"),
+        ([], [torch.tensor([1])], "non-empty K pool"),
         (
             [torch.tensor([1]), torch.tensor([2])],
             [torch.tensor([3])],
@@ -292,6 +327,88 @@ def test_mp_connector_validates_pools_before_opening_mq(
             k_pool=k_pool,
             v_pool=v_pool,
         )
+
+
+@pytest.mark.parametrize("worker_id", [0, 1])
+def test_tp_worker_namespaces_daemon_lookup_lifecycle(
+    worker_id: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every daemon-side lookup/session operation uses the worker-scoped RID."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    connector = _make_connector(healthy=True)
+    connector.mq_client = object()  # type: ignore[assignment]
+    connector.model_name = "test-model"
+    connector.tp_size = 2
+    connector.worker_id = worker_id
+    connector._pending_lookups = {}
+    connector._pending_lookups_lock = threading.Lock()
+    connector._global_min_tokens = lambda matched: matched  # type: ignore[method-assign]
+
+    requests: list[tuple[object, list[Any]]] = []
+
+    def send_request(
+        _mq_client: object,
+        request_type: object,
+        payload: list[Any],
+    ) -> MessagingFuture[Any]:
+        requests.append((request_type, payload))
+        future: MessagingFuture[Any] = MessagingFuture()
+        future.set_result(
+            2 if request_type is adapter_mod.RequestType.WAIT_PREFETCH_STATUS else True
+        )
+        return future
+
+    monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_request)
+
+    request_id = "request-1"
+    daemon_rid = f"{request_id}#{worker_id}"
+    assert connector.lookup_kv(list(range(2 * _CHUNK_SIZE)), request_id) == (
+        2 * _CHUNK_SIZE
+    )
+    connector.release_pending(request_id)
+    connector.end_session(request_id)
+
+    assert [request_type for request_type, _ in requests] == [
+        adapter_mod.RequestType.LOOKUP,
+        adapter_mod.RequestType.WAIT_PREFETCH_STATUS,
+        adapter_mod.RequestType.FREE_LOOKUP_LOCKS,
+        adapter_mod.RequestType.END_SESSION,
+    ]
+    assert requests[0][1][0].request_id == daemon_rid
+    assert requests[1][1][0] == daemon_rid
+    assert requests[2][1][0].request_id == daemon_rid
+    assert requests[3][1][0] == daemon_rid
+
+
+def test_retrieve_uses_worker_scoped_daemon_request_id() -> None:
+    """RETRIEVE must consume the same worker-scoped session as LOOKUP."""
+    _, _, _completed_future, _, LoadMetadata, _ = _import_adapter_symbols()
+    connector = _make_connector(healthy=True)
+    connector.worker_id = 1
+    connector.page_size = _CHUNK_SIZE
+    connector._pending_lookups = {
+        "request-1": SimpleNamespace(
+            token_ids=list(range(_CHUNK_SIZE)),
+            matched_token_num=_CHUNK_SIZE,
+            locks_held=True,
+        )
+    }
+    connector._pending_lookups_lock = threading.Lock()
+    connector._slot_mapping_to_block_ids = MagicMock(return_value=[1])
+    raw_future: MessagingFuture[tuple[bytes, bool]] = MessagingFuture()
+    connector._submit_retrieve = MagicMock(
+        return_value=(raw_future, _completed_future(True))
+    )
+
+    metadata = LoadMetadata(
+        token_ids=list(range(_CHUNK_SIZE)),
+        slot_mapping=torch.arange(_CHUNK_SIZE),
+        offset=0,
+        request_id="request-1",
+    )
+
+    assert connector.retrieve_kv(metadata) == _CHUNK_SIZE
+    assert connector._submit_retrieve.call_args.kwargs["request_id"] == "request-1#1"
 
 
 def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:

@@ -28,6 +28,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -54,22 +55,30 @@ def _validate_sglang_kv_pools(
     k_pool: list[torch.Tensor],
     v_pool: list[torch.Tensor],
 ) -> torch.device:
-    """Validate SGLang's split MHA pools and return their shared device.
+    """Validate SGLang's KV pools and return their shared device.
+
+    Two layouts are accepted:
+
+    * Split MHA: a non-empty ``k_pool`` and a ``v_pool`` of equal length (one
+      physical key and value buffer per layer).
+    * Fused MLA: a non-empty ``k_pool`` of latent buffers and an empty
+      ``v_pool`` (V is a slice of the latent buffer, not registered
+      separately).
 
     Args:
-        k_pool: Per-layer key-cache tensors.
-        v_pool: Per-layer value-cache tensors.
+        k_pool: Per-layer key (or fused-MLA latent) cache tensors.
+        v_pool: Per-layer value-cache tensors; empty for fused MLA.
 
     Returns:
-        The device shared by every key and value tensor.
+        The device shared by every registered tensor.
 
     Raises:
-        ValueError: If either pool is empty, layer counts differ, or tensors
-            span multiple devices.
+        ValueError: If ``k_pool`` is empty, a non-empty ``v_pool`` has a
+            different layer count, or tensors span multiple devices.
     """
-    if not k_pool or not v_pool:
-        raise ValueError("SGLang MP registration requires non-empty K and V pools")
-    if len(k_pool) != len(v_pool):
+    if not k_pool:
+        raise ValueError("SGLang MP registration requires a non-empty K pool")
+    if v_pool and len(k_pool) != len(v_pool):
         raise ValueError("SGLang MP registration requires matching K and V layers")
     tensors = [*k_pool, *v_pool]
     device = tensors[0].device
@@ -82,17 +91,18 @@ def _wrap_sglang_kv_caches(
     k_pool: list[torch.Tensor],
     v_pool: list[torch.Tensor],
 ) -> KVCache:
-    """Flatten SGLang's depth-2 ``[K_layers, V_layers]`` KV layout into a
-    single flat ``KVCache`` so it fits upstream's wire
+    """Flatten SGLang's KV pools into a single flat ``KVCache`` for the wire
     ``KVCache`` payload type. The daemon's
-    :func:`normalize_kv_and_discover_format` recognizes this shape from
-    ``EngineType.SGLANG`` plus ``tokens_per_block`` and ``kv_list_layout``
-    ``LayoutHints`` fields, then splits it back at its midpoint before format
-    detection.
+    :func:`normalize_kv_and_discover_format` detects the layout from
+    ``EngineType.SGLANG`` plus ``LayoutHints``: split MHA (non-empty
+    ``v_pool``) carries ``kv_list_layout="k_v"`` and is split back at its
+    midpoint; fused MLA (empty ``v_pool``) stays a depth-1 list of latent
+    buffers. Both layouts carry ``tokens_per_block`` so the folded page-buffer
+    dimension can be reshaped into explicit block axes.
 
     Raises:
-        ValueError: If the pools are empty, use different devices, or the
-            selected platform cannot provide the complete handle-transfer
+        ValueError: If ``k_pool`` is empty, the pools use different devices, or
+            the selected platform cannot provide the complete handle-transfer
             path.
     """
     device = _validate_sglang_kv_pools(k_pool, v_pool)
@@ -216,11 +226,15 @@ class LMCacheMPConnector:
         # ([K_layers, V_layers]); we flatten it on the wire to fit
         # ``KVCache = list[DeviceIPCWrapper]``. The daemon recognizes the
         # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
-        # ``tokens_per_block`` and ``kv_list_layout`` hints, then un-flattens
-        # and reshapes per layer.
-        # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the
-        # empty list -- which the server treats as one group spanning all layers
+        # ``kv_list_layout="k_v"`` hint, then un-flattens and reshapes it. Fused
+        # MLA has an empty ``v_pool`` and must not carry that hint; its depth-1
+        # latent buffers are instead un-fused using ``tokens_per_block``.
+        # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is
+        # the empty list -- the server treats it as one group spanning all layers
         # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
+        layout_hints: LayoutHints = {"tokens_per_block": self.page_size}
+        if v_pool:
+            layout_hints["kv_list_layout"] = "k_v"
         send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -230,7 +244,7 @@ class LMCacheMPConnector:
                 self.model_name,
                 self.tp_size,
                 EngineType.SGLANG,
-                {"tokens_per_block": self.page_size, "kv_list_layout": "k_v"},
+                layout_hints,
                 [],
             ],
         ).result(timeout=self._mq_timeout)
@@ -254,6 +268,16 @@ class LMCacheMPConnector:
 
     def chunk_size(self) -> int:
         return self._lmcache_chunk_size
+
+    def _daemon_rid(self, request_id: str) -> str:
+        """Return the request ID used by this TP worker in the daemon.
+
+        SGLang gives every TP worker the same request ID, while the daemon's
+        prefetch jobs and sessions are keyed only by request ID.  Include the
+        worker ID so concurrent LOOKUP/WAIT/RETRIEVE/cleanup flows cannot
+        overwrite or consume another TP worker's state.
+        """
+        return f"{request_id}#{self.worker_id}"
 
     @torch.no_grad()
     def _global_min_tokens(self, local_tokens: int) -> int:
@@ -379,7 +403,10 @@ class LMCacheMPConnector:
             stale = self._pending_lookups.pop(request_id, None)
         if stale is not None and stale.locks_held:
             self._free_lookup_locks(
-                stale.token_ids, 0, stale.matched_token_num, request_id
+                stale.token_ids,
+                0,
+                stale.matched_token_num,
+                self._daemon_rid(request_id),
             )
 
         aligned_end = (len(token_ids) // self._lmcache_chunk_size) * (
@@ -388,11 +415,12 @@ class LMCacheMPConnector:
         if aligned_end == 0:
             return 0  # too few tokens; no chunk-aligned range to LOOKUP
 
+        daemon_rid = self._daemon_rid(request_id)
         lookup_key = self._create_key(
             token_ids,
             start=0,
             end=aligned_end,
-            request_id=request_id,
+            request_id=daemon_rid,
             no_worker_id=True,
         )
         send_lmcache_request(
@@ -400,7 +428,7 @@ class LMCacheMPConnector:
             RequestType.LOOKUP,
             [lookup_key, self.tp_size],
         ).result(timeout=self._mq_timeout)
-        matched = self._wait_for_lookup(request_id)
+        matched = self._wait_for_lookup(daemon_rid)
         matched = self._global_min_tokens(matched)
 
         # Daemon now holds read locks for the matched chunks. Record
@@ -427,7 +455,7 @@ class LMCacheMPConnector:
             token_ids = pending.token_ids
             matched = pending.matched_token_num
         if matched > 0:
-            self._free_lookup_locks(token_ids, 0, matched, request_id)
+            self._free_lookup_locks(token_ids, 0, matched, self._daemon_rid(request_id))
 
     def end_session(self, request_id: str) -> None:
         """Tell the daemon we're done with this request_id.
@@ -449,9 +477,16 @@ class LMCacheMPConnector:
             return
         if pending.locks_held and pending.matched_token_num > 0:
             self._free_lookup_locks(
-                pending.token_ids, 0, pending.matched_token_num, request_id
+                pending.token_ids,
+                0,
+                pending.matched_token_num,
+                self._daemon_rid(request_id),
             )
-        send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
+        send_lmcache_request(
+            self.mq_client,
+            RequestType.END_SESSION,
+            [self._daemon_rid(request_id)],
+        )
 
     def _submit_retrieve(
         self,
@@ -537,7 +572,8 @@ class LMCacheMPConnector:
         fresh_start = offset + prefix_pad
         prefix_pad_pages = prefix_pad // self.page_size
 
-        self._free_lookup_locks(token_ids, 0, offset, request_id)
+        daemon_rid = self._daemon_rid(request_id)
+        self._free_lookup_locks(token_ids, 0, offset, daemon_rid)
         fresh_block_ids = self._slot_mapping_to_block_ids(
             load_metadata.slot_mapping[fresh_start:retrieve_token_num]
         )
@@ -552,7 +588,7 @@ class LMCacheMPConnector:
         server_released_locks = False
         try:
             raw_future, future = self._submit_retrieve(
-                request_id=request_id,
+                request_id=daemon_rid,
                 token_ids=token_ids,
                 offset=offset,
                 matched_end=retrieve_token_num,
@@ -572,7 +608,7 @@ class LMCacheMPConnector:
         finally:
             if not retrieve_succeeded and not server_released_locks:
                 self._free_lookup_locks(
-                    token_ids, offset, retrieve_token_num, request_id
+                    token_ids, offset, retrieve_token_num, daemon_rid
                 )
             with self._pending_lookups_lock:
                 if request_id in self._pending_lookups:

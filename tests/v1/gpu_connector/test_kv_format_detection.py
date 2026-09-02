@@ -101,6 +101,23 @@ def test_sglang_mla_depth1():
     assert fmt == F.NL_X_NBBS_ONE_HS
 
 
+def test_sglang_mla_mp_unfuse():
+    # MP path: depth-1 fused MLA [PBS, 1, HS] + tokens_per_block hint;
+    # detection un-fuses PBS -> (NB, BS) and drops the singleton head,
+    # landing on the block-aware NL_X_NB_BS_HS (same as vLLM MLA).
+    kv = [_t(NB * BS, 1, HS) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.SGLANG, {"tokens_per_block": BS})
+    assert fmt == F.NL_X_NB_BS_HS
+    assert len(out) == NL
+    assert tuple(out[0].shape) == (NB, BS, HS)
+
+
+def test_sglang_mla_mp_unfuse_indivisible_raises():
+    kv = [_t(NB * BS + 1, 1, HS) for _ in range(NL)]
+    with pytest.raises(ValueError, match="not divisible by tokens_per_block"):
+        detect_format(kv, EngineType.SGLANG, {"tokens_per_block": BS})
+
+
 def test_sglang_mha_depth2_fused():
     kv = [[_t(NB * BS, NH, HS) for _ in range(NL)] for _ in range(2)]
     fmt, _ = detect_format(kv, EngineType.SGLANG, {})

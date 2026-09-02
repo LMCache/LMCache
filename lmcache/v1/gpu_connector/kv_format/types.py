@@ -43,9 +43,11 @@ class LayoutHints(TypedDict, total=False):
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (to
-            reshape its pool tensor) and by SGLang MHA (to split the
-            folded ``page_buffer_size`` dimension into separate
-            ``num_blocks`` and ``block_size``).
+            reshape its pool tensor) and by SGLang (to split the folded
+            ``page_buffer_size`` dimension into separate ``num_blocks``
+            and ``block_size``). For fused SGLang MLA, it un-fuses depth-1
+            ``[PBS, 1, HS]`` into ``[NB, BS, HS]``
+            (``NL_X_NB_BS_HS``).
         kv_list_layout: Outer SGLang KV-cache list organization. ``"k_v"``
             identifies a flat registration containing equal K and V layer
             halves; combined with ``tokens_per_block``, it triggers
