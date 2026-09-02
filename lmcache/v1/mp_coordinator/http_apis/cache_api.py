@@ -37,6 +37,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     PrefetchRequest,
     PrefetchResponse,
 )
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
@@ -67,7 +68,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
     """
     ctx = get_context(request)
     prefetch = ctx.controllers.get(PrefetchManager)
-    target = ctx.registry.get(body.instance_id)
+    target = ctx.views.get(InstanceRegistry).get(body.instance_id)
     if target is None:
         raise HTTPException(
             status_code=404,
@@ -121,7 +122,7 @@ async def get_prefetch_status(
     """
     ctx = get_context(request)
     prefetch = ctx.controllers.get(PrefetchManager)
-    target = ctx.registry.get(instance_id)
+    target = ctx.views.get(InstanceRegistry).get(instance_id)
     if target is None:
         raise HTTPException(
             status_code=404,
@@ -246,7 +247,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
     """
     ctx = get_context(request)
     eviction = ctx.controllers.get(FleetEvictionController)
-    target = ctx.registry.get(body.instance_id)
+    target = ctx.views.get(InstanceRegistry).get(body.instance_id)
     if target is None:
         raise HTTPException(
             status_code=404,

@@ -248,6 +248,14 @@ class _FakeMambaSpec:
 
 
 @dataclass
+class MambaSpec:
+    """Mamba spec double detected by its public class name."""
+
+    block_size: int
+    mamba_cache_mode: str = "align"
+
+
+@dataclass
 class AttentionSpec:
     """Double for vLLM's AttentionSpec base; detection is by class name."""
 
@@ -304,6 +312,130 @@ def test_hybrid_layout_produces_mixed_spans():
     assert math.lcm(*spans) == 2048  # scheduler commit granularity
 
 
+def _import_connector_geometry_helpers():
+    """Import helpers lazily because their module imports vLLM."""
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import (
+        get_dcp_decorated_model_name,
+        get_group_tokens_per_block,
+        get_vllm_scheduler_block_size,
+        validate_mamba_step_alignment,
+    )
+
+    return (
+        get_group_tokens_per_block,
+        get_dcp_decorated_model_name,
+        get_vllm_scheduler_block_size,
+        validate_mamba_step_alignment,
+    )
+
+
+def _hybrid_kv_cache_config(
+    attention_block_size: int = 2304,
+    mamba_block_size: int = 2304,
+) -> SimpleNamespace:
+    """Resolved GLM-like groups after platform page-size equalization."""
+    return SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=_attention_spec(attention_block_size)),
+            SimpleNamespace(kv_cache_spec=MambaSpec(mamba_block_size)),
+        ]
+    )
+
+
+def _geometry_config(
+    *,
+    dcp_size: int = 4,
+    interleave: int = 4,
+    base_block_size: int = 256,
+    max_num_batched_tokens: int = 4096,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(model="org/glm-5.3-flash"),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=interleave,
+        ),
+        cache_config=SimpleNamespace(
+            block_size=base_block_size,
+            mamba_cache_mode="align",
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens),
+    )
+
+
+@requires_vllm
+def test_glm_dcp4_geometry_resolves_physical_mamba_block():
+    (
+        get_group_tokens_per_block,
+        _,
+        get_vllm_scheduler_block_size,
+        _,
+    ) = _import_connector_geometry_helpers()
+    config = _geometry_config()
+    kv_config = _hybrid_kv_cache_config()
+
+    assert get_group_tokens_per_block(config, kv_config) == [9216, 2304]
+    assert get_vllm_scheduler_block_size(config, kv_config) == 9216
+
+
+@requires_vllm
+def test_scheduler_block_size_is_group_span_lcm():
+    (
+        get_group_tokens_per_block,
+        _,
+        get_vllm_scheduler_block_size,
+        _,
+    ) = _import_connector_geometry_helpers()
+    config = _geometry_config(dcp_size=2)
+    kv_config = _hybrid_kv_cache_config(
+        attention_block_size=6,
+        mamba_block_size=18,
+    )
+
+    assert get_group_tokens_per_block(config, kv_config) == [12, 18]
+    assert get_vllm_scheduler_block_size(config, kv_config) == 36
+
+
+@requires_vllm
+def test_mamba_alignment_uses_resolved_page_not_cli_block_size():
+    *_, validate_mamba_step_alignment = _import_connector_geometry_helpers()
+    kv_config = _hybrid_kv_cache_config()
+
+    with pytest.raises(ValueError, match=r"block_size=2304"):
+        validate_mamba_step_alignment(
+            _geometry_config(max_num_batched_tokens=2048), kv_config
+        )
+
+    validate_mamba_step_alignment(
+        _geometry_config(max_num_batched_tokens=4096), kv_config
+    )
+
+
+@requires_vllm
+def test_dcp_interleave_participates_in_cache_identity():
+    _, get_dcp_decorated_model_name, _, _ = _import_connector_geometry_helpers()
+
+    interleave4 = get_dcp_decorated_model_name(_geometry_config(interleave=4))
+    interleave8 = get_dcp_decorated_model_name(_geometry_config(interleave=8))
+    assert interleave4 != interleave8
+    assert interleave4.endswith("##lmcache-dcp-layout-v1-d4-interleave4")
+
+
+@requires_vllm
+def test_trivial_interleave_preserves_legacy_cache_identity():
+    _, get_dcp_decorated_model_name, _, _ = _import_connector_geometry_helpers()
+
+    assert (
+        get_dcp_decorated_model_name(_geometry_config(dcp_size=4, interleave=1))
+        == "org/glm-5.3-flash"
+    )
+    assert (
+        get_dcp_decorated_model_name(_geometry_config(dcp_size=1, interleave=4))
+        == "org/glm-5.3-flash"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # validate_dcp_support: fail closed on unproven topologies                     #
 # --------------------------------------------------------------------------- #
@@ -324,6 +456,7 @@ def _config(
     pp_size: int = 1,
     interleave: int = 1,
     tp_size: int = 8,
+    cache_block_size: int = 256,
 ) -> SimpleNamespace:
     """Minimal stand-in exposing only the parallel_config fields read."""
     return SimpleNamespace(
@@ -334,7 +467,8 @@ def _config(
             cp_kv_cache_interleave_size=interleave,
             tensor_parallel_size=tp_size,
             world_size=tp_size * pp_size,
-        )
+        ),
+        cache_config=SimpleNamespace(block_size=cache_block_size),
     )
 
 
@@ -365,10 +499,30 @@ def test_validate_rejects_pcp_with_dcp():
 
 
 @requires_vllm
-def test_validate_rejects_nontrivial_interleave():
-    """The silent-corruption guard: wrong KV stored, no crash, without it."""
-    with pytest.raises(ValueError, match="cp_kv_cache_interleave_size"):
-        _import_validate_dcp_support()(_config(dcp_size=2, interleave=64), 1)
+def test_validate_accepts_interleave_when_layout_is_namespaced():
+    """Opaque per-rank pages round-trip when their key namespace is isolated."""
+    _import_validate_dcp_support()(
+        _config(dcp_size=4, interleave=4), 1, _hybrid_kv_cache_config()
+    )
+
+
+@requires_vllm
+def test_validate_uses_resolved_attention_block_for_interleave():
+    """The resolved 2304 page, rather than the CLI 256 page, is authoritative."""
+    validate = _import_validate_dcp_support()
+    kv_config = _hybrid_kv_cache_config(attention_block_size=2304)
+
+    validate(_config(dcp_size=4, interleave=768), 1, kv_config)
+
+
+@requires_vllm
+def test_validate_rejects_interleave_not_dividing_resolved_attention_block():
+    with pytest.raises(ValueError, match="evenly divide"):
+        _import_validate_dcp_support()(
+            _config(dcp_size=4, interleave=1000),
+            1,
+            _hybrid_kv_cache_config(attention_block_size=2304),
+        )
 
 
 @requires_vllm

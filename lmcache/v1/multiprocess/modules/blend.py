@@ -580,9 +580,13 @@ def _cb_group_rope_geometry(
     # Use the spec fact, not a format list: a missed fused format is treated
     # as split K/V and the V half of every head gets re-RoPE'd.
     engine_kv_format = getattr(group, "engine_kv_format", None)
-    fused_packed = (
+    fused_format = (
         engine_kv_format is not None
         and get_spec_class(engine_kv_format).is_fused_packed
+    )
+    declared_hs = getattr(getattr(group, "shape_desc", None), "hs", None)
+    fused_packed = fused_format and (
+        declared_hs is None or declared_hs == 2 * head_size
     )
     per_head = head_size * (2 if fused_packed else 1)
     n_heads = hidden_dim // per_head
@@ -1229,6 +1233,7 @@ class BlendModule(InstanceLivenessTarget):
             PrefetchRequestSpec(
                 keys=uniq_keys,
                 group_layout_descs=layouts,
+                num_kv_readers=key.require_num_kv_readers(),
                 policy=TrimPolicy.SPARSE,
                 attn_desc=_narrow_attn_desc(attn_desc, read.gids),
             ),
