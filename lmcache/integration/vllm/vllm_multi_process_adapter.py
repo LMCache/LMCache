@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import math
 import os
@@ -18,12 +18,9 @@ import zmq
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
-from lmcache.integration.vllm.utils import (
-    create_recorded_transfer_event,
-    vllm_layout_hints,
-)
+from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
-from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -39,12 +36,7 @@ from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
 )
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
-from lmcache.v1.platform.base.event_ipc import (
-    EventIPCBackend,
-    get_event_ipc_backend,
-)
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 if TYPE_CHECKING:
@@ -1195,11 +1187,6 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._layout_hints: "LayoutHints | None" = None
         self.engine_group_infos: list[EngineGroupInfo] = []
-        # KV-cache device and event backend, resolved once at registration
-        # so per-request event creation stays off the lookup path.
-        self._kv_device: torch.device | None = None
-        self._event_ipc_backend: EventIPCBackend | None = None
-
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
 
@@ -1209,10 +1196,10 @@ class LMCacheMPWorkerAdapter:
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
-        # The IPC handle is not enough by itself; the exporting event object
-        # must stay alive until the consumer is done with it.
-        self.store_events: dict[str, IPCEvent] = {}
-        self.retrieve_events: dict[str, IPCEvent] = {}
+        # The IPC handle is not enough by itself; CUDA needs the exporting
+        # event object to stay alive until the consumer is done with it.
+        self.store_events: dict[str, _IpcEvent] = {}
+        self.retrieve_events: dict[str, _IpcEvent] = {}
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
@@ -1375,24 +1362,6 @@ class LMCacheMPWorkerAdapter:
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
-    def create_and_record_event(self, stream: object | None = None) -> IPCEvent:
-        """Create and record the producer event for this worker's transfer mode.
-
-        Args:
-            stream: Stream that should record the event. ``None`` means the
-                active backend's current stream.
-
-        Returns:
-            A backend-native event object. LMCache-driven transfers return a
-            platform IPC event; engine-driven transfers return a normal local
-            event because the handle never leaves the worker process.
-
-        Raises:
-            RuntimeError: If KV caches are not registered or event IPC is
-                unsupported for an LMCache-driven device event.
-        """
-        return create_recorded_transfer_event(self, stream)
-
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -1410,8 +1379,6 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        self._kv_device = get_device(next(iter(kv_caches.values())))
-        self._event_ipc_backend = get_event_ipc_backend(self._kv_device)
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
@@ -1520,31 +1487,33 @@ class LMCacheMPWorkerAdapter:
 
         return True
 
-    def create_recorded_event(self) -> _IpcEvent:
-        """Create an IPC event recorded on the current stream with configured backend.
+    def create_recorded_event(self) -> _IpcEvent | None:
+        """Create the ordering event required by the active transfer context.
 
         Returns:
-            An event recorded on the current stream, ready for
-            ``submit_store_request`` / ``submit_retrieve_request``.
+            A recorded event for contexts that need stream ordering, or
+            ``None`` for synchronous engine-driven transfer or while the
+            adapter is unhealthy and requests will be dropped.
 
         Raises:
             RuntimeError: If called before ``register_kv_caches()``.
         """
-        if self._kv_device is None or self._event_ipc_backend is None:
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is None:
             raise RuntimeError(
                 "KV caches are not registered. Call register_kv_caches() "
                 "before creating transfer events."
             )
-        event = self._event_ipc_backend.create_event(self._kv_device)
-        self._event_ipc_backend.record_event(event, torch_dev.current_stream())
-        return cast(_IpcEvent, event)
+        if not self.is_healthy:
+            return None
+        return transfer_ctx.create_recorded_event()
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: IPCEvent,
+        event: _IpcEvent | None,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
     ):
@@ -1554,8 +1523,8 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the store operation.
-            event: The device event that is recorded after the current model
-                inference step.
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
@@ -1592,14 +1561,15 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
         )
         self.store_futures[request_id] = future
-        self.store_events[request_id] = event
+        if event is not None:
+            self.store_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: IPCEvent,
+        event: _IpcEvent | None,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
     ) -> None:
@@ -1613,8 +1583,8 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the retrieve operation.
-            event: The device event that is recorded after the current model
-                inference step.
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
@@ -1651,14 +1621,15 @@ class LMCacheMPWorkerAdapter:
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
-        self.retrieve_events[request_id] = event
+        if event is not None:
+            self.retrieve_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: IPCEvent,
+        event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
         request_configs_list: list[dict[str, Any] | None] | None = None,
     ):
@@ -1669,8 +1640,8 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the store operations. Should have
                 the same length as request_ids
-            event: The device event that is recorded after the current model
-                inference step.
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be the same as
                 request_ids.
@@ -1707,7 +1678,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: IPCEvent,
+        event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
         request_configs_list: list[dict[str, Any] | None] | None = None,
     ):
@@ -1718,8 +1689,8 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the retrieve operations. Should have
                 the same length as request_ids
-            event: The device event that is recorded after the current model
-                inference step.
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be same as
                 request_ids.

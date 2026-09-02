@@ -4,7 +4,6 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."""
 
 # Standard
-from types import SimpleNamespace
 from typing import Callable, ClassVar
 from unittest.mock import MagicMock
 import gc
@@ -28,7 +27,6 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.transfer_context import LMCacheDrivenTransferContext
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 
 
@@ -219,8 +217,12 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
 def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     fake_adapter, monkeypatch
 ):
-    """CPU KV cache registration routes to REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT."""
+    """CPU-only capability fallback registers without requiring an event."""
     adapter, send_mock, _ = fake_adapter
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "lmcache.integration.vllm.utils.vllm_layout_hints",
         lambda: {},
@@ -235,11 +237,18 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     args, _kwargs = send_mock.call_args
     assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
     assert len(args[2]) == 1
+    assert adapter.create_recorded_event() is None
 
 
-def test_register_kv_caches_tuple_caches_extract_device(fake_adapter, monkeypatch):
-    """Per-layer (K, V) tuple caches register and yield the tensor device."""
+def test_register_kv_caches_tuple_caches_use_engine_driven_context(
+    fake_adapter, monkeypatch
+):
+    """CPU-only tuple caches register without requiring an IPC event."""
     adapter, send_mock, _ = fake_adapter
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "lmcache.integration.vllm.utils.vllm_layout_hints",
         lambda: {},
@@ -252,124 +261,11 @@ def test_register_kv_caches_tuple_caches_extract_device(fake_adapter, monkeypatc
 
     adapter.register_kv_caches(tuple_kv)
 
-    assert adapter._kv_device == k.device
     assert adapter.kv_caches is tuple_kv
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
     assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
-
-
-def test_create_and_record_event_uses_ipc_backend_for_lmcache_driven_transfer(
-    fake_adapter, monkeypatch
-) -> None:
-    """LMCache-driven transfers must create exportable IPC events."""
-    adapter, _send_mock, _future = fake_adapter
-    fake_tensor = MagicMock(name="kv_tensor")
-    fake_tensor.device = torch.device("cpu")
-    adapter.kv_caches = {"layer0": fake_tensor}
-    adapter.transfer_ctx = LMCacheDrivenTransferContext()
-
-    created_event = object()
-    record_calls: list[tuple[object, object, object | None]] = []
-    monkeypatch.setattr(
-        "lmcache.integration.vllm.utils.create_event",
-        lambda device: created_event,
-    )
-    monkeypatch.setattr(
-        "lmcache.integration.vllm.utils.record_event",
-        lambda event, device, stream=None: record_calls.append((event, device, stream)),
-    )
-    monkeypatch.setattr(
-        "lmcache.integration.vllm.utils.torch_dev.Event",
-        lambda: pytest.fail("engine-local event should not be used here"),
-    )
-
-    stream = object()
-    event = adapter.create_and_record_event(stream)
-
-    assert event is created_event
-    assert record_calls == [(created_event, fake_tensor.device, stream)]
-
-
-def test_create_and_record_event_uses_local_event_for_engine_driven_transfer(
-    fake_adapter, monkeypatch
-) -> None:
-    """Engine-driven transfers keep their producer event local to the worker."""
-    adapter, _send_mock, _future = fake_adapter
-    fake_tensor = MagicMock(name="kv_tensor")
-    fake_tensor.device = torch.device("cpu")
-    adapter.kv_caches = {"layer0": fake_tensor}
-    adapter.transfer_ctx = object()
-
-    class _LocalEvent:
-        def __init__(self) -> None:
-            self.recorded: list[object | None] = []
-
-        def record(self, stream: object | None = None) -> None:
-            self.recorded.append(stream)
-
-    monkeypatch.setattr(
-        "lmcache.integration.vllm.utils.create_event",
-        lambda device: pytest.fail("IPC event should not be used here"),
-    )
-    monkeypatch.setattr(
-        "lmcache.integration.vllm.utils.record_event",
-        lambda *args, **kwargs: pytest.fail("IPC record helper should not be used"),
-    )
-    monkeypatch.setattr(
-        "lmcache.integration.vllm.utils.torch_dev.Event",
-        _LocalEvent,
-    )
-
-    stream = object()
-    event = adapter.create_and_record_event(stream)
-
-    assert isinstance(event, _LocalEvent)
-    assert event.recorded == [stream]
-
-
-def test_connector_event_helper_handles_vendored_adapter_without_helper(
-    monkeypatch,
-) -> None:
-    """Connectors must not assume vendored adapters expose create_and_record_event."""
-    # First Party
-    from lmcache.integration.vllm.utils import create_recorded_connector_event
-
-    fake_tensor = MagicMock(name="kv_tensor")
-    fake_tensor.device = torch.device("cpu")
-
-    class _LocalEvent:
-        def __init__(self) -> None:
-            self.recorded: list[object | None] = []
-
-        def record(self, stream: object | None = None) -> None:
-            self.recorded.append(stream)
-
-    monkeypatch.setattr(
-        "lmcache.integration.vllm.utils.torch_dev.Event",
-        _LocalEvent,
-    )
-
-    adapter = SimpleNamespace(
-        kv_caches={"layer0": fake_tensor},
-        transfer_ctx=object(),
-    )
-    stream = object()
-    event = create_recorded_connector_event(adapter, stream)
-
-    assert isinstance(event, _LocalEvent)
-    assert event.recorded == [stream]
-
-
-def test_connector_event_helper_accepts_adapter_recorded_event_helper() -> None:
-    """Vendored adapters exposing only create_recorded_event stay compatible."""
-    # First Party
-    from lmcache.integration.vllm.utils import create_recorded_connector_event
-
-    expected_event = object()
-    adapter = SimpleNamespace(create_recorded_event=lambda: expected_event)
-
-    assert create_recorded_connector_event(adapter, object()) is expected_event
+    assert adapter.create_recorded_event() is None
 
 
 def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
@@ -531,43 +427,54 @@ def test_isolated_ipc_untouched_without_extra_config(
     assert is_isolated_ipc() is True
 
 
-def test_create_recorded_event_routes_through_backend(fake_adapter, monkeypatch):
-    """create_recorded_event uses the backend resolved once at registration."""
+def test_create_recorded_event_delegates_to_transfer_context(fake_adapter, monkeypatch):
+    """The active transfer context owns ordering-event creation."""
     adapter, _send_mock, _future = fake_adapter
-    _patch_transfer_context_factory(monkeypatch)
+    contexts = _patch_transfer_context_factory(monkeypatch)
     kv = torch.zeros(1)
 
-    backend = MagicMock(name="event_backend")
     created_event = MagicMock(name="event")
-    backend.create_event.return_value = created_event
-    resolve_calls: list[object] = []
-
-    def fake_get_backend(device: object) -> MagicMock:
-        resolve_calls.append(device)
-        return backend
-
-    monkeypatch.setattr(adapter_mod, "get_event_ipc_backend", fake_get_backend)
-    current_stream = MagicMock(name="current_stream")
-    fake_torch_dev = MagicMock(name="torch_dev")
-    fake_torch_dev.current_stream.return_value = current_stream
-    monkeypatch.setattr(adapter_mod, "torch_dev", fake_torch_dev)
-
     adapter.register_kv_caches({"layer.0": kv})
+    context = contexts[0]
+    context.create_recorded_event.return_value = created_event
     event = adapter.create_recorded_event()
     adapter.create_recorded_event()
 
     assert event is created_event
-    # Backend lookup happens once at registration, not per event.
-    assert resolve_calls == [kv.device]
-    backend.create_event.assert_called_with(kv.device)
-    assert backend.create_event.call_count == 2
-    backend.record_event.assert_called_with(created_event, current_stream)
+    assert context.create_recorded_event.call_count == 2
 
 
 def test_create_recorded_event_before_registration_raises(fake_adapter):
     adapter, _send_mock, _future = fake_adapter
     with pytest.raises(RuntimeError, match="register_kv_caches"):
         adapter.create_recorded_event()
+
+
+def test_create_recorded_event_skips_unregistered_recovery_context(fake_adapter):
+    """Degraded-mode forwards must not touch a context still registering."""
+    adapter, _send_mock, _future = fake_adapter
+    recovery_context = MagicMock()
+    adapter.transfer_ctx = recovery_context
+    adapter._health_event.clear()
+
+    assert adapter.create_recorded_event() is None
+    recovery_context.create_recorded_event.assert_not_called()
+
+
+def test_none_event_is_not_retained(fake_adapter, monkeypatch):
+    """Synchronous engine-driven requests do not retain a placeholder event."""
+    adapter, _send_mock, _future = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_store.return_value = MagicMock()
+    transfer_ctx.submit_retrieve.return_value = MagicMock()
+    adapter.transfer_ctx = transfer_ctx
+
+    adapter.submit_store_request("store", _op([[0]]), None)
+    adapter.submit_retrieve_request("retrieve", _op([[1]]), None)
+
+    assert "store" not in adapter.store_events
+    assert "retrieve" not in adapter.retrieve_events
 
 
 def test_store_keeps_event_until_future_finishes(fake_adapter):

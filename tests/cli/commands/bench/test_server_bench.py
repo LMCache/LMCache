@@ -847,6 +847,7 @@ class TestRegisterKVCacheMLA:
                 kv_caches=None,
                 use_gpu=False,
                 use_handle=False,
+                num_physical_slots=128,
             )
             client.close()
             payload = router.last_payload
@@ -862,6 +863,10 @@ class TestRegisterKVCacheMLA:
     def test_classical_sets_use_mla_false(self, router_endpoint: str) -> None:
         payload = self._register(router_endpoint, kv_size=2)
         assert payload.use_mla is False
+
+    def test_sends_num_physical_slots(self, router_endpoint: str) -> None:
+        payload = self._register(router_endpoint, kv_size=1)
+        assert payload.num_physical_slots == 128
 
     def test_mixed_kv_size_defaults_to_non_mla(self, router_endpoint: str) -> None:
         """Heterogeneous specs cannot be expressed in one register call.

@@ -8,9 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
-from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import (
-    create_recorded_connector_event,
     extract_request_configs_from_request,
     mla_enabled,
 )
@@ -584,9 +582,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        event = create_recorded_connector_event(
-            self.worker_adapter, torch_dev.current_stream()
-        )
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_retrieve_requests(
             request_ids,
@@ -653,9 +649,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        event = create_recorded_connector_event(
-            self.worker_adapter, torch_dev.current_stream()
-        )
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_store_requests(
             request_ids,

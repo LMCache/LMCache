@@ -398,6 +398,7 @@ def _send_register_kv_cache(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     engine_group_infos: "list[EngineGroupInfo] | None" = None,
+    num_physical_slots: int | None = None,
 ) -> "bool | RegisterEngineDrivenContextResponse":
     """Register a KV cache context with the MP server.
 
@@ -417,6 +418,9 @@ def _send_register_kv_cache(
     tensors (which the HND layout can swap with ``num_heads``). ``None``
     sends an empty list (single non-hybrid group, geometry discovered
     from the tensors).
+
+    ``num_physical_slots`` is required in data mode and describes the exact
+    physical-slot axis of each gathered chunk. Handle mode ignores it.
     """
     if use_handle is None:
         use_handle = use_gpu
@@ -443,6 +447,8 @@ def _send_register_kv_cache(
         return result is not _TIMEOUT
 
     # CPU mode: use the non-GPU context registration protocol.
+    if num_physical_slots is None:
+        raise ValueError("num_physical_slots is required in data mode")
     # layout_hints carries num_layers, num_heads, head_size, block_size,
     # dtype, kv_size.  hidden_dim_size = num_heads * head_size (NHD).
     hints_d: dict = layout_hints or {}
@@ -474,6 +480,7 @@ def _send_register_kv_cache(
         hidden_dim_size=hidden_dim_size,
         dtype_str=dtype_str,
         use_mla=use_mla,
+        num_physical_slots=num_physical_slots,
     )
     result = _call(
         client, RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT, [payload]
