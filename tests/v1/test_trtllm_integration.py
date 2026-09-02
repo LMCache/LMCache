@@ -378,3 +378,103 @@ class TestRawCudaIPCWrapperType:
         registry = custom_types._CUSTOMERIZED_SERIALIZERS  # noqa: PLC2701
         assert custom_types.DeviceIPCWrapper in registry
         assert registry[custom_types.DeviceIPCWrapper].code == 1
+
+
+@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+class TestTRTLLMBatchedTransferCap:
+    """Regression for #3889.
+
+    ``multi_layer_block_kv_transfer`` hard-rejects calls carrying more than 4
+    LMCache objects, so the Python batch stride must never exceed that cap.
+    Before the fix the stride was 32, which raised
+    ``RuntimeError: Expected 1-4 LMCache objects, got <N>`` for any prompt
+    spanning more than 4 chunks. This test does not need a GPU: it stubs the
+    kernel call and only checks how many object pointers each call receives.
+    """
+
+    def test_kernel_batch_size_within_cap(self) -> None:
+        # First Party
+        from lmcache.v1.gpu_connector import gpu_connectors
+
+        assert gpu_connectors._MULTI_LAYER_KERNEL_MAX_OBJECTS == 4
+        assert (
+            gpu_connectors._TRTLLM_KERNEL_BATCH_SIZE
+            <= gpu_connectors._MULTI_LAYER_KERNEL_MAX_OBJECTS
+        )
+
+    def test_batched_to_gpu_never_exceeds_kernel_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Standard
+        from unittest.mock import MagicMock
+        import contextlib
+
+        # First Party
+        from lmcache.v1.gpu_connector import gpu_connectors
+        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+        from lmcache.v1.memory_management import (
+            MemoryFormat,
+            MemoryObj,
+            MemoryObjMetadata,
+            TensorMemoryObj,
+        )
+
+        # CPU-only test: the transfer streams and the kernel are the only GPU
+        # bits, so stub them and exercise everything else for real.
+        monkeypatch.setattr(torch.cuda, "Stream", lambda **kwargs: MagicMock())
+        monkeypatch.setattr(
+            torch.cuda, "stream", lambda stream: contextlib.nullcontext()
+        )
+
+        objects_per_call: list[int] = []
+
+        def _record(paged_ptrs, ptrs, *args, **kwargs) -> None:
+            objects_per_call.append(len(ptrs))
+
+        monkeypatch.setattr(
+            gpu_connectors.lmc_ops, "multi_layer_block_kv_transfer", _record
+        )
+
+        num_kv_heads, head_dim, tokens_per_block = 2, 64, 16
+        num_layers, chunk_size = 4, 256
+        connector = TRTLLMGPUConnector(
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            hidden_dim_size=num_kv_heads * head_dim,
+            num_layers=num_layers,
+            chunk_size=chunk_size,
+            dtype=torch.bfloat16,
+            device=torch.device("cpu"),
+        )
+
+        # Register the TRT-LLM pool via the public API. flat dim is
+        # num_kv_heads * tokens_per_block * head_dim.
+        flat = num_kv_heads * tokens_per_block * head_dim
+        pool = torch.zeros(4, num_layers, 2, flat, dtype=torch.bfloat16)
+        connector.register_kv_caches(pool)
+
+        def _cpu_memory_obj() -> TensorMemoryObj:
+            raw = torch.zeros(16, dtype=torch.float32)
+            meta = MemoryObjMetadata(
+                shape=torch.Size([16]),
+                dtype=torch.float32,
+                address=0,
+                phy_size=16 * 4,
+                fmt=MemoryFormat.KV_2LTD,
+                ref_count=1,
+            )
+            return TensorMemoryObj(raw, meta, parent_allocator=None)
+
+        num_chunks = 9  # > 4 chunks: the failing case before the fix.
+        blocks_per_chunk = chunk_size // tokens_per_block
+        memory_objs: list[MemoryObj] = [_cpu_memory_obj() for _ in range(num_chunks)]
+        starts = [i * chunk_size for i in range(num_chunks)]
+        ends = [start + chunk_size for start in starts]
+        block_ids = list(range(num_chunks * blocks_per_chunk))
+
+        connector.batched_to_gpu(memory_objs, starts, ends, block_ids=block_ids)
+
+        assert objects_per_call, "kernel was never invoked"
+        assert max(objects_per_call) <= 4
+        # Every chunk must still be transferred exactly once.
+        assert sum(objects_per_call) == num_chunks
