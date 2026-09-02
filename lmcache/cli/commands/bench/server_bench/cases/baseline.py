@@ -121,6 +121,7 @@ class BaselineBenchCase:
             log,
         )
 
+        log("")
         time.sleep(self.interval_seconds)
 
     @staticmethod
@@ -145,7 +146,7 @@ class BaselineBenchCase:
         request_kind: Literal["cold", "warm"],
         outcome: _RequestOutcome | None,
     ) -> None:
-        if outcome is None:
+        if outcome is None or not outcome.lookup.succeeded:
             return
         result.record_latency(f"{request_kind}.lookup", outcome.lookup.latency_ms)
         if outcome.store is not None:

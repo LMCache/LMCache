@@ -115,7 +115,7 @@ class TestCaseDelegation:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Standard
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, call
 
         # First Party
         from lmcache.cli.commands.bench.server_bench import command as sv_cmd
@@ -126,11 +126,22 @@ class TestCaseDelegation:
         client = MagicMock()
         bench_case = MagicMock()
         bench_case.name = "baseline"
-        bench_case.run.return_value = BenchResult(case_name="baseline")
+        case_result = BenchResult(
+            case_name="baseline",
+            completed_runs=2,
+            checks={"checksum_match": [True, False]},
+        )
+        bench_case.run.return_value = case_result
         client_factory = MagicMock(return_value=client)
         case_factory = MagicMock(return_value=bench_case)
+        metrics = MagicMock()
+        config_section = MagicMock()
+        result_section = MagicMock()
+        metrics.add_section.side_effect = [config_section, result_section]
+        create_metrics = MagicMock(return_value=metrics)
         monkeypatch.setattr(sv_cmd, "ServerBenchClient", client_factory)
         monkeypatch.setattr(sv_cmd, "BaselineBenchCase", case_factory)
+        monkeypatch.setattr(cmd, "create_metrics", create_metrics)
         args = parser.parse_args(
             [
                 "bench",
@@ -158,6 +169,16 @@ class TestCaseDelegation:
         bench_case.run.assert_called_once()
         assert bench_case.run.call_args.args[0] is client
         client.close.assert_called_once_with()
+        create_metrics.assert_called_once_with("Server Bench Result", args, width=64)
+        result_section.add.assert_has_calls(
+            [
+                call("total_requests", "Total requests", 2),
+                call("checksum_ok", "Checksum OK", 1),
+                call("checksum_fail", "Checksum FAIL", 1),
+                call("pass_rate", "Pass rate (%)", 50.0),
+            ]
+        )
+        metrics.emit.assert_called_once_with()
 
     def test_closes_client_when_case_fails(
         self,

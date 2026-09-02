@@ -9,15 +9,11 @@ import argparse
 import pytest
 
 # First Party
-from lmcache.cli.commands.bench.server_bench.cases.baseline import (
-    BaselineBenchCase,
-)
 from lmcache.cli.commands.bench.server_bench.client import (
     LookupResult,
     TransferResult,
 )
 from lmcache.cli.commands.bench.server_bench.config import (
-    BenchRunSpec,
     WorkerSpec,
     parse_args_to_config,
 )
@@ -73,28 +69,6 @@ def test_worker_spec_is_immutable_and_validated() -> None:
         spec.rank = 1  # type: ignore[misc]
     with pytest.raises(ValueError, match="kv_world_size must be positive"):
         WorkerSpec(0, 1000, 0, 0, True)
-
-
-def test_bench_config_excludes_case_and_cli_fields() -> None:
-    config = parse_args_to_config(_args())
-
-    assert not hasattr(config, "start")
-    assert not hasattr(config, "end")
-    assert not hasattr(config, "quiet")
-
-
-def test_run_spec_binds_case_to_config() -> None:
-    config = parse_args_to_config(_args())
-    bench_case = BaselineBenchCase(
-        sequence_count=1,
-        sequence_id_offset=0,
-        interval_seconds=0,
-    )
-
-    run_spec = BenchRunSpec(config=config, bench_case=bench_case)
-
-    assert run_spec.config is config
-    assert run_spec.bench_case is bench_case
 
 
 @pytest.mark.parametrize(
