@@ -45,6 +45,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     - use_odirect: bypass page cache via O_DIRECT.
     - read_ahead_size: trigger filesystem readahead by
       reading this many bytes first (optional).
+    - hash_subdir_levels: number of two-hex-character chunk-hash
+      subdirectory levels (0, 1, or 2; default 0).
     """
 
     def __init__(
@@ -55,13 +57,15 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         use_odirect: bool = False,
         read_ahead_size: Optional[int] = None,
         max_capacity_gb: float = 0,
-    ):
+        hash_subdir_levels: int = 0,
+    ) -> None:
         self.base_path = base_path
         self.num_workers = num_workers
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
         self.max_capacity_gb = max_capacity_gb
+        self.hash_subdir_levels = hash_subdir_levels
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSNativeL2AdapterConfig":
@@ -90,6 +94,10 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(max_capacity_gb, (int, float)) or max_capacity_gb < 0:
             raise ValueError("max_capacity_gb must be a non-negative number")
 
+        hash_subdir_levels = d.get("hash_subdir_levels", 0)
+        if type(hash_subdir_levels) is not int or hash_subdir_levels not in (0, 1, 2):
+            raise ValueError("hash_subdir_levels must be one of 0, 1, or 2")
+
         return cls(
             base_path=base_path,
             num_workers=num_workers,
@@ -97,6 +105,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             use_odirect=use_odirect,
             read_ahead_size=read_ahead_size,
             max_capacity_gb=float(max_capacity_gb),
+            hash_subdir_levels=hash_subdir_levels,
         )
 
     @classmethod
@@ -116,7 +125,10 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "first (optional)\n"
             "- max_capacity_gb (float): max L2 capacity "
             "in GB for usage tracking / eviction "
-            "(default 0 = disabled)"
+            "(default 0 = disabled)\n"
+            "- hash_subdir_levels (int): number of "
+            "two-hex-character chunk-hash subdirectory "
+            "levels, one of 0, 1, or 2 (default 0)"
         )
 
 
@@ -150,13 +162,16 @@ def _create_fs_native_l2_adapter(
         config.relative_tmp_dir,
         config.use_odirect,
         config.read_ahead_size or 0,
+        config.hash_subdir_levels,
     )
     logger.info(
-        "Created FS native L2 adapter: %s (workers=%d, odirect=%s, read_ahead=%s)",
+        "Created FS native L2 adapter: %s "
+        "(workers=%d, odirect=%s, read_ahead=%s, hash_subdir_levels=%d)",
         config.base_path,
         config.num_workers,
         config.use_odirect,
         config.read_ahead_size,
+        config.hash_subdir_levels,
     )
     return NativeConnectorL2Adapter(
         native_client,
@@ -167,6 +182,7 @@ def _create_fs_native_l2_adapter(
             "use_odirect": config.use_odirect,
             "num_workers": config.num_workers,
             "read_ahead_size": config.read_ahead_size,
+            "hash_subdir_levels": config.hash_subdir_levels,
         },
     )
 
