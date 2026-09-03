@@ -135,7 +135,7 @@ class UnifiedLMCacheMPConnector:
         pp_group: Optional[dist.ProcessGroup] = None,
         page_size: int,
         kv_groups: list[LMCacheKVGroup],
-        mla_only: bool = False,
+        mla_enabled: bool = False,
     ) -> None:
         try:
             # Third Party
@@ -211,6 +211,8 @@ class UnifiedLMCacheMPConnector:
                 )
             )
 
+        self.mla_only = self._is_mla_only(mla_enabled, resolved_groups)
+
         # Preserve attention as [NB, BS, NH, HS] and MLA as [NB, BS, HS].
         # Each non-MLA tensor remains an independent K or V list entry; no K/V
         # regrouping is needed. Recurrent state retains the opaque block view.
@@ -221,10 +223,14 @@ class UnifiedLMCacheMPConnector:
                     tensor,
                     rows_per_block,
                     preserve_head_geometry=(
-                        not mla_only and not group.recurrent_state and tensor.dim() == 3
+                        not self.mla_only
+                        and not group.recurrent_state
+                        and tensor.dim() == 3
                     ),
                     preserve_mla_geometry=(
-                        mla_only and not group.recurrent_state and tensor.dim() == 3
+                        self.mla_only
+                        and not group.recurrent_state
+                        and tensor.dim() == 3
                     ),
                 )
                 for tensor, rows_per_block in zip(
@@ -283,7 +289,6 @@ class UnifiedLMCacheMPConnector:
             )
 
         self.model_name = model_name
-        self.mla_only = bool(mla_only)
         # Match vLLM's MLA-only parallel strategy. Replicated MLA collapses
         # the LMCache object identity across TP while retaining one distinct
         # piece per PP stage. The general path keeps one piece per TP x PP rank.
@@ -381,6 +386,21 @@ class UnifiedLMCacheMPConnector:
             pp_rank,
             tp_size * pp_size,
             pp_rank * tp_size + tp_rank,
+        )
+
+    @staticmethod
+    def _is_mla_only(
+        mla_enabled: bool,
+        kv_groups: list[LMCacheKVGroup],
+    ) -> bool:
+        """Match vLLM's MLA-only optimization eligibility.
+
+        Multiple paged-attention cache specs, such as FULL plus SWA, do not
+        make a model hybrid for this purpose. Only recurrent Mamba/SSM/linear
+        attention state prevents the TP-replicated MLA optimization.
+        """
+        return bool(mla_enabled) and not any(
+            group.recurrent_state for group in kv_groups
         )
 
     @staticmethod

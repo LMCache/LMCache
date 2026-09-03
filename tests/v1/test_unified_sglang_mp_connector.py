@@ -107,6 +107,23 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
         self.assertEqual(actual, [(2, 0), (2, 0), (2, 1), (2, 1)])
 
+    def test_mla_only_allows_full_and_swa_attention_groups(self):
+        groups = [
+            LMCacheKVGroup("full", ()),
+            LMCacheKVGroup("swa", (), sliding_window_size=4096),
+        ]
+
+        self.assertTrue(self.connector._is_mla_only(True, groups))
+
+    def test_mla_only_rejects_recurrent_hybrid_groups(self):
+        groups = [
+            LMCacheKVGroup("full", ()),
+            LMCacheKVGroup("mamba", (), recurrent_state=True),
+        ]
+
+        self.assertFalse(self.connector._is_mla_only(True, groups))
+        self.assertFalse(self.connector._is_mla_only(False, groups[:1]))
+
     def test_parallel_geometry_rejects_invalid_pp_rank(self):
         with self.assertRaisesRegex(ValueError, "Invalid LMCache PP topology"):
             self.connector._resolve_parallel_geometry(2, 0, 2, 2)
