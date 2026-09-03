@@ -61,6 +61,7 @@ FMT_VLLM_FUSED_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
 FMT_VLLM_FUSED_NHD = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
 FMT_VLLM_CS_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
 FMT_VLLM_CS_NHD = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
+FMT_SGLANG_COMPONENT = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS
 
 # Format parameters: (engine_kv_format, num_layers, num_heads, head_size, is_mla)
 # The is_mla column really means "kv_size == 1": the fused-K/V and content-size
@@ -80,6 +81,7 @@ FORMAT_PARAMS = [
     (FMT_VLLM_FUSED_NHD, 4, 8, 256, True),
     (FMT_VLLM_CS_HND, 4, 8, 256, True),
     (FMT_VLLM_CS_NHD, 4, 8, 256, True),
+    (FMT_SGLANG_COMPONENT, 8, 8, 128, True),
 ]
 
 
@@ -112,7 +114,11 @@ def create_vllm_tensors(
     elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
         shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+    elif engine_kv_format in (
+        FMT_VLLM_FUSED_NHD,
+        FMT_VLLM_CS_NHD,
+        FMT_SGLANG_COMPONENT,
+    ):
         shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_MLA:
@@ -156,7 +162,11 @@ def create_zero_vllm_tensors(
     elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
         shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+    elif engine_kv_format in (
+        FMT_VLLM_FUSED_NHD,
+        FMT_VLLM_CS_NHD,
+        FMT_SGLANG_COMPONENT,
+    ):
         shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_MLA:
@@ -217,7 +227,11 @@ def get_block_data(
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
         elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
-        elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+        elif engine_kv_format in (
+            FMT_VLLM_FUSED_NHD,
+            FMT_VLLM_CS_NHD,
+            FMT_SGLANG_COMPONENT,
+        ):
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
         elif engine_kv_format == FMT_MLA:
             results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
@@ -309,6 +323,7 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
         "vllm_fused_nhd",
         "vllm_cs_hnd",
         "vllm_cs_nhd",
+        "sglang_component",
     ],
 )
 @pytest.mark.parametrize(

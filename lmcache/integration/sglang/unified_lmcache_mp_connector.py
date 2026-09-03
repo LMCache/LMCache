@@ -80,9 +80,8 @@ class LMCacheKVGroup:
     # SGLang page size; a recurrent/Mamba group uses its checkpoint grid.
     tokens_per_block: int = 0
     # SGLang allocator slots covered by one block id. This is page_size for
-    # attention and 1 for a Mamba checkpoint slot. The connector folds each
-    # complete block into one opaque row before LMCache registration, so this
-    # is intentionally distinct from LMCache's detected physical BS (= 1).
+    # attention and 1 for a Mamba checkpoint slot. Attention and MLA preserve
+    # this as the explicit BS axis; recurrent state uses an opaque view.
     slots_per_block: int = 0
     # Number of source tensor rows making up one block, one value per tensor.
     # Usually this equals slots_per_block. Page-native sidecars such as the DSA
@@ -212,21 +211,22 @@ class UnifiedLMCacheMPConnector:
                 )
             )
 
-        # Register every SGLang block as one opaque row. Attention tensors fold
-        # their page_size consecutive token slots into that row; a recurrent
-        # tensor already has one complete state slot per block. This mirrors
-        # vLLM's Mamba page view: LMCache sees a uniform physical BS of 1 while
-        # EngineGroupInfo.tokens_per_block carries the logical token coverage
-        # (page_size/checkpoint grid) independently. All views are zero-copy.
-        #
-        # MHA K and V live in separate allocations, so a hybrid registration
-        # cannot represent them as one nested [K_layers, V_layers] object
-        # without losing the component boundary. Treating every page as opaque
-        # bytes is byte-for-byte symmetric for store/load.
+        # Preserve attention as [NB, BS, NH, HS] and MLA as [NB, BS, HS].
+        # Each non-MLA tensor remains an independent K or V list entry; no K/V
+        # regrouping is needed. Recurrent state retains the opaque block view.
         wire_groups: list[LMCacheKVGroup] = []
         for group in resolved_groups:
             wire_tensors = tuple(
-                self._to_wire_block_tensor(tensor, rows_per_block)
+                self._to_wire_block_tensor(
+                    tensor,
+                    rows_per_block,
+                    preserve_head_geometry=(
+                        not mla_only and not group.recurrent_state and tensor.dim() == 3
+                    ),
+                    preserve_mla_geometry=(
+                        mla_only and not group.recurrent_state and tensor.dim() == 3
+                    ),
+                )
                 for tensor, rows_per_block in zip(
                     group.kv_tensors,
                     group.tensor_rows_per_block,
@@ -326,8 +326,6 @@ class UnifiedLMCacheMPConnector:
                 )
         self._lookup_leader = self.tp_rank == 0 and self.pp_rank == 0
         self.page_size = int(page_size)
-        # Every registered wire row is one complete engine block/page.
-        self._layout_slots_per_block = 1
         self.device = kv_tensors[0].device
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
         self._kv_caches = {f"kv_{i}": tensor for i, tensor in enumerate(kv_tensors)}
@@ -410,15 +408,24 @@ class UnifiedLMCacheMPConnector:
 
     @staticmethod
     def _to_wire_block_tensor(
-        tensor: torch.Tensor, slots_per_block: int
+        tensor: torch.Tensor,
+        slots_per_block: int,
+        *,
+        preserve_head_geometry: bool = False,
+        preserve_mla_geometry: bool = False,
     ) -> torch.Tensor:
-        """View one complete SGLang block as one opaque LMCache row."""
+        """Create a zero-copy block view for one SGLang component."""
         if tensor.shape[0] % slots_per_block:
             raise ValueError(
                 f"Tensor rows {tensor.shape[0]} are not divisible by "
                 f"slots_per_block={slots_per_block}"
             )
-        return tensor.view(tensor.shape[0] // slots_per_block, 1, -1)
+        num_blocks = tensor.shape[0] // slots_per_block
+        if preserve_head_geometry:
+            return tensor.view(num_blocks, slots_per_block, *tensor.shape[1:])
+        if preserve_mla_geometry:
+            return tensor.view(num_blocks, slots_per_block, -1)
+        return tensor.view(num_blocks, 1, -1)
 
     def _build_engine_group_info_specs(
         self,
@@ -427,12 +434,10 @@ class UnifiedLMCacheMPConnector:
         specs: list[dict[str, Any]] = []
         tensor_offset = 0
         for engine_group_id, group in enumerate(self._kv_groups):
-            # LMCache creates one copy-kernel group per physical identity.  The
-            # opaque wire format has NH=1 and a shared page size, so flattened
-            # per-token width and dtype reproduce LMCache's kernel identity.
+            # LMCache creates one copy-kernel group per physical identity.
             buckets: dict[tuple[Any, ...], list[int]] = {}
             for local_idx, tensor in enumerate(group.kv_tensors):
-                identity = (tensor.shape[-1], tensor.dtype)
+                identity = (*tensor.shape[1:], tensor.dtype)
                 buckets.setdefault(identity, []).append(tensor_offset + local_idx)
             for indices in buckets.values():
                 specs.append(
@@ -530,9 +535,7 @@ class UnifiedLMCacheMPConnector:
                 self._mq_client,
                 self._mq_timeout,
                 self._send_request,
-                # This hint describes the physical tensor shape. Logical
-                # compression is carried independently by EngineGroupInfo.
-                layout_hints={"tokens_per_block": self._layout_slots_per_block},
+                layout_hints={"kv_list_layout": "unified"},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.SGLANG,
             )

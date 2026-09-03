@@ -256,6 +256,26 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(wire.data_ptr(), tensor.data_ptr())
         self.assertTrue(torch.equal(wire.reshape(-1), tensor.reshape(-1)))
 
+    def test_wire_view_can_preserve_attention_head_geometry(self) -> None:
+        tensor = torch.arange(4 * 2 * 3).reshape(4, 2, 3)
+
+        wire = self.connector._to_wire_block_tensor(
+            tensor, slots_per_block=4, preserve_head_geometry=True
+        )
+
+        self.assertEqual(tuple(wire.shape), (1, 4, 2, 3))
+        self.assertEqual(wire.data_ptr(), tensor.data_ptr())
+
+    def test_wire_view_can_preserve_mla_block_geometry(self) -> None:
+        tensor = torch.arange(4 * 1 * 6).reshape(4, 1, 6)
+
+        wire = self.connector._to_wire_block_tensor(
+            tensor, slots_per_block=4, preserve_mla_geometry=True
+        )
+
+        self.assertEqual(tuple(wire.shape), (1, 4, 6))
+        self.assertEqual(wire.data_ptr(), tensor.data_ptr())
+
     def test_wire_view_keeps_one_mamba_state_slot_per_block(self):
         tensor = torch.arange(5 * 2 * 3).reshape(5, 2, 3)
 
@@ -271,8 +291,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             LMCacheKVGroup(
                 "full",
                 (
-                    torch.empty(20, 1, 8),
-                    torch.empty(20, 1, 8),
+                    torch.empty(5, 4, 1, 8),
+                    torch.empty(5, 4, 1, 8),
                 ),
                 tokens_per_block=4,
                 slots_per_block=4,
