@@ -30,12 +30,13 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
@@ -164,62 +165,39 @@ class _IpcEvent(Protocol):
     def wait(self, stream: Any = None) -> None: ...
 
 
-def send_lmcache_request(
-    mq_client: MessageQueueClient,
-    request_type: RequestType,
-    payloads: list[Any],
-) -> MessagingFuture[Any]:
-    """
-    Helper function to send the request to the LMCache multiprocess server
-
-    Args:
-        mq_client: The LMCache multiprocess mode message queue client
-        request_type: The request type
-        payloads: The request payloads
-
-    Returns:
-        A messaging future for the request
-    """
-
-    future = mq_client.submit_request(
-        request_type, payloads, get_response_class(request_type)
-    )
-    return future
-
-
 def get_lmcache_chunk_size(
-    mq_client: MessageQueueClient,
+    req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
 ) -> int:
     """
     Helper function to get the LMCache chunk size from the server
 
     Args:
-        mq_client: The LMCache multiprocess mode message queue client
+        req_client: The LMCache multiprocess request client.
         timeout: Timeout in seconds for the blocking request.
 
     Returns:
         An integer representing the LMCache chunk size
     """
-    future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
+    future = req_client.get_chunk_size()
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
 
 
 def get_experimental(
-    mq_client: MessageQueueClient,
+    req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
 ) -> set[str]:
     """Query the experimental capabilities a server advertises.
 
     Args:
-        mq_client: The LMCache multiprocess mode message queue client.
+        req_client: The LMCache multiprocess request client.
         timeout: Seconds to wait for the server's response.
 
     Returns:
         Experimental features built into the server (now `transfer_query`).
     """
-    future = send_lmcache_request(mq_client, RequestType.GET_EXPERIMENTAL, [])
+    future = req_client.get_experimental()
     try:
         return set(future.result(timeout=timeout))
     except TimeoutError:
@@ -262,14 +240,14 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
 
 
 def send_ping(
-    mq_client: MessageQueueClient,
+    req_client: RequestClient,
     timeout: float,
     instance_id: int | None = None,
 ) -> bool:
     """Send a PING request and return the result.
 
     Args:
-        mq_client: The message queue client.
+        req_client: The request client.
         timeout: Seconds to wait for the server's response.
         instance_id: The worker's instance ID so the server can refresh its
             liveness, or None for an untracked prober (scheduler adapter).
@@ -278,7 +256,7 @@ def send_ping(
         True if server is healthy, False on timeout or error.
     """
     try:
-        future = send_lmcache_request(mq_client, RequestType.PING, [instance_id])
+        future = req_client.ping(instance_id)
         return future.result(timeout=timeout)
     except TimeoutError:
         return False
@@ -433,14 +411,14 @@ class HeartbeatThread(PeriodicThread):
 
     def __init__(
         self,
-        mq_client: MessageQueueClient,
+        req_client: RequestClient,
         health_event: threading.Event,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         instance_id: int | None = None,
     ):
         """
         Args:
-            mq_client: The message queue client used to send PING requests.
+            req_client: The request client used to send PING requests.
             health_event: A threading.Event shared with the adapter.
                 Set when the server is healthy, cleared when unhealthy.
                 Adapters check this event to decide whether to proceed
@@ -455,7 +433,7 @@ class HeartbeatThread(PeriodicThread):
             interval=interval,
             level=ThreadLevel.CRITICAL,
         )
-        self._mq_client = mq_client
+        self._req_client = req_client
         self._health_event = health_event
         self._interval = interval
         self._instance_id = instance_id
@@ -498,7 +476,7 @@ class HeartbeatThread(PeriodicThread):
         """
         was_healthy = self._health_event.is_set()
         healthy = send_ping(
-            self._mq_client, timeout=self._interval, instance_id=self._instance_id
+            self._req_client, timeout=self._interval, instance_id=self._instance_id
         )
 
         if self.stop_requested:
@@ -626,8 +604,9 @@ class LMCacheMPSchedulerAdapter:
         )
         assert len(server_urls) >= 1, "At least one server url required"
         self._server_urls: list[str] = list(server_urls)
-        self.mq_clients: dict[str, MessageQueueClient] = {
-            url: MessageQueueClient(url, context) for url in self._server_urls
+        self.req_clients: dict[str, RequestClient] = {
+            url: ZmqMultiprocessClient(MessageQueueClient(url, context))
+            for url in self._server_urls
         }
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
@@ -654,13 +633,13 @@ class LMCacheMPSchedulerAdapter:
 
         # Read chunk size from lmcache
         chunk_sizes: dict[str, int] = {}
-        for url, client in self.mq_clients.items():
+        for url, client in self.req_clients.items():
             try:
                 chunk_sizes[url] = get_lmcache_chunk_size(
                     client, timeout=self._mq_timeout
                 )
             except TimeoutError:
-                for c in self.mq_clients.values():
+                for c in self.req_clients.values():
                     c.close()
                 _raise_server_unreachable(url, self._mq_timeout)
 
@@ -725,9 +704,9 @@ class LMCacheMPSchedulerAdapter:
         with self._heartbeat_lock:
             if self._heartbeats is not None:
                 return
-            for url, client in self.mq_clients.items():
+            for url, client in self.req_clients.items():
                 hb = HeartbeatThread(
-                    mq_client=client,
+                    req_client=client,
                     health_event=self._health_events[url],
                     interval=self._heartbeat_interval,
                 )
@@ -791,11 +770,7 @@ class LMCacheMPSchedulerAdapter:
         ).no_worker_id_version()
 
         futures: dict[str, MessagingFuture[Any]] = {
-            url: send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.LOOKUP,
-                [key, self.tp_size],
-            )
+            url: self.req_clients[url].lookup(key, self.tp_size)
             for url in self._server_urls
         }
 
@@ -851,11 +826,7 @@ class LMCacheMPSchedulerAdapter:
                     cache_salt=cs or "",
                     request_configs=request_configs,
                 ).no_worker_id_version()
-                send_lmcache_request(
-                    self.mq_clients[url],
-                    RequestType.FREE_LOOKUP_LOCKS,
-                    [tail_key, self.tp_size],
-                )
+                self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -895,11 +866,7 @@ class LMCacheMPSchedulerAdapter:
         unresolved_urls = [u for u in self._server_urls if u not in per_server]
 
         futures: dict[str, MessagingFuture[Any]] = {
-            url: send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.QUERY_PREFETCH_STATUS,
-                [request_id],
-            )
+            url: self.req_clients[url].query_prefetch_status(request_id)
             for url in unresolved_urls
         }
 
@@ -956,7 +923,7 @@ class LMCacheMPSchedulerAdapter:
 
     def shutdown(self) -> None:
         """Shutdown the scheduler adapter and its resources."""
-        for client in self.mq_clients.values():
+        for client in self.req_clients.values():
             client.close()
         with self._heartbeat_lock:
             for hb in self._heartbeats.values():
@@ -1006,11 +973,7 @@ class LMCacheMPSchedulerAdapter:
             request_configs=request_configs,
         ).no_worker_id_version()
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.FREE_LOOKUP_LOCKS,
-                [base_key, self.tp_size],
-            )
+            self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
 
     def end_session(self, request_id: str) -> None:
         """
@@ -1022,11 +985,7 @@ class LMCacheMPSchedulerAdapter:
             return
 
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.END_SESSION,
-                [request_id],
-            )
+            self.req_clients[url].end_session(request_id)
 
     def report_block_allocations(
         self,
@@ -1045,10 +1004,8 @@ class LMCacheMPSchedulerAdapter:
             return
 
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.REPORT_BLOCK_ALLOCATION,
-                [os.getpid(), self.model_name, records],
+            self.req_clients[url].report_block_allocation(
+                os.getpid(), self.model_name, records
             )
 
     # Helper functions
@@ -1171,7 +1128,7 @@ class LMCacheMPWorkerAdapter:
             set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
         else:
             self._mp_transfer_mode = None
-        self.mq_client = MessageQueueClient(server_url, context)
+        self.req_client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
         self._mq_timeout = mq_timeout
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
@@ -1224,10 +1181,10 @@ class LMCacheMPWorkerAdapter:
         # Read chunk size from lmcache
         try:
             lmcache_tokens_per_chunk = get_lmcache_chunk_size(
-                self.mq_client, timeout=self._mq_timeout
+                self.req_client, timeout=self._mq_timeout
             )
         except TimeoutError:
-            self.mq_client.close()
+            self.req_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
         if lmcache_tokens_per_chunk % vllm_block_size != 0:
@@ -1241,7 +1198,7 @@ class LMCacheMPWorkerAdapter:
 
         # Experimental intermediate tensor transfer
         self.experimental: set[str] = get_experimental(
-            self.mq_client, timeout=self._mq_timeout
+            self.req_client, timeout=self._mq_timeout
         )
         self.dispatcher: "Dispatcher | None" = None
 
@@ -1392,9 +1349,8 @@ class LMCacheMPWorkerAdapter:
                 self.model_name,
                 self.world_size,
                 self.blocks_in_chunk,
-                self.mq_client,
+                self.req_client,
                 self._mq_timeout,
-                send_request=send_lmcache_request,
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
@@ -1422,7 +1378,7 @@ class LMCacheMPWorkerAdapter:
             if self._heartbeat is not None:
                 return
             heartbeat = HeartbeatThread(
-                mq_client=self.mq_client,
+                req_client=self.req_client,
                 health_event=self._health_event,
                 interval=self._heartbeat_interval,
                 instance_id=self.instance_id,
@@ -2039,7 +1995,7 @@ class LMCacheMPWorkerAdapter:
         Shutdown the LMCache MP worker adapter.
 
         Stops the heartbeat (if started) before UNREGISTER: no new ping
-        on the closing mq_client, and a straggler in-flight cycle cannot
+        on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
         """
         with self._heartbeat_lock:
@@ -2048,16 +2004,13 @@ class LMCacheMPWorkerAdapter:
 
         logger.info("Unregistering kv caches")
         try:
-            unregister_type = (
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
-                if isinstance(self.transfer_ctx, EngineDrivenTransferContext)
-                else RequestType.UNREGISTER_KV_CACHE
-            )
-            send_lmcache_request(
-                self.mq_client,
-                unregister_type,
-                [self.instance_id],
-            ).result(timeout=self._mq_timeout)
+            if isinstance(self.transfer_ctx, EngineDrivenTransferContext):
+                future = self.req_client.unregister_kv_cache_engine_driven_context(
+                    self.instance_id
+                )
+            else:
+                future = self.req_client.unregister_kv_cache(self.instance_id)
+            future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "LMCache server did not respond to unregister within %ss. "
@@ -2072,7 +2025,7 @@ class LMCacheMPWorkerAdapter:
             self.transfer_ctx.close()
             self.transfer_ctx = None
 
-        self.mq_client.close()
+        self.req_client.close()
         self.request_telemetry.close()
 
     # Helper functions
