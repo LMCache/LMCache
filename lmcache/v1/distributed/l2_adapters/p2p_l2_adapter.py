@@ -45,7 +45,7 @@ from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 logger = init_logger(__name__)
 
 _LOOKUP_RPC_TIMEOUT_S = 3.0
-_PERIODIC_NOTIFIER_INTERVAL_MS = 5
+_FALLBACK_NOTIFIER_INTERVAL_MS = 5
 
 
 @dataclass
@@ -145,10 +145,13 @@ class P2PL2Adapter(L2AdapterInterface):
         self._lookup_efd = create_event_notifier()
         self._load_efd = create_event_notifier()
 
-        PeriodicEventNotifier.create(
-            interval_ms=_PERIODIC_NOTIFIER_INTERVAL_MS, use_eventfd=HAS_EVENTFD
-        )
         notifier = PeriodicEventNotifier.get()
+        if notifier is None:
+            PeriodicEventNotifier.create(
+                interval_ms=_FALLBACK_NOTIFIER_INTERVAL_MS,
+                use_eventfd=HAS_EVENTFD,
+            )
+            notifier = PeriodicEventNotifier.get()
         if notifier is None:
             raise RuntimeError("PeriodicEventNotifier is unavailable after create()")
         self._notifier = notifier

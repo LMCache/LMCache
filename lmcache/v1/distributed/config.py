@@ -340,8 +340,9 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     """Validate storage manager configuration.
 
-    This rejects L2 adapters that require a single contiguous L1 memory
-    descriptor when hybrid L1 Device-DAX overflow is enabled.
+    This rejects non-positive notifier intervals and L2 adapters that require
+    a single contiguous L1 memory descriptor when hybrid L1 Device-DAX
+    overflow is enabled.
 
     Args:
         config: Storage manager configuration to validate.
@@ -350,9 +351,13 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         None.
 
     Raises:
-        ValueError: If mutually exclusive L1 tiers are both configured, or
-            hybrid L1 is paired with incompatible L2 adapters.
+        ValueError: If the notifier interval is not positive, mutually
+            exclusive L1 tiers are both configured, or hybrid L1 is paired
+            with incompatible L2 adapters.
     """
+    if config.periodic_notifier_interval_ms <= 0:
+        raise ValueError("periodic_notifier_interval_ms must be greater than 0")
+
     if (
         config.l1_manager_config.gds_l1_config is not None
         and config.l1_manager_config.memory_config.devdax_path

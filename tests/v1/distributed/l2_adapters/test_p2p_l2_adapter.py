@@ -2,6 +2,7 @@
 """Unit tests for the P2P L2 adapter (mocked MQ client + transfer channel)."""
 
 # Standard
+from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 import time
@@ -71,6 +72,31 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
         adapter = P2PL2Adapter(config)
         try:
             yield adapter, mq, tc_ctx, tc_client, notifier
+        finally:
+            adapter.close()
+
+
+@contextmanager
+def _adapter_with_notifier_class(
+    notifier_exists: bool,
+) -> Iterator[tuple[P2PL2Adapter, MagicMock]]:
+    mq = MagicMock()
+    tc_ctx = MagicMock()
+    tc_ctx.get_transfer_channel_client.return_value = MagicMock()
+    notifier = MagicMock()
+
+    with (
+        patch.object(p2p_mod, "MessageQueueClient", return_value=mq),
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=tc_ctx),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
+    ):
+        if notifier_exists:
+            mock_pen.get.return_value = notifier
+        else:
+            mock_pen.get.side_effect = [None, notifier]
+        adapter = P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+        try:
+            yield adapter, mock_pen
         finally:
             adapter.close()
 
@@ -146,6 +172,20 @@ def test_factory_creates_adapter():
 # ---------------------------------------------------------------------------
 # Event fds + notifier registration
 # ---------------------------------------------------------------------------
+
+
+def test_existing_notifier_is_reused_without_changing_its_interval() -> None:
+    with _adapter_with_notifier_class(notifier_exists=True) as (_adapter, mock_pen):
+        mock_pen.create.assert_not_called()
+
+
+def test_standalone_adapter_creates_fallback_notifier() -> None:
+    with _adapter_with_notifier_class(notifier_exists=False) as (_adapter, mock_pen):
+        mock_pen.create.assert_called_once_with(
+            interval_ms=5,
+            use_eventfd=p2p_mod.HAS_EVENTFD,
+        )
+        assert mock_pen.get.call_count == 2
 
 
 def test_event_fds_are_distinct_and_registered():
@@ -320,7 +360,13 @@ def test_load_not_finished_returns_none():
 
 def test_load_deadline_expired_yields_failure():
     keys = [_key(0)]
-    with _adapter(load_timeout_s=0.01) as (adapter, _mq, _tc_ctx, tc_client, _notifier):
+    with _adapter(load_timeout_s=0.01) as (
+        adapter,
+        _mq,
+        _tc_ctx,
+        tc_client,
+        _notifier,
+    ):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         tc_client.submit_read.return_value = 1
         task_id = adapter.submit_load_task(
