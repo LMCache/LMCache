@@ -9,7 +9,7 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 
 
 class RequestClient(Protocol):
-    """Define method-oriented multiprocess requests shared by transports."""
+    """Base class for method-oriented multiprocess request clients."""
 
     def register_kv_cache(
         self,

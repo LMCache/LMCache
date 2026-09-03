@@ -51,6 +51,10 @@ def test_all_request_types_have_explicit_named_methods() -> None:
     assert "submit_request" not in ZmqMultiprocessClient.__dict__
 
 
+def test_zmq_client_explicitly_inherits_shared_contract() -> None:
+    assert RequestClient in ZmqMultiprocessClient.__bases__
+
+
 def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     """Business callers must use named methods instead of ZMQ envelopes."""
     repo_root = Path(__file__).parents[3]
