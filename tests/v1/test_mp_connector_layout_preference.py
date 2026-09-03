@@ -36,8 +36,8 @@ def make_config(use_mla: bool = False, legacy: bool = False) -> SimpleNamespace:
     )
 
 
-def test_non_mla_prefers_standardized_head_contiguous_layout(connector_cls):
-    assert connector_cls.get_required_kvcache_layout(make_config()) == "LBHNC"
+def test_non_mla_defers_to_vllm(connector_cls):
+    assert connector_cls.get_required_kvcache_layout(make_config()) is None
 
 
 def test_mla_defers_to_vllm(connector_cls):
@@ -45,7 +45,7 @@ def test_mla_defers_to_vllm(connector_cls):
 
 
 def test_legacy_vllm_gets_legacy_name(connector_cls):
-    assert connector_cls.get_required_kvcache_layout(make_config(legacy=True)) == "HND"
+    assert connector_cls.get_required_kvcache_layout(make_config(legacy=True)) is None
 
 
 def test_missing_model_config_defers(connector_cls):

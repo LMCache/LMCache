@@ -9,6 +9,7 @@ ends up forgotten.
 
 # Standard
 from collections.abc import Callable, Iterator, Sequence
+from types import ModuleType
 from typing import Generic, TypeVar, cast
 import importlib
 import inspect
@@ -129,31 +130,54 @@ class Registry(Generic[MemberT]):
 
 
 def discover(
-    package_path: Sequence[str], package_name: str, base: type[MemberT]
+    module_names: Sequence[str], base: type[MemberT]
 ) -> Iterator[type[MemberT]]:
-    """Yield the ``base`` subclasses each module of a package defines.
+    """Yield the ``base`` subclasses the named modules define.
+
+    A name may address a package -- walked entire, subpackages included,
+    so a member needing more than one module can be a directory -- or a
+    single module. The built-in package and one an operator names at
+    startup are the same thing to this function.
 
     Only classes a module defines itself are yielded, so one imported for
     use elsewhere is not built a second time, and ``base`` is skipped --
     it is the definition of a member, not one.
 
     Args:
-        package_path: The package's ``__path__``.
-        package_name: The package's ``__name__``.
+        module_names: Importable dotted paths, in the order given.
         base: The marker every member subclasses.
 
     Yields:
         One class per member found, in module then class-name order.
+
+    Raises:
+        ModuleNotFoundError: If a name does not import. A silent skip
+            would look like a member that loaded and did nothing.
     """
-    for module_info in sorted(
-        pkgutil.iter_modules(package_path), key=lambda info: info.name
-    ):
-        module = importlib.import_module(f"{package_name}.{module_info.name}")
-        for _, candidate in sorted(inspect.getmembers(module, inspect.isclass)):
-            if (
-                candidate.__module__ == module.__name__
-                and candidate is not base
-                and not inspect.isabstract(candidate)
-                and issubclass(candidate, base)
-            ):
-                yield candidate
+    for module_name in module_names:
+        module = importlib.import_module(module_name)
+        package_path = getattr(module, "__path__", None)
+        if package_path is None:
+            yield from _defined_in(module, base)
+            continue
+        submodules = sorted(
+            pkgutil.walk_packages(package_path, prefix=f"{module_name}."),
+            key=lambda info: info.name,
+        )
+        for info in submodules:
+            yield from _defined_in(importlib.import_module(info.name), base)
+
+
+# -- Internals ---------------------------------------------------------
+
+
+def _defined_in(module: ModuleType, base: type[MemberT]) -> Iterator[type[MemberT]]:
+    """Yield the ``base`` subclasses ``module`` defines itself."""
+    for _, candidate in sorted(inspect.getmembers(module, inspect.isclass)):
+        if (
+            candidate.__module__ == module.__name__
+            and candidate is not base
+            and not inspect.isabstract(candidate)
+            and issubclass(candidate, base)
+        ):
+            yield candidate

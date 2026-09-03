@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Tuple
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 import hashlib
 import os
 import string
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
@@ -115,7 +117,47 @@ def try_get_vllm_kv_cache_layout(
     except Exception:
         logger.error("Could not query the KV cache layout from this vLLM version")
         return None
-    return translate_vllm_kv_cache_layout(get_kv_cache_layout())
+
+    kv_layout = translate_vllm_kv_cache_layout(get_kv_cache_layout())
+    # Legacy vLLM could report NHD on CPU even though the CPU attention backend
+    # physically allocated [B, H, N, C] (HND). Post-vllm#51718 layouts are
+    # returned from CacheConfig above, so normalize only this legacy fallback.
+    if torch_device_type == "cpu" and kv_layout in ("NHD", "HND"):
+        return "HND"
+    return kv_layout
+
+
+def extract_request_configs_from_sampling_params(
+    sampling_params: object,
+) -> dict[str, Any] | None:
+    """Extract LMCache request configs from a vLLM sampling-params object.
+
+    Only ``lmcache.*`` entries from ``extra_args["kv_transfer_params"]`` are
+    forwarded. Other transfer params are transport-only metadata and must not
+    participate in LMCache key derivation.
+    """
+    extra_args = getattr(sampling_params, "extra_args", None)
+    if not isinstance(extra_args, Mapping):
+        return None
+    kv_transfer_params = extra_args.get("kv_transfer_params")
+    if not isinstance(kv_transfer_params, Mapping):
+        return None
+
+    request_configs = {
+        key: value
+        for key, value in kv_transfer_params.items()
+        if isinstance(key, str) and key.startswith("lmcache.")
+    }
+    return request_configs or None
+
+
+def extract_request_configs_from_request(
+    request: "Request",
+) -> dict[str, Any] | None:
+    """Extract LMCache request configs from a vLLM request object."""
+    return extract_request_configs_from_sampling_params(
+        getattr(request, "sampling_params", None)
+    )
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
