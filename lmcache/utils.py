@@ -35,6 +35,11 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.cache_identity import (
+    CACHE_IDENTITY_CONFIG_PREFIX,
+    CACHE_IDENTITY_REVISION_TAG,
+    cache_identity_revision,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -428,12 +433,33 @@ class CacheEngineKey:
 
     def __post_init__(self):
         tag_list = None
+        has_identity_config = False
         if self.request_configs is not None:
             for k, v in self.request_configs.items():
+                if k == CACHE_IDENTITY_CONFIG_PREFIX[:-1] or k.startswith(
+                    CACHE_IDENTITY_CONFIG_PREFIX
+                ):
+                    has_identity_config = True
                 if k.startswith("lmcache.tag."):
                     if tag_list is None:
                         tag_list = []
                     tag_list.append((k[len("lmcache.tag.") :], v))
+            if CACHE_IDENTITY_REVISION_TAG in self.request_configs:
+                has_identity_config = True
+            revision = (
+                cache_identity_revision(self.request_configs)
+                if has_identity_config
+                else ""
+            )
+            if revision and CACHE_IDENTITY_REVISION_TAG not in self.request_configs:
+                if tag_list is None:
+                    tag_list = []
+                tag_list.append(
+                    (
+                        CACHE_IDENTITY_REVISION_TAG[len("lmcache.tag.") :],
+                        revision,
+                    )
+                )
         if self.dtype not in TORCH_DTYPE_TO_STR_DTYPE:
             raise ValueError(f"Unsupported dtype in CacheEngineKey: {self.dtype}")
         self._dtype_str = TORCH_DTYPE_TO_STR_DTYPE[self.dtype]
