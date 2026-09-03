@@ -222,6 +222,31 @@ class _FakeTarget:
         self.dropped.append(instance_id)
 
 
+class _FailingTarget(_FakeTarget):
+    """Liveness target that raises during one selected fanout phase."""
+
+    def __init__(self, phase: str) -> None:
+        super().__init__()
+        self.phase = phase
+
+    def touch_instance(self, instance_id: int) -> None:
+        if self.phase == "touch":
+            raise RuntimeError("touch failed")
+        super().touch_instance(instance_id)
+
+    def reap_stale_instances(
+        self, reap_timeout_s: float, registration_grace_s: float
+    ) -> list[int]:
+        if self.phase == "reap":
+            raise RuntimeError("reap failed")
+        return super().reap_stale_instances(reap_timeout_s, registration_grace_s)
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        if self.phase == "drop":
+            raise RuntimeError("drop failed")
+        super().drop_instance_state(instance_id)
+
+
 @pytest.fixture(autouse=True)
 def _reset_periodic_registry():
     """Keep the reaper out of the global registry across tests."""
@@ -238,6 +263,46 @@ def test_management_ping_touches_targets() -> None:
     assert mgmt.ping(42) is True
     assert mgmt.ping(None) is True
     assert target.touched == [42]
+
+
+def test_management_ping_isolates_target_failure() -> None:
+    healthy = _FakeTarget()
+    mgmt = ManagementModule(
+        MagicMock(), liveness_targets=[_FailingTarget("touch"), healthy]
+    )
+
+    assert mgmt.ping(42) is True
+    assert healthy.touched == [42]
+
+
+def test_management_reaper_isolates_scan_failure() -> None:
+    healthy = _FakeTarget()
+    healthy.to_reap = [7]
+    mgmt = ManagementModule(
+        MagicMock(), liveness_targets=[_FailingTarget("reap"), healthy]
+    )
+
+    summary = mgmt._reap_cycle()
+
+    assert healthy.dropped == [7]
+    assert summary.success is False
+    assert summary.message == "reaped=1, failures=1"
+
+
+def test_management_reaper_isolates_drop_failure() -> None:
+    source = _FakeTarget()
+    source.to_reap = [9]
+    observer = _FakeTarget()
+    mgmt = ManagementModule(
+        MagicMock(),
+        liveness_targets=[source, _FailingTarget("drop"), observer],
+    )
+
+    summary = mgmt._reap_cycle()
+
+    assert observer.dropped == [9]
+    assert summary.success is False
+    assert summary.message == "reaped=1, failures=1"
 
 
 def test_management_reaper_reaps_and_drops() -> None:
@@ -257,6 +322,22 @@ def test_management_reaper_reaps_and_drops() -> None:
         assert target.dropped == [7]
     finally:
         mgmt.close()
+
+
+def test_management_reaper_deduplicates_instance_fanout() -> None:
+    """A stale instance reported by multiple targets is dropped once per target."""
+    first = _FakeTarget()
+    second = _FakeTarget()
+    first.to_reap = [7]
+    second.to_reap = [7]
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[first, second])
+
+    summary = mgmt._reap_cycle()
+
+    assert first.dropped == [7]
+    assert second.dropped == [7]
+    assert summary.success is True
+    assert summary.message == "reaped=1, failures=0"
 
 
 def test_management_reaper_disabled_when_timeout_zero() -> None:
