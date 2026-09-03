@@ -1,0 +1,168 @@
+name: Build MUSA Artifacts
+
+# Reusable workflow for the Moore Threads MUSA-compatible wheel.
+#
+# The builder image owns the TorchMUSA and MUSA SDK ABI.  LMCache's current
+# MUSA profile ships the Python MUSA integration plus common native extensions;
+# it does not bundle TorchMUSA or vendor runtime libraries.  The artifact is
+# therefore installed with --no-deps in the matching runtime image and is
+# published to a dedicated v{tag}-musa GitHub Release, never to PyPI.
+
+on:
+    workflow_call:
+        inputs:
+            dev_version:
+                description: >-
+                    Build a .devN pre-release from the newest stable tag. This
+                    keeps nightly or branch artifacts unique.
+                type: boolean
+                default: false
+                required: false
+        outputs:
+            musa_version:
+                description: Full LMCache version baked into the MUSA wheel.
+                value: ${{ jobs.build-musa-artifacts.outputs.musa_version }}
+
+env:
+    LC_ALL: en_US.UTF-8
+    # This image is the validated TorchMUSA stack used by the MUSA Buildkite
+    # lane. Organizations with a mirrored/public image can override it at the
+    # repository variable MUSA_IMAGE without changing this workflow.
+    MUSA_IMAGE: ${{ vars.MUSA_IMAGE || 'sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci:latest' }}
+    MUSA_IMAGE_DIGEST: ${{ vars.MUSA_IMAGE_DIGEST || '' }}
+    MUSA_HOME: ${{ vars.MUSA_HOME || '/usr/local/musa' }}
+    # Leave package installation empty: the validated image supplies TorchMUSA.
+    # A vendor image that needs wheel installation can set these repository
+    # variables and pass them through when invoking this reusable workflow.
+    TORCH_MUSA_PACKAGES: ${{ vars.TORCH_MUSA_PACKAGES || '' }}
+    TORCH_MUSA_INDEX: ${{ vars.TORCH_MUSA_INDEX || '' }}
+    MUSA_REQUIRE_TORCH_MUSA: ${{ vars.MUSA_REQUIRE_TORCH_MUSA || '1' }}
+    MUSA_MANYLINUX_PLATFORM: manylinux_2_35_x86_64
+    MUSA_LOCAL_VERSION: musa
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-musa-artifacts:
+        name: Build MUSA wheel
+        runs-on: ubuntu-latest
+        env:
+            # Map the secret at job scope so the login step can safely test
+            # whether it is present; GitHub does not expose secrets directly
+            # in step-level ``if`` expressions.
+            MUSA_REGISTRY_TOKEN: ${{ secrets.MUSA_REGISTRY_TOKEN }}
+        outputs:
+            musa_version: ${{ steps.musa-version.outputs.musa_version }}
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                  fetch-depth: 0
+
+            # Variant tags such as v0.5.5rc1-musa are not valid version
+            # anchors for setuptools_scm. Keep only release and rc/a/b tags.
+            - name: Remove non-release tags
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+
+            - name: Login to MUSA registry
+              if: vars.MUSA_REGISTRY_USERNAME != '' && env.MUSA_REGISTRY_TOKEN != ''
+              env:
+                  MUSA_REGISTRY_TOKEN: ${{ secrets.MUSA_REGISTRY_TOKEN }}
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                  registry: sh-harbor.mthreads.com
+                  username: ${{ vars.MUSA_REGISTRY_USERNAME }}
+                  password: ${{ secrets.MUSA_REGISTRY_TOKEN }}
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            - name: Resolve MUSA wheel version
+              id: musa-version
+              env:
+                  DEV_VERSION: ${{ inputs.dev_version }}
+              run: |
+                  set -euo pipefail
+                  LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+                  if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+                      BASE="${GITHUB_REF_NAME#v}"
+                  elif [[ "${DEV_VERSION}" == "true" && -n "${LATEST_TAG}" ]]; then
+                      COMMITS=$(git rev-list --count "${LATEST_TAG}..HEAD")
+                      IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
+                      BASE="${MAJOR}.${MINOR}.$((PATCH + 1)).dev${COMMITS}"
+                  else
+                      BASE="${LATEST_TAG#v}"
+                      BASE="${BASE:-0.0.0.dev0}"
+                  fi
+                  MUSA_VERSION="${BASE}+${MUSA_LOCAL_VERSION}"
+                  echo "MUSA_VERSION=${MUSA_VERSION}" >> "$GITHUB_ENV"
+                  echo "musa_version=${MUSA_VERSION}" >> "$GITHUB_OUTPUT"
+
+            - name: Build MUSA wheel in the validated vendor image
+              env:
+                  MUSA_IMAGE: ${{ env.MUSA_IMAGE }}
+                  MUSA_IMAGE_DIGEST: ${{ env.MUSA_IMAGE_DIGEST }}
+              run: |
+                  MUSA_IMAGE_REF="${MUSA_IMAGE}"
+                  if [[ -n "${MUSA_IMAGE_DIGEST}" ]]; then
+                      [[ "${MUSA_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+                          echo "MUSA_IMAGE_DIGEST must be a sha256 digest" >&2
+                          exit 1
+                      }
+                      MUSA_IMAGE_REF="${MUSA_IMAGE}@${MUSA_IMAGE_DIGEST}"
+                  fi
+                  docker run --rm \
+                      --ipc=host \
+                      --network=host \
+                      -e SETUPTOOLS_SCM_PRETEND_VERSION="${MUSA_VERSION}" \
+                      -e MUSA_HOME="${MUSA_HOME}" \
+                      -e MUSA_REQUIRE_TORCH_MUSA="${MUSA_REQUIRE_TORCH_MUSA}" \
+                      -e TORCH_MUSA_PACKAGES="${TORCH_MUSA_PACKAGES}" \
+                      -e TORCH_MUSA_INDEX="${TORCH_MUSA_INDEX}" \
+                      -e MUSA_MANYLINUX_PLATFORM="${MUSA_MANYLINUX_PLATFORM}" \
+                      -v "${PWD}:/work/LMCache" \
+                      --entrypoint bash "${MUSA_IMAGE_REF}" \
+                      /work/LMCache/.github/scripts/build_musa_wheel.sh
+
+            - name: Smoke-check wheel installation in the MUSA runtime image
+              env:
+                  MUSA_IMAGE: ${{ env.MUSA_IMAGE }}
+                  MUSA_IMAGE_DIGEST: ${{ env.MUSA_IMAGE_DIGEST }}
+              run: |
+                  MUSA_IMAGE_REF="${MUSA_IMAGE}"
+                  if [[ -n "${MUSA_IMAGE_DIGEST}" ]]; then
+                      MUSA_IMAGE_REF="${MUSA_IMAGE}@${MUSA_IMAGE_DIGEST}"
+                  fi
+                  docker run --rm \
+                      --ipc=host \
+                      --network=host \
+                      --shm-size=4g \
+                      -v "${PWD}:/work/LMCache" \
+                      --entrypoint bash "${MUSA_IMAGE_REF}" \
+                      -lc '
+                        set -euxo pipefail
+                        WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
+                        python3 -m pip install --no-deps "$WHEEL"
+                        python3 -c "import lmcache, lmcache.lmcache_native, torch_musa; print(\"LMCache MUSA wheel import OK\"); print(\"Torch:\", __import__(\"torch\").__version__)"
+                      '
+
+            - name: Upload MUSA release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                  name: release-musa-artifacts
+                  path: dist/
+
+# Real MUSA device tests remain in Buildkite because GitHub-hosted runners do
+# not expose Moore Threads hardware. The smoke install above catches ABI,
+# packaging, and import regressions before a release artifact is published.
