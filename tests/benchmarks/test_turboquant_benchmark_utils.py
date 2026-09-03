@@ -81,3 +81,20 @@ def test_non_negative_int_accepts_zero_and_rejects_negative() -> None:
     assert _UTILS.non_negative_int("0") == 0
     with pytest.raises(argparse.ArgumentTypeError):
         _UTILS.non_negative_int("-1")
+
+
+@pytest.mark.parametrize(
+    ("blocks", "block_size", "tokens", "expected"),
+    [
+        (512, 16, None, 8192),
+        (512, 16, 8193, 8193),
+        (1, 32, 1, 1),
+    ],
+)
+def test_resolve_num_tokens_supports_partial_tail_blocks(
+    blocks: int,
+    block_size: int,
+    tokens: int | None,
+    expected: int,
+) -> None:
+    assert _UTILS.resolve_num_tokens(blocks, block_size, tokens) == expected

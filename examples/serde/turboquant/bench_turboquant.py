@@ -8,7 +8,12 @@ import time
 
 # Third Party
 from benchmark_tensor_utils import tensor_error_metrics
-from benchmark_utils import non_negative_int, positive_int, summarize_timings
+from benchmark_utils import (
+    non_negative_int,
+    positive_int,
+    resolve_num_tokens,
+    summarize_timings,
+)
 import torch
 import triton
 
@@ -152,6 +157,12 @@ def main() -> None:
     parser.add_argument("--layers", type=positive_int, default=24)
     parser.add_argument("--blocks", type=positive_int, default=4096)
     parser.add_argument("--block-size", type=positive_int, default=16)
+    parser.add_argument(
+        "--tokens",
+        type=positive_int,
+        default=None,
+        help="logical token count; overrides --blocks * --block-size",
+    )
     parser.add_argument("--kv-heads", type=positive_int, default=2)
     parser.add_argument("--head-dim", type=positive_int, default=64)
     parser.add_argument("--warmup", type=non_negative_int, default=3)
@@ -182,7 +193,7 @@ def main() -> None:
     }[args.dtype]
 
     device = torch.device(args.device)
-    num_tokens = args.blocks * args.block_size
+    num_tokens = resolve_num_tokens(args.blocks, args.block_size, args.tokens)
     hidden_dim = args.kv_heads * args.head_dim
 
     # Direct serde layout used by tests:

@@ -77,3 +77,10 @@ def non_negative_int(value: str) -> int:
             f"expected a non-negative integer, got {parsed}"
         )
     return parsed
+
+
+def resolve_num_tokens(blocks: int, block_size: int, tokens: int | None) -> int:
+    """Resolve the logical token count while preserving the blocks default."""
+    if tokens is not None:
+        return tokens
+    return blocks * block_size

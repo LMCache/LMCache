@@ -40,14 +40,18 @@ Triton versions, GPU name, and compute capability so results can be reproduced
 and compared across systems. Accuracy metrics are computed in chunks, avoiding
 full float32 tensor copies and CUDA BLAS element-count limits on large KV shapes.
 Use `--metric-chunk-elements` to tune that temporary-memory bound.
+Pass `--tokens` to benchmark a logical sequence length that is not an exact
+multiple of the page size; when omitted, the existing
+`--blocks * --block-size` behavior is unchanged.
 
-For example, the following shape models 8K tokens, 32 layers, and eight 128-wide
-KV heads:
+For example, the following shape models 8K plus one token (and therefore a
+partial final block), 32 layers, and eight 128-wide KV heads:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples/serde/turboquant/bench_turboquant.py \
   --layers 32 \
   --blocks 512 \
+  --tokens 8193 \
   --block-size 16 \
   --kv-heads 8 \
   --head-dim 128 \
