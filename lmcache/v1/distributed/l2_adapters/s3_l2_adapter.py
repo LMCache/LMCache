@@ -16,11 +16,13 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 import asyncio
 import ctypes
+import json
 import threading
 import xml.etree.ElementTree as ET
 
@@ -112,6 +114,28 @@ def _string_to_object_key(name: str) -> ObjectKey:
     )
 
 
+def _parse_s3_last_modified(text: Optional[str]) -> Optional[float]:
+    """Parse an S3 ``LastModified`` timestamp into a UTC epoch float.
+
+    S3 emits ISO-8601 with a trailing ``Z`` (e.g.
+    ``2024-01-02T03:04:05.000Z``). Returns ``None`` on a missing or
+    unparsable value so callers can fall back to a neutral ordering
+    rather than crash on a malformed listing.
+    """
+    if not text:
+        return None
+    try:
+        # ``fromisoformat`` accepts ``+00:00`` but historically not the
+        # bare ``Z`` suffix on older interpreters — normalize it.
+        normalized = text.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
 def _parse_list_response_xml(
     body: bytes,
 ) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
@@ -120,6 +144,26 @@ def _parse_list_response_xml(
     Entries this adapter can't parse (foreign objects in the bucket)
     are skipped silently. ``next_token`` is ``None`` when the listing
     is not truncated.
+
+    Raises:
+        ValueError: the response body is not valid XML.
+    """
+    entries_with_mtime, next_token = _parse_list_response_xml_with_mtime(body)
+    entries = [(obj_key, size) for obj_key, size, _mtime in entries_with_mtime]
+    return entries, next_token
+
+
+def _parse_list_response_xml_with_mtime(
+    body: bytes,
+) -> tuple[list[tuple[ObjectKey, int, Optional[float]]], Optional[str]]:
+    """Like :func:`_parse_list_response_xml` but also surfaces each
+    object's ``LastModified`` as a UTC epoch float (or ``None`` when
+    absent / unparsable).
+
+    Used by the startup size-seed path, which orders objects
+    oldest-modified first as an LRU proxy. Kept separate from
+    :func:`_parse_list_response_xml` so the existing ``(ObjectKey, int)``
+    listing contract used by ``list_l2_keys`` stays unchanged.
 
     Raises:
         ValueError: the response body is not valid XML.
@@ -135,10 +179,11 @@ def _parse_list_response_xml(
         if "}" in elem.tag:
             elem.tag = elem.tag.split("}", 1)[1]
 
-    entries: list[tuple[ObjectKey, int]] = []
+    entries: list[tuple[ObjectKey, int, Optional[float]]] = []
     for contents in root.findall("Contents"):
         key_elem = contents.find("Key")
         size_elem = contents.find("Size")
+        mtime_elem = contents.find("LastModified")
         if key_elem is None or key_elem.text is None:
             continue
         try:
@@ -154,7 +199,10 @@ def _parse_list_response_xml(
                 size = int(size_elem.text)
             except ValueError:
                 pass
-        entries.append((obj_key, size))
+        last_modified = _parse_s3_last_modified(
+            mtime_elem.text if mtime_elem is not None else None
+        )
+        entries.append((obj_key, size, last_modified))
 
     next_token_elem = root.find("NextContinuationToken")
     next_token = (
@@ -163,6 +211,78 @@ def _parse_list_response_xml(
         else None
     )
     return entries, next_token
+
+
+# Sidecar object name holding the serialized LRU access-order index.
+# Kept generic; lives in the same bucket as the cached objects. The
+# trailing ``@`` shape would make it look like a malformed cache key, so
+# the leading underscore plus ``.json`` keeps it out of the cache-key
+# namespace (``_string_to_object_key`` rejects it, so a stray listing of
+# the sidecar is skipped, not mis-parsed).
+LRU_INDEX_OBJECT_NAME = "_lmcache_lru_index.json"
+
+# Bump when the on-disk sidecar layout changes incompatibly.
+_LRU_INDEX_SCHEMA_VERSION = 1
+
+
+def _serialize_lru_index(
+    entries: list[tuple[str, int, int]],
+) -> bytes:
+    """Serialize an LRU index to a compact JSON sidecar payload.
+
+    ``entries`` is ``[(object_name, size_bytes, access_tick), ...]`` in
+    LRU order (oldest access first). The payload is intentionally small:
+    a flat list of 3-tuples plus a schema version, so a 100k-object
+    index stays in the low single-digit MBs.
+    """
+    payload = {
+        "version": _LRU_INDEX_SCHEMA_VERSION,
+        # Flat triples keep the JSON ~3x smaller than a list of dicts.
+        "entries": [[name, size, tick] for (name, size, tick) in entries],
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+def _deserialize_lru_index(
+    body: bytes,
+) -> Optional[list[tuple[str, int, int]]]:
+    """Parse a sidecar payload back into an ordered LRU index.
+
+    Returns the list of ``(object_name, size_bytes, access_tick)`` triples
+    in stored order, or ``None`` when the payload is missing, truncated,
+    corrupt, or carries an unknown schema version. A ``None`` return is
+    the signal for the caller to treat the sidecar as absent and fall
+    back to the LastModified scan — a partial/corrupt sidecar must never
+    crash startup.
+    """
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("version") != _LRU_INDEX_SCHEMA_VERSION:
+        return None
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list):
+        return None
+
+    out: list[tuple[str, int, int]] = []
+    for item in raw_entries:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            # Skip individual malformed rows rather than discarding the
+            # whole index — a single bad triple shouldn't lose all the
+            # access-order fidelity the sidecar exists to preserve.
+            continue
+        name, size, tick = item
+        if not isinstance(name, str):
+            continue
+        if not isinstance(size, int) or isinstance(size, bool):
+            continue
+        if not isinstance(tick, int) or isinstance(tick, bool):
+            continue
+        out.append((name, size, tick))
+    return out
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
@@ -327,6 +447,20 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     - max_capacity_gb (float): aggregate capacity used by
       ``get_usage()``; ``0`` disables aggregate eviction
       (``usage_fraction == -1.0``).
+    - s3_seed_usage_on_start (bool): when ``True``, scan the bucket on
+      adapter startup and seed both the aggregate byte counter and the
+      eviction policy's key index (ordered oldest-``LastModified``
+      first) so the LRU cap binds across process restarts. Default
+      ``False`` (no behavior change for existing deployments). A scan
+      failure is logged and non-fatal.
+    - s3_persist_lru_index (bool): when ``True``, periodically write a
+      small sidecar object (``_lmcache_lru_index.json``) capturing true
+      LRU access order, and restore from it on startup (reconciled
+      against the live bucket listing) for higher eviction fidelity than
+      the ``LastModified`` proxy alone. Default ``False``. Implies the
+      startup seed behavior when restoring.
+    - s3_lru_index_checkpoint_interval_s (int): seconds between sidecar
+      checkpoints when ``s3_persist_lru_index`` is on. Default 300.
     """
 
     def __init__(
@@ -340,6 +474,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
+        s3_seed_usage_on_start: bool = False,
+        s3_persist_lru_index: bool = False,
+        s3_lru_index_checkpoint_interval_s: int = 300,
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -350,6 +487,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.max_capacity_gb = max_capacity_gb
+        self.s3_seed_usage_on_start = s3_seed_usage_on_start
+        self.s3_persist_lru_index = s3_persist_lru_index
+        self.s3_lru_index_checkpoint_interval_s = s3_lru_index_checkpoint_interval_s
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -394,6 +534,11 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             aws_access_key_id=_opt_str("aws_access_key_id"),
             aws_secret_access_key=_opt_str("aws_secret_access_key"),
             max_capacity_gb=float(max_cap),
+            s3_seed_usage_on_start=_bool("s3_seed_usage_on_start", False),
+            s3_persist_lru_index=_bool("s3_persist_lru_index", False),
+            s3_lru_index_checkpoint_interval_s=_int(
+                "s3_lru_index_checkpoint_interval_s", 300
+            ),
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -412,6 +557,12 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "- aws_access_key_id / aws_secret_access_key (str): static creds; "
             "when unset, boto3 resolves credentials\n"
             "- max_capacity_gb (float): capacity for get_usage (0 = disabled)\n"
+            "- s3_seed_usage_on_start (bool): scan bucket on startup and "
+            "seed usage + eviction LRU index (default false)\n"
+            "- s3_persist_lru_index (bool): checkpoint/restore a sidecar LRU "
+            "index for cross-restart access-order fidelity (default false)\n"
+            "- s3_lru_index_checkpoint_interval_s (int): sidecar checkpoint "
+            "interval in seconds (default 300)\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
         )
 
@@ -520,6 +671,17 @@ class S3L2Adapter(L2AdapterInterface):
         self._connection_failures = 0
         self._connection_disabled = False
 
+        # LRU access-order tracking for the optional sidecar checkpoint
+        # (feature b). The adapter is the single source of truth for what
+        # it stored/accessed, so we record a monotonically increasing
+        # "tick" per key here rather than reaching into the eviction
+        # policy's private ordering. ``_access_ticks`` maps the S3 object
+        # name -> (size, last_access_tick); only maintained when
+        # ``s3_persist_lru_index`` is enabled to keep the hot path free.
+        self._track_access_order = config.s3_persist_lru_index
+        self._access_ticks: dict[str, tuple[int, int]] = {}
+        self._access_tick_counter = 0
+
         self._lock = threading.Lock()
 
         # Background asyncio event loop.
@@ -533,16 +695,40 @@ class S3L2Adapter(L2AdapterInterface):
 
         self._closed = False
 
+        # Background sidecar checkpoint thread (feature b). Created lazily
+        # in ``_maybe_start_checkpoint_thread`` after a successful seed so
+        # we never checkpoint an empty index over a good one.
+        self._checkpoint_stop = threading.Event()
+        self._checkpoint_thread: Optional[threading.Thread] = None
+
         logger.info(
             "Initialized S3L2Adapter (endpoint=%s region=%s "
-            "http2=%s s3express=%s tls=%s max_capacity_gb=%.2f)",
+            "http2=%s s3express=%s tls=%s max_capacity_gb=%.2f "
+            "seed_usage_on_start=%s persist_lru_index=%s)",
             self._endpoint,
             self._region,
             config.s3_prefer_http2,
             self._enable_s3express,
             not config.disable_tls,
             config.max_capacity_gb,
+            config.s3_seed_usage_on_start,
+            config.s3_persist_lru_index,
         )
+
+        # Startup seed (features a + b). Both flags default OFF, so this
+        # is a no-op for existing deployments. A failure here must never
+        # break adapter startup, so the whole block is best-effort.
+        if config.s3_seed_usage_on_start or config.s3_persist_lru_index:
+            try:
+                self._seed_from_bucket()
+            except Exception:
+                logger.exception(
+                    "S3L2Adapter startup seed failed; continuing with an "
+                    "empty in-memory index (eviction will only see objects "
+                    "stored by this process generation)"
+                )
+            if config.s3_persist_lru_index:
+                self._maybe_start_checkpoint_thread()
 
     # ------------------------------------------------------------------
     # Event Fd Interface
@@ -664,6 +850,53 @@ class S3L2Adapter(L2AdapterInterface):
             return self._completed_load_tasks.pop(task_id, None)
 
     # ------------------------------------------------------------------
+    # LRU access-order tracking (feature b)
+    # ------------------------------------------------------------------
+    #
+    # We override the base ``_notify_keys_*`` hooks to additionally record
+    # a per-key access tick when ``s3_persist_lru_index`` is on. The base
+    # implementations still run (byte accounting + listener fanout to the
+    # eviction policy), so behavior is unchanged when tracking is off.
+
+    def _bump_access_ticks(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Record/refresh the access tick for ``keys`` (size-aware)."""
+        with self._lock:
+            for key, size in zip(keys, sizes, strict=True):
+                self._access_tick_counter += 1
+                self._access_ticks[_object_key_to_string(key)] = (
+                    size,
+                    self._access_tick_counter,
+                )
+
+    def _touch_access_ticks(self, keys: list[ObjectKey]) -> None:
+        """Refresh the access tick for already-tracked ``keys`` on read."""
+        with self._lock:
+            for key in keys:
+                name = _object_key_to_string(key)
+                prev = self._access_ticks.get(name)
+                if prev is None:
+                    continue
+                self._access_tick_counter += 1
+                self._access_ticks[name] = (prev[0], self._access_tick_counter)
+
+    def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        super()._notify_keys_stored(keys, sizes)
+        if self._track_access_order:
+            self._bump_access_ticks(keys, sizes)
+
+    def _notify_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        super()._notify_keys_accessed(keys)
+        if self._track_access_order:
+            self._touch_access_ticks(keys)
+
+    def _notify_keys_deleted(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        super()._notify_keys_deleted(keys, sizes)
+        if self._track_access_order:
+            with self._lock:
+                for key in keys:
+                    self._access_ticks.pop(_object_key_to_string(key), None)
+
+    # ------------------------------------------------------------------
     # Eviction Interface
     # ------------------------------------------------------------------
 
@@ -779,6 +1012,19 @@ class S3L2Adapter(L2AdapterInterface):
         if self._closed:
             return
         self._closed = True
+
+        # Stop the checkpoint thread and write one final sidecar so the
+        # latest access order survives a clean shutdown. Best-effort:
+        # a failure here must not block close().
+        if self._checkpoint_thread is not None:
+            self._checkpoint_stop.set()
+            try:
+                # Short timeout: don't let a slow S3 block shutdown past the
+                # container's termination grace period (-> SIGKILL).
+                self._checkpoint_lru_index(timeout=5.0)
+            except Exception:
+                logger.exception("S3L2Adapter final LRU checkpoint failed")
+            self._checkpoint_thread.join(timeout=5)
 
         async def _stop_tasks():
             tasks = [
@@ -1276,6 +1522,417 @@ class S3L2Adapter(L2AdapterInterface):
             deleted_keys.append(key)
             deleted_sizes.append(sz if sz is not None else 0)
         return deleted_keys, deleted_sizes
+
+    async def _execute_list_with_mtime(
+        self,
+        prefix: Optional[str],
+        max_keys: int,
+        continuation_token: Optional[str],
+    ) -> tuple[list[tuple[ObjectKey, int, Optional[float]]], Optional[str]]:
+        """One ``ListObjectsV2`` call, parsed with ``LastModified``."""
+        s3_req, body_chunks, _captured = self._list_request(
+            prefix, max_keys, continuation_token
+        )
+        await asyncio.wrap_future(s3_req.finished_future)
+        return _parse_list_response_xml_with_mtime(b"".join(body_chunks))
+
+    async def _execute_get_raw(self, key_str: str) -> Optional[bytes]:
+        """GET an arbitrary object and return its raw bytes.
+
+        Used for the LRU-index sidecar (not a cache object, so it does
+        not flow through the MemoryObj load path). Returns ``None`` on a
+        404 / any error — the caller treats a missing sidecar as "fall
+        back to scan".
+        """
+        body_chunks: list[bytes] = []
+        captured = {"status": None}
+
+        req = self._make_request("GET", key_str)
+
+        def on_body(chunk, offset, **kwargs):
+            body_chunks.append(bytes(chunk))
+
+        def on_headers(status_code, headers, **kwargs):
+            captured["status"] = status_code
+
+        def on_done(error=None, status_code=None, **kwargs):
+            # Do NOT raise here. A missing sidecar (HTTP 404) is an expected,
+            # benign case the caller handles by falling back to a full scan.
+            # Raising inside this CRT callback logs a noisy traceback even though
+            # finished_future already surfaces any genuine error — so just record
+            # the outcome and let the awaiter decide.
+            captured["status"] = status_code or captured["status"]
+            captured["error"] = error
+
+        s3_req = s3.S3Request(
+            client=self._s3_client,
+            type=s3.S3RequestType.DEFAULT,
+            request=req,
+            operation_name="GetObject",
+            on_body=on_body,
+            on_headers=on_headers,
+            on_done=on_done,
+            credential_provider=self._credentials_provider,
+            region=self._region,
+        )
+        try:
+            await asyncio.wrap_future(s3_req.finished_future)
+        except Exception as exc:
+            # CRT raises AWS_ERROR_S3_INVALID_RESPONSE_STATUS for a 404 — that's a
+            # missing sidecar, not a failure. Return None quietly; caller scans.
+            logger.debug("sidecar %s absent/unreadable (%s); will scan", key_str, exc)
+            return None
+        if captured.get("error") or captured["status"] not in (200, 206):
+            logger.debug(
+                "sidecar %s status %s; treating as absent",
+                key_str,
+                captured.get("error") or captured["status"],
+            )
+            return None
+        return b"".join(body_chunks)
+
+    async def _execute_put_raw(self, key_str: str, body: bytes) -> bool:
+        """PUT raw bytes to an arbitrary object name (the sidecar)."""
+        stream = MemoryViewStream(memoryview(body))
+        req = self._make_request(
+            "PUT",
+            key_str,
+            body_stream=stream,
+            extra_headers=[
+                ("Content-Length", str(len(body))),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        captured = {"status": None}
+
+        def on_done(error=None, status_code=None, **kwargs):
+            captured["status"] = status_code
+            if error or status_code not in (200, 201):
+                raise RuntimeError(
+                    f"S3 PUT failed for {key_str}: {error or status_code}"
+                )
+
+        s3_req = s3.S3Request(
+            client=self._s3_client,
+            type=s3.S3RequestType.PUT_OBJECT,
+            request=req,
+            on_done=on_done,
+            credential_provider=self._credentials_provider,
+            region=self._region,
+        )
+        try:
+            await asyncio.wrap_future(s3_req.finished_future)
+        except Exception as exc:
+            logger.warning("S3 PUT for sidecar %s failed: %s", key_str, exc)
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Internal: startup seed + sidecar checkpoint (features a & b)
+    # ------------------------------------------------------------------
+
+    def _scan_bucket(self) -> list[tuple[ObjectKey, int, Optional[float]]]:
+        """List the entire bucket, paginated, returning all cache entries.
+
+        Each entry is ``(ObjectKey, size_bytes, last_modified_epoch)``.
+        Foreign / unparsable objects (including the sidecar itself) are
+        skipped by the XML parser. Logs progress so a 100k+ object scan
+        is observable.
+        """
+        all_entries: list[tuple[ObjectKey, int, Optional[float]]] = []
+        cursor: Optional[str] = None
+        page_no = 0
+        while True:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._execute_list_with_mtime(None, 1000, cursor),
+                self._loop,
+            )
+            entries, next_token = fut.result(timeout=60.0)
+            all_entries.extend(entries)
+            page_no += 1
+            if page_no % 20 == 0:
+                logger.info(
+                    "S3L2Adapter seed scan in progress: %d pages, %d objects",
+                    page_no,
+                    len(all_entries),
+                )
+            if not next_token:
+                break
+            cursor = next_token
+        logger.info(
+            "S3L2Adapter seed scan complete: %d pages, %d cache objects",
+            page_no,
+            len(all_entries),
+        )
+        return all_entries
+
+    def _seed_policy_in_order(self, ordered: list[tuple[ObjectKey, int]]) -> int:
+        """Seed usage + the eviction policy from keys in LRU order.
+
+        ``ordered`` is ``[(ObjectKey, size), ...]`` with the **least
+        recently used key first**. The eviction policy is populated via
+        ``_notify_keys_stored`` (base class -> ``L2EvictionPolicy`` ->
+        ``policy.on_keys_created``). ``on_keys_created`` reverses keys
+        within a single call, so a single batch notify of the
+        **reversed** list reconstructs ``ordered`` exactly in the policy's
+        OrderedDict (oldest at the front == first eviction victim) — same
+        result as one notify per key, but O(1) lock/listener traffic
+        instead of O(N) (a 100k-object bucket would otherwise thrash on
+        startup). ``_key_sizes`` is also seeded so a later ``delete`` of a
+        seeded key balances the base-class byte accounting.
+
+        Returns the number of keys seeded.
+        """
+        to_seed_keys: list[ObjectKey] = []
+        to_seed_sizes: list[int] = []
+        with self._lock:
+            for key, size in ordered:
+                if key in self._key_sizes:
+                    # Already known from a store in this process — don't
+                    # double-count or reorder it.
+                    continue
+                self._key_sizes[key] = size
+                self._object_size_cache[_object_key_to_string(key)] = size
+                to_seed_keys.append(key)
+                to_seed_sizes.append(size)
+        if not to_seed_keys:
+            return 0
+
+        # Single batch notify. Suppress per-key tick tracking during the
+        # batch (it would stamp the reversed order); seed ticks explicitly
+        # afterwards in true oldest->newest order.
+        was_tracking = self._track_access_order
+        self._track_access_order = False
+        try:
+            self._notify_keys_stored(
+                list(reversed(to_seed_keys)), list(reversed(to_seed_sizes))
+            )
+        finally:
+            self._track_access_order = was_tracking
+
+        if was_tracking:
+            with self._lock:
+                for key, size in zip(to_seed_keys, to_seed_sizes, strict=True):
+                    self._access_tick_counter += 1
+                    self._access_ticks[_object_key_to_string(key)] = (
+                        size,
+                        self._access_tick_counter,
+                    )
+        return len(to_seed_keys)
+
+    def _seed_from_bucket(self) -> None:
+        """Seed usage + eviction index from the bucket on startup.
+
+        Strategy:
+        1. If ``s3_persist_lru_index`` is on and a valid sidecar exists,
+           restore true access-order from it, reconciled against the live
+           listing (drop vanished keys; append new keys by LastModified).
+        2. Otherwise fall back to a pure LastModified scan (feature a).
+        """
+        entries = self._scan_bucket()
+
+        restored = False
+        if self._config.s3_persist_lru_index:
+            restored = self._restore_from_sidecar(entries)
+
+        if not restored:
+            self._seed_from_last_modified(entries)
+
+    def _seed_from_last_modified(
+        self, entries: list[tuple[ObjectKey, int, Optional[float]]]
+    ) -> None:
+        """Feature (a): order by LastModified (oldest first) and seed."""
+        ordered = _order_entries_by_last_modified(entries)
+        seeded = self._seed_policy_in_order(ordered)
+        logger.info(
+            "S3L2Adapter seeded %d keys from LastModified ordering (total bytes ~%d)",
+            seeded,
+            sum(sz for _k, sz in ordered),
+        )
+
+    def _restore_from_sidecar(
+        self, entries: list[tuple[ObjectKey, int, Optional[float]]]
+    ) -> bool:
+        """Feature (b): restore true access-order from the sidecar.
+
+        Returns ``True`` when a usable sidecar was found and applied,
+        ``False`` when it was absent/corrupt (caller falls back to the
+        LastModified scan). On a successful restore, the in-memory
+        ``_access_ticks`` map is rebuilt so the next checkpoint preserves
+        continuity.
+        """
+        fut = asyncio.run_coroutine_threadsafe(
+            self._execute_get_raw(LRU_INDEX_OBJECT_NAME),
+            self._loop,
+        )
+        try:
+            body = fut.result(timeout=60.0)
+        except Exception as exc:
+            logger.warning("S3L2Adapter sidecar GET failed: %s", exc)
+            return False
+        if body is None:
+            logger.info("S3L2Adapter no LRU sidecar found; falling back to scan")
+            return False
+
+        index = _deserialize_lru_index(body)
+        if index is None:
+            logger.warning(
+                "S3L2Adapter LRU sidecar corrupt/unknown-version; "
+                "treating as absent and falling back to scan"
+            )
+            return False
+
+        # Reconcile: only keep sidecar entries whose object still exists
+        # in the bucket; append live objects missing from the sidecar
+        # using their LastModified as the order proxy (placed before the
+        # sidecar entries since a never-recorded object is, by access
+        # order, colder than anything we have a tick for).
+        live_by_name: dict[str, tuple[ObjectKey, int, Optional[float]]] = {}
+        for obj_key, size, mtime in entries:
+            live_by_name[_object_key_to_string(obj_key)] = (obj_key, size, mtime)
+
+        sidecar_names = {name for (name, _sz, _tick) in index}
+
+        # Sidecar entries are stored oldest-access first already.
+        sidecar_ordered: list[tuple[ObjectKey, int, int]] = []
+        for name, size, tick in index:
+            live = live_by_name.get(name)
+            if live is None:
+                continue  # object no longer in bucket — drop it
+            obj_key, live_size, _mtime = live
+            sidecar_ordered.append((obj_key, live_size, tick))
+
+        # Live objects not in the sidecar, ordered by LastModified.
+        missing = [
+            (obj_key, size, mtime)
+            for name, (obj_key, size, mtime) in live_by_name.items()
+            if name not in sidecar_names
+        ]
+        missing_ordered = _order_entries_by_last_modified(missing)
+
+        # Final LRU order: brand-new (never-recorded) objects are coldest,
+        # then sidecar entries by ascending access tick.
+        final_ordered: list[tuple[ObjectKey, int]] = [
+            (k, sz) for (k, sz) in missing_ordered
+        ]
+        final_ordered.extend((k, sz) for (k, sz, _tick) in sidecar_ordered)
+
+        seeded = self._seed_policy_in_order(final_ordered)
+
+        # Rebuild the in-memory tick map so the next checkpoint continues
+        # from a monotonic counter above every restored tick.
+        with self._lock:
+            self._access_ticks.clear()
+            max_tick = 0
+            for obj_key, size, tick in sidecar_ordered:
+                self._access_ticks[_object_key_to_string(obj_key)] = (size, tick)
+                max_tick = max(max_tick, tick)
+            # Missing objects get fresh ticks below the sidecar floor so
+            # they remain the coldest in subsequent checkpoints until
+            # actually touched.
+            self._access_tick_counter = max_tick
+        logger.info(
+            "S3L2Adapter restored LRU index from sidecar: %d from sidecar, "
+            "%d new from listing, %d seeded total",
+            len(sidecar_ordered),
+            len(missing_ordered),
+            seeded,
+        )
+        return True
+
+    def _snapshot_lru_index(self) -> list[tuple[str, int, int]]:
+        """Snapshot the access-order index as ordered serializable triples.
+
+        Returns ``[(object_name, size, tick), ...]`` sorted by ascending
+        tick (oldest access first) so the sidecar restores in LRU order.
+        """
+        with self._lock:
+            items = [
+                (name, size, tick) for name, (size, tick) in self._access_ticks.items()
+            ]
+        items.sort(key=lambda t: t[2])
+        return items
+
+    def _checkpoint_lru_index(self, timeout: float = 60.0) -> bool:
+        """Serialize the access-order index and PUT it to the sidecar.
+
+        Best-effort: returns ``False`` (logged) on any failure so the
+        checkpoint loop keeps running. ``timeout`` bounds the PUT wait;
+        ``close()`` passes a short one so a slow/unresponsive S3 can't
+        block shutdown past the container's termination grace period.
+        """
+        snapshot = self._snapshot_lru_index()
+        if not snapshot:
+            return False
+        try:
+            body = _serialize_lru_index(snapshot)
+        except Exception:
+            logger.exception("S3L2Adapter failed to serialize LRU index")
+            return False
+        fut = asyncio.run_coroutine_threadsafe(
+            self._execute_put_raw(LRU_INDEX_OBJECT_NAME, body),
+            self._loop,
+        )
+        try:
+            ok = fut.result(timeout=timeout)
+        except Exception as exc:
+            logger.warning("S3L2Adapter LRU checkpoint PUT failed: %s", exc)
+            return False
+        if ok:
+            logger.debug(
+                "S3L2Adapter checkpointed LRU index (%d entries, %d bytes)",
+                len(snapshot),
+                len(body),
+            )
+        return ok
+
+    def _maybe_start_checkpoint_thread(self) -> None:
+        """Launch the periodic sidecar checkpoint thread (once)."""
+        if self._checkpoint_thread is not None:
+            return
+        interval = max(1, int(self._config.s3_lru_index_checkpoint_interval_s))
+
+        def _loop() -> None:
+            while not self._checkpoint_stop.wait(interval):
+                try:
+                    self._checkpoint_lru_index()
+                except Exception:
+                    logger.exception("S3L2Adapter checkpoint loop error")
+
+        self._checkpoint_thread = threading.Thread(
+            target=_loop,
+            daemon=True,
+            name="s3-l2-lru-checkpoint",
+        )
+        self._checkpoint_thread.start()
+        logger.info(
+            "S3L2Adapter LRU checkpoint thread started (interval=%ds)", interval
+        )
+
+
+# ---------------------------------------------------------------------------
+# Module helpers for seeding (pure; unit-tested without S3)
+# ---------------------------------------------------------------------------
+
+
+def _order_entries_by_last_modified(
+    entries: list[tuple[ObjectKey, int, Optional[float]]],
+) -> list[tuple[ObjectKey, int]]:
+    """Order ``(ObjectKey, size, last_modified)`` triples oldest-first.
+
+    Oldest ``LastModified`` sorts to the front (== first LRU eviction
+    victim). Objects with an unknown ``LastModified`` (``None``) are
+    treated as oldest (``-inf``) so a malformed timestamp can't protect
+    an object from eviction. Returns ``(ObjectKey, size)`` pairs in LRU
+    order, ready for :meth:`S3L2Adapter._seed_policy_in_order`.
+    """
+
+    def sort_key(item: tuple[ObjectKey, int, Optional[float]]) -> float:
+        mtime = item[2]
+        return mtime if mtime is not None else float("-inf")
+
+    ordered = sorted(entries, key=sort_key)
+    return [(obj_key, size) for obj_key, size, _mtime in ordered]
 
 
 # ---------------------------------------------------------------------------
