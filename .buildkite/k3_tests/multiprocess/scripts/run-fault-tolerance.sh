@@ -150,6 +150,26 @@ fi
 
 ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASH_ATTN}"
 BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
+ENFORCE_EAGER_ARG=""
+if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
+    ENFORCE_EAGER_ARG="--enforce-eager"
+fi
+PREFIX_CACHING_ARG=""
+if [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "true" ]; then
+    PREFIX_CACHING_ARG="--no-enable-prefix-caching"
+fi
+CHUNKED_PREFILL_ARG=""
+if [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "1" ] || [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "true" ]; then
+    CHUNKED_PREFILL_ARG="--no-enable-chunked-prefill"
+fi
+MAX_NUM_BATCHED_TOKENS_ARG=""
+if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
+    MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
+fi
+MAX_NUM_SEQS_ARG=""
+if [ -n "${MAX_NUM_SEQS:-}" ]; then
+    MAX_NUM_SEQS_ARG="--max-num-seqs ${MAX_NUM_SEQS}"
+fi
 
 env -u VLLM_PORT \
     "${DEVICE_AFFINITY_VAR}=${GPU_DEVICE}" \
@@ -163,7 +183,12 @@ vllm serve "$MODEL" \
     --attention-backend "$ATTENTION_BACKEND" \
     --port "$VLLM_PORT" \
     --no-async-scheduling \
+    $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
+    $PREFIX_CACHING_ARG \
+    $MAX_NUM_BATCHED_TOKENS_ARG \
+    $CHUNKED_PREFILL_ARG \
+    $MAX_NUM_SEQS_ARG \
     > "/tmp/build_${BUILD_ID}_vllm_ft.log" 2>&1 &
 
 NEW_VLLM_PID=$!
