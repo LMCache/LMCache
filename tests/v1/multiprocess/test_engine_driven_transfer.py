@@ -1296,6 +1296,49 @@ def test_server_store_and_retrieve_cpu_chunks(
     assert torch.allclose(recovered_chunks[0], payload)
 
 
+def test_server_engine_driven_transfer_publishes_lifecycle_events(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Verify engine-driven transfers emit observability start/end event pairs."""
+    # First Party
+    from lmcache.v1.mp_observability.event import EventType
+
+    mock_storage = MagicMock()
+    memory_obj = MagicMock()
+    memory_obj.tensor = torch.zeros(2, 2, 8, 16)
+    mock_storage.reserve_write.return_value = {"obj": memory_obj}
+
+    @contextmanager
+    def _read_prefetched_results(_keys: Any) -> Any:
+        yield [memory_obj]
+
+    mock_storage.read_prefetched_results.side_effect = _read_prefetched_results
+    module, _, _, ctx = server_module_factory(mock_storage=mock_storage)
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    key = _default_key()
+
+    module.prepare_store(key, 2)
+    assert module.commit_store(key, 2, pickle.dumps([torch.ones_like(memory_obj.tensor)]))
+
+    assert module.prepare_retrieve(key, 2).success
+    assert module.commit_retrieve(key, 2)
+
+    events = [call.args[0] for call in ctx.event_bus.publish.call_args_list]
+    assert [event.event_type for event in events] == [
+        EventType.MP_STORE_START,
+        EventType.MP_STORE_END,
+        EventType.MP_RETRIEVE_START,
+        EventType.MP_RETRIEVE_END,
+    ]
+    assert events[1].metadata["stored_count"] == 1
+    assert events[1].metadata["total_bytes"] == memory_obj.tensor.nbytes
+    assert events[3].metadata["retrieved_count"] == 1
+    assert events[3].metadata["total_bytes"] == memory_obj.tensor.nbytes
+
+
 def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,

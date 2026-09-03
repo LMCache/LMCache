@@ -32,6 +32,7 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
 # Local
@@ -41,6 +42,16 @@ from .server_transfer import (
 )
 
 logger = init_logger(__name__)
+
+
+def _chunk_nbytes(metadata: EngineDrivenContextMetadata) -> int:
+    """Return the serialized byte size of one engine-driven cache chunk."""
+    return sum(
+        shape.numel() * torch.empty((), dtype=dtype).element_size()
+        for shape, dtype in zip(
+            metadata.layout_desc.shapes, metadata.layout_desc.dtypes
+        )
+    )
 
 
 @dataclass
@@ -90,6 +101,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             tuple[int, IPCCacheServerKey], list[ObjectKey]
         ] = {}
         self._pending_shm_lock = threading.Lock()
+        self._pending_transfer_events: set[
+            tuple[str, int, str, IPCCacheServerKey]
+        ] = set()
+        self._transfer_event_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
 
     @property
@@ -168,6 +183,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         with self._lock:
             self._engine_driven_contexts.clear()
             self._strategies.clear()
+        with self._transfer_event_lock:
+            self._pending_transfer_events.clear()
 
     def touch_instance(self, instance_id: int) -> None:
         """Refresh the worker's last-seen time and mark it ping-proven.
@@ -442,6 +459,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
+        if response.context.get("chunk_indices") != []:
+            self._publish_transfer_start("store", key, instance_id, entry)
         return response
 
     @_lmcache_nvtx_annotate
@@ -484,6 +503,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 num_tokens,
                 time.perf_counter() - st,
             )
+        self._publish_transfer_end("store", key, instance_id, entry, result)
         return result
 
     @_lmcache_nvtx_annotate
@@ -505,7 +525,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
@@ -513,6 +533,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()
+        if response.success:
+            self._publish_transfer_start("retrieve", key, instance_id, entry)
         return response
 
     @_lmcache_nvtx_annotate
@@ -530,7 +552,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Returns:
             Always ``True``.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
@@ -543,4 +565,79 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 num_tokens,
                 time.perf_counter() - st,
             )
+        self._publish_transfer_end("retrieve", key, instance_id, entry, result)
         return result
+
+    def _publish_transfer_start(
+        self,
+        operation: str,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        entry: EngineDrivenContextEntry,
+    ) -> None:
+        """Publish an engine-driven transfer start event once per operation."""
+        event_key = self._transfer_event_key(operation, key, instance_id)
+        with self._transfer_event_lock:
+            self._pending_transfer_events.add(event_key)
+        event_type = (
+            EventType.MP_STORE_START
+            if operation == "store"
+            else EventType.MP_RETRIEVE_START
+        )
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=event_type,
+                session_id=key.request_id,
+                metadata={
+                    "device": f"engine_driven:{instance_id}",
+                    "engine_id": instance_id,
+                    "model_name": entry.model_name,
+                },
+            )
+        )
+
+    def _publish_transfer_end(
+        self,
+        operation: str,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        entry: EngineDrivenContextEntry,
+        succeeded: bool,
+    ) -> None:
+        """Publish an engine-driven transfer end event for a started operation."""
+        event_key = self._transfer_event_key(operation, key, instance_id)
+        with self._transfer_event_lock:
+            if event_key not in self._pending_transfer_events:
+                return
+            self._pending_transfer_events.remove(event_key)
+
+        chunk_count = len(self._resolve_single_group_obj_keys(key)) if succeeded else 0
+        event_type = (
+            EventType.MP_STORE_END
+            if operation == "store"
+            else EventType.MP_RETRIEVE_END
+        )
+        metadata = {
+            "device": f"engine_driven:{instance_id}",
+            "engine_id": instance_id,
+            "model_name": entry.model_name,
+            "total_bytes": chunk_count * _chunk_nbytes(entry.metadata),
+            "num_tokens": chunk_count * self._ctx.chunk_size,
+        }
+        if operation == "store":
+            metadata["stored_count"] = chunk_count
+        else:
+            metadata["retrieved_count"] = chunk_count
+            metadata["cache_salt"] = key.cache_salt
+        self._ctx.event_bus.publish(
+            Event(event_type=event_type, session_id=key.request_id, metadata=metadata)
+        )
+
+    @staticmethod
+    def _transfer_event_key(
+        operation: str,
+        key: IPCCacheServerKey,
+        instance_id: int,
+    ) -> tuple[str, int, str, IPCCacheServerKey]:
+        """Return an event key that keeps request IDs distinct for equal cache keys."""
+        return operation, instance_id, key.request_id, key
