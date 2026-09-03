@@ -4,22 +4,30 @@
 from __future__ import annotations
 
 # Standard
+from pathlib import Path
 from typing import Any
+import base64
 import ctypes
 import dataclasses
+import json
 import stat
+import struct
 import sys
 import types
+import zlib
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.storage_backend.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
+    RawBlockKeySpec,
     encode_object_key,
     normalize_raw_block_placement_ids,
+    slot_identity_from_encoded_key,
 )
 from tests.v1.storage_backend.raw_block_test_utils import (
     RAW_BLOCK_CI_BLOCK_ALIGN,
@@ -37,6 +45,73 @@ from tests.v1.storage_backend.raw_block_test_utils import (
 import lmcache.v1.storage_backend.raw_block.core as raw_block_core
 
 pytest.importorskip("lmcache_rust_raw_block_io")
+
+
+def _read_latest_checkpoint(
+    path: Path,
+    core: RawBlockCore,
+) -> tuple[dict[str, Any], bytes]:
+    """Read the newest valid checkpoint from a test backing file."""
+    candidates: list[tuple[int, dict[str, Any], bytes]] = []
+    header_struct = struct.Struct("<8sIQQI")
+    with path.open("rb") as device:
+        for container_offset in core.metadata_container_offsets():
+            device.seek(container_offset)
+            header = device.read(core.block_align)
+            if len(header) < header_struct.size:
+                continue
+            magic, version, sequence, payload_len, checksum = header_struct.unpack(
+                header[: header_struct.size]
+            )
+            if magic != b"LMCIDX01" or version != core.meta_version:
+                continue
+            device.seek(container_offset + core.block_align)
+            payload = device.read(payload_len)
+            if len(payload) != payload_len:
+                continue
+            if zlib.crc32(payload) & 0xFFFFFFFF != checksum:
+                continue
+            candidates.append((int(sequence), json.loads(payload), payload))
+
+    if not candidates:
+        raise AssertionError("no valid metadata checkpoint found")
+    _, state, payload = max(candidates, key=lambda item: item[0])
+    return state, payload
+
+
+def _read_slot_header(path: Path, offset: int, header_bytes: int) -> bytes:
+    """Read one complete raw-block slot header from a test file."""
+    with path.open("rb") as device:
+        device.seek(offset)
+        header = device.read(header_bytes)
+    if len(header) != header_bytes:
+        raise AssertionError("short raw-block slot header")
+    return header
+
+
+def _write_checkpoint_state(
+    path: Path,
+    core: RawBlockCore,
+    state: dict[str, Any],
+) -> None:
+    """Write one test checkpoint copy using the mirrored metadata wire format."""
+    payload = json.dumps(state, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
+    header_struct = struct.Struct("<8sIQQI")
+    header = header_struct.pack(
+        b"LMCIDX01",
+        core.meta_version,
+        1,
+        len(payload),
+        zlib.crc32(payload) & 0xFFFFFFFF,
+    )
+    container_offset = core.metadata_container_offsets()[0]
+    with path.open("r+b") as device:
+        device.seek(container_offset)
+        device.write(header)
+        device.write(b"\x00" * (core.block_align - len(header)))
+        device.write(payload)
 
 
 def test_normalize_raw_block_placement_ids_rejects_out_of_range() -> None:
@@ -296,6 +371,265 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
         assert memory_obj_bytes(loaded) == payload
     finally:
         recovered.close()
+
+
+def test_raw_block_core_reads_legacy_v1_checkpoint_and_slot_header(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    spec = encode_object_key(make_object_key(32))
+    payload = b"legacy-raw-block-payload"
+
+    core = RawBlockCore(
+        dataclasses.replace(config, load_checkpoint_on_init=False),
+        key_namespace="object",
+    )
+    try:
+        assert core.put_many([spec], [make_memory_obj(payload)]).results == [True]
+        offset = core.entry_offset(spec.encoded)
+        assert offset is not None
+        with path.open("r+b") as device:
+            device.seek(offset + 24)
+            device.write(b"\x00" * (config.header_bytes - 24))
+
+        state = {
+            "version": 1,
+            "device_path": str(path),
+            "capacity_bytes": core.capacity_bytes,
+            "block_align": core.block_align,
+            "header_bytes": core.header_bytes,
+            "slot_bytes": core.slot_bytes,
+            "meta_total_bytes": core.meta_total_bytes,
+            "meta_magic": core.meta_magic_text,
+            "meta_version": core.meta_version,
+            "data_base_offset": core.data_base_offset(),
+            "next_slot": 1,
+            "entries": {
+                spec.encoded: {
+                    "offset": offset,
+                    "size": len(payload),
+                    "shape": [len(payload)],
+                    "dtype": "uint8",
+                    "fmt": "BINARY",
+                    "cached_positions": None,
+                }
+            },
+        }
+    finally:
+        core.close()
+    _write_checkpoint_state(path, core, state)
+
+    recovered = RawBlockCore(config, key_namespace="object")
+    try:
+        assert recovered.contains_key(spec.encoded) is True
+        loaded = make_empty_memory_obj(len(payload))
+        assert recovered.load_many_into([spec.encoded], [loaded]) == [True]
+        assert memory_obj_bytes(loaded) == payload
+    finally:
+        recovered.close()
+
+
+def test_raw_block_core_checkpoint_uses_slot_manifest_and_header_metadata(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    specs = [encode_object_key(make_object_key(35 + i)) for i in range(3)]
+    payloads = [b"compact-a", b"compact-b", b"compact-c"]
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        objects = [make_memory_obj(payload) for payload in payloads]
+        objects[1].metadata.cached_positions = torch.tensor([1, 4, 7])
+        assert core.put_many(specs, objects).results == [True, True, True]
+        core.checkpoint_now()
+
+        state, payload = _read_latest_checkpoint(path, core)
+        assert state["version"] == 2
+        assert state["slot_manifest_version"] == 1
+        assert state["slot_manifest_count"] == len(specs)
+        assert state["entries"] == {}
+        manifest = base64.b64decode(state["slot_manifest"])
+        assert len(manifest) == len(specs) * struct.Struct("<IQ").size
+        assert all(spec.encoded.encode() not in payload for spec in specs)
+
+        recovery_header = struct.Struct("<8sHII")
+        for spec, expected_payload in zip(specs, payloads, strict=True):
+            offset = core.entry_offset(spec.encoded)
+            assert offset is not None
+            header = _read_slot_header(path, offset, config.header_bytes)
+            assert header[:8] == b"LMCBLK01"
+            record_header = header[24 : 24 + recovery_header.size]
+            magic, version, record_len, checksum = recovery_header.unpack(
+                record_header
+            )
+            assert magic == b"LMCRCV01"
+            assert version == 1
+            record = header[
+                24 + recovery_header.size : 24 + recovery_header.size + record_len
+            ]
+            assert zlib.crc32(record) & 0xFFFFFFFF == checksum
+            record_data = json.loads(record)
+            assert record_data["key"] == spec.encoded
+            assert record_data["namespace"] == "object"
+            assert record_data["shape"] == [len(expected_payload)]
+
+        recovered = RawBlockCore(config, key_namespace="object")
+        try:
+            assert recovered.exists_many([spec.encoded for spec in specs]) == [
+                True,
+                True,
+                True,
+            ]
+            loaded = [make_empty_memory_obj(len(payload)) for payload in payloads]
+            assert recovered.load_many_into(
+                [spec.encoded for spec in specs], loaded
+            ) == [True, True, True]
+            assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+            recovered_metadata = recovered.get_metadata_many(
+                [spec.encoded for spec in specs]
+            )
+            assert recovered_metadata[1] is not None
+            assert recovered_metadata[1].cached_positions is not None
+            assert recovered_metadata[1].cached_positions.tolist() == [1, 4, 7]
+        finally:
+            recovered.close()
+    finally:
+        core.close()
+
+
+def test_raw_block_core_compact_manifest_rejects_reused_slot(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    original = encode_object_key(make_object_key(36))
+    replacement = encode_object_key(make_object_key(37))
+
+    core = RawBlockCore(config, key_namespace="object")
+    recovered = None
+    try:
+        assert core.put_many([original], [make_memory_obj(b"original")]).results == [
+            True
+        ]
+        core.checkpoint_now()
+        assert core.delete_many([original.encoded]) == [True]
+        assert core.put_many(
+            [replacement], [make_memory_obj(b"replacement")]
+        ).results == [True]
+
+        # The latest durable checkpoint still commits ``original``. The slot
+        # header now identifies ``replacement``, so recovery must not resurrect
+        # either uncommitted replacement data or the stale committed key.
+        recovered = RawBlockCore(config, key_namespace="object")
+        assert recovered.exists_many([original.encoded, replacement.encoded]) == [
+            False,
+            False,
+        ]
+        assert recovered.report_status()["free_slot_count"] == 1
+    finally:
+        if recovered is not None:
+            recovered.close()
+        core.close()
+
+
+def test_raw_block_core_compact_manifest_rejects_corrupt_slot_record(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    spec = encode_object_key(make_object_key(38))
+
+    core = RawBlockCore(config, key_namespace="object")
+    recovered = None
+    try:
+        assert core.put_many([spec], [make_memory_obj(b"corruptible")]).results == [
+            True
+        ]
+        core.checkpoint_now()
+        offset = core.entry_offset(spec.encoded)
+        assert offset is not None
+
+        record_payload_offset = 24 + struct.Struct("<8sHII").size
+        with path.open("r+b") as device:
+            device.seek(offset + record_payload_offset)
+            original_byte = device.read(1)
+            assert original_byte
+            device.seek(offset + record_payload_offset)
+            device.write(bytes([original_byte[0] ^ 0x01]))
+
+        recovered = RawBlockCore(config, key_namespace="object")
+        assert recovered.contains_key(spec.encoded) is False
+        assert recovered.report_status()["free_slot_count"] == 1
+    finally:
+        if recovered is not None:
+            recovered.close()
+        core.close()
+
+
+def test_raw_block_core_compact_manifest_falls_back_for_large_key(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    compact = encode_object_key(make_object_key(39))
+    oversized_encoded = "x" * 5000
+    oversized = RawBlockKeySpec(
+        encoded=oversized_encoded,
+        slot_identity=slot_identity_from_encoded_key(oversized_encoded, "object"),
+    )
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        assert core.put_many(
+            [compact, oversized],
+            [make_memory_obj(b"compact"), make_memory_obj(b"fallback")],
+        ).results == [True, True]
+        core.checkpoint_now()
+
+        state, payload = _read_latest_checkpoint(path, core)
+        assert state["version"] == 2
+        assert state["slot_manifest_count"] == 1
+        assert compact.encoded.encode() not in payload
+        assert oversized.encoded.encode() in payload
+    finally:
+        core.close()
+
+    recovered = RawBlockCore(config, key_namespace="object")
+    try:
+        assert recovered.exists_many([compact.encoded, oversized.encoded]) == [
+            True,
+            True,
+        ]
+        loaded = [make_empty_memory_obj(7), make_empty_memory_obj(8)]
+        assert recovered.load_many_into(
+            [compact.encoded, oversized.encoded], loaded
+        ) == [True, True]
+        assert [memory_obj_bytes(obj) for obj in loaded] == [b"compact", b"fallback"]
+    finally:
+        recovered.close()
+
+
+def test_raw_block_core_rejects_duplicate_compact_manifest_slots(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    core = RawBlockCore(config, key_namespace="object")
+
+    try:
+        manifest_record = struct.pack("<IQ", 0, 1)
+        manifest = base64.b64encode(manifest_record * 2).decode("ascii")
+        state = {
+            "version": 2,
+            "device_path": str(path),
+            "capacity_bytes": core.capacity_bytes,
+            "block_align": core.block_align,
+            "header_bytes": core.header_bytes,
+            "slot_bytes": core.slot_bytes,
+            "meta_total_bytes": core.meta_total_bytes,
+            "meta_magic": core.meta_magic_text,
+            "meta_version": core.meta_version,
+            "data_base_offset": core.data_base_offset(),
+            "next_slot": 1,
+            "key_namespace": "object",
+            "slot_manifest_version": 1,
+            "slot_manifest_count": 2,
+            "slot_manifest": manifest,
+            "entries": {},
+        }
+        assert core.apply_loaded_state(state) is False
+    finally:
+        core.close()
 
 
 def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):

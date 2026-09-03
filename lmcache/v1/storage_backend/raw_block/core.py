@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
+import base64
 import ctypes
 import json
 import os
@@ -41,6 +42,14 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
+_CHECKPOINT_STATE_VERSION = 2
+_SLOT_HEADER_BASE_BYTES = 24
+_SLOT_HEADER_MAGIC = b"LMCBLK01"
+_SLOT_RECOVERY_MAGIC = b"LMCRCV01"
+_SLOT_RECOVERY_VERSION = 1
+_SLOT_RECOVERY_HEADER_STRUCT = struct.Struct("<8sHII")
+_SLOT_MANIFEST_STRUCT = struct.Struct("<IQ")
+_SLOT_MANIFEST_VERSION = 1
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
@@ -205,6 +214,8 @@ class _Entry:
     offset: int
     size: int
     meta: DiskCacheMetadata
+    slot_identity: int | None = None
+    has_recovery_record: bool = False
 
 
 @dataclass
@@ -784,7 +795,13 @@ class RawBlockCore:
                 )
                 self._inflight[key.encoded] = _Inflight(offset=offset, meta=meta)
 
-            success = self._write_one(key, obj, offset, placement_id=placement_id)
+            success, has_recovery_record = self._write_one(
+                key,
+                obj,
+                offset,
+                metadata=meta,
+                placement_id=placement_id,
+            )
 
             with self._lock:
                 inflight = self._inflight.pop(key.encoded, None)
@@ -803,6 +820,8 @@ class RawBlockCore:
                     offset=inflight.offset,
                     size=inflight.meta.size,
                     meta=inflight.meta,
+                    slot_identity=key.slot_identity,
+                    has_recovery_record=has_recovery_record,
                 )
                 self._meta_dirty_total += 1
                 results[i] = True
@@ -1665,22 +1684,31 @@ class RawBlockCore:
         memory_obj: MemoryObj,
         offset: int,
         *,
+        metadata: DiskCacheMetadata,
         placement_id: PlacementId = None,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """Write one object header and payload into a raw-block slot.
 
         Args:
             key: Raw-block key spec with the slot-header identity.
             memory_obj: Source object to write.
             offset: Slot byte offset on the raw device.
+            metadata: Durable metadata associated with the object.
             placement_id: FDP placement identifier for this raw-block write.
                 ``None`` omits the directive; explicit identifier 0 is rejected.
 
         Returns:
-            True when both header and payload writes complete; false otherwise.
+            A pair of ``(success, has_recovery_record)``. The second value is
+            false when the metadata did not fit in the configured slot header
+            and the checkpoint must retain the legacy per-entry fallback.
         """
         try:
-            header = self._encode_header(key.slot_identity, len(memory_obj.byte_array))
+            recovery_record = self._encode_slot_recovery_record(key.encoded, metadata)
+            header = self._encode_header(
+                key.slot_identity,
+                len(memory_obj.byte_array),
+                recovery_record,
+            )
             buf, payload_len, total_len = self._prepare_write_payload(memory_obj)
 
             with self._lock:
@@ -1712,33 +1740,174 @@ class RawBlockCore:
                 with self._lock:
                     self._inflight_io_count -= 1
                     self._last_io_ts = time.monotonic()
-            return True
+            return True, recovery_record is not None
         except Exception as e:
             logger.error("RawBlockCore write failed for %s: %s", key.encoded, e)
-            return False
+            return False, False
 
-    def _encode_header(self, slot_identity: int, payload_len: int) -> bytes:
-        """Encode a fixed-size raw-block slot header."""
+    def _encode_header(
+        self,
+        slot_identity: int,
+        payload_len: int,
+        recovery_record: bytes | None = None,
+    ) -> bytes:
+        """Encode a fixed-size raw-block slot header and recovery record.
+
+        Args:
+            slot_identity: Stable identity associated with the stored key.
+            payload_len: Logical payload length in bytes.
+            recovery_record: Optional encoded per-slot metadata record.
+
+        Returns:
+            A zero-filled header containing the base slot fields and, when it
+            fits, the supplied recovery record.
+
+        Raises:
+            ValueError: If ``recovery_record`` exceeds the configured header.
+        """
         hdr = bytearray(self.header_bytes)
-        hdr[0:8] = b"LMCBLK01"
+        hdr[0:8] = _SLOT_HEADER_MAGIC
         hdr[8:16] = int(slot_identity & ((1 << 64) - 1)).to_bytes(
             8,
             "little",
             signed=False,
         )
         hdr[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
+        if recovery_record is not None:
+            record_end = _SLOT_HEADER_BASE_BYTES + len(recovery_record)
+            if record_end > self.header_bytes:
+                raise ValueError("slot recovery record exceeds header capacity")
+            hdr[_SLOT_HEADER_BASE_BYTES:record_end] = recovery_record
         return bytes(hdr)
 
     def _decode_slot_header(self, hdr: bytes) -> Optional[tuple[int, int]]:
         """Decode a raw-block slot header into identity and payload length."""
-        if len(hdr) < 24 or hdr[0:8] != b"LMCBLK01":
+        if len(hdr) < _SLOT_HEADER_BASE_BYTES or hdr[0:8] != _SLOT_HEADER_MAGIC:
             return None
         slot_identity = int.from_bytes(hdr[8:16], "little", signed=False)
         payload_len = int.from_bytes(hdr[16:24], "little", signed=False)
         return slot_identity, payload_len
 
+    def _encode_slot_recovery_record(
+        self,
+        encoded_key: str,
+        metadata: DiskCacheMetadata,
+    ) -> bytes | None:
+        """Encode metadata needed to recover one slot from its header.
+
+        Args:
+            encoded_key: Reversible raw-block key stored in the slot.
+            metadata: Metadata associated with the key.
+
+        Returns:
+            A versioned, CRC-protected record when it fits in the configured
+            header; otherwise ``None`` so the central checkpoint can use its
+            legacy full-entry fallback.
+        """
+        try:
+            record_data = {
+                "key": encoded_key,
+                "namespace": self.key_namespace,
+                "shape": (
+                    list(metadata.shape) if metadata.shape is not None else None
+                ),
+                "dtype": self._checkpoint_dtype_name(metadata.dtype),
+                "fmt": self._checkpoint_fmt_name(metadata.fmt),
+                "cached_positions": self._checkpoint_cached_positions(
+                    metadata.cached_positions
+                ),
+            }
+            payload = json.dumps(
+                record_data,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        except Exception:
+            logger.warning(
+                "RawBlockCore cannot encode slot metadata for %s; "
+                "using legacy checkpoint fallback",
+                encoded_key,
+            )
+            return None
+
+        record_len = _SLOT_RECOVERY_HEADER_STRUCT.size + len(payload)
+        if _SLOT_HEADER_BASE_BYTES + record_len > self.header_bytes:
+            logger.debug(
+                "RawBlockCore slot metadata for %s exceeds header capacity; "
+                "using legacy checkpoint fallback",
+                encoded_key,
+            )
+            return None
+
+        record_header = _SLOT_RECOVERY_HEADER_STRUCT.pack(
+            _SLOT_RECOVERY_MAGIC,
+            _SLOT_RECOVERY_VERSION,
+            len(payload),
+            zlib.crc32(payload) & 0xFFFFFFFF,
+        )
+        return record_header + payload
+
+    def _decode_slot_recovery_record(
+        self,
+        hdr: bytes,
+    ) -> Optional[dict[str, Any]]:
+        """Decode and validate a per-slot recovery record.
+
+        Args:
+            hdr: Complete fixed-size slot header bytes.
+
+        Returns:
+            A decoded metadata dictionary, or ``None`` for a legacy header,
+            an incomplete record, or corruption.
+        """
+        record_offset = _SLOT_HEADER_BASE_BYTES
+        record_header_size = _SLOT_RECOVERY_HEADER_STRUCT.size
+        if len(hdr) < record_offset + record_header_size:
+            return None
+
+        record_header = hdr[record_offset : record_offset + record_header_size]
+        if not any(record_header):
+            return None
+        try:
+            magic, version, payload_len, payload_crc = (
+                _SLOT_RECOVERY_HEADER_STRUCT.unpack(record_header)
+            )
+        except struct.error:
+            return None
+        if magic != _SLOT_RECOVERY_MAGIC or version != _SLOT_RECOVERY_VERSION:
+            return None
+
+        payload_offset = record_offset + record_header_size
+        payload_end = payload_offset + int(payload_len)
+        if payload_len <= 0 or payload_end > len(hdr):
+            return None
+        payload = bytes(hdr[payload_offset:payload_end])
+        if zlib.crc32(payload) & 0xFFFFFFFF != int(payload_crc):
+            return None
+        try:
+            record_data = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(record_data, dict):
+            return None
+        if record_data.get("namespace") != self.key_namespace:
+            return None
+        if not isinstance(record_data.get("key"), str):
+            return None
+        return record_data
+
     def _read_slot_header(self, offset: int) -> Optional[tuple[int, int]]:
         """Read and decode the slot header at a raw-device offset."""
+        decoded = self._read_slot_header_record(offset)
+        if decoded is None:
+            return None
+        return decoded[0], decoded[1]
+
+    def _read_slot_header_record(
+        self,
+        offset: int,
+    ) -> Optional[tuple[int, int, Optional[dict[str, Any]]]]:
+        """Read a complete slot header and optionally decode recovery metadata."""
         buf = bytearray(self.header_bytes)
         try:
             with self._lock:
@@ -1752,7 +1921,14 @@ class RawBlockCore:
                 )
             ):
                 return None
-            return self._decode_slot_header(buf)
+            decoded = self._decode_slot_header(buf)
+            if decoded is None:
+                return None
+            slot_identity, payload_len = decoded
+            recovery = self._decode_slot_recovery_record(bytes(buf))
+            if recovery is None:
+                return slot_identity, payload_len, None
+            return slot_identity, payload_len, recovery
         except Exception:
             return None
         finally:
@@ -1944,48 +2120,122 @@ class RawBlockCore:
         return best_header, best_payload
 
     def _snapshot_state(self) -> tuple[dict[str, Any], int]:
-        """Build a JSON-serializable checkpoint state snapshot."""
+        """Build a compact, JSON-serializable checkpoint state snapshot."""
         with self._lock:
             dirty_total = self._meta_dirty_total
-            snapshot = {
-                "version": 1,
-                "device_path": self.device_path,
-                "capacity_bytes": self.capacity_bytes,
-                "block_align": self.block_align,
-                "header_bytes": self.header_bytes,
-                "slot_bytes": self.slot_bytes,
-                "meta_total_bytes": self.meta_total_bytes,
-                "meta_magic": self.meta_magic_text,
-                "meta_version": self.meta_version,
-                "data_base_offset": self._data_base_offset,
-                "next_slot": self._next_slot,
-                "entries": {
-                    encoded_key: {
-                        "offset": entry.offset,
-                        "size": entry.meta.size,
-                        "shape": list(entry.meta.shape)
-                        if entry.meta.shape is not None
-                        else None,
-                        "dtype": self._checkpoint_dtype_name(entry.meta.dtype),
-                        "fmt": (
-                            entry.meta.fmt.name
-                            if entry.meta.fmt is not None
-                            and hasattr(entry.meta.fmt, "name")
-                            else str(entry.meta.fmt)
-                            if entry.meta.fmt is not None
-                            else None
-                        ),
-                        "cached_positions": (
-                            entry.meta.cached_positions.tolist()
-                            if entry.meta.cached_positions is not None
-                            and hasattr(entry.meta.cached_positions, "tolist")
-                            else None
-                        ),
-                    }
-                    for encoded_key, entry in self._index.items()
-                },
-            }
+            indexed_entries = list(self._index.items())
+            next_slot = self._next_slot
+
+        manifest: list[tuple[int, int]] = []
+        fallback_entries: dict[str, dict[str, Any]] = {}
+        for encoded_key, entry in indexed_entries:
+            slot = self._offset_to_slot(int(entry.offset))
+            slot_identity = entry.slot_identity
+            can_use_manifest = (
+                entry.has_recovery_record
+                and 0 <= slot <= 0xFFFFFFFF
+                and slot_identity is not None
+                and 0 <= int(slot_identity) <= 0xFFFFFFFFFFFFFFFF
+            )
+            if can_use_manifest:
+                manifest.append((slot, int(slot_identity)))
+            else:
+                fallback_entries[encoded_key] = self._checkpoint_entry_state(entry)
+
+        snapshot = {
+            "version": _CHECKPOINT_STATE_VERSION,
+            "device_path": self.device_path,
+            "capacity_bytes": self.capacity_bytes,
+            "block_align": self.block_align,
+            "header_bytes": self.header_bytes,
+            "slot_bytes": self.slot_bytes,
+            "meta_total_bytes": self.meta_total_bytes,
+            "meta_magic": self.meta_magic_text,
+            "meta_version": self.meta_version,
+            "data_base_offset": self._data_base_offset,
+            "next_slot": next_slot,
+            "key_namespace": self.key_namespace,
+            "slot_manifest_version": _SLOT_MANIFEST_VERSION,
+            "slot_manifest_count": len(manifest),
+            "slot_manifest": self._encode_slot_manifest(manifest),
+            "entries": fallback_entries,
+        }
         return snapshot, dirty_total
+
+    def _checkpoint_entry_state(
+        self,
+        entry: _Entry,
+    ) -> dict[str, Any]:
+        """Return the legacy checkpoint fields for one indexed entry."""
+        return {
+            "offset": int(entry.offset),
+            "size": int(entry.size),
+            "shape": list(entry.meta.shape) if entry.meta.shape is not None else None,
+            "dtype": self._checkpoint_dtype_name(entry.meta.dtype),
+            "fmt": self._checkpoint_fmt_name(entry.meta.fmt),
+            "cached_positions": self._checkpoint_cached_positions(
+                entry.meta.cached_positions
+            ),
+        }
+
+    def _checkpoint_fmt_name(self, fmt: MemoryFormat | None) -> str | None:
+        """Return a stable checkpoint representation for a memory format."""
+        if fmt is None:
+            return None
+        if hasattr(fmt, "name"):
+            return str(fmt.name)
+        return str(fmt)
+
+    def _checkpoint_cached_positions(
+        self,
+        cached_positions: Any,
+    ) -> Any:
+        """Convert cached-position metadata to a JSON-compatible value."""
+        if cached_positions is None or not hasattr(cached_positions, "tolist"):
+            return None
+        return cached_positions.tolist()
+
+    def _encode_slot_manifest(self, records: Sequence[tuple[int, int]]) -> str:
+        """Encode compact ``(slot, expected_identity)`` manifest records."""
+        payload = bytearray(len(records) * _SLOT_MANIFEST_STRUCT.size)
+        for idx, (slot, slot_identity) in enumerate(records):
+            _SLOT_MANIFEST_STRUCT.pack_into(
+                payload,
+                idx * _SLOT_MANIFEST_STRUCT.size,
+                int(slot),
+                int(slot_identity),
+            )
+        return base64.b64encode(payload).decode("ascii")
+
+    def _decode_slot_manifest(
+        self,
+        manifest: Any,
+        manifest_count: Any,
+    ) -> Optional[list[tuple[int, int]]]:
+        """Decode and validate a compact checkpoint slot manifest."""
+        if not isinstance(manifest, str) or isinstance(manifest_count, bool):
+            return None
+        try:
+            count = int(manifest_count)
+            raw = base64.b64decode(manifest.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError, TypeError):
+            return None
+        if count < 0 or len(raw) != count * _SLOT_MANIFEST_STRUCT.size:
+            return None
+
+        records: list[tuple[int, int]] = []
+        seen_slots: set[int] = set()
+        for offset in range(0, len(raw), _SLOT_MANIFEST_STRUCT.size):
+            slot, slot_identity = _SLOT_MANIFEST_STRUCT.unpack_from(raw, offset)
+            if slot in seen_slots:
+                logger.warning(
+                    "RawBlockCore checkpoint contains duplicate manifest slot %d",
+                    slot,
+                )
+                return None
+            seen_slots.add(slot)
+            records.append((int(slot), int(slot_identity)))
+        return records
 
     def _checkpoint_dtype_name(self, dtype: torch.dtype | None) -> str | None:
         """Return a durable checkpoint string for a torch dtype.
@@ -2080,39 +2330,18 @@ class RawBlockCore:
         """Apply decoded checkpoint state after validating layout fields."""
         if not isinstance(data, dict):
             return False
-        if int(data.get("version", 0)) != 1:
+        try:
+            state_version = int(data.get("version", 0))
+        except (TypeError, ValueError):
             return False
-        checkpoint_device_path = data.get("device_path")
-        if checkpoint_device_path and checkpoint_device_path != self.device_path:
-            logger.warning("Device metadata device_path mismatch; ignoring metadata")
+        if state_version not in (1, _CHECKPOINT_STATE_VERSION):
             return False
-        if int(data.get("block_align", self.block_align)) != self.block_align:
-            logger.warning("Device metadata block_align mismatch; ignoring metadata")
-            return False
-        if int(data.get("header_bytes", self.header_bytes)) != self.header_bytes:
-            logger.warning("Device metadata header_bytes mismatch; ignoring metadata")
-            return False
-        if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:
-            logger.warning("Device metadata slot_bytes mismatch; ignoring metadata")
-            return False
-        if (
-            int(data.get("meta_total_bytes", self.meta_total_bytes))
-            != self.meta_total_bytes
-        ):
-            logger.warning(
-                "Device metadata meta_total_bytes mismatch; ignoring metadata"
-            )
-            return False
-        if str(data.get("meta_magic", self.meta_magic_text)) != self.meta_magic_text:
-            logger.warning("Device metadata meta_magic mismatch; ignoring metadata")
-            return False
-        if int(data.get("meta_version", self.meta_version)) != self.meta_version:
-            logger.warning("Device metadata meta_version mismatch; ignoring metadata")
+        if not self._validate_checkpoint_layout(data):
             return False
 
         try:
             next_slot = int(data.get("next_slot", 0))
-        except Exception:
+        except (TypeError, ValueError):
             logger.warning("Device metadata next_slot is invalid; ignoring metadata")
             return False
         if next_slot < 0 or next_slot > self._max_slots:
@@ -2122,6 +2351,37 @@ class RawBlockCore:
             )
             return False
 
+        loaded_entries: list[tuple[str, _Entry]] = []
+        if state_version == 1:
+            loaded_entries = self._decode_checkpoint_entries(data.get("entries", {}))
+        else:
+            try:
+                manifest_version = int(data.get("slot_manifest_version", 0))
+            except (TypeError, ValueError):
+                return False
+            if manifest_version != _SLOT_MANIFEST_VERSION:
+                return False
+            manifest = self._decode_slot_manifest(
+                data.get("slot_manifest"),
+                data.get("slot_manifest_count"),
+            )
+            if manifest is None:
+                logger.warning(
+                    "Device metadata slot manifest is invalid; ignoring metadata"
+                )
+                return False
+
+            loaded_entries = self._recover_manifest_entries(manifest, next_slot)
+            fallback_entries = self._decode_checkpoint_entries(
+                data.get("entries", {})
+            )
+            loaded_keys = {encoded_key for encoded_key, _ in loaded_entries}
+            loaded_entries.extend(
+                (encoded_key, entry)
+                for encoded_key, entry in fallback_entries
+                if encoded_key not in loaded_keys
+            )
+
         with self._lock:
             self._next_slot = next_slot
             self._free_slots = {}
@@ -2130,58 +2390,14 @@ class RawBlockCore:
             self._index.clear()
             self._lock_refcnt.clear()
 
-            entries = data.get("entries", {})
-            if isinstance(entries, dict):
-                for encoded_key, entry in entries.items():
-                    if not isinstance(entry, dict):
-                        continue
+            used_slots: set[int] = set()
+            for encoded_key, entry in loaded_entries:
+                slot = self._offset_to_slot(int(entry.offset))
+                if encoded_key in self._index or slot in used_slots:
+                    continue
+                self._index[encoded_key] = entry
+                used_slots.add(slot)
 
-                    offset = int(entry.get("offset", 0))
-                    size = int(entry.get("size", 0))
-                    shape_list = entry.get("shape")
-                    fmt_name = entry.get("fmt")
-                    cached_positions_list = entry.get("cached_positions")
-                    dtype_name = entry.get("dtype")
-
-                    if not self._is_valid_checkpoint_entry(offset, size):
-                        continue
-
-                    shape = (
-                        torch.Size(list(shape_list)) if shape_list is not None else None
-                    )
-                    fmt = (
-                        MemoryFormat[fmt_name]
-                        if isinstance(fmt_name, str)
-                        and fmt_name in MemoryFormat.__members__
-                        else MemoryFormat.UNDEFINED
-                    )
-                    cached_positions = (
-                        torch.tensor(cached_positions_list, dtype=torch.long)
-                        if cached_positions_list is not None
-                        else None
-                    )
-                    dtype = self._recover_checkpoint_dtype(
-                        str(encoded_key),
-                        dtype_name,
-                    )
-
-                    meta = DiskCacheMetadata(
-                        path=f"{self.device_path}@{offset}",
-                        size=size,
-                        shape=shape,
-                        dtype=dtype,
-                        cached_positions=cached_positions,
-                        fmt=fmt,
-                        pin_count=0,
-                    )
-                    self._index[encoded_key] = _Entry(
-                        offset=offset, size=size, meta=meta
-                    )
-
-            used_slots = {
-                self._offset_to_slot(int(entry.offset))
-                for entry in self._index.values()
-            }
             # Rebuild from committed entries instead of trusting checkpoint
             # free_slots. A crash-time checkpoint can otherwise preserve a slot
             # reserved by an uncommitted in-flight write as neither used nor free.
@@ -2195,6 +2411,190 @@ class RawBlockCore:
         if self.meta_verify_on_load:
             self._validate_loaded_entries()
         return True
+
+    def _validate_checkpoint_layout(self, data: dict[str, Any]) -> bool:
+        """Validate checkpoint fields that describe this raw-block layout."""
+        checkpoint_device_path = data.get("device_path")
+        if checkpoint_device_path and checkpoint_device_path != self.device_path:
+            logger.warning("Device metadata device_path mismatch; ignoring metadata")
+            return False
+        layout_fields = (
+            ("block_align", self.block_align),
+            ("header_bytes", self.header_bytes),
+            ("slot_bytes", self.slot_bytes),
+            ("meta_total_bytes", self.meta_total_bytes),
+        )
+        for field_name, expected in layout_fields:
+            try:
+                actual = int(data.get(field_name, expected))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Device metadata %s is invalid; ignoring metadata", field_name
+                )
+                return False
+            if actual != expected:
+                logger.warning(
+                    "Device metadata %s mismatch; ignoring metadata", field_name
+                )
+                return False
+        if str(data.get("meta_magic", self.meta_magic_text)) != self.meta_magic_text:
+            logger.warning("Device metadata meta_magic mismatch; ignoring metadata")
+            return False
+        try:
+            checkpoint_meta_version = int(
+                data.get("meta_version", self.meta_version)
+            )
+        except (TypeError, ValueError):
+            logger.warning("Device metadata meta_version is invalid; ignoring metadata")
+            return False
+        if checkpoint_meta_version != self.meta_version:
+            logger.warning("Device metadata meta_version mismatch; ignoring metadata")
+            return False
+        checkpoint_namespace = data.get("key_namespace")
+        if (
+            checkpoint_namespace is not None
+            and checkpoint_namespace != self.key_namespace
+        ):
+            logger.warning("Device metadata key namespace mismatch; ignoring metadata")
+            return False
+        return True
+
+    def _decode_checkpoint_entries(
+        self,
+        entries: Any,
+    ) -> list[tuple[str, _Entry]]:
+        """Decode legacy full-entry checkpoint records, skipping bad entries."""
+        if not isinstance(entries, dict):
+            return []
+        decoded: list[tuple[str, _Entry]] = []
+        for encoded_key, entry in entries.items():
+            parsed = self._decode_checkpoint_entry(encoded_key, entry)
+            if parsed is not None:
+                decoded.append(parsed)
+        return decoded
+
+    def _decode_checkpoint_entry(
+        self,
+        encoded_key: Any,
+        entry: Any,
+        *,
+        slot_identity: int | None = None,
+        has_recovery_record: bool = False,
+    ) -> Optional[tuple[str, _Entry]]:
+        """Decode one checkpoint entry into the in-memory metadata model."""
+        if not isinstance(encoded_key, str) or not isinstance(entry, dict):
+            return None
+        try:
+            offset = int(entry.get("offset", 0))
+            size = int(entry.get("size", 0))
+        except (TypeError, ValueError):
+            return None
+        if not self._is_valid_checkpoint_entry(offset, size):
+            return None
+
+        shape_list = entry.get("shape")
+        if shape_list is not None and (
+            not isinstance(shape_list, (list, tuple))
+            or any(
+                not isinstance(dim, int) or isinstance(dim, bool) or dim < 0
+                for dim in shape_list
+            )
+        ):
+            return None
+        try:
+            shape = torch.Size(shape_list) if shape_list is not None else None
+        except (TypeError, ValueError, OverflowError, RuntimeError):
+            return None
+
+        cached_positions_list = entry.get("cached_positions")
+        if cached_positions_list is not None and not isinstance(
+            cached_positions_list, (list, tuple)
+        ):
+            return None
+        try:
+            cached_positions = (
+                torch.tensor(cached_positions_list, dtype=torch.long)
+                if cached_positions_list is not None
+                else None
+            )
+        except (TypeError, ValueError, OverflowError, RuntimeError):
+            return None
+
+        fmt_name = entry.get("fmt")
+        fmt = (
+            MemoryFormat[fmt_name]
+            if isinstance(fmt_name, str) and fmt_name in MemoryFormat.__members__
+            else MemoryFormat.UNDEFINED
+        )
+        dtype = self._recover_checkpoint_dtype(encoded_key, entry.get("dtype"))
+        metadata = DiskCacheMetadata(
+            path=f"{self.device_path}@{offset}",
+            size=size,
+            shape=shape,
+            dtype=dtype,
+            cached_positions=cached_positions,
+            fmt=fmt,
+            pin_count=0,
+        )
+        return encoded_key, _Entry(
+            offset=offset,
+            size=size,
+            meta=metadata,
+            slot_identity=slot_identity,
+            has_recovery_record=has_recovery_record,
+        )
+
+    def _recover_manifest_entries(
+        self,
+        manifest: Sequence[tuple[int, int]],
+        next_slot: int,
+    ) -> list[tuple[str, _Entry]]:
+        """Recover entries whose metadata is stored in committed slot headers."""
+        recovered: list[tuple[str, _Entry]] = []
+        seen_keys: set[str] = set()
+        for slot, expected_identity in manifest:
+            if slot >= next_slot or slot >= self._max_slots:
+                continue
+            offset = self._slot_to_offset(slot)
+            slot_header = self._read_slot_header_record(offset)
+            if slot_header is None:
+                continue
+            slot_identity, payload_len, record_data = slot_header
+            if record_data is None or int(slot_identity) != int(expected_identity):
+                continue
+
+            encoded_key = record_data.get("key")
+            if not isinstance(encoded_key, str) or encoded_key in seen_keys:
+                continue
+            try:
+                derived_identity = slot_identity_from_encoded_key(
+                    encoded_key,
+                    self.key_namespace,
+                )
+            except Exception:
+                continue
+            if int(derived_identity) != int(slot_identity):
+                continue
+
+            checkpoint_entry = {
+                "offset": offset,
+                "size": payload_len,
+                "shape": record_data.get("shape"),
+                "dtype": record_data.get("dtype"),
+                "fmt": record_data.get("fmt"),
+                "cached_positions": record_data.get("cached_positions"),
+            }
+            parsed = self._decode_checkpoint_entry(
+                encoded_key,
+                checkpoint_entry,
+                slot_identity=int(slot_identity),
+                has_recovery_record=True,
+            )
+            if parsed is None:
+                continue
+            recovered.append(parsed)
+            seen_keys.add(encoded_key)
+        return recovered
 
     def _recover_checkpoint_dtype(
         self,
