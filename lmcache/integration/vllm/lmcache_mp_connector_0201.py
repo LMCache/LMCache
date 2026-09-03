@@ -298,7 +298,7 @@ class LMCacheMPRequestMetadata:
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
-        # TODO: This should be checked everytime we update the num_stored_blocks
+        # TODO: This should be checked every time we update the num_stored_blocks
         #
         # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
         #
