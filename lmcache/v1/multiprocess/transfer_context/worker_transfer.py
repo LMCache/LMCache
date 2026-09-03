@@ -15,9 +15,6 @@ import threading
 import torch
 
 # First Party
-import lmcache.lmcache_native as lmcache_native
-
-# First Party
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
@@ -50,6 +47,7 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.kv_wrap import wrap_kv_caches
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
