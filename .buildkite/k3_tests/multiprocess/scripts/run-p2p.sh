@@ -164,7 +164,7 @@ launch_vllm() {
     "${VLLM_DEVICE_ENV[@]}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
+    VLLM_BATCH_INVARIANT="${BATCH_INVARIANT:-1}" \
     PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
         --kv-transfer-config "$(CONNECTOR_CONFIG "$3")" \

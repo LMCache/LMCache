@@ -139,6 +139,34 @@ print(int(total))
 EOF
 }
 
+wait_for_l1_writes_to_settle() {
+    local timeout_seconds=60
+    local deadline=$(( $(date +%s) + timeout_seconds ))
+    local previous=-1
+    local stable_samples=0
+
+    echo "Waiting for asynchronous L1 stores to settle..."
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local current
+        current=$(scrape_l1_write_keys) || return 1
+
+        if [ "$current" -eq "$previous" ]; then
+            stable_samples=$((stable_samples + 1))
+            if [ "$stable_samples" -ge 3 ]; then
+                echo "L1 writes settled at $current chunks."
+                return 0
+            fi
+        else
+            previous=$current
+            stable_samples=0
+        fi
+        sleep 5
+    done
+
+    echo "FAIL: L1 writes did not settle within ${timeout_seconds}s"
+    return 1
+}
+
 wait_for_lmcache_http() {
     local deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -258,6 +286,10 @@ if ! run_bench_round "round1" "41"; then
     exit 1
 fi
 
+if ! wait_for_l1_writes_to_settle; then
+    exit 1
+fi
+
 ROUND1_WRITES=$(scrape_l1_write_keys) || {
     echo "FAIL: could not scrape /metrics after round 1"
     exit 1
@@ -301,6 +333,10 @@ if ! run_bench_round "round2" "42"; then
     echo "FAIL: round 2 bench failed"
     echo "--- vllm log (last 80 lines) ---"
     tail -80 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
+    exit 1
+fi
+
+if ! wait_for_l1_writes_to_settle; then
     exit 1
 fi
 
