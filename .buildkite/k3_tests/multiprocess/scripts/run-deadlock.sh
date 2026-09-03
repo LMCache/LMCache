@@ -100,8 +100,8 @@ echo "$LMCACHE_PID" >> "$PID_FILE"
 echo "LMCache server started (PID=$LMCACHE_PID)"
 sleep 10
 
-# ── 2. Launch vLLM with DeepSeek TP=2 ─────────────────────
-echo "=== Launching vLLM (DeepSeek TP=2) ==="
+# ── 2. Launch vLLM ─────────────────────────────────────────
+echo "=== Launching vLLM ==="
 echo "Model: $MODEL"
 echo "Port: $VLLM_PORT"
 
@@ -135,11 +135,19 @@ HUGGING_FACE_OVERRIDES_ARG=()
 if [ -n "${VLLM_HF_OVERRIDES:-}" ]; then
     HUGGING_FACE_OVERRIDES_ARG=(--hf-overrides "$VLLM_HF_OVERRIDES")
 fi
+if [ "$TORCH_DEVICE_TYPE" = "xpu" ]; then
+    BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
+else
+    BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
+fi
 
 env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
     "${VLLM_DEVICE_ENV[@]}" \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
+    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
+    VLLM_BATCH_INVARIANT="$BATCH_INVARIANT" \
+    PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --block-size "$VLLM_BLOCK_SIZE" \
