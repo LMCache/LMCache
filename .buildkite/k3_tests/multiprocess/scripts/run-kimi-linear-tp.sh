@@ -50,6 +50,18 @@ BUILD_ID="${BUILD_ID:-local_$$}"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache.log"
 
+# On any failure, surface the LMCache server log in the step output: the
+# server replies nothing when a handler raises (the client just times out),
+# so the traceback only exists in this log, and /tmp is not an artifact path.
+dump_lmcache_log_on_failure() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ -f "$LMCACHE_LOG" ]; then
+        echo "=== LMCache server log tail (exit=$status) ===" >&2
+        tail -n 200 "$LMCACHE_LOG" >&2
+    fi
+}
+trap dump_lmcache_log_on_failure EXIT
+
 # vLLM block size == LMCache chunk size for this model. 'align' requires
 # block_size <= max_num_batched_tokens < 2*block_size so every prefill step
 # advances exactly one block (one reusable linear-attention snapshot per chunk).
