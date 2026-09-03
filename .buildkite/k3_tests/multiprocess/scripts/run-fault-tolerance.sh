@@ -50,10 +50,11 @@ wait_for_port_release() {
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local listener_pids
-        listener_pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
-        if [ -z "$listener_pids" ]; then
+        if ! timeout 1 bash -c "</dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
             return 0
         fi
+        listener_pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+        listener_pids="${listener_pids:-unknown}"
         echo "Waiting for previous $service listener on port $port: $listener_pids"
         sleep 2
     done
