@@ -66,7 +66,6 @@ try:
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         ParallelStrategy,
-        send_lmcache_request,
     )
 
     try:
@@ -618,7 +617,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
                 ctx = FeatureContext(
                     worker_adapter=self.worker_adapter,
-                    send_lmcache_request=send_lmcache_request,
                 )
                 requested = (
                     {TRANSFER_QUERY} if self.transfer_intermediate_tensors else set()

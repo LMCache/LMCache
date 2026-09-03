@@ -45,12 +45,12 @@ class FakeHeartbeatThread:
 
     def __init__(
         self,
-        mq_client: object = None,
+        req_client: object = None,
         health_event: threading.Event | None = None,
         interval: float = 0.0,
         instance_id: int | None = None,
     ) -> None:
-        self.mq_client = mq_client
+        self.req_client = req_client
         self.health_event = (
             health_event if health_event is not None else threading.Event()
         )
@@ -149,17 +149,16 @@ def fake_adapter(monkeypatch):
     """Build an adapter with the network boundary stubbed. Returns
     ``(adapter, send_mock, future)``; ``future.result()`` defaults to succeed.
     ``HeartbeatThread`` is replaced by ``FakeHeartbeatThread``."""
-    # Stub the MQ boundary so __init__'s chunk-size query and any later
-    # send_lmcache_request call don't touch a real socket.
-    fake_client = MagicMock(name="mq_client")
+    # Stub the raw ZMQ boundary so facade calls do not touch a real socket.
+    fake_client = MagicMock(name="req_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
     future = MagicMock(name="future")
     future.result.return_value = None
-    send_mock = MagicMock(name="send_lmcache_request", return_value=future)
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_mock)
+    send_mock = MagicMock(name="submit_request", return_value=future)
+    fake_client.submit_request = send_mock
 
     FakeHeartbeatThread.instances.clear()
     FakeHeartbeatThread.start_hook = None
@@ -200,7 +199,7 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     assert adapter.kv_caches is new_caches
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
-    assert args[1] == RequestType.REGISTER_KV_CACHE
+    assert args[0] == RequestType.REGISTER_KV_CACHE
 
 
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
@@ -235,8 +234,8 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     assert adapter.kv_caches is cpu_kv
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
-    assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
-    assert len(args[2]) == 1
+    assert args[0] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+    assert len(args[1]) == 1
     assert adapter.create_recorded_event() is None
 
 
@@ -264,7 +263,7 @@ def test_register_kv_caches_tuple_caches_use_engine_driven_context(
     assert adapter.kv_caches is tuple_kv
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
-    assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+    assert args[0] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
     assert adapter.create_recorded_event() is None
 
 
@@ -687,11 +686,11 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     first successful ping invokes the recover callback while the event
     is still cleared, then sets the event."""
     monkeypatch.setattr(
-        adapter_mod, "send_ping", lambda mq_client, timeout, instance_id=None: True
+        adapter_mod, "send_ping", lambda req_client, timeout, instance_id=None: True
     )
     health_event = threading.Event()  # cleared: pessimistic start state
     heartbeat = HeartbeatThread(
-        mq_client=MagicMock(name="mq_client"),
+        req_client=MagicMock(name="req_client"),
         health_event=health_event,
         interval=60.0,
     )
@@ -766,7 +765,7 @@ def test_dropped_retrieve_reported_once_via_healthy_get_finished(
 
 def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
-    stray heartbeat ping can race the closing mq_client."""
+    stray heartbeat ping can race the closing req_client."""
     adapter, send_mock, future = fake_adapter
     adapter.transfer_ctx = MagicMock()
     adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
@@ -775,7 +774,9 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     stop_state_at_unregister: list[bool] = []
 
     def record_send(
-        mq_client: object, request_type: RequestType, payloads: list[object]
+        request_type: RequestType,
+        payloads: list[object],
+        _response_cls: object,
     ) -> MagicMock:
         if request_type == RequestType.UNREGISTER_KV_CACHE:
             stop_state_at_unregister.append(heartbeat.stop_requested)
@@ -800,8 +801,8 @@ def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
     assert FakeHeartbeatThread.instances == []
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
-    assert args[1] == RequestType.UNREGISTER_KV_CACHE
-    assert args[2] == [adapter.instance_id]
+    assert args[0] == RequestType.UNREGISTER_KV_CACHE
+    assert args[1] == [adapter.instance_id]
 
 
 def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> None:
@@ -812,7 +813,7 @@ def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> Non
     release_ping = threading.Event()
 
     def slow_ping(
-        mq_client: object, timeout: float, instance_id: int | None = None
+        req_client: object, timeout: float, instance_id: int | None = None
     ) -> bool:
         ping_entered.set()
         release_ping.wait(timeout=10.0)
@@ -821,7 +822,7 @@ def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> Non
     monkeypatch.setattr(adapter_mod, "send_ping", slow_ping)
     health_event = threading.Event()  # cleared: a success would take the edge
     heartbeat = HeartbeatThread(
-        mq_client=MagicMock(name="mq_client"),
+        req_client=MagicMock(name="req_client"),
         health_event=health_event,
         interval=60.0,
     )
@@ -889,13 +890,13 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
         def transfer_ctx(self, value):
             pass
 
-    fake_client = MagicMock(name="mq_client")
+    fake_client = MagicMock(name="req_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
     future = MagicMock(name="future")
     future.result.return_value = None
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", lambda *a, **kw: future)
+    fake_client.submit_request.return_value = future
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
     # First Party
     from lmcache.v1.multiprocess.transfer_context import worker_transfer

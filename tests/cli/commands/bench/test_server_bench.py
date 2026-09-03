@@ -9,6 +9,7 @@ Covers:
 
 # Standard
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
 import argparse
 import json
 import threading
@@ -33,6 +34,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -591,9 +593,9 @@ class _LookupRouter:
 
 
 class TestLookupProtocol:
-    def _make_client(self, endpoint: str) -> MessageQueueClient:
+    def _make_client(self, endpoint: str) -> ZmqMultiprocessClient:
         ctx = zmq.Context.instance()
-        return MessageQueueClient(endpoint, ctx)
+        return ZmqMultiprocessClient(MessageQueueClient(endpoint, ctx))
 
     def test_send_lookup_void_reply_is_success(
         self,
@@ -687,9 +689,9 @@ class _UnregisterRouter:
 
 
 class TestUnregisterKVCache:
-    def _make_client(self, endpoint: str) -> MessageQueueClient:
+    def _make_client(self, endpoint: str) -> ZmqMultiprocessClient:
         ctx = zmq.Context.instance()
-        return MessageQueueClient(endpoint, ctx)
+        return ZmqMultiprocessClient(MessageQueueClient(endpoint, ctx))
 
     def test_handle_mode_sends_unregister_kv_cache(
         self,
@@ -815,9 +817,9 @@ class TestRegisterKVCacheMLA:
     shape and every STORE / RETRIEVE afterwards would corrupt data.
     """
 
-    def _make_client(self, endpoint: str) -> MessageQueueClient:
+    def _make_client(self, endpoint: str) -> ZmqMultiprocessClient:
         ctx = zmq.Context.instance()
-        return MessageQueueClient(endpoint, ctx)
+        return ZmqMultiprocessClient(MessageQueueClient(endpoint, ctx))
 
     def _register(self, endpoint: str, kv_size):
         # First Party
@@ -1174,14 +1176,14 @@ class TestClientMultiWorker:
             success = True
             context: dict = {}
 
-        # ``_call`` returns different shapes per RequestType:
+        # The fake ZMQ transport returns different shapes per RequestType:
         #   LOOKUP -> None (void)
         #   QUERY_PREFETCH_STATUS -> hit_chunks (int) or None
         #   STORE / RETRIEVE (handle) -> (worker_id, True)
         #   PREPARE_* -> _FakePrep()
         #   COMMIT_* -> True
         #   END_SESSION -> None
-        def fake_call(_client, req_type, payloads):
+        def fake_response(req_type, payloads):
             calls.append((req_type, payloads))
             name = req_type.name
             if name == "GET_CHUNK_SIZE":
@@ -1202,6 +1204,10 @@ class TestClientMultiWorker:
                 pass
 
         class FakeClient:
+            def submit_request(self, req_type, payloads, _response_cls=None):
+                value = fake_response(req_type, payloads)
+                return SimpleNamespace(result=lambda timeout=None: value)
+
             def close(self) -> None:
                 pass
 
@@ -1211,7 +1217,6 @@ class TestClientMultiWorker:
             tensor_refs.append(weakref.ref(tensor))
             return [tensor], [object()], [], []
 
-        monkeypatch.setattr(sv_helpers, "_call", fake_call)
         monkeypatch.setattr(sv_helpers, "_make_event_handle", lambda: b"")
         monkeypatch.setattr(
             sv_helpers,
