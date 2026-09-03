@@ -217,13 +217,14 @@ Name it in ``disabled_controllers`` and it is not built at all:
       "disabled_controllers": ["FleetEvictionController"]
     }'
 
-Endpoints belonging to a disabled controller then answer ``404`` naming it,
-rather than failing on an unbuilt collaborator. Endpoints that merely consult
-one carry on without it: ``POST /cache/delete`` holds back L2-pinned keys when
-there is an eviction controller to ask, and deletes everything requested when
-there is not. A name that matches no discovered controller raises at startup,
-so a typo cannot quietly leave the built-in one running against its
-replacement.
+Endpoints belonging to a disabled controller are not mounted at all — the
+built-in eviction controller owns ``/quota`` and ``/cache/pins``, so both go
+with it, and a replacement is free to register those same paths so existing
+clients need no change. Endpoints that merely consult a controller carry on
+without it: ``POST /cache/delete`` holds back L2-pinned keys when there is an
+eviction controller to ask, and deletes everything requested when there is
+not. A name that matches no discovered controller raises at startup, so a typo
+cannot quietly leave the built-in one running against its replacement.
 
 Coordinator metrics export
 --------------------------

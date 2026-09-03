@@ -85,7 +85,6 @@ lmcache/v1/mp_coordinator/
     dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
-    quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
     cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...

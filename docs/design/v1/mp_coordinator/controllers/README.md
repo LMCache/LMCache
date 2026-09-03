@@ -32,9 +32,11 @@ A setting a controller needs but the core config does not name goes in
 ## Registering HTTP endpoints
 
 The routers in `http_apis/` resolve their collaborator with
-`ctx.controllers.get(FleetEvictionController)`, which works only for a class
-the coordinator already imports. A controller that ships elsewhere instead
-implements `get_routers`, returning routers built around itself:
+`ctx.controllers.get(SomeController)`, which works only for a class the
+coordinator already imports — and leaves the route mounted even when that class
+is not built. A controller owns its endpoints instead by implementing
+`get_routers`, returning routers built around itself; the built-in eviction
+controller does this for `/quota` and `/cache/pins`:
 
 ```python
 class WidgetController(Controller):
@@ -178,11 +180,21 @@ that does not import does: an operator believing they disabled something they
 did not is worse than a boot failure that says so -- a typo would silently
 leave the built-in controller running against whatever replaced it.
 
-The endpoints that speak for a disabled controller answer `404` naming it,
-through `require_controller` in `http_apis/dependencies.py`. One that merely
-*consults* a controller resolves it with `Registry.find` and carries on
-without: `/cache/delete` holds back pinned keys when there is an eviction
-controller to ask, and deletes everything asked for when there is not.
+The endpoints that speak for a disabled controller are simply not mounted:
+they come from its `get_routers`, so they go with it. That is why the built-in
+eviction controller now owns `/quota` and `/cache/pins` rather than having them
+discovered from `http_apis/` — a route that outlives its controller either
+answers with nothing or, worse, shadows the replacement's identically-named
+one, because `http_apis` routers mount first.
+
+An endpoint that merely *consults* a controller is different: it resolves it
+with `Registry.find` and carries on without. `/cache/delete` holds back pinned
+keys when there is an eviction controller to ask, and deletes everything asked
+for when there is not.
+
+**A replacement can serve the same paths.** With the built-in controller
+unbuilt, `/quota` and `/cache/pins` are free, so a controller taking its place
+can register them and existing clients need no change.
 
 A controller replacing a built-in one inherits its durable state, because the
 sections are named by the component rather than by its owner -- so a swap keeps

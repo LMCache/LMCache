@@ -31,6 +31,7 @@ from lmcache.v1.mp_coordinator.controllers.base import (
     Controller,
     ControllerRuntime,
 )
+from lmcache.v1.mp_coordinator.controllers.eviction_http_api import build_routers
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
@@ -42,6 +43,9 @@ from lmcache.v1.multiprocess.cache_control.object_service import (
 )
 
 if TYPE_CHECKING:
+    # Third Party
+    from fastapi import APIRouter
+
     # First Party
     from lmcache.v1.distributed.api import ObjectKey
     from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
@@ -188,6 +192,17 @@ class FleetEvictionController(Controller):
             trigger_watermark=config.trigger_watermark,
             check_interval=config.eviction_check_interval,
         )
+
+    def get_routers(self) -> tuple[APIRouter, ...]:
+        """Return the ``/quota`` and ``/cache/pins`` endpoints, bound to this
+        controller.
+
+        They act on state only this controller holds, so they are built around
+        it rather than resolving it per request -- and go away with it when an
+        operator leaves it unbuilt, rather than lingering as paths that cannot
+        answer.
+        """
+        return build_routers(self)
 
     def get_durable_components(self) -> tuple[DurableComponent, ...]:
         """Return the state this controller owns that must outlive the process.

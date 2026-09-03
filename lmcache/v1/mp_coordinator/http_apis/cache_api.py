@@ -8,7 +8,8 @@ Warm-prefetch dispatch to a named MP server, thin over the
 unreachable or rejects a proxied call.
 
 Quota writes, combined quota+usage status, and usage-event ingestion are
-accounting concerns and live in the ``/quota`` group (:mod:`quota_api`).
+accounting concerns and belong to the eviction controller, which brings
+them itself (:mod:`lmcache.v1.mp_coordinator.controllers.eviction_http_api`).
 """
 
 # Standard
@@ -28,13 +29,10 @@ from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManag
 from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
     get_outbound_client,
-    require_controller,
 )
 from lmcache.v1.mp_coordinator.schemas import (
     DeleteRequest,
     DeleteResponse,
-    PinRequest,
-    PinResponse,
     PrefetchRequest,
     PrefetchResponse,
 )
@@ -143,86 +141,6 @@ async def get_prefetch_status(
         ) from None
 
     return JSONResponse(status_code=code, content=payload)
-
-
-# -- Pin / unpin (L2 eviction protection) ------------------------------------
-
-
-@router.post("/cache/pins")
-async def request_pin(body: PinRequest, request: Request) -> PinResponse:
-    """Pin a token sequence's keys in the L2 eviction plan.
-
-    The coordinator resolves the token sequence to its object keys locally and
-    records them so they are excluded from its L2 eviction plan (fleet-wide,
-    per ``cache_salt``). No MP-server round-trip.
-
-    Args:
-        body: model/world_size, token_ids, cache_salt.
-
-    Returns:
-        ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys pinned.
-
-    Raises:
-        HTTPException: 400 if the token cap is exceeded or a key field is invalid.
-    """
-    ctx = get_context(request)
-    eviction = require_controller(request, FleetEvictionController)
-    try:
-        resolved, chunks = resolve_object_keys(
-            ctx.token_hasher,
-            body.model_name,
-            body.world_size,
-            body.token_ids,
-            body.cache_salt,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-    eviction.pin(resolved)
-    ctx.metadata_persister.save()
-    return PinResponse(
-        requested=chunks,
-        affected=len(resolved),
-        status="pinned",
-    )
-
-
-@router.delete("/cache/pins")
-async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
-    """Unpin a token sequence's keys from the L2 eviction plan.
-
-    Symmetric with pin: resolves the keys locally and releases them, making them
-    eligible for L2 eviction again.
-
-    Args:
-        body: model/world_size, token_ids, cache_salt.
-
-    Returns:
-        ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys unpinned.
-
-    Raises:
-        HTTPException: 400 if the token cap is exceeded or a key field is invalid.
-    """
-    ctx = get_context(request)
-    eviction = require_controller(request, FleetEvictionController)
-    try:
-        resolved, chunks = resolve_object_keys(
-            ctx.token_hasher,
-            body.model_name,
-            body.world_size,
-            body.token_ids,
-            body.cache_salt,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-    eviction.unpin(resolved)
-    ctx.metadata_persister.save()
-    return PinResponse(
-        requested=chunks,
-        affected=len(resolved),
-        status="unpinned",
-    )
 
 
 # -- Delete dispatch ---------------------------------------------------------

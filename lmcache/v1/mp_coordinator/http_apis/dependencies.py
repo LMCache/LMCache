@@ -11,10 +11,9 @@ handlers fetch it via :func:`get_outbound_client`.
 
 # Standard
 from dataclasses import dataclass
-from typing import TypeVar
 
 # Third Party
-from fastapi import HTTPException, Request
+from fastapi import Request
 import httpx
 
 # First Party
@@ -24,8 +23,6 @@ from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.views.base import View
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-
-ControllerT = TypeVar("ControllerT", bound=Controller)
 
 
 @dataclass
@@ -80,39 +77,6 @@ def get_context(request: Request) -> CoordinatorContext:
     if ctx is None:
         raise RuntimeError("coordinator context not initialized")
     return ctx
-
-
-def require_controller(
-    request: Request, controller_type: type[ControllerT]
-) -> ControllerT:
-    """Return a controller, or fail the request if it is disabled.
-
-    An operator can leave a built-in controller unbuilt (see
-    ``extra_config["disabled_controllers"]``), usually because something
-    out of tree has taken over its job. The endpoints that speak for it
-    then have nothing to act on, and say so rather than raising the
-    ``KeyError`` that reaching for an unbuilt collaborator would.
-
-    Args:
-        request: The FastAPI request carrying the coordinator context.
-        controller_type: The controller the endpoint acts on.
-
-    Returns:
-        The controller.
-
-    Raises:
-        HTTPException: 404 if it was not built.
-    """
-    controller = get_context(request).controllers.find(controller_type)
-    if controller is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"{controller_type.__name__} is disabled on this coordinator; "
-                f"its endpoints are unavailable"
-            ),
-        )
-    return controller
 
 
 def get_outbound_client(request: Request) -> httpx.AsyncClient:
