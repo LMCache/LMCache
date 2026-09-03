@@ -415,7 +415,7 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
     return CacheEngineKey.from_string(key_str)
 
 
-def _validate_tag(name: str, value: Any) -> None:
+def _validate_tag(name: str, value: object) -> None:
     """Reject tag names and values that would break key serialization.
 
     ``CacheEngineKey.to_string`` joins tags as ``f"{name}%{value}"`` separated by
