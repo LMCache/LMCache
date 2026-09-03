@@ -27,11 +27,12 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
@@ -48,22 +49,9 @@ class _IpcEvent(Protocol):
     def wait(self, stream: object | None = None) -> None: ...
 
 
-def _send_request(
-    client: MessageQueueClient,
-    request_type: RequestType,
-    payloads: list[Any],
-) -> MessagingFuture[Any]:
-    """Submit one typed request to an LMCache multiprocess server."""
-    return client.submit_request(
-        request_type,
-        payloads,
-        get_response_class(request_type),
-    )
-
-
-def _get_chunk_size(client: MessageQueueClient, timeout: float) -> int:
+def _get_chunk_size(client: RequestClient, timeout: float) -> int:
     """Read the server's configured token chunk size."""
-    return int(_send_request(client, RequestType.GET_CHUNK_SIZE, []).result(timeout))
+    return int(client.get_chunk_size().result(timeout))
 
 
 class _HeartbeatThread(PeriodicThread):
@@ -71,7 +59,7 @@ class _HeartbeatThread(PeriodicThread):
 
     def __init__(
         self,
-        client: MessageQueueClient,
+        client: RequestClient,
         health_event: threading.Event,
         instance_id: int,
         interval: float,
@@ -125,11 +113,7 @@ class _HeartbeatThread(PeriodicThread):
         was_healthy = self._health_event.is_set()
         try:
             healthy = bool(
-                _send_request(
-                    self._client,
-                    RequestType.PING,
-                    [self._instance_id],
-                ).result(timeout=self._timeout)
+                self._client.ping(self._instance_id).result(timeout=self._timeout)
             )
         except Exception:
             healthy = False
@@ -191,7 +175,7 @@ class AtomMPSchedulerAdapter:
         *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
     ) -> None:
-        client = MessageQueueClient(server_url, context)
+        client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
         self._model_name = model_name
         self._parallel = parallel_config
         self._mq_timeout = mq_timeout
@@ -242,11 +226,9 @@ class AtomMPSchedulerAdapter:
             request_id=request_id,
             worker_id=None,
         )
-        _send_request(
-            self._client,
-            RequestType.LOOKUP,
-            [key, self._parallel.tp_size],
-        ).result(timeout=self._mq_timeout)
+        self._client.lookup(key, self._parallel.tp_size).result(
+            timeout=self._mq_timeout
+        )
         self._pending_lookups.add(request_id)
 
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -255,11 +237,9 @@ class AtomMPSchedulerAdapter:
             return self._lookup_results[request_id]
         if request_id not in self._pending_lookups:
             return 0
-        result = _send_request(
-            self._client,
-            RequestType.QUERY_PREFETCH_STATUS,
-            [request_id],
-        ).result(timeout=self._mq_timeout)
+        result = self._client.query_prefetch_status(request_id).result(
+            timeout=self._mq_timeout
+        )
         if result is None:
             return None
         matched_tokens = int(result) * self.lmcache_tokens_per_chunk
@@ -283,11 +263,7 @@ class AtomMPSchedulerAdapter:
             request_id=request_id,
             worker_id=None,
         )
-        _send_request(
-            self._client,
-            RequestType.FREE_LOOKUP_LOCKS,
-            [key, self._parallel.tp_size],
-        )
+        self._client.free_lookup_locks(key, self._parallel.tp_size)
 
     def cleanup_lookup_result(self, request_id: str) -> None:
         """Discard client-side lookup state after handoff or cleanup."""
@@ -296,7 +272,7 @@ class AtomMPSchedulerAdapter:
 
     def end_session(self, request_id: str) -> None:
         """Ask the LMCache server to release request-scoped state."""
-        _send_request(self._client, RequestType.END_SESSION, [request_id])
+        self._client.end_session(request_id)
 
     def shutdown(self) -> None:
         """Close the scheduler-side message queue client."""
@@ -319,6 +295,8 @@ class AtomMPSchedulerAdapter:
         return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
+            # Each ATOM TP rank retrieves only its own rank-local object.
+            num_kv_readers=1,
             worker_id=worker_id,
             token_ids=tuple(token_ids),
             start=start,
@@ -342,7 +320,7 @@ class AtomMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         transfer_mode: str | None = None,
     ) -> None:
-        client = MessageQueueClient(server_url, context)
+        client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
         self._model_name = model_name
         self._block_size = block_size
         self._parallel = parallel_config
@@ -561,11 +539,9 @@ class AtomMPWorkerAdapter:
 
             if registered and transfer_context is not None:
                 try:
-                    _send_request(
-                        self._client,
-                        RequestType.UNREGISTER_KV_CACHE,
-                        [self.instance_id],
-                    ).result(timeout=self._mq_timeout)
+                    self._client.unregister_kv_cache(self.instance_id).result(
+                        timeout=self._mq_timeout
+                    )
                 except Exception:
                     logger.warning(
                         "ATOM LMCache unregister failed during shutdown",
@@ -613,7 +589,6 @@ class AtomMPWorkerAdapter:
                 self.blocks_in_chunk,
                 self._client,
                 self._mq_timeout,
-                _send_request,
                 layout_hints={},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.ATOM,
@@ -679,11 +654,9 @@ class AtomMPWorkerAdapter:
         # late server registration and never publish its local context.
         try:
             try:
-                _send_request(
-                    self._client,
-                    RequestType.UNREGISTER_KV_CACHE,
-                    [self.instance_id],
-                ).result(timeout=self._mq_timeout)
+                self._client.unregister_kv_cache(self.instance_id).result(
+                    timeout=self._mq_timeout
+                )
             except Exception:
                 logger.warning(
                     "Failed to remove late ATOM LMCache registration",
@@ -805,11 +778,9 @@ class AtomMPWorkerAdapter:
     ) -> None:
         """Best-effort removal of an ambiguously registered candidate."""
         try:
-            _send_request(
-                self._client,
-                RequestType.UNREGISTER_KV_CACHE,
-                [self.instance_id],
-            ).result(timeout=self._mq_timeout)
+            self._client.unregister_kv_cache(self.instance_id).result(
+                timeout=self._mq_timeout
+            )
         except Exception:
             logger.warning(
                 "Failed to roll back rejected ATOM LMCache registration",
@@ -846,6 +817,8 @@ class AtomMPWorkerAdapter:
         return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
+            # Each ATOM TP rank retrieves only its own rank-local object.
+            num_kv_readers=1,
             worker_id=self._parallel.worker_id,
             token_ids=tuple(spec.token_ids),
             start=spec.start,
