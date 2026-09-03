@@ -196,6 +196,19 @@ def test_aligned_two_request_step():
         want = _expected_tokens(req, query, [a, b])
         assert torch.equal(got, want)
 
+    metrics = capture.metrics_snapshot()
+    assert metrics.steps_attempted == 1
+    assert metrics.steps_captured == 1
+    assert metrics.steps_skipped == 0
+    assert metrics.store_requests_seen == 2
+    assert metrics.requests_captured == 2
+    assert metrics.tokens_captured == 768
+    assert metrics.blocks_reserved == 48
+    assert metrics.plan_duration_ns_total > 0
+    assert metrics.plan_duration_ns_max == metrics.plan_duration_ns_total
+    assert metrics.ring.used_blocks == 48
+    assert metrics.ring.high_watermark_blocks == 48
+
 
 def test_unaligned_tail_does_not_shift_next_request():
     """The reported bug: A has a chunk-unaligned tail (300 rows, op covers
@@ -274,6 +287,12 @@ def test_ring_exhaustion_skips_op_without_leak():
     assert state is not None
     assert [s.request_id for s in state.stores] == ["A"]
     assert ring.num_free_blocks() == 34 - 32
+    metrics = capture.metrics_snapshot()
+    assert metrics.steps_captured == 1
+    assert metrics.requests_captured == 1
+    assert metrics.skipped_ring_exhausted_requests == 1
+    assert metrics.ring_exhausted_requested_blocks == 16
+    assert metrics.ring_exhausted_shortfall_blocks == 14
 
 
 def test_slot_mapping_padding_rows_are_dropped():
@@ -300,6 +319,10 @@ def test_missing_slot_mapping_disables_step():
     query, md, _ = _build_step([a])
     assert capture._build_q_step_state(query, md, None) is None
     assert capture._build_q_step_state(query, md, SimpleNamespace(foo=1)) is None
+    metrics = capture.metrics_snapshot()
+    assert metrics.steps_attempted == 2
+    assert metrics.steps_skipped == 2
+    assert metrics.skipped_missing_slot_mapping_steps == 2
 
 
 def test_no_store_ops_returns_none():
@@ -307,6 +330,54 @@ def test_no_store_ops_returns_none():
     capture = _make_capture()
     query, md, am = _build_step([r])
     assert capture._build_q_step_state(query, md, am) is None
+    metrics = capture.metrics_snapshot()
+    assert metrics.steps_skipped == 1
+    assert metrics.store_requests_seen == 0
+    assert metrics.skipped_no_store_steps == 1
+
+
+def test_capture_metrics_accumulate_fixed_request_skip_reasons():
+    """Per-request validation failures remain visible on a captured step."""
+    good = _Request("good", 16, first_gpu_block=0)
+    query, _, am = _build_step([good])
+    metadata = _FakeConnectorMetadata(
+        requests=[
+            good.meta(),
+            _FakeRequestMeta(
+                request_id="empty",
+                direction="STORE",
+                op=_FakeOp(block_ids=[[1]], start=1, end=1),
+            ),
+            _FakeRequestMeta(
+                request_id="unaligned",
+                direction="STORE",
+                op=_FakeOp(block_ids=[[2]], start=0, end=15),
+            ),
+            _FakeRequestMeta(
+                request_id="multi-group",
+                direction="STORE",
+                op=_FakeOp(block_ids=[[3], [4]], start=0, end=16),
+            ),
+            _FakeRequestMeta(
+                request_id="partial",
+                direction="STORE",
+                op=_FakeOp(block_ids=[[5]], start=0, end=16),
+            ),
+        ]
+    )
+    capture = _make_capture()
+
+    state = capture._build_q_step_state(query, metadata, am)
+
+    assert state is not None
+    assert [store.request_id for store in state.stores] == ["good"]
+    metrics = capture.metrics_snapshot()
+    assert metrics.store_requests_seen == 5
+    assert metrics.requests_captured == 1
+    assert metrics.skipped_nonpositive_requests == 1
+    assert metrics.skipped_unaligned_requests == 1
+    assert metrics.skipped_unsupported_layout_requests == 1
+    assert metrics.skipped_partial_step_requests == 1
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 3])

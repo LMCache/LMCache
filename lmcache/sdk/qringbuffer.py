@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 import math
+import threading
+import time
 
 # Third Party
 import torch
@@ -36,6 +38,385 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.mq import MessagingFuture
 
 logger = lmcache_init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class QRingBufferUsageSnapshot:
+    """Immutable block-usage snapshot for a query ring.
+
+    Attributes:
+        capacity_blocks: Total number of blocks in the ring.
+        used_blocks: Blocks currently reserved by capture or an in-flight store.
+        free_blocks: Blocks currently available for capture.
+        high_watermark_blocks: Maximum simultaneous block usage since creation.
+    """
+
+    capacity_blocks: int
+    used_blocks: int
+    free_blocks: int
+    high_watermark_blocks: int
+
+
+@dataclass(frozen=True)
+class QCaptureMetricsSnapshot:
+    """Cumulative query-capture metrics plus current ring pressure.
+
+    Skip reasons use fixed fields rather than request IDs or free-form labels,
+    so exporting a snapshot cannot create unbounded metric cardinality.
+
+    Attributes:
+        steps_attempted: Query-capture plans attempted.
+        steps_captured: Steps where at least one request was captured.
+        steps_skipped: Steps where no request was captured.
+        store_requests_seen: STORE requests inspected while building plans.
+        requests_captured: Requests successfully assigned ring blocks.
+        tokens_captured: Query-token rows assigned to ring slots.
+        blocks_reserved: Ring blocks reserved by successful captures.
+        plan_duration_ns_total: Total host time spent building capture plans.
+        plan_duration_ns_max: Maximum host time spent building one plan.
+        skipped_ring_unavailable_steps: Steps skipped before ring setup.
+        skipped_missing_slot_mapping_steps: Steps skipped because rows could
+            not be mapped back to KV slots.
+        skipped_no_store_steps: Steps containing no STORE request.
+        skipped_nonpositive_requests: STORE requests with empty token ranges.
+        skipped_unaligned_requests: STORE requests not aligned to ring blocks.
+        skipped_unsupported_layout_requests: STORE requests whose GPU block
+            layout query capture does not support.
+        skipped_partial_step_requests: STORE requests whose complete token
+            range was not present in the current forward step.
+        skipped_ring_exhausted_requests: STORE requests rejected by ring
+            backpressure.
+        ring_exhausted_requested_blocks: Blocks requested by rejected stores.
+        ring_exhausted_shortfall_blocks: Additional blocks required for those
+            rejected stores at allocation time.
+        ring: Current and high-water ring block usage.
+    """
+
+    steps_attempted: int
+    steps_captured: int
+    steps_skipped: int
+    store_requests_seen: int
+    requests_captured: int
+    tokens_captured: int
+    blocks_reserved: int
+    plan_duration_ns_total: int
+    plan_duration_ns_max: int
+    skipped_ring_unavailable_steps: int
+    skipped_missing_slot_mapping_steps: int
+    skipped_no_store_steps: int
+    skipped_nonpositive_requests: int
+    skipped_unaligned_requests: int
+    skipped_unsupported_layout_requests: int
+    skipped_partial_step_requests: int
+    skipped_ring_exhausted_requests: int
+    ring_exhausted_requested_blocks: int
+    ring_exhausted_shortfall_blocks: int
+    ring: QRingBufferUsageSnapshot
+
+
+@dataclass(frozen=True)
+class QStoreMetricsSnapshot:
+    """Cumulative query-store metrics and current in-flight pressure.
+
+    Attributes:
+        requests_submitted: Stores accepted by the transfer context.
+        requests_completed: Submitted stores completing successfully.
+        requests_failed: Submitted stores returning failure or raising while
+            their completion is reclaimed.
+        requests_submission_failed: Stores raising synchronously at submit.
+        requests_dropped_unavailable: Stores dropped because the ring or
+            transfer context was unavailable.
+        requests_dropped_unhealthy: Stores dropped before submit because the
+            worker adapter was unhealthy.
+        requests_dropped_missing_token_ids: Stores dropped because a cache key
+            could not be constructed.
+        requests_dropped_missing_event: Captures dropped at forward exit when
+            vLLM supplied no completion event.
+        requests_abandoned_unhealthy: Previously submitted stores reclaimed
+            without polling after the adapter became unhealthy.
+        blocks_submitted: Ring blocks handed to the transfer context.
+        blocks_released: Ring blocks returned on every terminal path.
+        completion_duration_ns_total: Total host-observed submit-to-reclaim
+            time for completed and failed asynchronous stores.
+        completion_duration_ns_max: Maximum host-observed submit-to-reclaim
+            time for one asynchronous store.
+        in_flight_requests: Submitted stores awaiting completion.
+        in_flight_blocks: Ring blocks held by in-flight stores.
+        high_watermark_in_flight_requests: Maximum simultaneous stores.
+        high_watermark_in_flight_blocks: Maximum blocks held by stores.
+    """
+
+    requests_submitted: int
+    requests_completed: int
+    requests_failed: int
+    requests_submission_failed: int
+    requests_dropped_unavailable: int
+    requests_dropped_unhealthy: int
+    requests_dropped_missing_token_ids: int
+    requests_dropped_missing_event: int
+    requests_abandoned_unhealthy: int
+    blocks_submitted: int
+    blocks_released: int
+    completion_duration_ns_total: int
+    completion_duration_ns_max: int
+    in_flight_requests: int
+    in_flight_blocks: int
+    high_watermark_in_flight_requests: int
+    high_watermark_in_flight_blocks: int
+
+
+@dataclass(frozen=True)
+class QPipelineMetricsSnapshot:
+    """Point-in-time query capture and asynchronous-store metrics.
+
+    Attributes:
+        capture: Capture-plan outcomes and ring pressure.
+        store: Store outcomes, latency, and in-flight pressure.
+    """
+
+    capture: QCaptureMetricsSnapshot
+    store: QStoreMetricsSnapshot
+
+
+@dataclass
+class _QCaptureAttempt:
+    """Metrics accumulated locally while building one capture plan."""
+
+    store_requests_seen: int = 0
+    requests_captured: int = 0
+    tokens_captured: int = 0
+    blocks_reserved: int = 0
+    skipped_ring_unavailable_steps: int = 0
+    skipped_missing_slot_mapping_steps: int = 0
+    skipped_no_store_steps: int = 0
+    skipped_nonpositive_requests: int = 0
+    skipped_unaligned_requests: int = 0
+    skipped_unsupported_layout_requests: int = 0
+    skipped_partial_step_requests: int = 0
+    skipped_ring_exhausted_requests: int = 0
+    ring_exhausted_requested_blocks: int = 0
+    ring_exhausted_shortfall_blocks: int = 0
+
+
+class _QCaptureMetricsRecorder:
+    """Thread-safe cumulative query-capture metric recorder."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._steps_attempted = 0
+        self._steps_captured = 0
+        self._store_requests_seen = 0
+        self._requests_captured = 0
+        self._tokens_captured = 0
+        self._blocks_reserved = 0
+        self._plan_duration_ns_total = 0
+        self._plan_duration_ns_max = 0
+        self._skipped_ring_unavailable_steps = 0
+        self._skipped_missing_slot_mapping_steps = 0
+        self._skipped_no_store_steps = 0
+        self._skipped_nonpositive_requests = 0
+        self._skipped_unaligned_requests = 0
+        self._skipped_unsupported_layout_requests = 0
+        self._skipped_partial_step_requests = 0
+        self._skipped_ring_exhausted_requests = 0
+        self._ring_exhausted_requested_blocks = 0
+        self._ring_exhausted_shortfall_blocks = 0
+
+    def record(
+        self,
+        attempt: _QCaptureAttempt,
+        captured: bool,
+        duration_ns: int,
+    ) -> None:
+        """Merge one capture attempt into the cumulative counters."""
+        with self._lock:
+            self._steps_attempted += 1
+            self._steps_captured += int(captured)
+            self._store_requests_seen += attempt.store_requests_seen
+            self._requests_captured += attempt.requests_captured
+            self._tokens_captured += attempt.tokens_captured
+            self._blocks_reserved += attempt.blocks_reserved
+            self._plan_duration_ns_total += duration_ns
+            self._plan_duration_ns_max = max(self._plan_duration_ns_max, duration_ns)
+            self._skipped_ring_unavailable_steps += (
+                attempt.skipped_ring_unavailable_steps
+            )
+            self._skipped_missing_slot_mapping_steps += (
+                attempt.skipped_missing_slot_mapping_steps
+            )
+            self._skipped_no_store_steps += attempt.skipped_no_store_steps
+            self._skipped_nonpositive_requests += attempt.skipped_nonpositive_requests
+            self._skipped_unaligned_requests += attempt.skipped_unaligned_requests
+            self._skipped_unsupported_layout_requests += (
+                attempt.skipped_unsupported_layout_requests
+            )
+            self._skipped_partial_step_requests += attempt.skipped_partial_step_requests
+            self._skipped_ring_exhausted_requests += (
+                attempt.skipped_ring_exhausted_requests
+            )
+            self._ring_exhausted_requested_blocks += (
+                attempt.ring_exhausted_requested_blocks
+            )
+            self._ring_exhausted_shortfall_blocks += (
+                attempt.ring_exhausted_shortfall_blocks
+            )
+
+    def snapshot(self, ring: QRingBufferUsageSnapshot) -> QCaptureMetricsSnapshot:
+        """Return an immutable, internally consistent counter snapshot."""
+        with self._lock:
+            steps_attempted = self._steps_attempted
+            steps_captured = self._steps_captured
+            return QCaptureMetricsSnapshot(
+                steps_attempted=steps_attempted,
+                steps_captured=steps_captured,
+                steps_skipped=steps_attempted - steps_captured,
+                store_requests_seen=self._store_requests_seen,
+                requests_captured=self._requests_captured,
+                tokens_captured=self._tokens_captured,
+                blocks_reserved=self._blocks_reserved,
+                plan_duration_ns_total=self._plan_duration_ns_total,
+                plan_duration_ns_max=self._plan_duration_ns_max,
+                skipped_ring_unavailable_steps=(self._skipped_ring_unavailable_steps),
+                skipped_missing_slot_mapping_steps=(
+                    self._skipped_missing_slot_mapping_steps
+                ),
+                skipped_no_store_steps=self._skipped_no_store_steps,
+                skipped_nonpositive_requests=self._skipped_nonpositive_requests,
+                skipped_unaligned_requests=self._skipped_unaligned_requests,
+                skipped_unsupported_layout_requests=(
+                    self._skipped_unsupported_layout_requests
+                ),
+                skipped_partial_step_requests=(self._skipped_partial_step_requests),
+                skipped_ring_exhausted_requests=(self._skipped_ring_exhausted_requests),
+                ring_exhausted_requested_blocks=(self._ring_exhausted_requested_blocks),
+                ring_exhausted_shortfall_blocks=(self._ring_exhausted_shortfall_blocks),
+                ring=ring,
+            )
+
+
+class _QStoreMetricsRecorder:
+    """Thread-safe cumulative query-store metric recorder."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._requests_submitted = 0
+        self._requests_completed = 0
+        self._requests_failed = 0
+        self._requests_submission_failed = 0
+        self._requests_dropped_unavailable = 0
+        self._requests_dropped_unhealthy = 0
+        self._requests_dropped_missing_token_ids = 0
+        self._requests_dropped_missing_event = 0
+        self._requests_abandoned_unhealthy = 0
+        self._blocks_submitted = 0
+        self._blocks_released = 0
+        self._completion_duration_ns_total = 0
+        self._completion_duration_ns_max = 0
+        self._in_flight_requests = 0
+        self._in_flight_blocks = 0
+        self._high_watermark_in_flight_requests = 0
+        self._high_watermark_in_flight_blocks = 0
+
+    def record_submitted(self, blocks: int) -> None:
+        """Record one successfully submitted asynchronous store."""
+        with self._lock:
+            self._requests_submitted += 1
+            self._blocks_submitted += blocks
+            self._in_flight_requests += 1
+            self._in_flight_blocks += blocks
+            self._high_watermark_in_flight_requests = max(
+                self._high_watermark_in_flight_requests,
+                self._in_flight_requests,
+            )
+            self._high_watermark_in_flight_blocks = max(
+                self._high_watermark_in_flight_blocks,
+                self._in_flight_blocks,
+            )
+
+    def record_finished(
+        self,
+        blocks: int,
+        succeeded: bool,
+        duration_ns: int,
+    ) -> None:
+        """Record one reclaimed asynchronous store."""
+        with self._lock:
+            if succeeded:
+                self._requests_completed += 1
+            else:
+                self._requests_failed += 1
+            self._blocks_released += blocks
+            self._completion_duration_ns_total += duration_ns
+            self._completion_duration_ns_max = max(
+                self._completion_duration_ns_max, duration_ns
+            )
+            self._in_flight_requests -= 1
+            self._in_flight_blocks -= blocks
+
+    def record_submission_failed(self, blocks: int) -> None:
+        """Record a synchronous submission failure and released blocks."""
+        with self._lock:
+            self._requests_submission_failed += 1
+            self._blocks_released += blocks
+
+    def record_dropped_unavailable(self, blocks: int) -> None:
+        """Record a store dropped before submit because transport is absent."""
+        with self._lock:
+            self._requests_dropped_unavailable += 1
+            self._blocks_released += blocks
+
+    def record_dropped_unhealthy(self, blocks: int) -> None:
+        """Record a store dropped before submit because transport is unhealthy."""
+        with self._lock:
+            self._requests_dropped_unhealthy += 1
+            self._blocks_released += blocks
+
+    def record_dropped_missing_token_ids(self, blocks: int) -> None:
+        """Record a store dropped because its key cannot be built."""
+        with self._lock:
+            self._requests_dropped_missing_token_ids += 1
+            self._blocks_released += blocks
+
+    def record_dropped_missing_event(self, blocks: int) -> None:
+        """Record a capture discarded because no forward event exists."""
+        with self._lock:
+            self._requests_dropped_missing_event += 1
+            self._blocks_released += blocks
+
+    def record_abandoned_unhealthy(self, requests: int, blocks: int) -> None:
+        """Record submitted stores reclaimed after transport became unhealthy."""
+        with self._lock:
+            self._requests_abandoned_unhealthy += requests
+            self._blocks_released += blocks
+            self._in_flight_requests -= requests
+            self._in_flight_blocks -= blocks
+
+    def snapshot(self) -> QStoreMetricsSnapshot:
+        """Return an immutable, internally consistent store snapshot."""
+        with self._lock:
+            return QStoreMetricsSnapshot(
+                requests_submitted=self._requests_submitted,
+                requests_completed=self._requests_completed,
+                requests_failed=self._requests_failed,
+                requests_submission_failed=self._requests_submission_failed,
+                requests_dropped_unavailable=(self._requests_dropped_unavailable),
+                requests_dropped_unhealthy=self._requests_dropped_unhealthy,
+                requests_dropped_missing_token_ids=(
+                    self._requests_dropped_missing_token_ids
+                ),
+                requests_dropped_missing_event=self._requests_dropped_missing_event,
+                requests_abandoned_unhealthy=(self._requests_abandoned_unhealthy),
+                blocks_submitted=self._blocks_submitted,
+                blocks_released=self._blocks_released,
+                completion_duration_ns_total=(self._completion_duration_ns_total),
+                completion_duration_ns_max=self._completion_duration_ns_max,
+                in_flight_requests=self._in_flight_requests,
+                in_flight_blocks=self._in_flight_blocks,
+                high_watermark_in_flight_requests=(
+                    self._high_watermark_in_flight_requests
+                ),
+                high_watermark_in_flight_blocks=(self._high_watermark_in_flight_blocks),
+            )
 
 
 @dataclass
@@ -68,6 +449,21 @@ class _QStepState:
 
     ring_slots: torch.Tensor
     stores: list[_QLayerStore]
+
+
+@dataclass
+class _QStoreFutureState:
+    """One submitted query store awaiting asynchronous completion.
+
+    Attributes:
+        future: Transfer-context future for the store result.
+        ring_block_ids: Ring blocks held until the future is terminal.
+        submitted_ns: Monotonic host timestamp immediately before submission.
+    """
+
+    future: "MessagingFuture[StoreResult]"
+    ring_block_ids: list[int]
+    submitted_ns: int
 
 
 class QRingBuffer:
@@ -111,10 +507,24 @@ class QRingBuffer:
             f"lmcache_q_layer_{i}": self._layer_tensors[i] for i in range(num_layers)
         }
         self._free_blocks: list[int] = list(range(num_blocks))
+        self._allocation_lock = threading.Lock()
+        self._high_watermark_blocks = 0
 
     def num_free_blocks(self) -> int:
         """The number of free blocks in the ring buffer."""
-        return len(self._free_blocks)
+        with self._allocation_lock:
+            return len(self._free_blocks)
+
+    def usage_snapshot(self) -> QRingBufferUsageSnapshot:
+        """Return a consistent snapshot of current and peak block pressure."""
+        with self._allocation_lock:
+            free_blocks = len(self._free_blocks)
+            return QRingBufferUsageSnapshot(
+                capacity_blocks=self.num_blocks,
+                used_blocks=self.num_blocks - free_blocks,
+                free_blocks=free_blocks,
+                high_watermark_blocks=self._high_watermark_blocks,
+            )
 
     def allocate(self, n: int) -> list[int] | None:
         """Allocating n blocks from the ring buffer.
@@ -128,32 +538,36 @@ class QRingBuffer:
         """
         if n < 0:
             raise ValueError(f"cannot allocate a negative block count: {n}")
-        if n > len(self._free_blocks):
-            return None
-        reserved = self._free_blocks[-n:] if n else []
-        del self._free_blocks[len(self._free_blocks) - n :]
-        return reserved
+        with self._allocation_lock:
+            if n > len(self._free_blocks):
+                return None
+            reserved = self._free_blocks[-n:] if n else []
+            del self._free_blocks[len(self._free_blocks) - n :]
+            used_blocks = self.num_blocks - len(self._free_blocks)
+            self._high_watermark_blocks = max(self._high_watermark_blocks, used_blocks)
+            return reserved
 
     def free(self, block_ids: list[int]) -> None:
         """Free the given block IDs back to the ring buffer.
         Drop invalid or already freed block IDs with a warning."""
-        free_blocks = set(self._free_blocks)
-        for block_id in block_ids:
-            if block_id < 0 or block_id >= self.num_blocks:
-                logger.warning(
-                    "free() called with invalid block_id %d (valid [0, %d))",
-                    block_id,
-                    self.num_blocks,
-                )
-                continue
-            if block_id in free_blocks:
-                logger.warning(
-                    "free() called with already freed block_id %d",
-                    block_id,
-                )
-                continue
-            free_blocks.add(block_id)
-            self._free_blocks.append(block_id)
+        with self._allocation_lock:
+            free_blocks = set(self._free_blocks)
+            for block_id in block_ids:
+                if block_id < 0 or block_id >= self.num_blocks:
+                    logger.warning(
+                        "free() called with invalid block_id %d (valid [0, %d))",
+                        block_id,
+                        self.num_blocks,
+                    )
+                    continue
+                if block_id in free_blocks:
+                    logger.warning(
+                        "free() called with already freed block_id %d",
+                        block_id,
+                    )
+                    continue
+                free_blocks.add(block_id)
+                self._free_blocks.append(block_id)
 
     def scatter(
         self,
@@ -245,6 +659,17 @@ class QRingBufferCapture:
         self.q_layer_index: dict[str, int] = {}
         self.q_step_state: _QStepState | None = None
         self.q_step_disabled: bool = False
+        self._metrics = _QCaptureMetricsRecorder()
+
+    def metrics_snapshot(self) -> QCaptureMetricsSnapshot:
+        """Return cumulative capture outcomes and current ring pressure."""
+        q_ring = self.q_ring_adapter.q_ring
+        ring_usage = (
+            q_ring.usage_snapshot()
+            if q_ring is not None
+            else QRingBufferUsageSnapshot(0, 0, 0, 0)
+        )
+        return self._metrics.snapshot(ring_usage)
 
     def setup_q_ring(
         self,
@@ -381,9 +806,12 @@ class QRingBufferCapture:
                             and per-request store ops).
             None if not storing any query tensors.
         """
+        started_ns = time.perf_counter_ns()
+        attempt = _QCaptureAttempt()
         q_ring = self.q_ring_adapter.q_ring
         if q_ring is None:
-            return None
+            attempt.skipped_ring_unavailable_steps = 1
+            return self._finish_capture_attempt(attempt, None, started_ns)
         block_size = q_ring.block_size
 
         slot_mapping = getattr(attn_metadata, "slot_mapping", None)
@@ -393,7 +821,8 @@ class QRingBufferCapture:
                 "not expose slot_mapping, so query rows cannot be attributed "
                 "to tokens."
             )
-            return None
+            attempt.skipped_missing_slot_mapping_steps = 1
+            return self._finish_capture_attempt(attempt, None, started_ns)
 
         num_query_rows = query.shape[0]
         # Rows beyond slot_mapping (CUDA-graph padding) and rows with slot -1
@@ -409,12 +838,15 @@ class QRingBufferCapture:
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
+            attempt.store_requests_seen += 1
             op = meta.op
             num_tokens = op.end - op.start
             if num_tokens <= 0:
+                attempt.skipped_nonpositive_requests += 1
                 continue
 
             if num_tokens % block_size != 0:
+                attempt.skipped_unaligned_requests += 1
                 logger.warning(
                     "Skip query for %s: tokens (%d) undivisible by block size",
                     meta.request_id,
@@ -424,6 +856,7 @@ class QRingBufferCapture:
 
             gpu_blocks = self._op_gpu_blocks(op)
             if gpu_blocks is None or len(gpu_blocks) * block_size != num_tokens:
+                attempt.skipped_unsupported_layout_requests += 1
                 logger.warning(
                     "Skip query for request %s: op block layout does not "
                     "cover its token range (%d blocks of %d tokens for %d "
@@ -452,6 +885,7 @@ class QRingBufferCapture:
             hit = (row_slots >= 0) & (sorted_slots[pos_clamped] == row_slots)
             num_matched = int(hit.sum().item())
             if num_matched != num_tokens:
+                attempt.skipped_partial_step_requests += 1
                 logger.warning(
                     "Skip query for request %s: only %d of %d op tokens are "
                     "in this step's batch (tokens computed in an earlier "
@@ -465,11 +899,17 @@ class QRingBufferCapture:
             n_blocks = num_tokens // block_size
             ring_blocks = q_ring.allocate(n_blocks)
             if ring_blocks is None:
+                free_blocks = q_ring.num_free_blocks()
+                attempt.skipped_ring_exhausted_requests += 1
+                attempt.ring_exhausted_requested_blocks += n_blocks
+                attempt.ring_exhausted_shortfall_blocks += max(
+                    0, n_blocks - free_blocks
+                )
                 logger.warning(
                     "Skip query for request %s: need %d Q blocks, %d free",
                     meta.request_id,
                     n_blocks,
-                    q_ring.num_free_blocks(),
+                    free_blocks,
                 )
                 continue
 
@@ -489,11 +929,28 @@ class QRingBufferCapture:
                     cache_salt=meta.cache_salt,
                 )
             )
+            attempt.requests_captured += 1
+            attempt.tokens_captured += num_tokens
+            attempt.blocks_reserved += n_blocks
 
         if not stores:
-            return None
+            if attempt.store_requests_seen == 0:
+                attempt.skipped_no_store_steps = 1
+            return self._finish_capture_attempt(attempt, None, started_ns)
 
-        return _QStepState(ring_slots=ring_slots, stores=stores)
+        state = _QStepState(ring_slots=ring_slots, stores=stores)
+        return self._finish_capture_attempt(attempt, state, started_ns)
+
+    def _finish_capture_attempt(
+        self,
+        attempt: _QCaptureAttempt,
+        state: _QStepState | None,
+        started_ns: int,
+    ) -> _QStepState | None:
+        """Record one plan outcome and return it unchanged."""
+        duration_ns = max(0, time.perf_counter_ns() - started_ns)
+        self._metrics.record(attempt, state is not None, duration_ns)
+        return state
 
     @staticmethod
     def _op_gpu_blocks(op: "LoadStoreOp") -> list[int] | None:
@@ -527,17 +984,30 @@ class QRingBufferCapture:
         self.q_step_state = None
         self.q_step_disabled = False
 
-        if state is None or event is None:
+        if state is None:
+            return
+        if event is None:
+            for q_store in state.stores:
+                self.q_ring_adapter.discard_q_store_without_event(
+                    q_store.ring_block_ids
+                )
             return
 
+        first_error: Exception | None = None
         for q_store in state.stores:
-            self.q_ring_adapter.submit_q_store_request(
-                q_store.request_id,
-                q_store.op,
-                q_store.ring_block_ids,
-                event,
-                cache_salt=q_store.cache_salt,
-            )
+            try:
+                self.q_ring_adapter.submit_q_store_request(
+                    q_store.request_id,
+                    q_store.op,
+                    q_store.ring_block_ids,
+                    event,
+                    cache_salt=q_store.cache_salt,
+                )
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 class QRingBufferAdapter:
@@ -553,11 +1023,14 @@ class QRingBufferAdapter:
 
         self.q_ring: QRingBuffer | None = None
         self.q_engine_group_infos: Sequence[EngineGroupInfo] | None = None
-        self.q_store_futures: dict[
-            int, tuple[MessagingFuture[StoreResult], list[int]]
-        ] = {}
+        self.q_store_futures: dict[int, _QStoreFutureState] = {}
         self.q_store_events: dict[int, _IpcEvent] = {}
         self._q_store_seq: int = 0
+        self._metrics = _QStoreMetricsRecorder()
+
+    def metrics_snapshot(self) -> QStoreMetricsSnapshot:
+        """Return cumulative store outcomes and current in-flight pressure."""
+        return self._metrics.snapshot()
 
     def register_q_ring(
         self,
@@ -670,6 +1143,16 @@ class QRingBufferAdapter:
             return
         self.q_ring.scatter(layer_index, query, ring_slots)
 
+    def discard_q_store_without_event(self, ring_block_ids: list[int]) -> None:
+        """Release a captured request when no forward completion event exists.
+
+        Args:
+            ring_block_ids: Ring blocks reserved for the discarded request.
+        """
+        if self.q_ring is not None:
+            self.q_ring.free(ring_block_ids)
+        self._metrics.record_dropped_missing_event(len(ring_block_ids))
+
     def submit_q_store_request(
         self,
         request_id: str,
@@ -689,37 +1172,56 @@ class QRingBufferAdapter:
             event: The IPC event to signal when the store is complete.
             cache_salt: Per-user isolation salt.
         """
-        if not self.q_ring or not self._adapter.transfer_ctx:
+        q_ring = self.q_ring
+        if q_ring is None:
+            self._metrics.record_dropped_unavailable(0)
             return
-        self._adapter._ensure_heartbeat_started()
-        if not self._adapter.is_healthy:
-            self.q_ring.free(ring_block_ids)
+        if not self._adapter.transfer_ctx:
+            q_ring.free(ring_block_ids)
+            self._metrics.record_dropped_unavailable(len(ring_block_ids))
             return
-        if op.token_ids is None:
-            logger.warning("Skipping Q store for %s: token_ids is None", request_id)
-            self.q_ring.free(ring_block_ids)
-            return
-        key = self._adapter._create_key(
-            op.token_ids,
-            op.start,
-            op.end,
-            request_id=request_id,
-            cache_salt=cache_salt,
-        )
-        key = replace(key, model_name=self.q_model_name)
-        future = self._adapter.transfer_ctx.submit_q_store(
-            request_id,
-            key,
-            self._adapter.instance_id,
-            self.q_ring.tensors,
-            [ring_block_ids],
-            event,
-            self._adapter.blocks_in_chunk,
-        )
+        try:
+            self._adapter._ensure_heartbeat_started()
+            if not self._adapter.is_healthy:
+                q_ring.free(ring_block_ids)
+                self._metrics.record_dropped_unhealthy(len(ring_block_ids))
+                return
+            if op.token_ids is None:
+                logger.warning("Skipping Q store for %s: token_ids is None", request_id)
+                q_ring.free(ring_block_ids)
+                self._metrics.record_dropped_missing_token_ids(len(ring_block_ids))
+                return
+            key = self._adapter._create_key(
+                op.token_ids,
+                op.start,
+                op.end,
+                request_id=request_id,
+                cache_salt=cache_salt,
+            )
+            key = replace(key, model_name=self.q_model_name)
+            submitted_ns = time.perf_counter_ns()
+            future = self._adapter.transfer_ctx.submit_q_store(
+                request_id,
+                key,
+                self._adapter.instance_id,
+                q_ring.tensors,
+                [ring_block_ids],
+                event,
+                self._adapter.blocks_in_chunk,
+            )
+        except Exception:
+            q_ring.free(ring_block_ids)
+            self._metrics.record_submission_failed(len(ring_block_ids))
+            raise
         seq = self._q_store_seq
         self._q_store_seq += 1
-        self.q_store_futures[seq] = (future, ring_block_ids)
+        self.q_store_futures[seq] = _QStoreFutureState(
+            future=future,
+            ring_block_ids=ring_block_ids,
+            submitted_ns=submitted_ns,
+        )
         self.q_store_events[seq] = event
+        self._metrics.record_submitted(len(ring_block_ids))
 
     def reclaim_finished_q_stores(self) -> None:
         """Reclaim ring blocks when query has been saved to LMCache.
@@ -727,18 +1229,33 @@ class QRingBufferAdapter:
         if not self.q_ring or not self.q_store_futures:
             return
         if not self._adapter.is_healthy:
-            for _, ring_block_ids in self.q_store_futures.values():
-                self.q_ring.free(ring_block_ids)
+            abandoned_requests = len(self.q_store_futures)
+            abandoned_blocks = 0
+            for state in self.q_store_futures.values():
+                abandoned_blocks += len(state.ring_block_ids)
+                self.q_ring.free(state.ring_block_ids)
             self.q_store_futures.clear()
             self.q_store_events.clear()
+            self._metrics.record_abandoned_unhealthy(
+                abandoned_requests, abandoned_blocks
+            )
             return
         done: list[int] = []
-        for seq, (future, ring_block_ids) in self.q_store_futures.items():
-            if not future.query():
-                continue
-            if not future.result():
-                logger.error("Q store failed for seq=%d", seq)
-            self.q_ring.free(ring_block_ids)
+        for seq, state in self.q_store_futures.items():
+            succeeded = False
+            try:
+                if not state.future.query():
+                    continue
+                succeeded = bool(state.future.result())
+                if not succeeded:
+                    logger.error("Q store failed for seq=%d", seq)
+            except Exception:
+                logger.exception("Q store completion raised for seq=%d", seq)
+            self.q_ring.free(state.ring_block_ids)
+            duration_ns = max(0, time.perf_counter_ns() - state.submitted_ns)
+            self._metrics.record_finished(
+                len(state.ring_block_ids), succeeded, duration_ns
+            )
             done.append(seq)
         for seq in done:
             self.q_store_futures.pop(seq, None)
