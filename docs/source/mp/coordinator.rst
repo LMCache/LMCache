@@ -205,10 +205,10 @@ does not import raises at startup; a controller that raises while starting is
 logged and skipped. Views cannot be added this way: they are the coordinator's
 own shared state, which your controller reads.
 
-**Replacing a built-in controller.** Loading yours does not displace the
-built-in one — this tree is always scanned, so both would be built, holding
-state under the same artifact sections and answering for the same endpoints.
-Name it in ``disabled_controllers`` and it is not built at all:
+**Disabling a built-in controller.** Name its class in
+``disabled_controllers`` and it is not built, taking its endpoints with it —
+which is how a controller of your own replaces one rather than running beside
+it:
 
 .. code-block:: bash
 
@@ -217,14 +217,7 @@ Name it in ``disabled_controllers`` and it is not built at all:
       "disabled_controllers": ["FleetEvictionController"]
     }'
 
-Endpoints belonging to a disabled controller are not mounted at all — the
-built-in eviction controller owns ``/quota`` and ``/cache/pins``, so both go
-with it, and a replacement is free to register those same paths so existing
-clients need no change. Endpoints that merely consult a controller carry on
-without it: ``POST /cache/delete`` holds back L2-pinned keys when there is an
-eviction controller to ask, and deletes everything requested when there is
-not. A name that matches no discovered controller raises at startup, so a typo
-cannot quietly leave the built-in one running against its replacement.
+A name matching no discovered controller raises at startup.
 
 Coordinator metrics export
 --------------------------

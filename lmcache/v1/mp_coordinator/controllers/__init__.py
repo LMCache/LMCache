@@ -57,7 +57,7 @@ def build_controllers(
     packages = (__name__, *_named_packages(config.extra_config, _PACKAGES_KEY))
     discovered = list(discover(packages, Controller))
     registry: Registry[Controller] = Registry(
-        _without_disabled(discovered, config.extra_config),
+        _remove_disabled(discovered, config.extra_config),
         # A controller cannot reach a peer, so the registry it is
         # handed for that is ignored here.
         build=lambda controller_type, _peers: controller_type.from_config(
@@ -101,7 +101,7 @@ def _named_packages(extra_config: Mapping[str, object], key: str) -> Sequence[st
     return tuple(named)
 
 
-def _without_disabled(
+def _remove_disabled(
     discovered: Sequence[type[Controller]], extra_config: Mapping[str, object]
 ) -> list[type[Controller]]:
     """Drop the controllers an operator asked not to be built.
