@@ -361,6 +361,73 @@ def test_mq_noop_multiple_clients():
     )
 
 
+def _raise_sync_handler_error() -> str:
+    raise RuntimeError("sync boom")
+
+
+def _raise_blocking_handler_error(key: IPCCacheServerKey, tp_size: int) -> None:
+    raise RuntimeError(f"blocking boom for {key.request_id}/{tp_size}")
+
+
+@pytest.mark.parametrize(
+    ("request_type", "handler", "payloads", "expected_message"),
+    [
+        (
+            RequestType.NOOP,
+            _raise_sync_handler_error,
+            [],
+            "Remote NOOP handler failed with RuntimeError: sync boom",
+        ),
+        (
+            RequestType.LOOKUP,
+            _raise_blocking_handler_error,
+            [create_cache_key(7), 2],
+            "Remote LOOKUP handler failed with RuntimeError: "
+            "blocking boom for test_request_7/2",
+        ),
+    ],
+)
+def test_mq_handler_error_reaches_client_future(
+    request_type, handler, payloads, expected_message
+):
+    context = zmq.Context.instance()
+    endpoint = f"inproc://handler-error-{request_type.name}-{time.monotonic_ns()}"
+    server = MessageQueueServer(endpoint, context)
+    add_handler_helper(server, request_type, handler)
+    if isinstance(server.handlers[request_type], BlockingRequestHandler):
+        server.add_normal_thread_pool([request_type], max_workers=1)
+    server.start()
+    client = MessageQueueClient(endpoint, context)
+    try:
+        future = client.submit_request(request_type, payloads)
+
+        with pytest.raises(RuntimeError, match=expected_message):
+            future.result(timeout=1)
+    finally:
+        client.close()
+        server.close()
+
+
+def test_mq_missing_handler_reaches_client_future():
+    context = zmq.Context.instance()
+    endpoint = f"inproc://missing-handler-{time.monotonic_ns()}"
+    server = MessageQueueServer(endpoint, context)
+    server.start()
+    client = MessageQueueClient(endpoint, context)
+    try:
+        future = client.submit_request(RequestType.NOOP, [])
+
+        with pytest.raises(
+            RuntimeError,
+            match="Remote NOOP handler failed with LookupError: "
+            "No handler registered for request type NOOP",
+        ):
+            future.result(timeout=1)
+    finally:
+        client.close()
+        server.close()
+
+
 @pytest.mark.cuda
 @pytest.mark.skipif(
     not (torch_dev.is_available() and torch_device_type == "cuda"),
