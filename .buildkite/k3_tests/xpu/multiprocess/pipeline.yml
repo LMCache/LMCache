@@ -94,6 +94,10 @@ steps:
           export MODEL="Qwen/Qwen3-0.6B"
           # Qwen3-0.6B BF16 KV: 28 layers x K/V x 8 heads x 128 dimensions.
           export RR_TOKENS_PER_GB_KVCACHE="9362"
+          # random-prefill sends every request concurrently; keep engine-driven
+          # SHM stores below the XPU MQ timeout while still exercising recovery.
+          export RR_NUM_REQUESTS="8"
+          export RR_REQUEST_LEN="2048"
           export TENSOR_PARALLEL_SIZE="1"
           export GPU_FOR_VLLM="0"
           export MAX_WAIT_SECONDS="900"
