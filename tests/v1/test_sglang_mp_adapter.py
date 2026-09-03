@@ -19,7 +19,6 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.transport import zmq_impl
 
 pytestmark = pytest.mark.sglang
 
@@ -224,12 +223,13 @@ def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
         "zmq",
         SimpleNamespace(Context=SimpleNamespace(instance=lambda: object())),
     )
+    request_client_factory = MagicMock(name="request_client_factory")
+    request_client_factory.create.return_value = req_client
     monkeypatch.setattr(
-        zmq_impl,
-        "MessageQueueClient",
-        lambda _endpoint, _context: object(),
+        adapter_mod,
+        "RequestClientFactory",
+        request_client_factory,
     )
-    monkeypatch.setattr(zmq_impl, "ZmqMultiprocessClient", lambda _raw: req_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda _client: 4)
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
     monkeypatch.setattr(
