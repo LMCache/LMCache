@@ -170,6 +170,8 @@ MAX_NUM_SEQS_ARG=""
 if [ -n "${MAX_NUM_SEQS:-}" ]; then
     MAX_NUM_SEQS_ARG="--max-num-seqs ${MAX_NUM_SEQS}"
 fi
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
+MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
 
 env -u VLLM_PORT \
     "${DEVICE_AFFINITY_VAR}=${GPU_DEVICE}" \
@@ -186,6 +188,7 @@ vllm serve "$MODEL" \
     $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
     $PREFIX_CACHING_ARG \
+    $MAX_MODEL_LEN_ARG \
     $MAX_NUM_BATCHED_TOKENS_ARG \
     $CHUNKED_PREFILL_ARG \
     $MAX_NUM_SEQS_ARG \
