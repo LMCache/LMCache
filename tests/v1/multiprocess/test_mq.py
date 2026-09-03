@@ -2,6 +2,7 @@
 # Standard
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
+from unittest.mock import MagicMock
 import multiprocessing as mp
 import queue
 import sys
@@ -804,6 +805,38 @@ def test_shared_loop_dispatch():
         assert ClientPollingLoop._instance is None
     finally:
         server.close()
+
+
+def test_client_outbound_batch_is_bounded_and_ordered() -> None:
+    """One client drain must yield after its budget without reordering."""
+    client = MessageQueueClient.__new__(MessageQueueClient)
+    client.input_queue = queue.Queue()
+    client.pending_futures = {}
+    client.socket = MagicMock()
+
+    for request_uid in range(3):
+        client.input_queue.put(
+            MessageQueueClient.WrappedRequest(
+                request_uid=request_uid,
+                future=MessagingFuture(),
+                request_type=RequestType.NOOP,
+                request_payloads=[],
+            )
+        )
+
+    assert client.process_outbound_task(max_batch=2) is True
+    assert client.input_queue.qsize() == 1
+    assert [
+        msgspec.msgpack.decode(call.args[0][0])
+        for call in client.socket.send_multipart.call_args_list
+    ] == [0, 1]
+
+    assert client.process_outbound_task(max_batch=2) is False
+    assert client.input_queue.empty()
+    assert [
+        msgspec.msgpack.decode(call.args[0][0])
+        for call in client.socket.send_multipart.call_args_list
+    ] == [0, 1, 2]
 
 
 def test_client_survives_undecodable_response() -> None:
