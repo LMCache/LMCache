@@ -39,7 +39,7 @@ class SerializerDebugWrapper(Serializer):
         bs = self.s.to_bytes(t)
         end = time.perf_counter()
 
-        logger.debug(f"Serialization took {end - start:.2f} seconds")
+        logger.debug("Serialization took %.2f seconds", end - start)
         return bs
 
 
@@ -71,5 +71,5 @@ class DeserializerDebugWrapper(Deserializer):
         ret = self.d.from_bytes(t)
         end = time.perf_counter()
 
-        logger.debug(f"Deserialization took {(end - start) * 1000:.2f} ms")
+        logger.debug("Deserialization took %.2f ms", (end - start) * 1000)
         return ret

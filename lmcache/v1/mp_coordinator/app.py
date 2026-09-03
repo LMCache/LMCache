@@ -4,26 +4,22 @@
 The coordinator is a FastAPI app. Endpoints are auto-discovered from the
 ``http_apis`` package (the same convention as the mp server's HTTP API) and stay
 thin, operating on the shared collaborators carried on ``app.state``: ``config``,
-``registry``, ``key_directory``, ``eviction_controller`` (which owns quota and
-usage), and the ingest layer's ``event_gate``.
-The lifespan runs background tasks for health-checking (eviction of instances
-whose heartbeats have lapsed) and the fleet L2 eviction control loop, which the
-controller owns (``FleetEvictionController.run``).
+the view and controller registries, and the ingest layer's ``event_gate``.
+The lifespan runs health-checking (eviction of instances whose heartbeats have
+lapsed) and the checkpoint timer, and starts and stops every controller --
+this file names no controller of its own.
 
 Adding a capability = a new ``http_apis/<name>_api.py`` router (auto-discovered)
-that uses those shared collaborators. To push to an mp server, a future router
-resolves the instance's address from the registry (``ip`` + ``http_port``) and
-POSTs to that server's specific endpoint. A domain with real logic/state of its
-own adds a module under ``controllers/`` stashed on ``app.state`` here; thin
-domains (like membership) just use the registry directly.
+that uses those shared collaborators. A controller that ships outside this tree
+cannot be reached from one of those, so it implements ``get_routers`` and brings
+its endpoints with it; either way this file names no controller.
 """
 
 # Standard
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 import asyncio
-import contextlib
 
 # Third Party
 from fastapi import FastAPI
@@ -33,10 +29,9 @@ import httpx
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers import build_controllers
-from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
-    FleetEvictionController,
-)
+from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
+from lmcache.v1.mp_coordinator.http_routes import HttpRoutes
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventBroadcaster,
     CacheEventConsumer,
@@ -58,9 +53,9 @@ from lmcache.v1.mp_coordinator.persistence.store import (
     LocalArtifactStore,
     NullArtifactStore,
 )
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -96,10 +91,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         collaborators (``config`` plus the :class:`CoordinatorContext`); all
         ``http_apis`` routers are registered.
     """
-    registry = InstanceRegistry()
     views = build_views(config)
+    registry = views.get(InstanceRegistry)
     controllers = build_controllers(config, views)
-    eviction_controller = controllers.get(FleetEvictionController)
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
     token_hasher = TokenHasher(
@@ -136,7 +130,6 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         register_key_directory_metrics(views.get(KeyDirectory))
 
     ctx = CoordinatorContext(
-        registry=registry,
         views=views,
         controllers=controllers,
         token_hasher=token_hasher,
@@ -175,47 +168,62 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """Start background tasks and clean up resources on shutdown."""
-        # Shared async client for outbound coordinator → MP server
-        # calls (eviction dispatch). Created inside the lifespan so it
-        # binds to the running event loop.
-        outbound_client = httpx.AsyncClient(timeout=30.0)
-        app.state.outbound_client = outbound_client
-        health_task = None
-        eviction_task = None
-        checkpoint_task = None
-        if config.checkpoint_path and config.checkpoint_interval > 0:
-            checkpoint_task = asyncio.create_task(_checkpoint_loop())
-        if config.health_check_interval > 0:
-            health_task = asyncio.create_task(_health_loop())
-        if config.eviction_check_interval > 0:
-            eviction_task = asyncio.create_task(
-                eviction_controller.run(
-                    registry, outbound_client, config.eviction_check_interval
-                )
+        """Start background work and unwind it in order on shutdown.
+
+        Registration order is teardown order reversed, and the order is
+        load-bearing: timers stop before controllers so no checkpoint
+        races one settling, controllers before the final write so it
+        captures what they settled on, and the client closes last
+        because a draining controller is still using it.
+
+        A controller that raises on the way in is logged and skipped;
+        the rest still run.
+        """
+        async with AsyncExitStack() as stack:
+            # Bound to the running event loop, so it cannot be built with
+            # the rest of the app.
+            outbound_client = await stack.enter_async_context(
+                httpx.AsyncClient(timeout=30.0)
             )
-        logger.info(
-            "MP coordinator listening on http://%s:%d", config.host, config.port
-        )
-        try:
-            yield
-        finally:
-            for task in (health_task, eviction_task, checkpoint_task):
-                if task is not None:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
+            app.state.outbound_client = outbound_client
             if config.checkpoint_path:
-                # One last write, so a clean restart resumes where this
-                # process stopped rather than an interval-old copy.
-                await asyncio.to_thread(
+                # One last write on the way out, so a clean restart
+                # resumes here rather than at an interval-old copy.
+                stack.push_async_callback(
+                    asyncio.to_thread,
                     save_checkpoint,
                     checkpoint_store,
                     quiesce,
                     checkpoint_components,
                 )
-            await eviction_controller.wait_for_in_flight_dispatches()
-            await outbound_client.aclose()
+            # One controller is not allowed to take the coordinator down
+            # with it: the endpoints belonging to no controller keep
+            # working, and whatever the failed one does simply is not
+            # happening -- the log is the only notice of that.
+            runtime = ControllerRuntime(http_client=outbound_client)
+            for controller in controllers.all():
+                try:
+                    await stack.enter_async_context(controller.run(runtime))
+                except Exception:
+                    logger.exception(
+                        "Controller %s failed to start", type(controller).__name__
+                    )
+            # Nested, so they stop before the stack unwinds. Awaited too:
+            # ``save_checkpoint`` runs in a thread a cancel cannot reach.
+            timers = []
+            if config.checkpoint_path and config.checkpoint_interval > 0:
+                timers.append(asyncio.create_task(_checkpoint_loop()))
+            if config.health_check_interval > 0:
+                timers.append(asyncio.create_task(_health_loop()))
+            logger.info(
+                "MP coordinator listening on http://%s:%d", config.host, config.port
+            )
+            try:
+                yield
+            finally:
+                for timer in timers:
+                    timer.cancel()
+                await asyncio.gather(*timers, return_exceptions=True)
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
     app.state.ctx = ctx
@@ -226,6 +234,13 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     package = f"{__package__}.http_apis"
     for router in discover_api_routers(apis_path, package):
         app.include_router(router)
+    # Then whatever a controller brings itself, so one this file cannot
+    # name still gets its endpoints. In-tree routes are mounted above, so
+    # they win a path collision.
+    for member in (*views.all(), *controllers.all()):
+        if isinstance(member, HttpRoutes):
+            for router in member.get_routers():
+                app.include_router(router)
 
     return app
 

@@ -57,7 +57,12 @@ class MPCoordinatorConfig:
         extra_config: Settings the core config does not name, keyed by
             whatever reads them. Discovery means a new view or controller
             is one file; without this, giving it a setting would still
-            mean editing this class, the CLI, and the docs.
+            mean editing this class, the CLI, and the docs. The
+            coordinator itself reads one key, ``controller_packages``: a
+            list of importable paths to load controllers from, which is
+            how an out-of-tree controller gets in without anything here
+            importing it. Views have no equivalent -- they are in-tree
+            only.
         metrics_enabled: Whether to initialize OpenTelemetry metrics.
         otlp_endpoint: OTLP gRPC endpoint for metrics push mode. When unset,
             metrics use Prometheus pull mode on the coordinator HTTP port.

@@ -60,6 +60,10 @@ class IPCCacheServerKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # Request-scoped LMCache configuration passed across the IPC boundary.
+    # It is metadata, not part of cache identity.
+    request_configs: dict[str, Any] | None = field(default=None, compare=False)
+
     # Number of workers that retrieve this key's object; the server reserves
     # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
     # lookups reject it.
@@ -95,6 +99,7 @@ class IPCCacheServerKey:
         request_id: str = "",
         cache_salt: str = "",
         num_kv_readers: int = 1,
+        request_configs: dict[str, Any] | None = None,
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -107,6 +112,7 @@ class IPCCacheServerKey:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
 
     def require_num_kv_readers(self) -> int:
@@ -138,6 +144,7 @@ class IPCCacheServerKey:
             end=self.end,
             request_id=self.request_id,
             cache_salt=self.cache_salt,
+            request_configs=self.request_configs,
         )
 
 
@@ -157,6 +164,9 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
         use_mla: Whether the worker KV format is MLA.
+        num_physical_slots: Number of physical KV slots gathered into one
+            LMCache chunk. ``None`` accepts the legacy protocol, where the
+            server assumed one physical slot per logical token.
     """
 
     instance_id: int
@@ -167,6 +177,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
+    num_physical_slots: int | None = None
 
 
 @dataclass

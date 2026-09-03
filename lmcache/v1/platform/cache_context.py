@@ -24,20 +24,23 @@ external plugin.
 from __future__ import annotations
 
 # Standard
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import get_device_spec
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Sequence
+
     # First Party
+    from lmcache.v1.gpu_connector.utils import LayoutHints
+    from lmcache.v1.multiprocess.custom_types import KVCache
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+
 
 logger = init_logger(__name__)
 

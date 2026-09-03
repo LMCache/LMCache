@@ -293,9 +293,10 @@ start_vllm() {
   export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
   export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
   # Force non-MLA attention backend when the matrix profile asks for it.
-  # vLLM's CPU backend still raises NotImplementedError for MLA today,
-  # so DeepSeek-V2-family models (which normally route through MLA) must
-  # set this on CPU to fall back to standard MHA.
+  # vLLM's CPU backend now supports MLA (vllm-project/vllm#49453), so
+  # DeepSeek-V2-family models route through the CPU MLA backend by
+  # default. This knob only remains to opt *out* of MLA when a profile
+  # still wants the standard MHA fallback.
   #
   # vLLM parses this env as `bool(int(os.getenv("VLLM_MLA_DISABLE","0")))`,
   # so any non-integer value (including the empty string GitHub Actions
