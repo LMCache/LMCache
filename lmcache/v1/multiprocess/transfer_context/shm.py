@@ -16,7 +16,6 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -190,11 +189,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
             chunk is already cached in every group; otherwise three parallel
             per-slot lists ``(tensors, chunk_indices, group_ids)``.
         """
-        future = self.mq_client.submit_request(
-            RequestType.PREPARE_STORE,
-            [key, instance_id],
-            get_response_class(RequestType.PREPARE_STORE),
-        )
+        future = self.req_client.prepare_store(key, instance_id)
         if not future.wait(timeout=self.mq_timeout):
             raise LMCacheTimeoutError(
                 f"PREPARE_STORE timed out for instance_id={instance_id} "
@@ -221,11 +216,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
             ``None`` on a miss; otherwise parallel per-slot
             ``(tensors, group_ids)`` covering every chunk of every group.
         """
-        future = self.mq_client.submit_request(
-            RequestType.PREPARE_RETRIEVE,
-            [key, instance_id],
-            get_response_class(RequestType.PREPARE_RETRIEVE),
-        )
+        future = self.req_client.prepare_retrieve(key, instance_id)
         try:
             response = future.result(timeout=self.mq_timeout)
         except TimeoutError:
