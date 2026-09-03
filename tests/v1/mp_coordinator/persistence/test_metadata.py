@@ -14,9 +14,10 @@ from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.persistence.store import LocalArtifactStore
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 
 def _key(chunk_id: int) -> ObjectKey:
@@ -24,7 +25,9 @@ def _key(chunk_id: int) -> ObjectKey:
 
 
 def _controller() -> FleetEvictionController:
-    return FleetEvictionController(usage_manager=CacheUsageManager())
+    return FleetEvictionController(
+        usage_manager=CacheUsageManager(), registry=InstanceRegistry()
+    )
 
 
 class TestRoundTrip:

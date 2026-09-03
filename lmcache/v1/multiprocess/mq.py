@@ -253,7 +253,17 @@ class ClientPollingLoop:
                 if event & zmq.POLLIN:
                     owner = self._socket_to_client.get(sock)
                     if owner is not None:
-                        owner.process_inbound()
+                        try:
+                            owner.process_inbound()
+                        except Exception:
+                            # This loop is shared by every client in the
+                            # process, so one undecodable or unexpected frame
+                            # must not terminate it: that would strand all
+                            # other clients' pending and future requests.
+                            logger.exception(
+                                "process_inbound failed; dropping this frame "
+                                "and continuing the shared polling loop"
+                            )
 
         # Drain remaining ops so any waiting threads unblock.
         self._process_ops()
