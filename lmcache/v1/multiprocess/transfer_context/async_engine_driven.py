@@ -120,15 +120,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         )
         self._copy_stream: Any = torch_dev.Stream()
         self._worker_staging_state = _WorkerStagingState()
-        self._worker_arenas = [
-            _WorkerStagingArena() for _ in range(self._commit_workers)
-        ]
-        self._worker_assignment_lock = threading.Lock()
-        self._next_worker_arena = 0
         self._commit_executor: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=self._commit_workers,
             thread_name_prefix="lmcache_engine_driven_commit",
-            initializer=self._assign_worker_arena,
         )
         self._inflight_lock = threading.Lock()
         self._inflight_gather_events: set[Any] = set()
@@ -148,9 +142,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     ) -> list[torch.Tensor]:
         """Allocate contiguous staging views from the current worker's arena.
 
-        The executor initializer assigns one exclusive arena to each worker
-        thread. An arena grows only when its worker encounters a larger store,
-        then reuses its contiguous slab for later stores.
+        Each executor thread creates its arena on first use. An arena grows
+        only when its worker encounters a larger store, then reuses its
+        contiguous slab for later stores.
 
         Args:
             shape: Shape of one KV chunk.
@@ -159,13 +153,11 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
         Returns:
             Contiguous chunk views backed by the worker's staging slab.
-
-        Raises:
-            RuntimeError: If called outside an executor worker thread.
         """
         arena = self._worker_staging_state.arena
         if arena is None:
-            raise RuntimeError("Pinned staging access requires an executor worker")
+            arena = _WorkerStagingArena()
+            self._worker_staging_state.arena = arena
         return arena.views(shape, dtype, count)
 
     def _release_staging(self, _chunks: list[torch.Tensor]) -> None:
@@ -435,15 +427,6 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         self._sync_gather_events(suppress_errors=True)
         self._commit_executor.shutdown(wait=True, cancel_futures=False)
         super().close()
-
-    def _assign_worker_arena(self) -> None:
-        """Bind a unique staging arena to a newly started executor thread."""
-        with self._worker_assignment_lock:
-            worker_index = self._next_worker_arena
-            self._next_worker_arena += 1
-        if worker_index >= len(self._worker_arenas):
-            raise RuntimeError("Executor started more workers than configured")
-        self._worker_staging_state.arena = self._worker_arenas[worker_index]
 
     def _sync_gather_events(self, suppress_errors: bool = False) -> None:
         """Synchronize all in-flight gather (GPU->CPU) events.
