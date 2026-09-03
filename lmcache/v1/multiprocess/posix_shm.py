@@ -70,6 +70,16 @@ _ADDR_TO_MMAP: dict[int, _mmap.mmap] = {}
 _OWNED_NAMES: set[str] = set()
 
 
+def _validate_mapping_size(fd: int, name: str, nbytes: int) -> None:
+    """Reject mappings larger than the SHM object's backing capacity."""
+    actual_nbytes = os.fstat(fd).st_size
+    if nbytes > actual_nbytes:
+        raise ValueError(
+            f"POSIX SHM mapping for {name!r} exceeds segment capacity: "
+            f"requested {nbytes} bytes, segment contains {actual_nbytes} bytes"
+        )
+
+
 def _open_and_mmap(name: str, nbytes: int, *, create: bool) -> tuple[_mmap.mmap, int]:
     """Open (or create) a POSIX SHM segment and ``mmap`` it.
 
@@ -83,6 +93,8 @@ def _open_and_mmap(name: str, nbytes: int, *, create: bool) -> tuple[_mmap.mmap,
     try:
         if create:
             os.ftruncate(fd, nbytes)
+        else:
+            _validate_mapping_size(fd, name, nbytes)
         mm = _mmap.mmap(fd, nbytes, access=_mmap.ACCESS_WRITE)
         addr = _addr_of_mmap(mm)
     except BaseException:
@@ -148,8 +160,8 @@ def shm_create_readwrite(name: str, nbytes: int) -> int:
 def shm_map_readwrite(name: str, nbytes: int) -> int:
     """Open an existing shared-memory segment and return its address.
 
-    ``nbytes`` must match the segment's actual size; ``mmap`` will
-    raise on a mismatch.
+    ``nbytes`` may map a prefix of the segment but must not exceed its
+    actual backing capacity.
 
     Args:
         name: The name of the shared-memory segment.
@@ -160,6 +172,7 @@ def shm_map_readwrite(name: str, nbytes: int) -> int:
 
     Raises:
         OSError: If the segment cannot be opened or mapped.
+        ValueError: If ``nbytes`` exceeds the segment's actual size.
     """
     sm_name = _strip_leading_slash(name)
     mm, addr = _open_and_mmap(sm_name, nbytes, create=False)
@@ -264,10 +277,12 @@ def shm_open_pool_as_mmap(name: str, nbytes: int) -> _mmap.mmap:
 
     Raises:
         OSError: If the segment cannot be opened or mapped.
+        ValueError: If ``nbytes`` exceeds the segment's actual size.
     """
     sm_name = _strip_leading_slash(name)
     fd = _posixshmem.shm_open(_slashed(sm_name), os.O_RDWR, mode=0o600)
     try:
+        _validate_mapping_size(fd, sm_name, nbytes)
         return _mmap.mmap(fd, nbytes, access=_mmap.ACCESS_WRITE)
     finally:
         os.close(fd)
