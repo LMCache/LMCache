@@ -17,9 +17,11 @@ Why Use the Operator
 The manual DaemonSet approach works, but it has sharp edges the operator
 eliminates:
 
-- **Auto-injected pod settings** -- The operator always mounts the host's
-  ``/dev/shm`` (hostPath) and sets ``--host 0.0.0.0``.  Forgetting the shared
-  ``/dev/shm`` in a hand-written manifest causes silent CUDA IPC failures
+- **Auto-injected pod settings** -- The operator wires cross-pod CUDA IPC for
+  you (isolated driver-level CUDA IPC by default on NVIDIA -- no ``hostIPC``,
+  no ``/dev/shm`` sharing; the legacy host ``/dev/shm`` mount under
+  ``spec.isolatedIPC: false``) and sets ``--host 0.0.0.0``.  Getting the IPC
+  wiring wrong in a hand-written manifest causes silent CUDA IPC failures
   (``cudaErrorMapBufferObjectFailed``) that are hard to debug.
 - **Node-local service discovery** -- The operator creates a ClusterIP Service
   with ``internalTrafficPolicy=Local`` and a connection ConfigMap that vLLM
@@ -87,8 +89,10 @@ A minimal CR deploys a DaemonSet with 60 GB L1 cache on every GPU node:
 The operator automatically:
 
 - Creates a DaemonSet running one LMCache server pod per matched node
-- Mounts the host's ``/dev/shm`` (hostPath) for CUDA IPC and passes
-  ``--host 0.0.0.0`` to the server
+- Wires cross-pod CUDA IPC (isolated IPC by default on NVIDIA: the server
+  runs with ``--isolated-ipc`` and shares nothing with the host; see
+  :ref:`mp-operator-isolated-ipc`) and passes ``--host 0.0.0.0`` to the
+  server
 - Creates a node-local ClusterIP Service for vLLM discovery
 - Creates a connection ConfigMap (``my-cache-connection``) with the
   ``kv-transfer-config`` JSON that vLLM needs
@@ -99,6 +103,48 @@ The operator automatically:
    The operator defaults the container image to ``lmcache/vllm-openai:latest``.
    Override with ``spec.image.repository`` and ``spec.image.tag`` to pin a
    specific version.
+
+.. _mp-operator-isolated-ipc:
+
+IPC Mode: Isolated (Default) vs. Legacy ``/dev/shm`` Sharing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The engine and the vLLM workers exchange KV caches and completion events over
+CUDA IPC.  ``spec.isolatedIPC`` selects how that IPC is wired:
+
+- **Isolated IPC** (``spec.isolatedIPC`` unset on ``gpuVendor: nvidia``, the
+  default): the server runs with ``--isolated-ipc``, the connection ConfigMap
+  carries ``lmcache.mp.isolated_ipc: true``, and the handles rendezvous in the
+  kernel driver.  Neither pod needs ``hostIPC`` or a shared ``/dev/shm``; the
+  injection webhook only gives opted-in vLLM pods a pod-private, memory-backed
+  ``/dev/shm`` for vLLM's own workers.  The pods carry no host-level IPC
+  grants, so the ``baseline`` Pod Security Standard allows the wiring.
+  Requires an LMCache image that understands ``--isolated-ipc``.  See the
+  *Isolated IPC* section of the :doc:`deployment` guide for the mechanism and
+  its limitations.
+- **Legacy /dev/shm sharing** (``spec.isolatedIPC: false``, and the automatic
+  resolution for ``gpuVendor: amd``, whose ROCm stack has no isolated-IPC
+  backends): both pods must see the same ``/dev/shm`` tmpfs.  The operator
+  mounts the host's ``/dev/shm`` via hostPath (or joins the host IPC namespace
+  when ``spec.hostIPC: true``) on the engine pod and, through the webhook, on
+  opted-in vLLM pods.  Use this for LMCache images without ``--isolated-ipc``,
+  and for KV caches in allocators backed by the CUDA VMM API -- vLLM sleep
+  mode and ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` -- which
+  driver-level CUDA IPC cannot share.
+
+``spec.isolatedIPC`` has no static CRD default: the effective value depends on
+``gpuVendor`` and is resolved by the operator wherever it reads the spec; an
+explicit ``true``/``false`` always wins.
+
+.. warning::
+   **Upgrade note.** Earlier operator versions always wired the legacy
+   ``/dev/shm`` sharing.  On NVIDIA the upgrade flips existing engines to
+   isolated IPC: the engine pods restart once with ``--isolated-ipc`` and
+   without the host ``/dev/shm`` mount, and vLLM pods must be restarted so the
+   webhook re-injects them with the matching connector config (the two modes
+   exchange incompatible handles, so a half-switched pair fails loudly at
+   event import).  Set ``spec.isolatedIPC: false`` on existing CRs **before**
+   upgrading to keep the old wiring.
 
 Connecting vLLM
 ---------------
@@ -150,8 +196,9 @@ Mount it in your vLLM Deployment:
                 - name: kv-transfer-config
                   mountPath: /etc/lmcache
                   readOnly: true
-                # Required for CUDA IPC between vLLM and LMCache: both pods
-                # must see the same /dev/shm tmpfs
+                # Pod-private /dev/shm for vLLM's own workers (Kubernetes'
+                # 64Mi default is too small). Under the default isolated IPC
+                # nothing is shared with the LMCache pod.
                 - name: lmcache-dev-shm
                   mountPath: /dev/shm
               resources:
@@ -162,18 +209,25 @@ Mount it in your vLLM Deployment:
               configMap:
                 name: my-cache-connection  # <engine-name>-connection
             - name: lmcache-dev-shm
-              hostPath:
-                path: /dev/shm
-                type: Directory
+              emptyDir:
+                medium: Memory
+              # With spec.isolatedIPC: false, mount the host's /dev/shm instead
+              # (both pods must see the same tmpfs):
+              #   hostPath: { path: /dev/shm, type: Directory }
 
 Key requirements for vLLM pods:
 
-- **Shared /dev/shm** -- CUDA IPC (``cudaIpcOpenMemHandle``) needs vLLM and
-  LMCache to see the same ``/dev/shm`` tmpfs (PyTorch's CUDA IPC handles
-  reference a shared-memory ref-counter file there).  Mount the host's
-  ``/dev/shm`` via hostPath as above, or set ``spec.hostIPC: true`` on the
-  engine and ``hostIPC: true`` on the vLLM pod to share the host IPC
-  namespace instead.
+- **IPC wiring must match the engine's mode** -- under the default isolated
+  IPC nothing is shared: the connection JSON carries
+  ``lmcache.mp.isolated_ipc: true`` and the handles rendezvous in the kernel
+  driver, so the pod only needs a large enough private ``/dev/shm`` for vLLM's
+  own workers (the emptyDir above).  With ``spec.isolatedIPC: false``, CUDA
+  IPC (``cudaIpcOpenMemHandle``) needs vLLM and LMCache to see the same
+  ``/dev/shm`` tmpfs (PyTorch's CUDA IPC handles reference a shared-memory
+  ref-counter file there): mount the host's ``/dev/shm`` via hostPath instead,
+  or set ``spec.hostIPC: true`` on the engine and ``hostIPC: true`` on the
+  vLLM pod to share the host IPC namespace.  See
+  :ref:`mp-operator-isolated-ipc`.
 - **PYTHONHASHSEED=0** -- Ensures deterministic token hashing so vLLM and
   LMCache produce consistent cache keys.
 - **ConfigMap mount** -- The ``$(cat ...)`` pattern reads the connection JSON
@@ -198,15 +252,23 @@ the webhook mutates the pod at admission time to add:
 
 - ``--kv-transfer-config <JSON>`` -- the ``LMCacheMPConnector`` config, read
   verbatim from the engine's ``<engine>-connection`` ConfigMap and inlined onto
-  the vLLM container's ``args`` (no volume mount needed);
-- a hostPath mount of the host's ``/dev/shm`` (CUDA IPC with the node-local
-  server; ``hostIPC: true`` instead when the engine sets ``spec.hostIPC``);
+  the vLLM container's ``args`` (no volume mount needed); under isolated IPC
+  it carries ``lmcache.mp.isolated_ipc: true`` so the connector picks the
+  driver-level transports;
+- the ``/dev/shm`` wiring matching the engine's IPC mode -- a pod-private
+  memory-backed emptyDir under the default isolated IPC (vLLM's own workers
+  need more than Kubernetes' 64Mi default), or a hostPath mount of the host's
+  ``/dev/shm`` when the engine sets ``spec.isolatedIPC: false``
+  (``hostIPC: true`` instead when it also sets ``spec.hostIPC``);
 - ``PYTHONHASHSEED=0`` on the vLLM container env, **set-if-absent** -- it
   preserves a value you already set.
 
 The connector config lives in the connection ConfigMap; the webhook also
-reads the ``LMCacheEngine`` CR (when present) to mirror its ``spec.hostIPC``
-mode and its optional injection sub-spec.  It fails open
+reads the ``LMCacheEngine`` CR (when present) to mirror its IPC mode
+(``spec.isolatedIPC`` / ``spec.hostIPC``) and its optional injection
+sub-spec.  When the CR cannot be read it falls back to the legacy host
+``/dev/shm`` mount (a legacy engine breaks without it; an isolated engine
+ignores the extra mount).  It fails open
 (``failurePolicy: Ignore``) and is idempotent (re-admitted pods carrying the
 ``lmcache.ai/lmcache-injected`` stamp are allowed unchanged).
 
@@ -217,9 +279,11 @@ Prerequisites
   controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``) --
   same as the CacheBlend webhook; install once per cluster (see
   :ref:`mp-operator-cacheblend` "Additional Prerequisites").
-- **Pod Security Standards** -- the injected hostPath ``/dev/shm`` mount (and
-  ``hostIPC``, when the engine opts in) is rejected by the ``baseline`` /
-  ``restricted`` PSS profiles, so the vLLM pod's namespace must be labeled
+- **Pod Security Standards** -- under the default isolated IPC the webhook
+  injects only an emptyDir, which the ``baseline`` / ``restricted`` PSS
+  profiles allow.  With ``spec.isolatedIPC: false`` the injected hostPath
+  ``/dev/shm`` mount (and ``hostIPC``, when the engine opts in) is rejected by
+  those profiles, so the vLLM pod's namespace must then be labeled
   ``pod-security.kubernetes.io/enforce=privileged``.
 - **Engine reconciled in the same namespace** -- the webhook reads the
   ``<engine>-connection`` ConfigMap directly, so the ``LMCacheEngine`` must
@@ -256,9 +320,10 @@ not reach ``vllm serve``):
             # lmcache.ai/lmcache-container: "vllm"
         spec:
           runtimeClassName: nvidia
-          # Do NOT mount an emptyDir at /dev/shm -- the webhook injects a
-          # hostPath mount of the host's /dev/shm; an emptyDir would shadow the
-          # host's /dev/shm and break cudaIpcOpenMemHandle.
+          # Do NOT add your own /dev/shm volume -- the webhook injects the one
+          # matching the engine's IPC mode (a pod-private emptyDir by default;
+          # the host's /dev/shm via hostPath under spec.isolatedIPC: false,
+          # where an emptyDir would shadow it and break cudaIpcOpenMemHandle).
           containers:
             - name: vllm
               image: lmcache/vllm-openai:latest
@@ -285,7 +350,12 @@ Deployment spec):
 .. code-block:: bash
 
     kubectl get pod -l app=vllm-lmcache -o yaml | \
-      grep -E "lmcache-dev-shm|hostIPC|kv-transfer-config|lmcache-injected|lmcache-skip-reason"
+      grep -E "lmcache-dev-shm|emptyDir|hostPath|hostIPC|isolated_ipc|kv-transfer-config|lmcache-injected|lmcache-skip-reason"
+
+Under the default isolated IPC the ``lmcache-dev-shm`` volume is a
+memory-backed ``emptyDir`` and the injected ``--kv-transfer-config`` contains
+``lmcache.mp.isolated_ipc``; with ``spec.isolatedIPC: false`` the volume is a
+``hostPath`` (or the pod has ``hostIPC: true``) and the key is absent.
 
 If nothing was injected, check the pod's ``lmcache.ai/lmcache-skip-reason``
 annotation:
@@ -568,16 +638,33 @@ GPU & Security
    * - ``gpuVendor``
      - ``nvidia``
      - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
-       (runs on the default runtime).
+       (runs on the default runtime; also resolves ``isolatedIPC`` to
+       ``false``).
+   * - ``isolatedIPC``
+     - unset (auto)
+     - Run the engine with ``--isolated-ipc``: KV caches and completion events
+       travel over driver-level CUDA IPC, so neither ``hostIPC`` nor any
+       ``/dev/shm`` sharing is wired, and the connection ConfigMap carries
+       ``lmcache.mp.isolated_ipc: true`` for the connector. Unset resolves to
+       ``true`` for ``gpuVendor: nvidia`` and ``false`` for ``amd`` (the
+       isolated-IPC backends are NVIDIA-only); there is no static CRD default
+       because the value depends on ``gpuVendor``. When it resolves to
+       ``true`` it overrides ``hostIPC``. Requires an LMCache image that
+       understands ``--isolated-ipc``. Set ``false`` to keep the legacy
+       ``/dev/shm``-sharing wiring: for older images, and for allocators
+       backed by the CUDA VMM API (vLLM sleep mode,
+       ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``), which
+       driver-level CUDA IPC cannot share. See
+       :ref:`mp-operator-isolated-ipc`.
    * - ``hostIPC``
      - ``false``
-     - Run the pod in the host IPC namespace instead of mounting the host's
-       ``/dev/shm`` via hostPath. Cross-pod CUDA IPC needs only the shared
-       ``/dev/shm`` tmpfs, so the default hostPath mount suffices on NVIDIA
-       clusters; set ``true`` where hostPath volumes are blocked by an
-       admission policy, or for ``gpuVendor: amd`` (the HIP IPC path is
-       unverified without it). The injection webhook mirrors this setting on
-       opted-in vLLM pods.
+     - Only applies when ``isolatedIPC`` resolves to ``false``: run the pod in
+       the host IPC namespace instead of mounting the host's ``/dev/shm`` via
+       hostPath. Legacy cross-pod CUDA IPC needs only the shared ``/dev/shm``
+       tmpfs, so the hostPath mount suffices on NVIDIA clusters; set ``true``
+       where hostPath volumes are blocked by an admission policy, or for
+       ``gpuVendor: amd`` (the HIP IPC path is unverified without it). The
+       injection webhook mirrors this setting on opted-in vLLM pods.
    * - ``privileged``
      - ``false``
      - Run the engine container in privileged mode. On most clusters
@@ -672,12 +759,16 @@ Auto-Injected Pod Settings
 
 The operator always injects these into the pod spec:
 
-- **Host /dev/shm mount (hostPath)** -- Required for CUDA IPC between LMCache
-  and vLLM: both processes must see the same ``/dev/shm`` tmpfs (PyTorch's CUDA
-  IPC handles reference a shared-memory ref-counter file there).  Set
-  ``spec.hostIPC: true`` to share the host IPC namespace instead (needed on
-  clusters that block hostPath volumes, and for ``gpuVendor: amd``); the mount
-  is then omitted.
+- **Cross-pod IPC wiring** -- Under the default isolated IPC
+  (``spec.isolatedIPC`` unset on NVIDIA) the server runs with
+  ``--isolated-ipc`` and the pod gets **no** ``hostIPC`` and **no**
+  ``/dev/shm`` mount: the KV-cache and event handles rendezvous in the kernel
+  driver.  With ``spec.isolatedIPC: false`` the operator mounts the host's
+  ``/dev/shm`` (hostPath) instead -- legacy CUDA IPC needs both processes to
+  see the same ``/dev/shm`` tmpfs (PyTorch's CUDA IPC handles reference a
+  shared-memory ref-counter file there) -- or sets ``hostIPC: true`` when
+  ``spec.hostIPC`` is set (needed on clusters that block hostPath volumes, and
+  for ``gpuVendor: amd``); the mount is then omitted.
 - **--host 0.0.0.0** -- Binds the server to all interfaces so the node-local
   Service can route to it.
 - **NVIDIA_VISIBLE_DEVICES=all** -- Ensures GPU access for IPC-based memory
@@ -688,9 +779,11 @@ The operator always injects these into the pod spec:
   and readiness (5s) probes on the server port.
 
 .. note::
-   The operator never mounts an emptyDir at ``/dev/shm``.  Mounting an emptyDir
-   there would shadow the host's ``/dev/shm`` with a private tmpfs and break
-   CUDA IPC.
+   In legacy mode (``spec.isolatedIPC: false``) the operator never mounts an
+   emptyDir at ``/dev/shm``: it would shadow the host's ``/dev/shm`` with a
+   private tmpfs and break CUDA IPC.  Under isolated IPC the engine pod needs
+   no ``/dev/shm`` volume at all; only the webhook-injected vLLM pods get a
+   private one, for vLLM's own workers.
 
 Resources Created
 ~~~~~~~~~~~~~~~~~
@@ -1283,9 +1376,11 @@ annotation to select the prefiller or decoder config:
         lmcache.ai/pd-role: "decoder"
 
 The webhook injects ``--kv-transfer-config`` (the role-specific MultiConnector
-JSON), ``hostIPC: true``, ``PYTHONHASHSEED=0``, ``VLLM_NIXL_SIDE_CHANNEL_HOST``,
-and ``VLLM_NIXL_SIDE_CHANNEL_PORT`` into each opted-in pod.  Do **not** mount
-the ConfigMap or add ``--kv-transfer-config`` yourself.
+JSON), the ``/dev/shm`` wiring matching the engine's IPC mode (see
+:ref:`mp-operator-isolated-ipc`), ``PYTHONHASHSEED=0``,
+``VLLM_NIXL_SIDE_CHANNEL_HOST``, and ``VLLM_NIXL_SIDE_CHANNEL_PORT`` into each
+opted-in pod.  Do **not** mount the ConfigMap or add ``--kv-transfer-config``
+yourself.
 
 .. note::
    **NIXL RDMA and hostNetwork** -- NIXL's UCX backend requires valid RDMA GIDs,
@@ -1596,9 +1691,11 @@ Operator vs Manual Deployment
    * - Concern
      - Manual DaemonSet
      - LMCacheEngine Operator
-   * - ``/dev/shm`` sharing (CUDA IPC)
-     - Must set manually
-     - Auto-injected (hostPath mount; ``spec.hostIPC`` opt-in)
+   * - Cross-pod CUDA IPC wiring
+     - Must set manually (``hostIPC`` / shared ``/dev/shm``)
+     - Auto-wired: isolated IPC by default (nothing shared);
+       ``spec.isolatedIPC: false`` for the legacy ``/dev/shm`` mount,
+       ``spec.hostIPC`` opt-in
    * - ``--host 0.0.0.0``
      - Must set manually
      - Auto-injected
@@ -1624,17 +1721,23 @@ Operator vs Manual Deployment
 Security Considerations
 -----------------------
 
-The **hostPath /dev/shm mount** exposes the host's shared-memory tmpfs to the
-container -- a narrower grant than the whole host IPC namespace, but still
-host-level access.  ``spec.hostIPC: true`` (opt-in, default ``false``) instead
-exposes the host's IPC namespace (System V IPC, POSIX message queues): any
-process in the container can interact with IPC resources from other processes
-on the same host.
+Under the default **isolated IPC** (see :ref:`mp-operator-isolated-ipc`) the
+engine and vLLM pods carry no host-level IPC grants at all -- no hostPath
+``/dev/shm`` mount, no ``hostIPC`` -- so the ``baseline`` Pod Security Standard
+no longer blocks the wiring.
 
-- Deploy only in trusted environments.
-- Clusters using Pod Security Standards must allow the ``privileged`` profile
-  for the LMCache namespace -- the ``baseline`` and ``restricted`` profiles
-  reject hostPath volumes and ``hostIPC`` alike.
+In legacy mode (``spec.isolatedIPC: false``) the **hostPath /dev/shm mount**
+exposes the host's shared-memory tmpfs to the container -- a narrower grant
+than the whole host IPC namespace, but still host-level access.
+``spec.hostIPC: true`` (opt-in, default ``false``) instead exposes the host's
+IPC namespace (System V IPC, POSIX message queues): any process in the
+container can interact with IPC resources from other processes on the same
+host.
+
+- Deploy legacy-mode engines only in trusted environments.
+- In legacy mode, clusters using Pod Security Standards must allow the
+  ``privileged`` profile for the LMCache namespace -- the ``baseline`` and
+  ``restricted`` profiles reject hostPath volumes and ``hostIPC`` alike.
 - ``spec.privileged`` defaults to ``false``. When enabled (required for
   ``gpuVendor: amd``), the engine container additionally runs privileged,
   granting it full device access -- enable it only where GPU visibility

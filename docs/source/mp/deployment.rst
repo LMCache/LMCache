@@ -38,8 +38,8 @@ Required Docker flags:
 
 - ``--network host`` -- Allows the vLLM container to reach LMCache on localhost.
 - ``--ipc host`` -- Required for CUDA IPC shared memory transfers between
-  containers (see *Isolated IPC* below for the plan to remove this
-  requirement).
+  containers in the default (legacy) mode; see *Isolated IPC* below for
+  running without it.
 - ``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container
   runtime.
 
@@ -102,6 +102,8 @@ after ``lmcache.mp.mq_timeout``).
    ``hostIPC: true`` / the shared ``/dev/shm`` mount (Kubernetes) can be
    dropped. The two containers only need access to the same GPUs and
    distinct PID *values* (any regular container setup provides both).
+   The Kubernetes :doc:`operator` wires isolated IPC by default on NVIDIA
+   (``spec.isolatedIPC``).
 
 Current limitations:
 
@@ -203,8 +205,8 @@ Architecture Notes
 - **DaemonSet uses ``hostNetwork: true``** so vLLM pods discover the LMCache
   server via ``status.hostIP``.
 - **Both containers mount ``/dev/shm``** from the host to enable CUDA IPC
-  memory sharing (see *Isolated IPC* above for the plan to remove this
-  requirement).
+  memory sharing in the default (legacy) mode; see *Isolated IPC* above for
+  running without it.
 - **GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain
   exclusively allocated to vLLM pods.  The NVIDIA container runtime
   automatically provides GPU access for IPC-based memory transfers.
