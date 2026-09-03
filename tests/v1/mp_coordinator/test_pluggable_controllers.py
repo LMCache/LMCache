@@ -334,14 +334,33 @@ def test_a_disabled_controller_holds_no_durable_state():
     assert "pins" not in sections
 
 
-def test_the_endpoints_of_a_disabled_controller_report_it():
-    """A 404 naming the controller, rather than the ``KeyError`` that
-    reaching for an unbuilt collaborator would raise."""
+def test_the_endpoints_of_a_disabled_controller_are_not_mounted():
+    """They belong to the controller, so they go with it -- leaving the
+    paths free for whatever took its place, rather than shadowing them."""
     with TestClient(create_app(_disabling("FleetEvictionController"))) as client:
-        response = client.get("/quota")
+        assert client.get("/quota").status_code == 404
+        assert not [
+            path
+            for path in client.app.openapi()["paths"]
+            if "quota" in path or "pins" in path
+        ]
 
-        assert response.status_code == 404
-        assert "FleetEvictionController is disabled" in response.json()["detail"]
+
+def test_those_endpoints_are_mounted_when_it_is_built():
+    """The other half: disabling is what removes them, not their absence."""
+    with TestClient(create_app(_config())) as client:
+        mounted = {
+            path
+            for path in client.app.openapi()["paths"]
+            if "quota" in path or "pins" in path
+        }
+
+        assert mounted == {
+            "/quota",
+            "/quota/config",
+            "/quota/{cache_salt}",
+            "/cache/pins",
+        }
 
 
 def test_deleting_still_works_without_an_eviction_controller():
