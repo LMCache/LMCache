@@ -113,6 +113,7 @@ class EventBus:
         self._wake = threading.Event()
         self._stop_flag = threading.Event()
         self._lock = threading.Lock()
+        self._queue_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
@@ -203,21 +204,22 @@ class EventBus:
         if not self._config.enabled:
             return
 
-        if len(self._queue) >= self._config.max_queue_size:
-            self._discard_count += 1
-            now = time.monotonic()
-            if now - self._last_discard_warning >= 1.0:
-                logger.warning(
-                    "EventBus queue full (max_queue_size=%d), "
-                    "%d event(s) discarded so far",
-                    self._config.max_queue_size,
-                    self._discard_count,
-                )
-                self._last_discard_warning = now
-            return
+        with self._queue_lock:
+            if len(self._queue) >= self._config.max_queue_size:
+                self._discard_count += 1
+                now = time.monotonic()
+                if now - self._last_discard_warning >= 1.0:
+                    logger.warning(
+                        "EventBus queue full (max_queue_size=%d), "
+                        "%d event(s) discarded so far",
+                        self._config.max_queue_size,
+                        self._discard_count,
+                    )
+                    self._last_discard_warning = now
+                return
 
-        event.timestamp = time.time()
-        self._queue.append(event)
+            event.timestamp = time.time()
+            self._queue.append(event)
         self._wake.set()
 
     def start(self) -> None:
