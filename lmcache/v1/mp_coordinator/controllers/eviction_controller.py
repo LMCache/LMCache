@@ -8,10 +8,12 @@ See ``docs/design/v1/mp_coordinator/usage_and_eviction.md``.
 from __future__ import annotations
 
 # Standard
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, cast
 import asyncio
+import contextlib
 
 # Third Party
 import httpx
@@ -25,10 +27,16 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
 )
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
+from lmcache.v1.mp_coordinator.controllers.base import (
+    Controller,
+    ControllerRuntime,
+)
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.object_service import (
     MAX_DELETE_BATCH,
 )
@@ -36,39 +44,48 @@ from lmcache.v1.multiprocess.cache_control.object_service import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.api import ObjectKey
-    from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
-    from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+    from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+    from lmcache.v1.mp_coordinator.discovery import Registry
+    from lmcache.v1.mp_coordinator.views.base import View
+    from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 
 logger = init_logger(__name__)
 
 
-class FleetEvictionController:
+class FleetEvictionController(Controller):
     """Per-``cache_salt`` L2 eviction controller for the fleet.
 
     Owns the quota registry it enforces (exposed for the ``/quota``
     endpoints) and reads the fleet usage view on the ``l2`` tier.
-    :meth:`run` is the loop, :meth:`execute_evictions` one pass of it.
+    :meth:`run` drives the loop, :meth:`execute_evictions` one pass of it.
 
     Args:
         usage_manager: The fleet usage view. A consumer in its own
             right, registered on the broadcaster **before** this
             controller so it has accounted a batch by the time
             :meth:`consume` reads sizes from it.
+        registry: The fleet membership view; supplies the address a
+            victim's DELETE is sent to.
         eviction_ratio: Fraction of tracked keys to evict per cycle.
         trigger_watermark: Eviction fires when usage reaches this
             fraction of the quota.
+        check_interval: Seconds between sweeps. Zero runs no loop.
     """
 
     def __init__(
         self,
         usage_manager: CacheUsageManager,
+        registry: InstanceRegistry,
         eviction_ratio: float = 0.5,
         trigger_watermark: float = 1.0,
+        check_interval: float = 0.0,
     ) -> None:
         self._quota_manager = QuotaManager()
         self._usage_manager = usage_manager
+        self._registry = registry
         self._eviction_ratio = max(0.0, min(1.0, eviction_ratio))
         self._trigger_watermark = trigger_watermark
+        self._check_interval = check_interval
         self._policy = IsolatedLRUEvictionPolicy()
         self._in_flight_dispatches: set[asyncio.Task] = set()
         self._pin_counts: dict[ObjectKey, int] = {}
@@ -147,6 +164,30 @@ class FleetEvictionController:
                 self._pin_counts.pop(key, None)
             else:
                 self._pin_counts[key] = count - 1
+
+    @classmethod
+    def from_config(
+        cls,
+        config: "MPCoordinatorConfig",
+        views: "Registry[View]",
+    ) -> "FleetEvictionController":
+        """Build the controller from configuration and the fleet's views.
+
+        The usage view comes from the registry rather than being made
+        here: the coordinator has exactly one, and the eviction plan is
+        only correct if it reads the same bytes the fleet reported.
+
+        Args:
+            config: The coordinator configuration.
+            views: The fleet's read models.
+        """
+        return cls(
+            usage_manager=views.get(CacheUsageManager),
+            registry=views.get(InstanceRegistry),
+            eviction_ratio=config.eviction_ratio,
+            trigger_watermark=config.trigger_watermark,
+            check_interval=config.eviction_check_interval,
+        )
 
     def get_durable_components(self) -> tuple[DurableComponent, ...]:
         """Return the state this controller owns that must outlive the process.
@@ -265,31 +306,32 @@ class FleetEvictionController:
 
         return eviction_plan
 
-    async def run(
-        self,
-        registry: InstanceRegistry,
-        http_client: httpx.AsyncClient,
-        check_interval: float,
-    ) -> None:
-        """Run the control loop until cancelled, sleeping first.
+    @asynccontextmanager
+    async def run(self, runtime: ControllerRuntime) -> AsyncIterator[None]:
+        """Sweep on a cadence while the app serves, then drain.
+
+        A dispatch is fire-and-forget, so one the last sweep launched
+        would otherwise die with the process; the exit half waits for it.
 
         Args:
-            registry: Fleet membership; supplies the dispatch target.
-            http_client: Client for the outbound DELETE requests.
-            check_interval: Seconds between passes; must be positive.
-
-        Raises:
-            ValueError: If ``check_interval`` is not positive.
+            runtime: Supplies the client for the outbound DELETEs.
         """
-        if check_interval <= 0:
-            raise ValueError(f"check_interval must be > 0 (got {check_interval})")
-        while True:
-            await asyncio.sleep(check_interval)
-            await self.execute_evictions(registry, http_client)
+        task: asyncio.Task | None = None
+        if self._check_interval > 0:
+            task = asyncio.create_task(self._sweep_forever(runtime.http_client))
+        else:
+            logger.debug("Eviction loop disabled (check_interval=0)")
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            await self.wait_for_in_flight_dispatches()
 
     async def execute_evictions(
         self,
-        registry: InstanceRegistry,
         http_client: httpx.AsyncClient,
     ) -> dict[str, list[ObjectKey]]:
         """Compute the plan and fire-and-forget ``DELETE /cache/objects``
@@ -300,12 +342,19 @@ class FleetEvictionController:
         the dispatch tasks are spawned; the LRU clears only when the
         matching ``delete`` event comes back on the cache-event stream.
         At-least-once, safe because the delete is idempotent.
+
+        Args:
+            http_client: Client for the outbound DELETE requests.
+
+        Returns:
+            The plan dispatched, keyed by ``cache_salt``; empty when
+            there was nothing to evict or no server to send it to.
         """
         plan = self.compute_eviction_plan()
         if not plan:
             return plan
 
-        target = registry.random_instance()
+        target = self._registry.random_instance()
         if target is None:
             logger.warning(
                 "Eviction plan computed (%d salts) but no MP servers are "
@@ -338,11 +387,17 @@ class FleetEvictionController:
         """Await every outstanding fire-and-forget dispatch."""
         await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
 
+    async def _sweep_forever(self, http_client: httpx.AsyncClient) -> None:
+        """Evict on a cadence until cancelled, sleeping first."""
+        while True:
+            await asyncio.sleep(self._check_interval)
+            await self.execute_evictions(http_client)
+
     @staticmethod
     async def _dispatch_eviction(
         http_client: httpx.AsyncClient,
         url: str,
-        body: dict,
+        body: Mapping[str, object],
         instance_id: str,
         key_count: int,
         salt_count: int,

@@ -109,7 +109,7 @@ type CacheBlendEngineSpec struct {
 	// +kubebuilder:validation:Enum=nvidia;amd
 	GPUVendor *string `json:"gpuVendor,omitempty"`
 
-	// image defines the container image to use for the blend_v3 engine. This
+	// image defines the container image to use for the blend engine. This
 	// may be a PRIVATE image; use imagePullSecrets to pull it.
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`

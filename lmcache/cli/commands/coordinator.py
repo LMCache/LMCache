@@ -8,6 +8,7 @@ leaves the corresponding :class:`MPCoordinatorConfig` default.
 
 # Standard
 import argparse
+import json
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
@@ -160,6 +161,17 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--extra-config",
+            type=str,
+            default=None,
+            help=(
+                "JSON object of settings the core flags do not name, read by "
+                "whichever view or controller looks for them. The coordinator "
+                'reads "controller_packages": a list of importable paths to '
+                "load out-of-tree controllers from."
+            ),
+        )
+        parser.add_argument(
             "--metadata-path",
             type=str,
             default=None,
@@ -250,6 +262,9 @@ class CoordinatorCommand(BaseCommand):
         }
         if args.disable_metrics is not None:
             fields["metrics_enabled"] = not args.disable_metrics
+        extra_config = _parse_extra_config(args.extra_config)
+        if extra_config is not None:
+            fields["extra_config"] = extra_config
         config = MPCoordinatorConfig(**fields)
 
         init_coordinator_metrics(config)
@@ -261,3 +276,30 @@ class CoordinatorCommand(BaseCommand):
             log_level="info",
             timeout_keep_alive=config.timeout_keep_alive,
         )
+
+
+def _parse_extra_config(raw: str | None) -> dict[str, object] | None:
+    """Parse ``--extra-config``.
+
+    Args:
+        raw: The JSON object as given, or ``None`` when the flag is unset.
+
+    Returns:
+        The parsed settings, or ``None`` so an unset flag leaves the
+        config default alone.
+
+    Raises:
+        ValueError: If it is not JSON, or is not an object -- a list or a
+            bare string would fail far from here, on the first lookup.
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"--extra-config is not valid JSON: {e}") from None
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"--extra-config must be a JSON object, got {type(parsed).__name__}"
+        )
+    return parsed

@@ -8,6 +8,45 @@ server.  Arguments are grouped by the config module that defines them.
    :local:
    :depth: 2
 
+Per-request LMCache configuration
+---------------------------------
+
+vLLM clients can attach request-scoped LMCache metadata through the top-level
+``kv_transfer_params`` field.  When vLLM uses ``LMCacheMPConnector``, entries
+whose keys start with ``lmcache.`` are forwarded with the request across the
+MP scheduler and worker IPC paths.  Other ``kv_transfer_params`` entries are
+reserved for the transfer layer and are not forwarded to LMCache.
+
+For example:
+
+.. code-block:: bash
+
+   curl -X POST http://localhost:8000/v1/completions \
+       -H "Content-Type: application/json" \
+       -d '{
+           "model": "Qwen/Qwen3-14B",
+           "prompt": "Explain KV cache reuse.",
+           "max_tokens": 32,
+           "kv_transfer_params": {
+               "lmcache.tag.tenant": "example-tenant",
+               "lmcache.ttl": 60
+           }
+       }'
+
+The connector carries these values on lookup, prefetch, store, retrieve, and
+lookup-lock cleanup operations so server-side features can inspect the same
+request metadata throughout the request lifecycle.
+
+.. important::
+
+   Forwarding a value does not by itself make the MP server act on it or make
+   it part of cache identity.  The current MP server treats request configs as
+   metadata.  Do not rely on ``lmcache.tag.*``, ``lmcache.ttl``,
+   ``lmcache.skip_save``, or another request config for isolation, expiration,
+   or cache-control behavior in MP mode unless the selected server-side
+   feature explicitly documents support for it.  The in-process
+   ``LMCacheConnectorV1`` may interpret these values differently.
+
 MP Server
 ---------
 
@@ -57,12 +96,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--engine-type``
      - ``default``
      - Cache engine backend type. ``default`` uses standard prefix
-       caching; ``blend`` selects the current CacheBlend V3 implementation
-       (composes a ``BlendV3Module`` into the engine);
-       ``blend_legacy`` selects the original CacheBlend
-       (composes a ``BlendModule``). Both blend variants require
+       caching; ``blend`` composes the CacheBlend ``BlendModule`` into the
+       engine for non-prefix KV reuse and requires
        ``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``.
-       Choices: ``default``, ``blend``, ``blend_legacy``.
+       Choices: ``default``, ``blend``.
    * - ``--supported-transfer-mode``
      - ``lmcache_driven``
      - Which worker → server transfer paths the server loads.
@@ -73,6 +110,21 @@ Source: ``lmcache/v1/multiprocess/config.py``
        so workers of either device type can connect without manual
        configuration.
        Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
+   * - ``--isolated-ipc`` / ``--no-isolated-ipc``
+     - ``false``
+     - Assume engine workers and this server run in containers that share
+       no host IPC namespace (``hostIPC``) and no common ``/dev/shm``, and
+       use IPC mechanisms that work there: on CUDA, raw CUDA IPC memory
+       handles for KV-cache registration (instead of PyTorch storage IPC,
+       which needs a shared ``/dev/shm``) and timeline-semaphore events
+       (instead of CUDA interprocess *event* handles). Must match the
+       workers'
+       ``lmcache.mp.isolated_ipc`` setting -- the two mechanisms exchange
+       incompatible event handles, and a mismatch fails at event import
+       on whichever side receives the foreign handle. Currently supported
+       by the vLLM MP connector only; the default stays ``false`` until
+       the integrations that still create raw CUDA interprocess events
+       (SGLang, TensorRT-LLM, CacheBlend, qstore) migrate.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to
@@ -119,6 +171,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
        L1-resident and only the dropped gap is recomputed, instead of
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
+   * - ``--enable-dedup-content``
+     - ``False``
+     - ``--engine-type blend`` only: skip fingerprint registration for a chunk
+       whose content is already indexed, so the same text stored behind two
+       prefixes is indexed once. No effect for other engines.
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
      - ``False``
      - Split a hybrid model's kernel groups into one object group per
@@ -286,6 +343,21 @@ example ``/dev/ugds_drv0``) rather than a directory. The first
 ``--l1-size-gb`` bytes of the device are the slab, so the device must be at
 least that large and must not hold anything else.
 
+**Phoenix** (``libphoenix.so``) is a fourth opt-in backend selected with
+``--gds-l1-backend phx``. Phoenix (phxfs) provides a kernel-mediated
+user-space NVMe-to-GPU DMA path with a very low software-stack overhead.
+Like cuFile and hipFile it uses a filesystem slab: ``--gds-l1-path`` names
+an NVMe directory, ``--gds-l1-use-direct-io`` applies, and the slab file
+can share the disk with other data. Each GPU staging buffer is registered with
+phxfs (``phxfs_regmem``, 64 KiB-aligned) and the slab is read and written
+with stream-ordered submissions (``phxfs_read_stream`` /
+``phxfs_write_stream``) that keep the DMA ordered with the other work on
+the stream. A ``libphoenix`` build without the stream-ordered API fails
+to load. Follow the
+`Phoenix installation guide <https://github.com/xPU-IO/Phoenix/blob/main/doc/install.md>`_
+to build ``libphoenix.so``, load the ``phoenixfs`` kernel module, and
+verify the installation.
+
 
 
 .. note::
@@ -318,6 +390,14 @@ least that large and must not hold anything else.
    Ensure the SSD is not used for any other purpose and that its contents are
    not critical.
 
+.. note::
+
+   Phoenix requires the ``phoenixfs`` kernel module loaded and a
+   platform-matching ``libphoenix.so`` reachable through the loader
+   (``ldconfig`` or ``LD_LIBRARY_PATH``). It has been validated on NVIDIA
+   GPUs; other platforms require a matching ``libphoenix`` build and are not
+   yet tested.
+
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -329,12 +409,12 @@ least that large and must not hold anything else.
      - Not set
      - NVMe directory for the GDS L1 slab, or the raw device path when
        ``--gds-l1-backend ugds`` is used. Setting this enables the GDS L1
-       tier; with cuFile or hipFile one shared slab per process lives at
-       ``<path>/lmcache_gds_slab.bin``.
+       tier; with cuFile, hipFile, or phx one shared slab per process lives
+       at ``<path>/lmcache_gds_slab.bin``.
    * - ``--gds-l1-backend``
      - ``auto``
-     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, or ``ugds``.
-       ``auto`` selects cuFile on CUDA and hipFile on ROCm.
+     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, ``ugds``, or
+       ``phx``. ``auto`` selects cuFile on CUDA and hipFile on ROCm.
    * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
@@ -557,6 +637,69 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
 
+Decode context parallelism (DCP)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``--decode-context-parallel-size`` is supported. Under DCP, vLLM shards the
+attention KV cache across ranks along the token axis, so each rank holds only
+a strided ``1/dcp`` slice and one block ID spans ``block_size * dcp`` tokens.
+LMCache stores each rank's opaque page as its own object and a chunk counts as
+a hit only when every rank's slice is present. Non-trivial
+``--cp-kv-cache-interleave-size`` values are supported when they evenly divide
+every resolved attention cache block size. Because interleave changes the
+token-to-slot byte layout, the connector automatically adds the DCP size and
+interleave value to its internal cache namespace. This prevents pages written
+by one interleave layout from being loaded by another. It does not change the
+model name served by vLLM, but the decorated cache model name is visible in MP
+metric labels so operators can distinguish incompatible cache layouts.
+
+One configuration change is required: the LMCache chunk size must be a
+multiple of vLLM's resolved scheduler block size. For a single attention
+group, that is ``block_size * decode_context_parallel_size``. For a hybrid
+model, it is the least common multiple of every attention group's DCP-scaled
+block span and every recurrent-state group's unscaled physical block span. If
+the chunk size is incompatible, vLLM fails at connector startup with the
+required multiple in the message (the LMCache server itself starts fine).
+
+The example model also needs a vLLM build that can run it under DCP:
+Kimi-Linear DCP support landed after v0.27.1 (vLLM commit ``63ac04a61e``,
+PR #50484). On stock v0.27.1 the command below fails at startup with
+``Kimi-K3 MultiHeadLatentAttention does not support context parallelism``.
+
+.. code-block:: bash
+
+    # block_size 1024 x dcp 2 -> chunk size must be a multiple of 2048
+    lmcache server --host localhost --port 6000 --chunk-size 2048 \
+        --l1-size-gb 20 --eviction-policy LRU
+
+    vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
+        --trust-remote-code \
+        --tensor-parallel-size 2 \
+        --decode-context-parallel-size 2 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+
+Pipeline parallelism and multiple LMCache servers may both be combined with
+DCP. These combinations are rejected at startup:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Rejected with DCP
+     - Reason
+   * - ``--prefill-context-parallel-size > 1``
+     - Adds a second KV shard axis this connector does not map.
+   * - Fewer than ``dcp_size`` ranks per LMCache server
+     - No server holds a complete set of shards, and lookup takes the
+       minimum hit count across servers, so it reports no hits.
+
+An interleave value that is non-positive, larger than a resolved attention
+cache block, or does not evenly divide every resolved attention block is
+rejected at connector startup.
+
+``decode_context_parallel_size > tensor_parallel_size`` is rejected by vLLM
+itself, so this connector does not re-check it.
+
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
 
@@ -611,6 +754,23 @@ All connector-level options are passed through
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.lazy_offload``
+     - ``false``
+     - Defer store operations and submit finished requests in FIFO batches.
+       Available only with vLLM and ``LMCacheMPConnector``. See
+       :doc:`lazy_offload` for behavior, limitations, and tuning guidance.
+   * - ``lmcache.mp.lazy_offload_policy``
+     - ``FIFO``
+     - Policy used to select finished pending requests. ``FIFO`` is currently
+       the only supported value. Used only when lazy offload is enabled.
+   * - ``lmcache.mp.lazy_offload_threshold``
+     - ``100``
+     - Number of finished pending requests required before a lazy-offload
+       batch becomes eligible for submission.
+   * - ``lmcache.mp.lazy_offload_select_count``
+     - ``10``
+     - Maximum number of finished requests selected each time the
+       lazy-offload threshold is met.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
@@ -620,6 +780,16 @@ All connector-level options are passed through
        ``engine_driven`` (force the worker-side gather/scatter copy
        path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
        set.
+   * - ``lmcache.mp.isolated_ipc``
+     - ``false``
+     - Assume the vLLM workers and the LMCache server run in containers
+       that share no host IPC namespace (``hostIPC``) and no common
+       ``/dev/shm``, and use IPC mechanisms that work there: on CUDA, raw
+       CUDA IPC memory handles for KV-cache registration and
+       timeline-semaphore events instead of CUDA interprocess *event*
+       handles. Set it together with the
+       server's ``--isolated-ipc`` flag -- a mismatch fails at event
+       import on whichever side receives the foreign handle.
 
 Environment Variables
 ---------------------

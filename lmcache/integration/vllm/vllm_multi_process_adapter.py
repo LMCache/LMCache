@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
+import math
 import os
 import threading
 import uuid
@@ -19,6 +20,7 @@ from lmcache.integration.request_telemetry.factory import RequestTelemetryFactor
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -28,13 +30,15 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 if TYPE_CHECKING:
     # First Party
@@ -65,6 +69,11 @@ class ExtraConfigDefault(enum.Enum):
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
+    # Whether IPC mechanisms must work across isolated containers (no
+    # shared host IPC namespace or /dev/shm); see
+    # lmcache/v1/platform/isolated_ipc.py. Must match the LMCache server's
+    # ``--isolated-ipc`` setting.
+    isolated_ipc = False
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -78,6 +87,27 @@ _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
 # default 10 s heartbeat interval (3 x 10 s); the adapter warns at startup
 # when 3 x heartbeat_interval exceeds it (server timeout must be raised too).
 _SERVER_REAP_TIMEOUT_FLOOR_SECONDS: float = 30.0
+
+
+def _coerce_extra_config_value(default: Any, raw: Any) -> Any:
+    """Coerce a user-provided extra_config value to its default's type.
+
+    Args:
+        default: The :class:`ExtraConfigDefault` member value, defining the
+            target type.
+        raw: The user-provided value (typed when the connector config came
+            from JSON, a string when it came from a CLI passthrough).
+
+    Returns:
+        ``raw`` coerced to ``type(default)``. Booleans accept the usual
+        string spellings (``1/true/yes/on``, case-insensitive) because
+        ``bool("false")`` is ``True``.
+    """
+    if isinstance(default, bool):
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    return type(default)(raw)
 
 
 def _resolve_extra_config(
@@ -111,7 +141,7 @@ def _resolve_extra_config(
     for item in ExtraConfigDefault:
         default = item.value
         raw = stripped.get(item.name)
-        value = type(default)(raw) if raw is not None else default
+        value = _coerce_extra_config_value(default, raw) if raw is not None else default
         if value != default:
             logger.info(
                 "%s%s = %s (overridden, default: %s)",
@@ -132,67 +162,42 @@ def _resolve_extra_config(
 
 
 class _IpcEvent(Protocol):
-    def ipc_handle(self) -> Any: ...
-
     def wait(self, stream: Any = None) -> None: ...
 
 
-def send_lmcache_request(
-    mq_client: MessageQueueClient,
-    request_type: RequestType,
-    payloads: list[Any],
-) -> MessagingFuture[Any]:
-    """
-    Helper function to send the request to the LMCache multiprocess server
-
-    Args:
-        mq_client: The LMCache multiprocess mode message queue client
-        request_type: The request type
-        payloads: The request payloads
-
-    Returns:
-        A messaging future for the request
-    """
-
-    future = mq_client.submit_request(
-        request_type, payloads, get_response_class(request_type)
-    )
-    return future
-
-
 def get_lmcache_chunk_size(
-    mq_client: MessageQueueClient,
+    req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
 ) -> int:
     """
     Helper function to get the LMCache chunk size from the server
 
     Args:
-        mq_client: The LMCache multiprocess mode message queue client
+        req_client: The LMCache multiprocess request client.
         timeout: Timeout in seconds for the blocking request.
 
     Returns:
         An integer representing the LMCache chunk size
     """
-    future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
+    future = req_client.get_chunk_size()
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
 
 
 def get_experimental(
-    mq_client: MessageQueueClient,
+    req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
 ) -> set[str]:
     """Query the experimental capabilities a server advertises.
 
     Args:
-        mq_client: The LMCache multiprocess mode message queue client.
+        req_client: The LMCache multiprocess request client.
         timeout: Seconds to wait for the server's response.
 
     Returns:
         Experimental features built into the server (now `transfer_query`).
     """
-    future = send_lmcache_request(mq_client, RequestType.GET_EXPERIMENTAL, [])
+    future = req_client.get_experimental()
     try:
         return set(future.result(timeout=timeout))
     except TimeoutError:
@@ -235,14 +240,14 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
 
 
 def send_ping(
-    mq_client: MessageQueueClient,
+    req_client: RequestClient,
     timeout: float,
     instance_id: int | None = None,
 ) -> bool:
     """Send a PING request and return the result.
 
     Args:
-        mq_client: The message queue client.
+        req_client: The request client.
         timeout: Seconds to wait for the server's response.
         instance_id: The worker's instance ID so the server can refresh its
             liveness, or None for an untracked prober (scheduler adapter).
@@ -251,7 +256,7 @@ def send_ping(
         True if server is healthy, False on timeout or error.
     """
     try:
-        future = send_lmcache_request(mq_client, RequestType.PING, [instance_id])
+        future = req_client.ping(instance_id)
         return future.result(timeout=timeout)
     except TimeoutError:
         return False
@@ -286,15 +291,19 @@ class ParallelStrategy:
     n_servers: int
     """Number of LMCache servers backing this deployment"""
 
+    dcp_size: int = 1
+    """Decode-context-parallel size: each chunk's KV is split into
+    ``dcp_size`` token shards instead of one replicated copy."""
+
     @property
     def kv_world_size(self) -> int:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.mla_only:
-            # In this PR we do not support PP + TP + MLA in multi-server mode.
-            # A precondition check enforces pp_size == 1, so kv_world_size for
-            # MLA can be derived as world_size / tp_size.
-            return self.vllm_world_size // self.tp_size
+            # MLA replicates KV across TP; distinct bytes exist only per
+            # pipeline stage and per DCP token shard.
+            pp_stages = self.vllm_world_size // self.tp_size
+            return pp_stages * self.dcp_size
         return self.vllm_world_size // self.n_servers
 
     @property
@@ -303,8 +312,28 @@ class ParallelStrategy:
         that the current worker is responsible for,
         in ``[0, kv_world_size)``."""
         if self.mla_only:
-            return self.vllm_worker_id // self.tp_size
+            # Row-major over (pipeline stage, token shard).
+            pp_stage = self.vllm_worker_id // self.tp_size
+            return pp_stage * self.dcp_size + self._get_dcp_rank()
         return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
+
+    def _get_dcp_rank(self) -> int:
+        """Token shard index in ``[0, dcp_size)``: vLLM builds DCP groups as
+        contiguous runs within each TP group, so ``tp_rank % dcp_size``."""
+        return (self.vllm_worker_id % self.tp_size) % self.dcp_size
+
+    @property
+    def num_kv_readers(self) -> int:
+        """Number of workers that retrieve one stored object.
+
+        Non-MLA: 1. MLA: the same-shard TP ranks of one stage on one
+        server, ``ceil(kv_tp_size / dcp_size)`` -- rounded up so an uneven
+        split never under-reserves (the server takes one read lock per
+        declared reader).
+        """
+        if not self.mla_only:
+            return 1
+        return math.ceil(self.kv_tp_size / self.dcp_size)
 
     @property
     def kv_tp_size(self) -> int:
@@ -316,6 +345,13 @@ class ParallelStrategy:
         """Whether this rank is responsible for storing KV."""
         if not self.mla_only:
             return True
+        if self.dcp_size > 1:
+            # One writer per token shard within every server and every
+            # pipeline stage; both are contiguous rank runs, so the first
+            # dcp_size ranks of the smaller run cover each shard once.
+            ranks_per_server = self.vllm_world_size // self.n_servers
+            block = min(ranks_per_server, self.tp_size)
+            return (self.vllm_worker_id % block) < self.dcp_size
         # MLA-only: only first rank per node is a writer.
         return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
 
@@ -375,14 +411,14 @@ class HeartbeatThread(PeriodicThread):
 
     def __init__(
         self,
-        mq_client: MessageQueueClient,
+        req_client: RequestClient,
         health_event: threading.Event,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         instance_id: int | None = None,
     ):
         """
         Args:
-            mq_client: The message queue client used to send PING requests.
+            req_client: The request client used to send PING requests.
             health_event: A threading.Event shared with the adapter.
                 Set when the server is healthy, cleared when unhealthy.
                 Adapters check this event to decide whether to proceed
@@ -397,7 +433,7 @@ class HeartbeatThread(PeriodicThread):
             interval=interval,
             level=ThreadLevel.CRITICAL,
         )
-        self._mq_client = mq_client
+        self._req_client = req_client
         self._health_event = health_event
         self._interval = interval
         self._instance_id = instance_id
@@ -440,7 +476,7 @@ class HeartbeatThread(PeriodicThread):
         """
         was_healthy = self._health_event.is_set()
         healthy = send_ping(
-            self._mq_client, timeout=self._interval, instance_id=self._instance_id
+            self._req_client, timeout=self._interval, instance_id=self._instance_id
         )
 
         if self.stop_requested:
@@ -568,8 +604,9 @@ class LMCacheMPSchedulerAdapter:
         )
         assert len(server_urls) >= 1, "At least one server url required"
         self._server_urls: list[str] = list(server_urls)
-        self.mq_clients: dict[str, MessageQueueClient] = {
-            url: MessageQueueClient(url, context) for url in self._server_urls
+        self.req_clients: dict[str, RequestClient] = {
+            url: ZmqMultiprocessClient(MessageQueueClient(url, context))
+            for url in self._server_urls
         }
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
@@ -587,20 +624,22 @@ class LMCacheMPSchedulerAdapter:
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
-        self._lookup_params: dict[str, tuple[list[int], str]] = {}
+        self._lookup_params: dict[
+            str, tuple[list[int], str, dict[str, Any] | None]
+        ] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
         chunk_sizes: dict[str, int] = {}
-        for url, client in self.mq_clients.items():
+        for url, client in self.req_clients.items():
             try:
                 chunk_sizes[url] = get_lmcache_chunk_size(
                     client, timeout=self._mq_timeout
                 )
             except TimeoutError:
-                for c in self.mq_clients.values():
+                for c in self.req_clients.values():
                     c.close()
                 _raise_server_unreachable(url, self._mq_timeout)
 
@@ -613,9 +652,13 @@ class LMCacheMPSchedulerAdapter:
             )
         self.lmcache_tokens_per_chunk = unique_sizes.pop()
 
-        assert self.lmcache_tokens_per_chunk % vllm_block_size == 0, (
-            "LMCache chunk size should be a multiple of vLLM block size"
-        )
+        if self.lmcache_tokens_per_chunk % vllm_block_size != 0:
+            raise ValueError(
+                f"LMCache chunk size {self.lmcache_tokens_per_chunk} must be a "
+                f"multiple of {vllm_block_size} (the vLLM block size scaled by "
+                f"decode_context_parallel_size). Set --chunk-size to a multiple "
+                f"of {vllm_block_size}."
+            )
         self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state: one Event per server. The adapter is considered healthy
@@ -661,9 +704,9 @@ class LMCacheMPSchedulerAdapter:
         with self._heartbeat_lock:
             if self._heartbeats is not None:
                 return
-            for url, client in self.mq_clients.items():
+            for url, client in self.req_clients.items():
                 hb = HeartbeatThread(
-                    mq_client=client,
+                    req_client=client,
                     health_event=self._health_events[url],
                     interval=self._heartbeat_interval,
                 )
@@ -676,6 +719,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         token_ids: list[int],
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ):
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -690,6 +734,8 @@ class LMCacheMPSchedulerAdapter:
             token_ids: Token IDs to lookup from LMCache
             cache_salt: Per-user isolation salt. Requests with different
                 cache_salt values produce separate cache entries.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             None
@@ -720,14 +766,11 @@ class LMCacheMPSchedulerAdapter:
             end=aligned_end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         ).no_worker_id_version()
 
         futures: dict[str, MessagingFuture[Any]] = {
-            url: send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.LOOKUP,
-                [key, self.tp_size],
-            )
+            url: self.req_clients[url].lookup(key, self.tp_size)
             for url in self._server_urls
         }
 
@@ -745,7 +788,7 @@ class LMCacheMPSchedulerAdapter:
                 return
 
         self._pending_lookups.add(request_id)
-        self._lookup_params[request_id] = (token_ids, cache_salt)
+        self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -765,7 +808,9 @@ class LMCacheMPSchedulerAdapter:
             per_server: Per-server hit chunk counts.
             min_chunks: Minimum hit chunk count across all servers.
         """
-        token_ids_l, cs = self._lookup_params.pop(request_id, (None, None))
+        token_ids_l, cs, request_configs = self._lookup_params.pop(
+            request_id, (None, None, None)
+        )
         if token_ids_l is not None:
             for url, hit_chunks in per_server.items():
                 if hit_chunks <= min_chunks:
@@ -779,12 +824,9 @@ class LMCacheMPSchedulerAdapter:
                     end=tail_end,
                     request_id=request_id,
                     cache_salt=cs or "",
+                    request_configs=request_configs,
                 ).no_worker_id_version()
-                send_lmcache_request(
-                    self.mq_clients[url],
-                    RequestType.FREE_LOOKUP_LOCKS,
-                    [tail_key, self.tp_size],
-                )
+                self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -824,11 +866,7 @@ class LMCacheMPSchedulerAdapter:
         unresolved_urls = [u for u in self._server_urls if u not in per_server]
 
         futures: dict[str, MessagingFuture[Any]] = {
-            url: send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.QUERY_PREFETCH_STATUS,
-                [request_id],
-            )
+            url: self.req_clients[url].query_prefetch_status(request_id)
             for url in unresolved_urls
         }
 
@@ -885,7 +923,7 @@ class LMCacheMPSchedulerAdapter:
 
     def shutdown(self) -> None:
         """Shutdown the scheduler adapter and its resources."""
-        for client in self.mq_clients.values():
+        for client in self.req_clients.values():
             client.close()
         with self._heartbeat_lock:
             for hb in self._heartbeats.values():
@@ -898,6 +936,7 @@ class LMCacheMPSchedulerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -918,6 +957,8 @@ class LMCacheMPSchedulerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
         """
         if not self.is_healthy:
             return
@@ -929,13 +970,10 @@ class LMCacheMPSchedulerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         ).no_worker_id_version()
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.FREE_LOOKUP_LOCKS,
-                [base_key, self.tp_size],
-            )
+            self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
 
     def end_session(self, request_id: str) -> None:
         """
@@ -947,11 +985,7 @@ class LMCacheMPSchedulerAdapter:
             return
 
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.END_SESSION,
-                [request_id],
-            )
+            self.req_clients[url].end_session(request_id)
 
     def report_block_allocations(
         self,
@@ -970,10 +1004,8 @@ class LMCacheMPSchedulerAdapter:
             return
 
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.REPORT_BLOCK_ALLOCATION,
-                [os.getpid(), self.model_name, records],
+            self.req_clients[url].report_block_allocation(
+                os.getpid(), self.model_name, records
             )
 
     # Helper functions
@@ -984,6 +1016,7 @@ class LMCacheMPSchedulerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -993,6 +1026,8 @@ class LMCacheMPSchedulerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             IPCCacheServerKey: The constructed key.
@@ -1000,6 +1035,7 @@ class LMCacheMPSchedulerAdapter:
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
         return IPCCacheServerKey(
+            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -1008,6 +1044,7 @@ class LMCacheMPSchedulerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
 
     def update_pending_store_count(self, req_id: str, count: int) -> bool:
@@ -1088,9 +1125,10 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
+            set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
         else:
             self._mp_transfer_mode = None
-        self.mq_client = MessageQueueClient(server_url, context)
+        self.req_client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
         self._mq_timeout = mq_timeout
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
@@ -1104,8 +1142,8 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self._layout_hints: "LayoutHints | None" = None
         self.engine_group_infos: list[EngineGroupInfo] = []
-
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
 
@@ -1143,20 +1181,24 @@ class LMCacheMPWorkerAdapter:
         # Read chunk size from lmcache
         try:
             lmcache_tokens_per_chunk = get_lmcache_chunk_size(
-                self.mq_client, timeout=self._mq_timeout
+                self.req_client, timeout=self._mq_timeout
             )
         except TimeoutError:
-            self.mq_client.close()
+            self.req_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
-        assert lmcache_tokens_per_chunk % vllm_block_size == 0, (
-            "LMCache chunk size should be a multiple of vLLM block size"
-        )
+        if lmcache_tokens_per_chunk % vllm_block_size != 0:
+            raise ValueError(
+                f"LMCache chunk size {lmcache_tokens_per_chunk} must be a "
+                f"multiple of {vllm_block_size} (the vLLM block size scaled by "
+                f"decode_context_parallel_size). Set --chunk-size to a multiple "
+                f"of {vllm_block_size}."
+            )
         self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
         # Experimental intermediate tensor transfer
         self.experimental: set[str] = get_experimental(
-            self.mq_client, timeout=self._mq_timeout
+            self.req_client, timeout=self._mq_timeout
         )
         self.dispatcher: "Dispatcher | None" = None
 
@@ -1236,6 +1278,7 @@ class LMCacheMPWorkerAdapter:
         self,
         kv_caches: dict[str, torch.Tensor],
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        layout_hints: "LayoutHints | None" = None,
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -1244,6 +1287,8 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
+            layout_hints: Engine layout hints forwarded to the server; built
+                here from the ambient vLLM config when not provided.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -1265,6 +1310,10 @@ class LMCacheMPWorkerAdapter:
                 )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
+        # Reused when heartbeat recovery re-registers.
+        self._layout_hints = (
+            layout_hints if layout_hints is not None else vllm_layout_hints()
+        )
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
@@ -1288,7 +1337,7 @@ class LMCacheMPWorkerAdapter:
         """
         self.kv_caches = kv_caches
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
-        layout_hints = vllm_layout_hints()
+        layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
         try:
             # Register on the local, not self.transfer_ctx: a concurrent
@@ -1300,9 +1349,8 @@ class LMCacheMPWorkerAdapter:
                 self.model_name,
                 self.world_size,
                 self.blocks_in_chunk,
-                self.mq_client,
+                self.req_client,
                 self._mq_timeout,
-                send_request=send_lmcache_request,
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
@@ -1330,7 +1378,7 @@ class LMCacheMPWorkerAdapter:
             if self._heartbeat is not None:
                 return
             heartbeat = HeartbeatThread(
-                mq_client=self.mq_client,
+                req_client=self.req_client,
                 health_event=self._health_event,
                 interval=self._heartbeat_interval,
                 instance_id=self.instance_id,
@@ -1395,13 +1443,35 @@ class LMCacheMPWorkerAdapter:
 
         return True
 
+    def create_recorded_event(self) -> _IpcEvent | None:
+        """Create the ordering event required by the active transfer context.
+
+        Returns:
+            A recorded event for contexts that need stream ordering, or
+            ``None`` for synchronous engine-driven transfer or while the
+            adapter is unhealthy and requests will be dropped.
+
+        Raises:
+            RuntimeError: If called before ``register_kv_caches()``.
+        """
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is None:
+            raise RuntimeError(
+                "KV caches are not registered. Call register_kv_caches() "
+                "before creating transfer events."
+            )
+        if not self.is_healthy:
+            return None
+        return transfer_ctx.create_recorded_event()
+
     @_lmcache_nvtx_annotate
     def submit_store_request(
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ):
         """
         Submit a KV cache store request to LMCache
@@ -1409,9 +1479,11 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the store operation.
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
         """
         self._ensure_heartbeat_started()
 
@@ -1428,6 +1500,7 @@ class LMCacheMPWorkerAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -1444,15 +1517,17 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
         )
         self.store_futures[request_id] = future
-        self.store_events[request_id] = event
+        if event is not None:
+            self.store_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> None:
         """
         Submit a KV cache retrieve request to LMCache
@@ -1464,9 +1539,11 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the retrieve operation.
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
         """
         self._ensure_heartbeat_started()
 
@@ -1482,6 +1559,7 @@ class LMCacheMPWorkerAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -1499,15 +1577,17 @@ class LMCacheMPWorkerAdapter:
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
-        self.retrieve_events[request_id] = event
+        if event is not None:
+            self.retrieve_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
+        request_configs_list: list[dict[str, Any] | None] | None = None,
     ):
         """
         Submit a batched store request to LMCache
@@ -1516,24 +1596,47 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the store operations. Should have
                 the same length as request_ids
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be the same as
                 request_ids.
+            request_configs_list: Optional LMCache request configs, one per
+                request.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
-        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
-            self.submit_store_request(request_id, op, event, cache_salt=salt)
+        if request_configs_list is None:
+            request_configs_list = [None] * len(request_ids)
+        if not (
+            len(request_ids)
+            == len(ops)
+            == len(cache_salts)
+            == len(request_configs_list)
+        ):
+            raise ValueError(
+                "request_ids, ops, cache_salts, and request_configs_list "
+                "must have the same length"
+            )
+        for request_id, op, salt, request_configs in zip(
+            request_ids, ops, cache_salts, request_configs_list, strict=True
+        ):
+            self.submit_store_request(
+                request_id,
+                op,
+                event,
+                cache_salt=salt,
+                request_configs=request_configs,
+            )
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
+        request_configs_list: list[dict[str, Any] | None] | None = None,
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -1542,16 +1645,38 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the retrieve operations. Should have
                 the same length as request_ids
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model inference
+                step, or ``None`` for synchronous engine-driven transfer.
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be same as
                 request_ids.
+            request_configs_list: Optional LMCache request configs, one per
+                request.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
-        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
-            self.submit_retrieve_request(request_id, op, event, cache_salt=salt)
+        if request_configs_list is None:
+            request_configs_list = [None] * len(request_ids)
+        if not (
+            len(request_ids)
+            == len(ops)
+            == len(cache_salts)
+            == len(request_configs_list)
+        ):
+            raise ValueError(
+                "request_ids, ops, cache_salts, and request_configs_list "
+                "must have the same length"
+            )
+        for request_id, op, salt, request_configs in zip(
+            request_ids, ops, cache_salts, request_configs_list, strict=True
+        ):
+            self.submit_retrieve_request(
+                request_id,
+                op,
+                event,
+                cache_salt=salt,
+                request_configs=request_configs,
+            )
 
     def _process_finished_stores(
         self,
@@ -1652,7 +1777,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
@@ -1660,6 +1785,7 @@ class LMCacheMPWorkerAdapter:
             finished_retrieves.add(request_id)
 
             if not r_result:
+                self.error_block_ids.update(r_block_ids)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -1772,7 +1898,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
@@ -1780,6 +1906,7 @@ class LMCacheMPWorkerAdapter:
             finished_retrieves.add(request_id)
 
             if not r_result:
+                self.error_block_ids.update(r_block_ids)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -1868,7 +1995,7 @@ class LMCacheMPWorkerAdapter:
         Shutdown the LMCache MP worker adapter.
 
         Stops the heartbeat (if started) before UNREGISTER: no new ping
-        on the closing mq_client, and a straggler in-flight cycle cannot
+        on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
         """
         with self._heartbeat_lock:
@@ -1877,16 +2004,13 @@ class LMCacheMPWorkerAdapter:
 
         logger.info("Unregistering kv caches")
         try:
-            unregister_type = (
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
-                if isinstance(self.transfer_ctx, EngineDrivenTransferContext)
-                else RequestType.UNREGISTER_KV_CACHE
-            )
-            send_lmcache_request(
-                self.mq_client,
-                unregister_type,
-                [self.instance_id],
-            ).result(timeout=self._mq_timeout)
+            if isinstance(self.transfer_ctx, EngineDrivenTransferContext):
+                future = self.req_client.unregister_kv_cache_engine_driven_context(
+                    self.instance_id
+                )
+            else:
+                future = self.req_client.unregister_kv_cache(self.instance_id)
+            future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "LMCache server did not respond to unregister within %ss. "
@@ -1901,7 +2025,7 @@ class LMCacheMPWorkerAdapter:
             self.transfer_ctx.close()
             self.transfer_ctx = None
 
-        self.mq_client.close()
+        self.req_client.close()
         self.request_telemetry.close()
 
     # Helper functions
@@ -1924,6 +2048,7 @@ class LMCacheMPWorkerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -1933,11 +2058,14 @@ class LMCacheMPWorkerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             IPCCacheServerKey: The constructed key.
         """
         return IPCCacheServerKey(
+            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
@@ -1946,4 +2074,5 @@ class LMCacheMPWorkerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )

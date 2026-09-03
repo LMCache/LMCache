@@ -19,6 +19,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -141,7 +142,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, extra_count=0
+        sentinel_obj_keys, read_locks=1
     )
 
 
@@ -150,6 +151,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(num_tokens)),
         start=start,
@@ -161,7 +163,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"extra_count": 0}
+    assert kwargs == {"read_locks": 1}
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -261,6 +263,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     key = IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(256)),
         start=0,
@@ -309,7 +312,7 @@ def test_adapter_free_lookup_locks_sends_request():
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
     mock_client.submit_request.return_value = mock_future
-    adapter.mq_clients = {"tcp://test:0": mock_client}
+    adapter.req_clients = {"tcp://test:0": ZmqMultiprocessClient(mock_client)}
     adapter._pending_lookups = set()
 
     token_ids = list(range(512))
@@ -318,6 +321,7 @@ def test_adapter_free_lookup_locks_sends_request():
         start=0,
         end=512,
         request_id="req-1",
+        request_configs={"lmcache.skip_save": True},
     )
 
     mock_client.submit_request.assert_called_once()
@@ -335,6 +339,7 @@ def test_adapter_free_lookup_locks_sends_request():
     assert key.worker_id is None
     assert key.model_name == "test_model"
     assert key.request_id == "req-1"
+    assert key.request_configs == {"lmcache.skip_save": True}
     assert payloads[1] == 1  # tp_size
 
 
@@ -364,7 +369,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_future = MagicMock()
     mock_future.result.return_value = None  # LOOKUP returns None
     mock_client.submit_request.return_value = mock_future
-    adapter.mq_clients = {"tcp://test:0": mock_client}
+    adapter.req_clients = {"tcp://test:0": ZmqMultiprocessClient(mock_client)}
     adapter._pending_lookups = set()
     adapter._lookup_params = {}
 
@@ -372,7 +377,11 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     # Submit lookup – patch heartbeat to avoid spawning a real thread
     with patch.object(adapter, "_ensure_heartbeat_started"):
-        adapter.maybe_submit_lookup_request("req-1", token_ids)
+        adapter.maybe_submit_lookup_request(
+            "req-1",
+            token_ids,
+            request_configs={"lmcache.skip_save": True},
+        )
     lookup_call = mock_client.submit_request.call_args
     lookup_payloads = lookup_call[0][1]
     lookup_key = lookup_payloads[0]
@@ -387,6 +396,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
         start=0,
         end=aligned_end,
         request_id="req-1",
+        request_configs={"lmcache.skip_save": True},
     )
     free_call = mock_client.submit_request.call_args
     free_payloads = free_call[0][1]
@@ -403,6 +413,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
     assert lookup_key.token_ids == free_key.token_ids
+    assert lookup_key.request_configs == free_key.request_configs
 
 
 def test_server_free_lookup_locks_honors_the_session_lock_model():

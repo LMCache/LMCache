@@ -60,6 +60,15 @@ class IPCCacheServerKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # Request-scoped LMCache configuration passed across the IPC boundary.
+    # It is metadata, not part of cache identity.
+    request_configs: dict[str, Any] | None = field(default=None, compare=False)
+
+    # Number of workers that retrieve this key's object; the server reserves
+    # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
+    # lookups reject it.
+    num_kv_readers: int = field(default=0, compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -89,18 +98,39 @@ class IPCCacheServerKey:
         end: int = 0,
         request_id: str = "",
         cache_salt: str = "",
+        num_kv_readers: int = 1,
+        request_configs: dict[str, Any] | None = None,
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
             model_name=model_name,
             world_size=world_size,
             worker_id=worker_id,
+            num_kv_readers=num_kv_readers,
             token_ids=tuple(token_ids),
             start=start,
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
+
+    def require_num_kv_readers(self) -> int:
+        """Declared reader count; rejects keys from pre-field clients.
+
+        Each reader's retrieve releases one read lock, so the count must
+        be exact: under-counting unpins an object mid-copy; over-counting
+        only holds it to the TTL. 0 means the field was never sent --
+        rejected, not guessed.
+        """
+        if self.num_kv_readers < 1:
+            raise ValueError(
+                f"num_kv_readers={self.num_kv_readers}: this server "
+                "requires clients that send "
+                "IPCCacheServerKey.num_kv_readers. Upgrade the LMCache "
+                "client."
+            )
+        return self.num_kv_readers
 
     def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
@@ -108,11 +138,13 @@ class IPCCacheServerKey:
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
+            num_kv_readers=self.num_kv_readers,
             token_ids=self.token_ids,
             start=self.start,
             end=self.end,
             request_id=self.request_id,
             cache_salt=self.cache_salt,
+            request_configs=self.request_configs,
         )
 
 
@@ -132,6 +164,9 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
         use_mla: Whether the worker KV format is MLA.
+        num_physical_slots: Number of physical KV slots gathered into one
+            LMCache chunk. ``None`` accepts the legacy protocol, where the
+            server assumed one physical slot per logical token.
     """
 
     instance_id: int
@@ -142,6 +177,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
+    num_physical_slots: int | None = None
 
 
 @dataclass
