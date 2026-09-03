@@ -17,18 +17,12 @@ cd "${REPO_ROOT}"
 source .buildkite/k3_tests/common_scripts/helpers.sh
 
 # ── Configuration ────────────────────────────────────────────
-export TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
-
-if [ "$TORCH_DEVICE_TYPE" = "xpu" ]; then
-    DEFAULT_MODEL="Qwen/Qwen3-0.6B"
-else
-    DEFAULT_MODEL="Qwen/Qwen3-14B"
-fi
+export DEFAULT_MODEL="${DEFAULT_MODEL:-Qwen/Qwen3-14B}"
 
 # gds_smoke_test enables the GDS L1 NVMe-slab tier
 GDS_SCRATCH="${GDS_SCRATCH:-/scratch}"
@@ -103,7 +97,6 @@ echo "============================================"
 echo "=== LMCache Multiprocessing Test: ${TEST_NAME} ==="
 echo "============================================"
 echo "Build ID: $BUILD_ID"
-echo "Torch device type: $TORCH_DEVICE_TYPE"
 echo "Model: $MODEL"
 echo "LMCache port: $LMCACHE_PORT"
 echo "vLLM port: $VLLM_PORT"
@@ -117,9 +110,8 @@ SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp dsv4_flash_tp "
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
-# Respect an explicit environment override (for example, the XPU wrapper sets
-# LAUNCH_BASELINE=false to keep the lane single-instance) before applying the
-# default baseline heuristic below.
+# Respect an explicit environment override from a device-specific wrapper
+# before applying the default baseline heuristic below.
 BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
 if [ -n "${LAUNCH_BASELINE:-}" ]; then
     export LAUNCH_BASELINE

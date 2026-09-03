@@ -14,32 +14,13 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 # Configuration
 VLLM_PORT="${VLLM_PORT:-8000}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
-# XPU is more sensitive to high in-flight request counts in this harness.
-if [ -n "${NUM_CONCURRENT:-}" ]; then
-    NUM_CONCURRENT="${NUM_CONCURRENT}"
-elif [ "${TORCH_DEVICE_TYPE:-cuda}" = "xpu" ]; then
-    NUM_CONCURRENT="8"
-else
-    NUM_CONCURRENT="50"
-fi
+NUM_CONCURRENT="${NUM_CONCURRENT:-${LM_EVAL_NUM_CONCURRENT_DEFAULT:-50}}"
 LIMIT="${LIMIT:-300}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
-if [ -n "${LM_EVAL_VERIFY_MODE:-}" ]; then
-    LM_EVAL_VERIFY_MODE="${LM_EVAL_VERIFY_MODE}"
-elif [ "${TORCH_DEVICE_TYPE:-cuda}" = "xpu" ]; then
-    LM_EVAL_VERIFY_MODE="score"
-else
-    LM_EVAL_VERIFY_MODE="samples"
-fi
+LM_EVAL_VERIFY_MODE="${LM_EVAL_VERIFY_MODE:-${LM_EVAL_VERIFY_MODE_DEFAULT:-samples}}"
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
-if [ -n "${SCORE_MIN:-}" ]; then
-    SCORE_MIN="${SCORE_MIN}"
-elif [ "${TORCH_DEVICE_TYPE:-cuda}" = "xpu" ]; then
-    SCORE_MIN="0.30"
-else
-    SCORE_MIN="0.80"
-fi
+SCORE_MIN="${SCORE_MIN:-${LM_EVAL_SCORE_MIN_DEFAULT:-0.80}}"
 VLLM_LOG="${VLLM_LOG:-/tmp/build_${BUILD_ID}_vllm.log}"
 
 case "$LM_EVAL_VERIFY_MODE" in

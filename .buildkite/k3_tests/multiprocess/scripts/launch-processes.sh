@@ -16,20 +16,12 @@ CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
-TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
+VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:?VLLM_TARGET_DEVICE must be exported by the test entry point}"
+DEVICE_AFFINITY_VAR="${DEVICE_AFFINITY_VAR:?DEVICE_AFFINITY_VAR must be exported by the test entry point}"
+GPU_MEMORY_PROBE_ENABLED="${GPU_MEMORY_PROBE_ENABLED:-1}"
+BATCH_INVARIANT_DEFAULT="${BATCH_INVARIANT_DEFAULT:-1}"
 
-# Pick the device affinity env var once, then reuse it for all launched processes.
-DEVICE_AFFINITY_VAR="CUDA_VISIBLE_DEVICES"
-VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="cuda")
-if [ "${TORCH_DEVICE_TYPE}" = "xpu" ]; then
-    DEVICE_AFFINITY_VAR="ZE_AFFINITY_MASK"
-    VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="xpu")
-    unset CUDA_VISIBLE_DEVICES || true
-    if [ -f /opt/intel/oneapi/setvars.sh ]; then
-        # shellcheck disable=SC1091
-        source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
-    fi
-fi
+VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}")
 
 # K8s assigns exactly 2 GPUs as devices 0 and 1 (overridable for local runs).
 GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
@@ -42,18 +34,19 @@ echo "Using CARD $GPU_FOR_BASELINE for vLLM baseline"
 # and LMCache's cache path is never exercised, making the test pass vacuously.
 GPU_MEMORY_UTIL_ARG=""
 GPU_MEMORY_GB=0
-if [ "${TORCH_DEVICE_TYPE}" = "xpu" ]; then
-    echo "XPU backend: skipping CUDA GPU memory probe"
-else
+if [ "${GPU_MEMORY_PROBE_ENABLED}" = "1" ] || [ "${GPU_MEMORY_PROBE_ENABLED}" = "true" ]; then
     GPU_MEMORY_MB=$(
-        CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" python3 - <<'PY'
-import torch
+        env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
+        python3 - <<'PY'
+from lmcache import torch_dev
 
-print(torch.cuda.get_device_properties(0).total_memory // (1024 * 1024))
+print(torch_dev.get_device_properties(0).total_memory // (1024 * 1024))
 PY
     )
     GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
     echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
+else
+    echo "GPU memory probe disabled"
 fi
 
 if [ -n "${GPU_MEMORY_UTILIZATION:-}" ]; then
@@ -84,12 +77,12 @@ if [ -n "${VLLM_ATTENTION_BACKEND:-}" ]; then
     VLLM_ATTENTION_BACKEND_ENV=(VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND}")
 fi
 
-# Optionally run vLLM in eager mode (skip CUDA graph capture) for both servers.
+# Optionally run vLLM in eager mode (skip graph capture) for both servers.
 # Off by default: verified to break the bit-exact run1 == run2 check in the
 # determinism tests (lm_eval) -- eager changes the kernel path enough to diverge
 # across the cold/warm batch difference even under VLLM_BATCH_INVARIANT. Enable
-# (ENFORCE_EAGER=1) only for large models whose CUDA-graph capture would
-# otherwise time out at launch (those tests use a tolerance, not bit-exactness).
+# (ENFORCE_EAGER=1) only for large models whose graph capture would otherwise
+# time out at launch (those tests use a tolerance, not bit-exactness).
 ENFORCE_EAGER_ARG=""
 if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
     ENFORCE_EAGER_ARG="--enforce-eager"
@@ -107,13 +100,8 @@ if [ -n "${CHUNK_SIZE:-}" ]; then
     CHUNK_SIZE_ARG="--chunk-size ${CHUNK_SIZE}"
 fi
 
-# vLLM batch-invariant mode. Keep CUDA default on for determinism tests.
-# On XPU, default off to avoid vLLM entering CUDA-only BLAS preference code.
-if [ "${TORCH_DEVICE_TYPE}" = "xpu" ]; then
-    BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
-else
-    BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
-fi
+# vLLM batch-invariant mode is configurable per device entry point.
+BATCH_INVARIANT="${BATCH_INVARIANT:-${BATCH_INVARIANT_DEFAULT}}"
 
 # Prefix-caching policy. Default behavior is unchanged: ordinary models rely on
 # vLLM's existing default, while hybrid Mamba models explicitly enable prefix
