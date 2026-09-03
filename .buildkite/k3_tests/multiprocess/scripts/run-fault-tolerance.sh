@@ -180,8 +180,8 @@ fi
 
 if ! wait_for_server "$VLLM_PORT" 300; then
     echo "vLLM failed to start"
-    tail -50 "/tmp/build_${BUILD_ID}_lmcache_ft.log" || true
-    tail -50 "/tmp/build_${BUILD_ID}_vllm_ft.log" || true
+    tail -200 "/tmp/build_${BUILD_ID}_lmcache_ft.log" || true
+    tail -200 "/tmp/build_${BUILD_ID}_vllm_ft.log" || true
     exit 1
 fi
 echo ""

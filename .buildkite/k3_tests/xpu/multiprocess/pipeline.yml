@@ -60,6 +60,7 @@ steps:
           export L1_USE_LAZY="false"
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
+          export BATCH_INVARIANT="0"
           export CPU_BUFFER_SIZE="80"
           export VLLM_DISABLE_CHUNKED_PREFILL="true"
           export VLLM_DISABLE_PREFIX_CACHING="true"
