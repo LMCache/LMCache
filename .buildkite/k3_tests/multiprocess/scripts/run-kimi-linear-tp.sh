@@ -295,6 +295,7 @@ lmcache server \
     --chunk-size "$CHUNK_SIZE" \
     --l1-size-gb 80 \
     $L1_LAZY_ARG \
+    --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" \
     --eviction-policy LRU \
     --max-workers 4 \
     ${SEPARATE_OBJECT_GROUPS_ARG} \
