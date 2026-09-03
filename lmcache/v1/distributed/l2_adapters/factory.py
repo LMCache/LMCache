@@ -104,19 +104,18 @@ def ensure_adapter_loaded(name: str) -> None:
     been tried).
 
     Raises:
-        ImportError: If a module fails to import due to
-            a missing third-party dependency **and** it
-            was the last candidate.
+        Exception: If an adapter module fails during import
+            and it was the last candidate.
     """
     if name in _L2_ADAPTER_FACTORY_REGISTRY:
         return
 
-    last_err: ImportError | None = None
+    last_err: Exception | None = None
     while _PENDING_MODULES:
         mod_path = _PENDING_MODULES.pop(0)
         try:
             importlib.import_module(mod_path)
-        except ImportError as exc:
+        except Exception as exc:
             logger.debug(
                 "Skipping module %s (import failed: %s)",
                 mod_path,
@@ -129,7 +128,7 @@ def ensure_adapter_loaded(name: str) -> None:
             return
 
     # If we exhausted all pending modules and still
-    # didn't find the name, the last ImportError (if
+    # didn't find the name, the last import error (if
     # any) might be the root cause.
     if last_err is not None and name not in _L2_ADAPTER_FACTORY_REGISTRY:
         raise last_err
@@ -145,10 +144,12 @@ def load_all_adapters() -> None:
         mod_path = _PENDING_MODULES.pop(0)
         try:
             importlib.import_module(mod_path)
-        except ImportError:
+        except Exception as exc:
             logger.debug(
-                "Skipping module %s during bulk load",
+                "Skipping module %s during bulk load (%s: %s)",
                 mod_path,
+                type(exc).__name__,
+                exc,
             )
 
 
