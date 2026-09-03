@@ -36,8 +36,8 @@ class _WorkerStagingArena:
 
     def views(
         self, shape: torch.Size, dtype: torch.dtype, count: int
-    ) -> list[torch.Tensor]:
-        """Return contiguous pinned chunk views with capacity for ``count``."""
+    ) -> list[torch.Tensor] | None:
+        """Return contiguous pinned chunk views, or ``None`` on allocation failure."""
         key = (tuple(shape), dtype)
         slab = self.slabs.get(key)
         if slab is None or slab.shape[0] < count:
@@ -47,13 +47,13 @@ class _WorkerStagingArena:
                 )
             except RuntimeError:
                 logger.warning(
-                    "Falling back to non-pinned CPU staging slab "
+                    "Failed to allocate pinned CPU staging slab "
                     "(shape=%s, dtype=%s, chunks=%d)",
                     tuple(shape),
                     dtype,
                     count,
                 )
-                slab = torch.empty((count, *shape), dtype=dtype, device="cpu")
+                return None
             self.slabs[key] = slab
         return [slab[chunk_idx] for chunk_idx in range(count)]
 
@@ -139,7 +139,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
     def _alloc_pinned_staging(
         self, shape: torch.Size, dtype: torch.dtype, count: int
-    ) -> list[torch.Tensor]:
+    ) -> list[torch.Tensor] | None:
         """Allocate contiguous staging views from the current worker's arena.
 
         Each executor thread creates its arena on first use. An arena grows
@@ -152,7 +152,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             count: Number of tensors needed.
 
         Returns:
-            Contiguous chunk views backed by the worker's staging slab.
+            Contiguous chunk views backed by the worker's staging slab, or
+            ``None`` when pinned allocation fails.
         """
         arena = self._worker_staging_state.arena
         if arena is None:
@@ -251,6 +252,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                 gather_done: Any | None = None
                 ok = False
                 copy_staging_to_shm = False
+                staging_destinations: list[torch.Tensor] = []
                 staged_chunks: list[torch.Tensor] = []
                 try:
                     # --- Phase 1: prepare_store ---
@@ -286,12 +288,14 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             raise RuntimeError(
                                 "engine-driven layout_desc.dtypes is empty"
                             )
-                        staged_chunks = self._alloc_pinned_staging(
+                        allocated_chunks = self._alloc_pinned_staging(
                             layout_desc.shapes[0],
                             layout_desc.dtypes[0],
                             num_chunks,
                         )
-                        gather_target = staged_chunks
+                        if allocated_chunks is not None:
+                            staged_chunks = allocated_chunks
+                        gather_target = allocated_chunks
                     elif (
                         isinstance(engine_driven_context, EngineDrivenContextShm)
                         and engine_driven_context.is_pinned
@@ -308,19 +312,24 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                                 "Pinned SHM staging requires uniform chunk "
                                 "shapes and dtypes"
                             )
-                        staged_chunks = self._alloc_pinned_staging(
+                        allocated_chunks = self._alloc_pinned_staging(
                             first_buffer.shape,
                             first_buffer.dtype,
                             len(out_buffers),
                         )
-                        gather_target = staged_chunks
-                        copy_staging_to_shm = True
+                        if allocated_chunks is None:
+                            gather_target = out_buffers
+                        else:
+                            staged_chunks = allocated_chunks
+                            gather_target = staged_chunks
+                            staging_destinations = out_buffers
+                            copy_staging_to_shm = True
 
                     # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
                     with torch.inference_mode(), torch_dev.stream(self._copy_stream):
                         _event.wait(stream=self._copy_stream)
 
-                        gather_paged_kv_to_cpu(
+                        gathered_chunks = gather_paged_kv_to_cpu(
                             kv_caches,
                             full_block_ids,
                             blocks_in_chunk,
@@ -329,6 +338,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             out=gather_target,
                             chunk_indices=chunk_indices,
                         )
+
+                        if gather_target is None:
+                            gather_target = gathered_chunks
                         gather_done = torch_dev.Event()
                         gather_done.record(self._copy_stream)
 
@@ -345,24 +357,18 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         # The source GPU KV is no longer needed. Let vLLM
                         # release its blocks while LMCache finishes the CPU-only
                         # SHM copy and commit in this executor task.
-                        if out_buffers is None:
-                            raise RuntimeError(
-                                "Pinned SHM staging requires destination buffers"
-                            )
                         completion.set_result(True)
-                        for dst, src in zip(out_buffers, staged_chunks, strict=True):
+                        for dst, src in zip(
+                            staging_destinations, staged_chunks, strict=True
+                        ):
                             dst.copy_(src)
+                        gather_target = staging_destinations
                     # --- Phase 3: commit ---
-                    commit_buffers = (
-                        out_buffers if copy_staging_to_shm else gather_target
-                    )
-                    if commit_buffers is None:
-                        raise RuntimeError("Engine-driven store has no commit buffers")
                     with self._commit_lock:
                         ok = engine_driven_context.commit_store(
                             key,
                             instance_id,
-                            commit_buffers,
+                            gather_target,
                         )
                     if not ok:
                         logger.error(

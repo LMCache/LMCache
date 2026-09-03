@@ -560,3 +560,63 @@ def test_pinned_shm_gathers_directly_without_staging(
     commit_gate.set()
     assert future.result(timeout=1) is True
     ctx.close()
+
+
+def test_pickle_store_falls_back_when_pinned_staging_allocation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pickle store lets gather allocate its output when staging allocation fails."""
+    gather_gate = threading.Event()
+    gather_gate.set()
+    committed_chunks: list[torch.Tensor] = []
+
+    def _commit(chunks: list[torch.Tensor]) -> bool:
+        committed_chunks.extend(chunks)
+        return True
+
+    ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
+
+    def _raise_allocation_error(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise RuntimeError("pinned allocation failed")
+
+    monkeypatch.setattr(async_engine_driven.torch, "empty", _raise_allocation_error)
+
+    future = ctx.submit_store(
+        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+    )
+
+    assert future.result(timeout=1) is True
+    assert len(committed_chunks) == 1
+    ctx.close()
+
+
+def test_shm_store_gathers_directly_when_pinned_staging_allocation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unpinned SHM store gathers into its destination if staging allocation fails."""
+    gather_gate = threading.Event()
+    gather_gate.set()
+    destination = torch.zeros((2, 1, 1, 1), dtype=torch.float32)
+
+    def _commit(chunks: list[torch.Tensor]) -> bool:
+        assert chunks == [destination]
+        return True
+
+    ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
+    ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]
+        commit_impl=_commit,
+        prepare_result=([destination], [0]),
+    )
+
+    def _raise_allocation_error(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise RuntimeError("pinned allocation failed")
+
+    monkeypatch.setattr(async_engine_driven.torch, "empty", _raise_allocation_error)
+
+    future = ctx.submit_store(
+        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+    )
+
+    assert future.result(timeout=1) is True
+    assert torch.equal(destination, torch.ones_like(destination))
+    ctx.close()
