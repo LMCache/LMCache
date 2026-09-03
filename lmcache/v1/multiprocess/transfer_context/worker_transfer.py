@@ -652,6 +652,9 @@ class EngineDrivenTransferContext(TransferContext):
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
+        # Multi-group worker state; empty means single-group (stage: filled
+        # by register() for hybrid-KV models).
+        self._group_states: list = []
 
     @property
     def engine_driven_context(self) -> EngineDrivenContext:

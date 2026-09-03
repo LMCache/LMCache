@@ -9,7 +9,6 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -101,11 +100,7 @@ class EngineDrivenContextPickle(EngineDrivenContext):
         Returns:
             Group-major chunk lists on hit, or None on miss/timeout.
         """
-        future = self.mq_client.submit_request(
-            RequestType.PREPARE_RETRIEVE,
-            [key, instance_id],
-            get_response_class(RequestType.PREPARE_RETRIEVE),
-        )
+        future = self.req_client.prepare_retrieve(key, instance_id)
         try:
             response = future.result(timeout=self.mq_timeout)
         except TimeoutError:
