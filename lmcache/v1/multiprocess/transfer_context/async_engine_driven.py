@@ -25,14 +25,13 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
 logger = init_logger(__name__)
 
 
-_StagingKey = tuple[tuple[int, ...], torch.dtype]
-
-
 @dataclass
 class _WorkerStagingArena:
     """Pinned staging slabs owned exclusively by one executor worker."""
 
-    slabs: dict[_StagingKey, torch.Tensor] = field(default_factory=dict)
+    slabs: dict[tuple[tuple[int, ...], torch.dtype], torch.Tensor] = field(
+        default_factory=dict
+    )
 
     def views(
         self, shape: torch.Size, dtype: torch.dtype, count: int
