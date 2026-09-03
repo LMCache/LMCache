@@ -246,3 +246,14 @@ def test_shutdown_no_wait():
     pool.submit(lambda: time.sleep(0.5), affinity_key=0)
     # Should return immediately without waiting
     pool.shutdown(wait=False)
+
+
+@pytest.mark.parametrize("wait", [True, False])
+def test_submit_after_shutdown_raises(wait: bool):
+    pool = AffinityThreadPool(max_workers=1)
+    pool.shutdown(wait=wait)
+
+    with pytest.raises(
+        RuntimeError, match="cannot schedule new futures after shutdown"
+    ):
+        pool.submit(lambda: None, affinity_key=0)
