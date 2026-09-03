@@ -89,3 +89,29 @@ steps:
         agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
+
+      # Kill the LMCache MP server while a request batch is in flight. vLLM
+      # must recompute failed cache loads and continue serving every request.
+      - label: ":xpu: fault_tolerance"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export LMCACHE_ENGINE_DRIVEN_PINNED_STAGING="1"
+          export L1_USE_LAZY="false"
+          export ENFORCE_EAGER="1"
+          export VLLM_USE_STANDALONE_COMPILE="0"
+          export CPU_BUFFER_SIZE="80"
+          export VLLM_DISABLE_CHUNKED_PREFILL="true"
+          export VLLM_DISABLE_PREFIX_CACHING="true"
+          export MAX_NUM_BATCHED_TOKENS="40960"
+          export MAX_NUM_SEQS="64"
+          export MODEL="Qwen/Qwen3-4B"
+          export TENSOR_PARALLEL_SIZE="1"
+          export GPU_FOR_VLLM="0"
+          export RANDOM_INPUT_LEN="10000"
+          export MAX_WAIT_SECONDS="900"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh fault_tolerance
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]

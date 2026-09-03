@@ -50,9 +50,8 @@ echo "=== Restarting LMCache + vLLM ==="
 echo "============================================"
 
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
-GPU_DEVICE="${GPU_FOR_VLLM:-0}"
 
-# Kill existing LMCache + vLLM (keep baseline on line 3)
+# Kill existing LMCache + vLLM (keep baseline on line 3).
 if [ -f "$PID_FILE" ]; then
     OLD_LMCACHE_PID=$(sed -n '1p' "$PID_FILE")
     OLD_VLLM_PID=$(sed -n '2p' "$PID_FILE")
@@ -66,57 +65,18 @@ if [ -f "$PID_FILE" ]; then
     sleep 2
 fi
 
-# Launch LMCache with L1 config
-CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
-lmcache server \
-    --l1-size-gb "$CPU_BUFFER_SIZE" \
-    --eviction-policy LRU \
-    --max-workers "$MAX_WORKERS" \
-    --port "$LMCACHE_PORT" \
-    > "/tmp/build_${BUILD_ID}_lmcache_ft.log" 2>&1 &
-
-NEW_LMCACHE_PID=$!
-echo "LMCache server started (PID=$NEW_LMCACHE_PID)"
-sleep 10
-
-# Launch vLLM with LMCache
-GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_DEVICE}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-if [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
-fi
-
-env -u VLLM_PORT \
-    CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
-    PYTHONHASHSEED=0 \
-vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
-    --attention-backend FLASH_ATTN \
-    --port "$VLLM_PORT" \
-    --no-async-scheduling \
-    $GPU_MEMORY_UTIL_ARG \
-    > "/tmp/build_${BUILD_ID}_vllm_ft.log" 2>&1 &
-
-NEW_VLLM_PID=$!
-echo "vLLM started (PID=$NEW_VLLM_PID)"
-
-# Update PID file
-if [ -f "$PID_FILE" ]; then
-    sed -i "1s/.*/$NEW_LMCACHE_PID/" "$PID_FILE"
-    sed -i "2s/.*/$NEW_VLLM_PID/" "$PID_FILE"
-else
-    echo "$NEW_LMCACHE_PID" > "$PID_FILE"
-    echo "$NEW_VLLM_PID" >> "$PID_FILE"
+# Reuse the shared launcher so this test preserves the active device backend
+# and all vLLM/LMCache transfer settings. In particular, XPU requires
+# ZE_AFFINITY_MASK and VLLM_TARGET_DEVICE=xpu rather than CUDA variables.
+if ! "${SCRIPT_DIR}/launch-processes.sh"; then
+    echo "Failed to restart LMCache + vLLM"
+    exit 1
 fi
 
 if ! wait_for_server "$VLLM_PORT" 300; then
     echo "vLLM failed to start"
-    tail -50 "/tmp/build_${BUILD_ID}_lmcache_ft.log" || true
-    tail -50 "/tmp/build_${BUILD_ID}_vllm_ft.log" || true
+    tail -50 "/tmp/build_${BUILD_ID}_lmcache.log" || true
+    tail -50 "/tmp/build_${BUILD_ID}_vllm.log" || true
     exit 1
 fi
 echo ""
