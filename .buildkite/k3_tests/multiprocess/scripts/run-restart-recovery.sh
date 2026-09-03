@@ -39,6 +39,7 @@ GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
 NUM_REQUESTS="${RR_NUM_REQUESTS:-100}"
 REQUEST_LEN="${RR_REQUEST_LEN:-5000}"
 KV_CACHE_VOLUME="${RR_KV_CACHE_VOLUME:-5}"
+TOKENS_PER_GB_KVCACHE="${RR_TOKENS_PER_GB_KVCACHE:-}"
 
 # Recovery timing
 RECOVER_TIMEOUT="${RR_RECOVER_TIMEOUT:-150}"
@@ -63,8 +64,15 @@ run_bench_round() {
     local label="$1"
     local seed=$2
     local out_subdir="$OUT_DIR/$label"
+    local tokens_per_gb_arg=()
     mkdir -p "$out_subdir"
     echo "--- bench round: $label ---"
+
+    if [ -n "$TOKENS_PER_GB_KVCACHE" ]; then
+        tokens_per_gb_arg=(
+            --tokens-per-gb-kvcache "$TOKENS_PER_GB_KVCACHE"
+        )
+    fi
 
     if ! lmcache bench engine \
         --engine-url "http://localhost:${VLLM_PORT}" \
@@ -73,6 +81,7 @@ run_bench_round() {
         --rp-num-requests "$NUM_REQUESTS" \
         --rp-request-length "$REQUEST_LEN" \
         --kv-cache-volume "$KV_CACHE_VOLUME" \
+        "${tokens_per_gb_arg[@]}" \
         --no-interactive \
         --no-csv \
         --json \
@@ -144,8 +153,8 @@ wait_for_lmcache_http() {
 }
 
 wait_for_worker_reregister() {
-    # Poll /status until cache_context_meta has at least one entry,
-    # which proves the vLLM worker re-registered with the new server.
+    # lmcache_driven workers populate cache_context_meta; engine_driven
+    # workers instead populate non_cuda_context_meta.
     local deadline=$(( $(date +%s) + RECOVER_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local count
@@ -154,7 +163,8 @@ import json, urllib.request
 try:
     body = urllib.request.urlopen("http://localhost:${LMCACHE_HTTP_PORT}/status", timeout=5).read()
     data = json.loads(body)
-    print(len(data.get("cache_context_meta", {})))
+    context_meta = data.get("cache_context_meta") or data.get("non_cuda_context_meta", {})
+    print(len(context_meta))
 except Exception:
     print(0)
 EOF
