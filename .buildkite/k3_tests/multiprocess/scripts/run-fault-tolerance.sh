@@ -27,9 +27,6 @@ RANDOM_INPUT_LEN="${RANDOM_INPUT_LEN:-10000}"
 RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1}"
 RANDOM_SEED="${RANDOM_SEED:-42}"
 
-CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
-MAX_WORKERS="${MAX_WORKERS:-4}"
-
 # Output directory
 FT_DIR="$RESULTS_DIR/fault_tolerance"
 mkdir -p "$FT_DIR"
@@ -42,44 +39,9 @@ echo "Bench: $NUM_PROMPTS prompts, input_len=$RANDOM_INPUT_LEN, output_len=$RAND
 echo "Results dir: $FT_DIR"
 echo ""
 
-# ── Step 0: Restart LMCache + vLLM with fresh state ─────────
-# Previous steps may have left processes in an unknown state.
-# Restart both so vLLM registers its GPU context with the new server.
-echo "============================================"
-echo "=== Restarting LMCache + vLLM ==="
-echo "============================================"
-
-PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
-
-# Kill existing LMCache + vLLM (keep baseline on line 3).
-if [ -f "$PID_FILE" ]; then
-    OLD_LMCACHE_PID=$(sed -n '1p' "$PID_FILE")
-    OLD_VLLM_PID=$(sed -n '2p' "$PID_FILE")
-    for pid in $OLD_LMCACHE_PID $OLD_VLLM_PID; do
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            echo "Killing PID $pid"
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
-    done
-    sleep 2
-fi
-
-# Reuse the shared launcher so this test preserves the active device backend
-# and all vLLM/LMCache transfer settings. In particular, XPU requires
-# ZE_AFFINITY_MASK and VLLM_TARGET_DEVICE=xpu rather than CUDA variables.
-if ! "${SCRIPT_DIR}/launch-processes.sh"; then
-    echo "Failed to restart LMCache + vLLM"
-    exit 1
-fi
-
-if ! wait_for_server "$VLLM_PORT" 300; then
-    echo "vLLM failed to start"
-    tail -50 "/tmp/build_${BUILD_ID}_lmcache.log" || true
-    tail -50 "/tmp/build_${BUILD_ID}_vllm.log" || true
-    exit 1
-fi
-echo ""
+# run-single-test.sh starts fresh LMCache and vLLM processes for every job and
+# waits for vLLM before dispatching here. Reusing them avoids a shutdown/startup
+# race over the engine-driven L1 shared-memory pool.
 
 # ── Helpers ──────────────────────────────────────────────────
 
