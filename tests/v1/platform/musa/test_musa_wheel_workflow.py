@@ -29,6 +29,15 @@ def test_musa_builder_script_is_executable_and_has_required_guards() -> None:
     assert "--exclude 'libmusa*.so*'" in content
     assert "wheel is missing the +musa local version" in content
 
+    workflow = _load_workflow(".github/workflows/build_musa_artifacts.yml")
+    cleanup = next(
+        step
+        for step in workflow["jobs"]["build-musa-artifacts"]["steps"]
+        if step.get("name") == "Remove non-release tags"
+    )
+    assert "grep -vE" in cleanup["run"]
+    assert "|| true" in cleanup["run"]
+
 
 def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     """The reusable job output must match the artifact consumed by publish."""

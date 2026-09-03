@@ -73,7 +73,14 @@ jobs:
             # Variant tags such as v0.5.5rc1-musa are not valid version
             # anchors for setuptools_scm. Keep only release and rc/a/b tags.
             - name: Remove non-release tags
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+              run: |
+                  set -euo pipefail
+                  non_release_tags=$(git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' || true)
+                  if [[ -n "${non_release_tags}" ]]; then
+                      while IFS= read -r tag; do
+                          git tag -d "${tag}"
+                      done <<< "${non_release_tags}"
+                  fi
 
             - name: Login to MUSA registry
               if: vars.MUSA_REGISTRY_USERNAME != '' && env.MUSA_REGISTRY_TOKEN != ''
