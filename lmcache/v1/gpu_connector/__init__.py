@@ -180,6 +180,7 @@ def CreateGPUConnector(
                 VLLMPagedMemGPUConnectorV2,
                 VLLMPagedMemGPUConnectorV3,
                 VLLMPagedMemLayerwiseGPUConnector,
+                configure_neuron_nixl_staging,
             )
 
             if config.use_layerwise:
@@ -192,24 +193,27 @@ def CreateGPUConnector(
                         metadata, use_gpu, device, layout_hints=layout_hints
                     )
 
+            connector: VLLMPagedMemGPUConnectorV2 | VLLMPagedMemGPUConnectorV3
             if config.use_gpu_connector_v3:
-                return VLLMPagedMemGPUConnectorV3.from_metadata(
+                connector = VLLMPagedMemGPUConnectorV3.from_metadata(
                     metadata,
                     use_gpu,
                     device,
                     layout_hints=layout_hints,
-                    enable_neuron_nixl_staging=enable_neuron_nixl_staging,
-                    neuron_nixl_backends=neuron_nixl_backends,
                 )
             else:
-                return VLLMPagedMemGPUConnectorV2.from_metadata(
+                connector = VLLMPagedMemGPUConnectorV2.from_metadata(
                     metadata,
                     use_gpu,
                     device,
                     layout_hints=layout_hints,
-                    enable_neuron_nixl_staging=enable_neuron_nixl_staging,
-                    neuron_nixl_backends=neuron_nixl_backends,
                 )
+            configure_neuron_nixl_staging(
+                connector,
+                enable_neuron_nixl_staging=enable_neuron_nixl_staging,
+                neuron_nixl_backends=neuron_nixl_backends,
+            )
+            return connector
         elif torch_device_type == "xpu":
             # First Party
             from lmcache.v1.gpu_connector.xpu_connectors import (

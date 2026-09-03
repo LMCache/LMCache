@@ -3,7 +3,7 @@
 import abc
 from collections.abc import Sequence
 from contextlib import nullcontext
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Protocol, Tuple, Union
 
 # Third Party
 import torch
@@ -71,6 +71,50 @@ def _device_stream_context(
     if isinstance(stream, torch.cuda.Stream):
         return torch.cuda.stream(stream)
     return nullcontext()
+
+
+class _SupportsNeuronNixlStaging(Protocol):
+    enable_neuron_nixl_staging: bool
+    _neuron_nixl_stager: "_NeuronNixlStager | None"
+
+
+class _NeuronNixlStager(Protocol):
+    def transfer_into_key_value(
+        self,
+        key_value: torch.Tensor,
+        layer_tensors: list[torch.Tensor],
+        slot_mapping: torch.Tensor,
+        engine_kv_format: "lmcache_native.EngineKVFormat",
+        block_size: int,
+        head_size: int,
+    ) -> None: ...
+
+
+def _build_neuron_nixl_stager(
+    enable_neuron_nixl_staging: bool,
+    neuron_nixl_backends: Optional[Sequence[str] | str],
+) -> "_NeuronNixlStager | None":
+    if not enable_neuron_nixl_staging:
+        return None
+
+    from lmcache.v1.gpu_connector.neuron_nixl_staging import (
+        NeuronNixlBlockStager,
+    )
+
+    return NeuronNixlBlockStager(neuron_nixl_backends)
+
+
+def configure_neuron_nixl_staging(
+    connector: _SupportsNeuronNixlStaging,
+    enable_neuron_nixl_staging: bool,
+    neuron_nixl_backends: Optional[Sequence[str] | str] = None,
+) -> None:
+    """Attach optional neuron staging support post-construction."""
+    connector.enable_neuron_nixl_staging = enable_neuron_nixl_staging
+    connector._neuron_nixl_stager = _build_neuron_nixl_stager(
+        enable_neuron_nixl_staging,
+        neuron_nixl_backends,
+    )
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
@@ -213,24 +257,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
-        self.enable_neuron_nixl_staging = kwargs.get(
-            "enable_neuron_nixl_staging", False
-        )
+        self.enable_neuron_nixl_staging = False
         self.layout_hints: LayoutHints = (
             kwargs.get(  # type: ignore[assignment]
                 "layout_hints"
             )
             or {}
         )
-        self._neuron_nixl_stager = None
-        if self.enable_neuron_nixl_staging:
-            from lmcache.v1.gpu_connector.neuron_nixl_staging import (
-                NeuronNixlBlockStager,
-            )
-
-            self._neuron_nixl_stager = NeuronNixlBlockStager(
-                kwargs.get("neuron_nixl_backends")
-            )
+        self._neuron_nixl_stager: _NeuronNixlStager | None = None
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -254,8 +288,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
         layout_hints: Optional[LayoutHints] = None,
-        enable_neuron_nixl_staging: bool = False,
-        neuron_nixl_backends: Optional[Sequence[str] | str] = None,
     ) -> "VLLMPagedMemGPUConnectorV2":
         """Create a connector from LMCacheMetadata.
 
@@ -286,8 +318,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             device=device,
             use_mla=metadata.use_mla,
             layout_hints=layout_hints,
-            enable_neuron_nixl_staging=enable_neuron_nixl_staging,
-            neuron_nixl_backends=neuron_nixl_backends,
         )
 
     def _initialize_pointers(
@@ -507,8 +537,6 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         device: torch.device,
         use_gpu: bool = False,
         layout_hints: Optional[LayoutHints] = None,
-        enable_neuron_nixl_staging: bool = False,
-        neuron_nixl_backends: Optional[Sequence[str] | str] = None,
     ):
         assert device.type in ("cuda", "neuron", "xpu", "musa", "hpu"), (
             f"Unsupported device type: {device.type}"
@@ -520,14 +548,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.use_gpu = use_gpu
         self.layout_hints: LayoutHints = layout_hints or {}
         self.kvcaches: Optional[List[torch.Tensor]] = None
-        self.enable_neuron_nixl_staging = enable_neuron_nixl_staging
-        self._neuron_nixl_stager = None
-        if self.enable_neuron_nixl_staging:
-            from lmcache.v1.gpu_connector.neuron_nixl_staging import (
-                NeuronNixlBlockStager,
-            )
-
-            self._neuron_nixl_stager = NeuronNixlBlockStager(neuron_nixl_backends)
+        self.enable_neuron_nixl_staging = False
+        self._neuron_nixl_stager: _NeuronNixlStager | None = None
 
         self.init = False
         self.group_kv_cache_pointers_on_gpu: Optional[list[torch.Tensor]] = None
@@ -543,18 +565,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
         layout_hints: Optional[LayoutHints] = None,
-        enable_neuron_nixl_staging: bool = False,
-        neuron_nixl_backends: Optional[Sequence[str] | str] = None,
     ) -> "VLLMPagedMemGPUConnectorV3":
         assert device is not None
-        return cls(
-            metadata,
-            device,
-            use_gpu,
-            layout_hints=layout_hints,
-            enable_neuron_nixl_staging=enable_neuron_nixl_staging,
-            neuron_nixl_backends=neuron_nixl_backends,
-        )
+        return cls(metadata, device, use_gpu, layout_hints=layout_hints)
 
     def _initialize_kv_cache_pointers(self):
         """Discover KV-cache layout, build the layer-groups manager, and
@@ -1395,7 +1408,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         for layer_id in range(self.num_layers):
             memory_objs_layer = yield
             if sync:
-                if current_stream is not None:
+                if current_stream is not None and isinstance(
+                    self.load_stream, torch.cuda.Stream
+                ):
                     current_stream.wait_stream(self.load_stream)
             if layer_id > 0:
                 logger.debug("Finished loading layer %s", layer_id - 1)
@@ -1442,7 +1457,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         yield
 
         # synchronize the last layer
-        if sync and current_stream is not None:
+        if sync and current_stream is not None and isinstance(
+            self.load_stream, torch.cuda.Stream
+        ):
             current_stream.wait_stream(self.load_stream)
 
         # free the buffer memory
@@ -2259,7 +2276,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         tensor_ptr: int,
         block_ids: List[int],
         direction: "lmcache_native.TransferDirection",
-        stream: object,
+        stream: "torch.cuda.Stream | _NoOpStream",
     ) -> None:
         if self.shape_desc is None or self._kv_format is None:
             raise RuntimeError("register_kv_caches must be called before transfer")
@@ -2309,7 +2326,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         starts: List[int],
         block_ids: List[int],
         direction: "lmcache_native.TransferDirection",
-        stream: object,
+        stream: "torch.cuda.Stream | _NoOpStream",
     ) -> None:
         if self.shape_desc is None or self._kv_format is None:
             raise RuntimeError("register_kv_caches must be called before transfer")
