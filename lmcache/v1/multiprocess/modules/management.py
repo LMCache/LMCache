@@ -147,7 +147,14 @@ class ManagementModule:
         """
         if instance_id is not None:
             for target in self._liveness_targets:
-                target.touch_instance(instance_id)
+                try:
+                    target.touch_instance(instance_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to refresh liveness for instance %d on %s",
+                        instance_id,
+                        type(target).__name__,
+                    )
         return True
 
     def _reap_cycle(self) -> ThreadRunSummary:
@@ -159,15 +166,34 @@ class ManagementModule:
         Returns:
             A summary recording how many instances were reaped this scan.
         """
-        reaped: list[int] = []
+        reaped: set[int] = set()
+        failures = 0
         for target in self._liveness_targets:
-            reaped.extend(
-                target.reap_stale_instances(self._reap_timeout, self._reap_grace)
-            )
+            try:
+                reaped.update(
+                    target.reap_stale_instances(self._reap_timeout, self._reap_grace)
+                )
+            except Exception:
+                failures += 1
+                logger.exception(
+                    "Failed to reap stale instances from %s",
+                    type(target).__name__,
+                )
         for instance_id in reaped:
             for target in self._liveness_targets:
-                target.drop_instance_state(instance_id)
-        return ThreadRunSummary(success=True, message=f"reaped={len(reaped)}")
+                try:
+                    target.drop_instance_state(instance_id)
+                except Exception:
+                    failures += 1
+                    logger.exception(
+                        "Failed to drop instance %d state from %s",
+                        instance_id,
+                        type(target).__name__,
+                    )
+        return ThreadRunSummary(
+            success=failures == 0,
+            message=f"reaped={len(reaped)}, failures={failures}",
+        )
 
     def get_chunk_size(self) -> int:
         """Return the chunk size used for KV cache operations.
