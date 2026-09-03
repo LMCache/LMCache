@@ -103,14 +103,6 @@ if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
     MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
 fi
 
-# Chunked prefill is enabled by vLLM by default. Benchmark configurations that
-# measure long-prefill store backpressure can disable it for both servers.
-CHUNKED_PREFILL_ARG=""
-if [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "1" ] || [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "true" ]; then
-    echo "Disabling vLLM chunked prefill"
-    CHUNKED_PREFILL_ARG="--no-enable-chunked-prefill"
-fi
-
 # Split kernel groups into one object group per sliding-window size at
 # KV-cache registration. Required for hybrid models (e.g. gemma-4's
 # sliding-window + full-attention groups have different block sizes); without
@@ -252,7 +244,6 @@ vllm serve "$MODEL" \
     $MAMBA_ARGS \
     $PREFIX_CACHING_ARG \
     $MAX_NUM_BATCHED_TOKENS_ARG \
-    $CHUNKED_PREFILL_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
 VLLM_PID=$!
@@ -279,7 +270,6 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
         $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
         $PREFIX_CACHING_ARG \
-        $CHUNKED_PREFILL_ARG \
         > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 
     VLLM_BASELINE_PID=$!

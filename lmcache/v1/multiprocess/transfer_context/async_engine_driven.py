@@ -5,9 +5,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
-import os
 import threading
-import time
 
 # Third Party
 import torch
@@ -248,8 +246,6 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         # Signals when this task has recorded its CUDA event (or exited early),
         # allowing flush_inflight_stores to safely proceed.
         gather_launched = threading.Event()
-        profile_store = os.environ.get("LMCACHE_PROFILE_PAGED_GATHER") == "1"
-        submitted_at = time.perf_counter()
         try:
             with self._inflight_lock:
                 if self._is_closing:
@@ -260,12 +256,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             full_block_ids = _single_group_block_ids(block_ids)
 
             def _prepare_gather_and_commit() -> None:
-                task_started = time.perf_counter()
                 gather_done: Any | None = None
                 ok = False
                 copy_staging_to_shm = False
                 staged_chunks: list[torch.Tensor] = []
-                staging_copy_seconds: list[float] = []
                 try:
                     # --- Phase 1: prepare_store ---
                     # In pickle mode this is the costliest step (sync RPC
@@ -290,10 +284,6 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     # - Pinned SHM path: gather directly into SHM views
                     # - Unpinned SHM path: gather into pinned staging then copy
                     # - Pickle path (no out_buffers): gather into pinned staging
-                    direct_unpinned_shm = (
-                        os.environ.get("LMCACHE_ENGINE_DRIVEN_DIRECT_UNPINNED_SHM")
-                        == "1"
-                    )
                     if out_buffers is None:
                         layout_desc = engine_driven_context.layout_desc
                         if not layout_desc.shapes:
@@ -310,8 +300,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             num_chunks,
                         )
                         gather_target = staged_chunks
-                    elif isinstance(engine_driven_context, EngineDrivenContextShm) and (
-                        engine_driven_context.is_pinned or direct_unpinned_shm
+                    elif (
+                        isinstance(engine_driven_context, EngineDrivenContextShm)
+                        and engine_driven_context.is_pinned
                     ):
                         gather_target = out_buffers
                     else:
@@ -333,7 +324,6 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         gather_target = staged_chunks
                         copy_staging_to_shm = True
 
-                    pre_copy_finished = time.perf_counter()
                     # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
                     with torch.inference_mode(), torch_dev.stream(self._copy_stream):
                         _event.wait(stream=self._copy_stream)
@@ -346,14 +336,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             engine_kv_format=self._engine_kv_format,
                             out=gather_target,
                             chunk_indices=chunk_indices,
-                            out_is_pinned=(
-                                isinstance(
-                                    engine_driven_context, EngineDrivenContextShm
-                                )
-                                and engine_driven_context.is_pinned
-                            ),
                         )
-                        gather_enqueued = time.perf_counter()
                         gather_done = torch_dev.Event()
                         gather_done.record(self._copy_stream)
 
@@ -365,9 +348,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
                     if gather_done is not None:
                         gather_done.synchronize()
-                    gather_finished = time.perf_counter()
 
-                    staging_copy_finished = gather_finished
                     if copy_staging_to_shm:
                         # The source GPU KV is no longer needed. Let vLLM
                         # release its blocks while LMCache finishes the CPU-only
@@ -378,12 +359,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             )
                         completion.set_result(True)
                         for dst, src in zip(out_buffers, staged_chunks, strict=True):
-                            staging_copy_started = time.perf_counter()
                             dst.copy_(src)
-                            staging_copy_seconds.append(
-                                time.perf_counter() - staging_copy_started
-                            )
-                        staging_copy_finished = time.perf_counter()
                     # --- Phase 3: commit ---
                     commit_buffers = (
                         out_buffers if copy_staging_to_shm else gather_target
@@ -396,31 +372,6 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             instance_id,
                             commit_buffers,
                         )
-                    commit_finished = time.perf_counter()
-                    if profile_store:
-                        logger.info(
-                            "Async store profile: request_id=%s queue_wait=%.3fs "
-                            "worker_pre_copy=%.3fs d2h_enqueue=%.3fs "
-                            "d2h_wait=%.3fs staging_copy=%.3fs "
-                            "commit=%.3fs total=%.3fs",
-                            _request_id,
-                            task_started - submitted_at,
-                            pre_copy_finished - task_started,
-                            gather_enqueued - pre_copy_finished,
-                            gather_finished - gather_enqueued,
-                            staging_copy_finished - gather_finished,
-                            commit_finished - staging_copy_finished,
-                            commit_finished - submitted_at,
-                        )
-                        if staging_copy_seconds:
-                            logger.info(
-                                "Staging SHM copy profile: request_id=%s "
-                                "chunk_seconds=%s",
-                                _request_id,
-                                ",".join(
-                                    f"{seconds:.6f}" for seconds in staging_copy_seconds
-                                ),
-                            )
                     if not ok:
                         logger.error(
                             "Async engine-driven commit_store failed for request_id=%s",
