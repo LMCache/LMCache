@@ -230,6 +230,17 @@ restart_lmcache() {
 
 # ── Step 1: Bench round 1 ────────────────────────────────────
 echo "============================================"
+echo "=== Waiting for initial worker registration ==="
+echo "============================================"
+if ! wait_for_worker_reregister; then
+    echo "--- lmcache log (last 80 lines) ---"
+    tail -80 "/tmp/build_${BUILD_ID}_lmcache.log" 2>/dev/null || true
+    echo "--- vllm log (last 80 lines) ---"
+    tail -80 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
+    exit 1
+fi
+
+echo "============================================"
 echo "=== Round 1: bench against original server ==="
 echo "============================================"
 if ! run_bench_round "round1" "41"; then
