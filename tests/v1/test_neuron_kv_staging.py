@@ -59,6 +59,48 @@ def test_compact_slot_mapping_remaps_blocks_and_preserves_invalid_slots():
     assert compact.tolist() == [-1, 0, 1, 4, 5]
 
 
+def test_compact_slot_mapping_handles_scattered_unsorted_blocks():
+    """Real slot mappings come from the block allocator, not a dense range."""
+    stager = staging_mod.NeuronKVBlockStager()
+    # Blocks 9, 2 and 5, visited out of order, with a prefix-cache gap.
+    slots = torch.tensor([-1, -1, 37, 36, 11, 22, 8], dtype=torch.long)
+
+    selected_blocks, compact = stager._compact_slot_mapping(slots, block_size=4)
+
+    assert selected_blocks == [2, 5, 9]
+    # 37 -> block 9 off 1 -> compact block 2; 36 -> block 9 off 0;
+    # 11 -> block 2 off 3 -> compact block 0; 22 -> block 5 off 2 -> compact 1;
+    # 8 -> block 2 off 0 -> compact block 0.
+    assert compact.tolist() == [-1, -1, 9, 8, 3, 6, 0]
+
+
+def test_compact_slot_mapping_all_invalid_returns_no_blocks():
+    stager = staging_mod.NeuronKVBlockStager()
+    slots = torch.tensor([-1, -1], dtype=torch.long)
+
+    selected_blocks, compact = stager._compact_slot_mapping(slots, block_size=4)
+
+    assert selected_blocks == []
+    assert compact.tolist() == [-1, -1]
+
+
+def test_contiguous_runs_collapses_adjacent_indices():
+    """Runs are what keep a transfer from touching the whole paged cache."""
+    runs = staging_mod.NeuronKVBlockStager._contiguous_runs([0, 1, 2, 7, 9, 10])
+
+    assert runs == [(0, 3), (7, 1), (9, 2)]
+
+
+def test_contiguous_runs_empty_selection():
+    assert staging_mod.NeuronKVBlockStager._contiguous_runs([]) == []
+
+
+def test_contiguous_runs_fully_scattered_indices():
+    runs = staging_mod.NeuronKVBlockStager._contiguous_runs([1, 3, 5])
+
+    assert runs == [(1, 1), (3, 1), (5, 1)]
+
+
 def test_selection_block_indexed_hnd_two_major_uses_block_axis():
     stager = staging_mod.NeuronKVBlockStager()
 
