@@ -101,9 +101,28 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
+    """
+    Calculate the size in bytes with the given shapes and dtypes.
+    """
+    assert len(shapes) == len(kv_dtypes), (
+        f"shapes and dtypes must have the same length, "
+        f"but got {len(shapes)} and {len(kv_dtypes)}"
+    )
+    return sum(
+        shape.numel() * kv_dtype.itemsize
+        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
+    )
+
+
 def round_down(x: int, y: int) -> int:
     """Round down x to the nearest multiple of y."""
     return (x // y) * y
+
+
+def round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    return ((x + y - 1) // y) * y
 
 
 def compress_slot_mapping(slots: list[int]) -> list[Union[int, list[int]]]:
