@@ -12,6 +12,12 @@ import pytest
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 
 
+@pytest.mark.parametrize("max_workers", [0, -1])
+def test_rejects_nonpositive_worker_count(max_workers: int):
+    with pytest.raises(ValueError, match="max_workers must be greater than 0"):
+        AffinityThreadPool(max_workers=max_workers)
+
+
 def test_submit_returns_correct_result():
     pool = AffinityThreadPool(max_workers=2)
     future = pool.submit(lambda x: x * 2, 21, affinity_key=0)

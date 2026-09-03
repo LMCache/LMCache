@@ -40,6 +40,8 @@ class AffinityThreadPool:
         max_workers: int,
         thread_name_prefix: str = "affinity",
     ) -> None:
+        if max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
         self._num_workers = max_workers
         self._queues: list[queue.Queue] = [queue.Queue() for _ in range(max_workers)]
         self._threads: list[threading.Thread] = []
