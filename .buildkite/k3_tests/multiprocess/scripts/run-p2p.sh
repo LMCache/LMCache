@@ -34,6 +34,8 @@ RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 
 # Ports (localhost, single pod).
 COORDINATOR_PORT="${COORDINATOR_PORT:-12300}"
@@ -61,13 +63,58 @@ PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 # vLLM GPU-memory fraction: clamp on very large GPUs so APC does not cover the
 # whole prefix and hide the LMCache path (mirrors launch-processes.sh).
 GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_A}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-echo "Detected GPU memory: ${GPU_MEMORY_GB}GB"
-if [ -n "${GPU_MEMORY_UTILIZATION:-}" ]; then
+if [ "$TORCH_DEVICE_TYPE" = "cuda" ]; then
+    GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_A}" | tr -d ' ')
+    GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
+    echo "Detected GPU memory: ${GPU_MEMORY_GB}GB"
+    if [ -n "${GPU_MEMORY_UTILIZATION:-}" ]; then
+        GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}"
+    elif [ "$GPU_MEMORY_GB" -gt 90 ]; then
+        GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
+    fi
+elif [ -n "${GPU_MEMORY_UTILIZATION:-}" ]; then
     GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}"
-elif [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
+fi
+
+DEVICE_AFFINITY_VAR="CUDA_VISIBLE_DEVICES"
+VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="cuda")
+if [ "$TORCH_DEVICE_TYPE" = "xpu" ]; then
+    DEVICE_AFFINITY_VAR="ZE_AFFINITY_MASK"
+    VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="xpu")
+    unset CUDA_VISIBLE_DEVICES || true
+    if [ -f /opt/intel/oneapi/setvars.sh ]; then
+        # shellcheck disable=SC1091
+        source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+    fi
+fi
+
+TRANSFER_MODE_ARG="--supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASH_ATTN}"
+ATTENTION_BACKEND_ARG=""
+if [ "$ATTENTION_BACKEND" != "auto" ]; then
+    ATTENTION_BACKEND_ARG="--attention-backend $ATTENTION_BACKEND"
+fi
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
+MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
+ENFORCE_EAGER_ARG=""
+if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
+    ENFORCE_EAGER_ARG="--enforce-eager"
+fi
+PREFIX_CACHING_ARG=""
+if [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "true" ]; then
+    PREFIX_CACHING_ARG="--no-enable-prefix-caching"
+fi
+CHUNKED_PREFILL_ARG=""
+if [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "1" ] || [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "true" ]; then
+    CHUNKED_PREFILL_ARG="--no-enable-chunked-prefill"
+fi
+MAX_NUM_BATCHED_TOKENS_ARG=""
+if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
+    MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
+fi
+MAX_NUM_SEQS_ARG=""
+if [ -n "${MAX_NUM_SEQS:-}" ]; then
+    MAX_NUM_SEQS_ARG="--max-num-seqs ${MAX_NUM_SEQS}"
 fi
 
 CONNECTOR_CONFIG() {
@@ -77,7 +124,17 @@ CONNECTOR_CONFIG() {
 
 launch_lmcache() {
     # $1=gpu $2=zmq_port $3=http_port $4=p2p_advertise $5=instance_id $6=logname
-    CUDA_VISIBLE_DEVICES="$1" \
+    local l1_lazy_arg=""
+    local shm_name_arg=""
+    if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+        l1_lazy_arg="--no-l1-use-lazy"
+        if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+            shm_name_arg="--shm-name ${BUILD_ID}_${6}"
+        fi
+    fi
+
+    env "${DEVICE_AFFINITY_VAR}=$1" \
+        "${VLLM_DEVICE_ENV[@]}" \
     lmcache server \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
@@ -89,6 +146,9 @@ launch_lmcache() {
         --coordinator-url "$COORDINATOR_URL" \
         --coordinator-advertise-ip 127.0.0.1 \
         --p2p-advertise-url "$4" \
+        ${l1_lazy_arg} \
+        ${shm_name_arg} \
+        ${TRANSFER_MODE_ARG} \
         > "/tmp/build_${BUILD_ID}_${6}.log" 2>&1 &
     local pid=$!
     echo "$pid" >> "$PID_FILE"
@@ -100,18 +160,25 @@ launch_vllm() {
     # Unset VLLM_PORT so vLLM's get_open_port() picks a random internal port
     # for torch.distributed instead of colliding on serving_port+1.
     env -u VLLM_PORT \
-    CUDA_VISIBLE_DEVICES="$1" \
+    "${DEVICE_AFFINITY_VAR}=$1" \
+    "${VLLM_DEVICE_ENV[@]}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     VLLM_SERVER_DEV_MODE=1 \
     VLLM_BATCH_INVARIANT=1 \
     PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
         --kv-transfer-config "$(CONNECTOR_CONFIG "$3")" \
-        --attention-backend FLASH_ATTN \
+        --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
+        $ATTENTION_BACKEND_ARG \
         --port "$2" \
         --no-async-scheduling \
-        --max-model-len auto \
+        $MAX_MODEL_LEN_ARG \
+        $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
+        $PREFIX_CACHING_ARG \
+        $MAX_NUM_BATCHED_TOKENS_ARG \
+        $CHUNKED_PREFILL_ARG \
+        $MAX_NUM_SEQS_ARG \
         > "/tmp/build_${BUILD_ID}_${4}.log" 2>&1 &
     local pid=$!
     echo "$pid" >> "$PID_FILE"

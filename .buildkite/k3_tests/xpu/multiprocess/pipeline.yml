@@ -25,6 +25,23 @@ x-pod-1xpu: &pod-1xpu
     - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 90Gi } }
 
+x-pod-2xpu: &pod-2xpu
+  containers:
+    - name: container-0
+      image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu
+      imagePullPolicy: IfNotPresent
+      resources:
+        requests:
+          deviceclass.resource.kubernetes.io/gpu.intel.com: "2"
+        limits:
+          deviceclass.resource.kubernetes.io/gpu.intel.com: "2"
+      volumeMounts:
+        - { name: hf-cache, mountPath: /root/.cache/huggingface }
+        - { name: dshm, mountPath: /dev/shm }
+  volumes:
+    - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 90Gi } }
+
 steps:
   - group: ":xpu: Multiprocess (1-pod)"
     steps:
@@ -154,4 +171,108 @@ steps:
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: long_doc_qa"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export L1_USE_LAZY="false"
+          export ENFORCE_EAGER="1"
+          export VLLM_USE_STANDALONE_COMPILE="0"
+          export BATCH_INVARIANT="0"
+          export CPU_BUFFER_SIZE="80"
+          export VLLM_DISABLE_CHUNKED_PREFILL="true"
+          export VLLM_DISABLE_PREFIX_CACHING="true"
+          export MAX_MODEL_LEN="40960"
+          export MAX_NUM_BATCHED_TOKENS="40960"
+          export MAX_NUM_SEQS="64"
+          export MODEL="Qwen/Qwen3-0.6B"
+          export TENSOR_PARALLEL_SIZE="1"
+          export GPU_FOR_VLLM="0"
+          export GPU_FOR_BASELINE="1"
+          export MAX_WAIT_SECONDS="900"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh long_doc_qa
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: long_doc_qa_l2"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export L1_USE_LAZY="false"
+          export ENFORCE_EAGER="1"
+          export VLLM_USE_STANDALONE_COMPILE="0"
+          export BATCH_INVARIANT="0"
+          export CPU_BUFFER_SIZE="80"
+          export VLLM_DISABLE_CHUNKED_PREFILL="true"
+          export VLLM_DISABLE_PREFIX_CACHING="true"
+          export MAX_MODEL_LEN="40960"
+          export MAX_NUM_BATCHED_TOKENS="40960"
+          export MAX_NUM_SEQS="64"
+          export MODEL="Qwen/Qwen3-0.6B"
+          export TENSOR_PARALLEL_SIZE="1"
+          export GPU_FOR_VLLM="0"
+          export GPU_FOR_BASELINE="1"
+          export MAX_WAIT_SECONDS="900"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh long_doc_qa_l2
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: deadlock"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export L1_USE_LAZY="false"
+          export ENFORCE_EAGER="1"
+          export VLLM_USE_STANDALONE_COMPILE="0"
+          export CPU_BUFFER_SIZE="50"
+          export VLLM_DISABLE_CHUNKED_PREFILL="true"
+          export VLLM_DISABLE_PREFIX_CACHING="true"
+          export ATTENTION_BACKEND="TRITON_ATTN"
+          export MAX_MODEL_LEN="40960"
+          export MAX_NUM_BATCHED_TOKENS="auto"
+          export MAX_NUM_SEQS="32"
+          export VLLM_BLOCK_SIZE="16"
+          export MODEL="Qwen/Qwen3-0.6B"
+          export TENSOR_PARALLEL_SIZE="1"
+          export GPU_FOR_VLLM="0"
+          export VLLM_LOAD_FORMAT="auto"
+          export DEADLOCK_REQUEST_LEN="4096"
+          export DEADLOCK_NUM_REQUESTS="100"
+          export MAX_WAIT_SECONDS="900"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh deadlock
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: p2p"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export L1_USE_LAZY="false"
+          export ENFORCE_EAGER="1"
+          export VLLM_USE_STANDALONE_COMPILE="0"
+          export BATCH_INVARIANT="0"
+          export CPU_BUFFER_SIZE="80"
+          export VLLM_DISABLE_CHUNKED_PREFILL="true"
+          export VLLM_DISABLE_PREFIX_CACHING="true"
+          export ATTENTION_BACKEND="TRITON_ATTN"
+          export MAX_MODEL_LEN="40960"
+          export MAX_NUM_BATCHED_TOKENS="40960"
+          export MAX_NUM_SEQS="64"
+          export MODEL="Qwen/Qwen3-0.6B"
+          export TENSOR_PARALLEL_SIZE="1"
+          export GPU_FOR_A="0"
+          export GPU_FOR_B="1"
+          export MAX_WAIT_SECONDS="900"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh p2p
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
