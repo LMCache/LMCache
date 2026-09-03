@@ -86,6 +86,20 @@ export TRITON_CACHE_AUTOTUNING=1
 export TRITON_CACHE_DIR="/tmp/build_${BUILD_ID}_triton_cache"
 # Seconds to let async LMCache stores drain before restarting vLLM.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
+ENGINE_DRIVEN_TRANSPORT="${ENGINE_DRIVEN_TRANSPORT:-}"
+L1_LAZY_ARG=""
+
+case "$ENGINE_DRIVEN_TRANSPORT" in
+    ""|pickle|shm) ;;
+    *)
+        echo "ERROR: ENGINE_DRIVEN_TRANSPORT must be 'pickle' or 'shm', got '$ENGINE_DRIVEN_TRANSPORT'"
+        exit 1
+        ;;
+esac
+
+if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+    L1_LAZY_ARG="--no-l1-use-lazy"
+fi
 
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 TP_DIR="$RESULTS_DIR/kimi_linear_tp"
@@ -184,14 +198,10 @@ stop_vllm() {
     fi
     # Free the serving port in case a child socket lingers.
     fuser -k "${VLLM_PORT}/tcp" 2>/dev/null || true
-    # TP=2 puts a vLLM rank on GPU 0 and GPU 1, so both have to come back
-    # before the relaunch sizes its KV cache -- waiting on GPU 1 alone let a
-    # rank-0 allocation that outlived the process shrink the relaunch's budget
-    # ("Free memory on device cuda:0 ... less than desired GPU memory
-    # utilization"). GPU 1 is vLLM's alone; GPU 0 also carries the LMCache
-    # server, so it is measured against the pre-vLLM baseline.
+    # GPU 1 is used exclusively by vLLM (the LMCache server pins its CUDA
+    # context on GPU 0), so its memory dropping to near-idle is a clean signal
+    # that the old vLLM (and its TP workers) are fully gone.
     wait_for_gpu_release 1 2000
-    wait_for_gpu_release 0 $(( GPU0_BASELINE_MIB + 2000 ))
 }
 
 # Send one greedy completion request and write the generated text to a file.
@@ -239,6 +249,28 @@ count_retrieves() {
     grep -c "Retrieved" "$LMCACHE_LOG" 2>/dev/null || true
 }
 
+assert_engine_driven_transport_active() {
+    [ -n "$ENGINE_DRIVEN_TRANSPORT" ] || return 0
+
+    local marker
+    case "$ENGINE_DRIVEN_TRANSPORT" in
+        pickle) marker="Using pickle non-GPU transfer strategy" ;;
+        shm) marker="Using shm non-GPU transfer strategy" ;;
+    esac
+    local max_wait=30
+    local elapsed=0
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        if [ -f "$LMCACHE_LOG" ] && grep -qi "$marker" "$LMCACHE_LOG" 2>/dev/null; then
+            echo "Engine-driven $ENGINE_DRIVEN_TRANSPORT transport confirmed in LMCache log."
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+    echo "ERROR: LMCache log did not contain '$marker' after ${max_wait}s."
+    return 1
+}
+
 # ── 1. Launch LMCache MP server (kept alive across the vLLM restart) ──
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT) ==="
 lmcache server \
@@ -246,6 +278,7 @@ lmcache server \
     --port "$LMCACHE_PORT" \
     --chunk-size "$CHUNK_SIZE" \
     --l1-size-gb 80 \
+    $L1_LAZY_ARG \
     --eviction-policy LRU \
     --max-workers 4 \
     ${SEPARATE_OBJECT_GROUPS_ARG} \
@@ -254,13 +287,6 @@ LMCACHE_PID=$!
 echo "$LMCACHE_PID" >> "$PID_FILE"
 echo "LMCache MP server started (PID=$LMCACHE_PID)"
 sleep 10
-
-# Everything on GPU 0 that is not vLLM (the LMCache server's CUDA context and
-# its buffers). stop_vllm waits for GPU 0 to come back to this, so the wait
-# does not depend on guessing the server's footprint.
-GPU0_BASELINE_MIB=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
-    -i 0 2>/dev/null | tr -d ' ' || echo 0)
-echo "GPU 0 baseline before vLLM: ${GPU0_BASELINE_MIB} MiB"
 
 # ── 2. Build a long, deterministic prompt, then ask for a summary ──
 # A ~7-8k word document (well over the several-thousand-token span needed for
@@ -290,6 +316,7 @@ echo ""
 
 # ── 3. vLLM run: compute from scratch, populating LMCache ───
 launch_vllm "/tmp/build_${BUILD_ID}_vllm.log"
+assert_engine_driven_transport_active
 send_completion "$OUT_A" "vLLM run"
 
 echo "Waiting ${STORE_DRAIN_SECONDS}s for LMCache stores to drain..."

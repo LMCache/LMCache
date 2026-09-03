@@ -14,6 +14,7 @@ vllm_port="${VLLM_PORT:-8000}"
 vllm_baseline_port="${VLLM_BASELINE_PORT:-9000}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+LMCACHE_MQ_TIMEOUT="${LMCACHE_MQ_TIMEOUT:-10}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 
@@ -27,13 +28,7 @@ echo "Using GPU $GPU_FOR_BASELINE for vLLM baseline"
 # Without this, vLLM allocates so much KV cache that APC covers all prefixes
 # and LMCache's cache path is never exercised, making the test pass vacuously.
 GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(
-    CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" python3 - <<'PY'
-import torch
-
-print(torch.cuda.get_device_properties(0).total_memory // (1024 * 1024))
-PY
-)
+GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_FOR_VLLM}" | tr -d ' ')
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
@@ -83,18 +78,10 @@ fi
 # vLLM batch-invariant mode. On by default; GDN/Mamba backends do not support it.
 BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
 
-# Prefix-caching policy. Default behavior is unchanged: ordinary models rely on
-# vLLM's existing default, while hybrid Mamba models explicitly enable prefix
-# caching. Tests that need to force LMCache retrieve can opt out with
-# VLLM_DISABLE_PREFIX_CACHING=true.
-PREFIX_CACHING_ARG=""
+# Mamba KV cache mode + prefix caching, set only for hybrid Mamba models.
 MAMBA_ARGS=""
-if [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "true" ]; then
-    echo "Disabling vLLM prefix caching via --no-enable-prefix-caching"
-    PREFIX_CACHING_ARG="--no-enable-prefix-caching"
-elif [ -n "${MAMBA_CACHE_MODE:-}" ]; then
-    MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE}"
-    PREFIX_CACHING_ARG="--enable-prefix-caching"
+if [ -n "${MAMBA_CACHE_MODE:-}" ]; then
+    MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE} --enable-prefix-caching"
 fi
 
 # Max tokens per scheduler step. Empty -> vLLM default.
@@ -190,51 +177,13 @@ echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
 echo "Port: $vllm_port"
 
-# A dedicated GPU integration test enables FIFO lazy offload through this
-# flag. Keep the normal launch configuration eager so the existing test suite
-# preserves its current store timing.
-KV_TRANSFER_CONFIG="$(
-    LMCACHE_PORT="${LMCACHE_PORT}" \
-    LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
-    python3 - <<'PY'
-import json
-import os
-
-extra_config = {
-    "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
-    "lmcache.mp.mq_timeout": 10,
-}
-if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
-    extra_config.update(
-        {
-            "lmcache.mp.lazy_offload": True,
-            "lmcache.mp.lazy_offload_policy": "FIFO",
-            "lmcache.mp.lazy_offload_threshold": 2,
-            "lmcache.mp.lazy_offload_select_count": 1,
-        }
-    )
-
-print(
-    json.dumps(
-        {
-            "kv_connector": "LMCacheMPConnector",
-            "kv_role": "kv_both",
-            "kv_load_failure_policy": "recompute",
-            "kv_connector_extra_config": extra_config,
-        }
-    )
-)
-PY
-)"
-echo "LMCache KV transfer configuration: ${KV_TRANSFER_CONFIG}"
-
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
-    --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": $LMCACHE_MQ_TIMEOUT}}" \
     $ATTENTION_BACKEND_ARG \
     --port "$vllm_port" \
     --no-async-scheduling \
@@ -242,7 +191,6 @@ vllm serve "$MODEL" \
     $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
     $MAMBA_ARGS \
-    $PREFIX_CACHING_ARG \
     $MAX_NUM_BATCHED_TOKENS_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
@@ -260,7 +208,7 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
     CUDA_VISIBLE_DEVICES="${GPU_FOR_BASELINE}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
+    VLLM_BATCH_INVARIANT=1 \
     PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
         $ATTENTION_BACKEND_ARG \
@@ -269,7 +217,6 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
         $MAX_MODEL_LEN_ARG \
         $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
-        $PREFIX_CACHING_ARG \
         > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 
     VLLM_BASELINE_PID=$!

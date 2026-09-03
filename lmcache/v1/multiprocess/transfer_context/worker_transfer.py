@@ -764,7 +764,7 @@ class EngineDrivenTransferContext(TransferContext):
             )
             layer_names = list(kv_caches)
             normalized_kv, per_layer_formats = normalize_and_discover_per_layer_formats(
-                kv_caches,
+                list(kv_caches.values()),
                 [group.layer_indices for group in engine_group_infos],
                 engine_type,
                 layout_hints=layout_hints,
