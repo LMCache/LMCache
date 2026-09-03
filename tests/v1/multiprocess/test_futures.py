@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from concurrent.futures import CancelledError
 import gc
 import multiprocessing as mp
 import threading
@@ -241,6 +242,32 @@ def test_messaging_future_retains_reference_for_its_lifetime() -> None:
     del future
     gc.collect()
     assert resource_ref() is None
+
+
+def test_messaging_future_callback_runs_once_on_completion() -> None:
+    """Terminal callbacks run for both pending and already-finished futures."""
+    future = MessagingFuture[int]()
+    callbacks: list[tuple[MessagingFuture[int], str]] = []
+
+    future.add_done_callback(lambda completed: callbacks.append((completed, "early")))
+    future.set_result(42)
+    future.set_result(99)
+    future.add_done_callback(lambda completed: callbacks.append((completed, "late")))
+
+    assert callbacks == [(future, "early"), (future, "late")]
+    assert future.result(timeout=0) == 42
+
+
+def test_messaging_future_cancel_is_terminal() -> None:
+    """Cancellation wakes waiters and produces a stable caller-visible error."""
+    future = MessagingFuture[int]()
+
+    assert future.cancel() is True
+    assert future.cancel() is False
+    assert future.query() is True
+    assert future.cancelled() is True
+    with pytest.raises(CancelledError, match="Message queue client closed"):
+        future.result(timeout=0)
 
 
 # ==============================================================================
@@ -655,6 +682,21 @@ def test_device_future_stub_end_to_end():
     assert fut.wait() is True
     assert fut.result() == 7
     assert fut.query() is True
+
+
+def test_device_future_propagates_raw_cancellation() -> None:
+    """Closing an MQ client is visible through its device-future wrapper."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    raw = MessagingFuture[tuple[bytes, int]]()
+    future = DeviceMessagingFuture.FromMessagingFuture(raw, device="cpu")
+
+    assert raw.cancel() is True
+    assert future.wait(timeout=0) is True
+    assert future.cancelled() is True
+    with pytest.raises(CancelledError, match="Message queue client closed"):
+        future.result(timeout=0)
 
 
 def test_device_future_delegates_to_backend(monkeypatch):

@@ -1,21 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Callable
+from concurrent.futures import CancelledError
 from typing import Any, Generic, Optional, TypeVar, cast
 import threading
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import lmcache_deprecate
+from lmcache.utils import init_logger, lmcache_deprecate
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
 T = TypeVar("T")
+logger = init_logger(__name__)
 
 
 class MessagingFuture(Generic[T]):
     def __init__(self) -> None:
         self.is_done_ = threading.Event()
         self.result_: T | None = None
+        self._exception: BaseException | None = None
+        self._completion_lock = threading.RLock()
+        self._done_callbacks: list[Callable[["MessagingFuture[T]"], None]] = []
         self._retained_references: list[object] = []
 
     def query(self) -> bool:
@@ -57,7 +63,10 @@ class MessagingFuture(Generic[T]):
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError("Future result not available within timeout")
-        return cast(T, self.result_)
+        with self._completion_lock:
+            if self._exception is not None:
+                raise self._exception
+            return cast(T, self.result_)
 
     def set_result(self, result: T) -> None:
         """
@@ -68,8 +77,92 @@ class MessagingFuture(Generic[T]):
         Args:
             result (T): The result to set.
         """
-        self.result_ = result
-        self.is_done_.set()
+        callbacks: list[Callable[[MessagingFuture[T]], None]]
+        with self._completion_lock:
+            if self.is_done_.is_set():
+                return
+            self.result_ = result
+            self.is_done_.set()
+            callbacks = self._done_callbacks
+            self._done_callbacks = []
+        self._run_done_callbacks(callbacks)
+
+    def set_exception(self, exception: BaseException) -> None:
+        """Complete the future with ``exception``.
+
+        Args:
+            exception: Error raised by subsequent calls to :meth:`result`.
+        """
+        callbacks: list[Callable[[MessagingFuture[T]], None]]
+        with self._completion_lock:
+            if self.is_done_.is_set():
+                return
+            self._exception = exception
+            self.is_done_.set()
+            callbacks = self._done_callbacks
+            self._done_callbacks = []
+        self._run_done_callbacks(callbacks)
+
+    def cancel(self) -> bool:
+        """Cancel an unfinished future.
+
+        Returns:
+            True if this call cancelled the future, or False if it had already
+            reached a terminal state.
+        """
+        callbacks: list[Callable[[MessagingFuture[T]], None]]
+        with self._completion_lock:
+            if self.is_done_.is_set():
+                return False
+            self._exception = CancelledError("Message queue client closed")
+            self.is_done_.set()
+            callbacks = self._done_callbacks
+            self._done_callbacks = []
+        self._run_done_callbacks(callbacks)
+        return True
+
+    def cancelled(self) -> bool:
+        """Return whether this future completed through cancellation."""
+        with self._completion_lock:
+            return self.is_done_.is_set() and isinstance(
+                self._exception, CancelledError
+            )
+
+    def exception(self, timeout: Optional[float] = None) -> BaseException | None:
+        """Return the terminal exception, waiting up to ``timeout`` seconds.
+
+        Args:
+            timeout: Maximum time to wait, or None to wait indefinitely.
+
+        Returns:
+            The terminal exception, or None after successful completion.
+
+        Raises:
+            TimeoutError: If the future is not done within ``timeout``.
+        """
+        if not self.wait(timeout):
+            raise LMCacheTimeoutError("Future result not available within timeout")
+        with self._completion_lock:
+            return self._exception
+
+    def add_done_callback(
+        self,
+        callback: Callable[["MessagingFuture[T]"], None],
+    ) -> None:
+        """Invoke ``callback`` once this future reaches a terminal state.
+
+        The callback runs synchronously in the thread that completes the
+        future. If the future is already done, it runs before this method
+        returns.
+
+        Args:
+            callback: Callable receiving this future.
+        """
+        with self._completion_lock:
+            if not self.is_done_.is_set():
+                self._done_callbacks.append(callback)
+                return
+        self._run_done_callbacks([callback])
 
     def retain_reference(self, value: object) -> None:
         """Keep a resource alive for at least the lifetime of this future.
@@ -81,6 +174,17 @@ class MessagingFuture(Generic[T]):
             value: Resource whose lifetime must be tied to this future.
         """
         self._retained_references.append(value)
+
+    def _run_done_callbacks(
+        self,
+        callbacks: list[Callable[["MessagingFuture[T]"], None]],
+    ) -> None:
+        """Run terminal callbacks without holding the completion lock."""
+        for callback in callbacks:
+            try:
+                callback(self)
+            except Exception:
+                logger.exception("MessagingFuture done callback failed")
 
     def to_device_future(
         self,
@@ -143,17 +247,20 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         """
         Update the device event and result when the raw future is complete.
         """
-        if self._raw_response_processed:
-            return
+        with self._completion_lock:
+            if self._raw_response_processed or self.is_done_.is_set():
+                return
+            event_bytes, result = self.raw_future_.result()
+            self.result_ = result
+            self.event_ = (
+                self._event_backend.import_event(event_bytes, self.device_)
+                if event_bytes
+                else None
+            )
+            self._raw_response_processed = True
 
-        event_bytes, result = self.raw_future_.result()
-        event = None
-        if event_bytes:
-            event = self._event_backend.import_event(event_bytes, self.device_)
-
-        self.result_ = result
-        self.event_ = event
-        self._raw_response_processed = True
+        if self.event_ is None:
+            MessagingFuture.set_result(self, result)
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
@@ -171,20 +278,33 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Notes:
             This function does not support waiting for a specific time.
         """
-        if self._raw_response_processed:
-            if self.event_ is not None:
-                self._event_backend.synchronize_event(self.event_, self.device_)
+        if self.is_done_.is_set():
             return True
 
-        flag = self.raw_future_.wait(timeout)
-        if not flag:
-            return False
+        if not self._raw_response_processed:
+            flag = self.raw_future_.wait(timeout)
+            if not flag:
+                return False
 
-        self._on_raw_future_complete()
+            try:
+                self._on_raw_future_complete()
+            except BaseException as error:
+                MessagingFuture.set_exception(self, error)
+                return True
 
-        if self.event_ is not None:
+        if self.is_done_.is_set():
+            return True
+
+        if self.event_ is None:
+            MessagingFuture.set_result(self, cast(T, self.result_))
+            return True
+
+        try:
             self._event_backend.synchronize_event(self.event_, self.device_)
-
+        except BaseException as error:
+            MessagingFuture.set_exception(self, error)
+            return True
+        MessagingFuture.set_result(self, cast(T, self.result_))
         return True
 
     def result(self, timeout: Optional[float] = None) -> T:
@@ -209,8 +329,10 @@ class DeviceMessagingFuture(MessagingFuture[T]):
                 "DeviceMessagingFuture result not available within timeout"
             )
 
-        assert self.result_ is not None
-        return self.result_
+        with self._completion_lock:
+            if self._exception is not None:
+                raise self._exception
+            return cast(T, self.result_)
 
     def query(self) -> bool:
         """
@@ -219,16 +341,26 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Returns:
             bool: True if the future is done, False otherwise.
         """
-        if self._raw_response_processed:
-            if self.event_ is None:
-                return True
-            return self._event_backend.query_event(self.event_)
+        if self.is_done_.is_set():
+            return True
 
-        if self.raw_future_.query():
-            self._on_raw_future_complete()
-            if self.event_ is None:
+        if not self._raw_response_processed and self.raw_future_.query():
+            try:
+                self._on_raw_future_complete()
+            except BaseException as error:
+                MessagingFuture.set_exception(self, error)
                 return True
-            return self._event_backend.query_event(self.event_)
+
+        if self.is_done_.is_set():
+            return True
+
+        if self._raw_response_processed and self.event_ is None:
+            MessagingFuture.set_result(self, cast(T, self.result_))
+            return True
+
+        if self.event_ is not None and self._event_backend.query_event(self.event_):
+            MessagingFuture.set_result(self, cast(T, self.result_))
+            return True
 
         return False
 
@@ -236,6 +368,11 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         raise NotImplementedError(
             "DeviceMessagingFuture does not support set_result directly"
         )
+
+    def cancel(self) -> bool:
+        """Cancel both the raw MQ request and this device-aware future."""
+        self.raw_future_.cancel()
+        return MessagingFuture.cancel(self)
 
     @staticmethod
     def FromMessagingFuture(
