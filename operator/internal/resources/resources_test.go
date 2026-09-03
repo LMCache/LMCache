@@ -36,6 +36,8 @@ const (
 	kvRoleBoth     = "kv_both"
 	kvRoleProducer = "kv_producer"
 	kvRoleConsumer = "kv_consumer"
+
+	nixlConnectorName = "NixlConnector"
 )
 
 // --- helpers ---
@@ -1216,7 +1218,7 @@ func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
 	}
 
 	nixl := connectors[0].(map[string]any)
-	if nixl["kv_connector"] != "NixlConnector" {
+	if nixl["kv_connector"] != nixlConnectorName {
 		t.Fatalf("first connector must be NixlConnector, got %v", nixl["kv_connector"])
 	}
 	if nixl["kv_role"] != kvRoleProducer {

@@ -96,11 +96,13 @@ type CacheBlendPodInjector struct {
 
 // Handle implements admission.Handler. It applies mutations M0–M7 to an opted-in
 // pod whose named CacheBlendEngine connection ConfigMap exists, then returns a
-// JSON patch. It short-circuits to an unchanged Allowed response for non-opted-in
-// or already-injected pods, and stamps a skip-reason annotation (still Allowed,
-// fail-open) when it declines to mutate (engine missing, command override,
-// payload image unset, target container missing, or user-supplied
-// --kv-transfer-config).
+// JSON patch. For a PD engine, the pod's lmcache.ai/pd-role annotation selects
+// the prefiller or decoder kv-transfer-config and the NIXL side-channel env
+// vars are injected. It short-circuits to an unchanged Allowed response for
+// non-opted-in or already-injected pods, and stamps a skip-reason annotation
+// (still Allowed, fail-open) when it declines to mutate (engine missing,
+// command override, payload image unset, target container missing, or
+// user-supplied --kv-transfer-config).
 func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Request) admission.Response {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -129,10 +131,15 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 
 	// (3b/6/4) Read the connection ConfigMap (in the engine's namespace), resolve
 	// the target container, and apply the command-override gate (shared with the
-	// LMCache injector).
+	// LMCache injector). In PD mode the pod's pd-role annotation selects the
+	// prefiller (MultiConnector) or decoder (bare NixlConnector) config.
+	pdRole := ""
+	if engine.Spec.PD != nil {
+		pdRole = strings.TrimSpace(pod.Annotations[PDRoleAnnotationKey])
+	}
 	kvTransferConfigJSON, containerIdx, resp, ok := prepareInjection(
 		ctx, p.Client, req, pod, cacheBlendKeys, engineName, engineNamespace,
-		engine.Spec.Injection.TargetContainer, "")
+		engine.Spec.Injection.TargetContainer, pdRole)
 	if !ok {
 		return resp
 	}
@@ -183,6 +190,12 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 	injectedSecrets := resolveInjectedPullSecrets(engine.Spec.Injection.ImagePullSecrets,
 		pod.Annotations[AnnotationImagePullSecrets])
 	pod.Spec.ImagePullSecrets = MergeImagePullSecrets(pod.Spec.ImagePullSecrets, injectedSecrets)
+
+	// PD disaggregation: inject NIXL side-channel env vars when the engine is
+	// configured for PD mode (both roles run a NixlConnector).
+	if engine.Spec.PD != nil {
+		target.Env = BuildPDEnv(target.Env, engine.Spec.PD)
+	}
 
 	// M6: stamp the idempotency guard (+ skip reason if --kv-transfer-config was
 	// user-supplied) and return the patch.
