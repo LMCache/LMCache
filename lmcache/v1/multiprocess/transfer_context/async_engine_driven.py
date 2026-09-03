@@ -251,6 +251,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             def _prepare_gather_and_commit() -> None:
                 gather_done: Any | None = None
                 ok = False
+                release_before_commit = False
                 copy_staging_to_shm = False
                 staging_destinations: list[torch.Tensor] = []
                 staged_chunks: list[torch.Tensor] = []
@@ -277,6 +278,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         isinstance(engine_driven_context, EngineDrivenContextShm)
                         and engine_driven_context.is_pinned
                     ):
+                        release_before_commit = True
                         first_buffer = out_buffers[0]
                         if any(
                             buffer.shape != first_buffer.shape
@@ -328,11 +330,12 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     if gather_done is not None:
                         gather_done.synchronize()
 
-                    if copy_staging_to_shm:
+                    if release_before_commit:
                         # The source GPU KV is no longer needed. Let vLLM
                         # release its blocks while LMCache finishes the CPU-only
-                        # SHM copy and commit in this executor task.
+                        # work and commit in this executor task.
                         completion.set_result(True)
+                    if copy_staging_to_shm:
                         for dst, src in zip(
                             staging_destinations, staged_chunks, strict=True
                         ):
