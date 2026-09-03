@@ -116,6 +116,7 @@ class EventBus:
         self._thread: threading.Thread | None = None
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
+        self._malformed_native_event_count: int = 0
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
 
@@ -288,6 +289,10 @@ class EventBus:
         """Cumulative count of events dropped because the queue was full."""
         return self._discard_count
 
+    def malformed_native_events_count(self) -> int:
+        """Cumulative count of malformed native records skipped during drain."""
+        return self._malformed_native_event_count
+
     def subscriber_exception_counts(self) -> dict[str, int]:
         """Snapshot of per-subscriber callback exception counts.
 
@@ -314,17 +319,22 @@ class EventBus:
         # Drain events buffered on the C++ side (from CUDA host callbacks)
         if _has_native_recorder:
             native_events = _device_ops.drain_recorded_events()
-            for name, sid, ts, str_meta, int_meta in native_events:
-                metadata: dict[str, Any] = dict(str_meta)
-                metadata.update(int_meta)
-                self._queue.append(
-                    Event(
+            for native_event in native_events:
+                try:
+                    name, sid, ts, str_meta, int_meta = native_event
+                    metadata: dict[str, Any] = dict(str_meta)
+                    metadata.update(int_meta)
+                    event = Event(
                         event_type=EventType(name),
                         session_id=sid,
                         timestamp=ts,
                         metadata=metadata,
                     )
-                )
+                except Exception:
+                    self._malformed_native_event_count += 1
+                    logger.exception("EventBus: dropping malformed native event")
+                    continue
+                self._queue.append(event)
 
         with self._lock:
             snapshot = dict(self._subscribers)
