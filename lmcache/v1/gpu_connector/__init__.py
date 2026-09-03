@@ -165,12 +165,8 @@ def CreateGPUConnector(
         local_worker_id = metadata.local_worker_id
         torch_dev.set_device(local_worker_id)
         device = torch.device(f"{torch_device_type}:{local_worker_id}")
-        enable_neuron_nixl_staging = (
-            torch_device_type == "neuron"
-            and config.get_extra_config_value("neuron_use_nixl_staging", True)
-        )
-        neuron_nixl_backends = config.get_extra_config_value(
-            "neuron_nixl_backends", None
+        enable_neuron_kv_staging = torch_device_type == "neuron" and bool(
+            config.get_extra_config_value("neuron_use_kv_staging", True)
         )
 
         if torch_device_type in ("cuda", "neuron"):
@@ -180,7 +176,6 @@ def CreateGPUConnector(
                 VLLMPagedMemGPUConnectorV2,
                 VLLMPagedMemGPUConnectorV3,
                 VLLMPagedMemLayerwiseGPUConnector,
-                configure_neuron_nixl_staging,
             )
 
             if config.use_layerwise:
@@ -208,11 +203,8 @@ def CreateGPUConnector(
                     device,
                     layout_hints=layout_hints,
                 )
-            configure_neuron_nixl_staging(
-                connector,
-                enable_neuron_nixl_staging=enable_neuron_nixl_staging,
-                neuron_nixl_backends=neuron_nixl_backends,
-            )
+            if enable_neuron_kv_staging:
+                connector.configure_neuron_kv_staging()
             return connector
         elif torch_device_type == "xpu":
             # First Party

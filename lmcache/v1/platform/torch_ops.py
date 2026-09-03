@@ -681,9 +681,17 @@ def multi_layer_kv_transfer(
             is_two_first = int(engine_kv_format) == int(
                 EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
             )
-            # For non-CUDA devices (e.g. Neuron), fancy indexing on device
-            # tensors may fail. Move to CPU for the reshape, then back.
-            paged_cpu = paged_tensor.cpu()
+            # This fallback uses fancy indexing, which is unsupported on some
+            # accelerators (e.g. Neuron). Those devices must stage their blocks
+            # to CPU first (see NeuronKVBlockStager) rather than pay a silent
+            # full-tensor device-to-host copy here.
+            if paged_tensor.device.type != "cpu":
+                raise RuntimeError(
+                    "HND fallback requires CPU paged tensors; got device "
+                    f"'{paged_tensor.device}'. Stage the KV blocks to CPU "
+                    "before calling multi_layer_kv_transfer."
+                )
+            paged_cpu = paged_tensor
             bi_cpu = block_indices.cpu()
             bo_cpu = block_offsets.cpu()
             if int(direction) == int(TransferDirection.H2D):
@@ -723,7 +731,7 @@ def multi_layer_kv_transfer(
                         g = paged_cpu[bi_cpu, kv_idx, :, bo_cpu, :]
                         parts.append(g.reshape(-1, hidden_size))
                     flat = torch.stack(parts, dim=0)
-                flat_c = flat.clone().to(kv_device, non_blocking=False)
+                flat_c = flat.to(kv_device, non_blocking=False)
                 for kv_idx2 in range(2):
                     key_value[kv_idx2, layer_id].index_copy_(
                         0, token_indices, flat_c[kv_idx2]

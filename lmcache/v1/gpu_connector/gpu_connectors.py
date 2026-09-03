@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import abc
-from collections.abc import Sequence
 from contextlib import nullcontext
-from typing import List, Optional, Protocol, Tuple, Union
+from typing import List, Optional, Protocol, Tuple, Union, cast
 
 # Third Party
 import torch
@@ -73,12 +72,7 @@ def _device_stream_context(
     return nullcontext()
 
 
-class _SupportsNeuronNixlStaging(Protocol):
-    enable_neuron_nixl_staging: bool
-    _neuron_nixl_stager: "_NeuronNixlStager | None"
-
-
-class _NeuronNixlStager(Protocol):
+class _NeuronKVStager(Protocol):
     def transfer_into_key_value(
         self,
         key_value: torch.Tensor,
@@ -89,32 +83,26 @@ class _NeuronNixlStager(Protocol):
         head_size: int,
     ) -> None: ...
 
-
-def _build_neuron_nixl_stager(
-    enable_neuron_nixl_staging: bool,
-    neuron_nixl_backends: Optional[Sequence[str] | str],
-) -> "_NeuronNixlStager | None":
-    if not enable_neuron_nixl_staging:
-        return None
-
-    from lmcache.v1.gpu_connector.neuron_nixl_staging import (
-        NeuronNixlBlockStager,
-    )
-
-    return NeuronNixlBlockStager(neuron_nixl_backends)
+    def transfer_from_key_value(
+        self,
+        key_value: torch.Tensor,
+        layer_tensors: list[torch.Tensor],
+        slot_mapping: torch.Tensor,
+        engine_kv_format: "lmcache_native.EngineKVFormat",
+        block_size: int,
+        head_size: int,
+    ) -> None: ...
 
 
-def configure_neuron_nixl_staging(
-    connector: _SupportsNeuronNixlStaging,
-    enable_neuron_nixl_staging: bool,
-    neuron_nixl_backends: Optional[Sequence[str] | str] = None,
-) -> None:
-    """Attach optional neuron staging support post-construction."""
-    connector.enable_neuron_nixl_staging = enable_neuron_nixl_staging
-    connector._neuron_nixl_stager = _build_neuron_nixl_stager(
-        enable_neuron_nixl_staging,
-        neuron_nixl_backends,
-    )
+def _build_neuron_kv_stager() -> "_NeuronKVStager":
+    """Import and construct the Neuron KV stager lazily.
+
+    The import is deferred so non-Neuron builds never load the module.
+    """
+    # First Party
+    from lmcache.v1.gpu_connector.neuron_kv_staging import NeuronKVBlockStager
+
+    return NeuronKVBlockStager()
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
@@ -257,14 +245,13 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
-        self.enable_neuron_nixl_staging = False
         self.layout_hints: LayoutHints = (
             kwargs.get(  # type: ignore[assignment]
                 "layout_hints"
             )
             or {}
         )
-        self._neuron_nixl_stager: _NeuronNixlStager | None = None
+        self._neuron_kv_stager: _NeuronKVStager | None = None
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -322,21 +309,33 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
     def _initialize_pointers(
         self, kv_caches: List[torch.Tensor]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    ) -> torch.Tensor | List[torch.Tensor]:
         self.device = kv_caches[0].device
         device_type = str(self.device).split(":")[0]
+        discoverable_kv_caches = cast(DiscoverableKVCache, kv_caches)
 
-        self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
-            kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
+        self.engine_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
+            discoverable_kv_caches,
+            EngineType.VLLM,
+            layout_hints=self.layout_hints,
+        )  # type: ignore[arg-type]
+        kv_caches = cast(List[torch.Tensor], normalized_kv_caches)
+        discoverable_normalized = cast(DiscoverableKVCache, kv_caches)
+        self.num_blocks = get_num_blocks(  # type: ignore[arg-type]
+            discoverable_normalized, self.engine_kv_format
         )
-        self.num_blocks = get_num_blocks(kv_caches, self.engine_kv_format)
-        self.block_size = get_block_size(kv_caches, self.engine_kv_format)
+        self.block_size = get_block_size(discoverable_normalized, self.engine_kv_format)  # type: ignore[arg-type]
         self.page_buffer_size = self.num_blocks * self.block_size
-        self.head_size = get_head_size(kv_caches, self.engine_kv_format)
+        self.head_size = get_head_size(  # type: ignore[arg-type]
+            discoverable_normalized, self.engine_kv_format
+        )
         self.block_stride_elems = (
             resolve_block_stride_and_log_layout(
-                kv_caches, self.engine_kv_format, layer_idx=0, group_idx=0
-            )
+                discoverable_normalized,
+                self.engine_kv_format,
+                layer_idx=0,
+                group_idx=0,
+            )  # type: ignore[arg-type]
             or 0
         )
 
@@ -355,6 +354,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
         return self.kv_cache_pointers_on_gpu[idx]
+
+    def configure_neuron_kv_staging(self) -> None:
+        """Enable Neuron block staging for paged-KV transfers.
+
+        Called post-construction so the Neuron-only staging path stays out of
+        the shared connector constructors.
+        """
+        self._neuron_kv_stager = _build_neuron_kv_stager()
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -408,6 +415,22 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
+        if (
+            self._neuron_kv_stager is not None
+            and isinstance(kv_cache_pointers, list)
+            and str(self.kvcaches[0].device).split(":")[0] == "neuron"
+        ):
+            layer_tensors = cast(List[torch.Tensor], kv_cache_pointers)
+            self._neuron_kv_stager.transfer_from_key_value(
+                key_value=memory_obj.tensor,
+                layer_tensors=layer_tensors,
+                slot_mapping=slot_mapping[start:end],
+                engine_kv_format=self.engine_kv_format,
+                block_size=self.block_size,
+                head_size=self.head_size,
+            )
+            return
+
         device_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
@@ -456,13 +479,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
         if (
-            self._neuron_nixl_stager is not None
+            self._neuron_kv_stager is not None
             and isinstance(kv_cache_pointers, list)
             and str(self.kvcaches[0].device).split(":")[0] == "neuron"
         ):
-            self._neuron_nixl_stager.transfer_into_key_value(
+            layer_tensors = cast(List[torch.Tensor], kv_cache_pointers)
+            self._neuron_kv_stager.transfer_into_key_value(
                 key_value=memory_obj.tensor,
-                layer_tensors=kv_cache_pointers,
+                layer_tensors=layer_tensors,
                 slot_mapping=slot_mapping[start:end],
                 engine_kv_format=self.engine_kv_format,
                 block_size=self.block_size,
@@ -548,11 +572,12 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.use_gpu = use_gpu
         self.layout_hints: LayoutHints = layout_hints or {}
         self.kvcaches: Optional[List[torch.Tensor]] = None
-        self.enable_neuron_nixl_staging = False
-        self._neuron_nixl_stager: _NeuronNixlStager | None = None
+        self._neuron_kv_stager: _NeuronKVStager | None = None
 
         self.init = False
-        self.group_kv_cache_pointers_on_gpu: Optional[list[torch.Tensor]] = None
+        self.group_kv_cache_pointers_on_gpu: Optional[
+            list[torch.Tensor | list[torch.Tensor]]
+        ] = None
         self.group_tmp_buffer: Optional[list[torch.Tensor]] = None
 
         self.store_stream = _create_device_stream(self.device)
@@ -658,6 +683,14 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.init = True
         logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
 
+    def configure_neuron_kv_staging(self) -> None:
+        """Enable Neuron block staging for paged-KV transfers.
+
+        Called post-construction so the Neuron-only staging path stays out of
+        the shared connector constructors.
+        """
+        self._neuron_kv_stager = _build_neuron_kv_stager()
+
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         assert memory_obj.raw_tensor is not None
@@ -679,6 +712,24 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         # block lmcache is transferring back
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
+
+        if (
+            self._neuron_kv_stager is not None
+            and str(self.kvcaches[0].device).split(":")[0] == "neuron"
+        ):
+            for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
+                assert isinstance(kv_cache_pointer, list)
+                memory_obj_tensor = memory_obj.get_tensor(i)
+                assert memory_obj_tensor is not None
+                self._neuron_kv_stager.transfer_from_key_value(
+                    key_value=memory_obj_tensor,
+                    layer_tensors=kv_cache_pointer,
+                    slot_mapping=slot_mapping[start:end],
+                    engine_kv_format=self.engine_kv_format,
+                    block_size=self.block_size,
+                    head_size=self.head_size,
+                )
+            return
 
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
             memory_obj_tensor = memory_obj.get_tensor(i)
@@ -710,14 +761,14 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.group_kv_cache_pointers_on_gpu is not None
 
         if (
-            self._neuron_nixl_stager is not None
+            self._neuron_kv_stager is not None
             and str(self.kvcaches[0].device).split(":")[0] == "neuron"
         ):
             for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
                 assert isinstance(kv_cache_pointer, list)
                 memory_obj_tensor = memory_obj.get_tensor(i)
                 assert memory_obj_tensor is not None
-                self._neuron_nixl_stager.transfer_into_key_value(
+                self._neuron_kv_stager.transfer_into_key_value(
                     key_value=memory_obj_tensor,
                     layer_tensors=kv_cache_pointer,
                     slot_mapping=slot_mapping[start:end],
@@ -1457,8 +1508,10 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         yield
 
         # synchronize the last layer
-        if sync and current_stream is not None and isinstance(
-            self.load_stream, torch.cuda.Stream
+        if (
+            sync
+            and current_stream is not None
+            and isinstance(self.load_stream, torch.cuda.Stream)
         ):
             current_stream.wait_stream(self.load_stream)
 
