@@ -1,10 +1,10 @@
 Supported Backends
 ==================
 
-LMCache ships several L2 storage backends. Select one or more with the
-``--l2-adapter`` flag (each backend's ``"type"`` is shown below); every backend
-has its own configuration page. They are grouped by the kind of medium they
-target.
+LMCache ships several L2 storage backends and can load external plugins.
+Select one or more with the ``--l2-adapter`` flag (each backend's ``"type"``
+is shown below); every backend has its own configuration page. They are
+grouped by the kind of medium they target.
 
 .. list-table::
    :header-rows: 1
@@ -40,6 +40,9 @@ target.
    * - :doc:`Mooncake Store <mooncake_store>`
      - ``mooncake_store``
      - Remote & Distributed
+   * - :doc:`SeaweedFS <seaweedfs>`
+     - ``native_plugin`` (external)
+     - Remote & Distributed
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
      - Remote & Distributed
@@ -69,3 +72,4 @@ target.
    mock
    fault_inject
    plugin
+   seaweedfs
