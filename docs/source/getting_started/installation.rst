@@ -8,6 +8,9 @@ Installation
 Install LMCache
 ---------------
 
+For guidance on choosing a vLLM release, LMCache release channel, and native
+runtime, see :doc:`compatibility` before installing.
+
 .. tab-set::
 
     .. tab-item:: Python (pip / uv)
