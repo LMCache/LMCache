@@ -231,6 +231,51 @@ def _wait_for_prefetch_status(
     return None
 
 
+def _mock_l2_store_is_complete(
+    sm: StorageManager,
+    expected_object_count: int,
+) -> bool:
+    """Return whether the mock L2 store is observable and fully settled."""
+    status = sm.report_status()
+    store = status["store_controller"]
+    l1 = status["l1_manager"]
+    adapter = status["l2_adapters"][0]
+    return (
+        adapter["stored_object_count"] >= expected_object_count
+        and store["in_flight_task_count"] == 0
+        and store["pending_keys_count"] == 0
+        and l1["write_locked_count"] == 0
+        and l1["read_locked_count"] == 0
+        and l1["temporary_count"] == 0
+    )
+
+
+def _fs_l2_store_is_complete(
+    sm: StorageManager,
+    base_path: str,
+    expected_object_count: int,
+) -> bool:
+    """Return whether final FS objects exist and the store is fully settled."""
+    root = Path(base_path)
+    tmp_root = root / "tmp"
+    stored_object_count = sum(
+        1
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_relative_to(tmp_root)
+    )
+    status = sm.report_status()
+    store = status["store_controller"]
+    l1 = status["l1_manager"]
+    return (
+        stored_object_count >= expected_object_count
+        and store["in_flight_task_count"] == 0
+        and store["pending_keys_count"] == 0
+        and l1["write_locked_count"] == 0
+        and l1["read_locked_count"] == 0
+        and l1["temporary_count"] == 0
+    )
+
+
 def _finish_read_prefetched_until_clean(
     sm: StorageManager,
     keys: list[ObjectKey],
@@ -339,16 +384,11 @@ def test_turboquant_storage_manager_roundtrip(
 
         sm.finish_write(list(ret.keys()))
 
-        # Wait until both the store controller and the serde wrapper cleanup
-        # have released temporary objects and locks.
+        # The controller pops pending keys before it creates the L2 task, so
+        # its pending/in-flight counters can both briefly read zero. First
+        # require the backend-visible object count, then confirm cleanup.
         ok = _wait_for_condition(
-            lambda: (
-                sm.report_status()["store_controller"]["in_flight_task_count"] == 0
-                and sm.report_status()["store_controller"]["pending_keys_count"] == 0
-                and sm.report_status()["l1_manager"]["write_locked_count"] == 0
-                and sm.report_status()["l1_manager"]["read_locked_count"] == 0
-                and sm.report_status()["l1_manager"]["temporary_count"] == 0
-            ),
+            lambda: _mock_l2_store_is_complete(sm, len(keys)),
             timeout=120.0,
         )
         assert ok, "Store to L2 did not fully complete"
@@ -576,14 +616,10 @@ def test_turboquant_fs_storage_manager_roundtrip(
 
         sm.finish_write(list(ret.keys()))
 
+        # Final files prove that the asynchronous store ran. Queue counters
+        # alone have a zero/zero transition window before task submission.
         ok = _wait_for_condition(
-            lambda: (
-                sm.report_status()["store_controller"]["in_flight_task_count"] == 0
-                and sm.report_status()["store_controller"]["pending_keys_count"] == 0
-                and sm.report_status()["l1_manager"]["write_locked_count"] == 0
-                and sm.report_status()["l1_manager"]["read_locked_count"] == 0
-                and sm.report_status()["l1_manager"]["temporary_count"] == 0
-            ),
+            lambda: _fs_l2_store_is_complete(sm, base_dir, len(keys)),
             timeout=120.0,
         )
         assert ok, "Store to FS L2 did not fully complete"
