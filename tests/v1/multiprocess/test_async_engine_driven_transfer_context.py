@@ -562,13 +562,14 @@ def test_pinned_shm_gathers_directly_without_staging(
     ctx.close()
 
 
-def test_pickle_store_falls_back_when_pinned_staging_allocation_fails(
+def test_pickle_store_uses_gather_allocated_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pickle store lets gather allocate its output when staging allocation fails."""
+    """Pickle store lets the gather helper allocate its output chunks."""
     gather_gate = threading.Event()
     gather_gate.set()
     committed_chunks: list[torch.Tensor] = []
+    gathered_chunks = [torch.ones(1)]
 
     def _commit(chunks: list[torch.Tensor]) -> bool:
         committed_chunks.extend(chunks)
@@ -576,17 +577,23 @@ def test_pickle_store_falls_back_when_pinned_staging_allocation_fails(
 
     ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
 
-    def _raise_allocation_error(*_args: object, **_kwargs: object) -> torch.Tensor:
-        raise RuntimeError("pinned allocation failed")
+    def _gather(
+        _kv_caches: dict[str, torch.Tensor],
+        _block_ids: list[int],
+        _blocks_in_chunk: int,
+        **kwargs: object,
+    ) -> list[torch.Tensor]:
+        assert kwargs.get("out") is None
+        return gathered_chunks
 
-    monkeypatch.setattr(async_engine_driven.torch, "empty", _raise_allocation_error)
+    monkeypatch.setattr(async_engine_driven, "gather_paged_kv_to_cpu", _gather)
 
     future = ctx.submit_store(
         "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
 
     assert future.result(timeout=1) is True
-    assert len(committed_chunks) == 1
+    assert committed_chunks == gathered_chunks
     ctx.close()
 
 

@@ -69,10 +69,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     """Fully async engine-driven data transfer context (store-only async).
 
     "Store-only async" means ``submit_store`` returns an *unresolved* future
-    while the deferred gather runs off the forward thread. For SHM transfers,
-    the future resolves after GPU-to-staging completion so the engine can
-    release source blocks while LMCache finishes the staging-to-SHM copy and
-    commit internally.
+    while the deferred gather runs off the forward thread. For unpinned SHM
+    transfers, the future resolves after GPU-to-staging completion so the
+    engine can release source blocks while LMCache finishes the staging-to-SHM
+    copy and commit internally.
     ``submit_retrieve`` stays synchronous and returns an already-resolved future
     exactly as on the base context.
 
@@ -86,7 +86,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     1. prepare: call prepare_store() to negotiate buffers with the server
        (the costliest step in pickle mode due to the synchronous RPC round-trip).
     2. gather: wait for the forward event on the copy stream, then enqueue
-       GPU->CPU copies into worker-owned pinned staging buffers.
+       GPU->CPU copies. Unpinned SHM uses worker-owned pinned staging buffers;
+       pickle lets the gather helper allocate its returned CPU chunks.
     3. commit: wait for gather completion (via a recorded CUDA event), then
        perform commit_store() and resolve the returned future.
 
@@ -202,9 +203,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         block-id flattening), then submits all three phases — prepare_store,
         gather (GPU->CPU), and commit — to the background ``commit_executor``.
         Returns an unresolved future. Pickle transfers resolve after all three
-        phases complete. SHM transfers resolve after the gather event; the
-        staging-to-SHM copy and commit remain owned by the background executor
-        and are drained by :meth:`close`.
+        phases complete. Unpinned SHM transfers using staging resolve after the
+        gather event; the staging-to-SHM copy and commit remain owned by the
+        background executor and are drained by :meth:`close`.
 
         Args:
             _request_id: External request identifier (used for logging).
@@ -267,40 +268,15 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         ok = True
                         return
 
-                    num_chunks = (
-                        len(chunk_indices)
-                        if chunk_indices is not None
-                        else len(full_block_ids) // blocks_in_chunk
-                    )
-
                     # Determine gather target:
                     # - Pinned SHM path: gather directly into SHM views
                     # - Unpinned SHM path: gather into pinned staging then copy
-                    # - Pickle path (no out_buffers): gather into pinned staging
-                    if out_buffers is None:
-                        layout_desc = engine_driven_context.layout_desc
-                        if not layout_desc.shapes:
-                            raise RuntimeError(
-                                "engine-driven layout_desc.shapes is empty"
-                            )
-                        if not layout_desc.dtypes:
-                            raise RuntimeError(
-                                "engine-driven layout_desc.dtypes is empty"
-                            )
-                        allocated_chunks = self._alloc_pinned_staging(
-                            layout_desc.shapes[0],
-                            layout_desc.dtypes[0],
-                            num_chunks,
-                        )
-                        if allocated_chunks is not None:
-                            staged_chunks = allocated_chunks
-                        gather_target = allocated_chunks
-                    elif (
+                    # - Pickle path (no out_buffers): let gather allocate chunks
+                    gather_target = out_buffers
+                    if out_buffers is not None and not (
                         isinstance(engine_driven_context, EngineDrivenContextShm)
                         and engine_driven_context.is_pinned
                     ):
-                        gather_target = out_buffers
-                    else:
                         first_buffer = out_buffers[0]
                         if any(
                             buffer.shape != first_buffer.shape
