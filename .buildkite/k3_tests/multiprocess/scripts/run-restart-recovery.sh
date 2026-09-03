@@ -31,6 +31,8 @@ BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
+GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
 
 # Bench parameters — small enough for CI but big enough to register
 # a non-trivial l1_write_keys count per round.
@@ -182,12 +184,40 @@ restart_lmcache() {
     sleep 60
 
     echo "Relaunching LMCache on port ${LMCACHE_PORT} / HTTP ${LMCACHE_HTTP_PORT}..."
+    local device_affinity_var="CUDA_VISIBLE_DEVICES"
+    local vllm_device_env=(VLLM_TARGET_DEVICE="cuda")
+    local l1_lazy_arg=""
+    local shm_name_arg=""
+    local transfer_mode_arg="--supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+
+    if [ "$TORCH_DEVICE_TYPE" = "xpu" ]; then
+        device_affinity_var="ZE_AFFINITY_MASK"
+        vllm_device_env=(VLLM_TARGET_DEVICE="xpu")
+        unset CUDA_VISIBLE_DEVICES || true
+        if [ -f /opt/intel/oneapi/setvars.sh ]; then
+            # shellcheck disable=SC1091
+            source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+        l1_lazy_arg="--no-l1-use-lazy"
+        if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+            shm_name_arg="--shm-name ${BUILD_ID}_2"
+        fi
+    fi
+
+    env "${device_affinity_var}=${GPU_FOR_VLLM}" \
+        "${vllm_device_env[@]}" \
     lmcache server \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
         --max-workers "$MAX_WORKERS" \
         --port "$LMCACHE_PORT" \
         --http-port "$LMCACHE_HTTP_PORT" \
+        ${l1_lazy_arg} \
+        ${shm_name_arg} \
+        ${transfer_mode_arg} \
         > "/tmp/build_${BUILD_ID}_lmcache_restart.log" 2>&1 &
 
     local new_pid=$!
