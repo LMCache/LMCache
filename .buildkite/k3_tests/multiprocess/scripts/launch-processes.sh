@@ -180,7 +180,7 @@ SHM_NAME_ARG=""
 if [ "${L1_USE_LAZY:-true}" = "false" ]; then
     L1_LAZY_ARG="--no-l1-use-lazy"
     if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
-        SHM_NAME_ARG="--shm-name mp_${BUILD_ID}"
+        SHM_NAME_ARG="--shm-name ${BUILD_ID}_1"
         echo "L1 lazy allocation disabled (SHM transport enabled)"
     else
         echo "L1 lazy allocation disabled"

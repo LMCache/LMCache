@@ -519,7 +519,13 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
     shm = _shm_registry.pop(ptr, None)
     if shm is not None:
         shm.close()
-        shm.unlink()
+        try:
+            shm.unlink()
+        except FileNotFoundError:
+            logger.warning(
+                "Shared-memory segment %s was already unlinked during cleanup",
+                shm.name,
+            )
     mm = _hugetlb_registry.pop(ptr, None)
     if mm is not None:
         mm.close()

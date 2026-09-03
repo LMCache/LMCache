@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from multiprocessing import shared_memory
 from typing import Any, Union
 import ctypes
 import os
@@ -1732,7 +1733,7 @@ def scenario_alloc_free_pinned_numa_ptr(
 def scenario_alloc_free_shm_pinned_ptr(
     ops: Any, device: str
 ) -> dict[str, torch.Tensor]:
-    """Test alloc_shm_pinned_ptr and free_shm_pinned_ptr round-trip."""
+    """Test SHM allocation and cleanup after an external unlink."""
     alloc_size = 4096
     shm_name = "/test_lmcache_shm"
 
@@ -1741,7 +1742,14 @@ def scenario_alloc_free_shm_pinned_ptr(
     assert isinstance(ptr, int), f"Expected int, got {type(ptr)}"
     assert ptr != 0, "alloc_shm_pinned_ptr returned null"
 
-    # 2. Free
+    # Simulate a peer process's resource tracker unlinking the segment first.
+    external_shm = shared_memory.SharedMemory(
+        name=shm_name.lstrip("/"), create=False
+    )
+    external_shm.unlink()
+    external_shm.close()
+
+    # 2. Free must tolerate the segment already being unlinked.
     ops.free_shm_pinned_ptr(ptr, alloc_size, shm_name)
 
     return {"alloc_free_shm_pinned_ptr": torch.tensor([1], dtype=torch.int32)}
