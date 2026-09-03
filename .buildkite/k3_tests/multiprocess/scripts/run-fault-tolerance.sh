@@ -42,6 +42,26 @@ echo "Bench: $NUM_PROMPTS prompts, input_len=$RANDOM_INPUT_LEN, output_len=$RAND
 echo "Results dir: $FT_DIR"
 echo ""
 
+wait_for_port_release() {
+    local port="$1"
+    local service="$2"
+    local timeout_seconds=60
+    local deadline=$(( $(date +%s) + timeout_seconds ))
+
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local listener_pids
+        listener_pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+        if [ -z "$listener_pids" ]; then
+            return 0
+        fi
+        echo "Waiting for previous $service listener on port $port: $listener_pids"
+        sleep 2
+    done
+
+    echo "Previous $service listener still holds port $port: $listener_pids"
+    return 1
+}
+
 # ── Step 0: Restart LMCache + vLLM with fresh state ─────────
 # Restart both so vLLM registers its GPU context with the new server.
 echo "============================================"
@@ -74,10 +94,18 @@ if [ -f "$PID_FILE" ]; then
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "Killing PID $pid"
             kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
         fi
     done
     sleep 2
+fi
+
+# launch-processes.sh owns these background children, so this shell cannot
+# wait on their PIDs. A released listener is the observable shutdown boundary.
+if ! wait_for_port_release "$LMCACHE_PORT" "LMCache"; then
+    exit 1
+fi
+if ! wait_for_port_release "$VLLM_PORT" "vLLM"; then
+    exit 1
 fi
 
 # Match the engine-driven L1 configuration used for the initial server, while
