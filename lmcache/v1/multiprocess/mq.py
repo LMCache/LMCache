@@ -40,6 +40,23 @@ T = TypeVar("T")
 # Internal type used for the client-server communication
 RequestUID = int
 
+_REMOTE_ERROR_MARKER = b"lmcache.remote-error.v1"
+_MAX_REMOTE_ERROR_MESSAGE_CHARS = 4096
+
+
+class RemoteHandlerError(RuntimeError):
+    """A server handler failed before producing its declared response."""
+
+
+def _remote_error_frames(
+    prefix_frames: list[bytes], exception: BaseException
+) -> list[bytes]:
+    """Build a bounded, traceback-free error response."""
+    error_type = type(exception).__name__
+    message = str(exception)[:_MAX_REMOTE_ERROR_MESSAGE_CHARS]
+    payload = msgspec.msgpack.encode((error_type, message))
+    return prefix_frames + [_REMOTE_ERROR_MARKER, payload]
+
 
 # Helper functions
 def encode_request_uid(uid: RequestUID) -> bytes:
@@ -360,11 +377,30 @@ class MessageQueueClient:
 
         if request_uid in self.pending_futures:
             future = self.pending_futures.pop(request_uid)
-            if b_response:
-                response = msgspec_decode(b_response[0], cls=response_cls)
-                future.set_result(response)
-            else:
-                future.set_result(None)
+            try:
+                if b_response and b_response[0] == _REMOTE_ERROR_MARKER:
+                    if len(b_response) != 2:
+                        raise ValueError(
+                            "Malformed remote error response: expected marker "
+                            "and payload"
+                        )
+                    error_type, message = msgspec_decode(
+                        b_response[1], cls=tuple[str, str]
+                    )
+                    future.set_exception(
+                        RemoteHandlerError(
+                            f"Remote {request_type.name} handler failed with "
+                            f"{error_type}: {message}"
+                        )
+                    )
+                elif b_response:
+                    response = msgspec_decode(b_response[0], cls=response_cls)
+                    future.set_result(response)
+                else:
+                    future.set_result(None)
+            except Exception as exc:
+                future.set_exception(exc)
+                raise
 
     def submit_request(
         self,
@@ -585,8 +621,10 @@ class MessageQueueServer:
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error in blocking handler")
+                self.output_queue.put(_remote_error_frames(prefix_frames, exc))
+                self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
 
@@ -626,20 +664,33 @@ class MessageQueueServer:
                 identity, b_request_uid, b_request_type, *payloads = msg
                 request_type = msgspec_decode(b_request_type, cls=RequestType)
 
+                prefix_frames = [identity, b_request_uid, b_request_type]
                 if handler_entry := self.handlers.get(request_type):
                     try:
                         self._call_handler(
                             handler_entry=handler_entry,
                             payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_request_type],
+                            prefix_frames=prefix_frames,
                         )
-                    except Exception:
+                    except Exception as exc:
                         logger.exception("Error handling request %s", request_type)
+                        self.socket.send_multipart(
+                            _remote_error_frames(prefix_frames, exc)
+                        )
                 else:
                     logger.error(
                         "No handler registered for request type %s", request_type
                     )
                     logger.error("Available handlers: %s", list(self.handlers.keys()))
+                    self.socket.send_multipart(
+                        _remote_error_frames(
+                            prefix_frames,
+                            LookupError(
+                                "No handler registered for request type "
+                                f"{request_type.name}"
+                            ),
+                        )
+                    )
 
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
