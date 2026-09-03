@@ -356,23 +356,33 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
-        if required_size > self.max_cache_size:
-            logger.warning(
-                "Put task for %s requires %s bytes, exceeding disk cache "
-                "capacity %s bytes.",
-                key,
-                required_size,
-                self.max_cache_size,
-            )
-            return None
 
-        if not self.disk_worker.try_insert_put_task(key):
-            logger.debug("Put task for %s is already in progress.", key)
-            return None
-
+        task_registered = False
         admission_succeeded = False
         try:
             with self.disk_lock:
+                # Keep the resident re-check and registration in one critical
+                # section so a completed write cannot expose a gap between
+                # publishing the key and removing its in-flight marker.
+                if key in self.dict:
+                    self.cache_policy.update_on_hit(key, self.dict)
+                    return None
+
+                if required_size > self.max_cache_size:
+                    logger.warning(
+                        "Put task for %s requires %s bytes, exceeding disk cache "
+                        "capacity %s bytes.",
+                        key,
+                        required_size,
+                        self.max_cache_size,
+                    )
+                    return None
+
+                if not self.disk_worker.try_insert_put_task(key):
+                    logger.debug("Put task for %s is already in progress.", key)
+                    return None
+                task_registered = True
+
                 required_eviction = (
                     self.current_cache_size + required_size - self.max_cache_size
                 )
@@ -409,9 +419,9 @@ class LocalDiskBackend(StorageBackendInterface):
 
                 self.current_cache_size += required_size
                 self.cache_policy.update_on_put(key)
-            admission_succeeded = True
+                admission_succeeded = True
         finally:
-            if not admission_succeeded:
+            if task_registered and not admission_succeeded:
                 self.disk_worker.remove_put_task(key)
         memory_obj.ref_count_up()
 

@@ -180,3 +180,45 @@ def test_oversized_put_fails_before_registering_or_evicting() -> None:
     cast(MagicMock, backend.cache_policy.update_on_put).assert_not_called()
     cast(MagicMock, memory_obj.ref_count_up).assert_not_called()
     schedule.assert_not_called()
+
+
+def test_put_completion_handoff_does_not_reregister_resident_key() -> None:
+    key = _create_key(4)
+    entries: dict[CacheEngineKey, SimpleNamespace] = {}
+    backend = _create_backend(
+        current_cache_size=10,
+        max_cache_size=100,
+        entries=entries,
+    )
+    backend.disk_worker.put_tasks = [key]
+    memory_obj = _create_memory_obj(10)
+    resident_metadata = _metadata(10, can_evict=True)
+
+    def complete_first_put() -> int:
+        with backend.disk_lock:
+            entries[key] = resident_metadata
+        backend.disk_worker.remove_put_task(key)
+        return 10
+
+    cast(MagicMock, memory_obj.get_physical_size).side_effect = complete_first_put
+
+    with patch.object(
+        backend.disk_worker,
+        "try_insert_put_task",
+        side_effect=AssertionError("resident key was re-registered"),
+    ):
+        with patch(
+            "lmcache.v1.storage_backend.local_disk_backend.asyncio.run_coroutine_threadsafe"
+        ) as schedule:
+            result = backend.submit_put_task(key, memory_obj)
+
+    assert result is None
+    assert backend.dict[key] is resident_metadata
+    assert backend.current_cache_size == 10
+    assert backend.disk_worker.put_tasks == []
+    cast(MagicMock, backend.cache_policy.update_on_hit).assert_called_once_with(
+        key, backend.dict
+    )
+    cast(MagicMock, backend.cache_policy.update_on_put).assert_not_called()
+    cast(MagicMock, memory_obj.ref_count_up).assert_not_called()
+    schedule.assert_not_called()
