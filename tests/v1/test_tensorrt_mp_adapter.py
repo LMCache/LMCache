@@ -66,7 +66,7 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     worker._metadata = module.LMCacheMPConnectorMetadata(
         loads={7: module._BlockSpec(tokens=[1, 2], block_ids=[3])}
     )
-    worker._mq_client = MagicMock(name="mq_client")
+    worker._req_client = MagicMock(name="req_client")
     worker._mq_timeout = 5.0
     worker._instance_id = 42
     worker._device = "cpu"
@@ -84,8 +84,7 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     device_future.result.return_value = False
     raw_future = MagicMock(name="raw_future")
     raw_future.to_device_future.return_value = device_future
-    send_request = MagicMock(return_value=raw_future)
-    monkeypatch.setattr(module, "_send_request", send_request)
+    worker._req_client.retrieve.return_value = raw_future
 
     with pytest.raises(RuntimeError, match="refusing to use unloaded KV blocks"):
         worker.start_load_kv(MagicMock(name="stream"))

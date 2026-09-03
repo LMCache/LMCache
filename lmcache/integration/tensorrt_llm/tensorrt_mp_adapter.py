@@ -37,8 +37,9 @@ from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.platform.base.event_ipc import create_event, export_event, record_event
 from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
@@ -54,16 +55,6 @@ def _get_server_url(llm_args: "TorchLlmArgs") -> str:
     if cfg is not None and cfg.server_url is not None:
         return cfg.server_url
     return os.environ.get("LMCACHE_SERVER_URL", DEFAULT_SERVER_URL)
-
-
-def _send_request(
-    mq_client: MessageQueueClient,
-    request_type: RequestType,
-    payloads: list,
-) -> MessagingFuture:
-    return mq_client.submit_request(
-        request_type, payloads, get_response_class(request_type)
-    )
 
 
 @dataclass
@@ -88,14 +79,14 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         self._pending: dict = {}
 
         self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(
-            _get_server_url(self._llm_args), self._zmq_context
+        self._req_client: RequestClient = ZmqMultiprocessClient(
+            MessageQueueClient(_get_server_url(self._llm_args), self._zmq_context)
         )
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
 
-        future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
+        future = self._req_client.get_chunk_size()
         self._chunk_size = future.result(timeout=self._mq_timeout)
         logger.info(
             "LMCache MP scheduler: connected to server at %s (chunk_size=%d)",
@@ -165,13 +156,9 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         t1 = time.perf_counter()
 
         try:
-            _send_request(self._mq_client, RequestType.LOOKUP, [key, 1]).result(
-                timeout=self._mq_timeout
-            )
-            result = _send_request(
-                self._mq_client,
-                RequestType.QUERY_PREFETCH_STATUS,
-                [str(request.request_id)],
+            self._req_client.lookup(key, 1).result(timeout=self._mq_timeout)
+            result = self._req_client.query_prefetch_status(
+                str(request.request_id)
             ).result(timeout=self._mq_timeout)
             cached_tokens = result * self._chunk_size if result is not None else 0
         except Exception as e:
@@ -198,11 +185,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
                 request_id=request.request_id,
             ).no_worker_id_version()
             try:
-                _send_request(
-                    self._mq_client,
-                    RequestType.FREE_LOOKUP_LOCKS,
-                    [free_key, 1],
-                )
+                self._req_client.free_lookup_locks(free_key, 1)
             except Exception as e:
                 logger.warning("LMCache MP scheduler: free_lookup_locks failed: %s", e)
 
@@ -261,11 +244,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         release the server-side token-hash/session state for the request.
         """
         try:
-            _send_request(
-                self._mq_client,
-                RequestType.END_SESSION,
-                [str(request.request_id)],
-            )
+            self._req_client.end_session(str(request.request_id))
         except Exception as e:
             logger.warning("LMCache MP scheduler: end_session failed: %s", e)
         return False
@@ -285,8 +264,8 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._block_size: int = self._llm_args.kv_cache_config.tokens_per_block
 
         self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(
-            _get_server_url(self._llm_args), self._zmq_context
+        self._req_client: RequestClient = ZmqMultiprocessClient(
+            MessageQueueClient(_get_server_url(self._llm_args), self._zmq_context)
         )
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
@@ -305,7 +284,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._world_size = tp_size * pp_size
         self._model_name = str(getattr(llm_args, "model", "unknown_model"))
 
-        future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
+        future = self._req_client.get_chunk_size()
         self._chunk_size = future.result(timeout=self._mq_timeout)
 
     def _create_key(
@@ -364,18 +343,14 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             "head_dim": head_dim,
         }
 
-        future = _send_request(
-            self._mq_client,
-            RequestType.REGISTER_KV_CACHE,
-            [
-                self._instance_id,
-                wrapped,
-                self._model_name,
-                self._world_size,
-                EngineType.TRTLLM,
-                layout_hints,
-                [],
-            ],
+        future = self._req_client.register_kv_cache(
+            self._instance_id,
+            wrapped,
+            self._model_name,
+            self._world_size,
+            EngineType.TRTLLM,
+            layout_hints,
+            [],
         )
         try:
             future.result(timeout=self._mq_timeout)
@@ -422,16 +397,12 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             key = self._create_key(spec.tokens, req_id)
             try:
                 success = (
-                    _send_request(
-                        self._mq_client,
-                        RequestType.RETRIEVE,
-                        [
-                            key,
-                            self._instance_id,
-                            [spec.block_ids],
-                            export_event(event, self._device),
-                            0,  # skip_first_n_tokens
-                        ],
+                    self._req_client.retrieve(
+                        key,
+                        self._instance_id,
+                        [spec.block_ids],
+                        export_event(event, self._device),
+                        0,  # skip_first_n_tokens
                     )
                     .to_device_future()
                     .result(timeout=self._mq_timeout)
@@ -482,15 +453,11 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             key = self._create_key(spec.tokens, req_id)
             try:
                 success = (
-                    _send_request(
-                        self._mq_client,
-                        RequestType.STORE,
-                        [
-                            key,
-                            self._instance_id,
-                            [spec.block_ids],
-                            export_event(event, self._device),
-                        ],
+                    self._req_client.store(
+                        key,
+                        self._instance_id,
+                        [spec.block_ids],
+                        export_event(event, self._device),
                     )
                     .to_device_future()
                     .result(timeout=self._mq_timeout)
