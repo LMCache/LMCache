@@ -375,6 +375,8 @@ def add_mp_server_args(
         help="SHM segment name for engine-driven KV transfer. "
         'Default "" (not specified): disable SHM. '
         "Set to a name to create and use that specific SHM segment. "
+        "Requires --no-l1-use-lazy: lazy L1 allocation cannot back a "
+        "named SHM segment, so SHM stays disabled while lazy is on. "
         "(Only use this for engine_driven transfer mode, see "
         "`--supported-transfer-mode`.) ",
     )

@@ -372,7 +372,21 @@ def run_cache_server(
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         if mp_config.shm_name is not None:
             mem_cfg.shm_name = mp_config.shm_name
-        if mem_cfg.shm_name and sys.platform.startswith("linux"):
+        if mem_cfg.shm_name and (mem_cfg.use_lazy or mem_cfg.devdax_path):
+            # _compute_shm_pool_info advertises an empty pool for these
+            # combinations; warn here where the operator's explicit
+            # --shm-name intent is still visible.
+            logger.warning(
+                "--shm-name %r is set but SHM transfer is disabled: %s. "
+                "Engine-driven workers will fall back to pickle transfers.",
+                mem_cfg.shm_name,
+                "lazy L1 allocation cannot back a named SHM segment "
+                "(--l1-use-lazy defaults to on; pass --no-l1-use-lazy)"
+                if mem_cfg.use_lazy
+                else "a devdax-backed L1 cannot back a named SHM segment "
+                "(unset --l1-devdax-path)",
+            )
+        elif mem_cfg.shm_name and sys.platform.startswith("linux"):
             logger.info("Checking if shm capacity is larger than L1 request")
             try:
                 free_bytes = shutil.disk_usage("/dev/shm").free
