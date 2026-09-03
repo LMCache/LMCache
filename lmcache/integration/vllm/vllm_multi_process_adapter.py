@@ -29,7 +29,11 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
+from lmcache.v1.multiprocess.mq import (
+    DEFAULT_CONNECT_TIMEOUT,
+    MessageQueueClient,
+    MessagingFuture,
+)
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
@@ -61,6 +65,11 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Bound (seconds) on each TCP connect attempt of the client's ZMQ
+    # socket. Keep below ``heartbeat_interval`` so one wedged connect
+    # attempt (silently dropped SYN) costs at most a single missed ping.
+    # See ``lmcache.v1.multiprocess.mq.DEFAULT_CONNECT_TIMEOUT``.
+    connect_timeout = DEFAULT_CONNECT_TIMEOUT
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
     # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
@@ -602,16 +611,20 @@ class LMCacheMPSchedulerAdapter:
             legacy_block_size,
             mq_timeout,
         )
-        assert len(server_urls) >= 1, "At least one server url required"
-        self._server_urls: list[str] = list(server_urls)
-        self.req_clients: dict[str, RequestClient] = {
-            url: ZmqMultiprocessClient(MessageQueueClient(url, context))
-            for url in self._server_urls
-        }
+        connect_timeout = DEFAULT_CONNECT_TIMEOUT
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            connect_timeout = cfg[ExtraConfigDefault.connect_timeout.name]
+        assert len(server_urls) >= 1, "At least one server url required"
+        self._server_urls: list[str] = list(server_urls)
+        self.req_clients: dict[str, RequestClient] = {
+            url: ZmqMultiprocessClient(
+                MessageQueueClient(url, context, connect_timeout=connect_timeout)
+            )
+            for url in self._server_urls
+        }
         self._mq_timeout = mq_timeout
 
         # Lookup state tracking:
@@ -1110,10 +1123,12 @@ class LMCacheMPWorkerAdapter:
             legacy_block_size,
             mq_timeout,
         )
+        connect_timeout = DEFAULT_CONNECT_TIMEOUT
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            connect_timeout = cfg[ExtraConfigDefault.connect_timeout.name]
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1128,7 +1143,9 @@ class LMCacheMPWorkerAdapter:
             set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
         else:
             self._mp_transfer_mode = None
-        self.req_client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+        self.req_client = ZmqMultiprocessClient(
+            MessageQueueClient(server_url, context, connect_timeout=connect_timeout)
+        )
         self._mq_timeout = mq_timeout
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
