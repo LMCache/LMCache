@@ -30,6 +30,35 @@ The pytest suite includes TurboQuant serde tests that exercise direct CUDA, Mock
 CUDA_VISIBLE_DEVICES=0 python -m pytest tests/v1/distributed/serde/test_turboquant.py -q -s
 ```
 
+## Benchmark
+
+`bench_turboquant.py` compares every TurboQuant preset on the same seeded input;
+`bench_serde_baselines.py` adds the fp8 serde baseline. For each encode and
+decode path they report mean, p50, and p95 latency plus raw KV throughput in
+GiB/s. The JSON output also records the seed, iteration counts, PyTorch and
+Triton versions, GPU name, and compute capability so results can be reproduced
+and compared across systems. Accuracy metrics are computed in chunks, avoiding
+full float32 tensor copies and CUDA BLAS element-count limits on large KV shapes.
+Use `--metric-chunk-elements` to tune that temporary-memory bound.
+
+For example, the following shape models 8K tokens, 32 layers, and eight 128-wide
+KV heads:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/serde/turboquant/bench_turboquant.py \
+  --layers 32 \
+  --blocks 512 \
+  --block-size 16 \
+  --kv-heads 8 \
+  --head-dim 128 \
+  --warmup 3 \
+  --iters 20 \
+  --seed 2026
+```
+
+Use more measured iterations when comparing small changes. `--iters` and all
+shape dimensions must be positive; `--warmup` may be zero.
+
 ## Requirements
 
 - vLLM installed (`vllm serve` works)
