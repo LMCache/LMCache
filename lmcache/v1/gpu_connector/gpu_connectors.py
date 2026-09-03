@@ -54,7 +54,9 @@ class _NoOpStream:
         pass
 
 
-def _create_device_stream(device: torch.device | None) -> object:
+def _create_device_stream(
+    device: torch.device | None,
+) -> "torch.cuda.Stream | _NoOpStream":
     """Create a stream for the given device, or a no-op stub."""
     device_type = str(device).split(":")[0] if device is not None else "cpu"
     if device_type == "cuda":
@@ -62,7 +64,9 @@ def _create_device_stream(device: torch.device | None) -> object:
     return _NoOpStream()
 
 
-def _device_stream_context(stream: object):
+def _device_stream_context(
+    stream: "torch.cuda.Stream | _NoOpStream",
+) -> "torch.cuda.StreamContext | nullcontext":
     """Return a context manager that routes ops to the given stream."""
     if isinstance(stream, torch.cuda.Stream):
         return torch.cuda.stream(stream)
