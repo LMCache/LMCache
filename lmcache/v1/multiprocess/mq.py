@@ -37,6 +37,19 @@ logger = init_logger(__name__)
 
 T = TypeVar("T")
 
+# Default bound (seconds) on each TCP connect attempt of a client socket.
+# Without a bound, a connect whose SYN is silently dropped (e.g. racing a
+# Kubernetes Service endpoint update while the server pod restarts) inherits
+# the OS connect timeout (~127s on Linux) and wedges the socket for that long
+# — stalling every pending request, including heartbeat PINGs, which delays
+# the unhealthy->healthy recovery (and thus KV re-registration) by ~2 minutes.
+# Kept below the default 10s heartbeat interval so one wedged attempt costs at
+# most a single missed ping. Configurable via ``lmcache.mp.connect_timeout``.
+DEFAULT_CONNECT_TIMEOUT: float = 5.0
+# Cap (milliseconds) on zmq's exponential reconnect backoff, so a restarted
+# server is re-dialed at least once per second.
+RECONNECT_IVL_MAX_MS = 1000
+
 # Internal type used for the client-server communication
 RequestUID = int
 
@@ -278,10 +291,17 @@ class MessageQueueClient:
         request_type: RequestType
         request_payloads: list[Any]
 
-    def __init__(self, server_url: str, context: zmq.Context):
+    def __init__(
+        self,
+        server_url: str,
+        context: zmq.Context,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+    ):
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
+        self.socket.setsockopt(zmq.CONNECT_TIMEOUT, int(connect_timeout * 1000))
+        self.socket.setsockopt(zmq.RECONNECT_IVL_MAX, RECONNECT_IVL_MAX_MS)
         self.socket.connect(server_url)
 
         # Input queue

@@ -22,6 +22,8 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
+    DEFAULT_CONNECT_TIMEOUT,
+    RECONNECT_IVL_MAX_MS,
     BlockingRequestHandler,
     MessageQueueClient,
     MessageQueueServer,
@@ -936,3 +938,25 @@ def test_start_fails_without_pool_assignment():
         server.start()
 
     server.close()
+
+
+def test_client_socket_bounds_connect_attempts():
+    """
+    The client DEALER must carry a bounded connect timeout and a capped
+    reconnect backoff: an unbounded connect attempt (OS default, ~127s on
+    Linux) whose SYN is silently dropped wedges the socket — and every pending
+    request on it, including heartbeat PINGs — for minutes after the server
+    is back.
+    """
+    context = zmq.Context.instance()
+
+    client = MessageQueueClient("tcp://127.0.0.1:15705", context)
+    assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == int(
+        DEFAULT_CONNECT_TIMEOUT * 1000
+    )
+    assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
+    client.close()
+
+    client = MessageQueueClient("tcp://127.0.0.1:15706", context, connect_timeout=2.5)
+    assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == 2500
+    client.close()
