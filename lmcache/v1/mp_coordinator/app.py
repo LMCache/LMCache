@@ -54,8 +54,8 @@ from lmcache.v1.mp_coordinator.persistence.store import (
     NullArtifactStore,
 )
 from lmcache.v1.mp_coordinator.views import build_views
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
