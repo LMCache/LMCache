@@ -68,6 +68,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
+from lmcache.v1.multiprocess.transport.factory import effective_transport
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
 )
@@ -530,7 +531,7 @@ def run_cache_server(
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
-    transport = mp_config.transport
+    transport = effective_transport(mp_config.transport)
     if transport == "grpc":
         server: GrpcMultiprocessServer | MessageQueueServer = (
             _build_grpc_request_server(modules, mp_config)
