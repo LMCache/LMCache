@@ -296,11 +296,7 @@ class HiddenStateStore:
         chunks: Iterable["tuple[int, int, CacheEngineKey]"],
         layer_idxs: Sequence[int] = (0,),
     ) -> int:
-        """Return how many leading tokens have every layer in ``layer_idxs`` cached.
-
-        The walk stops at the first gap, so the result is a prefix length
-        directly comparable with the token count ``lookup`` reports for KV.
-        """
+        """Return how many leading tokens have every layer in ``layer_idxs`` cached."""
         covered = 0
         for _start, end, key in chunks:
             if not all(self.has_chunk(key, layer_idx) for layer_idx in layer_idxs):
