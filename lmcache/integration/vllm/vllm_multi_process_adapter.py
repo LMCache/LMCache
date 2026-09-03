@@ -36,7 +36,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.mq import MessagingFuture
+from lmcache.v1.multiprocess.mq import DEFAULT_CONNECT_TIMEOUT, MessagingFuture
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
@@ -99,6 +99,11 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Bound (seconds) on each TCP connect attempt of the client's ZMQ
+    # socket. Keep below ``heartbeat_interval`` so one wedged connect
+    # attempt (silently dropped SYN) costs at most a single missed ping.
+    # See ``lmcache.v1.multiprocess.mq.DEFAULT_CONNECT_TIMEOUT``.
+    connect_timeout = DEFAULT_CONNECT_TIMEOUT
     # Poll status replies without blocking the scheduler by default.
     nonblocking_lookup_status = True
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
@@ -668,12 +673,7 @@ class LMCacheMPSchedulerAdapter:
             legacy_block_size,
             mq_timeout,
         )
-        assert len(server_urls) >= 1, "At least one server url required"
-        self._server_urls: list[str] = list(server_urls)
-        self.req_clients: dict[str, RequestClient] = {
-            url: RequestClientFactory.create(url, context=context)
-            for url in self._server_urls
-        }
+        connect_timeout = DEFAULT_CONNECT_TIMEOUT
         self._nonblocking_lookup_status = (
             ExtraConfigDefault.nonblocking_lookup_status.default
         )
@@ -681,9 +681,18 @@ class LMCacheMPSchedulerAdapter:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            connect_timeout = cfg[ExtraConfigDefault.connect_timeout.name]
             self._nonblocking_lookup_status = cfg[
                 ExtraConfigDefault.nonblocking_lookup_status.name
             ]
+        assert len(server_urls) >= 1, "At least one server url required"
+        self._server_urls: list[str] = list(server_urls)
+        self.req_clients: dict[str, RequestClient] = {
+            url: RequestClientFactory.create(
+                url, context=context, connect_timeout=connect_timeout
+            )
+            for url in self._server_urls
+        }
         self._mq_timeout = mq_timeout
 
         # Lookup state tracking:
@@ -1266,11 +1275,13 @@ class LMCacheMPWorkerAdapter:
             mq_timeout,
         )
         hash_algorithm = ExtraConfigDefault.hash_algorithm.default
+        connect_timeout = DEFAULT_CONNECT_TIMEOUT
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
             hash_algorithm = cfg[ExtraConfigDefault.hash_algorithm.name]
+            connect_timeout = cfg[ExtraConfigDefault.connect_timeout.name]
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1288,7 +1299,9 @@ class LMCacheMPWorkerAdapter:
             )
         else:
             self._mp_transfer_mode = None
-        self.req_client = RequestClientFactory.create(server_url, context=context)
+        self.req_client = RequestClientFactory.create(
+            server_url, context=context, connect_timeout=connect_timeout
+        )
         self._mq_timeout = mq_timeout
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather

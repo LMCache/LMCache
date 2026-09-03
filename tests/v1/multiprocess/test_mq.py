@@ -22,6 +22,8 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
+    DEFAULT_CONNECT_TIMEOUT,
+    RECONNECT_IVL_MAX_MS,
     BlockingRequestHandler,
     MessageQueueClient,
     MessageQueueServer,
@@ -33,6 +35,7 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
     get_zmq_handler_specs,
@@ -989,3 +992,46 @@ def test_start_fails_without_pool_assignment():
         server.start()
 
     server.close()
+
+
+def test_client_socket_bounds_connect_attempts():
+    """
+    The client DEALER must carry a bounded connect timeout and a capped
+    reconnect backoff: an unbounded connect attempt (OS default, ~127s on
+    Linux) whose SYN is silently dropped wedges the socket — and every pending
+    request on it, including heartbeat PINGs — for minutes after the server
+    is back.
+    """
+    context = zmq.Context.instance()
+
+    client = MessageQueueClient("tcp://127.0.0.1:15705", context)
+    assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == int(
+        DEFAULT_CONNECT_TIMEOUT * 1000
+    )
+    assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
+    client.close()
+
+    client = MessageQueueClient("tcp://127.0.0.1:15706", context, connect_timeout=2.5)
+    assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == 2500
+    client.close()
+
+
+def test_request_client_factory_forwards_connect_timeout():
+    """
+    Adapters build their clients through ``RequestClientFactory``; the bound
+    must reach the ZMQ socket through that path too, and the factory default
+    must equal the MQ default.
+    """
+    context = zmq.Context.instance()
+
+    client = RequestClientFactory.create("tcp://127.0.0.1:15707", context=context)
+    socket = client._message_queue_client.socket  # noqa: SLF001
+    assert socket.getsockopt(zmq.CONNECT_TIMEOUT) == int(DEFAULT_CONNECT_TIMEOUT * 1000)
+    client.close()
+
+    client = RequestClientFactory.create(
+        "tcp://127.0.0.1:15708", context=context, connect_timeout=2.5
+    )
+    socket = client._message_queue_client.socket  # noqa: SLF001
+    assert socket.getsockopt(zmq.CONNECT_TIMEOUT) == 2500
+    client.close()
