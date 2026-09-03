@@ -243,6 +243,9 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
 | ``DELETE`` | ``/quota/{cache_salt}`` | Remove quota |
 | ``GET`` | ``/quota/{cache_salt}`` | Quota + usage for one salt (``tier``: ``l1`` or ``l2``) |
 | ``GET`` | ``/quota`` | Quota + usage for all salts (``tier``: ``l1`` or ``l2``) |
+| ``POST`` | ``/cache/pins`` | Pin a token sequence's keys against eviction |
+| ``DELETE`` | ``/cache/pins`` | Release them |
+| ``GET`` | ``/cache/pins`` | Page through the pin table, filterable by ``cache_salt`` / ``model_name`` |
 
 Both status reads are **wholly scoped to the requested tier** — quota fields
 included. Quotas are enforced on L2, so an ``l1`` read reports L1 usage with

@@ -81,6 +81,7 @@ lmcache/v1/mp_coordinator/
     __init__.py         # build_controllers: scans this package + named ones
     base.py             # Controller: construction + run(); views only
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
+    eviction_http_api.py    # the /quota and /cache/pins endpoints it owns
     prefetch_manager.py # dispatches warm prefetch to a named MP server
   http_routes.py        # HttpRoutes: a controller registering its own endpoints
   http_apis/
@@ -88,7 +89,7 @@ lmcache/v1/mp_coordinator/
     dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
-    cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
+    cache_api.py        # /cache/prefetches, /cache/delete
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
     instances_usage_api.py  # /instances/usage, /instances/{id}/usage
