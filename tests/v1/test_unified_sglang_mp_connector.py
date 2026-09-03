@@ -16,6 +16,9 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     LMCacheLookupOperation,
     UnifiedLMCacheMPConnector,
 )
+from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.kv_format import detect_format
+import lmcache.lmcache_native as lmcache_native
 
 
 class _Future:
@@ -264,14 +267,17 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         )
         self.assertEqual(block_ids, [[1, 3], [2, 4], [2, 4]])
 
-    def test_wire_view_folds_attention_page_into_one_opaque_row(self):
+    def test_wire_view_folds_opaque_page_into_single_plane(self):
         tensor = torch.arange(4 * 2 * 3).reshape(4, 2, 3)
 
         wire = self.connector._to_wire_block_tensor(tensor, slots_per_block=4)
 
-        self.assertEqual(tuple(wire.shape), (1, 1, 24))
+        self.assertEqual(tuple(wire.shape), (1, 1, 1, 24))
         self.assertEqual(wire.data_ptr(), tensor.data_ptr())
         self.assertTrue(torch.equal(wire.reshape(-1), tensor.reshape(-1)))
+        fmt, _ = detect_format([wire], EngineType.SGLANG, {"kv_list_layout": "unified"})
+        self.assertEqual(fmt, lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS)
+        self.assertFalse(lmcache_native.is_mla(fmt))
 
     def test_wire_view_can_preserve_attention_head_geometry(self) -> None:
         tensor = torch.arange(4 * 2 * 3).reshape(4, 2, 3)
@@ -298,7 +304,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
         wire = self.connector._to_wire_block_tensor(tensor, slots_per_block=1)
 
-        self.assertEqual(tuple(wire.shape), (5, 1, 6))
+        self.assertEqual(tuple(wire.shape), (5, 1, 1, 6))
         self.assertEqual(wire.data_ptr(), tensor.data_ptr())
 
     def test_group_info_specs_preserve_component_address_spaces(self):

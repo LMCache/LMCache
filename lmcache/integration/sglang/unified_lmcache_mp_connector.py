@@ -211,11 +211,12 @@ class UnifiedLMCacheMPConnector:
                 )
             )
 
-        self.mla_only = self._is_mla_only(mla_enabled, resolved_groups)
+        self.mla_enabled = bool(mla_enabled)
+        self.mla_only = self._is_mla_only(self.mla_enabled, resolved_groups)
 
-        # Preserve attention as [NB, BS, NH, HS] and MLA as [NB, BS, HS].
-        # Each non-MLA tensor remains an independent K or V list entry; no K/V
-        # regrouping is needed. Recurrent state retains the opaque block view.
+        # Preserve token-native attention as [NB, BS, NH, HS] and token-native
+        # MLA as [NB, BS, HS]. Page-native sidecars and recurrent state use an
+        # explicit single-plane opaque view [NB, 1, 1, elements].
         wire_groups: list[LMCacheKVGroup] = []
         for group in resolved_groups:
             wire_tensors = tuple(
@@ -223,12 +224,12 @@ class UnifiedLMCacheMPConnector:
                     tensor,
                     rows_per_block,
                     preserve_head_geometry=(
-                        not self.mla_only
+                        not self.mla_enabled
                         and not group.recurrent_state
                         and tensor.dim() == 3
                     ),
                     preserve_mla_geometry=(
-                        self.mla_only
+                        self.mla_enabled
                         and not group.recurrent_state
                         and tensor.dim() == 3
                     ),
@@ -445,7 +446,7 @@ class UnifiedLMCacheMPConnector:
             return tensor.view(num_blocks, slots_per_block, *tensor.shape[1:])
         if preserve_mla_geometry:
             return tensor.view(num_blocks, slots_per_block, -1)
-        return tensor.view(num_blocks, 1, -1)
+        return tensor.view(num_blocks, 1, 1, -1)
 
     def _build_engine_group_info_specs(
         self,
