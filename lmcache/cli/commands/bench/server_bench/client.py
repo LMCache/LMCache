@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
 @dataclass(frozen=True)
@@ -160,7 +160,7 @@ class ServerBenchClient:
         self._config = config
         self._log = log
         self._zmq_context: Any | None = None
-        self._mq_client: "MessageQueueClient | None" = None
+        self._req_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
         self._registered_instance_ids: list[int] = []
         self._shm_names: list[str] = []
@@ -249,7 +249,7 @@ class ServerBenchClient:
         Raises:
             RuntimeError: If the client is not started.
         """
-        mq_client = self._require_started()
+        req_client = self._require_started()
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
@@ -266,7 +266,7 @@ class ServerBenchClient:
             world_size=self._kv_world_size,
         )
         started_at = time.monotonic()
-        if not _send_lookup(mq_client, lookup_key, tp_size=len(self._workers)):
+        if not _send_lookup(req_client, lookup_key, tp_size=len(self._workers)):
             latency_ms = (time.monotonic() - started_at) * 1000
             self._log(
                 "  [seq %d/%s] LOOKUP timeout"
@@ -279,7 +279,7 @@ class ServerBenchClient:
                 error="timeout",
             )
 
-        hit_chunks = _poll_prefetch_status(mq_client, lookup_key.request_id)
+        hit_chunks = _poll_prefetch_status(req_client, lookup_key.request_id)
         if hit_chunks is None:
             hit_chunks = 0
         latency_ms = (time.monotonic() - started_at) * 1000
@@ -319,7 +319,7 @@ class ServerBenchClient:
             RuntimeError: If the client is not started.
             ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
-        mq_client = self._require_started()
+        req_client = self._require_started()
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
@@ -349,7 +349,7 @@ class ServerBenchClient:
                 world_size=self._kv_world_size,
             )
             worker_status = _send_store(
-                mq_client,
+                req_client,
                 key,
                 block_offset=block_offset,
                 block_size=self._block_size,
@@ -409,7 +409,7 @@ class ServerBenchClient:
             RuntimeError: If the client is not started.
             ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
-        mq_client = self._require_started()
+        req_client = self._require_started()
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
@@ -440,7 +440,7 @@ class ServerBenchClient:
                 world_size=self._kv_world_size,
             )
             worker_status = _send_retrieve(
-                mq_client,
+                req_client,
                 key,
                 self._chunk_size,
                 hit_chunks,
@@ -598,12 +598,12 @@ class ServerBenchClient:
 
     def end_session(self, request: RequestContext) -> None:
         """End the request's Server-side session."""
-        mq_client = self._require_started()
+        req_client = self._require_started()
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import _send_end_session
 
-        _send_end_session(mq_client, request.request_id)
+        _send_end_session(req_client, request.request_id)
 
     def close(self) -> None:
         """Idempotently release resources, including after partial startup."""
@@ -612,11 +612,11 @@ class ServerBenchClient:
             _send_unregister_kv_cache,
         )
 
-        if self._mq_client is not None:
+        if self._req_client is not None:
             for instance_id in self._registered_instance_ids:
                 try:
                     ok = _send_unregister_kv_cache(
-                        self._mq_client,
+                        self._req_client,
                         instance_id=instance_id,
                         use_handle=self._config.uses_handle_transfer,
                     )
@@ -653,13 +653,13 @@ class ServerBenchClient:
                     except OSError:
                         pass
 
-        if self._mq_client is not None:
+        if self._req_client is not None:
             try:
-                self._mq_client.close()
+                self._req_client.close()
             except Exception as exc:
                 self._log("  [warning] MessageQueueClient close failed: %s" % exc)
             finally:
-                self._mq_client = None
+                self._req_client = None
         if self._zmq_context is not None:
             try:
                 self._zmq_context.term()
@@ -707,6 +707,7 @@ class ServerBenchClient:
         )
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo
         from lmcache.v1.multiprocess.mq import MessageQueueClient
+        from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 
         config = self._config
         use_gpu = config.is_gpu
@@ -724,9 +725,11 @@ class ServerBenchClient:
             % (config.rpc_url, config.mode)
         )
         self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(config.rpc_url, self._zmq_context)
+        self._req_client = ZmqMultiprocessClient(
+            MessageQueueClient(config.rpc_url, self._zmq_context)
+        )
 
-        self._chunk_size = _get_chunk_size(self._mq_client)
+        self._chunk_size = _get_chunk_size(self._req_client)
         self._log("Server chunk_size = %d" % self._chunk_size)
 
         layer_groups = parse_kvcache_shape_spec(config.kvcache_shape_spec)
@@ -896,7 +899,7 @@ class ServerBenchClient:
             self._workers.append(worker)
 
             register_result = _send_register_kv_cache(
-                self._mq_client,
+                self._req_client,
                 instance_id=instance_id,
                 world_size=self._kv_world_size,
                 layout_hints=layout_hints,
@@ -927,11 +930,11 @@ class ServerBenchClient:
 
         self._log("")
 
-    def _require_started(self) -> "MessageQueueClient":
-        """Return the live MessageQueueClient or raise before startup."""
-        if not self._started or self._mq_client is None:
+    def _require_started(self) -> "RequestClient":
+        """Return the live multiprocess client or raise before startup."""
+        if not self._started or self._req_client is None:
             raise RuntimeError("ServerBenchClient must be started before use")
-        return self._mq_client
+        return self._req_client
 
     def _validate_token_range(
         self,

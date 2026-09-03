@@ -28,11 +28,12 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -50,7 +51,7 @@ ModifyFnType = Callable[
 
 class LMCacheSDKContext:
     """
-    Retrieve and store KV cache tensors via LMCache's MQ endpoints.
+    Retrieve and store KV cache tensors through an LMCache MP request client.
 
     The model layout must already be registered in the running LMCache server
     (e.g. by a vllm instance that called REGISTER_KV_CACHE).
@@ -84,7 +85,9 @@ class LMCacheSDKContext:
         """
         self._kind = kind
         self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(url, self._zmq_context)
+        self._req_client: RequestClient = ZmqMultiprocessClient(
+            MessageQueueClient(url, self._zmq_context)
+        )
         self._mq_timeout = timeout
         self._model_name = kind.server_model_name(model_name)
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
@@ -228,20 +231,14 @@ class LMCacheSDKContext:
             head_dim=head_dim,
         )
 
-        # First Party
-        from lmcache.integration.vllm.vllm_multi_process_adapter import (
-            send_lmcache_request,
-        )
-
         transfer_ctx.register(
             self.instance_id,
             self._kv_caches,
             self._model_name,
             self._world_size,
             self.blocks_in_chunk,
-            self._mq_client,
+            self._req_client,
             self._mq_timeout,
-            send_request=send_lmcache_request,
             layout_hints=layout_hints,
         )
 
@@ -270,8 +267,8 @@ class LMCacheSDKContext:
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the MQ client and ZMQ context."""
-        self._mq_client.close()
+        """Close the request client and ZMQ context."""
+        self._req_client.close()
 
     def maybe_submit_lookup_request(
         self,
@@ -307,11 +304,7 @@ class LMCacheSDKContext:
             request_configs=request_configs,
         ).no_worker_id_version()
 
-        future = self._mq_client.submit_request(
-            RequestType.LOOKUP,
-            [key, self._world_size],
-            get_response_class(RequestType.LOOKUP),
-        )
+        future = self._req_client.lookup(key, self._world_size)
         try:
             future.result(timeout=self._mq_timeout)
         except TimeoutError:
@@ -345,11 +338,9 @@ class LMCacheSDKContext:
             return self._finished_lookups[request_id]
 
         try:
-            result = self._mq_client.submit_request(
-                RequestType.QUERY_PREFETCH_STATUS,
-                [request_id],
-                get_response_class(RequestType.QUERY_PREFETCH_STATUS),
-            ).result(timeout=self._mq_timeout)
+            result = self._req_client.query_prefetch_status(request_id).result(
+                timeout=self._mq_timeout
+            )
         except TimeoutError:
             logger.warning(
                 "QUERY_PREFETCH_STATUS timed out after %ss.",
@@ -374,11 +365,7 @@ class LMCacheSDKContext:
         self._pending_lookups.discard(request_id)
         self._finished_lookups.pop(request_id, None)
         try:
-            self._mq_client.submit_request(
-                RequestType.END_SESSION,
-                [request_id],
-                get_response_class(RequestType.END_SESSION),
-            ).result(timeout=self._mq_timeout)
+            self._req_client.end_session(request_id).result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "END_SESSION timed out after %ss for request_id=%s.",
