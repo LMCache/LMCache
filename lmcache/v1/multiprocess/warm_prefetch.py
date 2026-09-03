@@ -128,7 +128,9 @@ class WarmPrefetchJobs:
             return WarmStatus(state=PENDING)
 
         with self._lock:
-            self._jobs.pop(request_id, None)
+            consumed_handle = self._jobs.pop(request_id, None)
+        if consumed_handle is None:
+            return WarmStatus(state=UNKNOWN)
         found_keys = found.popcount()
         logger.info(
             "Warm prefetch %s completed: %d/%d keys loaded into L1",
