@@ -138,7 +138,8 @@ def capture_run(
     request_id: str,
     prompt: list[int],
     cache_salt: str,
-    model: str,
+    served_model: str,
+    cache_model: str,
     vllm_url: str,
     lmcache_url: str,
     lmcache_mq_url: str,
@@ -146,11 +147,11 @@ def capture_run(
     top_k: int,
     timeout: float,
 ) -> tuple[HybridCorrectnessTrace, list[dict[str, float]]]:
-    recorder = RecordingCompletion(vllm_url, model, timeout, top_k)
+    recorder = RecordingCompletion(vllm_url, served_model, timeout, top_k)
     ctx = lmc_sdk.kvcache.connect(
         url=lmcache_mq_url,
         http_url=lmcache_url,
-        model_name=model,
+        model_name=cache_model,
         timeout=timeout,
     )
     frames: list[TraceFrame] = []
@@ -250,7 +251,8 @@ def capture_run(
             metadata=(
                 ("cache_salt", cache_salt),
                 ("capture", "live-vllm-lmcache-sdk"),
-                ("model", model),
+                ("served_model", served_model),
+                ("cache_model", cache_model),
             ),
         ),
         timings,
@@ -260,6 +262,14 @@ def capture_run(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
+    parser.add_argument(
+        "--hf-model",
+        help="HF tokenizer ID/path; defaults to --model",
+    )
+    parser.add_argument(
+        "--cache-model",
+        help="LMCache registration name; defaults to --model",
+    )
     parser.add_argument("--vllm-url", default="http://localhost:8000")
     parser.add_argument("--lmcache-url", default="http://localhost:8080")
     parser.add_argument("--lmcache-mq-url", default="tcp://localhost:6555")
@@ -279,7 +289,9 @@ def main() -> None:
     args = parse_args()
     if args.prompt_tokens <= 0 or args.steps <= 0 or args.top_k <= 0:
         raise ValueError("prompt tokens, steps, and top-k must be positive")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    hf_model = args.hf_model or args.model
+    cache_model = args.cache_model or args.model
+    tokenizer = AutoTokenizer.from_pretrained(hf_model, trust_remote_code=True)
     seed = tokenizer.encode(
         "Hybrid cache traces localize the first correctness divergence. ",
         add_special_tokens=False,
@@ -292,7 +304,8 @@ def main() -> None:
         "request_id": "hybrid-correctness-e2e-request",
         "prompt": prompt,
         "cache_salt": cache_salt,
-        "model": args.model,
+        "served_model": args.model,
+        "cache_model": cache_model,
         "vllm_url": args.vllm_url,
         "lmcache_url": args.lmcache_url,
         "lmcache_mq_url": args.lmcache_mq_url,
@@ -317,6 +330,9 @@ def main() -> None:
         "frames": len(report.frame_metrics),
         "reference_timings": reference_timings,
         "candidate_timings": candidate_timings,
+        "served_model_name": args.model,
+        "hf_model_name": hf_model,
+        "cache_model_name": cache_model,
         "output_dir": str(args.output_dir),
     }
     print(json.dumps(summary, indent=2))

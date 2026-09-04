@@ -58,6 +58,10 @@ python -m benchmarks.hybrid_cache_correctness.live_e2e \
   --output-dir /tmp/lmcache-hybrid-correctness-e2e
 ```
 
+For an offline deployment where vLLM logs a local snapshot path as
+`cache_model_name`, keep `--model` as the served API alias and pass that exact
+path to both `--hf-model` and `--cache-model`.
+
 The driver makes two deterministic multi-step requests with the same prompt
 and cache salt. For every accepted token it captures the real vLLM token,
 log-probability and top-k set, retrieves the real contiguous KV tensor through
