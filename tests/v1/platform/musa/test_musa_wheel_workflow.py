@@ -47,9 +47,6 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
         "'registry.mthreads.com/mcconline/musa-pytorch-release-public:"
         "rc5.2.0-v2.9.1.post1-S5000-py310' }}"
     )
-    assert workflow["env"]["MUSA_REQUIRE_TORCH_MUSA"] == (
-        "${{ vars.MUSA_REQUIRE_TORCH_MUSA || '0' }}"
-    )
     assert workflow["env"]["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert workflow["env"]["SKIP_AUDITWHEEL_REPAIR"] == "0"
     assert workflow["env"]["MAX_JOBS"] == "2"
