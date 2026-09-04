@@ -99,6 +99,18 @@ def test_messaging_future_basic_usage():
     assert result == 42, f"Expected result 42, got {result}"
 
 
+def test_messaging_future_propagates_request_exception():
+    """A transport failure is raised when the future result is consumed."""
+    future = MessagingFuture[int]()
+    error = RuntimeError("request failed")
+
+    future.set_exception(error)
+
+    assert future.query()
+    with pytest.raises(RuntimeError, match="request failed"):
+        future.result()
+
+
 def test_messaging_future_with_thread():
     """Test MessagingFuture with result set from another thread."""
     future = MessagingFuture[str]()

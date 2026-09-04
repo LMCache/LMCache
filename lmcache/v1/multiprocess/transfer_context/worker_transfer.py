@@ -804,9 +804,12 @@ class EngineDrivenTransferContext(TransferContext):
             out=out_buffers,
             chunk_indices=chunk_indices,
         )
-        if out_buffers is not None:
-            # SHM path uses async device->CPU copies; complete them before commit.
-            torch_dev.synchronize()
+        # Gather issues async device->CPU copies on BOTH transports: into the
+        # SHM slots when out_buffers is given, otherwise into fresh buffers that
+        # commit_store serializes immediately. Either way the copies must be
+        # complete first, so this is unconditional -- guarding it on out_buffers
+        # left the pickle path serializing a buffer still being written.
+        torch_dev.synchronize()
         ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
 
         future = MessagingFuture()

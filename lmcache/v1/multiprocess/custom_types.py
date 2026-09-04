@@ -181,6 +181,30 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
 
 
 @dataclass
+class RegisterEngineDrivenContextResponse:
+    """Shared response for engine-driven context registration."""
+
+    shm_name: str = ""
+    pool_size: int = 0
+
+
+@dataclass
+class PrepareStoreResponse:
+    """Shared response for an engine-driven store preparation."""
+
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
+class PrepareRetrieveResponse:
+    """Shared response for an engine-driven retrieve preparation."""
+
+    success: bool
+    data: bytes = b""
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
 class CustomizedSerdeConfig:
     serializer: Callable[[Any], bytes]
     deserializer: Callable[[bytes], Any]
