@@ -25,12 +25,12 @@ from lmcache.v1.gpu_connector.utils import (
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
 class BaseCacheContext(ABC):
@@ -178,7 +178,7 @@ class BaseCacheContext(ABC):
             kernel_group_idx, num_tokens
         )
 
-    def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+    def get_shape_desc(self, group_idx: int) -> PageBufferShapeDesc:
         """Returns the PageBufferShapeDesc for *group_idx*."""
         return self.kv_layer_groups_manager.get_shape_desc(group_idx)
 
@@ -214,9 +214,9 @@ class BaseCacheContext(ABC):
         Formats differ across layers for a mixed-format model. ``None`` marks a
         layer in no kernel group (a cross-layer KV-sharing layer).
         """
-        formats: list["lmcache_native.EngineKVFormat | None"] = [None] * len(
-            self.kv_caches_
-        )
+        formats: list["lmcache_native.EngineKVFormat | None"] = [
+            None
+        ] * self.num_layers_
         for kernel_group_idx, group in enumerate(
             self.kv_layer_groups_manager.kernel_groups
         ):

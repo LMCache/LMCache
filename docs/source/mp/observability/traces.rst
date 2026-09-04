@@ -39,7 +39,10 @@ Each session is wrapped in a per-request root span — ``request`` for the
 standard MP path and ``cb.request`` for the CacheBlend path — that nests
 all child spans (``mp.store``, ``mp.retrieve``, ``mp.lookup_prefetch``)
 beneath it.  When the lookup phase ends, the root span is annotated with
-three OTel attributes that summarise the request-level cache hit rate:
+OTel attributes that summarise the request-level cache hit rate.  Both
+root spans carry the first three below; the rest are specific to the
+``request`` span, and ``cb.request`` instead carries its own CacheBlend
+breakdown of ``hit_tokens`` (prefix / segmented-prefix / non-prefix).
 
 .. list-table::
    :header-rows: 1
@@ -59,6 +62,31 @@ three OTel attributes that summarise the request-level cache hit rate:
      - ``hit_tokens / requested_tokens``; ``0.0`` when the denominator is
        zero.  Stored as a precomputed float because trace UIs (Tempo,
        Jaeger) cannot derive it from two integer attributes at query time.
+   * - ``l1_hit_tokens``
+     - ``int``
+     - Tokens in the prefix L1 alone could serve, under each object
+       group's attention window rule.  ``request`` span only.
+   * - ``l2_hit_tokens``
+     - ``int``
+     - Tokens by which L2 extended that prefix.  Together with
+       ``l1_hit_tokens`` this is an exact integer partition of
+       ``hit_tokens``.  ``request`` span only.
+   * - ``l1_hit_rate``
+     - ``float``
+     - ``l1_hit_tokens / requested_tokens``; ``0.0`` when the denominator
+       is zero.  ``request`` span only.
+   * - ``l2_hit_rate``
+     - ``float``
+     - ``l2_hit_tokens / requested_tokens``; ``0.0`` when the denominator
+       is zero.  Sums with ``l1_hit_rate`` to ``hit_rate`` up to float
+       rounding.  ``request`` span only.
+   * - ``early_exit_reason``
+     - ``str``
+     - Which branch of the lookup returned before a prefetch was
+       submitted: ``no_gpu_context`` or ``no_group_layout_descs`` (nothing
+       registered for this model / world size), or ``empty_chunk_hashes``
+       (prompt shorter than one chunk).  ``""`` on the normal path,
+       including a genuine cold miss.  ``request`` span only.
 
 The attributes are written when ``MP_LOOKUP_PREFETCH_END`` (standard MP
 path) or ``CB_LOOKUP_END`` (CacheBlend path) is processed — while the
@@ -78,6 +106,12 @@ Example TraceQL queries (Grafana Tempo):
 
     # Complete misses (lookup ran but nothing was cached)
     { name = "request" && span.requested_tokens > 0 && span.hit_tokens = 0 }
+
+    # Requests that had to go to L2 for most of their hit
+    { name = "request" && span.l2_hit_rate > 0.5 }
+
+    # Lookups that exited early rather than genuinely missing
+    { name = "request" && span.early_exit_reason != "" }
 
 For the full event-to-span mapping and the registry pattern that links
 child spans back to the root see

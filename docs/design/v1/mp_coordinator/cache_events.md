@@ -2,7 +2,7 @@
 
 Module: `lmcache/v1/mp_coordinator/cache_events.py`
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
-Consumer: `lmcache/v1/mp_coordinator/key_directory.py` (see
+Consumer: `lmcache/v1/mp_coordinator/views/key_directory.py` (see
 [key_directory.md](key_directory.md))
 
 This is the emission half of the key directory (M1 of the control-plane
@@ -30,14 +30,14 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   `seq` gap that marks the instance's slice stale until the stream is
   replayed, and restarts are fenced by `incarnation`. A sink never needs exactly-once or global ordering.
 - **`HttpCacheEventSink`** — the first sink: one
-  `POST /directory/events` per flush, batches in list order. Failures
+  `POST /events` per flush, batches in list order. Failures
   raise `CacheEventPublishError`; the caller decides retry vs drop
   (both are safe, see above).
 - A future **Kafka sink** produces to a topic with the message key set
   to `instance_id`, so one partition carries one instance's stream —
   partition FIFO is exactly the per-instance FIFO the directory needs.
   The coordinator side gains a consumer that feeds
-  `KeyDirectory.apply_batch`; the subscriber and producers are
+  the coordinator's `EventGate`; the subscriber and producers are
   untouched.
 
 ## Batching and sequencing (inside the subscriber)
@@ -126,10 +126,11 @@ listener plumbing or a dedicated flush task:
   trade for a self-contained protocol (see
   [key_directory.md](key_directory.md) — Token index).
   `ACCESS` batches carry an **empty backend**: the directory only
-  refreshes key-level recency on access, so there is no placement
-  identity to name — the vocabulary requires a non-empty backend for
-  `store`/`delete` only. The subscriber is single-threaded by design —
-  everything runs on the bus's drain thread, so it needs no locking.
+  refreshes key-level recency and access count on access, so there is
+  no placement identity to name. The vocabulary requires a non-empty
+  backend for `store`/`delete` only. The subscriber is single-threaded
+  by design - everything runs on the bus's drain thread, so it needs no
+  locking.
 - **Threading.** The bus dispatches on one drain thread, which is
   exactly the per-instance FIFO the directory needs. The subscriber
   self-paces delivery: recording flushes when `flush_interval` has

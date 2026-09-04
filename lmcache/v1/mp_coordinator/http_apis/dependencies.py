@@ -17,15 +17,11 @@ from fastapi import Request
 import httpx
 
 # First Party
-from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
-    CacheEventBroadcaster,
-)
-from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
-from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.controllers.base import Controller
+from lmcache.v1.mp_coordinator.discovery import Registry
+from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
+from lmcache.v1.mp_coordinator.views.base import View
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
@@ -34,28 +30,34 @@ class CoordinatorContext:
     """Shared collaborators the coordinator's HTTP handlers operate on.
 
     Attributes:
-        registry: Fleet membership (``MPInstance`` by ``instance_id``).
-        quota_manager: Per-``cache_salt`` L2 quota state.
-        usage_manager: Per-``cache_salt`` L2 usage tracking.
-        eviction_manager: Quota/LRU L2 eviction dispatcher; also holds the L2
-            pin set consulted when computing eviction plans.
-        prefetch_manager: Warm-prefetch proxy to MP servers.
+        controllers: The coordinator's controllers, addressed by type --
+            ``controllers.get(FleetEvictionController)`` for the fleet L2
+            eviction loop (which owns the quota registry and the L2 pin
+            set, enforced against the ``l2`` half of the usage view), and
+            ``PrefetchManager`` for warm prefetch. Addressing by type only
+            works for a class the coordinator imports, so a controller
+            shipped out of tree registers its own routes instead (see
+            ``HttpRoutes``) rather than being resolved here.
         token_hasher: Resolves a pin request's ``token_ids`` to object keys
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
-        key_directory: Fleet-wide key → placements directory built from
-            MP-server cache events (eventually consistent).
-        event_broadcaster: Fans directory-applied cache-event batches out to
-            the registered consumers.
+        views: The fleet's read models, addressed by type --
+            ``views.get(KeyDirectory)`` for key → placements,
+            ``CacheUsageManager`` for per-tier byte usage,
+            ``InstanceRegistry`` for fleet membership, and
+            ``ServerConfigRegistry`` for the declared capacities a usage
+            ratio divides by.
+        event_gate: Ingest entry point for the fleet cache-event stream
+            (``POST /events``).
+        metadata_persister: Durable store for operator intent. Every
+            handler that changes a pin or a quota must ``save`` so the
+            change survives a restart.
     """
 
-    registry: InstanceRegistry
-    quota_manager: QuotaManager
-    usage_manager: L2UsageManager
-    eviction_manager: L2EvictionManager
-    prefetch_manager: PrefetchManager
+    controllers: Registry[Controller]
     token_hasher: TokenHasher
-    key_directory: KeyDirectory
-    event_broadcaster: CacheEventBroadcaster
+    views: Registry[View]
+    event_gate: EventGate
+    metadata_persister: MetadataPersister
 
 
 def get_context(request: Request) -> CoordinatorContext:

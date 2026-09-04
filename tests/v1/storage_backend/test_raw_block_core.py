@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 # Standard
+from typing import Any
+import ctypes
 import dataclasses
 import stat
 import sys
@@ -42,6 +44,114 @@ def test_normalize_raw_block_placement_ids_rejects_out_of_range() -> None:
 
     with pytest.raises(ValueError, match="range 1..=65535"):
         normalize_raw_block_placement_ids([65536], 1)
+
+
+class _RecordingRawDevice:
+    def __init__(self) -> None:
+        self.offsets: list[int] = []
+        self.buffers: list[memoryview] = []
+        self.lengths: list[int] = []
+        self.read_buffers: list[memoryview] = []
+        self.read_data = b""
+        self.read_cursor = 0
+        self.waited_batch_id: int | None = None
+        self._batch_results: dict[int, list[bool]] = {}
+
+    def batched_write(
+        self,
+        offsets: list[int],
+        buffers: list[memoryview],
+        lengths: list[int],
+        placement_ids: list[int | None] | None = None,
+    ) -> int:
+        del placement_ids
+        self.offsets = offsets
+        self.buffers = buffers
+        self.lengths = lengths
+        self._batch_results[17] = [True] * len(offsets)
+        return 17
+
+    def batched_read(
+        self,
+        offsets: list[int],
+        buffers: list[memoryview],
+        lengths: list[int],
+    ) -> int:
+        for target, total_len in zip(buffers, lengths, strict=True):
+            self.read_buffers.append(target)
+            end = self.read_cursor + total_len
+            target[:total_len] = self.read_data[self.read_cursor : end]
+            self.read_cursor = end
+        self._batch_results[17] = [True] * len(offsets)
+        return 17
+
+    def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
+        self.waited_batch_id = batch_id
+        return self._batch_results.pop(batch_id), []
+
+    def read_uring(
+        self,
+        offset: int,
+        target: memoryview,
+        payload_len: int,
+        total_len: int,
+    ) -> None:
+        del offset, payload_len
+        self.read_buffers.append(target)
+        end = self.read_cursor + total_len
+        target[:total_len] = self.read_data[self.read_cursor : end]
+        self.read_cursor = end
+
+
+def _buffer_address(buf: memoryview) -> int:
+    return ctypes.addressof((ctypes.c_byte * 1).from_buffer(buf))
+
+
+def test_raw_block_core_uring_cmd_write_padding_uses_aligned_chunks(monkeypatch):
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 4096
+    raw_dev = _RecordingRawDevice()
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+
+    payload = bytes([3]) * 5000
+
+    core._write_uring_cmd_buffers(
+        offsets=[4096],
+        buffers=[bytearray(payload)],
+        payload_lens=[len(payload)],
+        total_lens=[8192],
+    )
+
+    assert raw_dev.offsets == [4096, 8192]
+    assert raw_dev.lengths == [4096, 4096]
+    assert raw_dev.waited_batch_id == 17
+    assert all(_buffer_address(buf) % core.block_align == 0 for buf in raw_dev.buffers)
+    assert b"".join(bytes(buf) for buf in raw_dev.buffers) == payload + bytes(3192)
+
+
+def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks(monkeypatch):
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 4096
+    raw_dev = _RecordingRawDevice()
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+
+    payload = bytes([5]) * 5000
+    raw_dev.read_data = payload + bytes(3192)
+    dst = bytearray(len(payload))
+
+    core._read_uring_cmd_buffers(
+        offsets=[4096],
+        buffers=[dst],
+        payload_lens=[len(payload)],
+        total_lens=[8192],
+    )
+
+    assert dst == payload
+    assert all(
+        _buffer_address(buf) % core.block_align == 0 for buf in raw_dev.read_buffers
+    )
 
 
 def test_raw_block_core_store_load_and_exists(tmp_path):
@@ -259,6 +369,7 @@ class _FakeRawDevice:
             tuple[list[int], list[int], list[int | None] | None]
         ] = []
         self.write_uring_calls: list[tuple[int, int, int, int | None]] = []
+        self._batch_results: dict[int, list[bool]] = {}
 
     def size_bytes(self) -> int:
         return self._size_bytes
@@ -279,10 +390,12 @@ class _FakeRawDevice:
     ) -> int:
         del buffers
         self.batched_write_calls.append((offsets, total_lens, placement_ids))
+        self._batch_results[123] = [True] * len(offsets)
         return 123
 
-    def wait_iouring(self, batch_id: int) -> None:
+    def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
         assert batch_id == 123
+        return self._batch_results.pop(batch_id), []
 
     def write_uring(
         self,
@@ -309,6 +422,7 @@ def _make_fake_io_uring_core(
     fdp_slot_affinity_enabled: bool = False,
 ) -> tuple[RawBlockCore, _FakeRawDevice]:
     raw_devices: list[_FakeRawDevice] = []
+    device_path = tmp_path / "ng0n1"
 
     def create_fake_device(path: str, **kwargs):
         del path, kwargs
@@ -322,13 +436,19 @@ def _make_fake_io_uring_core(
         types.SimpleNamespace(RawBlockDevice=create_fake_device),
     )
     if use_uring_cmd:
+        real_stat = raw_block_core.os.stat
+
+        def fake_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if str(path) == str(device_path):
+                return types.SimpleNamespace(st_mode=stat.S_IFCHR)
+            return real_stat(path, *args, **kwargs)
+
         monkeypatch.setattr(
             raw_block_core.os,
             "stat",
-            lambda path: types.SimpleNamespace(st_mode=stat.S_IFCHR),
+            fake_stat,
         )
 
-    device_path = tmp_path / "ng0n1"
     core = RawBlockCore(
         RawBlockCoreConfig(
             device_path=str(device_path),

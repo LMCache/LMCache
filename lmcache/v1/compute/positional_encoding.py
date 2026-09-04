@@ -7,9 +7,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rop
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import device_ops, torch_device_type
 from lmcache.logging import init_logger
-import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -65,7 +64,7 @@ class FusedRope:
     def fused_encode(self, old_positions, new_positions, k):
         num_tokens = k.shape[0]
         k = k.view(num_tokens, -1, self.head_size)
-        lmc_ops.rotary_embedding_k_fused(
+        device_ops.rotary_embedding_k_fused(
             old_positions,
             new_positions,
             k,
