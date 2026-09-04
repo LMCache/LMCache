@@ -10,6 +10,14 @@ tables. `lmcache.sdk.token_selection` separates those layers:
 - `expand_plan()` first validates every fence and family invariant, then emits
   full-block `PhysicalGroupOperation` values.
 
+This hides three kinds of adapter complexity from policy authors: translating
+logical token spans through compression and alignment into physical entry/byte
+ranges, atomically validating every member of a hybrid cache family, and
+rejecting stale request/topology/policy revisions before any destructive range
+is exposed. The serving adapter still owns the actual cache mutation and must
+handle explicit residual spans; the abstraction does not conceal that side
+effect or silently widen a partial physical block.
+
 ## Fail-closed boundaries
 
 Expansion returns no operations when request generation, decode round,
@@ -127,3 +135,7 @@ expansion = expand_plan(
 )
 assert expansion.validation.valid
 ```
+
+For a live LMCache/vLLM path in which the expanded physical range drives an
+actual `LMCacheRequestStream.modify_kv()` operation, see
+[`examples/token_dropping/topology_aware_token_dropping.py`](../../../examples/token_dropping/topology_aware_token_dropping.py).
