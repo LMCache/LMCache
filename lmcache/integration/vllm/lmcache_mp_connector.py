@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 import math
 import sys
@@ -429,6 +430,12 @@ def _ensure_transport_scheme(server_url: str) -> str:
     return f"tcp://{server_url}"
 
 
+@dataclass(frozen=True)
+class _PinnedStoreOperation:
+    request_id: str
+    block_ids: tuple[int, ...]
+
+
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     """
     The connector for LMCache multi-process mode.
@@ -455,7 +462,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig | None" = None,
-    ):
+    ) -> None:
         # Older supported vLLM releases allow connectors to omit this value,
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
@@ -581,6 +588,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
+            self._next_store_op_id = 0
+            self._pinned_store_operations: dict[int, _PinnedStoreOperation] = {}
 
             # Initialize pending store for lazy offload mode
             if self.lazy_offload:
@@ -603,6 +612,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+                operation_store_lifetime=True,
             )
             if self.transfer_intermediate_tensors:
                 # First Party
@@ -810,7 +820,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return
 
-    def wait_for_save(self):
+    def wait_for_save(self) -> None:
         """
         Block until all the save operations is done. This is called
         as the forward context exits to ensure that the async saving
@@ -822,13 +832,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
         request_ids = []
+        store_op_ids: list[int | None] = []
         ops = []
         cache_salts = []
         request_configs_list = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
+            if not self.lazy_offload and meta.store_op_id is None:
+                raise RuntimeError("non-lazy STORE metadata is missing an operation ID")
             request_ids.append(meta.request_id)
+            store_op_ids.append(meta.store_op_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
             request_configs_list.append(meta.request_configs)
@@ -846,6 +860,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             event,
             cache_salts=cache_salts,
             request_configs_list=request_configs_list,
+            store_op_ids=store_op_ids,
         )
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
@@ -896,16 +911,31 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
-    def build_connector_worker_meta(self):
-        if not self.lazy_offload:
-            return None
-        completed_store_requests = self.worker_adapter.get_completed_store_requests()
-        if completed_store_requests:
+    def build_connector_worker_meta(self) -> LMCacheMPWorkerMetadata | None:
+        """Drain worker STORE results for scheduler-side block release.
+
+        Returns:
+            New operation terminal reports, legacy lazy-offload request counts,
+            or None when no results are available.
+        """
+        if self.lazy_offload:
+            completed_store_requests = (
+                self.worker_adapter.get_completed_store_requests()
+            )
+            if not completed_store_requests:
+                return None
             return LMCacheMPWorkerMetadata(
                 completed_store_requests=completed_store_requests
             )
-        else:
+
+        result = self.worker_adapter.get_completed_store_operations()
+        if result is None:
             return None
+        terminal, failed = result
+        return LMCacheMPWorkerMetadata(
+            terminal_store_operations=terminal,
+            failed_store_operations=failed,
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
@@ -991,9 +1021,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
-        # TODO: support loading KV for preempted requests in the future
-        if request.status == RequestStatus.PREEMPTED:
-            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1207,7 +1234,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         return metadata
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """
         Update KVConnector state from worker-side connectors output.
 
@@ -1215,21 +1242,61 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
-        if not self.lazy_offload:
-            return
-        if not self._gpu_block_pool:
-            raise ValueError("Lazy offload is enabled but gpu block pool is not binded")
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
             return
-        for req_id, count in meta.completed_store_requests.items():
-            if self.scheduler_adapter.update_pending_store_count(req_id, count):
-                gpu_block_ids = self._pending_store.get_request_gpu_block_ids(req_id)
-                self._gpu_block_pool.free_blocks(
-                    [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+        if self._gpu_block_pool is None:
+            raise RuntimeError("GPU block pool is not bound")
+
+        if self.lazy_offload:
+            for req_id, count in meta.completed_store_requests.items():
+                if self.scheduler_adapter.update_pending_store_count(req_id, count):
+                    gpu_block_ids = self._pending_store.get_request_gpu_block_ids(
+                        req_id
+                    )
+                    self._gpu_block_pool.free_blocks(
+                        [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+                    )
+                    self._pending_store.remove_request_gpu_block_ids(req_id)
+                    self.scheduler_adapter.end_session(req_id)
+            return
+
+        unknown_failures = set(meta.failed_store_operations).difference(
+            meta.terminal_store_operations
+        )
+        if unknown_failures:
+            raise RuntimeError(
+                "STORE failures lack matching terminal worker IDs: "
+                f"{sorted(unknown_failures)}"
+            )
+
+        for store_op_id, terminal_workers in meta.terminal_store_operations.items():
+            pinned = self._pinned_store_operations.get(store_op_id)
+            if pinned is None:
+                raise RuntimeError(
+                    f"unknown or already released STORE operation {store_op_id}"
                 )
-                self._pending_store.remove_request_gpu_block_ids(req_id)
-                self.scheduler_adapter.end_session(req_id)
+            failed_workers = meta.failed_store_operations.get(store_op_id, set())
+            all_failed_workers = self.scheduler_adapter.update_pending_store_workers(
+                store_op_id,
+                terminal_workers,
+                failed_workers,
+            )
+            if all_failed_workers is None:
+                continue
+
+            del self._pinned_store_operations[store_op_id]
+            self._gpu_block_pool.free_blocks(
+                self._gpu_block_pool.blocks[block_id]
+                for block_id in reversed(pinned.block_ids)
+            )
+            if all_failed_workers:
+                logger.error(
+                    "STORE operation %d for request %s failed on workers %s",
+                    store_op_id,
+                    pinned.request_id,
+                    sorted(all_failed_workers),
+                )
 
     def request_finished(
         self,
@@ -1277,8 +1344,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         if self.lazy_offload:
             self._pending_store.mark_req_finished(request.request_id)
-            return False, (return_params or None)
-        return True, (return_params or None)
+        return False, (return_params or None)
 
     def request_finished_all_groups(
         self,
@@ -1320,6 +1386,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             int: expected sending or receiving completion count.
         """
         return None
+
+    def has_pending_push_work(self) -> bool:
+        """Keep polling while non-lazy STORE operations own block references."""
+        return bool(
+            self.role == KVConnectorRole.SCHEDULER
+            and not self.lazy_offload
+            and self._pinned_store_operations
+        )
 
     @classmethod
     def build_kv_connector_stats(
@@ -1391,7 +1465,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 if self.lazy_offload:
                     self._pending_store.add(r_meta)
                 else:
-                    metadata.add_request_metadata(r_meta)
+                    self._add_store_metadata(metadata, r_meta)
         # if scheduler_output.total_num_scheduled_tokens is 0,
         # vllm `gpu_model_runner` will call `kv_connector_no_forward`
         # in `execute_model`, which will result in lose some store ops.
@@ -1432,7 +1506,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 if self.lazy_offload:
                     self._pending_store.add(r_meta)
                 else:
-                    metadata.add_request_metadata(r_meta)
+                    self._add_store_metadata(metadata, r_meta)
         # if scheduler_output.total_num_scheduled_tokens is 0,
         # vllm `gpu_model_runner` will call `kv_connector_no_forward`
         # in `execute_model`, which will result in lose some store ops.
@@ -1585,3 +1659,34 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
+
+    def _add_store_metadata(
+        self,
+        connector_metadata: LMCacheMPConnectorMetadata,
+        store_metadata: LMCacheMPRequestMetadata,
+    ) -> None:
+        """Pin the blocks referenced by one non-lazy STORE operation."""
+        if self.lazy_offload:
+            raise RuntimeError("operation-level STORE tracking excludes lazy offload")
+        if store_metadata.direction != "STORE":
+            raise ValueError("only STORE metadata can own GPU block references")
+        if store_metadata.store_op_id is not None:
+            raise ValueError("STORE metadata already has an operation ID")
+        if self._gpu_block_pool is None:
+            raise RuntimeError("GPU block pool must be bound before storing KV")
+
+        block_ids = tuple(dict.fromkeys(store_metadata.op.flat_block_ids))
+        if not block_ids:
+            raise ValueError("STORE metadata must reference at least one GPU block")
+        self._gpu_block_pool.touch(
+            [self._gpu_block_pool.blocks[block_id] for block_id in block_ids]
+        )
+
+        store_op_id = self._next_store_op_id
+        self._next_store_op_id += 1
+        store_metadata.store_op_id = store_op_id
+        self._pinned_store_operations[store_op_id] = _PinnedStoreOperation(
+            request_id=store_metadata.request_id,
+            block_ids=block_ids,
+        )
+        connector_metadata.add_request_metadata(store_metadata)

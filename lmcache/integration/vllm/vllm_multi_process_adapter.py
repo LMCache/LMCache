@@ -562,6 +562,12 @@ RetrieveResult = bool
 LookupResult = int
 
 
+@dataclass
+class _PendingStoreFuture:
+    request_id: str
+    future: MessagingFuture[StoreResult]
+
+
 class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
@@ -575,7 +581,7 @@ class LMCacheMPSchedulerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """
         Args:
             server_urls: LMCache multiprocess request server URLs.
@@ -681,6 +687,8 @@ class LMCacheMPSchedulerAdapter:
         # Events must be reported by all world_size workers before considered complete.
         self._expected_worker_count = parallel_strategy.vllm_world_size
         self._store_request_pending_counts: dict[str, int] = {}
+        self._store_operation_terminal_workers: dict[int, set[int]] = {}
+        self._store_operation_failed_workers: dict[int, set[int]] = {}
 
     @property
     def world_size(self) -> int:
@@ -1066,6 +1074,54 @@ class LMCacheMPSchedulerAdapter:
             self._store_request_pending_counts[req_id] = total
             return False
 
+    def update_pending_store_workers(
+        self,
+        store_op_id: int,
+        terminal_workers: set[int],
+        failed_workers: set[int],
+    ) -> set[int] | None:
+        """Accumulate one STORE operation until every worker is terminal.
+
+        Args:
+            store_op_id: Scheduler-assigned STORE identity.
+            terminal_workers: Worker ranks that have finished reading the source.
+            failed_workers: Terminal ranks that did not durably store the KV.
+
+        Returns:
+            Failed ranks once all workers are terminal, or None while pending.
+            Repeated ranks do not count as additional completions.
+
+        Raises:
+            ValueError: If ranks are invalid, the terminal set is empty, or a
+                failed rank is absent from the terminal report.
+        """
+        if not terminal_workers:
+            raise ValueError("terminal_workers must not be empty")
+        if not failed_workers.issubset(terminal_workers):
+            raise ValueError("failed_workers must be a subset of terminal_workers")
+
+        invalid_workers = {
+            worker_id
+            for worker_id in terminal_workers
+            if worker_id < 0 or worker_id >= self._expected_worker_count
+        }
+        if invalid_workers:
+            raise ValueError(
+                "STORE operation reported invalid worker IDs: "
+                f"{sorted(invalid_workers)}"
+            )
+
+        terminal = self._store_operation_terminal_workers.setdefault(store_op_id, set())
+        failures = self._store_operation_failed_workers.setdefault(store_op_id, set())
+        terminal.update(terminal_workers)
+        failures.update(failed_workers)
+        if len(terminal) != self._expected_worker_count:
+            return None
+
+        self._store_operation_terminal_workers.pop(store_op_id, None)
+        self._store_operation_failed_workers.pop(store_op_id, None)
+        return failures
+
 
 class LMCacheMPWorkerAdapter:
     def __init__(
@@ -1080,7 +1136,8 @@ class LMCacheMPWorkerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
-    ):
+        operation_store_lifetime: bool = False,
+    ) -> None:
         """Initialize the worker adapter for current or legacy vLLM callers.
 
         Args:
@@ -1100,6 +1157,9 @@ class LMCacheMPWorkerAdapter:
             extra_config: Optional dict with keys starting with
                 ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
+            operation_store_lifetime: Use scheduler-assigned STORE operation
+                IDs and worker metadata for completion. Legacy connectors leave
+                this disabled and keep request-level completion semantics.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1130,6 +1190,7 @@ class LMCacheMPWorkerAdapter:
             self._mp_transfer_mode = None
         self.req_client = RequestClientFactory.create(server_url, context=context)
         self._mq_timeout = mq_timeout
+        self.operation_store_lifetime = operation_store_lifetime
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
         # than os.getpid() to avoid collision in containerized deployments.
@@ -1149,6 +1210,7 @@ class LMCacheMPWorkerAdapter:
 
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
+        self._store_operation_futures: dict[int, _PendingStoreFuture] = {}
         # request_id -> (future, block_ids)
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
@@ -1156,6 +1218,7 @@ class LMCacheMPWorkerAdapter:
         # The IPC handle is not enough by itself; CUDA needs the exporting
         # event object to stay alive until the consumer is done with it.
         self.store_events: dict[str, _IpcEvent] = {}
+        self._store_operation_events: dict[int, _IpcEvent] = {}
         self.retrieve_events: dict[str, _IpcEvent] = {}
 
         # Block IDs that failed due to retrieve timeout
@@ -1166,14 +1229,14 @@ class LMCacheMPWorkerAdapter:
         # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         self._dropped_retrieves: set[str] = set()
 
-        # The store requests that have finished execution in LMCache
+        # Request-level STORE completion state used by legacy connectors.
         self.finished_stores: set[str] = set()
-        # The finished request ids that are passed via vLLM and also
-        # have corresponding store requests submitted to LMCache before
         self.previously_finished: set[str] = set()
-        # Request IDs already returned as finished_sending to the scheduler.
-        # Prevents re-reporting the same ID after drain clears tracking sets.
         self._returned_finished: set[str] = set()
+
+        self._pending_store_ops_by_request: dict[str, set[int]] = {}
+        self._engine_finished_store_requests: set[str] = set()
+        self._indeterminate_store_operations: dict[int, str] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -1247,6 +1310,8 @@ class LMCacheMPWorkerAdapter:
 
         # Completed store requests to report via build_connector_worker_meta
         self._completed_store_requests: dict[str, int] = {}
+        self._terminal_store_operations: dict[int, set[int]] = {}
+        self._failed_store_operations: dict[int, set[int]] = {}
 
     @property
     def is_healthy(self) -> bool:
@@ -1472,7 +1537,9 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent | None,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-    ):
+        *,
+        store_op_id: int | None = None,
+    ) -> None:
         """
         Submit a KV cache store request to LMCache
 
@@ -1484,13 +1551,64 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            store_op_id: Scheduler-assigned identity for a non-lazy STORE.
+
+        Raises:
+            ValueError: If an operation identity is missing or already pending.
+            RuntimeError: If a legacy caller has no transfer context. Submission
+                errors also propagate; operation-owned references remain held
+                when submission may have reached the server.
         """
         self._ensure_heartbeat_started()
 
+        if self.lazy_offload or not self.operation_store_lifetime:
+            if not self.is_kv_writer or not self.is_healthy:
+                return
+            assert op.token_ids is not None
+            key = self._create_key(
+                op.token_ids,
+                op.start,
+                op.end,
+                request_id=request_id,
+                cache_salt=cache_salt,
+                request_configs=request_configs,
+            )
+            if self.transfer_ctx is None:
+                raise RuntimeError(
+                    "Transfer context is not initialized. "
+                    "Call register_kv_caches() before submitting store requests."
+                )
+            future = self.transfer_ctx.submit_store(
+                request_id,
+                key,
+                self.instance_id,
+                self.kv_caches,
+                self._block_ids_per_group(op),
+                event,
+                self.blocks_in_chunk,
+            )
+            self.store_futures[request_id] = future
+            if event is not None:
+                self.store_events[request_id] = event
+            return
+
+        if store_op_id is None:
+            raise ValueError("operation-level STORE requires store_op_id")
+        if (
+            store_op_id in self._store_operation_futures
+            or store_op_id in self._indeterminate_store_operations
+        ):
+            raise ValueError(f"duplicate pending store_op_id {store_op_id}")
+        self._pending_store_ops_by_request.setdefault(request_id, set()).add(
+            store_op_id
+        )
+
         if not self.is_kv_writer:
+            self._record_store_terminal(store_op_id, request_id, succeeded=True)
             return
 
         if not self.is_healthy:
+            self._record_store_terminal(store_op_id, request_id, succeeded=False)
             return
 
         assert op.token_ids is not None
@@ -1503,22 +1621,39 @@ class LMCacheMPWorkerAdapter:
             request_configs=request_configs,
         )
         if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting store requests."
+            logger.error(
+                "STORE operation %d cannot start for request_id=%s because "
+                "the transfer context is not initialized",
+                store_op_id,
+                request_id,
             )
-        future = self.transfer_ctx.submit_store(
-            request_id,
-            key,
-            self.instance_id,
-            self.kv_caches,
-            self._block_ids_per_group(op),
-            event,
-            self.blocks_in_chunk,
-        )
-        self.store_futures[request_id] = future
+            self._record_store_terminal(store_op_id, request_id, succeeded=False)
+            return
         if event is not None:
-            self.store_events[request_id] = event
+            self._store_operation_events[store_op_id] = event
+        try:
+            future = self.transfer_ctx.submit_store(
+                request_id,
+                key,
+                self.instance_id,
+                self.kv_caches,
+                self._block_ids_per_group(op),
+                event,
+                self.blocks_in_chunk,
+            )
+        except Exception:
+            logger.exception(
+                "STORE operation %d for request_id=%s has indeterminate "
+                "submission state; retaining its GPU block references",
+                store_op_id,
+                request_id,
+            )
+            self._indeterminate_store_operations[store_op_id] = request_id
+            raise
+        self._store_operation_futures[store_op_id] = _PendingStoreFuture(
+            request_id,
+            future,
+        )
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -1588,7 +1723,9 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
         request_configs_list: list[dict[str, Any] | None] | None = None,
-    ):
+        *,
+        store_op_ids: list[int | None] | None = None,
+    ) -> None:
         """
         Submit a batched store request to LMCache
 
@@ -1603,9 +1740,16 @@ class LMCacheMPWorkerAdapter:
                 request_ids.
             request_configs_list: Optional LMCache request configs, one per
                 request.
+            store_op_ids: Scheduler-assigned identities, one per STORE.
+
+        Raises:
+            ValueError: If list lengths differ. No requests are submitted in
+                that case. Individual submission errors propagate to the caller.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
+        if store_op_ids is None:
+            store_op_ids = [None] * len(request_ids)
         if request_configs_list is None:
             request_configs_list = [None] * len(request_ids)
         if not (
@@ -1613,13 +1757,19 @@ class LMCacheMPWorkerAdapter:
             == len(ops)
             == len(cache_salts)
             == len(request_configs_list)
+            == len(store_op_ids)
         ):
             raise ValueError(
-                "request_ids, ops, cache_salts, and request_configs_list "
+                "request_ids, ops, cache_salts, request_configs_list, and store_op_ids "
                 "must have the same length"
             )
-        for request_id, op, salt, request_configs in zip(
-            request_ids, ops, cache_salts, request_configs_list, strict=True
+        for request_id, op, salt, request_configs, store_op_id in zip(
+            request_ids,
+            ops,
+            cache_salts,
+            request_configs_list,
+            store_op_ids,
+            strict=True,
         ):
             self.submit_store_request(
                 request_id,
@@ -1627,6 +1777,7 @@ class LMCacheMPWorkerAdapter:
                 event,
                 cache_salt=salt,
                 request_configs=request_configs,
+                store_op_id=store_op_id,
             )
 
     @_lmcache_nvtx_annotate
@@ -1683,7 +1834,7 @@ class LMCacheMPWorkerAdapter:
         finished_req_ids_from_lmcache: set[str],
         finished_req_ids_from_engine: set[str],
     ) -> set[str]:
-        """Merge LMCache-side and engine-side finished store info."""
+        """Merge request-level completion state for legacy connectors."""
         self.finished_stores.update(finished_req_ids_from_lmcache)
         ret_stores = set()
         for req_id in finished_req_ids_from_engine:
@@ -1701,133 +1852,62 @@ class LMCacheMPWorkerAdapter:
     def get_finished(
         self, finished_req_ids_from_engine: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        """
-        Check and get the finished store and retrieve requests.
+        """Poll non-lazy STORE work and asynchronous retrieves.
+
+        Operation-aware callers receive STORE completion through worker
+        metadata, while legacy callers retain request-level
+        ``finished_sending`` semantics. Retrieve completion continues to use
+        the vLLM connector contract in both modes.
 
         Args:
-            finished_req_ids_from_engine: the set of request ids that are
-                reported as finished from the vLLM engine side.
+            finished_req_ids_from_engine: Request IDs finished in this scheduler
+                step. vLLM sends each finished request in one step only.
 
         Returns:
-            A tuple of two sets:
-            - The first set contains the finished store request ids. The returned
-                store request ids MUST be seen before in the
-                `finished_req_ids_from_engine`.
-            - The second set contains the finished retrieve request ids,
-                including retrieves dropped at submit time while unhealthy
-                (reported exactly once; blocks already in error_block_ids).
-
-        Notes:
-            When enabling async scheduling in vLLM, the same request ID may appear
-            multiple times in `finished_req_ids_from_engine`. The adapter should
-            take care of deduplicating the request IDs and only return the request
-            IDs that have not been returned before.
+            Finished STORE and RETRIEVE request IDs. Operation-aware callers
+            receive an empty STORE set and drain STORE worker metadata instead.
         """
+        if self.lazy_offload:
+            raise ValueError("use get_finished_with_lazy_offload in lazy mode")
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "reclaim")
+        if not self.operation_store_lifetime:
+            return self._get_finished_request_level(finished_req_ids_from_engine)
 
-        # If unhealthy, drain all pending futures immediately
+        self._engine_finished_store_requests.update(finished_req_ids_from_engine)
+        self._poll_store_operations()
+
+        finished_retrieves: set[str] = set()
         if not self.is_healthy:
-            finished_stores = set(self.store_futures.keys())
-            finished_retrieves = set()
             for request_id, (
                 _r_future,
                 r_block_ids,
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
-            self.store_futures.clear()
             self.retrieve_futures.clear()
-            self.store_events.clear()
             self.retrieve_events.clear()
+        else:
+            for request_id, (future, block_ids) in self.retrieve_futures.items():
+                if not future.query():
+                    continue
+                succeeded = bool(future.result(timeout=60))
+                finished_retrieves.add(request_id)
+                if not succeeded:
+                    self.error_block_ids.update(block_ids)
+                    logger.error(
+                        "RETRIEVE was not successful for request_id=%s",
+                        request_id,
+                    )
+            for request_id in finished_retrieves:
+                self.retrieve_futures.pop(request_id, None)
+                self.retrieve_events.pop(request_id, None)
 
-            # Retrieves dropped at submit time still must be reported,
-            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
-            # Swap-drain (not update-then-clear): a concurrent
-            # submit_retrieve_request add lands in the old set (reported now)
-            # or the fresh set (reported next call), never lost.
-            dropped = self._dropped_retrieves
-            self._dropped_retrieves = set()
-            finished_retrieves.update(dropped)
-
-            ret_stores = self._process_finished_stores(
-                finished_stores, finished_req_ids_from_engine
-            )
-            # A request may have a pending retrieve AND appear in
-            # finished_req_ids_from_engine (it ran without loading KV after
-            # the server died).  The scheduler processes finished_recving
-            # first and deletes the request, so we must not also report it
-            # in finished_sending.
-            ret_stores -= finished_retrieves
-            return ret_stores, finished_retrieves
-
-        finished_stores = set()
-        finished_retrieves = set()
-        for request_id, s_future in self.store_futures.items():
-            if not s_future.query():
-                continue
-
-            s_result = s_future.result(timeout=60)
-            finished_stores.add(request_id)
-
-            if not s_result:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "store request for request_id=%s",
-                    request_id,
-                )
-
-        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
-            if not r_future.query():
-                continue
-
-            r_result = r_future.result(timeout=60)
-            finished_retrieves.add(request_id)
-
-            if not r_result:
-                self.error_block_ids.update(r_block_ids)
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
-                )
-
-        # Remove the finished requests from the tracking dicts
-        for request_id in finished_stores:
-            self.store_futures.pop(request_id, None)
-            self.store_events.pop(request_id, None)
-        for request_id in finished_retrieves:
-            self.retrieve_futures.pop(request_id, None)
-            self.retrieve_events.pop(request_id, None)
-
-        # Retrieves dropped while unhealthy still must be reported,
-        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
-        # finished_sending dedup is needed (unlike the unhealthy branch): a
-        # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
-        # this report, so it cannot also be engine-finished in the same call.
-        # Swap-drain so a concurrent submit_retrieve_request add is never lost.
         dropped = self._dropped_retrieves
         self._dropped_retrieves = set()
         finished_retrieves.update(dropped)
-
-        # Update the internal states
-        ret_stores = self._process_finished_stores(
-            finished_stores, finished_req_ids_from_engine
-        )
-
-        # the invocation of `get_finished` means that
-        # these requests' KV caches are already fully stored.
-        # or the requests normally ends without any store.
-        if ret_stores:
-            self.request_telemetry.on_request_store_finished(
-                request_ids_set=ret_stores,
-                model_name=self.model_name,
-                world_size=self.world_size,
-                kv_rank=self.worker_id,
-            )
-
-        return ret_stores, finished_retrieves
+        self._finish_operation_store_telemetry()
+        return set(), finished_retrieves
 
     # TODO(chunxiaozheng): There are some duplicated codes
     #  with `get_finished`, optimize it later.
@@ -1955,6 +2035,25 @@ class LMCacheMPWorkerAdapter:
         self._completed_store_requests = {}
         return completed_store_requests
 
+    def get_completed_store_operations(
+        self,
+    ) -> tuple[dict[int, set[int]], dict[int, set[int]]] | None:
+        """Drain non-lazy STORE terminal results since the previous call.
+
+        Returns:
+            Terminal and failed worker ranks keyed by STORE identity, or None
+            when no operation is terminal. Query failures retain the operation
+            because completion has not been established.
+        """
+        self._poll_store_operations()
+        if not self._terminal_store_operations:
+            return None
+        terminal = self._terminal_store_operations
+        failed = self._failed_store_operations
+        self._terminal_store_operations = {}
+        self._failed_store_operations = {}
+        return terminal, failed
+
     def num_blocks_per_chunk(self) -> int:
         """
         Returns:
@@ -2029,17 +2128,12 @@ class LMCacheMPWorkerAdapter:
         self.request_telemetry.close()
 
     # Helper functions
-    def _update_and_get_finished_store(
-        self,
-    ) -> set[str]:
-        """Converge the internal states about finished stores
-        and returns the 'safe finished store request ids' back
-        """
-        safe_finished_s = self.finished_stores.intersection(self.previously_finished)
+    def _update_and_get_finished_store(self) -> set[str]:
+        """Return request IDs terminal on both engine and LMCache sides."""
+        safe_finished = self.finished_stores.intersection(self.previously_finished)
         self.finished_stores.difference_update(self.previously_finished)
-        self.previously_finished.difference_update(safe_finished_s)
-
-        return safe_finished_s
+        self.previously_finished.difference_update(safe_finished)
+        return safe_finished
 
     def _create_key(
         self,
@@ -2076,3 +2170,158 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
+
+    def _record_store_terminal(
+        self,
+        store_op_id: int,
+        request_id: str,
+        *,
+        succeeded: bool,
+    ) -> None:
+        if store_op_id in self._terminal_store_operations:
+            raise RuntimeError(f"STORE operation {store_op_id} completed twice")
+
+        worker_id = self.parallel_strategy.vllm_worker_id
+        self._terminal_store_operations[store_op_id] = {worker_id}
+        if not succeeded:
+            self._failed_store_operations[store_op_id] = {worker_id}
+
+        request_operations = self._pending_store_ops_by_request.get(request_id)
+        if request_operations is not None:
+            request_operations.discard(store_op_id)
+            if not request_operations:
+                self._pending_store_ops_by_request.pop(request_id, None)
+
+    def _poll_store_operations(self) -> None:
+        finished: set[int] = set()
+        for store_op_id, pending in list(self._store_operation_futures.items()):
+            try:
+                is_terminal = pending.future.query()
+            except Exception:
+                logger.exception(
+                    "Cannot prove STORE operation %d terminal for request_id=%s; "
+                    "retaining its GPU block references",
+                    store_op_id,
+                    pending.request_id,
+                )
+                continue
+            if not is_terminal:
+                continue
+
+            try:
+                succeeded = bool(pending.future.result(timeout=60))
+            except Exception:
+                logger.exception(
+                    "Terminal STORE operation %d failed for request_id=%s",
+                    store_op_id,
+                    pending.request_id,
+                )
+                succeeded = False
+            if not succeeded:
+                logger.error(
+                    "STORE operation %d was not durable for request_id=%s",
+                    store_op_id,
+                    pending.request_id,
+                )
+            self._record_store_terminal(
+                store_op_id,
+                pending.request_id,
+                succeeded=succeeded,
+            )
+            finished.add(store_op_id)
+
+        for store_op_id in finished:
+            self._store_operation_futures.pop(store_op_id, None)
+            self._store_operation_events.pop(store_op_id, None)
+
+    def _finish_operation_store_telemetry(self) -> None:
+        finished = {
+            request_id
+            for request_id in self._engine_finished_store_requests
+            if request_id not in self._pending_store_ops_by_request
+        }
+        if not finished:
+            return
+        self._engine_finished_store_requests.difference_update(finished)
+        self.request_telemetry.on_request_store_finished(
+            request_ids_set=finished,
+            model_name=self.model_name,
+            world_size=self.world_size,
+            kv_rank=self.worker_id,
+        )
+
+    def _get_finished_request_level(
+        self,
+        finished_req_ids_from_engine: set[str],
+    ) -> tuple[set[str], set[str]]:
+        """Preserve request-level completion for legacy MP connectors."""
+        if not self.is_healthy:
+            finished_stores = set(self.store_futures)
+            finished_retrieves = set()
+            for request_id, (_future, block_ids) in self.retrieve_futures.items():
+                finished_retrieves.add(request_id)
+                self.error_block_ids.update(block_ids)
+            self.store_futures.clear()
+            self.retrieve_futures.clear()
+            self.store_events.clear()
+            self.retrieve_events.clear()
+
+            dropped = self._dropped_retrieves
+            self._dropped_retrieves = set()
+            finished_retrieves.update(dropped)
+
+            ret_stores = self._process_finished_stores(
+                finished_stores,
+                finished_req_ids_from_engine,
+            )
+            ret_stores.difference_update(finished_retrieves)
+            return ret_stores, finished_retrieves
+
+        finished_stores = set()
+        finished_retrieves = set()
+        for request_id, future in self.store_futures.items():
+            if not future.query():
+                continue
+            succeeded = bool(future.result(timeout=60))
+            finished_stores.add(request_id)
+            if not succeeded:
+                logger.error(
+                    "STORE was not successful for request_id=%s",
+                    request_id,
+                )
+
+        for request_id, (future, block_ids) in self.retrieve_futures.items():
+            if not future.query():
+                continue
+            succeeded = bool(future.result(timeout=60))
+            finished_retrieves.add(request_id)
+            if not succeeded:
+                self.error_block_ids.update(block_ids)
+                logger.error(
+                    "RETRIEVE was not successful for request_id=%s",
+                    request_id,
+                )
+
+        for request_id in finished_stores:
+            self.store_futures.pop(request_id, None)
+            self.store_events.pop(request_id, None)
+        for request_id in finished_retrieves:
+            self.retrieve_futures.pop(request_id, None)
+            self.retrieve_events.pop(request_id, None)
+
+        dropped = self._dropped_retrieves
+        self._dropped_retrieves = set()
+        finished_retrieves.update(dropped)
+
+        ret_stores = self._process_finished_stores(
+            finished_stores,
+            finished_req_ids_from_engine,
+        )
+        if ret_stores:
+            self.request_telemetry.on_request_store_finished(
+                request_ids_set=ret_stores,
+                model_name=self.model_name,
+                world_size=self.world_size,
+                kv_rank=self.worker_id,
+            )
+        return ret_stores, finished_retrieves
