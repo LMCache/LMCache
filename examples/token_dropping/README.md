@@ -29,6 +29,7 @@ smaller model and a shorter dataset to fit the T4's memory.
 
 | Notebook | Strategy | Needs query tensor? |
 | --- | --- | --- |
+| [generation_fenced_token_dropping.ipynb](./generation_fenced_token_dropping.ipynb) | Drops the middle half of a request's cached chunks while a generation-fenced lifecycle rejects duplicate and stale completions. | No |
 | [random_token_dropping.ipynb](./random_token_dropping.ipynb) | Drops a random subset of past tokens. Uses the KV cache only. | No |
 | [snapkv_token_dropping.ipynb](./snapkv_token_dropping.ipynb) | SnapKV: keeps the first and last window, as well as the tokens the recent-window queries attend to most. Needs each request's query tensor to score importance. | Yes |
 | [rkv_token_dropping.ipynb](./rkv_token_dropping.ipynb) | R-KV: SnapKV's importance term minus a **redundancy** term, so a token is kept only if it is both attended-to and says something new. Three optimized variants live in [rkv_variants/](./rkv_variants). | Yes |
