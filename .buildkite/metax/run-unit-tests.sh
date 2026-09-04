@@ -30,9 +30,7 @@ pytest --maxfail=1 --cov=lmcache \
     --ignore=tests/v1/multiprocess/test_engine_driven_transfer.py \
     --ignore=tests/v1/multiprocess/test_free_locks.py \
     --ignore=tests/v1/multiprocess/test_query_lookup_hits.py \
-    --deselect="tests/cli/commands/bench/test_server_bench.py::TestLookupProtocol::test_poll_prefetch_status_uses_request_id" \
     --deselect="tests/cli/commands/bench/test_server_bench.py::TestUnregisterKVCache::test_data_mode_sends_engine_driven_unregister" \
-    --deselect="tests/cli/commands/bench/test_server_bench.py::TestQueryChecksum::test_success" \
     --deselect="tests/v1/mp_coordinator/test_key_directory.py::test_token_ids_outside_uint32_leave_the_binding_unfilled" \
     --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_1_scenario[cuda_ops-load_and_reshape_flash-scenario_load_and_reshape_flash]" \
     --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_2_compare[multi_layer_block_kv_transfer]"
@@ -99,13 +97,13 @@ pytest --maxfail=1 --cov=lmcache \
 # - test_mq.py, test_cb_plan_executor_gpu.py, test_custom_types.py,
 #   test_engine_driven_transfer.py, test_free_locks.py,
 #   test_query_lookup_hits.py (whole files ignored); plus
-#   test_server_bench.py's two TestLookupProtocol/TestUnregisterKVCache
-#   cases, test_key_directory.py's uint32 case, and test_torch_ops.py's two
-#   TestScenarios cases (deselected individually, since most other tests in
-#   those three files pass): confirmed FAILING on 2026-09-04 (a full,
-#   no-maxfail run across the whole tests/ tree, not just tests/v1/), but
-#   NOT root-caused, unlike every exclusion above this one. Parked here
-#   deliberately rather than investigated further for now.
+#   test_server_bench.py::TestUnregisterKVCache, test_key_directory.py's
+#   uint32 case, and test_torch_ops.py's two TestScenarios cases (deselected
+#   individually, since most other tests in those files pass): confirmed
+#   FAILING on 2026-09-04 (a full, no-maxfail run across the whole tests/
+#   tree, not just tests/v1/), but NOT root-caused, unlike every exclusion
+#   above this one. Parked here deliberately rather than investigated
+#   further for now.
 #
 #   What IS known: most of the multiprocess/ cluster times out somewhere in
 #   an MP-server round trip (e.g. test_mq.py: "Some clients failed: Client 0:
@@ -120,19 +118,20 @@ pytest --maxfail=1 --cov=lmcache \
 #   test, previously in this same failure list), which is why that one test
 #   is NOT in the list above and needs no exclusion anymore.
 #
-#   test_server_bench.py/test_key_directory.py/test_torch_ops.py failures
-#   have not been looked at individually at all -- only surfaced in the
-#   2026-09-04 full-tree run and captured here as-is.
+#   test_key_directory.py's uint32 case has a suspicious lead not yet
+#   followed up on: it logs a numpy DeprecationWarning right at the point of
+#   the code path under test ("NumPy will stop allowing conversion of
+#   out-of-bound Python integers to integer arrays... will fail in the
+#   future"), which could mean the test's expected "left unfilled" outcome
+#   no longer matches actual numpy behavior on the version installed here.
+#   test_torch_ops.py's two cases have not been looked at individually at
+#   all -- only surfaced in the 2026-09-04 full-tree run and captured here
+#   as-is.
 #
-#   test_server_bench.py::TestQueryChecksum::test_success is a separate,
-#   confirmed-flaky case (not the same investigation as the two
-#   TestLookupProtocol/TestUnregisterKVCache cases above): FAILED with
-#   "HTTP Error 503" under --maxfail=1 in a final validation run on
-#   2026-09-04, but was NOT in the failure list of the no-maxfail full-tree
-#   scan run earlier that same day -- i.e. it passes sometimes. Consistent
-#   with the same kind of single-GPU-host startup-timing race as
-#   test_instances_usage_e2e.py above, but not independently confirmed as
-#   such (just deselected here to unblock --maxfail=1 runs).
+#   test_server_bench.py::TestUnregisterKVCache is the one case in that file
+#   NOT explained by the proxy issue below -- tested directly against the
+#   no_proxy fix and still fails, so it's a genuinely separate, uninvestigated
+#   issue, unlike its two now-removed neighbors (see common-setup.sh).
 #
 #   Revisit all of these with dedicated root-causing once there's time for
 #   it; nothing here should be assumed to be a real MACA capability gap the

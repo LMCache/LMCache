@@ -23,6 +23,25 @@ if (( free_gb < MIN_FREE_GB )); then
     exit 1
 fi
 
+# This host's proxy (needed for GitHub/PyPI reachability -- see the
+# BUILDKITE_PULL_REQUEST-adjacent host notes) is set via the agent's own
+# environment (systemd unit), not by this script. But `urllib`/`requests`
+# honor http_proxy/https_proxy for ANY destination including 127.0.0.1
+# unless no_proxy explicitly exempts it -- several tests spin up a real
+# local HTTPServer and immediately query it (tests/cli/test_describe.py,
+# tests/cli/commands/bench/test_server_bench.py), and without this, those
+# requests get routed through the external proxy, which doesn't know what
+# to do with a random localhost port and returns a bare
+# `HTTPError: 503 Service Unavailable`. Confirmed 2026-09-04: this was
+# read as three separate "flaky" test failures (TestQueryChecksum,
+# TestFetchJson, and intermittently others) before finding the shared
+# cause; reproduced 100% (3/3) with proxy env vars set and no exemption,
+# fixed 100% (3/3) once no_proxy/NO_PROXY exempt localhost. Set
+# unconditionally here (not just when a proxy happens to be configured)
+# so this doesn't regress silently if the agent's own proxy setup changes.
+export no_proxy="127.0.0.1,localhost,${no_proxy:-}"
+export NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}"
+
 # MACA SDK env (cu-bridge nvcc-compatible compiler + runtime libs).
 export MACA_PATH=/opt/maca
 export CUCC_PATH="${MACA_PATH}/tools/cu-bridge"
