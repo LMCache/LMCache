@@ -39,6 +39,7 @@ uv pip uninstall cupy-cuda12x 2>/dev/null || true
 uv pip install -e . --no-build-isolation
 
 if [[ "${LMCACHE_REQUEST_TRANSPORT:-zmq}" == "grpc" ]]; then
+    uv pip install -r requirements/proto.txt
     echo "--- :gear: Generating LMCache gRPC bindings"
     python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py"
 fi
