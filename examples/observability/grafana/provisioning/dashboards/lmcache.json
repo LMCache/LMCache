@@ -2832,6 +2832,313 @@
       ],
       "title": "Request Traces",
       "type": "traces"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 120
+      },
+      "id": 6000,
+      "title": "MP Transfer Phases (expand if the build has phase timing)",
+      "type": "row",
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "Host<->device DMA rate: staging bytes / staging elapsed. Staging rides the copy engine, which does not contend with the engine's kernels for SMs, so this elapsed really is the transfer time. Compare against a measured pinned-copy baseline on this host, never the PCIe spec number. The kernel phase is not plotted: its sections queue behind the engine's compute, so bytes/elapsed would report the contention rather than the kernel (~50x low, and differing per direction for reasons that have nothing to do with the kernel). Profile with nsys if you need the kernel's own rate. Prometheus.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "GB/s",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": 300000,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "none",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 121
+          },
+          "id": 601,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "refId": "A",
+              "range": true,
+              "expr": "sum by (direction) (rate(lmcache_mp_transfer_phase_bytes_total{phase=\"staging\"}[$__rate_interval])) / sum by (direction) (rate(lmcache_mp_transfer_phase_elapsed_seconds_total{phase=\"staging\"}[$__rate_interval])) / 1e9",
+              "legendFormat": "{{direction}} staging"
+            }
+          ],
+          "title": "MP Transfer DMA Throughput - staging (GB/s)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "uid": "tempo"
+          },
+          "description": "Store transfers. A cache-hit workload is ~90% retrieves and every store lands in the first seconds of a run, so browsing { name = \"request\" } rarely surfaces one - query the store span directly. Click a trace ID to open its span tree, where each mp.store carries transfer.kernel_interval / transfer.staging children. The transfer.kernel_interval bar is a stream interval, not execution time: the kernel needs SMs and queues behind the co-resident engine's compute, so most of that bar is the wait -- a long one means it met a busy engine, not a slow copy. Read transfer.staging for the link rate.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "filterable": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "traceID"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "targetBlank": true,
+                        "title": "Open trace",
+                        "url": "/explore?schemaVersion=1&orgId=1&panes={\"tempo\":{\"datasource\":\"tempo\",\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"tempo\",\"uid\":\"tempo\"},\"queryType\":\"traceql\",\"query\":\"${__value.raw}\"}],\"range\":{\"from\":\"${__from}\",\"to\":\"${__to}\"}}}"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "startTime"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "dateTimeAsIso"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "traceDuration"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ms"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 12,
+            "x": 0,
+            "y": 129
+          },
+          "id": 602,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true,
+            "sortBy": [
+              {
+                "desc": true,
+                "displayName": "startTime"
+              }
+            ]
+          },
+          "targets": [
+            {
+              "limit": 20,
+              "query": "{ name = \"mp.store\" }",
+              "queryType": "traceql",
+              "refId": "A"
+            }
+          ],
+          "title": "MP Store Transfers",
+          "type": "table"
+        },
+        {
+          "datasource": {
+            "uid": "tempo"
+          },
+          "description": "Retrieve transfers - the common case in a cache-hit workload, so this table fills up while the store table beside it stays sparse. Each mp.retrieve carries the same transfer.kernel_interval / transfer.staging children, read the same way: transfer.staging is the link rate, transfer.kernel_interval is a stream interval whose length mostly reports how busy the engine was, not how fast the transfer went.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "filterable": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "traceID"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "targetBlank": true,
+                        "title": "Open trace",
+                        "url": "/explore?schemaVersion=1&orgId=1&panes={\"tempo\":{\"datasource\":\"tempo\",\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"tempo\",\"uid\":\"tempo\"},\"queryType\":\"traceql\",\"query\":\"${__value.raw}\"}],\"range\":{\"from\":\"${__from}\",\"to\":\"${__to}\"}}}"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "startTime"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "dateTimeAsIso"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "traceDuration"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ms"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 12,
+            "x": 12,
+            "y": 129
+          },
+          "id": 603,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true,
+            "sortBy": [
+              {
+                "desc": true,
+                "displayName": "startTime"
+              }
+            ]
+          },
+          "targets": [
+            {
+              "limit": 20,
+              "query": "{ name = \"mp.retrieve\" }",
+              "queryType": "traceql",
+              "refId": "A"
+            }
+          ],
+          "title": "MP Retrieve Transfers",
+          "type": "table"
+        }
+      ]
     }
   ],
   "preload": false,

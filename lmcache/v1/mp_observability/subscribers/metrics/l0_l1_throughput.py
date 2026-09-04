@@ -14,9 +14,10 @@ Implementation:
     because one MP server process serves multiple vLLM workers, so TP/PP
     replicas of the same request fire concurrent START/END pairs on
     different GPUs.
-  - START/END events fire on the GPU cupy stream (``publish_on_stream``),
-    so their timestamps reflect true GPU-stream time for the D2H/H2D
-    copies — not Python/lock overhead.
+  - START/END events fire on the GPU cupy stream (``publish_on_stream``).
+    The store window also contains the CPU ``reserve_write`` share (it
+    runs after MP_STORE_START is on the stream); it was measured at well
+    under 1% of the window, so no correction is applied.
 """
 
 # Future
@@ -115,6 +116,23 @@ class L0L1ThroughputSubscriber(EventSubscriber):
             return None
         return (event.session_id, str(device))
 
+    @staticmethod
+    def _metric_attributes(event: Event) -> dict[str, Any]:
+        """Build the ``device`` / ``engine_id`` / ``model_name`` label set
+        shared by every histogram in this subscriber; absent fields are
+        omitted."""
+        attrs: dict[str, Any] = {}
+        device = event.metadata.get("device")
+        if device is not None:
+            attrs["device"] = str(device)
+        engine_id = event.metadata.get("engine_id")
+        if engine_id is not None:
+            attrs["engine_id"] = str(engine_id)
+        model_name = event.metadata.get("model_name")
+        if model_name is not None:
+            attrs["model_name"] = str(model_name)
+        return attrs
+
     @classmethod
     def _record(
         cls,
@@ -122,6 +140,11 @@ class L0L1ThroughputSubscriber(EventSubscriber):
         pending: dict[tuple[str, str], float],
         hist: Any,
     ) -> None:
+        """Record one throughput sample from a matched START/END pair.
+
+        Unpaired or degenerate events (no bytes, non-positive window) are
+        dropped without recording.
+        """
         key = cls._correlation_key(event)
         if key is None:
             return
@@ -137,12 +160,4 @@ class L0L1ThroughputSubscriber(EventSubscriber):
         if dt <= 0:
             return
 
-        engine_id = event.metadata.get("engine_id")
-        model_name = event.metadata.get("model_name")
-        attrs: dict[str, Any] = {"device": key[1]}
-        if engine_id is not None:
-            attrs["engine_id"] = str(engine_id)
-        if model_name is not None:
-            attrs["model_name"] = str(model_name)
-
-        hist.record(total_bytes / dt / 1e9, attributes=attrs)
+        hist.record(total_bytes / dt / 1e9, attributes=cls._metric_attributes(event))

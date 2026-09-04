@@ -22,7 +22,7 @@ from lmcache.utils import (
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -458,12 +458,14 @@ class QStoreModule(InstanceLivenessTarget):
                 )
             )
 
+            transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=key.request_id,
                     metadata={
+                        "transfer_key": transfer_key,
                         "device": str(cache_context.device),
                         "engine_id": instance_id,
                         "model_name": model_name,
@@ -507,6 +509,7 @@ class QStoreModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
+                        transfer_key=transfer_key,
                     )
 
                 store_succeeded = True
@@ -532,6 +535,7 @@ class QStoreModule(InstanceLivenessTarget):
                         event_type=EventType.MP_STORE_END,
                         session_id=key.request_id,
                         metadata={
+                            "transfer_key": transfer_key,
                             "stored_count": stored_count,
                             "device": str(cache_context.device),
                             "engine_id": instance_id,
