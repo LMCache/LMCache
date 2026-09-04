@@ -415,6 +415,41 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
     return CacheEngineKey.from_string(key_str)
 
 
+def _validate_tag(name: str, value: object) -> None:
+    """Reject tag names and values that would break key serialization.
+
+    ``CacheEngineKey.to_string`` joins tags as ``f"{name}%{value}"`` separated by
+    ``"@"``, and ``to_dict`` uses the same ``%`` join. Neither escapes, so a
+    delimiter inside a tag makes the serialized key ambiguous:
+
+    - ``%`` in a *name* is the dangerous one. ``{"a%b": "c"}`` and
+      ``{"a": "b%c"}`` both serialize to ``...@a%b%c``, so two different keys
+      collide on the wire and one request reads the other's KV cache.
+    - ``@`` in a name or value adds a field, which the parsers reject with
+      ``ValueError`` rather than silently mis-parsing.
+
+    ``%`` inside a *value* is safe: the parsers split with ``maxsplit=1``, so
+    everything after the first ``%`` stays with the value.
+
+    Args:
+        name: Tag name, already stripped of the ``lmcache.tag.`` prefix.
+        value: Tag value.
+
+    Raises:
+        ValueError: If the tag would serialize ambiguously.
+    """
+    if "@" in name or "%" in name:
+        raise ValueError(
+            f"Invalid tag name {name!r} in CacheEngineKey: tag names cannot "
+            f"contain '@' or '%' because they delimit the serialized key"
+        )
+    if isinstance(value, str) and "@" in value:
+        raise ValueError(
+            f"Invalid tag value {value!r} for tag {name!r} in CacheEngineKey: "
+            f"tag values cannot contain '@' because it delimits the serialized key"
+        )
+
+
 @dataclass(slots=True)
 class CacheEngineKey:
     model_name: str
@@ -433,7 +468,9 @@ class CacheEngineKey:
                 if k.startswith("lmcache.tag."):
                     if tag_list is None:
                         tag_list = []
-                    tag_list.append((k[len("lmcache.tag.") :], v))
+                    name = k[len("lmcache.tag.") :]
+                    _validate_tag(name, v)
+                    tag_list.append((name, v))
         if self.dtype not in TORCH_DTYPE_TO_STR_DTYPE:
             raise ValueError(f"Unsupported dtype in CacheEngineKey: {self.dtype}")
         self._dtype_str = TORCH_DTYPE_TO_STR_DTYPE[self.dtype]
