@@ -150,6 +150,16 @@ example, including a 256-token LMCache chunk size and
 python examples/token_dropping/topology_aware_token_dropping.py
 ```
 
+For an offline deployment where vLLM logs a local snapshot path as
+`cache_model_name`, keep `--model` as the served API alias and pass that exact
+path to both `--hf-model` and `--cache-model`:
+
+```sh
+python examples/token_dropping/topology_aware_token_dropping.py \
+  --hf-model /path/to/snapshot \
+  --cache-model /path/to/snapshot
+```
+
 The script performs a real prefill, expands a logical middle-chunk
 invalidation into physical entry and byte ranges, uses that expansion to edit
 and store the live KV tensor, and resumes decode. Its JSON output also shows
