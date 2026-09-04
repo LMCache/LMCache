@@ -1279,6 +1279,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # have not been offloaded, the touch operation in end_session is incorrect
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
+        # Drop lookup state for a request aborted before its lookup was
+        # consumed (update_state_after_alloc never ran for it).
+        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
         if self.lazy_offload:
             self._pending_store.mark_req_finished(request.request_id)
