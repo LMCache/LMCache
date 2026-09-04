@@ -37,8 +37,7 @@ def parse_grpc_target(server_url: str) -> str:
     """Convert an LMCache multiprocess endpoint into a gRPC target.
 
     Args:
-        server_url: gRPC endpoint or a legacy TCP/IPC endpoint temporarily
-            redirected to gRPC by this stacked migration PR.
+        server_url: gRPC endpoint.
 
     Returns:
         A target accepted by ``grpc.insecure_channel``.
@@ -52,11 +51,11 @@ def parse_grpc_target(server_url: str) -> str:
         return server_url
 
     parsed = urlparse(server_url)
-    if parsed.scheme in {"grpc", "tcp"}:
+    if parsed.scheme == "grpc":
         if not parsed.netloc:
             raise ValueError(f"Missing host in gRPC URL: {server_url!r}")
         return parsed.netloc
-    if parsed.scheme in {"grpc+unix", "ipc", "unix"}:
+    if parsed.scheme == "grpc+unix":
         path = f"/{parsed.netloc}{parsed.path}" if parsed.netloc else parsed.path
         if not path:
             raise ValueError(f"Missing socket path in gRPC URL: {server_url!r}")

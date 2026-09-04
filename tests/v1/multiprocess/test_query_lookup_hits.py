@@ -91,7 +91,7 @@ def test_query_prefetch_lookup_hits_request_transport(
     request_transport: RequestTransport,
     expected: int | None,
 ) -> None:
-    """Lookup-hit results round-trip over each enabled request transport."""
+    """Lookup-hit results round-trip over every request transport."""
     handler = _QueryLookupHitsHandler(expected)
     port = 15575 if request_transport == "zmq" else 15576
     server_url = request_server_url(request_transport, port)
