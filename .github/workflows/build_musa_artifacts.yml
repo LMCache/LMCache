@@ -2,10 +2,10 @@ name: Build MUSA Artifacts
 
 # Reusable workflow for the Moore Threads MUSA-compatible wheel.
 #
-# The builder image owns the TorchMUSA and MUSA SDK ABI.  LMCache's current
-# MUSA profile ships the Python MUSA integration plus common native extensions;
-# it does not bundle TorchMUSA or vendor runtime libraries.  The artifact is
-# therefore installed with --no-deps in the matching runtime image and is
+# The builder image supplies the MUSA SDK/compiler and Python build tools.
+# LMCache's current MUSA profile ships the Python MUSA integration plus common
+# native extensions; it does not bundle TorchMUSA or vendor runtime libraries.
+# The artifact is smoke-installed with --no-deps in this no-device image and is
 # published to a dedicated v{tag}-musa GitHub Release, never to PyPI.
 
 on:
@@ -25,21 +25,25 @@ on:
 
 env:
     LC_ALL: en_US.UTF-8
-    # Pin the validated TorchMUSA stack by digest so a release cannot silently
-    # change when the vendor moves a mutable tag. Organizations with a
-    # mirrored image can deliberately override it with the MUSA_IMAGE
-    # repository variable.
-    MUSA_IMAGE: ${{ vars.MUSA_IMAGE || 'sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci@sha256:75c8c1012cf49caf6dd99dbbfd33931ef100d035647083b999eaf0092d94edba' }}
+    # The public image contains the MUSA compiler, SDK and Python build tools;
+    # it is intentionally used for the no-device GitHub build. Organizations
+    # can deliberately override it with the MUSA_IMAGE repository variable.
+    MUSA_IMAGE: ${{ vars.MUSA_IMAGE || 'registry.mthreads.com/mcconline/musa-pytorch-release-public:rc5.2.0-v2.9.1.post1-S5000-py310' }}
     MUSA_IMAGE_DIGEST: ${{ vars.MUSA_IMAGE_DIGEST || '' }}
     MUSA_HOME: ${{ vars.MUSA_HOME || '/usr/local/musa' }}
-    # Leave package installation empty: the validated image supplies TorchMUSA.
-    # A vendor image that needs wheel installation can set these repository
-    # variables and pass them through when invoking this reusable workflow.
+    # Leave package installation empty: the public image supplies the build
+    # tools and Torch. A custom image that needs extra wheels can set these
+    # repository variables and pass them through to the build script.
     TORCH_MUSA_PACKAGES: ${{ vars.TORCH_MUSA_PACKAGES || '' }}
     TORCH_MUSA_INDEX: ${{ vars.TORCH_MUSA_INDEX || '' }}
-    MUSA_REQUIRE_TORCH_MUSA: ${{ vars.MUSA_REQUIRE_TORCH_MUSA || '1' }}
+    # GitHub-hosted runners do not expose MUSA devices. Keep runtime
+    # torch_musa validation in the Buildkite MooreThreads lane.
+    MUSA_REQUIRE_TORCH_MUSA: ${{ vars.MUSA_REQUIRE_TORCH_MUSA || '0' }}
+    TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
     MUSA_MANYLINUX_PLATFORM: manylinux_2_35_x86_64
     MUSA_LOCAL_VERSION: musa
+    SKIP_AUDITWHEEL_REPAIR: '0'
+    MAX_JOBS: '2'
 
 defaults:
     run:
@@ -52,11 +56,6 @@ jobs:
     build-musa-artifacts:
         name: Build MUSA wheel
         runs-on: ubuntu-latest
-        env:
-            # Map the secret at job scope so the login step can safely test
-            # whether it is present; GitHub does not expose secrets directly
-            # in step-level ``if`` expressions.
-            MUSA_REGISTRY_TOKEN: ${{ secrets.MUSA_REGISTRY_TOKEN }}
         outputs:
             musa_version: ${{ steps.musa-version.outputs.musa_version }}
         steps:
@@ -83,16 +82,6 @@ jobs:
                       done <<< "${non_release_tags}"
                   fi
 
-            - name: Login to MUSA registry
-              if: vars.MUSA_REGISTRY_USERNAME != '' && env.MUSA_REGISTRY_TOKEN != ''
-              env:
-                  MUSA_REGISTRY_TOKEN: ${{ secrets.MUSA_REGISTRY_TOKEN }}
-              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
-              with:
-                  registry: sh-harbor.mthreads.com
-                  username: ${{ vars.MUSA_REGISTRY_USERNAME }}
-                  password: ${{ secrets.MUSA_REGISTRY_TOKEN }}
-
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
 
@@ -117,7 +106,7 @@ jobs:
                   echo "MUSA_VERSION=${MUSA_VERSION}" >> "$GITHUB_ENV"
                   echo "musa_version=${MUSA_VERSION}" >> "$GITHUB_OUTPUT"
 
-            - name: Build MUSA wheel in the validated vendor image
+            - name: Build MUSA wheel in the public MUSA image
               env:
                   MUSA_IMAGE: ${{ env.MUSA_IMAGE }}
                   MUSA_IMAGE_DIGEST: ${{ env.MUSA_IMAGE_DIGEST }}
@@ -140,14 +129,17 @@ jobs:
                       -e SETUPTOOLS_SCM_PRETEND_VERSION="${MUSA_VERSION}" \
                       -e MUSA_HOME="${MUSA_HOME}" \
                       -e MUSA_REQUIRE_TORCH_MUSA="${MUSA_REQUIRE_TORCH_MUSA}" \
+                      -e TORCH_DEVICE_BACKEND_AUTOLOAD="${TORCH_DEVICE_BACKEND_AUTOLOAD}" \
                       -e TORCH_MUSA_PACKAGES="${TORCH_MUSA_PACKAGES}" \
                       -e TORCH_MUSA_INDEX="${TORCH_MUSA_INDEX}" \
                       -e MUSA_MANYLINUX_PLATFORM="${MUSA_MANYLINUX_PLATFORM}" \
+                      -e SKIP_AUDITWHEEL_REPAIR="${SKIP_AUDITWHEEL_REPAIR}" \
+                      -e MAX_JOBS="${MAX_JOBS}" \
                       -v "${PWD}:/work/LMCache" \
                       --entrypoint bash "${MUSA_IMAGE_REF}" \
                       /work/LMCache/.github/scripts/build_musa_wheel.sh
 
-            - name: Smoke-check wheel installation in the MUSA runtime image
+            - name: Smoke-check wheel installation in the public MUSA image
               env:
                   MUSA_IMAGE: ${{ env.MUSA_IMAGE }}
                   MUSA_IMAGE_DIGEST: ${{ env.MUSA_IMAGE_DIGEST }}
@@ -165,13 +157,15 @@ jobs:
                       --ipc=host \
                       --network=host \
                       --shm-size=4g \
+                      -e TORCH_DEVICE_BACKEND_AUTOLOAD="${TORCH_DEVICE_BACKEND_AUTOLOAD}" \
+                      -e MUSA_REQUIRE_TORCH_MUSA="${MUSA_REQUIRE_TORCH_MUSA}" \
                       -v "${PWD}:/work/LMCache" \
                       --entrypoint bash "${MUSA_IMAGE_REF}" \
                       -lc '
                         set -euxo pipefail
                         WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                         python3 -m pip install --no-deps "$WHEEL"
-                        python3 -c "import lmcache, lmcache.lmcache_native, torch_musa; print(\"LMCache MUSA wheel import OK\"); print(\"Torch:\", __import__(\"torch\").__version__)"
+                        python3 -c "import lmcache, lmcache.lmcache_native, torch; print(\"LMCache MUSA wheel import OK\"); print(\"Torch:\", torch.__version__)"
                       '
 
             - name: Upload MUSA release artifacts to GHA

@@ -41,12 +41,23 @@ def test_musa_builder_script_is_executable_and_has_required_guards() -> None:
 
 def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     """The reusable job output must match the artifact consumed by publish."""
+    workflow_path = ROOT / ".github/workflows/build_musa_artifacts.yml"
+    workflow_text = workflow_path.read_text(encoding="utf-8")
     workflow = _load_workflow(".github/workflows/build_musa_artifacts.yml")
     assert workflow["env"]["MUSA_IMAGE"] == (
         "${{ vars.MUSA_IMAGE || "
-        "'sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci@sha256:"
-        "75c8c1012cf49caf6dd99dbbfd33931ef100d035647083b999eaf0092d94edba' }}"
+        "'registry.mthreads.com/mcconline/musa-pytorch-release-public:"
+        "rc5.2.0-v2.9.1.post1-S5000-py310' }}"
     )
+    assert workflow["env"]["MUSA_REQUIRE_TORCH_MUSA"] == (
+        "${{ vars.MUSA_REQUIRE_TORCH_MUSA || '0' }}"
+    )
+    assert workflow["env"]["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
+    assert workflow["env"]["SKIP_AUDITWHEEL_REPAIR"] == "0"
+    assert workflow["env"]["MAX_JOBS"] == "2"
+    assert "registry.mthreads.com" in workflow_text
+    assert "sh-harbor.mthreads.com" not in workflow_text
+    assert "docker/login-action" not in workflow_text
     call = workflow["on"]["workflow_call"]
     assert call["outputs"]["musa_version"]["value"] == (
         "${{ jobs.build-musa-artifacts.outputs.musa_version }}"
@@ -61,6 +72,14 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
         if "uses" in step and "upload-artifact" in step["uses"]
     ]
     assert upload_steps[0]["with"]["name"] == "release-musa-artifacts"
+    smoke = next(
+        step
+        for step in job["steps"]
+        if step.get("name", "").startswith("Smoke-check wheel installation")
+    )
+    assert "torch_musa" not in smoke["run"]
+    assert "--no-deps" in smoke["run"]
+    assert "MUSA_REQUIRE_TORCH_MUSA" in smoke["run"]
 
 
 def test_publish_workflow_wires_musa_build_and_release() -> None:
