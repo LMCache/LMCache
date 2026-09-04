@@ -222,6 +222,32 @@ steps:
 
       # Temporarily disabled: hma_lm_eval_gemma4.
 
+      # HMA transfer-faithfulness probe on a Mamba/GDN hybrid
+      # (Qwen3.5-0.8B), one arm per attention backend, because the backends
+      # exercise different transfer paths. FLASH_ATTN advertises
+      # MultipleOf(16) kernel block sizes, so the mamba-aligned block size
+      # (544) is paged as-is and no re-view is needed. FLASHINFER only
+      # supports fixed kernel pages (16/32/64), so vLLM sub-pages the
+      # registered attention tensor and LMCache's subpaged-attention-view
+      # edit must fire for store/retrieve to be faithful (#4247): that arm
+      # is the regression gate for the sub-paging path. The probe compares
+      # an engine-computed completion against an LMCache-served one exactly
+      # (single request, temperature 0); see run-hma-probe.sh.
+      - label: ":compression: hma_probe_qwen3_5 / {{matrix.backend}}"
+        command: |
+          export ATTENTION_BACKEND="{{matrix.backend}}"
+          .buildkite/k3_tests/multiprocess/run.sh hma_probe_qwen3_5
+        matrix:
+          setup:
+            backend:
+              - "FLASH_ATTN"
+              - "FLASHINFER"
+        timeout_in_minutes: 20
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: fault_tolerance"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
         timeout_in_minutes: 30
