@@ -700,8 +700,10 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
 
     client = MessageQueueClient(server_url, context)
     try:
-        invalid = client.submit_request(RequestType.GET_CHUNK_SIZE, [123])
-        healthy = client.submit_request(RequestType.NOOP, [])
+        invalid: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, [123]
+        )
+        healthy: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
 
         with pytest.raises(ValueError, match="Payload count mismatch"):
             invalid.result(timeout=5)
