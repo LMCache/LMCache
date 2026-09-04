@@ -228,9 +228,17 @@ def create_lmcache_ec_config() -> LMCacheEngineConfig:
     return load_ec_engine_config(base_config=lmcache_get_or_create_config())
 
 
-def hex_hash_to_int16(s: str) -> int:
+# Number of bits kept from a multimodal identifier when it is injected into
+# the token-id stream. The injected value only ever feeds the chunk hash, so
+# the sole requirement is that two distinct identifiers stay distinct; 62 bits
+# keeps the value comfortably inside the signed 64-bit range used by the token
+# tensors while making a collision astronomically unlikely.
+MM_HASH_NUM_BITS = 62
+
+
+def hex_hash_to_int(s: str, num_bits: int = MM_HASH_NUM_BITS) -> int:
     """
-    Convert a hash identifier into a 16-bit integer.
+    Convert a hash identifier into an integer of at most ``num_bits`` bits.
 
     Historically, LMCache expected multimodal identifiers to be hex strings.
     In practice (e.g., OpenAI-style multimodal requests), identifiers may be
@@ -241,19 +249,31 @@ def hex_hash_to_int16(s: str) -> int:
     # Be defensive: vLLM may pass non-string identifiers.
     s = "" if s is None else str(s)
     s_stripped = s.strip()
+    mask = (1 << num_bits) - 1
 
     # Fast-path: pure hex (optionally 0x-prefixed).
     hex_part = s_stripped[2:] if s_stripped.lower().startswith("0x") else s_stripped
     if hex_part and all(c in string.hexdigits for c in hex_part):
         try:
-            return int(hex_part, 16) & 0xFFFF
+            return int(hex_part, 16) & mask
         except ValueError:
             # Extremely unlikely (e.g., oversized/odd formatting); fall back to hashing.
             pass
 
-    # Fallback: stable 16-bit value derived from the full identifier string.
+    # Fallback: stable value derived from the full identifier string.
     digest = hashlib.sha256(s_stripped.encode("utf-8")).digest()
-    return int.from_bytes(digest[:2], byteorder="big", signed=False)
+    num_bytes = (num_bits + 7) // 8
+    return int.from_bytes(digest[:num_bytes], byteorder="big", signed=False) & mask
+
+
+def hex_hash_to_int16(s: str) -> int:
+    """
+    Convert a hash identifier into a 16-bit integer.
+
+    Kept for backwards compatibility; 16 bits are too few to identify
+    multimodal content, so use :func:`hex_hash_to_int` for that.
+    """
+    return hex_hash_to_int(s, num_bits=16)
 
 
 def apply_mm_hashes_to_token_ids(
@@ -271,7 +291,7 @@ def apply_mm_hashes_to_token_ids(
         if start >= n:
             continue
         end = min(start + length, n)
-        token_ids[start:end] = hex_hash_to_int16(hash_str)
+        token_ids[start:end] = hex_hash_to_int(hash_str)
     return token_ids
 
 
