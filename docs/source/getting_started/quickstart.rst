@@ -57,7 +57,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
             include a ZMQ transport prefix (e.g. ``tcp://``); a bare
             ``host``/``host:port`` is also accepted and is normalized to
-            ``tcp://`` automatically:
+            ``tcp://`` automatically. See :doc:`/mp/request_transport` for
+            supported endpoint schemes and transport-selection behavior:
 
             .. code-block:: bash
 

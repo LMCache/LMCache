@@ -4,7 +4,8 @@
 Implements ``LMCacheMPKvConnectorScheduler`` and
 ``LMCacheMPKvConnectorWorker`` — the two classes TRT-LLM's
 ``kv_connector_config`` requires — backed by a standalone LMCache server
-reached over ZMQ. Provides process isolation and shared caching across
+reached through the configured request transport. Provides process isolation
+and shared caching across
 multiple TRT-LLM instances on the same node.
 
 The KV pool tensor is shared with the server via :class:`RawCudaIPCWrapper`
@@ -37,9 +38,8 @@ from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.base.event_ipc import create_event, export_event, record_event
 from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
@@ -79,8 +79,9 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         self._pending: dict = {}
 
         self._zmq_context = zmq.Context()
-        self._req_client: RequestClient = ZmqMultiprocessClient(
-            MessageQueueClient(_get_server_url(self._llm_args), self._zmq_context)
+        self._req_client: RequestClient = RequestClientFactory.create(
+            _get_server_url(self._llm_args),
+            context=self._zmq_context,
         )
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
@@ -264,8 +265,9 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._block_size: int = self._llm_args.kv_cache_config.tokens_per_block
 
         self._zmq_context = zmq.Context()
-        self._req_client: RequestClient = ZmqMultiprocessClient(
-            MessageQueueClient(_get_server_url(self._llm_args), self._zmq_context)
+        self._req_client: RequestClient = RequestClientFactory.create(
+            _get_server_url(self._llm_args),
+            context=self._zmq_context,
         )
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)

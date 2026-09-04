@@ -33,9 +33,8 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base.event_ipc import create_event, export_event, record_event
 from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
@@ -153,7 +152,7 @@ class _PendingLookup:
 class LMCacheMPConnector:
     """SGLang LMCache multi-process connector.
 
-    Talks to a standalone LMCache daemon over ZMQ.
+    Talks to a standalone LMCache daemon through the configured transport.
 
     - ``lookup_kv``: fires LOOKUP. Daemon prefetches missing
       chunks L2→L1 (DRAM), keeps the read locks held, returns the
@@ -202,8 +201,10 @@ class LMCacheMPConnector:
         self._pending_lookups_lock = threading.Lock()
 
         self.context = zmq.Context.instance()
-        self.req_client: RequestClient = ZmqMultiprocessClient(
-            MessageQueueClient(f"tcp://{host}:{port}", self.context)
+        server_url = f"{host}:{port}"
+        self.req_client: RequestClient = RequestClientFactory.create(
+            server_url,
+            context=self.context,
         )
 
         self._lmcache_chunk_size = get_lmcache_chunk_size(self.req_client)
