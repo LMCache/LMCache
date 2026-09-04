@@ -147,7 +147,7 @@ Install LMCache
                             docker run -it --privileged --network=host \
                                 -e MTHREADS_VISIBLE_DEVICES=all \
                                 --entrypoint bash \
-                                sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci:latest
+                                sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci@sha256:75c8c1012cf49caf6dd99dbbfd33931ef100d035647083b999eaf0092d94edba
 
                             VERSION=0.5.5  # replace with target release
                             pip install lmcache==${VERSION}+musa --no-deps \

@@ -25,10 +25,11 @@ on:
 
 env:
     LC_ALL: en_US.UTF-8
-    # This image is the validated TorchMUSA stack used by the MUSA Buildkite
-    # lane. Organizations with a mirrored/public image can override it at the
-    # repository variable MUSA_IMAGE without changing this workflow.
-    MUSA_IMAGE: ${{ vars.MUSA_IMAGE || 'sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci:latest' }}
+    # Pin the validated TorchMUSA stack by digest so a release cannot silently
+    # change when the vendor moves a mutable tag. Organizations with a
+    # mirrored image can deliberately override it with the MUSA_IMAGE
+    # repository variable.
+    MUSA_IMAGE: ${{ vars.MUSA_IMAGE || 'sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci@sha256:75c8c1012cf49caf6dd99dbbfd33931ef100d035647083b999eaf0092d94edba' }}
     MUSA_IMAGE_DIGEST: ${{ vars.MUSA_IMAGE_DIGEST || '' }}
     MUSA_HOME: ${{ vars.MUSA_HOME || '/usr/local/musa' }}
     # Leave package installation empty: the validated image supplies TorchMUSA.
@@ -127,7 +128,11 @@ jobs:
                           echo "MUSA_IMAGE_DIGEST must be a sha256 digest" >&2
                           exit 1
                       }
-                      MUSA_IMAGE_REF="${MUSA_IMAGE}@${MUSA_IMAGE_DIGEST}"
+                      # Allow the digest override to be used with either a
+                      # tag or the pinned default image without duplicating
+                      # the @sha256 suffix.
+                      MUSA_IMAGE_REF="${MUSA_IMAGE_REF%@sha256:*}"
+                      MUSA_IMAGE_REF="${MUSA_IMAGE_REF}@${MUSA_IMAGE_DIGEST}"
                   fi
                   docker run --rm \
                       --ipc=host \
@@ -149,7 +154,12 @@ jobs:
               run: |
                   MUSA_IMAGE_REF="${MUSA_IMAGE}"
                   if [[ -n "${MUSA_IMAGE_DIGEST}" ]]; then
-                      MUSA_IMAGE_REF="${MUSA_IMAGE}@${MUSA_IMAGE_DIGEST}"
+                      [[ "${MUSA_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+                          echo "MUSA_IMAGE_DIGEST must be a sha256 digest" >&2
+                          exit 1
+                      }
+                      MUSA_IMAGE_REF="${MUSA_IMAGE_REF%@sha256:*}"
+                      MUSA_IMAGE_REF="${MUSA_IMAGE_REF}@${MUSA_IMAGE_DIGEST}"
                   fi
                   docker run --rm \
                       --ipc=host \
