@@ -64,6 +64,9 @@ class FakeHeartbeatThread:
         # "start", "stop") for call-order assertions.
         self.calls: list[str] = []
         self.stop_requested = False
+        self.stop_timeouts: list[float] = []
+        self.in_flight_ping_duration = 0.0
+        self.in_flight_ping = False
         FakeHeartbeatThread.instances.append(self)
 
     def register_recover_callback(self, callback: Callable[[], bool]) -> None:
@@ -80,7 +83,11 @@ class FakeHeartbeatThread:
 
     def stop(self, timeout: float = 5.0) -> None:
         self.calls.append("stop")
+        self.stop_timeouts.append(timeout)
+        if timeout < self.in_flight_ping_duration:
+            return
         self.stop_requested = True
+        self.in_flight_ping = False
 
     def simulate_successful_ping(self) -> None:
         """Mimic one successful heartbeat cycle: on the unhealthy->healthy
@@ -116,6 +123,43 @@ def _make_worker_adapter(
         parallel_strategy=parallel_strategy,
         mq_timeout=5.0,
         extra_config=extra_config,
+    )
+
+
+def _make_scheduler_adapter_for_heartbeat_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[adapter_mod.LMCacheMPSchedulerAdapter, dict[str, MagicMock]]:
+    """Build a scheduler adapter with recorded request clients."""
+    server_urls = ["tcp://server-a:5555", "tcp://server-b:5555"]
+    clients = {
+        url: MagicMock(name=f"{url}_client", spec=RequestClient) for url in server_urls
+    }
+    for client in clients.values():
+        client.get_chunk_size.return_value.result.return_value = 256
+        client.lookup.return_value.result.return_value = None
+
+    request_client_factory = MagicMock()
+    request_client_factory.create.side_effect = lambda url, **_kwargs: clients[url]
+    monkeypatch.setattr(adapter_mod, "RequestClientFactory", request_client_factory)
+
+    return (
+        adapter_mod.LMCacheMPSchedulerAdapter(
+            server_urls=server_urls,
+            context=MagicMock(name="zmq_context"),
+            model_name="test-model",
+            vllm_block_size=16,
+            parallel_strategy=ParallelStrategy(
+                mla_only=False,
+                vllm_world_size=2,
+                vllm_worker_id=0,
+                tp_size=2,
+                pp_size=1,
+                n_servers=2,
+            ),
+            mq_timeout=5.0,
+            heartbeat_interval=10.0,
+        ),
+        clients,
     )
 
 
@@ -687,6 +731,81 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     adapter.submit_store_request("req-2", _op([[1]]), MagicMock())
     assert len(FakeHeartbeatThread.instances) == 1
     assert adapter.transfer_ctx.submit_store.call_count == 2
+
+
+def test_scheduler_heartbeat_startup_starts_missing_servers_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lookups start, backfill, and retain one heartbeat per server."""
+    FakeHeartbeatThread.instances.clear()
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+    adapter, clients = _make_scheduler_adapter_for_heartbeat_test(monkeypatch)
+    failed_client = clients["tcp://server-b:5555"]
+
+    def fail_one_start(heartbeat: FakeHeartbeatThread) -> None:
+        if heartbeat.req_client is failed_client:
+            FakeHeartbeatThread.start_hook = None
+            raise RuntimeError("simulated heartbeat start failure")
+
+    monkeypatch.setattr(FakeHeartbeatThread, "start_hook", fail_one_start)
+
+    with pytest.raises(RuntimeError, match="simulated heartbeat start failure"):
+        adapter.maybe_submit_lookup_request("first", list(range(256)))
+
+    adapter.maybe_submit_lookup_request("second", list(range(256)))
+    adapter.maybe_submit_lookup_request("third", list(range(256)))
+
+    server_a_heartbeats = [
+        heartbeat
+        for heartbeat in FakeHeartbeatThread.instances
+        if heartbeat.req_client is clients["tcp://server-a:5555"]
+    ]
+    server_b_heartbeats = [
+        heartbeat
+        for heartbeat in FakeHeartbeatThread.instances
+        if heartbeat.req_client is failed_client
+    ]
+    assert len(server_a_heartbeats) == 1
+    assert len(server_b_heartbeats) == 2
+    assert server_a_heartbeats[0].calls == ["start"]
+    assert server_b_heartbeats[-1].calls == ["start"]
+    assert clients["tcp://server-a:5555"].lookup.call_count == 2
+    assert failed_client.lookup.call_count == 2
+
+
+def test_scheduler_shutdown_waits_for_in_flight_heartbeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown waits for every in-flight heartbeat before closing clients."""
+    FakeHeartbeatThread.instances.clear()
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+    adapter, clients = _make_scheduler_adapter_for_heartbeat_test(monkeypatch)
+
+    adapter.maybe_submit_lookup_request("request", list(range(256)))
+
+    for heartbeat in FakeHeartbeatThread.instances:
+        heartbeat.in_flight_ping_duration = 10.5
+        heartbeat.in_flight_ping = True
+
+    heartbeat_stopped_at_close: list[bool] = []
+    for client in clients.values():
+        client.close.side_effect = lambda: heartbeat_stopped_at_close.append(
+            all(heartbeat.stop_requested for heartbeat in FakeHeartbeatThread.instances)
+        )
+
+    adapter.shutdown()
+
+    assert all(
+        heartbeat.in_flight_ping_duration > 5.0
+        for heartbeat in FakeHeartbeatThread.instances
+    )
+    assert all(
+        heartbeat.stop_timeouts == [11.0] for heartbeat in FakeHeartbeatThread.instances
+    )
+    assert all(
+        not heartbeat.in_flight_ping for heartbeat in FakeHeartbeatThread.instances
+    )
+    assert heartbeat_stopped_at_close == [True] * len(clients)
 
 
 def test_heartbeat_first_ping_runs_callback_before_setting_event(
