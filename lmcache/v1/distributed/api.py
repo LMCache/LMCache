@@ -324,9 +324,14 @@ class MemoryLayoutDesc:
             )
 
 
-GroupKind = Literal["attention", "recurrent", "standalone"]
+GroupKind = Literal["attention", "recurrent", "aux", "standalone"]
 """Object-group kind label: attention KV, recurrent state pages, or a
-connector-private standalone group."""
+connector-private aux group.
+
+``"standalone"`` is the deprecated spelling of ``"aux"``: producers emit
+``"aux"``; consumers accept both for one release, then ``"standalone"`` is
+removed. (The label never crosses the wire -- it is derived server-side from
+``EngineGroupInfo.extra_object_group_tag``.)"""
 
 
 @dataclass(frozen=True)

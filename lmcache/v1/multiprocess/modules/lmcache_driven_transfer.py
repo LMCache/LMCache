@@ -1418,7 +1418,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
-            # Standalone (connector-private) groups are never served by the
+            # Aux (connector-private) groups are never served by the
             # std retrieve: the lookup does not lock their keys and their
             # block-id entry is a placeholder -- reading them would be an
             # unlocked read of a plane nobody consumes here.
@@ -1426,7 +1426,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             skipped_groups = {
                 g
                 for g, kind in enumerate(attn_desc.group_kinds)
-                if kind == "standalone"
+                # "standalone" is the deprecated spelling of "aux".
+                if kind in ("aux", "standalone")
             }
             group_skips = [
                 0 if window < 0 else max(0, num_chunks - window)

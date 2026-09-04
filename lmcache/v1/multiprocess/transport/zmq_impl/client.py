@@ -255,6 +255,10 @@ class ZmqMultiprocessClient:
         """Run a CacheBlend unified lookup."""
         return self._call(RequestType.CB_UNIFIED_LOOKUP, key, tp_size)
 
+    def cb_protocol_handshake(self, client_version: int) -> MessagingFuture[Any]:
+        """Exchange blend protocol versions with the server."""
+        return self._call(RequestType.CB_PROTOCOL_HANDSHAKE, client_version)
+
     def p2p_lookup_and_lock(
         self,
         keys: list[Any],

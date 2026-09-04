@@ -299,9 +299,10 @@ class ObjectGroupInfo:
     kernel group in this object group. ``-1`` means the kernel groups are
     not sliding-window attention."""
 
-    standalone: bool = False
-    """Whether this is a connector-private (standalone) object group (see
-    ``KernelGroupInfo.extra_object_group_tag``)."""
+    aux: bool = False
+    """Whether this is a connector-private aux object group (see
+    ``KernelGroupInfo.extra_object_group_tag``). Previously named
+    ``standalone``."""
 
     recurrent: bool = False
     """Whether every kernel group in this object group holds recurrent state
@@ -606,7 +607,7 @@ class KVLayerGroupsManager:
             An :class:`AttnWindowDesc` with one entry per object group, in
             object-group order; the entry is ``-1`` for a non-sliding-window
             group. ``group_kinds`` labels each object group so consumers can
-            tell attention, recurrent-state, and connector-private standalone
+            tell attention, recurrent-state, and connector-private aux
             groups apart.
 
         Note:
@@ -614,9 +615,7 @@ class KVLayerGroupsManager:
             has a single full-attention entry.
         """
         kinds: tuple[GroupKind, ...] = tuple(
-            "standalone"
-            if g.standalone
-            else ("recurrent" if g.recurrent else "attention")
+            "aux" if g.aux else ("recurrent" if g.recurrent else "attention")
             for g in self._object_groups
         )
         if self._full_sw_kv:
@@ -712,7 +711,7 @@ class KVLayerGroupsManager:
             ObjectGroupInfo(
                 kernel_group_indices=kernel_group_indices,
                 sw_size_chunks=bucket_sw_size[bucket],
-                standalone=bucket.extra_tag != 0,
+                aux=bucket.extra_tag != 0,
                 recurrent=all(
                     self._kernel_groups[i].recurrent_state for i in kernel_group_indices
                 ),

@@ -15,7 +15,27 @@ REQUEST_NAMES = [
     "CB_UNREGISTER_ROPE",
     "CB_RETRIEVE_PRE_COMPUTED",
     "CB_UNIFIED_LOOKUP",
+    "CB_PROTOCOL_HANDSHAKE",
 ]
+
+# Version of the blend wire protocol (the CB_* payload/response shapes).
+# Bump ONLY on an incompatible shape change -- which also means introducing a
+# new request name, since wire ids are append-only. The handshake lets a
+# client detect version skew up front instead of hanging on a mismatched RPC.
+BLEND_PROTOCOL_VERSION = 1
+
+
+def handshake_response(client_version: int) -> tuple[int, bool]:
+    """Answer a CB_PROTOCOL_HANDSHAKE.
+
+    Args:
+        client_version: The client's BLEND_PROTOCOL_VERSION.
+
+    Returns:
+        (server_version, compatible): the server's version and whether the
+        client can talk to this server without shape mismatches.
+    """
+    return (BLEND_PROTOCOL_VERSION, client_version == BLEND_PROTOCOL_VERSION)
 
 
 def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
@@ -79,5 +99,14 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             # the sparse chunks are in L1 (mirrors dense QUERY_PREFETCH_STATUS).
             response_class=CBUnifiedLookupResult | None,
             handler_type=HandlerType.BLOCKING,
+        ),
+        # Protocol handshake: the client sends its BLEND_PROTOCOL_VERSION and
+        # the server answers (server_version, compatible). Client-gated by
+        # cb.handshake, default off (see RequestType.CB_PROTOCOL_HANDSHAKE).
+        # Payload: (client_version,). Returns: (server_version, compatible).
+        "CB_PROTOCOL_HANDSHAKE": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=tuple[int, bool],
+            handler_type=HandlerType.SYNC,
         ),
     }
