@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Tests for the QUERY_PREFETCH_LOOKUP_HITS protocol: enum registration,
-protocol definition, message-queue round-trip, and server handler.
+protocol definition, request-transport round-trip, and server handler.
 """
 
 # Standard
 from unittest.mock import MagicMock
 import time
+
+# Third Party
+import pytest
 
 # First Party
 from lmcache.v1.distributed.api import (
@@ -24,10 +27,14 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
-from tests.v1.multiprocess.test_mq import (
-    MessageQueueTestHelper,
+from tests.v1.multiprocess.transport_test_utils import (
+    REQUEST_TRANSPORTS,
+    RequestTransport,
+    request_server_url,
+    start_lookup_request_server,
 )
 
 # ============================================================================
@@ -61,50 +68,42 @@ def test_query_prefetch_lookup_hits_handler_type():
 
 
 # ============================================================================
-# Message-queue round-trip test
+# Request-transport round-trip tests
 # ============================================================================
 
 
-def _query_lookup_hits_handler(request_id: str) -> int | None:
-    """Dummy handler for QUERY_PREFETCH_LOOKUP_HITS requests."""
-    assert isinstance(request_id, str)
-    return 42
+class _QueryLookupHitsHandler:
+    """Return a configured lookup-hit result and record the request ID."""
+
+    def __init__(self, result: int | None) -> None:
+        self.result = result
+        self.request_id: str | None = None
+
+    def query_prefetch_lookup_hits(self, request_id: str) -> int | None:
+        """Record the request ID and return the configured result."""
+        self.request_id = request_id
+        return self.result
 
 
-def test_mq_query_prefetch_lookup_hits():
-    """Test MessageQueue with QUERY_PREFETCH_LOOKUP_HITS request type."""
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5575")
-    helper.register_handler(
-        RequestType.QUERY_PREFETCH_LOOKUP_HITS, _query_lookup_hits_handler
-    )
-
-    helper.run_test(
-        request_type=RequestType.QUERY_PREFETCH_LOOKUP_HITS,
-        payloads=["req-1"],
-        expected_response=42,
-        num_requests=1,
-    )
-
-
-def _query_lookup_hits_none_handler(request_id: str) -> int | None:
-    """Dummy handler that returns None (lookup still in progress)."""
-    assert isinstance(request_id, str)
-    return None
-
-
-def test_mq_query_prefetch_lookup_hits_none_response():
-    """Test MessageQueue returns None when lookup is still in progress."""
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5576")
-    helper.register_handler(
-        RequestType.QUERY_PREFETCH_LOOKUP_HITS, _query_lookup_hits_none_handler
-    )
-
-    helper.run_test(
-        request_type=RequestType.QUERY_PREFETCH_LOOKUP_HITS,
-        payloads=["req-1"],
-        expected_response=None,
-        num_requests=1,
-    )
+@pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
+@pytest.mark.parametrize("expected", [42, None])
+def test_query_prefetch_lookup_hits_request_transport(
+    request_transport: RequestTransport,
+    expected: int | None,
+) -> None:
+    """Lookup-hit results round-trip over every request transport."""
+    handler = _QueryLookupHitsHandler(expected)
+    port = 15575 if request_transport == "zmq" else 15576
+    server_url = request_server_url(request_transport, port)
+    server = start_lookup_request_server(request_transport, server_url, handler)
+    client = RequestClientFactory.create(server_url)
+    try:
+        result = client.query_prefetch_lookup_hits("req-1").result(timeout=5)
+        assert result == expected
+        assert handler.request_id == "req-1"
+    finally:
+        client.close()
+        server.close()
 
 
 # ============================================================================
