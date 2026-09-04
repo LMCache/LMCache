@@ -450,3 +450,63 @@ def test_redis_plugin_custom_url(mock_redis_connector, autorelease_v1) -> None:
 
     close_asyncio_loop(async_loop, async_thread)
     local_cpu_backend.close()
+
+
+@pytest.mark.parametrize(
+    "url_template",
+    [
+        # The no-authority form the fs:// scheme documents as fs:///tmp/lmcache.
+        "fs://{path}",
+        # The legacy form every other fs test uses.
+        "fs://host:0{path}",
+    ],
+)
+def test_fs_connector_authority_is_optional(autorelease_v1, url_template):
+    """An fs:// URL names the same directory with or without an authority.
+
+    The scheme is documented as fs://[host:port]/path, so fs:///var/lmcache
+    and fs://host:0/var/lmcache must both store into /var/lmcache.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        url = url_template.format(path=temp_dir)
+        async_loop, async_thread = init_asyncio_loop()
+        memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+        config = LMCacheEngineConfig.from_defaults()
+        local_cpu_backend = _create_local_cpu_backend(memory_allocator, False, config)
+        try:
+            connector = autorelease_v1(
+                CreateConnector(url, async_loop, local_cpu_backend, config)
+            )
+
+            random_key = dumb_cache_engine_key()
+            memory_obj = local_cpu_backend.allocate(
+                torch.Size([2, 32, 256, 1024]), torch.bfloat16
+            )
+            memory_obj.ref_count_up()
+
+            future = asyncio.run_coroutine_threadsafe(
+                connector.put(random_key, memory_obj), async_loop
+            )
+            future.result()
+
+            # The chunk landed in temp_dir, so the URL resolved to that path.
+            files = list(Path(temp_dir).glob("*.data"))
+            assert len(files) == 1
+            assert files[0].name == f"{random_key.to_string()}.data"
+        finally:
+            close_asyncio_loop(async_loop, async_thread)
+            local_cpu_backend.close()
+
+
+def test_fs_connector_url_without_path_is_rejected(autorelease_v1):
+    """An fs:// URL carrying no path is rejected with a usable message."""
+    async_loop, async_thread = init_asyncio_loop()
+    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    config = LMCacheEngineConfig.from_defaults()
+    local_cpu_backend = _create_local_cpu_backend(memory_allocator, False, config)
+    try:
+        with pytest.raises(ValueError, match="no path"):
+            CreateConnector("fs://", async_loop, local_cpu_backend, config)
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+        local_cpu_backend.close()
