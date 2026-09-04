@@ -22,6 +22,12 @@ from lmcache.v1.gpu_connector.gds_context import (
     initialize_gds_context,
 )
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
+from lmcache.v1.multiprocess.commit_policy import (
+    DEFAULT_COMMIT_CONFIG,
+    CommitPolicy,
+    CommitPolicyConfig,
+    create_commit_policy,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -197,6 +203,10 @@ class MPCacheServerContext:
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             False.
+        commit_config: How the ``END_SESSION`` handler decides whether a
+            finished request's final sliding window is copied to L2 right
+            away. Defaults to the "never" policy, which leaves every window
+            to the eviction write-back as before.
     """
 
     def __init__(
@@ -206,10 +216,13 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        commit_config: CommitPolicyConfig = DEFAULT_COMMIT_CONFIG,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._commit_config = commit_config
+        self._commit_policy = create_commit_policy(commit_config)
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -250,6 +263,16 @@ class MPCacheServerContext:
     def full_sw_kv(self) -> bool:
         """Whether sliding-window groups cache full per-chunk KV (no window cutting)."""
         return self._full_sw_kv
+
+    @property
+    def commit_config(self) -> CommitPolicyConfig:
+        """How this server decides and places sliding-window commits."""
+        return self._commit_config
+
+    @property
+    def commit_policy(self) -> CommitPolicy:
+        """The configured commit policy."""
+        return self._commit_policy
 
     @property
     def storage_manager(self) -> StorageManager:
@@ -297,6 +320,7 @@ class MPCacheServerContext:
         """
         session = self.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
+        session.note_resolved(key.end)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         chunk_hashes = [

@@ -35,6 +35,7 @@ from lmcache.v1.mp_observability.gc_monitor import (
     shutdown_gc_monitor,
 )
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
+from lmcache.v1.multiprocess.commit_policy import CommitAnchor, CommitPolicyConfig
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
     CoordinatorConfig,
@@ -403,6 +404,11 @@ def run_cache_server(
         hash_algorithm=mp_config.hash_algorithm,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
+        commit_config=CommitPolicyConfig(
+            policy=mp_config.commit_policy,
+            anchor=CommitAnchor(mp_config.commit_anchor),
+            boundary_token_ids=frozenset(mp_config.commit_boundary_token_ids),
+        ),
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)
