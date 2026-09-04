@@ -37,8 +37,7 @@ env:
     TORCH_MUSA_PACKAGES: ${{ vars.TORCH_MUSA_PACKAGES || '' }}
     TORCH_MUSA_INDEX: ${{ vars.TORCH_MUSA_INDEX || '' }}
     # GitHub-hosted runners do not expose MUSA devices. Keep runtime
-    # torch_musa validation in the Buildkite MooreThreads lane.
-    MUSA_REQUIRE_TORCH_MUSA: ${{ vars.MUSA_REQUIRE_TORCH_MUSA || '0' }}
+    # torch_musa validation runs separately in the Buildkite MooreThreads lane.
     TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
     MUSA_MANYLINUX_PLATFORM: manylinux_2_35_x86_64
     MUSA_LOCAL_VERSION: musa
@@ -128,7 +127,6 @@ jobs:
                       --network=host \
                       -e SETUPTOOLS_SCM_PRETEND_VERSION="${MUSA_VERSION}" \
                       -e MUSA_HOME="${MUSA_HOME}" \
-                      -e MUSA_REQUIRE_TORCH_MUSA="${MUSA_REQUIRE_TORCH_MUSA}" \
                       -e TORCH_DEVICE_BACKEND_AUTOLOAD="${TORCH_DEVICE_BACKEND_AUTOLOAD}" \
                       -e TORCH_MUSA_PACKAGES="${TORCH_MUSA_PACKAGES}" \
                       -e TORCH_MUSA_INDEX="${TORCH_MUSA_INDEX}" \
@@ -158,7 +156,6 @@ jobs:
                       --network=host \
                       --shm-size=4g \
                       -e TORCH_DEVICE_BACKEND_AUTOLOAD="${TORCH_DEVICE_BACKEND_AUTOLOAD}" \
-                      -e MUSA_REQUIRE_TORCH_MUSA="${MUSA_REQUIRE_TORCH_MUSA}" \
                       -v "${PWD}:/work/LMCache" \
                       --entrypoint bash "${MUSA_IMAGE_REF}" \
                       -lc '

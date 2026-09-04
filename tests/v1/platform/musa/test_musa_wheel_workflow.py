@@ -24,7 +24,7 @@ def test_musa_builder_script_is_executable_and_has_required_guards() -> None:
     script = ROOT / ".github/scripts/build_musa_wheel.sh"
     assert stat.S_IMODE(script.stat().st_mode) & stat.S_IXUSR
     content = script.read_text()
-    assert 'MUSA_REQUIRE_TORCH_MUSA="${MUSA_REQUIRE_TORCH_MUSA:-1}"' in content
+    assert "import torch_musa" not in content
     assert "SETUPTOOLS_SCM_PRETEND_VERSION:-0.0.0.dev0+musa" in content
     assert "--exclude 'libmusa*.so*'" in content
     assert "wheel is missing the +musa local version" in content
@@ -46,9 +46,6 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
         "${{ vars.MUSA_IMAGE || "
         "'registry.mthreads.com/mcconline/musa-pytorch-release-public:"
         "rc5.2.0-v2.9.1.post1-S5000-py310' }}"
-    )
-    assert workflow["env"]["MUSA_REQUIRE_TORCH_MUSA"] == (
-        "${{ vars.MUSA_REQUIRE_TORCH_MUSA || '0' }}"
     )
     assert workflow["env"]["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert workflow["env"]["SKIP_AUDITWHEEL_REPAIR"] == "0"
@@ -79,7 +76,6 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     )
     assert "torch_musa" not in smoke["run"]
     assert "--no-deps" in smoke["run"]
-    assert "MUSA_REQUIRE_TORCH_MUSA" in smoke["run"]
 
     version_step = next(
         step
