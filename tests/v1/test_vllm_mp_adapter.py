@@ -96,6 +96,8 @@ class FakeHeartbeatThread:
 
 def _make_worker_adapter(
     extra_config: dict[str, object] | None = None,
+    *,
+    operation_store_lifetime: bool = True,
 ) -> LMCacheMPWorkerAdapter:
     """Construct a worker adapter with the standard test arguments; the
     network boundary must already be patched (see ``fake_adapter``).
@@ -116,6 +118,7 @@ def _make_worker_adapter(
         parallel_strategy=parallel_strategy,
         mq_timeout=5.0,
         extra_config=extra_config,
+        operation_store_lifetime=operation_store_lifetime,
     )
 
 
@@ -277,8 +280,11 @@ def test_register_kv_caches_tuple_caches_use_engine_driven_context(
     assert adapter.create_recorded_event() is None
 
 
-def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
-    """submit_store_request stores the returned future in store_futures."""
+def test_submit_store_request_tracks_returned_future(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """submit_store_request tracks the future by STORE operation ID."""
     adapter, _send_mock, _ = fake_adapter
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     fake_tensor = MagicMock()
@@ -295,6 +301,7 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
         op,
         event=MagicMock(),
         request_configs={"lmcache.skip_save": True},
+        store_op_id=17,
     )
 
     assert transfer_ctx.submit_store.called
@@ -303,10 +310,123 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
         "lmcache.skip_save": True
     }
     assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
-    assert adapter.store_futures["req-1"] is fake_future
+    assert adapter._store_operation_futures[17].request_id == "req-1"
+    assert adapter._store_operation_futures[17].future is fake_future
 
 
-def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypatch):
+def test_legacy_connector_keeps_request_level_store_completion(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+) -> None:
+    legacy = _make_worker_adapter(operation_store_lifetime=False)
+    future = MagicMock()
+    future.query.return_value = True
+    future.result.return_value = True
+    legacy.transfer_ctx = MagicMock()
+    legacy.transfer_ctx.submit_store.return_value = future
+
+    legacy.submit_store_request("legacy-request", _op([[0]]), MagicMock())
+
+    assert legacy.store_futures == {"legacy-request": future}
+    assert legacy.get_finished({"legacy-request"}) == ({"legacy-request"}, set())
+
+
+def test_operation_store_requires_scheduler_identity(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+
+    with pytest.raises(ValueError, match="requires store_op_id"):
+        adapter.submit_store_request("missing-id", _op([[0]]), MagicMock())
+
+
+def test_operation_completion_releases_finished_request_id(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+) -> None:
+    class RequestId(str):
+        pass
+
+    adapter, _, _ = fake_adapter
+    adapter.request_telemetry = MagicMock()
+    request_id = RequestId("finished-request")
+    reference = weakref.ref(request_id)
+
+    assert adapter.get_finished({request_id}) == (set(), set())
+    adapter.get_finished(set())
+    adapter.request_telemetry.on_request_store_finished.assert_called_once()
+    adapter.request_telemetry.reset_mock()
+    del request_id
+    gc.collect()
+
+    assert reference() is None
+
+
+def test_operation_telemetry_waits_for_last_store(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.request_telemetry = MagicMock()
+    future = MagicMock()
+    future.query.return_value = False
+    future.result.return_value = True
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value = future
+    adapter.submit_store_request("delayed", _op([[1]]), MagicMock(), store_op_id=301)
+
+    adapter.get_finished({"delayed"})
+    adapter.get_finished(set())
+    adapter.request_telemetry.on_request_store_finished.assert_not_called()
+    future.query.return_value = True
+    adapter.get_finished(set())
+    adapter.get_finished(set())
+
+    adapter.request_telemetry.on_request_store_finished.assert_called_once_with(
+        request_ids_set={"delayed"}, model_name="test-model", world_size=1, kv_rank=0
+    )
+    assert adapter.get_completed_store_operations() == ({301: {0}}, {})
+
+
+def test_operation_store_accepts_context_without_event(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    future = MagicMock()
+    future.query.return_value = True
+    future.result.return_value = True
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value = future
+
+    adapter.submit_store_request("sync-store", _op([[1]]), None, store_op_id=302)
+
+    assert adapter.transfer_ctx.submit_store.call_args.args[5] is None
+    assert adapter.get_completed_store_operations() == ({302: {0}}, {})
+
+
+def test_store_batch_rejects_operation_count_before_submission(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _, _ = fake_adapter
+    submit = MagicMock()
+    monkeypatch.setattr(adapter, "submit_store_request", submit)
+
+    with pytest.raises(ValueError, match="must have the same length"):
+        adapter.batched_submit_store_requests(
+            ["first", "second"], [_op([[1]]), _op([[2]])], None, store_op_ids=[303]
+        )
+
+    submit.assert_not_called()
+
+
+def test_submit_store_request_expands_block_ids_to_views(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter, _send_mock, _ = fake_adapter
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     fake_tensor = MagicMock()
@@ -328,13 +448,208 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
         end=4,
     )
 
-    adapter.submit_store_request("req-1", op, event=MagicMock())
+    adapter.submit_store_request("req-1", op, event=MagicMock(), store_op_id=18)
 
     assert transfer_ctx.submit_store.call_args.args[4] == [
         [0, 1],
         [0, 1],
         [10, 11],
     ]
+
+
+def test_same_request_store_operations_do_not_overwrite_each_other(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.kv_caches = {"layer.0": MagicMock()}
+    first_future = MagicMock(name="first_future")
+    second_future = MagicMock(name="second_future")
+    first_future.query.return_value = True
+    first_future.result.return_value = True
+    second_future.query.return_value = False
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.side_effect = [first_future, second_future]
+
+    adapter.submit_store_request(
+        "same-request", _op([[1]]), MagicMock(), store_op_id=101
+    )
+    adapter.submit_store_request(
+        "same-request", _op([[2]]), MagicMock(), store_op_id=102
+    )
+
+    assert set(adapter._store_operation_futures) == {101, 102}
+    assert adapter.get_finished({"same-request"})[0] == set()
+    assert set(adapter._store_operation_futures) == {102}
+    assert adapter.get_completed_store_operations() == ({101: {0}}, {})
+
+    second_future.query.return_value = True
+    second_future.result.return_value = True
+    assert adapter.get_finished({"same-request"})[0] == set()
+    assert adapter._store_operation_futures == {}
+    assert adapter.get_completed_store_operations() == ({102: {0}}, {})
+
+
+def test_false_store_result_reports_failed_terminal(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.kv_caches = {"layer.0": MagicMock()}
+    future = MagicMock()
+    future.query.return_value = True
+    future.result.return_value = False
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value = future
+
+    adapter.submit_store_request("req-failed", _op([[3]]), MagicMock(), store_op_id=103)
+    adapter.get_finished(set())
+
+    assert adapter.get_completed_store_operations() == ({103: {0}}, {103: {0}})
+
+
+def test_terminal_store_exception_reports_failed_terminal(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.kv_caches = {"layer.0": MagicMock()}
+    future = MagicMock()
+    future.query.return_value = True
+    future.result.side_effect = RuntimeError("store failed")
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value = future
+
+    adapter.submit_store_request(
+        "req-terminal-error", _op([[3]]), MagicMock(), store_op_id=109
+    )
+
+    assert adapter.get_completed_store_operations() == ({109: {0}}, {109: {0}})
+    assert 109 not in adapter._store_operation_futures
+
+
+def test_unknown_store_state_retains_operation(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.kv_caches = {"layer.0": MagicMock()}
+    future = MagicMock()
+    future.query.side_effect = RuntimeError("query failed")
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value = future
+
+    adapter.submit_store_request(
+        "req-query-error", _op([[3]]), MagicMock(), store_op_id=110
+    )
+
+    assert adapter.get_completed_store_operations() is None
+    assert 110 in adapter._store_operation_futures
+    assert 110 in adapter._store_operation_events
+
+
+def test_store_submit_exception_is_indeterminate_and_propagates(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.kv_caches = {"layer.0": MagicMock()}
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.side_effect = RuntimeError("submit failed")
+
+    event = MagicMock()
+    with pytest.raises(RuntimeError, match="submit failed"):
+        adapter.submit_store_request(
+            "req-submit-failed", _op([[4]]), event, store_op_id=104
+        )
+
+    assert adapter._store_operation_futures == {}
+    assert adapter._indeterminate_store_operations == {104: "req-submit-failed"}
+    assert adapter._store_operation_events == {104: event}
+    assert adapter.get_completed_store_operations() is None
+
+
+def test_unhealthy_store_reports_failed_terminal(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter._health_event.clear()
+    adapter.transfer_ctx = MagicMock()
+
+    adapter.submit_store_request(
+        "req-unhealthy", _op([[5]]), MagicMock(), store_op_id=105
+    )
+
+    adapter.transfer_ctx.submit_store.assert_not_called()
+    assert adapter.get_completed_store_operations() == ({105: {0}}, {105: {0}})
+
+
+def test_missing_transfer_context_reports_failed_terminal(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.transfer_ctx = None
+
+    adapter.submit_store_request(
+        "req-no-context", _op([[5]]), MagicMock(), store_op_id=108
+    )
+
+    assert adapter.get_completed_store_operations() == ({108: {0}}, {108: {0}})
+
+
+def test_unhealthy_heartbeat_keeps_inflight_store_pending(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.kv_caches = {"layer.0": MagicMock()}
+    future = MagicMock()
+    future.query.return_value = False
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value = future
+
+    adapter.submit_store_request(
+        "req-inflight", _op([[5]]), MagicMock(), store_op_id=107
+    )
+    adapter._health_event.clear()
+    adapter.get_finished(set())
+
+    assert 107 in adapter._store_operation_futures
+    assert adapter.get_completed_store_operations() is None
+
+
+def test_non_writer_store_reports_successful_terminal(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    adapter.parallel_strategy = ParallelStrategy(
+        mla_only=True,
+        vllm_world_size=2,
+        vllm_worker_id=1,
+        tp_size=2,
+        pp_size=1,
+        n_servers=1,
+    )
+    adapter.transfer_ctx = MagicMock()
+
+    adapter.submit_store_request(
+        "req-non-writer", _op([[6]]), MagicMock(), store_op_id=106
+    )
+
+    adapter.transfer_ctx.submit_store.assert_not_called()
+    assert adapter.get_completed_store_operations() == ({106: {1}}, {})
 
 
 def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatch):
@@ -479,14 +794,16 @@ def test_none_event_is_not_retained(fake_adapter, monkeypatch):
     transfer_ctx.submit_retrieve.return_value = MagicMock()
     adapter.transfer_ctx = transfer_ctx
 
-    adapter.submit_store_request("store", _op([[0]]), None)
+    adapter.submit_store_request("store", _op([[0]]), None, store_op_id=304)
     adapter.submit_retrieve_request("retrieve", _op([[1]]), None)
 
-    assert "store" not in adapter.store_events
+    assert 304 not in adapter._store_operation_events
     assert "retrieve" not in adapter.retrieve_events
 
 
-def test_store_keeps_event_until_future_finishes(fake_adapter):
+def test_store_keeps_event_until_future_finishes(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+) -> None:
     """Store requests keep the exported CUDA event alive while pending."""
     adapter, _send_mock, _future = fake_adapter
     cuda_future = MagicMock(name="cuda_future")
@@ -499,7 +816,7 @@ def test_store_keeps_event_until_future_finishes(fake_adapter):
     event_ref = weakref.ref(event)
     op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
 
-    adapter.submit_store_request("req-1", op, event)
+    adapter.submit_store_request("req-1", op, event, store_op_id=23)
     del event
     gc.collect()
     assert event_ref() is not None
@@ -508,9 +825,10 @@ def test_store_keeps_event_until_future_finishes(fake_adapter):
     cuda_future.result.return_value = True
     finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
 
-    assert finished_stores == {"req-1"}
+    assert finished_stores == set()
     assert finished_retrieves == set()
-    assert "req-1" not in adapter.store_events
+    assert 23 not in adapter._store_operation_events
+    assert adapter.get_completed_store_operations() == ({23: {0}}, {})
     transfer_ctx.reset_mock()
     gc.collect()
     assert event_ref() is None
@@ -663,7 +981,9 @@ def test_instance_id_logged_at_info_on_construction(fake_adapter, monkeypatch) -
     assert any(str(adapter.instance_id) in msg for msg in messages)
 
 
-def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
+def test_heartbeat_lazy_start_wires_callback_before_start(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+) -> None:
     """The lazy create path starts the heartbeat healthy (no pessimistic
     clear) and wires the recover callback before ``start()``; the first
     store is not gated. Idempotent on re-entry (no second thread)."""
@@ -671,7 +991,7 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     adapter.transfer_ctx = MagicMock()
     assert adapter.is_healthy  # the constructor leaves the event set
 
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock(), store_op_id=201)
 
     assert len(FakeHeartbeatThread.instances) == 1
     heartbeat = FakeHeartbeatThread.instances[0]
@@ -684,7 +1004,7 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     assert adapter.transfer_ctx.submit_store.call_count == 1
 
     # Re-entry is idempotent: no new thread.
-    adapter.submit_store_request("req-2", _op([[1]]), MagicMock())
+    adapter.submit_store_request("req-2", _op([[1]]), MagicMock(), store_op_id=202)
     assert len(FakeHeartbeatThread.instances) == 1
     assert adapter.transfer_ctx.submit_store.call_count == 2
 
@@ -773,12 +1093,14 @@ def test_dropped_retrieve_reported_once_via_healthy_get_finished(
     assert finished_retrieves == set()
 
 
-def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
+def test_shutdown_stops_heartbeat_before_unregister(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
     stray heartbeat ping can race the closing req_client."""
     adapter, req_client, future = fake_adapter
     adapter.transfer_ctx = MagicMock()
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock(), store_op_id=203)
     heartbeat = FakeHeartbeatThread.instances[0]
 
     stop_state_at_unregister: list[bool] = []
@@ -848,7 +1170,8 @@ def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> Non
 
 
 def test_recover_callback_skips_register_after_stop_requested(
-    fake_adapter, monkeypatch
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A recover callback that observes a requested stop bails out before
     submitting REGISTER: a REGISTER submitted after UNREGISTER would
@@ -859,7 +1182,7 @@ def test_recover_callback_skips_register_after_stop_requested(
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     adapter.register_kv_caches({"layer.0": fake_tensor})
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock(), store_op_id=204)
     heartbeat = FakeHeartbeatThread.instances[0]
     assert heartbeat.recover_callback is not None
     rebuilds_before = len(contexts)
@@ -977,7 +1300,8 @@ def test_startup_does_not_warn_for_default_heartbeat_interval(
 
 
 def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
-    fake_adapter, monkeypatch
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pin current behavior: every recover-callback invocation rebuilds
     ``transfer_ctx`` without closing the previous context (known IPC leak;
@@ -989,7 +1313,7 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     fake_tensor.device.type = "cuda"
     adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[0]
     # Start the heartbeat (healthy, no recover) so the callback is wired.
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock(), store_op_id=205)
     heartbeat = FakeHeartbeatThread.instances[0]
     assert heartbeat.recover_callback is not None
     assert len(contexts) == 1

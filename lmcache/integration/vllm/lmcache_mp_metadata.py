@@ -183,6 +183,7 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    store_op_id: int | None = None
 
     @staticmethod
     def GetStoreMetadata(
@@ -367,12 +368,13 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         return len(self.requests)
 
     # For debugging
-    def __str__(self):
+    def __str__(self) -> str:
         request_strs = []
         for req_meta in self.requests:
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
                 f"direction={req_meta.direction}, "
+                f"store_op_id={req_meta.store_op_id}, "
                 f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
@@ -388,21 +390,36 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 
 @dataclass
 class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
-    """Worker -> Scheduler metadata for completed store events.
+    """Worker results for request- and operation-level STORE tracking."""
 
-    Each worker reports {req_id: 1} for newly completed stores.
-    ``aggregate()`` sums counts across workers within a step.
-    The scheduler-side manager accumulates across steps and processes
-    a store completion only when count reaches ``world_size``.
-    """
-
-    completed_store_requests: dict[str, int]
+    completed_store_requests: dict[str, int] = field(default_factory=dict)
+    terminal_store_operations: dict[int, set[int]] = field(default_factory=dict)
+    failed_store_operations: dict[int, set[int]] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
         assert isinstance(other, LMCacheMPWorkerMetadata)
-        merged = dict(self.completed_store_requests)
+        merged_requests = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
-            merged[k] = merged.get(k, 0) + v
-        return LMCacheMPWorkerMetadata(completed_store_requests=merged)
+            merged_requests[k] = merged_requests.get(k, 0) + v
+
+        merged_terminals = {
+            store_op_id: set(worker_ids)
+            for store_op_id, worker_ids in self.terminal_store_operations.items()
+        }
+        for store_op_id, worker_ids in other.terminal_store_operations.items():
+            merged_terminals.setdefault(store_op_id, set()).update(worker_ids)
+
+        merged_failures = {
+            store_op_id: set(worker_ids)
+            for store_op_id, worker_ids in self.failed_store_operations.items()
+        }
+        for store_op_id, worker_ids in other.failed_store_operations.items():
+            merged_failures.setdefault(store_op_id, set()).update(worker_ids)
+
+        return LMCacheMPWorkerMetadata(
+            completed_store_requests=merged_requests,
+            terminal_store_operations=merged_terminals,
+            failed_store_operations=merged_failures,
+        )
