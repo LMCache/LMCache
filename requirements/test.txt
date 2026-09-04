@@ -1,4 +1,5 @@
 buildkite-test-collector
+hypothesis>=6,<7
 pytest>=7.0,<9.1  # avoid some plugins breaking in 8.x
 pytest-asyncio
 pytest-benchmark
