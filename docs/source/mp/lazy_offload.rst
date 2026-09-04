@@ -2,10 +2,22 @@ Lazy KV Cache Offload
 =====================
 
 Lazy offload lets the vLLM ``LMCacheMPConnector`` defer GPU-to-LMCache store
-operations and submit finished requests in FIFO batches. It moves store work
-out of the normal per-step path, which can improve serving throughput when
-immediate cache availability is less important than reducing per-request
-offload overhead.
+operations instead of submitting them on the step that computed the KV. It
+moves store work out of the normal per-step path, which can improve serving
+throughput when immediate cache availability is less important than reducing
+per-request offload overhead.
+
+Two drain policies decide when a buffered store is submitted.
+``EVICTION_AWARE`` is the default: it releases a store when the GPU blocks
+holding its data approach vLLM's eviction head, so KV that is about to be
+lost is offloaded and KV that stays resident on the GPU is not. ``FIFO``, the
+count-triggered policy described in the rest of this page, remains available
+by setting ``lmcache.mp.lazy_offload_policy=FIFO``. The eviction-aware knobs
+are listed in :doc:`configuration`.
+
+Lazy offload requires vLLM prefix caching (``enable_prefix_caching=True``):
+eviction detection reads block hashes, which only exist while prefix caching
+maintains them.
 
 This feature is disabled by default and is available only with vLLM and
 ``LMCacheMPConnector``. The LMCache server needs no additional flags.
@@ -13,9 +25,10 @@ This feature is disabled by default and is available only with vLLM and
 Enable Lazy Offload
 -------------------
 
-Pass the lazy-offload options in vLLM's ``kv_connector_extra_config``. For
-example, the following configuration starts offloading after 20 requests have
-finished and selects up to 10 requests per FIFO batch:
+Pass the lazy-offload options in vLLM's ``kv_connector_extra_config``. The
+example below selects the legacy FIFO policy explicitly, starting offload
+after 20 requests have finished and selecting up to 10 requests per batch;
+omit ``lmcache.mp.lazy_offload_policy`` to get the eviction-aware default:
 
 .. code-block:: bash
 
@@ -36,9 +49,10 @@ The options are:
      - ``false``
      - Enable deferred, batched store submission.
    * - ``lmcache.mp.lazy_offload_policy``
-     - ``FIFO``
-     - Select finished requests in insertion order. ``FIFO`` is currently the
-       only supported policy.
+     - ``EVICTION_AWARE``
+     - Drain policy. ``EVICTION_AWARE`` releases a store when its GPU blocks
+       near the eviction head; ``FIFO`` selects finished requests in
+       insertion order once the threshold below is met.
    * - ``lmcache.mp.lazy_offload_threshold``
      - ``100``
      - Number of finished pending requests required to make a batch eligible

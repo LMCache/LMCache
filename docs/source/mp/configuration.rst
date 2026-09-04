@@ -790,6 +790,39 @@ All connector-level options are passed through
        handles. Set it together with the
        server's ``--isolated-ipc`` flag -- a mismatch fails at event
        import on whichever side receives the foreign handle.
+   * - ``lmcache.mp.lazy_offload``
+     - ``false``
+     - Buffer stores on the scheduler and submit them according to the
+       selected lazy-offload policy. Requires vLLM prefix caching.
+   * - ``lmcache.mp.lazy_offload_policy``
+     - ``EVICTION_AWARE``
+     - Lazy drain policy. ``EVICTION_AWARE`` drains blocks near the GPU free
+       queue's eviction head. Set ``FIFO`` explicitly to retain the legacy
+       count-triggered behavior.
+   * - ``lmcache.mp.lazy_offload_horizon_steps``
+     - ``2.5``
+     - ``EVICTION_AWARE`` only: estimated scheduler steps of block
+       consumption treated as imminent eviction. Must be greater than zero.
+       Larger values store earlier and reduce eviction losses, but may store
+       GPU-resident hot content and increase lower-tier eviction pressure.
+   * - ``lmcache.mp.lazy_offload_max_drain_per_step``
+     - ``64``
+     - ``EVICTION_AWARE`` only: maximum store operations emitted per
+       scheduler step. A value below the concurrent prefill admission rate
+       can lose buffered operations to eviction.
+   * - ``lmcache.mp.lazy_offload_max_deferral_seconds``
+     - ``0.0``
+     - ``EVICTION_AWARE`` only: upper bound on how long a buffered operation
+       may wait before it is emitted regardless of eviction pressure. Zero
+       leaves emission entirely to the danger window. Set it below the reuse
+       interval the workload has to beat.
+   * - ``lmcache.mp.lazy_offload_threshold``
+     - ``100``
+     - ``FIFO`` only: number of finished buffered requests that triggers a
+       drain.
+   * - ``lmcache.mp.lazy_offload_select_count``
+     - ``10``
+     - ``FIFO`` only: maximum finished requests emitted by one drain.
 
 Environment Variables
 ---------------------
