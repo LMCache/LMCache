@@ -33,7 +33,6 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_unregister_kv_cache,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.multiprocess.transport import factory as transport_factory
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -430,16 +429,6 @@ def router_endpoint() -> str:
     return endpoint
 
 
-@pytest.fixture
-def use_configured_transport(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disable the temporary gRPC override for ZMQ wire-protocol tests."""
-    monkeypatch.setattr(
-        transport_factory,
-        "effective_transport",
-        lambda configured_transport: configured_transport,
-    )
-
-
 # ------------------------------------------------------------------ #
 #  _allocate_kv_cache (dtype branching)
 # ------------------------------------------------------------------ #
@@ -603,7 +592,6 @@ class _LookupRouter:
                 self._router.send_multipart([identity, uid_f, type_f, body])
 
 
-@pytest.mark.usefixtures("use_configured_transport")
 class TestLookupProtocol:
     def _make_client(self, endpoint: str) -> RequestClient:
         ctx = zmq.Context.instance()
@@ -700,7 +688,6 @@ class _UnregisterRouter:
                 self._router.send_multipart([identity, uid_f, type_f])
 
 
-@pytest.mark.usefixtures("use_configured_transport")
 class TestUnregisterKVCache:
     def _make_client(self, endpoint: str) -> RequestClient:
         ctx = zmq.Context.instance()
@@ -820,7 +807,6 @@ class _RegisterEngineDrivenRouter:
                 self._router.send_multipart([identity, uid_f, type_f, body])
 
 
-@pytest.mark.usefixtures("use_configured_transport")
 class TestRegisterKVCacheMLA:
     """The data-mode register must set ``use_mla`` from ``layout_hints``.
 

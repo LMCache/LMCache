@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Generator
+from typing import Any, Generator, Literal
 import multiprocessing as mp
 import os
 import time
@@ -32,11 +32,12 @@ from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 # Configuration constants
 SERVER_HOST = "localhost"
 SERVER_PORT = 5599
-SERVER_URL = f"grpc://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
 DEFAULT_TIMEOUT = 20.0
 pytestmark = pytest.mark.cuda
+RequestTransport = Literal["zmq", "grpc"]
+REQUEST_TRANSPORTS: tuple[RequestTransport, ...] = ("zmq", "grpc")
 
 
 def _has_working_new_shared_cuda() -> bool:
@@ -242,12 +243,21 @@ def retrieve_keys(
 
 
 def server_process_runner(
-    host: str, port: int, chunk_size: int, cpu_buffer_size: float
-):
+    transport: RequestTransport,
+    host: str,
+    port: int,
+    chunk_size: int,
+    cpu_buffer_size: float,
+) -> None:
     """
     Entry point for the server process.
     """
-    mp_config = MPServerConfig(host=host, port=port, chunk_size=chunk_size)
+    mp_config = MPServerConfig(
+        transport=transport,
+        host=host,
+        port=port,
+        chunk_size=chunk_size,
+    )
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
@@ -264,8 +274,16 @@ def server_process_runner(
     )
 
 
+@pytest.fixture(scope="module", params=REQUEST_TRANSPORTS)
+def request_transport(request: pytest.FixtureRequest) -> RequestTransport:
+    """Select each supported request transport for the test matrix."""
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def server_process() -> Generator[mp.Process, None, None]:
+def server_process(
+    request_transport: RequestTransport,
+) -> Generator[mp.Process, None, None]:
     """
     Fixture that starts the cache server in a separate process.
     The server runs for the entire test module.
@@ -274,7 +292,13 @@ def server_process() -> Generator[mp.Process, None, None]:
     mp.set_start_method("spawn", force=True)
     process = mp.Process(
         target=server_process_runner,
-        args=(SERVER_HOST, SERVER_PORT, CHUNK_SIZE, CPU_BUFFER_SIZE),
+        args=(
+            request_transport,
+            SERVER_HOST,
+            SERVER_PORT,
+            CHUNK_SIZE,
+            CPU_BUFFER_SIZE,
+        ),
         daemon=True,
     )
     process.start()
@@ -296,11 +320,14 @@ def server_process() -> Generator[mp.Process, None, None]:
 @pytest.fixture(scope="function")
 def client(
     server_process: mp.Process,
+    request_transport: RequestTransport,
 ) -> Generator[RequestClient, None, None]:
     """
-    Fixture that provides a message queue client for each test function.
+    Fixture that provides a request client for each test function.
     """
-    client = RequestClientFactory.create(SERVER_URL)
+    scheme = "tcp" if request_transport == "zmq" else "grpc"
+    server_url = f"{scheme}://{SERVER_HOST}:{SERVER_PORT}"
+    client = RequestClientFactory.create(server_url)
     yield client
     # Client cleanup
     client.close()
