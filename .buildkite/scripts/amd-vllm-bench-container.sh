@@ -35,10 +35,8 @@ echo "AMD kernel mode: ${AMD_KERNEL_MODE}"
 
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip install --system --no-cache --no-build-isolation -e .
-if [[ "${LMCACHE_REQUEST_TRANSPORT:-zmq}" == "grpc" ]]; then
-    echo "Generating LMCache gRPC bindings"
-    python3 lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py
-fi
+echo "Generating LMCache gRPC bindings"
+python3 lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py
 uv pip install --system --no-cache openai pandas matplotlib
 
 # Fail during setup with the real import error instead of waiting for server

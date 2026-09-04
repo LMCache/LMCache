@@ -23,10 +23,8 @@ ${PIP_BIN} install -r requirements/common.txt
 ${PIP_BIN} install -r requirements/cli.txt
 ${PIP_BIN} install -e . --no-deps --no-build-isolation
 
-if [[ "${LMCACHE_REQUEST_TRANSPORT:-zmq}" == "grpc" ]]; then
-    echo "Generating LMCache gRPC bindings"
-    python lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py
-fi
+echo "Generating LMCache gRPC bindings"
+python lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py
 
 python -c "import lmcache, vllm; \
 print('lmcache:', lmcache.__version__, 'vllm:', vllm.__version__)"

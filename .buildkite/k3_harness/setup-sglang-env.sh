@@ -38,11 +38,9 @@ export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERS
 uv pip uninstall cupy-cuda12x 2>/dev/null || true
 uv pip install -e . --no-build-isolation
 
-if [[ "${LMCACHE_REQUEST_TRANSPORT:-zmq}" == "grpc" ]]; then
-    uv pip install -r requirements/proto.txt
-    echo "--- :gear: Generating LMCache gRPC bindings"
-    python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py"
-fi
+uv pip install -r requirements/proto.txt
+echo "--- :gear: Generating LMCache gRPC bindings"
+python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py"
 
 python -c "import lmcache, sglang; print(f'sglang={sglang.__version__}; lmcache OK')"
 python -c "import cupy; print(f'cupy={cupy.__version__}')"
