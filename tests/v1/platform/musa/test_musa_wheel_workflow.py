@@ -44,8 +44,8 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     workflow = _load_workflow(".github/workflows/build_musa_artifacts.yml")
     assert workflow["env"]["MUSA_IMAGE"] == (
         "${{ vars.MUSA_IMAGE || "
-        "'registry.mthreads.com/mcconline/musa-pytorch-release-public:"
-        "rc5.2.0-v2.9.1.post1-S5000-py310' }}"
+        "'sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci@sha256:"
+        "75c8c1012cf49caf6dd99dbbfd33931ef100d035647083b999eaf0092d94edba' }}"
     )
     assert workflow["env"]["MUSA_REQUIRE_TORCH_MUSA"] == (
         "${{ vars.MUSA_REQUIRE_TORCH_MUSA || '0' }}"
