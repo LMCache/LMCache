@@ -32,9 +32,9 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
     _send_unregister_kv_cache,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -645,9 +645,9 @@ class _LookupRouter:
 
 
 class TestLookupProtocol:
-    def _make_client(self, endpoint: str) -> ZmqMultiprocessClient:
+    def _make_client(self, endpoint: str) -> RequestClient:
         ctx = zmq.Context.instance()
-        return ZmqMultiprocessClient(MessageQueueClient(endpoint, ctx))
+        return RequestClientFactory.create(endpoint, context=ctx)
 
     def test_send_lookup_void_reply_is_success(
         self,
@@ -741,9 +741,9 @@ class _UnregisterRouter:
 
 
 class TestUnregisterKVCache:
-    def _make_client(self, endpoint: str) -> ZmqMultiprocessClient:
+    def _make_client(self, endpoint: str) -> RequestClient:
         ctx = zmq.Context.instance()
-        return ZmqMultiprocessClient(MessageQueueClient(endpoint, ctx))
+        return RequestClientFactory.create(endpoint, context=ctx)
 
     def test_handle_mode_sends_unregister_kv_cache(
         self,
@@ -869,9 +869,9 @@ class TestRegisterKVCacheMLA:
     shape and every STORE / RETRIEVE afterwards would corrupt data.
     """
 
-    def _make_client(self, endpoint: str) -> ZmqMultiprocessClient:
+    def _make_client(self, endpoint: str) -> RequestClient:
         ctx = zmq.Context.instance()
-        return ZmqMultiprocessClient(MessageQueueClient(endpoint, ctx))
+        return RequestClientFactory.create(endpoint, context=ctx)
 
     def _register(self, endpoint: str, kv_size):
         # First Party
@@ -1119,7 +1119,6 @@ class TestClientMultiWorker:
         from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import mq
 
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
         register_results = iter([True, False])
@@ -1152,7 +1151,11 @@ class TestClientMultiWorker:
             return True
 
         monkeypatch.setattr(zmq, "Context", lambda: context)
-        monkeypatch.setattr(mq, "MessageQueueClient", lambda *_args: transport)
+        monkeypatch.setattr(
+            RequestClientFactory,
+            "create",
+            lambda *_args, **_kwargs: transport,
+        )
         monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda _client: 16)
         monkeypatch.setattr(
             sv_helpers,
@@ -1213,7 +1216,6 @@ class TestClientMultiWorker:
             ServerBenchClient,
         )
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import mq
 
         calls: list[tuple] = []
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -1225,26 +1227,25 @@ class TestClientMultiWorker:
             success = True
             context: dict = {}
 
-        # The fake ZMQ transport returns different shapes per RequestType:
+        # The fake request client returns different shapes per named method:
         #   LOOKUP -> None (void)
         #   QUERY_PREFETCH_STATUS -> hit_chunks (int) or None
         #   STORE / RETRIEVE (handle) -> (worker_id, True)
         #   PREPARE_* -> _FakePrep()
         #   COMMIT_* -> True
         #   END_SESSION -> None
-        def fake_response(req_type, payloads):
-            calls.append((req_type, payloads))
-            name = req_type.name
-            if name == "GET_CHUNK_SIZE":
+        def fake_response(method_name, payloads):
+            calls.append((method_name, payloads))
+            if method_name == "get_chunk_size":
                 return 16
-            if name == "QUERY_PREFETCH_STATUS":
+            if method_name == "query_prefetch_status":
                 # No cache hits -> only STORE side fires.
                 return 0
-            if name in ("STORE", "RETRIEVE"):
+            if method_name in ("store", "retrieve"):
                 return (0, True)
-            if name.startswith("PREPARE_"):
+            if method_name.startswith("prepare_"):
                 return _FakePrep()
-            if name.startswith("COMMIT_"):
+            if method_name.startswith("commit_"):
                 return True
             return None
 
@@ -1253,9 +1254,12 @@ class TestClientMultiWorker:
                 pass
 
         class FakeClient:
-            def submit_request(self, req_type, payloads, _response_cls=None):
-                value = fake_response(req_type, payloads)
-                return SimpleNamespace(result=lambda timeout=None: value)
+            def __getattr__(self, method_name):
+                def request(*payloads):
+                    value = fake_response(method_name, payloads)
+                    return SimpleNamespace(result=lambda timeout=None: value)
+
+                return request
 
             def close(self) -> None:
                 pass
@@ -1273,7 +1277,11 @@ class TestClientMultiWorker:
             fake_allocate,
         )
         monkeypatch.setattr(zmq, "Context", FakeContext)
-        monkeypatch.setattr(mq, "MessageQueueClient", lambda *_args: FakeClient())
+        monkeypatch.setattr(
+            RequestClientFactory,
+            "create",
+            lambda *_args, **_kwargs: FakeClient(),
+        )
 
         kv_size = 1 if is_mla else 2
         bench_client = ServerBenchClient(
@@ -1319,8 +1327,8 @@ class TestClientMultiWorker:
         calls, result = self._run(monkeypatch, is_mla=True, tp_size=2)
         lookup, store_result = result
         # Extract STORE + RETRIEVE calls with their instance_id argument.
-        stores = [c for c in calls if c[0].name == "STORE"]
-        retrieves = [c for c in calls if c[0].name == "RETRIEVE"]
+        stores = [c for c in calls if c[0] == "store"]
+        retrieves = [c for c in calls if c[0] == "retrieve"]
         # MLA: rank 0 only.
         assert len(stores) == 1, "MLA tp=2 should STORE once (rank 0)"
         # payloads is [key, instance_id, block_ids, event_handle].
@@ -1352,7 +1360,7 @@ class TestClientMultiWorker:
     ) -> None:
         calls, result = self._run(monkeypatch, is_mla=False, tp_size=2)
         _lookup, store_result = result
-        stores = [c for c in calls if c[0].name == "STORE"]
+        stores = [c for c in calls if c[0] == "store"]
         # Non-MLA: every rank stores.
         assert len(stores) == 2
         # payloads is [key, instance_id, block_ids, event_handle].
@@ -1382,7 +1390,7 @@ class TestClientMultiWorker:
         tp: int,
     ) -> None:
         calls, _result = self._run(monkeypatch, is_mla=is_mla, tp_size=tp)
-        lookups = [c for c in calls if c[0].name == "LOOKUP"]
+        lookups = [c for c in calls if c[0] == "lookup"]
         assert len(lookups) == 1, (
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)

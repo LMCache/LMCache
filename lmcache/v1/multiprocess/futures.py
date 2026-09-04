@@ -16,6 +16,7 @@ class MessagingFuture(Generic[T]):
     def __init__(self) -> None:
         self.is_done_ = threading.Event()
         self.result_: T | None = None
+        self.exception_: BaseException | None = None
         self._retained_references: list[object] = []
 
     def query(self) -> bool:
@@ -57,6 +58,8 @@ class MessagingFuture(Generic[T]):
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError("Future result not available within timeout")
+        if self.exception_ is not None:
+            raise self.exception_
         return cast(T, self.result_)
 
     def set_result(self, result: T) -> None:
@@ -69,6 +72,20 @@ class MessagingFuture(Generic[T]):
             result (T): The result to set.
         """
         self.result_ = result
+        self.is_done_.set()
+
+    def set_exception(self, exception: BaseException) -> None:
+        """Set a request exception and mark this future as complete.
+
+        Note:
+            The current ZMQ transport does not call this method; only unit tests
+            exercise it in this change. It is part of the shared future interface
+            for asynchronous transports such as gRPC to propagate RPC failures.
+
+        Args:
+            exception: Failure raised while processing the request.
+        """
+        self.exception_ = exception
         self.is_done_.set()
 
     def retain_reference(self, value: object) -> None:

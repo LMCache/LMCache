@@ -19,7 +19,7 @@ class BenchConfig:
     CLI-only concerns such as profiling stay with the command layer.
 
     Attributes:
-        rpc_url: ZMQ endpoint of the LMCache Server.
+        rpc_url: Multiprocess request endpoint of the LMCache server.
         http_url: HTTP endpoint used by management and checksum APIs.
         mode: ``"cpu"`` or ``"gpu"`` for mock Worker resources.
         transfer_mode: ``"auto"``, ``"engine_driven"``, or

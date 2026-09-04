@@ -95,7 +95,7 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--rpc-url",
         default="tcp://localhost:5555",
-        help=("ZMQ endpoint of the MP server (default: tcp://localhost:5555)"),
+        help=("MP request endpoint (default: tcp://localhost:5555)"),
     )
     parser.add_argument(
         "--mode",

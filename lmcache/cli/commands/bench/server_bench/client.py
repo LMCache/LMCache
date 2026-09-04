@@ -657,7 +657,7 @@ class ServerBenchClient:
             try:
                 self._req_client.close()
             except Exception as exc:
-                self._log("  [warning] MessageQueueClient close failed: %s" % exc)
+                self._log("  [warning] Request client close failed: %s" % exc)
             finally:
                 self._req_client = None
         if self._zmq_context is not None:
@@ -706,8 +706,7 @@ class ServerBenchClient:
             parse_kvcache_shape_spec,
         )
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-        from lmcache.v1.multiprocess.mq import MessageQueueClient
-        from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+        from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
         config = self._config
         use_gpu = config.is_gpu
@@ -725,8 +724,9 @@ class ServerBenchClient:
             % (config.rpc_url, config.mode)
         )
         self._zmq_context = zmq.Context()
-        self._req_client = ZmqMultiprocessClient(
-            MessageQueueClient(config.rpc_url, self._zmq_context)
+        self._req_client = RequestClientFactory.create(
+            config.rpc_url,
+            context=self._zmq_context,
         )
 
         self._chunk_size = _get_chunk_size(self._req_client)

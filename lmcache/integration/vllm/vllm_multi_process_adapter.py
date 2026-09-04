@@ -29,14 +29,14 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
+from lmcache.v1.multiprocess.mq import MessagingFuture
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
@@ -578,7 +578,7 @@ class LMCacheMPSchedulerAdapter:
     ):
         """
         Args:
-            server_urls: The servers URL for the LMCache message queue
+            server_urls: LMCache multiprocess request server URLs.
             context: The ZMQ context
             model_name: The model name used for LMCache keys
             vllm_block_size: The block size used in vLLM
@@ -605,7 +605,7 @@ class LMCacheMPSchedulerAdapter:
         assert len(server_urls) >= 1, "At least one server url required"
         self._server_urls: list[str] = list(server_urls)
         self.req_clients: dict[str, RequestClient] = {
-            url: ZmqMultiprocessClient(MessageQueueClient(url, context))
+            url: RequestClientFactory.create(url, context=context)
             for url in self._server_urls
         }
         if extra_config is not None:
@@ -1084,7 +1084,7 @@ class LMCacheMPWorkerAdapter:
         """Initialize the worker adapter for current or legacy vLLM callers.
 
         Args:
-            server_url: The server URL for the LMCache message queue.
+            server_url: LMCache multiprocess request server URL.
             context: The ZMQ context.
             model_name: The model name used for LMCache keys.
             vllm_block_size: The block size used in vLLM, or legacy KV world
@@ -1128,7 +1128,7 @@ class LMCacheMPWorkerAdapter:
             set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
         else:
             self._mp_transfer_mode = None
-        self.req_client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+        self.req_client = RequestClientFactory.create(server_url, context=context)
         self._mq_timeout = mq_timeout
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
