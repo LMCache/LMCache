@@ -1,61 +1,29 @@
 // Global variables
 let currentNode = null;
-let currentProxy = null;
-let proxyNodes = {};
-let allProxies = []; // Store all proxies for filtering
+let allNodes = []; // Store all nodes for filtering
 
 // Initialize after DOM is loaded
 window.addEventListener('DOMContentLoaded', () => {
-    // Initialize proxy selector
-    loadProxies();
+    // Initialize node selector
+    loadNodes();
 
-    // Proxy search input event
-    const proxySearchInput = document.getElementById('proxySearchInput');
-    const proxyDropdown = document.getElementById('proxyDropdown');
-    
-    proxySearchInput.addEventListener('focus', () => {
-        filterProxies();
-        proxyDropdown.classList.add('show');
+    // Node search input event
+    const nodeSearchInput = document.getElementById('nodeSearchInput');
+    const nodeDropdown = document.getElementById('nodeDropdown');
+
+    nodeSearchInput.addEventListener('focus', () => {
+        filterNodes();
+        nodeDropdown.classList.add('show');
     });
-    
-    proxySearchInput.addEventListener('input', () => {
-        filterProxies();
+
+    nodeSearchInput.addEventListener('input', () => {
+        filterNodes();
     });
-    
+
     // Close dropdown when clicking outside
     document.addEventListener('click', (e) => {
-        if (!proxySearchInput.contains(e.target) && !proxyDropdown.contains(e.target)) {
-            proxyDropdown.classList.remove('show');
-        }
-    });
-
-    // Proxy selection event (kept for compatibility)
-    document.getElementById('proxySelector').addEventListener('change', (e) => {
-        const proxyName = e.target.value;
-        if (proxyName) {
-            currentProxy = proxyNodes[proxyName];
-            loadTargetNodes(proxyName);
-        } else {
-            currentProxy = null;
-            document.getElementById('targetSelector').disabled = true;
-            document.getElementById('targetSelector').innerHTML = '<option value="">-- Select Target --</option>';
-        }
-    });
-
-    // Target selection event
-    document.getElementById('targetSelector').addEventListener('change', (e) => {
-        const nodeId = e.target.value;
-        if (nodeId) {
-            currentNode = JSON.parse(nodeId);
-            document.getElementById('currentNode').textContent =
-                `${currentNode.name} (${currentNode.host}:${currentNode.port})`;
-
-            // Refresh active tab
-            refreshActiveTab();
-        } else {
-            currentNode = null;
-            document.getElementById('currentNode').textContent = 'No Node Selected';
-            clearAllTabs();
+        if (!nodeSearchInput.contains(e.target) && !nodeDropdown.contains(e.target)) {
+            nodeDropdown.classList.remove('show');
         }
     });
 
@@ -77,10 +45,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
     // Refresh page button
     document.getElementById('refreshPageBtn').addEventListener('click', refreshCurrentPage);
-
-    // Node management buttons
-    document.getElementById('addNodeBtn').addEventListener('click', addNode);
-    document.getElementById('updateNodeBtn').addEventListener('click', updateNode);
 
     // Refresh nodes button
     document.getElementById('refreshNodesBtn').addEventListener('click', refreshNodes);
@@ -107,314 +71,98 @@ window.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-// Load proxy list
-async function loadProxies() {
+// Load node list
+async function loadNodes() {
     try {
-        const response = await fetch('/api/proxies');
+        const response = await fetch('/api/nodes');
         const data = await response.json();
 
-        const selector = document.getElementById('proxySelector');
-        selector.innerHTML = '<option value="">-- Select Proxy --</option>';
+        allNodes = data.nodes || [];
 
-        proxyNodes = {};
-        allProxies = [];
-
-        data.proxies.forEach(proxy => {
-            const option = document.createElement('option');
-            option.value = proxy.name;
-            option.textContent = `${proxy.name} (${proxy.host}:${proxy.port})`;
-            selector.appendChild(option);
-
-            proxyNodes[proxy.name] = proxy;
-            allProxies.push(proxy);
-        });
-        
-        // Initialize dropdown with all proxies
-        filterProxies();
+        // Initialize dropdown with all nodes
+        filterNodes();
     } catch (error) {
-        console.error('Failed to load proxies:', error);
+        console.error('Failed to load nodes:', error);
     }
 }
 
-// Filter proxies based on search input
-function filterProxies() {
-    const searchInput = document.getElementById('proxySearchInput');
-    const dropdown = document.getElementById('proxyDropdown');
+// Filter nodes based on search input
+function filterNodes() {
+    const searchInput = document.getElementById('nodeSearchInput');
+    const dropdown = document.getElementById('nodeDropdown');
     const searchTerm = searchInput.value.toLowerCase();
-    
+
     dropdown.innerHTML = '';
-    
-    const filteredProxies = allProxies.filter(proxy => {
-        const proxyText = `${proxy.name} (${proxy.host}:${proxy.port})`.toLowerCase();
-        return proxyText.includes(searchTerm);
+
+    const filteredNodes = allNodes.filter(node => {
+        const nodeText = `${node.name} (${node.host}:${node.port})`.toLowerCase();
+        return nodeText.includes(searchTerm);
     });
-    
-    if (filteredProxies.length === 0) {
+
+    if (filteredNodes.length === 0) {
         const noResultItem = document.createElement('div');
         noResultItem.className = 'dropdown-item disabled';
-        noResultItem.textContent = 'No matching proxies found';
+        noResultItem.textContent = 'No matching nodes found';
         dropdown.appendChild(noResultItem);
     } else {
-        filteredProxies.forEach(proxy => {
+        filteredNodes.forEach(node => {
             const item = document.createElement('a');
             item.className = 'dropdown-item';
             item.href = '#';
-            item.textContent = `${proxy.name} (${proxy.host}:${proxy.port})`;
-            item.dataset.proxyName = proxy.name;
-            
+            item.textContent = `${node.name} (${node.host}:${node.port})`;
             item.addEventListener('click', (e) => {
                 e.preventDefault();
-                selectProxy(proxy);
+                selectNode(node);
             });
-            
             dropdown.appendChild(item);
         });
     }
 }
 
-// Select a proxy
-function selectProxy(proxy) {
-    const searchInput = document.getElementById('proxySearchInput');
-    const dropdown = document.getElementById('proxyDropdown');
-    const selector = document.getElementById('proxySelector');
-    
+// Select a node
+function selectNode(node) {
+    const searchInput = document.getElementById('nodeSearchInput');
+    const dropdown = document.getElementById('nodeDropdown');
+
     // Update search input display
-    searchInput.value = `${proxy.name} (${proxy.host}:${proxy.port})`;
-    
-    // Update hidden selector
-    selector.value = proxy.name;
-    
+    searchInput.value = `${node.name} (${node.host}:${node.port})`;
+
     // Close dropdown
     dropdown.classList.remove('show');
-    
-    // Trigger proxy selection
-    currentProxy = proxyNodes[proxy.name];
-    loadTargetNodes(proxy.name);
+
+    // Set current node and refresh the active tab
+    currentNode = node;
+    document.getElementById('currentNode').textContent =
+        `${node.name} (${node.host}:${node.port})`;
+    refreshActiveTab();
 }
 
-// Load target nodes for selected proxy
-async function loadTargetNodes(proxyName, filteredNodes = null) {
-    try {
-        let nodes;
-        if (filteredNodes) {
-            nodes = filteredNodes;
-        } else {
-            const response = await fetch(`/api/proxies/${proxyName}/nodes`);
-            const data = await response.json();
-            nodes = data.nodes;
-        }
-
-        const selector = document.getElementById('targetSelector');
-        selector.innerHTML = '<option value="">-- Select Target --</option>';
-        selector.disabled = false;
-
-        nodes.forEach(node => {
-            const option = document.createElement('option');
-            option.value = JSON.stringify(node);
-            option.textContent = `${node.name} (${node.host}:${node.port})`;
-            selector.appendChild(option);
-        });
-    } catch (error) {
-        console.error('Failed to load target nodes:', error);
-    }
-}
-
-// Refresh child nodes of proxy
-async function refreshProxyNodes(proxyName) {
-    try {
-        const response = await fetch(`/api/proxies/${proxyName}/refresh`);
-        const data = await response.json();
-        if (data.status === "success") {
-            return data.nodes;
-        }
-        return [];
-    } catch (error) {
-        console.error('Failed to refresh proxy nodes:', error);
-        return [];
-    }
-}
-
-// Load node list
-async function loadNodes() {}
-
-// Refresh nodes for current proxy
+// Refresh the node list from the coordinator-backed registry
 async function refreshNodes() {
-    if (!currentProxy) return;
-    await loadTargetNodes(currentProxy.name);
+    await loadNodes();
 }
 
-// ==== Node Management Functions ====
+// ==== Node Management (read-only) ====
 async function loadNodeListForManagement() {
     try {
         const response = await fetch('/api/nodes');
         const data = await response.json();
-        
+
         const tableBody = document.getElementById('nodeListBody');
         tableBody.innerHTML = '';
-        
+
         data.nodes.forEach(node => {
             const row = document.createElement('tr');
             row.innerHTML = `
                 <td>${node.name}</td>
                 <td>${node.host}</td>
                 <td>${node.port}</td>
-                <td>${node.is_proxy ? 'Yes' : 'No'}</td>
-                <td>${node.proxy_id || '-'}</td>
-                <td>
-                    <button class="btn btn-sm btn-warning edit-node me-1" data-name="${node.name}">Edit</button>
-                    <button class="btn btn-sm btn-danger delete-node" data-name="${node.name}">Delete</button>
-                </td>
             `;
             tableBody.appendChild(row);
         });
-        
-        // Add event listeners to edit/delete buttons
-        document.querySelectorAll('.edit-node').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const nodeName = e.target.dataset.name;
-                const node = data.nodes.find(n => n.name === nodeName);
-                if (node) {
-                    document.getElementById('nodeName').value = node.name;
-                    document.getElementById('nodeHost').value = node.host;
-                    document.getElementById('nodePort').value = node.port;
-                    
-                    // Auto-set proxy fields
-                    document.getElementById('isProxyCheck').checked = node.is_proxy || false;
-                    document.getElementById('proxyIdInput').value = node.proxy_id || '';
-                }
-            });
-        });
-        
-        document.querySelectorAll('.delete-node').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const nodeName = e.target.dataset.name;
-                if (confirm(`Are you sure you want to delete node ${nodeName}?`)) {
-                    deleteNode(nodeName);
-                }
-            });
-        });
-        
     } catch (error) {
         console.error('Failed to load nodes for management:', error);
         alert('Failed to load nodes: ' + error.message);
-    }
-}
-
-
-async function addNode() {
-    const name = document.getElementById('nodeName').value.trim();
-    const host = document.getElementById('nodeHost').value.trim();
-    const port = document.getElementById('nodePort').value.trim();
-    const isProxy = document.getElementById('isProxyCheck').checked;
-    const proxyId = document.getElementById('proxyIdInput').value.trim();
-    
-    if (!name || !host || !port) {
-        alert('Please fill all fields');
-        return;
-    }
-    
-    try {
-        const response = await fetch('/api/nodes', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                name, 
-                host, 
-                port,
-                is_proxy: isProxy,
-                proxy_id: proxyId || null
-            })
-        });
-        
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || 'Failed to add node');
-        }
-        
-        // Refresh UI
-        document.getElementById('nodeName').value = '';
-        document.getElementById('nodeHost').value = '';
-        document.getElementById('nodePort').value = '';
-        
-        loadNodeListForManagement();
-        loadNodes(); // Refresh node selector
-        
-        alert('Node added successfully');
-    } catch (error) {
-        console.error('Add node error:', error);
-        alert('Failed to add node: ' + error.message);
-    }
-}
-
-
-async function updateNode() {
-    const name = document.getElementById('nodeName').value.trim();
-    const host = document.getElementById('nodeHost').value.trim();
-    const port = document.getElementById('nodePort').value.trim();
-    const isProxy = document.getElementById('isProxyCheck').checked;
-    const proxyId = document.getElementById('proxyIdInput').value.trim();
-    
-    if (!name || !host || !port) {
-        alert('Please fill all fields');
-        return;
-    }
-    
-    try {
-        const response = await fetch(`/api/nodes/${encodeURIComponent(name)}`, {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                name, 
-                host, 
-                port,
-                is_proxy: isProxy,
-                proxy_id: proxyId || null
-            })
-        });
-        
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || 'Failed to update node');
-        }
-        
-        // Refresh UI
-        loadNodeListForManagement();
-        loadNodes(); // Refresh node selector
-        
-        alert('Node updated successfully');
-    } catch (error) {
-        console.error('Update node error:', error);
-        alert('Failed to update node: ' + error.message);
-    }
-}
-
-
-async function deleteNode(nodeName) {
-    try {
-        const response = await fetch(`/api/nodes/${encodeURIComponent(nodeName)}`, {
-            method: 'DELETE'
-        });
-        
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || 'Failed to delete node');
-        }
-        
-        // Refresh UI
-        loadNodeListForManagement();
-        loadNodes(); // Refresh node selector
-        
-        // Clear form if deleting the currently edited node
-        if (document.getElementById('nodeName').value === nodeName) {
-            document.getElementById('nodeName').value = '';
-            document.getElementById('nodeHost').value = '';
-            document.getElementById('nodePort').value = '';
-        }
-        
-        alert('Node deleted successfully');
-    } catch (error) {
-        console.error('Delete node error:', error);
-        alert('Failed to delete node: ' + error.message);
     }
 }
 
@@ -1009,21 +757,10 @@ function clearAllTabs() {
 
 function transformPath(path) {
     if (!currentNode) return path;
-
-    // When proxy_id equals the node's own name the node IS the proxy
-    // (multiProcess child node) – use a single proxy2 hop.
-    if (
-        currentNode.proxy_id
-        && proxyNodes[currentNode.proxy_id]
-        && currentNode.proxy_id !== currentNode.name
-    ) {
-        const proxyNode = proxyNodes[currentNode.proxy_id];
-        return `/proxy2/${proxyNode.name}/proxy2/${currentNode.name}/${path}`;
-    }
     return `/proxy2/${currentNode.name}/${path}`;
 }
 
-// Filter nodes by environment variable and show matching proxies
+// Filter nodes by environment variable and keep only matching nodes
 async function filterNodesByEnv() {
     const envFilter = document.getElementById('envFilterInput').value.trim();
     if (!envFilter) {
@@ -1034,13 +771,10 @@ async function filterNodesByEnv() {
     // Parse filter condition
     let filterKey, filterValue;
     const filterParts = envFilter.split('=');
-    
     if (filterParts.length === 1) {
-        // Only key provided, filter by key existence
         filterKey = filterParts[0].trim();
         filterValue = null;
     } else if (filterParts.length === 2) {
-        // Key=Value provided, filter by exact match
         filterKey = filterParts[0].trim();
         filterValue = filterParts[1].trim();
     } else {
@@ -1048,142 +782,56 @@ async function filterNodesByEnv() {
         return;
     }
 
+    const searchInput = document.getElementById('nodeSearchInput');
+    const dropdown = document.getElementById('nodeDropdown');
+    searchInput.value = 'Filtering nodes...';
+    searchInput.disabled = true;
+    dropdown.classList.remove('show');
+
     try {
-        // Show loading indicator
-        const proxySearchInput = document.getElementById('proxySearchInput');
-        const proxySelector = document.getElementById('proxySelector');
-        const targetSelector = document.getElementById('targetSelector');
-        const proxyDropdown = document.getElementById('proxyDropdown');
-        
-        proxySearchInput.value = 'Filtering proxies...';
-        proxySearchInput.disabled = true;
-        proxyDropdown.classList.remove('show');
-        targetSelector.innerHTML = '<option value="">-- Select Target --</option>';
-        targetSelector.disabled = true;
-
-        // Get all proxies
-        const response = await fetch('/api/proxies');
+        const response = await fetch('/api/nodes');
         const data = await response.json();
-        const fetchedProxies = data.proxies;
+        const nodes = data.nodes || [];
 
-        // Check each proxy's nodes for matching environment variables
-        const matchingProxies = new Map(); // Map<proxyName, matchingNodes[]>
-        
-        for (const proxy of fetchedProxies) {
+        const checks = nodes.map(async (node) => {
             try {
-                // Get nodes for this proxy
-                const nodesResponse = await fetch(`/api/proxies/${proxy.name}/nodes`);
-                const nodesData = await nodesResponse.json();
-                const nodes = nodesData.nodes;
-
-                // Check each node's environment variables
-                const matchingNodes = [];
-                const checkPromises = nodes.map(async (node) => {
-                    try {
-                        // Build the path to check env
-                        let envPath;
-                        if (node.proxy_id && proxyNodes[node.proxy_id]) {
-                            const proxyNode = proxyNodes[node.proxy_id];
-                            envPath = `/proxy2/${proxyNode.name}/proxy2/${node.name}/env`;
-                        } else {
-                            envPath = `/proxy2/${node.name}/env`;
-                        }
-
-                        const envResponse = await fetch(envPath);
-                        if (!envResponse.ok) {
-                            console.warn(`Failed to fetch env for node ${node.name}`);
-                            return null;
-                        }
-
-                        const envText = await envResponse.text();
-                        
-                        // Parse JSON response
-                        let envData;
-                        try {
-                            envData = JSON.parse(envText);
-                        } catch (e) {
-                            console.warn(`Failed to parse env JSON for node ${node.name}:`, e);
-                            return null;
-                        }
-                        
-                        // Check if the environment variable matches
-                        if (filterValue === null) {
-                            // Only key provided, check if key exists
-                            if (filterKey in envData) {
-                                return node;
-                            }
-                        } else {
-                            // Key=Value provided, match exact value
-                            if (filterKey in envData && envData[filterKey] === filterValue) {
-                                return node;
-                            }
-                        }
-                        
-                        return null;
-                    } catch (error) {
-                        console.error(`Error checking node ${node.name}:`, error);
-                        return null;
-                    }
-                });
-
-                const results = await Promise.all(checkPromises);
-                const validNodes = results.filter(node => node !== null);
-                
-                if (validNodes.length > 0) {
-                    matchingProxies.set(proxy.name, validNodes);
+                const envResponse = await fetch(`/proxy2/${node.name}/env`);
+                if (!envResponse.ok) return null;
+                const envData = JSON.parse(await envResponse.text());
+                if (filterValue === null) {
+                    return (filterKey in envData) ? node : null;
                 }
+                return (filterKey in envData && envData[filterKey] === filterValue) ? node : null;
             } catch (error) {
-                console.error(`Error checking proxy ${proxy.name}:`, error);
+                console.error(`Error checking node ${node.name}:`, error);
+                return null;
             }
-        }
+        });
 
-        // Update proxy selector with filtered proxies
-        proxySearchInput.value = '';
-        proxySearchInput.disabled = false;
+        const matchingNodes = (await Promise.all(checks)).filter(n => n !== null);
 
-        if (matchingProxies.size === 0) {
-            const filterDesc = filterValue === null ? filterKey : `${filterKey}=${filterValue}`;
+        searchInput.value = '';
+        searchInput.disabled = false;
+
+        const filterDesc = filterValue === null ? filterKey : `${filterKey}=${filterValue}`;
+        if (matchingNodes.length === 0) {
             alert(`No nodes found with ${filterDesc}`);
-            // Restore original proxy list
-            loadProxies();
+            loadNodes();
         } else {
-            // Update global allProxies with filtered results
-            allProxies = [];
-            let totalNodes = 0;
-            const proxyNodeMap = new Map(); // Store matching nodes for each proxy
-            
-            matchingProxies.forEach((nodes, proxyName) => {
-                const proxy = fetchedProxies.find(p => p.name === proxyName);
-                if (proxy) {
-                    allProxies.push(proxy);
-                    proxyNodeMap.set(proxyName, nodes);
-                    totalNodes += nodes.length;
-                }
-            });
-            
-            // Rebuild filtered proxy list
-            filterProxies();
-            
-            const filterDesc = filterValue === null ? filterKey : `${filterKey}=${filterValue}`;
-            alert(`Found ${matchingProxies.size} proxy(ies) with ${totalNodes} matching node(s) for ${filterDesc}`);
+            allNodes = matchingNodes;
+            filterNodes();
+            alert(`Found ${matchingNodes.length} matching node(s) for ${filterDesc}`);
         }
     } catch (error) {
         console.error('Failed to filter nodes:', error);
         alert('Failed to filter nodes: ' + error.message);
-        // Restore original proxy list
-        loadProxies();
+        searchInput.disabled = false;
+        loadNodes();
     }
 }
 
 // Clear environment filter
 function clearEnvFilter() {
     document.getElementById('envFilterInput').value = '';
-    
-    // Restore original proxy list
-    loadProxies();
-    
-    // Clear target selector
-    const targetSelector = document.getElementById('targetSelector');
-    targetSelector.innerHTML = '<option value="">-- Select Target --</option>';
-    targetSelector.disabled = true;
+    loadNodes();
 }
