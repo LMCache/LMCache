@@ -13,6 +13,5 @@ the cache.
    compatibility
    quickstart
    /mp/configuration
-   /mp/request_transport
    benchmarking
    kv_cache_calculator
