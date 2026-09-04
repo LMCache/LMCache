@@ -6,16 +6,25 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 # Third Party
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+import pytest
+
+pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
+
+# Third Party
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorRole,
+)
 
 # First Party
-from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
-from lmcache.integration.vllm.lmcache_mp_metadata import (
+from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
+    LMCacheMPConnector,
+)
+from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
     LMCacheMPRequestMetadata,
     LMCacheMPWorkerMetadata,
 )
-from lmcache.integration.vllm.vllm_multi_process_adapter import (
+from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LMCacheMPSchedulerAdapter,
     LoadStoreOp,
 )
