@@ -48,6 +48,10 @@ must not be combined as one performance score.
 
 ## Live exact-prefix end-to-end check
 
+Use [`live_e2e.ipynb`](./live_e2e.ipynb) for a notebook that checks both
+services, invokes the same driver described below, asserts an exact match, and
+verifies that all three JSON artifacts were written.
+
 With an LMCache server on ports 6555/8080 and a vLLM server on port 8000
 started with `LMCacheMPConnector`, `--no-enable-prefix-caching`, and
 `--return-tokens-as-token-ids`, run:
