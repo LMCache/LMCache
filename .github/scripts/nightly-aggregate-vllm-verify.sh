@@ -10,10 +10,10 @@
 # per OS rather than requiring one shared version across all of them.
 # pin-tested-vllm.sh writes latest_tested_vllm_<os>.txt accordingly.
 #
-# Results come from cpu_device.yml, whose matrix is (os x model), so one
-# OS contributes several legs. An OS is only pinned as tested when every
-# one of its legs passed the full CPU device suite (server bench + e2e);
-# "importable" is not enough.
+# Results come from cpu_device.yml, whose matrix is
+# (os x model x request transport), so one OS contributes several legs.
+# An OS is only pinned as tested when every one of its legs passed the full
+# CPU device suite (server bench + e2e); "importable" is not enough.
 #
 # Expects artifacts under verify-results/*/verify_result.json (one
 # subdirectory per matrix leg, from download-artifact).
@@ -55,18 +55,19 @@ for d in verify-results/*/; do
     fi
     # Read all fields in a single python3 invocation (tab-separated) to
     # avoid spawning one interpreter per field.
-    IFS=$'\t' read -r os model st ver rsn < <(python3 -c '
+    IFS=$'\t' read -r os model transport st ver rsn < <(python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
 print("\t".join([
     d["os"],
     d.get("model", "-"),
+    d.get("request_transport", "zmq"),
     d["status"],
     d.get("vllm_version", ""),
     d.get("reason", ""),
 ]))
 ' "$f")
-    OS_LEGS["$os"]="${OS_LEGS[$os]:-} ${model}=${st}"
+    OS_LEGS["$os"]="${OS_LEGS[$os]:-} ${model}/${transport}=${st}"
     # Record a version from any leg that reported one, even a failing
     # one, so the report can name the build that broke.
     [ -n "$ver" ] && OS_VERSION["$os"]="$ver"

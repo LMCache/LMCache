@@ -129,7 +129,7 @@ launch_vllm() {
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --port "$saved_port" \
         --block-size 944 \
-        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
+        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
     echo "$VLLM_PID" >> "$PID_FILE"
@@ -242,6 +242,7 @@ count_retrieves() {
 # ── 1. Launch LMCache MP server (kept alive across the vLLM restart) ──
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT) ==="
 lmcache server \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --host localhost \
     --port "$LMCACHE_PORT" \
     --chunk-size "$CHUNK_SIZE" \

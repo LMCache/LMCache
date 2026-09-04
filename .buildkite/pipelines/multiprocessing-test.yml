@@ -2,9 +2,15 @@ env:
   DOCKER_BUILDKIT: 1
 
 steps:
-  - label: ":compression: Multiprocessing tests"
+  - label: ":compression: Multiprocessing tests / {{matrix.request_transport}}"
     key: "test"
     timeout_in_minutes: 60
+    matrix:
+      setup:
+        request_transport:
+          - "zmq"
+          - "grpc"
+    env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     commands:
       - .buildkite/scripts/should-run-comprehensive.sh || exit 0 # Reuse the trigger condition for comprehensive tests
       - chmod +x .buildkite/scripts/multiprocessing-test/*.sh

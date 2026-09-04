@@ -3,8 +3,14 @@
 # 2) Performance: LMCache makes TTFT smaller.
 
 steps:
-  - label: ":test_tube: SGLang+LMCache — Correctness"
+  - label: ":test_tube: SGLang+LMCache — Correctness / {{matrix.request_transport}}"
     command: .buildkite/k3_tests/sglang/run.sh correctness
+    matrix:
+      setup:
+        request_transport:
+          - "zmq"
+          - "grpc"
+    env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     timeout_in_minutes: 15
     agents: { queue: "k8s" }
     plugins:
@@ -25,8 +31,14 @@ steps:
       - "*.log"
       - "*.json"
 
-  - label: ":zap: SGLang+LMCache — Performance"
+  - label: ":zap: SGLang+LMCache — Performance / {{matrix.request_transport}}"
     command: .buildkite/k3_tests/sglang/run.sh perf
+    matrix:
+      setup:
+        request_transport:
+          - "zmq"
+          - "grpc"
+    env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     timeout_in_minutes: 15
     retry:
       automatic:

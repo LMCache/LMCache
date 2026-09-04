@@ -119,6 +119,7 @@ echo "Pulling ${VLLM_ROCM_IMAGE}"
     --env "GPU_FOR_BASELINE=${GPU_FOR_BASELINE}" \
     --env "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx942}" \
     --env "AMD_KERNEL_MODE=${MODE}" \
+    --env "LMCACHE_REQUEST_TRANSPORT=${LMCACHE_REQUEST_TRANSPORT:-zmq}" \
     "${SERIALIZE_ENV[@]}" \
     --env ATTENTION_BACKEND=auto \
     --env BATCH_INVARIANT=0 \
