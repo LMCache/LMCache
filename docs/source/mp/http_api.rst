@@ -113,6 +113,10 @@ compatibility with the vLLM-embedded API server.
      - Detailed engine snapshot (L1, L2, registered contexts, sessions,
        prefetch jobs) for inspection and debugging.
    * - GET
+     - ``/status/memory-pressure``
+     - Typed local L1 and per-adapter L2 usage, capacity, policy watermark,
+       health, and derived capacity-pressure level.
+   * - GET
      - ``/config``
      - Dump the merged server configuration objects (``mp``,
        ``storage_manager``, ``observability``).
@@ -414,6 +418,105 @@ been initialized:
 .. code-block:: bash
 
     curl -s http://localhost:8080/status | jq
+
+``GET /status/memory-pressure``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Returns a typed, point-in-time view of local capacity pressure. The MP server
+collects L1 usage and each live L2 adapter independently; it does not aggregate
+multiple L2 backends, so a hot adapter cannot be hidden by a colder one.
+``adapter_id`` is the stable runtime adapter index and is ``null`` for L1.
+
+The level follows local policy rather than fixed monitoring thresholds:
+
+- ``high`` means usage reached the tier's configured global-capacity eviction
+  ``trigger_watermark``;
+- ``critical`` means usage reached the tier's reported logical capacity;
+- ``normal`` means known usage is below those boundaries; and
+- ``unknown`` means capacity or usage was unavailable.
+
+Backend health is reported separately and never changes the capacity-pressure
+level. If usage collection fails, its entry remains in the response with
+``collection_errors`` and an ``unknown`` level while healthy sources are still
+returned. A health-only failure sets health to ``unknown`` without discarding
+known pressure. ``complete=false`` means at least one tier's pressure could not
+be classified. Capacity ``0`` from an unlimited/unknown-capacity adapter is
+represented as ``null`` while its known ``used_bytes`` is preserved.
+For an L2 ``IsolatedLRU`` policy, the watermark applies to each
+``cache_salt`` quota rather than aggregate adapter capacity, so aggregate usage
+does not become ``high`` at that boundary; use the quota status API for the
+per-salt policy state.
+
+This is a local status surface. The MP coordinator owns fleet membership and
+control-plane state, but does not currently ingest or persist these snapshots.
+A future coordinator reporter or proxy can consume this transport-neutral
+local contract without moving local memory-safety ownership into the registry.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "instance_id": "mp-worker-0",
+      "timestamp_ms": 1784600000000,
+      "overall_level": "high",
+      "complete": true,
+      "tiers": [
+        {
+          "tier": "l1",
+          "adapter_id": null,
+          "backend_type": null,
+          "used_bytes": 85899345920,
+          "capacity_bytes": 107374182400,
+          "used_ratio": 0.8,
+          "trigger_watermark": 0.8,
+          "eviction_policy": "LRU",
+          "health": "ok",
+          "level": "high",
+          "collection_errors": []
+        },
+        {
+          "tier": "l2",
+          "adapter_id": 0,
+          "backend_type": "dax",
+          "used_bytes": 214748364800,
+          "capacity_bytes": 536870912000,
+          "used_ratio": 0.4,
+          "trigger_watermark": 0.8,
+          "eviction_policy": "LRU",
+          "health": "ok",
+          "level": "normal",
+          "collection_errors": []
+        }
+      ]
+    }
+
+The existing scrape-time ``lmcache_mp.l1_memory_usage_bytes``,
+``lmcache_mp.l1_usage_ratio``, ``lmcache_mp.l2_usage_bytes``, and eviction
+counters remain available as time-series signals. They do not currently expose
+L2 capacity or policy watermarks, so this patch deliberately treats the new
+contract as point-in-time status rather than claiming a complete L2 pressure
+series. Calling this endpoint does not populate or mutate metrics; a future
+live metric can consume the same snapshot API without making HTTP reads own
+metric state.
+
+**Response** (``503 Service Unavailable``):
+
+.. code-block:: json
+
+    {
+      "detail": "server not initialized"
+    }
+
+The endpoint also returns ``503`` with
+``detail="memory pressure snapshot unavailable"`` if the storage manager
+cannot produce the top-level snapshot.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/status/memory-pressure | jq
 
 ``GET /config``
 ~~~~~~~~~~~~~~~

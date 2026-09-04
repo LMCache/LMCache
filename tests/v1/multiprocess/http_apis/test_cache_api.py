@@ -104,7 +104,7 @@ def _make_app(sm: Optional[_FakeStorageManager]) -> FastAPI:
     app.include_router(cache_router)
     register_error_handlers(app)
     if sm is not None:
-        app.state.context = build_context(_FakeEngine(sm))
+        app.state.context = build_context(_FakeEngine(sm), instance_id="test")
     return app
 
 
@@ -487,7 +487,7 @@ def _make_prefetch_app(ctx: Optional[_FakeContext]) -> FastAPI:
     app.include_router(cache_router)
     register_error_handlers(app)
     if ctx is not None:
-        app.state.context = build_context(_PrefetchEngine(ctx))
+        app.state.context = build_context(_PrefetchEngine(ctx), instance_id="test")
     return app
 
 
@@ -598,7 +598,7 @@ def _make_clear_app(engine: Optional[_ClearEngine]) -> FastAPI:
     app.include_router(cache_router)
     register_error_handlers(app)
     if engine is not None:
-        app.state.context = build_context(engine)
+        app.state.context = build_context(engine, instance_id="test")
     return app
 
 

@@ -19,6 +19,7 @@ from fastapi import HTTPException, Request
 # First Party
 from lmcache.v1.multiprocess.cache_control.object_service import ObjectService
 from lmcache.v1.multiprocess.cache_control.prefetch_service import PrefetchService
+from lmcache.v1.multiprocess.memory_pressure import MemoryPressureService
 
 
 @dataclass
@@ -30,14 +31,17 @@ class MPHTTPContext:
             handlers (clear / checksums) reach engine internals directly.
         object_service: Key-addressed L1/L2 delete, adapter / object listing.
         prefetch_service: Warm-prefetch submit / status (owns the job table).
+        memory_pressure: Local usage/pressure snapshots. ``None`` only for
+            partial test engines that do not expose a storage manager.
     """
 
     engine: Any
     object_service: ObjectService
     prefetch_service: PrefetchService
+    memory_pressure: MemoryPressureService | None
 
 
-def build_context(engine: Any) -> MPHTTPContext:
+def build_context(engine: Any, *, instance_id: str) -> MPHTTPContext:
     """Construct the per-app context once the engine is ready.
 
     Called from the server lifespan; the result is stashed on
@@ -45,14 +49,23 @@ def build_context(engine: Any) -> MPHTTPContext:
 
     Args:
         engine: The initialized node cache engine.
+        instance_id: Canonical MP server identity shared with coordinator
+            membership and the OTel ``service.instance.id`` resource.
 
     Returns:
         A fresh :class:`MPHTTPContext` wrapping the engine and its services.
     """
+    storage_manager = getattr(engine, "storage_manager", None)
+    memory_pressure = (
+        MemoryPressureService(storage_manager, instance_id)
+        if storage_manager is not None
+        else None
+    )
     return MPHTTPContext(
         engine=engine,
         object_service=ObjectService(engine),
         prefetch_service=PrefetchService(engine),
+        memory_pressure=memory_pressure,
     )
 
 
