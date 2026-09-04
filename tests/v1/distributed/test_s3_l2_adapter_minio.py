@@ -33,6 +33,7 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.platform import consume_fd
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
+pytestmark = pytest.mark.no_shared_allocator
 
 # =============================================================================
 # Fake S3 backend (shared with test_s3_l2_adapter.py pattern)
@@ -245,20 +246,29 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     return False
 
 
-def _minio_config(**overrides) -> S3L2AdapterConfig:
+def _minio_config(
+    s3_endpoint: str = "lmcache-kv.localhost:9000",
+    s3_region: str = "us-east-1",
+    s3_num_io_threads: int = 1,
+    s3_prefer_http2: bool = False,
+    s3_enable_s3express: bool = False,
+    disable_tls: bool = True,
+    aws_access_key_id: str | None = "minioadmin",
+    aws_secret_access_key: str | None = "minioadmin",
+    max_capacity_gb: float = 0.001,
+) -> S3L2AdapterConfig:
     """Build a MinIO-style S3L2AdapterConfig with sensible defaults."""
-    defaults = {
-        "s3_endpoint": "lmcache-kv.localhost:9000",
-        "s3_region": "us-east-1",
-        "disable_tls": True,
-        "aws_access_key_id": "minioadmin",
-        "aws_secret_access_key": "minioadmin",
-        "s3_prefer_http2": False,
-        "s3_num_io_threads": 1,
-        "max_capacity_gb": 0.001,
-    }
-    defaults.update(overrides)
-    return S3L2AdapterConfig(**defaults)
+    return S3L2AdapterConfig(
+        s3_endpoint=s3_endpoint,
+        s3_region=s3_region,
+        s3_num_io_threads=s3_num_io_threads,
+        s3_prefer_http2=s3_prefer_http2,
+        s3_enable_s3express=s3_enable_s3express,
+        disable_tls=disable_tls,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        max_capacity_gb=max_capacity_gb,
+    )
 
 
 @pytest.fixture
