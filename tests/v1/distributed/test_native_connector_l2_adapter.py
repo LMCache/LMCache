@@ -19,6 +19,7 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
+    RecoveredL2Entry,
     _object_key_to_string,
 )
 from lmcache.v1.memory_management import (
@@ -49,9 +50,9 @@ class MockNativeConnector:
       - close()
     """
 
-    def __init__(self):
+    def __init__(self, initial_store: dict[str, bytes] | None = None) -> None:
         self._efd = create_event_notifier()
-        self._store: dict[str, bytes] = {}
+        self._store: dict[str, bytes] = dict(initial_store or {})
         self._next_id = 1
         self._completions: list[tuple[int, bool, str, list[bool] | None]] = []
         self._lock = threading.Lock()
@@ -1248,6 +1249,107 @@ class TestDeleteBackwardCompatibility:
         try:
             key = create_object_key(1)
             adp.delete([key])  # should not raise, just no-op
+        finally:
+            adp.close()
+
+
+# =============================================================================
+# Restart Recovery Tests
+# =============================================================================
+
+
+class TestRestartRecovery:
+    def test_recovered_entries_seed_usage_and_lru(self) -> None:
+        """Recovered entries restore aggregate/per-salt usage and LRU order."""
+        # First Party
+        from lmcache.v1.distributed.config import EvictionConfig
+        from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+            L2AdapterEvictionState,
+        )
+
+        older = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(1),
+            model_name="test_model",
+            kv_rank=0,
+            cache_salt="alice",
+        )
+        newer = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(2),
+            model_name="test_model",
+            kv_rank=0,
+            cache_salt="bob",
+        )
+        adp = NativeConnectorL2Adapter(
+            MockNativeConnector(),
+            max_capacity_gb=1000 / (1024**3),
+            recovered_entries=[
+                RecoveredL2Entry(older, 400, mtime_ns=1),
+                RecoveredL2Entry(newer, 200, mtime_ns=2),
+            ],
+        )
+        try:
+            usage = adp.get_usage()
+            assert usage.total_bytes_used == 600
+            assert usage.usage_fraction == pytest.approx(0.6)
+            assert dict(usage.bytes_by_cache_salt) == {
+                "alice": 400,
+                "bob": 200,
+            }
+
+            state = L2AdapterEvictionState(
+                0,
+                adp,
+                EvictionConfig(eviction_policy="LRU", eviction_ratio=1.0),
+            )
+            actions = state.eviction_policy.get_eviction_actions(1.0)
+            assert len(actions) == 1
+            assert actions[0].keys == [older, newer]
+            status = adp.report_status()
+            assert status["recovered_keys"] == 2
+            assert status["recovered_bytes"] == 600
+        finally:
+            adp.close()
+
+    def test_recovered_entry_is_not_double_counted_and_can_be_deleted(
+        self,
+    ) -> None:
+        """A re-store is idempotent and delete subtracts recovered bytes."""
+        key = create_object_key(1)
+        key_string = _object_key_to_string(key)
+        client = MockNativeConnector({key_string: bytes(400)})
+        adp = NativeConnectorL2Adapter(
+            client,
+            max_capacity_gb=1000 / (1024**3),
+            recovered_entries=[RecoveredL2Entry(key, 400)],
+        )
+        try:
+            obj = create_memory_obj(size=100, fill_value=1.0)
+            task_id = adp.submit_store_task([key], [obj])
+            assert wait_for_event_fd(adp.get_store_event_fd(), timeout=5.0)
+            result = adp.pop_completed_store_tasks()[task_id]
+
+            assert result.is_successful()
+            assert result.bytes_transferred() == 0
+            assert adp.get_usage().total_bytes_used == 400
+
+            adp.delete([key])
+            assert adp.get_usage().total_bytes_used == 0
+            assert dict(adp.get_usage().bytes_by_cache_salt) == {}
+
+            # A listener registered after deletion must not receive the stale
+            # startup snapshot.
+            # First Party
+            from lmcache.v1.distributed.config import EvictionConfig
+            from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+                L2AdapterEvictionState,
+            )
+
+            state = L2AdapterEvictionState(
+                0,
+                adp,
+                EvictionConfig(eviction_policy="LRU", eviction_ratio=1.0),
+            )
+            assert state.eviction_policy.get_eviction_actions(1.0) == []
         finally:
             adp.close()
 

@@ -44,17 +44,12 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
+from lmcache.v1.distributed.l2_adapters.fs_key_codec import (
+    object_key_to_filename as _object_key_to_filename,
+)
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
-
-_KEY_SEP = "@"
-# ``@`` in both ``model_name`` and ``cache_salt`` is rejected by
-# ObjectKey.__post_init__, so splitting on ``@`` is unambiguous.
-# Kept in sync with native_connector_l2_adapter.py and
-# csrc/storage_backends/fs/connector.cpp.
-_PATH_SLASH_REPLACEMENT = "-SEP-"
-_FILE_EXT = ".data"
 
 
 def _readinto_full(
@@ -94,74 +89,6 @@ async def _async_readinto_full(
             break
         total += n
     return total
-
-
-def _object_key_to_filename(key: ObjectKey) -> str:
-    """Build a reversible, filesystem-safe filename.
-
-    Unsalted::
-
-        <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>.data
-
-    Salted (trailing ``cache_salt``)::
-
-        <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>.data
-
-    ``kv_rank`` is written in ``0x`` prefixed hex so each byte
-    of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
-    is directly readable. ``object_group_id`` is written in plain hex.
-    """
-    safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
-    base = (
-        f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
-        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
-    )
-    if key.cache_salt:
-        return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
-    return f"{base}{_FILE_EXT}"
-
-
-def _filename_to_object_key(
-    filename: str,
-) -> Optional[ObjectKey]:
-    """Reverse ``_object_key_to_filename``.
-
-    Accepts both the 4-field unsalted shape and the 5-field salted
-    shape (trailing ``cache_salt``). Returns ``None`` for anything
-    else. Since ``model_name`` is guaranteed not to contain ``@``,
-    plain ``split`` suffices — no marker, no rsplit.
-    """
-    if not filename.endswith(_FILE_EXT):
-        return None
-    stem = filename[: -len(_FILE_EXT)]
-    parts = stem.split(_KEY_SEP)
-    if len(parts) == 4:
-        safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
-        cache_salt = ""
-    elif len(parts) == 5:
-        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
-    else:
-        return None
-
-    model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
-    try:
-        chunk_hash = bytes.fromhex(chunk_hash_hex)
-        kv_rank = int(kv_rank_str, 16)
-        object_group_id = int(object_group_str, 16)
-        # ObjectKey.__post_init__ raises ValueError when the decoded
-        # model_name / cache_salt violate the forbidden-char or length
-        # invariants (e.g. a stray file from another tool on disk).
-        # The contract here is to return None for anything unparsable,
-        # so keep the constructor inside the try block.
-        return ObjectKey(
-            chunk_hash=chunk_hash,
-            model_name=model_name,
-            kv_rank=kv_rank,
-            object_group_id=object_group_id,
-            cache_salt=cache_salt,
-        )
-    except ValueError:
-        return None
 
 
 class FSL2AdapterConfig(L2AdapterConfigBase):
