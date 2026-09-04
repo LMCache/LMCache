@@ -313,3 +313,36 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         )
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
+
+
+@dataclass(frozen=True)
+class SessionEndInfo:
+    """What the engine knows about a finished request, sent with END_SESSION.
+
+    The commit policy decides from these facts whether the request's final
+    sliding-window is worth committing to L2 (see
+    ``lmcache/v1/multiprocess/commit_policy.py``). They are raw observations,
+    not a decision: the engine reports how the request ended and, when the
+    caller passed a per-request hint, what the caller asked for; the policy
+    owns the rule.
+
+    Every field has a default so an engine adapter that knows nothing sends
+    ``SessionEndInfo()`` and the policy sees "no information", which every
+    built-in policy treats as "do not commit".
+    """
+
+    finish_reason: str = ""
+    """How the request finished, lowercased vLLM ``FinishReason`` ("stop",
+    "length", "abort", "error", "repetition"). Empty means unknown."""
+
+    stop_token_id: int = -1
+    """Token id the generation stopped on, ``-1`` when unknown. For a chat
+    model this is the turn-boundary marker the model emits to end its turn
+    (PLaMo 3: ``<|plamo:tag|>`` = 16). The engine reports the last generated
+    token when it has no more specific stop reason, which is the ordinary case
+    for a model that ends its turn on its own EOS."""
+
+
+NO_SESSION_END_INFO = SessionEndInfo()
+"""The "engine reported nothing" value, for adapters that do not observe how a
+request finished. Shared because :class:`SessionEndInfo` is frozen."""

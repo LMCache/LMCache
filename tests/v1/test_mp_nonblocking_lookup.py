@@ -17,6 +17,10 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPSchedulerAdapter,
     ParallelStrategy,
 )
+from lmcache.v1.multiprocess.custom_types import (
+    NO_SESSION_END_INFO,
+    SessionEndInfo,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 
 
@@ -95,7 +99,11 @@ class Client:
         self.frees.append(key)
         return self.free_ack
 
-    def end_session(self, request_id: str) -> MessagingFuture[Any]:
+    def end_session(
+        self,
+        request_id: str,
+        end_info: SessionEndInfo = NO_SESSION_END_INFO,
+    ) -> MessagingFuture[Any]:
         """Record session removal after its preceding obligations."""
         self.ends.append(request_id)
         return self.end_ack
