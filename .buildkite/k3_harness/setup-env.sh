@@ -263,6 +263,14 @@ echo "--- :python: Installing LMCache from source"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 uv pip freeze | sort > /tmp/env-before-lmcache.txt
 uv pip install -e . --no-build-isolation
+
+# Editable installs do not run setuptools' build_py hook. Generate the ignored
+# bindings in the checkout for gRPC matrix jobs after grpcio-tools is present.
+if [[ "${LMCACHE_REQUEST_TRANSPORT:-zmq}" == "grpc" ]]; then
+    echo "--- :gear: Generating LMCache gRPC bindings"
+    python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py"
+fi
+
 uv pip freeze | sort > /tmp/env-after-lmcache.txt
 if ! diff -q /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt >/dev/null; then
     echo "--- :warning: Packages changed during LMCache install"
