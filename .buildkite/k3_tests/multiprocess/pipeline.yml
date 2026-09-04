@@ -14,13 +14,13 @@ x-flaky-retry: &flaky-retry
     - exit_status: "*"
       limit: 2
 
-# Keep request transport as a shared matrix dimension so gRPC can be enabled
-# later with a small matrix-only change. For now, only ZMQ jobs are scheduled.
+# Run every regular multiprocess scenario against both request transports.
 # Worker-side KV transfer modes remain separate matrix dimensions below.
 x-request-transport-matrix: &request-transport-matrix
   setup:
     request_transport:
       - "zmq"
+      - "grpc"
 
 # Keep the regular 1-GPU pod anchor available after the two lm_eval steps are
 # merged; engine_driven still needs its separate /dev/shm pod below.
@@ -195,6 +195,7 @@ steps:
               - "engine_driven"
             request_transport:
               - "zmq"
+              - "grpc"
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         retry: *flaky-retry
@@ -237,6 +238,7 @@ steps:
               - "engine_driven"
             request_transport:
               - "zmq"
+              - "grpc"
         timeout_in_minutes: 30
         env:
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -349,6 +351,7 @@ steps:
               - "server_copy"
             request_transport:
               - "zmq"
+              - "grpc"
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -375,8 +378,9 @@ steps:
 
   # Canary path for VERIFY_AND_PIN_VLLM=true: skips every real test group
   # above (each group's `if` evaluates to false) and instead runs vllm_bench
-  # across the enabled request-transport matrix. The matrix currently contains
-  # only ZMQ; gRPC can be added once its request-server runtime is available.
+  # across both request transports. The pin is published only after both
+  # matrix jobs pass, preventing one successful transport from pinning a
+  # nightly that failed the other transport.
   - label: ":test_tube: Verify vLLM nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
@@ -408,8 +412,9 @@ steps:
   - label: ":pushpin: Pin verified vLLM nightly"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
-      buildkite-agent artifact download "verified_vllm_zmq.txt" .
-      VLLM_VERSION="$(cat verified_vllm_zmq.txt)" \
+      buildkite-agent artifact download "verified_vllm_*.txt" .
+      diff -u verified_vllm_zmq.txt verified_vllm_grpc.txt
+      VLLM_VERSION="$(cat verified_vllm_grpc.txt)" \
         bash .github/scripts/pin-tested-vllm.sh
     timeout_in_minutes: 10
     agents: { queue: "k8s" }

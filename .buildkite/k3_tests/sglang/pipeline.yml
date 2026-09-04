@@ -9,6 +9,7 @@ steps:
       setup:
         request_transport:
           - "zmq"
+          - "grpc"
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     timeout_in_minutes: 30
     retry:
@@ -42,6 +43,7 @@ steps:
       setup:
         request_transport:
           - "zmq"
+          - "grpc"
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     timeout_in_minutes: 30
     retry:

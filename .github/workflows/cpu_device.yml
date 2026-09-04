@@ -87,9 +87,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest]
-        # Keep the shared transport dimension ready, but do not run gRPC until
-        # the request-server implementation lands.
-        request_transport: [zmq]
+        request_transport: [zmq, grpc]
         # Each entry is a self-contained model profile the e2e steps
         # thread through env vars. Adding a new model = adding a new
         # entry here. All models share the same downloader
