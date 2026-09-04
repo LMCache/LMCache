@@ -113,6 +113,95 @@ jobs:
             --prerelease \
             dist/cu129/*.whl
 
+  resolve-xpu-nightly:
+    name: Resolve vLLM XPU nightly runtime
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.runtime.outputs.image }}
+      digest: ${{ steps.runtime.outputs.digest }}
+    steps:
+      - name: Resolve immutable XPU runtime image
+        id: runtime
+        run: |
+          set -Eeuo pipefail
+          IMAGE="vllm/vllm-openai-xpu"
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE}:nightly" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          test -n "${DIGEST}"
+          echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  nightly-xpu-wheel:
+    name: Build XPU nightly wheel
+    needs: resolve-xpu-nightly
+    uses: ./.github/workflows/build_xpu_artifacts.yml
+    with:
+      xpu_image: ${{ needs.resolve-xpu-nightly.outputs.image }}
+      dev_version: true
+    secrets: inherit
+
+  pin-nightly-xpu:
+    name: Pin smoke-verified XPU runtime
+    needs: [resolve-xpu-nightly, nightly-xpu-wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Record XPU runtime pin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_PLATFORM: github_actions
+          PIN_BACKEND: xpu
+          VLLM_IMAGE_TAG: vllm/vllm-openai-xpu:nightly
+          VLLM_IMAGE_REF: ${{ needs.resolve-xpu-nightly.outputs.image }}
+          VLLM_IMAGE_DIGEST: ${{ needs.resolve-xpu-nightly.outputs.digest }}
+          LMCACHE_VERSION: ${{ needs.nightly-xpu-wheel.outputs.xpu_version }}
+        run: bash .github/scripts/pin-tested-vllm.sh
+
+  publish-nightly-xpu:
+    name: Publish XPU nightly wheel
+    needs: [resolve-xpu-nightly, nightly-xpu-wheel, pin-nightly-xpu]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Fetch XPU nightly artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-xpu-artifacts
+          path: dist/xpu
+
+      - name: Publish XPU wheels to rolling nightly-xpu release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          XPU_VERSION: ${{ needs.nightly-xpu-wheel.outputs.xpu_version }}
+          XPU_IMAGE: ${{ needs.resolve-xpu-nightly.outputs.image }}
+        run: |
+          set -Eeuo pipefail
+          gh release delete nightly-xpu --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
+          gh release create nightly-xpu \
+            --repo ${{ github.repository }} \
+            --title "Nightly $(date +'%Y-%m-%d') · Intel XPU" \
+            --notes "Nightly Intel XPU wheel built from \`dev\` on $(date +'%Y-%m-%d').
+
+          Runtime image: \`${XPU_IMAGE}\`.
+
+          Install inside that vLLM XPU runtime image:
+          \`\`\`
+          pip install lmcache==${XPU_VERSION} --no-deps \\
+            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-xpu
+          \`\`\`" \
+            --prerelease \
+            dist/xpu/*
+
   # ROCm nightly. Unlike the CUDA wheels above (cibuildwheel on the runner), the
   # ROCm wheel compiles HIP kernels inside the ROCm dev image, so it reuses the
   # same reusable workflow the release pipeline calls. dev_version keeps it
@@ -127,8 +216,8 @@ jobs:
 
   publish-nightly-rocm:
     name: Publish ROCm nightly wheel
-    runs-on: ubuntu-latest
     needs: nightly-rocm-wheel
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
