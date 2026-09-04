@@ -6,15 +6,14 @@
 # profile deliberately has no in-tree GPU extension (the device transfer fast
 # path is supplied by the optional musa_aiter package), so this wheel contains
 # the common native extensions and the complete Python MUSA integration.  The
-# script still requires the MUSA SDK/compiler and TorchMUSA at build time: this
-# prevents a CPU wheel from being accidentally published as a MUSA artifact.
+# script still requires the MUSA SDK/compiler at build time. TorchMUSA is
+# validated separately on the device-backed Buildkite lane.
 #
 # Environment variables (the workflow sets the validated values):
 #   MUSA_HOME                    MUSA SDK root (default /usr/local/musa)
 #   MUSA_PYTHON                  Python executable (default auto-detected)
 #   TORCH_MUSA_PACKAGES          Optional whitespace-separated torch packages
 #   TORCH_MUSA_INDEX             Optional package index for those packages
-#   MUSA_REQUIRE_TORCH_MUSA      0 only for compiler-only dry runs (default 1)
 #   MUSA_MANYLINUX_PLATFORM      auditwheel policy (default manylinux_2_35_x86_64)
 #   SKIP_AUDITWHEEL_REPAIR       1 to intentionally keep the raw wheel
 #   SETUPTOOLS_SCM_PRETEND_VERSION wheel version (default 0.0.0.dev0+musa)
@@ -25,17 +24,8 @@ shopt -s nullglob
 PROJECT_DIR="${MUSA_PROJECT_DIR:-/work/LMCache}"
 export MUSA_HOME="${MUSA_HOME:-/usr/local/musa}"
 MUSA_PYTHON="${MUSA_PYTHON:-}"
-MUSA_REQUIRE_TORCH_MUSA="${MUSA_REQUIRE_TORCH_MUSA:-1}"
 MUSA_MANYLINUX_PLATFORM="${MUSA_MANYLINUX_PLATFORM:-manylinux_2_35_x86_64}"
 SKIP_AUDITWHEEL_REPAIR="${SKIP_AUDITWHEEL_REPAIR:-0}"
-
-case "${MUSA_REQUIRE_TORCH_MUSA}" in
-    0|1) ;;
-    *)
-        echo "MUSA_REQUIRE_TORCH_MUSA must be 0 or 1" >&2
-        exit 1
-        ;;
-esac
 
 if [[ -z "${MUSA_PYTHON}" ]]; then
     for candidate in python3.12 python3.11 python3.10 python3; do
@@ -93,11 +83,7 @@ if [[ -n "${TORCH_MUSA_PACKAGES:-}" ]]; then
     "${MUSA_PYTHON}" -m pip install "${pip_args[@]}" "${torch_packages[@]}"
 fi
 
-if [[ "${MUSA_REQUIRE_TORCH_MUSA}" == "1" ]]; then
-    "${MUSA_PYTHON}" -c 'import torch; import torch_musa; print("BUILD TORCH:", torch.__version__, "MUSA:", getattr(torch.version, "musa", "unknown"), "CXX11 ABI:", torch.compiled_with_cxx11_abi())'
-else
-    "${MUSA_PYTHON}" -c 'import torch; print("BUILD TORCH:", torch.__version__)'
-fi
+"${MUSA_PYTHON}" -c 'import torch; print("BUILD TORCH:", torch.__version__)'
 
 "${MUSA_PYTHON}" -m pip install --no-cache-dir \
     ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm wheel pybind11 auditwheel patchelf
