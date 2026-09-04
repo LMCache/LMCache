@@ -213,6 +213,7 @@ def _build_modules(
         mp_config.p2p_config,
         coordinator_config,
         mp_config.instance_id,
+        mp_config.transport,
     )
 
     # Build the transfer and blend modules first so the ManagementModule can
