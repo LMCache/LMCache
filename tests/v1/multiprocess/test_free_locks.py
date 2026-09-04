@@ -362,6 +362,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_client.free_lookup_locks.return_value = mock_future
     adapter.req_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
+    adapter._unacked_lookups = {}
     adapter._lookup_params = {}
 
     token_ids = list(range(512))
