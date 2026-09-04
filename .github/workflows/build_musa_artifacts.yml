@@ -156,6 +156,7 @@ jobs:
                       --network=host \
                       --shm-size=4g \
                       -e TORCH_DEVICE_BACKEND_AUTOLOAD="${TORCH_DEVICE_BACKEND_AUTOLOAD}" \
+                      -e LMCACHE_LOG_LEVEL=ERROR \
                       -v "${PWD}:/work/LMCache" \
                       --entrypoint bash "${MUSA_IMAGE_REF}" \
                       -lc '

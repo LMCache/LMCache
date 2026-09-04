@@ -75,6 +75,7 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
         if step.get("name", "").startswith("Smoke-check wheel installation")
     )
     assert "torch_musa" not in smoke["run"]
+    assert "-e LMCACHE_LOG_LEVEL=ERROR" in smoke["run"]
     assert "--no-deps" in smoke["run"]
 
     version_step = next(
