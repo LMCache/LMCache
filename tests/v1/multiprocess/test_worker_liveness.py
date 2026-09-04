@@ -8,6 +8,7 @@ are stubbed.
 """
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from typing import cast
 from unittest.mock import MagicMock
 import threading
@@ -28,6 +29,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
@@ -156,6 +158,37 @@ def test_gpu_unregister_cleans_up() -> None:
     module.unregister_kv_cache(1)  # already gone -> no exception
 
 
+def test_gpu_drop_supports_same_id_new_incarnation(monkeypatch) -> None:
+    """Idempotence must not tombstone a later registration reusing an ID."""
+    _stub_gpu_registration_backend(monkeypatch)
+    module = _bare_gpu_module()
+    first = MagicMock(
+        name="first-context",
+        num_layers=2,
+        **{"kv_layer_groups_manager.num_object_groups": 1},
+    )
+    second = MagicMock(
+        name="second-context",
+        num_layers=2,
+        **{"kv_layer_groups_manager.num_object_groups": 1},
+    )
+    monkeypatch.setattr(
+        gpu_mod, "create_cache_context", MagicMock(side_effect=[first, second])
+    )
+    monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+
+    module.register_kv_cache(1, MagicMock(), "m", 1, MagicMock(), MagicMock(), [])
+
+    module.drop_instance_state(1)
+    module.drop_instance_state(1)
+    module.register_kv_cache(1, MagicMock(), "m", 1, MagicMock(), MagicMock(), [])
+    module.drop_instance_state(1)
+
+    first.close.assert_called_once()
+    second.close.assert_called_once()
+    assert module.tracked_instance_count() == 0
+
+
 def test_non_gpu_reap_pops_strategy_as_pair() -> None:
     """Reaping a non-GPU entry pops its strategy in the same scan, keeping
     'strategy present iff entry present'."""
@@ -194,6 +227,17 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
 
     with pytest.raises(ValueError, match="not registered"):
         module._resolve_for_transfer(999)
+
+
+def test_transfer_modules_delegate_main_unregister_to_management() -> None:
+    """Primary transfer modules must not register competing unregister handlers."""
+    gpu_handlers = {spec.request_type for spec in _bare_gpu_module().get_handlers()}
+    non_gpu_handlers = {
+        spec.request_type for spec in _bare_non_gpu_module().get_handlers()
+    }
+
+    assert RequestType.UNREGISTER_KV_CACHE not in gpu_handlers
+    assert RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT not in non_gpu_handlers
 
 
 class _FakeTarget:
@@ -247,6 +291,33 @@ class _FailingTarget(_FakeTarget):
         super().drop_instance_state(instance_id)
 
 
+class _StateOwner(_FakeTarget):
+    """Idempotent state owner used to observe actual release effects."""
+
+    def __init__(self, *instance_ids: int) -> None:
+        super().__init__()
+        self.instances = set(instance_ids)
+        self.released: list[int] = []
+
+    def tracked_instance_count(self) -> int:
+        return len(self.instances)
+
+    def reap_stale_instances(
+        self, reap_timeout_s: float, registration_grace_s: float
+    ) -> list[int]:
+        reaped = [iid for iid in self.to_reap if iid in self.instances]
+        self.to_reap.clear()
+        self.instances.difference_update(reaped)
+        self.released.extend(reaped)
+        return reaped
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        self.dropped.append(instance_id)
+        if instance_id in self.instances:
+            self.instances.remove(instance_id)
+            self.released.append(instance_id)
+
+
 @pytest.fixture(autouse=True)
 def _reset_periodic_registry():
     """Keep the reaper out of the global registry across tests."""
@@ -273,6 +344,72 @@ def test_management_ping_isolates_target_failure() -> None:
 
     assert mgmt.ping(42) is True
     assert healthy.touched == [42]
+
+
+def test_management_owns_unified_unregister_handlers() -> None:
+    """Both transfer modes route their main unregister through management."""
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[_StateOwner(7)])
+
+    handlers = {spec.request_type: spec.handler for spec in mgmt.get_handlers()}
+
+    assert handlers[RequestType.UNREGISTER_KV_CACHE] == mgmt.unregister_instance
+    assert (
+        handlers[RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT]
+        == mgmt.unregister_instance
+    )
+
+
+def test_management_unregister_drops_all_state_idempotently() -> None:
+    """One unregister releases every owner; a duplicate has no second effect."""
+    first = _StateOwner(7)
+    second = _StateOwner(7)
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[first, second])
+
+    mgmt.unregister_instance(7)
+    mgmt.unregister_instance(7)
+
+    assert first.released == [7]
+    assert second.released == [7]
+    assert first.tracked_instance_count() == 0
+    assert second.tracked_instance_count() == 0
+
+
+def test_management_unregister_isolates_target_failure() -> None:
+    """One broken owner cannot prevent its siblings from releasing state."""
+    healthy = _StateOwner(9)
+    mgmt = ManagementModule(
+        MagicMock(), liveness_targets=[_FailingTarget("drop"), healthy]
+    )
+
+    mgmt.unregister_instance(9)
+
+    assert healthy.released == [9]
+
+
+def test_management_unregister_racing_reaper_releases_once() -> None:
+    """Concurrent explicit and passive cleanup cannot release an owner twice."""
+    owner = _StateOwner(11)
+    owner.to_reap = [11]
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[owner])
+    barrier = threading.Barrier(3)
+
+    def unregister() -> None:
+        barrier.wait()
+        mgmt.unregister_instance(11)
+
+    def reap() -> None:
+        barrier.wait()
+        mgmt._reap_cycle()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        unregister_future = executor.submit(unregister)
+        reaper_future = executor.submit(reap)
+        barrier.wait()
+        unregister_future.result(timeout=2.0)
+        reaper_future.result(timeout=2.0)
+
+    assert owner.released == [11]
+    assert owner.tracked_instance_count() == 0
 
 
 def test_management_reaper_isolates_scan_failure() -> None:

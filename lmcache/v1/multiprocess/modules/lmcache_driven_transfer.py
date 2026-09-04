@@ -872,11 +872,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE,
-                self.unregister_kv_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
                 RequestType.STORE,
                 self.store,
                 ThreadPoolType.AFFINITY,
@@ -1019,6 +1014,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         Args:
             instance_id: The GPU instance ID (such as PID).
         """
+        if not self._drop_instance_state(instance_id):
+            logger.warning(
+                "No registered GPU context found for instance ID %d", instance_id
+            )
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        """Release this module's state during unified instance cleanup."""
+        self._drop_instance_state(instance_id)
+
+    def _drop_instance_state(self, instance_id: int) -> bool:
+        """Pop and release one GPU registration, returning whether it existed."""
         with self._lock:
             popped = [
                 e
@@ -1026,15 +1032,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 if e is not None
             ]
         if not popped:
-            logger.warning(
-                "No registered GPU context found for instance ID %d", instance_id
-            )
-            return
+            return False
 
         # No scalar binding: `popped` must stay the only reference so
         # _release_entries' reclaim actually unmaps the IPC segments.
         self._release_entries(popped)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
+        return True
 
     @_lmcache_nvtx_annotate
     def store(

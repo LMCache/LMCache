@@ -136,6 +136,33 @@ def test_unregister_releases_context_and_layout(monkeypatch) -> None:
     module.unregister_q_cache(1)  # already gone -> no exception
 
 
+def test_unified_drop_releases_q_state_idempotently(monkeypatch) -> None:
+    """Main instance unregister can release optional Q state exactly once."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        qstore_mod,
+        "torch_dev",
+        SimpleNamespace(
+            empty_cache=lambda: calls.append("empty_cache"),
+            ipc_collect=lambda: calls.append("ipc_collect"),
+        ),
+    )
+    module = _module()
+    context = MagicMock(num_layers=2)
+    context.close.side_effect = lambda: calls.append("close")
+    monkeypatch.setattr(
+        qstore_mod, "create_cache_context", MagicMock(return_value=context)
+    )
+    monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    _register(module)
+
+    module.drop_instance_state(1)
+    module.drop_instance_state(1)
+
+    assert calls == ["close", "empty_cache", "ipc_collect"]
+    assert module.tracked_instance_count() == 0
+
+
 def test_release_tolerates_backends_without_ipc_collect(monkeypatch) -> None:
     """xpu/musa device modules expose no ipc_collect; release must not fail."""
     monkeypatch.setattr(
