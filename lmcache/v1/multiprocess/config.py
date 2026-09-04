@@ -59,6 +59,25 @@ class MPServerConfig:
     sliding-window size at KV-cache registration (hybrid models). When False
     (default), all kernel groups share a single full-attention object group."""
 
+    commit_policy: str = "never"
+    """Which commit policy decides whether a finished request's final
+    sliding window is copied to L2 right away. "never" (default) changes
+    nothing: sliding-window chunks reach L2 only through the write-back on
+    eviction, as they did before this option existed. See
+    ``lmcache/v1/multiprocess/commit_policy.py``."""
+
+    commit_anchor: str = "generation_end"
+    """Where a committed window ends: "generation_end" (the last chunk the
+    request stored) or "prompt_end" (the end of the looked-up prompt). Which
+    one is right follows from whether the serving frontend re-sends the
+    generated answer verbatim in the next turn, so it is a property of the
+    chat template and the client, not of one request."""
+
+    commit_boundary_token_ids: list[int] = field(default_factory=list)
+    """Token ids that mark a chat turn boundary, for the "stop_token" commit
+    policy. Empty (default) accepts any token a request stopped on. PLaMo 3
+    ends an assistant turn on ``<|plamo:tag|>`` = 16."""
+
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
     failure, retain the gapped contiguous prefix so the post-gap chunks stay
@@ -336,6 +355,35 @@ def add_mp_server_args(
         "--transport grpc. Default is 32.",
     )
     mp_group.add_argument(
+        "--commit-policy",
+        type=str,
+        default="never",
+        help="Commit policy deciding whether a finished request's final "
+        "sliding window is copied to L2 immediately. 'never' (default) leaves "
+        "it to the eviction write-back; 'stop_token' commits when the model "
+        "stopped on a chat turn boundary. Plugins may register more.",
+    )
+    mp_group.add_argument(
+        "--commit-anchor",
+        type=str,
+        default="generation_end",
+        choices=["generation_end", "prompt_end"],
+        help="Where a committed window ends. 'generation_end' (default) uses "
+        "the last chunk the request stored; 'prompt_end' uses the end of the "
+        "looked-up prompt, which is right when the next turn re-renders the "
+        "assistant message differently from what was generated (a reasoning "
+        "model whose client drops reasoning_content).",
+    )
+    mp_group.add_argument(
+        "--commit-boundary-tokens",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Token ids that mark a chat turn boundary, for --commit-policy "
+        "stop_token. Omit to accept any stop token. PLaMo 3 ends an assistant "
+        "turn on <|plamo:tag|> = 16.",
+    )
+    mp_group.add_argument(
         "--hash-algorithm",
         type=str,
         default="blake3",
@@ -488,6 +536,9 @@ def parse_args_to_mp_server_config(
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
+        commit_policy=args.commit_policy,
+        commit_anchor=args.commit_anchor,
+        commit_boundary_token_ids=list(args.commit_boundary_tokens or []),
         enable_segmented_prefix=args.enable_segmented_prefix,
         enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,

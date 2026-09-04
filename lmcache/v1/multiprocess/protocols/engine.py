@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    SessionEndInfo,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
@@ -214,9 +215,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # End session
         # Payload:
         #   - request_id: str - Request ID of the session to end
+        #   - end_info: SessionEndInfo - How the request finished, for the
+        #     commit policy. Engines that know nothing send SessionEndInfo().
         # Returns: None
         "END_SESSION": ProtocolDefinition(
-            payload_classes=[str],
+            payload_classes=[str, SessionEndInfo],
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
