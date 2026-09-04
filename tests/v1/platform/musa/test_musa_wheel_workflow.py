@@ -54,6 +54,8 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     assert workflow["env"]["SKIP_AUDITWHEEL_REPAIR"] == "0"
     assert workflow["env"]["MAX_JOBS"] == "2"
     call = workflow["on"]["workflow_call"]
+    assert call["inputs"]["dev_version"]["type"] == "boolean"
+    assert call["inputs"]["dev_version"]["default"] == "false"
     assert call["outputs"]["musa_version"]["value"] == (
         "${{ jobs.build-musa-artifacts.outputs.musa_version }}"
     )
@@ -79,6 +81,14 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     assert "--no-deps" in smoke["run"]
     assert "MUSA_REQUIRE_TORCH_MUSA" in smoke["run"]
 
+    version_step = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "Resolve MUSA wheel version"
+    )
+    assert version_step["env"]["DEV_VERSION"] == "${{ inputs.dev_version }}"
+    assert 'DEV_VERSION}" == "true"' in version_step["run"]
+
 
 def test_publish_workflow_wires_musa_build_and_release() -> None:
     """Changes, build, and release jobs must all reference MUSA artifacts."""
@@ -92,6 +102,28 @@ def test_publish_workflow_wires_musa_build_and_release() -> None:
         "test",
         "code-quality",
     ]
+    assert "secrets" not in build
     filter_text = jobs["changes"]["steps"][1]["with"]["filters"]
     assert ".github/workflows/build_musa_artifacts.yml" in filter_text
     assert ".github/scripts/build_musa_wheel.sh" in filter_text
+
+    nightly = _load_workflow(".github/workflows/nightly_build.yml")
+    nightly_build = nightly["jobs"]["nightly-musa-wheel"]
+    assert nightly_build["uses"] == "./.github/workflows/build_musa_artifacts.yml"
+    assert nightly_build["with"]["dev_version"] == "true"
+    nightly_publish = nightly["jobs"]["publish-nightly-musa"]
+    assert nightly_publish["needs"] == "nightly-musa-wheel"
+    download = next(
+        step
+        for step in nightly_publish["steps"]
+        if "actions/download-artifact@" in step.get("uses", "")
+    )
+    assert download["with"]["name"] == "release-musa-artifacts"
+    publish_step = next(
+        step
+        for step in nightly_publish["steps"]
+        if step.get("name", "").startswith("Publish MUSA wheels")
+    )
+    assert "nightly-musa" in publish_step["run"]
+    assert "--prerelease" in publish_step["run"]
+    assert "MUSA_VERSION" in publish_step["env"]

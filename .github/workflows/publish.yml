@@ -130,9 +130,6 @@ jobs:
         if: needs.changes.outputs.lmcache == 'true'
         name: Build MUSA
         uses: ./.github/workflows/build_musa_artifacts.yml
-        # The vendor image may live in a private MUSA registry; reusable
-        # workflows do not auto-inherit registry credentials.
-        secrets: inherit
 
     build-rocm-torch210:
         needs: changes

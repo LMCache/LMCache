@@ -6,15 +6,16 @@ name: Build MUSA Artifacts
 # LMCache's current MUSA profile ships the Python MUSA integration plus common
 # native extensions; it does not bundle TorchMUSA or vendor runtime libraries.
 # The artifact is smoke-installed with --no-deps in this no-device image and is
-# published to a dedicated v{tag}-musa GitHub Release, never to PyPI.
+# published to a dedicated v{tag}-musa GitHub Release (or nightly-musa), never
+# to PyPI.
 
 on:
     workflow_call:
         inputs:
             dev_version:
                 description: >-
-                    Build a .devN pre-release from the newest stable tag. This
-                    keeps nightly or branch artifacts unique.
+                    Build a .devN pre-release from the newest stable tag for
+                    nightly validation instead of the stable release version.
                 type: boolean
                 default: false
                 required: false
