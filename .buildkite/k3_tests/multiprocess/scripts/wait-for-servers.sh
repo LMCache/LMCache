@@ -30,14 +30,8 @@ wait_for_vllm_server() {
         current_time=$(date +%s)
         elapsed=$((current_time - start_time))
 
-        if [ "$current_time" -ge "$end_time" ]; then
-            echo "Timeout: $description did not become ready within ${MAX_WAIT_SECONDS}s"
-            echo ""
-            echo "=== $description log (last 100 lines) ==="
-            tail -100 "$logfile" 2>/dev/null || true
-            return 1
-        fi
-
+        # Probe before enforcing the deadline so a server that becomes ready
+        # during the final polling interval is not reported as timed out.
         if curl -sf "http://localhost:${port}/health" > /dev/null 2>&1; then
             echo "$description is ready! (took ${elapsed}s)"
             return 0
@@ -46,6 +40,14 @@ wait_for_vllm_server() {
         if curl -sf "http://localhost:${port}/v1/models" > /dev/null 2>&1; then
             echo "$description is ready! (took ${elapsed}s)"
             return 0
+        fi
+
+        if [ "$current_time" -ge "$end_time" ]; then
+            echo "Timeout: $description did not become ready within ${MAX_WAIT_SECONDS}s"
+            echo ""
+            echo "=== $description log (last 100 lines) ==="
+            tail -100 "$logfile" 2>/dev/null || true
+            return 1
         fi
 
         echo "Waiting for $description... (${elapsed}s elapsed)"
