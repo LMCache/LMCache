@@ -72,9 +72,9 @@ class InstanceLivenessTarget(Protocol):
       ``instance_id``, refreshed on PING and scanned for staleness
       (``touch_instance`` / ``reap_stale_instances`` /
       ``tracked_instance_count``). The transfer modules fill this role.
-    * **State mirror** -- holds a second reference to a reaped instance's
-      resources and releases it on demand (``drop_instance_state``).
-      ``BlendModule`` fills this role for its per-instance CB state.
+    * **State owner or mirror** -- releases any state for one instance on
+      demand (``drop_instance_state``). Transfer modules own the primary
+      registration; ``BlendModule`` mirrors per-instance CB state.
 
     Every method defaults to a no-op, so an implementer subclasses this
     protocol and overrides only the role it fills. The management module
@@ -120,11 +120,11 @@ class InstanceLivenessTarget(Protocol):
     def drop_instance_state(self, instance_id: int) -> None:
         """Release any state mirrored for a reaped instance.
 
-        Called for every reaped ``instance_id``. A no-op unless the target
-        keeps a second reference to that instance's resources (only mirrors
-        such as ``BlendModule`` override this).
+        Called for every explicitly unregistered or reaped ``instance_id``.
+        Implementations must be idempotent because an explicit unregister can
+        race the passive reaper. A no-op if the target has no matching state.
 
         Args:
-            instance_id: The reaped worker's instance ID.
+            instance_id: The worker instance ID to release.
         """
         return

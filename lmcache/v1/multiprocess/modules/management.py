@@ -58,6 +58,9 @@ class ManagementModule:
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
+        # Serializes active unregister with the passive reaper. Individual
+        # targets still own their leaf locks; this lock only orders fanout.
+        self._instance_lifecycle_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
@@ -91,6 +94,16 @@ class ManagementModule:
         """
         return [
             HandlerSpec(RequestType.CLEAR, self.clear, ThreadPoolType.NORMAL),
+            HandlerSpec(
+                RequestType.UNREGISTER_KV_CACHE,
+                self.unregister_instance,
+                ThreadPoolType.SYNC,
+            ),
+            HandlerSpec(
+                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+                self.unregister_instance,
+                ThreadPoolType.SYNC,
+            ),
             HandlerSpec(
                 RequestType.GET_CHUNK_SIZE,
                 self.get_chunk_size,
@@ -157,6 +170,47 @@ class ManagementModule:
                     )
         return True
 
+    def unregister_instance(self, instance_id: int) -> None:
+        """Immediately release every state fragment owned by an instance.
+
+        The main KV unregister requests are lifecycle events, not just transfer
+        module operations. Fan them out to all owners and mirrors so optional Q
+        and blend state cannot outlive the primary KV registration. Failures
+        are isolated: one broken target is logged but does not pin siblings.
+
+        Args:
+            instance_id: The worker instance identifier.
+        """
+        with self._instance_lifecycle_lock:
+            failures = self._drop_instance_state(instance_id)
+        if failures:
+            logger.error(
+                "Unregister for instance %d completed with %d cleanup failures",
+                instance_id,
+                failures,
+            )
+
+    def _drop_instance_state(self, instance_id: int) -> int:
+        """Fan one instance cleanup out to all targets exactly once.
+
+        The caller holds ``_instance_lifecycle_lock``.
+
+        Returns:
+            Number of target cleanup failures.
+        """
+        failures = 0
+        for target in self._liveness_targets:
+            try:
+                target.drop_instance_state(instance_id)
+            except Exception:
+                failures += 1
+                logger.exception(
+                    "Failed to drop instance %d state from %s",
+                    instance_id,
+                    type(target).__name__,
+                )
+        return failures
+
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan: reap stale workers, drop mirrored state.
 
@@ -166,30 +220,24 @@ class ManagementModule:
         Returns:
             A summary recording how many instances were reaped this scan.
         """
-        reaped: set[int] = set()
-        failures = 0
-        for target in self._liveness_targets:
-            try:
-                reaped.update(
-                    target.reap_stale_instances(self._reap_timeout, self._reap_grace)
-                )
-            except Exception:
-                failures += 1
-                logger.exception(
-                    "Failed to reap stale instances from %s",
-                    type(target).__name__,
-                )
-        for instance_id in reaped:
+        with self._instance_lifecycle_lock:
+            reaped: set[int] = set()
+            failures = 0
             for target in self._liveness_targets:
                 try:
-                    target.drop_instance_state(instance_id)
+                    reaped.update(
+                        target.reap_stale_instances(
+                            self._reap_timeout, self._reap_grace
+                        )
+                    )
                 except Exception:
                     failures += 1
                     logger.exception(
-                        "Failed to drop instance %d state from %s",
-                        instance_id,
+                        "Failed to reap stale instances from %s",
                         type(target).__name__,
                     )
+            for instance_id in reaped:
+                failures += self._drop_instance_state(instance_id)
         return ThreadRunSummary(
             success=failures == 0,
             message=f"reaped={len(reaped)}, failures={failures}",
