@@ -968,8 +968,8 @@ Options
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
-       (lmcache-driven handle path). ``cpu`` allocates POSIX-SHM-backed tensors
-       and uses the engine-driven (worker-side gather/scatter) path by default.
+       (lmcache-driven handle path). ``cpu`` allocates regular CPU tensors and
+       uses the engine-driven (worker-side gather/scatter) path by default.
    * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
      - ``auto``
      - Transport routing for STORE/RETRIEVE. ``lmcache_driven`` forces the
@@ -1019,8 +1019,11 @@ CPU mode (no GPU)
 ~~~~~~~~~~~~~~~~~
 
 ``--mode cpu`` runs the same end-to-end path without a GPU. The server
-runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
-POSIX-SHM-backed KV tensors and exercises the full RPC path.
+runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates regular
+CPU KV tensors and exercises the full RPC path through ``TransferContext``.
+The engine-driven context uses server-owned SHM staging when available and
+falls back to pickle transport. In ``lmcache_driven`` mode, the CPU wrapper
+migrates the tensors to POSIX SHM during registration.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path
 (``auto`` → ``cpu→engine_driven``); that path requires the server to
@@ -1106,18 +1109,16 @@ Both transfer modes support MLA:
   ``use_mla`` from the registered tensor shapes -- the bench's rank-3
   MLA client tensors trip this automatically.
 * ``engine_driven`` (CPU default): the bench derives ``use_mla`` from
-  ``kv_size`` in the spec and sends it on the register payload, so the
-  server sizes its SHM chunks correctly.
+  the tensor layout through ``TransferContext``, so the server sizes its SHM
+  chunks correctly.
 
 .. note::
 
    Heterogeneous specs that mix ``kv_size=1`` and ``kv_size=2`` groups
-   are fully supported in ``lmcache_driven`` mode -- each layer's
-   rank (3 vs. 5) tells the detector which per-group KV format to
-   use. In ``engine_driven`` mode the server registers a *single*
-   SHM chunk shape per context, so a mixed spec falls back to the
-   classical (non-MLA) layout; use ``lmcache_driven`` when you need
-   true per-group MLA.
+   are supported in ``lmcache_driven`` mode -- each layer's rank (3 vs. 5)
+   tells the detector which per-group KV format to use. ``engine_driven``
+   currently supports one KV group per context; use ``lmcache_driven`` for
+   heterogeneous or hybrid KV groups.
 
 Tensor Parallel (TP > 1)
 ^^^^^^^^^^^^^^^^^^^^^^^^

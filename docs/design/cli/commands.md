@@ -192,9 +192,10 @@ Supports two run modes via ``--mode``:
 
 - **``gpu``** (default) -- allocates real CUDA tensors and uses CUDA IPC
   (LMCache-driven handle transfer path).
-- **``cpu``** -- allocates POSIX-SHM-backed tensors; the server maps the same
-  physical pages for zero-copy STORE/RETRIEVE (engine-driven transfer path by
-  default). To use the zero-copy SHM handle path, add
+- **``cpu``** -- allocates regular CPU tensors and uses the engine-driven
+  worker-side gather/scatter path by default. Its ``TransferContext`` uses
+  server-owned SHM staging when available and falls back to pickle transport.
+  To migrate the tensors to POSIX SHM for the handle path, add
   ``--transfer-mode lmcache_driven``.
 
 The transfer path can be overridden explicitly with ``--transfer-mode
