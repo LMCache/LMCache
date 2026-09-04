@@ -84,7 +84,7 @@ class _FreeLocksHandler:
 
 @pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
 def test_free_locks_request_transport(request_transport: RequestTransport) -> None:
-    """FREE_LOOKUP_LOCKS round-trips over each enabled request transport."""
+    """FREE_LOOKUP_LOCKS round-trips over every request transport."""
     key = create_cache_key(0)
     handler = _FreeLocksHandler()
     server_url = request_server_url(

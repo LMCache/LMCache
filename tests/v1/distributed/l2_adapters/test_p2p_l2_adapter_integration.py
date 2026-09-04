@@ -2,17 +2,18 @@
 """In-process, real-NIXL integration test for the P2P L2 adapter.
 
 Stands up a peer side (a real ``StorageManager`` with objects in L1, a NIXL
-transfer-channel context registered against that L1, and a gRPC server hosting
-a ``P2PController``) and a local side (the global NIXL context over a destination
-buffer + a ``P2PL2Adapter``). It then drives the adapter through the full
-lookup -> load (loopback RDMA read) -> unlock lifecycle and verifies the pulled
-bytes match the peer's.
+transfer-channel context registered against that L1, and a request server
+hosting a ``P2PController``) and a local side (the global NIXL context over a
+destination buffer + a ``P2PL2Adapter``). It then drives the adapter through
+the full lookup -> load (loopback RDMA read) -> unlock lifecycle and verifies
+the pulled bytes match the peer's over both supported request transports.
 
 Requires a working NIXL runtime and CUDA (the L1 pool is pinned DRAM); skipped
 otherwise.
 """
 
 # Standard
+from typing import Literal, cast
 import itertools
 import time
 
@@ -30,6 +31,8 @@ if not torch_dev.is_available():
     )
 
 nixl = pytest.importorskip("nixl")
+# Third Party
+import zmq  # noqa: E402
 
 # First Party
 from lmcache.v1.distributed.api import (  # noqa: E402
@@ -55,11 +58,19 @@ from lmcache.v1.distributed.transfer_channel import (  # noqa: E402
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E402
     NixlTransferChannelContext,
 )
+from lmcache.v1.memory_management import (  # noqa: E402
+    MemoryObj,
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
 from lmcache.v1.multiprocess.config import (  # noqa: E402
     CoordinatorConfig,
     P2PConfig,
 )
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext  # noqa: E402
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
+from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
+from lmcache.v1.multiprocess.server import add_handler_helper  # noqa: E402
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (  # noqa: E402
     GrpcMultiprocessServer,
 )
@@ -70,10 +81,66 @@ from lmcache.v1.multiprocess.transport.grpc_impl.services.p2p import (  # noqa: 
 _PAGE = 4096
 _NUM_KEYS = 3
 _port_counter = itertools.count(18300)
+RequestTransport = Literal["zmq", "grpc"]
+RequestServer = MessageQueueServer | GrpcMultiprocessServer
 
 
 def _next_url() -> str:
     return f"127.0.0.1:{next(_port_counter)}"
+
+
+def _start_p2p_request_server(
+    transport: RequestTransport,
+    controller: P2PController,
+) -> tuple[str, RequestServer]:
+    """Start a P2P request server for the selected transport.
+
+    Args:
+        transport: Request transport to exercise.
+        controller: P2P controller that handles peer requests.
+
+    Returns:
+        The client URL and the started request server.
+    """
+    target = _next_url()
+    if transport == "grpc":
+        grpc_server = GrpcMultiprocessServer(
+            bind_url=f"grpc://{target}",
+            max_cpu_workers=4,
+            max_gpu_workers=4,
+        )
+        grpc_server.add_service("P2PService", P2PServiceImpl(controller))
+        grpc_server.start()
+        return f"grpc://{target}", grpc_server
+
+    zmq_server = MessageQueueServer(f"tcp://{target}", zmq.Context.instance())
+    specs = controller.get_handlers()
+    for spec in specs:
+        add_handler_helper(zmq_server, spec.request_type, spec.handler)
+    zmq_server.add_normal_thread_pool(
+        [spec.request_type for spec in specs],
+        max_workers=4,
+    )
+    zmq_server.start()
+    return f"tcp://{target}", zmq_server
+
+
+def _local_memory_obj(buffer: torch.Tensor, offset: int) -> MemoryObj:
+    """Wrap one destination page in the production memory-object type."""
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([_PAGE]),
+        dtype=torch.uint8,
+        address=offset,
+        phy_size=_PAGE,
+        ref_count=1,
+        shapes=[torch.Size([_PAGE])],
+        dtypes=[torch.uint8],
+    )
+    return TensorMemoryObj(
+        raw_data=buffer[offset : offset + _PAGE],
+        metadata=metadata,
+        parent_allocator=None,
+    )
 
 
 def _make_storage_manager(size_bytes: int) -> StorageManager:
@@ -119,24 +186,30 @@ def _poll(fn, timeout_s: float = 10.0):
     return result
 
 
-def test_p2p_adapter_end_to_end():
+@pytest.mark.parametrize("request_transport", ["zmq", "grpc"])
+def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
     keys = [_key(i) for i in range(_NUM_KEYS)]
     layout = MemoryLayoutDesc(shapes=[torch.Size([_PAGE])], dtypes=[torch.uint8])
 
     peer_sm = _make_storage_manager(64 * 1024 * 1024)
     peer_tc_ctx = None
-    grpc_server = None
+    request_server: RequestServer | None = None
     adapter = None
     local_buf = torch.zeros((_NUM_KEYS + 1) * _PAGE, dtype=torch.uint8)
 
     try:
         # --- Peer side: store known objects in L1 ---
         reserved = peer_sm.reserve_write(keys, layout, mode="new")
-        assert all(reserved[k] is not None for k in keys)
-        expected_values = {}
+        peer_objects: dict[ObjectKey, MemoryObj] = {}
+        expected_values: dict[ObjectKey, int] = {}
         for i, key in enumerate(keys):
+            peer_obj = reserved[key]
+            assert peer_obj is not None
+            peer_tensor = peer_obj.tensor
+            assert peer_tensor is not None
             value = i + 1
-            reserved[key].tensor.fill_(value)
+            peer_tensor.fill_(value)
+            peer_objects[key] = peer_obj
             expected_values[key] = value
         peer_sm.finish_write(keys)
 
@@ -147,21 +220,17 @@ def test_p2p_adapter_end_to_end():
             peer_l1_desc, listen_url=peer_tc_url, advertise_url=peer_tc_url
         )
 
-        # --- Peer side: gRPC server hosting the P2P controller ---
+        # --- Peer side: request server hosting the P2P controller ---
         controller = P2PController(
-            _PeerContext(peer_sm),
+            cast(MPCacheServerContext, _PeerContext(peer_sm)),
             P2PConfig(),
             CoordinatorConfig(),
             instance_id="peer",
         )
-        peer_mq_url = f"grpc://{_next_url()}"
-        grpc_server = GrpcMultiprocessServer(
-            bind_url=peer_mq_url,
-            max_cpu_workers=4,
-            max_gpu_workers=4,
+        peer_mq_url, request_server = _start_p2p_request_server(
+            request_transport,
+            controller,
         )
-        grpc_server.add_service("P2PService", P2PServiceImpl(controller))
-        grpc_server.start()
 
         # --- Local side: global NIXL context over the destination buffer ---
         local_tc_url = _next_url()
@@ -187,10 +256,10 @@ def test_p2p_adapter_end_to_end():
             assert bitmap.test(i) is True
         # Stashed remote addresses match the peer objects' real offsets.
         for key in keys:
-            assert adapter._remote_addresses[key].offset == reserved[key].shm_offset
+            assert adapter._remote_addresses[key].offset == peer_objects[key].shm_offset
 
         # Load: pull each key into a distinct page of the local buffer.
-        local_objs = [_LocalObj(offset=i * _PAGE, size=_PAGE) for i in range(_NUM_KEYS)]
+        local_objs = [_local_memory_obj(local_buf, i * _PAGE) for i in range(_NUM_KEYS)]
         load_id = adapter.submit_load_task(keys, local_objs)
         load_bitmap = _poll(lambda: adapter.query_load_result(load_id))
         assert load_bitmap is not None
@@ -208,18 +277,9 @@ def test_p2p_adapter_end_to_end():
     finally:
         if adapter is not None:
             adapter.close()
-        if grpc_server is not None:
-            grpc_server.close()
+        if request_server is not None:
+            request_server.close()
         delete_transfer_channel_context()
         if peer_tc_ctx is not None:
             peer_tc_ctx.close()
         peer_sm.close()
-
-
-class _LocalObj:
-    """A stand-in for an L1 MemoryObj exposing only the offset/size the
-    adapter reads when translating local transfer-channel addresses."""
-
-    def __init__(self, offset: int, size: int) -> None:
-        self.shm_offset = offset
-        self.shm_byte_length = size
