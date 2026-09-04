@@ -1,5 +1,4 @@
 # MUSA containerized unit tests.
-# This pipeline mirrors the dedicated unit-tests-xpu Buildkite lane.
 
 env:
   LMCACHE_TRACK_USAGE: "false"
