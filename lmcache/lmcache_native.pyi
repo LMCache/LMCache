@@ -27,6 +27,7 @@ class EngineKVFormat(IntEnum):
     NL_X_NB_BS_NH_CS = 13
     NL_X_NB_BSV_BSS = 14
     NL_X_TWO_NB_NH_ONE_BS_HS = 15
+    NL_X_TWO_X_NB_BS_NH_HS = 16
 
 # Backward-compat alias for EngineKVFormat.
 GPUKVFormat = EngineKVFormat
@@ -77,6 +78,9 @@ def is_cross_layer(format: EngineKVFormat) -> bool:
 
 def is_mla(format: EngineKVFormat) -> bool:
     """Return whether the format is an MLA variant (single latent KV head)."""
+
+def is_kv_second_tuple(format: EngineKVFormat) -> bool:
+    """Return whether each per-layer list entry is a (K, V) tuple of paged tensors."""
 
 class TTLLock:
     """
