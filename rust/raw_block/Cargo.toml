@@ -9,7 +9,14 @@ edition = "2021"
 name = "lmcache_rust_raw_block_io"
 crate-type = ["cdylib"]
 
+[features]
+default = []
+blkio = []
+
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module"] }
 libc = "0.2"
 io-uring = "0.7"
+
+[build-dependencies]
+pkg-config = "0.3"
