@@ -433,6 +433,7 @@ def test_block_transfer_roundtrip(
         "vllm_fused_nhd",
         "vllm_cs_hnd",
         "vllm_cs_nhd",
+        "sglang_component",
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
