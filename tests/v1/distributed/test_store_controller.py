@@ -10,6 +10,7 @@ the full integration without mocking internals.
 """
 
 # Standard
+from unittest.mock import patch
 import select
 import time
 
@@ -355,6 +356,56 @@ class TestStoreControllerSingleAdapter:
 
         ctrl.stop()
         adapter.close()
+
+    def test_read_lock_released_when_store_submission_raises(self, l1_manager):
+        """A failed L2 submission should release its L1 read lock."""
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+        )
+        ctrl.start()
+
+        try:
+            with (
+                patch.object(
+                    adapter,
+                    "submit_store_task",
+                    side_effect=RuntimeError("injected submit failure"),
+                ) as submit_store_task,
+                patch.object(
+                    l1_manager,
+                    "finish_read",
+                    wraps=l1_manager.finish_read,
+                ) as finish_read,
+            ):
+                with pytest.raises(RuntimeError, match="injected submit failure"):
+                    ctrl._submit_store_for_single_shape(keys)
+
+            submit_store_task.assert_called_once()
+            finish_read.assert_called_once_with(keys)
+            assert ctrl._in_flight_tasks == {}
+            assert ctrl._status_in_flight_count == 0
+
+            result = l1_manager.reserve_write(
+                keys=keys,
+                is_temporary=[False],
+                layout_desc=layout,
+                mode="update",
+            )
+            assert result[keys[0]][1] is not None, (
+                "Key should be updatable after a failed L2 store submission"
+            )
+            l1_manager.finish_write(keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
 
     def test_multiple_concurrent_requests_same_adapter(self, l1_manager):
         """Each L1-write batch produces an independent in-flight store request.
