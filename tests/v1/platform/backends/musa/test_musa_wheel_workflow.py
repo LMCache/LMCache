@@ -8,7 +8,7 @@ import stat
 # Third Party
 import yaml
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[5]
 
 
 def _load_workflow(relative_path: str) -> dict:
