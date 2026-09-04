@@ -74,7 +74,6 @@ register_all_apis()
   │    ├─ info_api        → has router? ✓ → include
   │    ├─ config_api      → has router? ✓ → include
   │    ├─ cache_api       → has router? ✓ → include
-  │    ├─ quota_api       → has router? ✓ → include
   │    └─ my_new_api      → has router? ✓ → include
   │
   └─ app.include_router(collected_router)

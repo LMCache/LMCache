@@ -24,7 +24,8 @@ is tracked but **not yet exposed**: it is read in-process off
 `ctx.usage_manager`, and gets an endpoint when something needs one.
 
 Code: `lmcache/v1/mp_coordinator/controllers/` (coordinator side),
-`lmcache/v1/mp_coordinator/http_apis/quota_api.py` (REST endpoints),
+`lmcache/v1/mp_coordinator/controllers/eviction_http_api.py` (the REST
+endpoints the controller owns),
 `lmcache/v1/mp_coordinator/schemas.py` (wire types),
 `lmcache/v1/multiprocess/http_server.py` (MP-server wiring).
 
@@ -232,7 +233,7 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
   own request, because the endpoint rejects any single delete over that cap with
   HTTP 400 — a full-salt eviction (quota dropped to 0) routinely exceeds it.
 
-## REST endpoints (`quota_api.py`)
+## REST endpoints (`controllers/eviction_http_api.py`)
 
 | Method | Path | Description |
 | --- | --- | --- |
