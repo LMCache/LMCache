@@ -244,7 +244,13 @@ class ClientPollingLoop:
             if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
                 self._notifier.consume()
                 for client in self._socket_to_client.values():
-                    client.process_outbound_task()
+                    try:
+                        client.process_outbound_task()
+                    except Exception:
+                        logger.exception(
+                            "process_outbound_task failed; continuing the shared "
+                            "polling loop"
+                        )
 
             # Inbound: dispatch each ready DEALER socket to its client.
             for sock, event in socks.items():
@@ -295,16 +301,16 @@ class MessageQueueClient:
         self._polling_loop = ClientPollingLoop.get_instance()
         self._polling_loop.register(self)
 
-    def process_outbound_task(self):
-        try:
-            while wrapped_request := self.input_queue.get_nowait():
-                # wrapped_request = self.input_queue.get_nowait()
+    def process_outbound_task(self) -> None:
+        """Encode and send queued requests without leaking per-request failures."""
+        while True:
+            try:
+                wrapped_request = self.input_queue.get_nowait()
+            except queue.Empty:
+                return
 
-                # Update the pending futures
-                request_uid = wrapped_request.request_uid
-                self.pending_futures[request_uid] = wrapped_request.future
-
-                # Send the request
+            request_uid = wrapped_request.request_uid
+            try:
                 b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
                 b_request_type = msgspec_encode(
                     wrapped_request.request_type, cls=RequestType
@@ -334,9 +340,22 @@ class MessageQueueClient:
                         strict=False,
                     )
                 ]
-                self.socket.send_multipart([b_request_uid, b_request_type] + b_payloads)
-        except queue.Empty:
-            pass
+
+                self.pending_futures[request_uid] = wrapped_request.future
+                try:
+                    self.socket.send_multipart(
+                        [b_request_uid, b_request_type] + b_payloads
+                    )
+                except Exception:
+                    self.pending_futures.pop(request_uid, None)
+                    raise
+            except Exception as exc:
+                self.pending_futures.pop(request_uid, None)
+                wrapped_request.future.set_exception(exc)
+                logger.exception(
+                    "Failed to prepare or send outbound request %s; continuing",
+                    request_uid,
+                )
 
     def process_inbound(self) -> None:
         """Process one inbound response from the server.
