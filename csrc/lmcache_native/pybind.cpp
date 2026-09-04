@@ -44,7 +44,8 @@ PYBIND11_MODULE(lmcache_native, m) {
       .value("NL_X_NB_BSV_BSS", EngineKVFormat::NL_X_NB_BSV_BSS)
       .value("NL_X_TWO_NB_NH_ONE_BS_HS",
              EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS)
-      .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS);
+      .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS)
+      .value("NL_X_TWO_X_NB_BS_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_HS);
 
   m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
 
