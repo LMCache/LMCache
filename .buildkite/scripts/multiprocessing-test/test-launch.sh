@@ -17,6 +17,17 @@ VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
+LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+    zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
+    grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+    *)
+        echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'"
+        echo "Valid values: zmq, grpc"
+        exit 1
+        ;;
+esac
 
 # Check GPU memory and set gpu-memory-utilization if > 100GB
 GPU_MEMORY_UTIL_ARG=""
@@ -44,6 +55,7 @@ docker run -d \
     -m lmcache.v1.multiprocess.server \
     --cpu-buffer-size "$CPU_BUFFER_SIZE" \
     --max-workers "$MAX_WORKERS" \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --port "$LMCACHE_PORT"
 
 echo "LMCache container started"
@@ -70,7 +82,7 @@ docker run -d \
     --env PYTHONHASHSEED=0 \
     lmcache/vllm-openai:test \
     "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     --port "$VLLM_PORT" \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
@@ -103,4 +115,3 @@ echo "vLLM baseline container started"
 
 echo "=== Containers launched ==="
 docker ps --filter "name=$LMCACHE_CONTAINER_NAME" --filter "name=$VLLM_CONTAINER_NAME" --filter "name=$VLLM_BASELINE_CONTAINER_NAME"
-

@@ -183,6 +183,7 @@ restart_lmcache() {
 
     echo "Relaunching LMCache on port ${LMCACHE_PORT} / HTTP ${LMCACHE_HTTP_PORT}..."
     lmcache server \
+        --transport "$LMCACHE_REQUEST_TRANSPORT" \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
         --max-workers "$MAX_WORKERS" \

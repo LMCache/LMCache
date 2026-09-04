@@ -160,6 +160,7 @@ fi
 
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 lmcache server \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
@@ -195,12 +196,14 @@ echo "Port: $vllm_port"
 # preserves its current store timing.
 KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
+    LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
     python3 - <<'PY'
 import json
 import os
 
 extra_config = {
+    "lmcache.mp.host": os.environ["LMCACHE_REQUEST_SCHEME"] + "://localhost",
     "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
     "lmcache.mp.mq_timeout": 10,
 }

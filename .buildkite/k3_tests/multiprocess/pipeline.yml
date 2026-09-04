@@ -14,6 +14,14 @@ x-flaky-retry: &flaky-retry
     - exit_status: "*"
       limit: 2
 
+# Run every regular multiprocess scenario against both request transports.
+# Worker-side KV transfer modes remain separate matrix dimensions below.
+x-request-transport-matrix: &request-transport-matrix
+  setup:
+    request_transport:
+      - "zmq"
+      - "grpc"
+
 # Keep the regular 1-GPU pod anchor available after the two lm_eval steps are
 # merged; engine_driven still needs its separate /dev/shm pod below.
 # Every pod mounts a 1Gi /dev/shm: the container runtime default is 64MB and
@@ -55,8 +63,10 @@ steps:
       # fp8 TP-shard load (plus the weight download on a cold hf-cache node)
       # needs the long timeout. The SM120 DeepGEMM build adds ~1-2 min,
       # measured in CI, so it does not move this budget.
-      - label: ":compression: dsv4_flash_tp"
+      - label: ":compression: dsv4_flash_tp / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 90
         retry: *flaky-retry
         agents: { queue: "k8s" }
@@ -81,8 +91,10 @@ steps:
   - group: ":compression: Multiprocess (2-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
-      - label: ":compression: vllm_bench"
+      - label: ":compression: vllm_bench / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -101,24 +113,30 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log"]
 
-      - label: ":compression: long_doc_qa"
+      - label: ":compression: long_doc_qa / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: long_doc_qa_l2"
+      - label: ":compression: long_doc_qa_l2 / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: deadlock"
+      - label: ":compression: deadlock / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
@@ -127,8 +145,10 @@ steps:
       # Two LMCache MP instances + two vLLM instances + one coordinator on a
       # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
       # KV from engine A over P2P.
-      - label: ":compression: p2p"
+      - label: ":compression: p2p / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh p2p
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
@@ -142,8 +162,10 @@ steps:
       # utils.py::mla_only) hands non-zero ranks rank 0's mamba shard and
       # diverges the output. Two 48B loads (cold + post-restart) need the long
       # timeout.
-      - label: ":compression: kimi_linear_tp"
+      - label: ":compression: kimi_linear_tp / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh kimi_linear_tp
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 60
         retry: *flaky-retry
         agents: { queue: "k8s" }
@@ -155,7 +177,7 @@ steps:
     steps:
       # Correctness coverage for both transfer modes. engine_driven requires
       # SHM transport, so both matrix jobs use the existing dshm pod spec.
-      - label: ":compression: lm_eval_{{matrix.mode}}"
+      - label: ":compression: lm_eval_{{matrix.mode}} / {{matrix.request_transport}}"
         command: |
           case "{{matrix.mode}}" in
             lmcache_driven) ;;
@@ -171,6 +193,10 @@ steps:
             mode:
               - "lmcache_driven"
               - "engine_driven"
+            request_transport:
+              - "zmq"
+              - "grpc"
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         retry: *flaky-retry
         agents: { queue: "k8s" }
@@ -195,7 +221,7 @@ steps:
       # lm_eval load. Both steps reuse the same run.sh lm_eval_preemption
       # command; env vars select the transfer mode. Checks: no crash, score
       # drift < 0.01, preemption actually occurred, score >= SCORE_MIN.
-      - label: ":compression: lm_eval_preemption / {{matrix.mode}}"
+      - label: ":compression: lm_eval_preemption / {{matrix.mode}} / {{matrix.request_transport}}"
         command: |
           case "{{matrix.mode}}" in
             lmcache_driven) ;;
@@ -210,8 +236,12 @@ steps:
             mode:
               - "lmcache_driven"
               - "engine_driven"
+            request_transport:
+              - "zmq"
+              - "grpc"
         timeout_in_minutes: 30
         env:
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
           GPU_MEMORY_UTILIZATION: "0.4"
           NUM_CONCURRENT: "256"
           MAX_MODEL_LEN: "4096"
@@ -222,22 +252,28 @@ steps:
 
       # Temporarily disabled: hma_lm_eval_gemma4.
 
-      - label: ":compression: fault_tolerance"
+      - label: ":compression: fault_tolerance / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: restart_recovery"
+      - label: ":compression: restart_recovery / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: cache_stats"
+      - label: ":compression: cache_stats / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
@@ -246,22 +282,28 @@ steps:
       # Real GPU MP integration: vLLM is launched with FIFO lazy offload
       # (threshold=2, select_count=1). Three requests verify that the first
       # two remain pending and the third drains the first request.
-      - label: ":compression: lazy_offload"
+      - label: ":compression: lazy_offload / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: http_api"
+      - label: ":compression: http_api / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: gds_smoke_test"
+      - label: ":compression: gds_smoke_test / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh gds_smoke_test
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -290,7 +332,7 @@ steps:
       # Note: LMCACHE_SHM_NAME uses `${VAR-default}` (not `:-`) in the
       # runner script, so an empty string ("") is meaningful and differs
       # from unset. `__default__` is the sentinel meaning "shm mode".
-      - label: ":compression: cpu_e2e_validation ({{matrix.mode}})"
+      - label: ":compression: cpu_e2e_validation ({{matrix.mode}} / {{matrix.request_transport}})"
         # matrix.adjustments does not support `env:` in Buildkite. Instead
         # we branch on {{matrix.mode}} inside the command to set the
         # per-mode env before invoking the shared runner script.
@@ -307,6 +349,10 @@ steps:
               - "shm"
               - "pickle"
               - "server_copy"
+            request_transport:
+              - "zmq"
+              - "grpc"
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -331,16 +377,18 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
 
   # Canary path for VERIFY_AND_PIN_VLLM=true: skips every real test group
-  # above (each group's `if` evaluates to false) and instead runs a single
-  # vllm_bench step that proves the freshly-installed vLLM nightly works
-  # with LMCache. On success, the verified vllm wheel version is pushed to
-  # the `buildkite_latest_tested_vllm` branch so downstream builds can pin
-  # to a known-good nightly instead of resolving "latest" again.
-  - label: ":pushpin: Verify & pin vLLM nightly"
+  # above (each group's `if` evaluates to false) and instead runs vllm_bench
+  # across both request transports. The pin is published only after both
+  # matrix jobs pass, preventing one successful transport from pinning a
+  # nightly that failed the other transport.
+  - label: ":test_tube: Verify vLLM nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-      bash .github/scripts/pin-tested-vllm.sh
+      python3 -c 'import vllm; print(vllm.__version__)' \
+        > "verified_vllm_{{matrix.request_transport}}.txt"
+    matrix: *request-transport-matrix
+    env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     timeout_in_minutes: 30
     agents: { queue: "k8s" }
     plugins:
@@ -351,16 +399,35 @@ steps:
                 image: lmcache/ci-base:latest
                 imagePullPolicy: Never
                 resources: { limits: { "nvidia.com/gpu": "2" } }
-                env:
-                  - name: GITHUB_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: buildkite-git-creds
-                        key: GITHUB_TOKEN
                 volumeMounts:
                   - { name: hf-cache, mountPath: /root/.cache/huggingface }
                   - { name: dshm, mountPath: /dev/shm }
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
               - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
-    artifact_paths: ["*.log"]
+    artifact_paths: ["*.log", "verified_vllm_*.txt"]
+
+  - wait
+
+  - label: ":pushpin: Pin verified vLLM nightly"
+    if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
+    command: |
+      buildkite-agent artifact download "verified_vllm_*.txt" .
+      diff -u verified_vllm_zmq.txt verified_vllm_grpc.txt
+      VLLM_VERSION="$(cat verified_vllm_grpc.txt)" \
+        bash .github/scripts/pin-tested-vllm.sh
+    timeout_in_minutes: 10
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
