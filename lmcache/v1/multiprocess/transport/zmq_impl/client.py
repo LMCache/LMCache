@@ -11,9 +11,10 @@ from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_response_class,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
-class ZmqMultiprocessClient:
+class ZmqMultiprocessClient(RequestClient):
     """Expose named multiprocess RPC methods over the existing ZMQ client.
 
     The wrapper changes only the Python call surface. Every method delegates to
