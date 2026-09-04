@@ -8,8 +8,8 @@ model.
 
 `raw_block` is a persistent MP L2 adapter backed by a raw block device or a
 dedicated file. It is designed to keep the MP request flow unchanged while
-reusing the existing raw-block on-device metadata format and the low-level Rust
-raw-device I/O path.
+reusing the existing mirrored checkpoint model and the low-level Rust raw-device
+I/O path.
 
 ```text
 StoreController / PrefetchController
@@ -137,7 +137,31 @@ Rules:
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
 
-The on-device format is intentionally unchanged by the MP adapter work.
+Checkpoint payloads written by current versions use state format v2. The
+mirrored metadata-container sequence and CRC protocol are unchanged. Instead
+of repeating every key and tensor metadata field in the central JSON payload,
+v2 stores a base64-encoded fixed-width manifest containing one `(slot,
+expected_identity)` record per committed slot. The expected identity protects
+against a slot being reused after the checkpoint was committed but before the
+next checkpoint was written.
+
+The remaining bytes in each configured slot header carry a versioned,
+CRC-protected recovery record. It contains the encoded key, key namespace,
+shape, dtype, memory format, and cached-position metadata. The slot offset is
+derived from the manifest slot number, and the payload length remains in the
+existing 24-byte base header. Recovery reads and validates the header record
+before rebuilding an index entry; invalid records, identity mismatches, and
+duplicate manifest slots are not accepted.
+
+If a recovery record does not fit in the configured header, the entry is kept
+in the v2 payload's legacy full-entry fallback map. This covers custom small
+headers, unusually long keys, and metadata that cannot be encoded in the
+header. State format v1 full-entry checkpoints remain readable. New slot
+writes keep the configured header write size unchanged, and no new runtime or
+user configuration option is required.
+
+Apart from the checkpoint and slot-header recovery records described above, the
+on-device format is unchanged by the MP adapter work.
 
 Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
 so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
