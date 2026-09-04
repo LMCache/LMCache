@@ -77,12 +77,6 @@ class RequestType(enum.Enum):
     CB_UNREGISTER_ROPE = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED = enum.auto()
     CB_UNIFIED_LOOKUP = enum.auto()
-    # Deprecated aliases (same member, same wire value) for blend plugins that
-    # still use the ``_V3`` names. Remove once the plugin has moved to the
-    # unversioned names above.
-    CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
-    CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE
-    CB_RETRIEVE_PRE_COMPUTED_V3 = CB_RETRIEVE_PRE_COMPUTED
 
     # P2P operations
     P2P_LOOKUP_AND_LOCK = enum.auto()
@@ -91,6 +85,12 @@ class RequestType(enum.Enum):
 
     # Experimental transfer intermediate tensor
     GET_EXPERIMENTAL = enum.auto()
+
+    # Deprecated aliases must follow every auto-valued member. On Python 3.10,
+    # placing aliases before auto() can reuse the preceding member's value.
+    CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
+    CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE
+    CB_RETRIEVE_PRE_COMPUTED_V3 = CB_RETRIEVE_PRE_COMPUTED
 
 
 @dataclass
