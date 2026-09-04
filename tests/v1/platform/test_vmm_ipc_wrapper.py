@@ -27,8 +27,8 @@ from lmcache.v1.platform.cuda.ipc_wrapper import (
     set_vmm_fd_resolver,
 )
 from lmcache.v1.platform.cuda.utils import _cuda
+from lmcache.v1.platform.cuda.vmm_ipc import is_use_vmm_api, set_use_vmm_api
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
-from lmcache.v1.platform.vmm_ipc import is_use_vmm_api, set_use_vmm_api
 
 pytestmark = [
     pytest.mark.cuda,

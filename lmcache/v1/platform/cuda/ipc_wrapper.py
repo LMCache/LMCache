@@ -16,7 +16,7 @@ driven by two mutually exclusive process-global switches:
 :class:`CudaIPCWrapper` by default, :class:`RawCudaIPCWrapper` under
 ``isolated_ipc`` (``lmcache/v1/platform/isolated_ipc.py``), and
 :class:`VmmCudaIPCWrapper` under ``use_vmm_api``
-(``lmcache/v1/platform/vmm_ipc.py``). The multiprocess adapter
+(``lmcache/v1/platform/cuda/vmm_ipc.py``). The multiprocess adapter
 dispatches through
 :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`; the TRT-LLM
 adapter instantiates :class:`RawCudaIPCWrapper` directly.

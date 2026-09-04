@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
+from lmcache.v1.platform.cuda.vmm_ipc import is_use_vmm_api
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc
 
 if TYPE_CHECKING:
@@ -82,7 +83,6 @@ def _select_ipc_wrapper_cls() -> "type[DeviceIPCWrapper]":
         RawCudaIPCWrapper,
         VmmCudaIPCWrapper,
     )
-    from lmcache.v1.platform.vmm_ipc import is_use_vmm_api
 
     if is_use_vmm_api():
         return VmmCudaIPCWrapper

@@ -88,7 +88,7 @@ exclusive process-global switches consulted in
 |---|---|
 | default | `CudaIPCWrapper` (torch storage IPC) |
 | `isolated_ipc` | `RawCudaIPCWrapper` (raw legacy IPC handles) |
-| `use_vmm_api` (`lmcache/v1/platform/vmm_ipc.py`) | `VmmCudaIPCWrapper` |
+| `use_vmm_api` (`lmcache/v1/platform/cuda/vmm_ipc.py`) | `VmmCudaIPCWrapper` |
 
 `use_vmm_api` composes with `isolated_ipc`, enforced per allocation at
 wrap time: the fabric kind is isolation-clean (inline blob; the IMEX

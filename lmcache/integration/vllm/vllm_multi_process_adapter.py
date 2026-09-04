@@ -38,8 +38,8 @@ from lmcache.v1.multiprocess.transfer_context import (
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform.cuda.vmm_ipc import set_use_vmm_api
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
-from lmcache.v1.platform.vmm_ipc import set_use_vmm_api
 
 if TYPE_CHECKING:
     # First Party
@@ -91,7 +91,7 @@ class ExtraConfigDefault(enum.Enum):
     # Whether the engine allocates its KV cache through the CUDA VMM API
     # (vLLM's ``--enable-cumem-allocator``), so KV registration must use
     # VMM IPC instead of legacy CUDA IPC handles; see
-    # lmcache/v1/platform/vmm_ipc.py.
+    # lmcache/v1/platform/cuda/vmm_ipc.py.
     use_vmm_api = False
 
 
