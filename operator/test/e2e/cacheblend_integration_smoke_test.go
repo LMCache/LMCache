@@ -46,10 +46,10 @@ import (
 //     --engine-type blend` DaemonSet pod.
 //  2. A vLLM Deployment opts in to CacheBlend injection (label + engine
 //     annotation). The mutating webhook injects the CacheBlend vLLM flags
-//     (--attention-backend CUSTOM, --kv-transfer-config <engine>, etc.), the
-//     cb-plugin init container, hostIPC, and the private payload's pull secret.
-//  3. vLLM loads the CUSTOM attention backend (asserted on the injected args
-//     AND on vLLM's own startup banner), starts, and serves /v1/models.
+//     (--kv-transfer-config <engine>, etc.), the cb-plugin init container,
+//     the /dev/shm hostPath mount, and the private payload's pull secret.
+//  3. vLLM comes up on the CUSTOM attention backend (asserted on its own
+//     startup banner), starts, and serves /v1/models.
 //  4. A completion request drives a forward pass, which makes vLLM's connector
 //     register its rope cache with the engine — the engine logs
 //     "Registered CB rope state for instance N".
@@ -166,9 +166,6 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 			g.Expect(pod.Annotations).To(HaveKeyWithValue("lmcache.ai/cacheblend-injected", "true"),
 				"webhook did not stamp cacheblend-injected=true; injection did not fire "+
 					"(skip-reason=%q)", pod.Annotations["lmcache.ai/cacheblend-skip-reason"])
-			args := vllmContainerArgs(pod)
-			g.Expect(argValue(args, "--attention-backend")).To(Equal("CUSTOM"),
-				"injected args missing '--attention-backend CUSTOM': %v", args)
 		}, 60*time.Second, 2*time.Second).Should(Succeed())
 
 		By("waiting for the vLLM Deployment to become Available (model load + connector handshake)")
@@ -190,7 +187,7 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 			return countLogLines(ctx, nsName, vllmPod.Name, backendLog)
 		}, 60*time.Second, 2*time.Second).Should(BeNumerically(">=", 1),
 			"vLLM never logged the CUSTOM attention backend banner (pattern %q) — "+
-				"the injected --attention-backend CUSTOM did not take effect", backendLog.String())
+				"the CB attention backend was not selected", backendLog.String())
 
 		By("port-forwarding to the vLLM service for completion requests")
 		vllmCloser, vllmBaseURL, err := utils.PortForward(
@@ -205,7 +202,7 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 		Expect(postCompletion(ctx, vllmBaseURL, model, buildLongPrompt())).To(Succeed())
 
 		By("verifying the engine logged 'Registered CB rope state for instance N'")
-		// The forward pass drives vLLM's connector to send CB_REGISTER_ROPE_V3,
+		// The forward pass drives vLLM's connector to send CB_REGISTER_ROPE,
 		// which the engine handles and logs. kubectl log streaming buffers a
 		// beat behind, so poll.
 		Eventually(func() int {
@@ -225,8 +222,8 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 var cbServerListeningLine = regexp.MustCompile(`LMCache ZMQ cache server is running`)
 
 // cbRopeRegisteredLine matches the engine-side log emitted by
-// BlendV3.cb_register_rope on every CB_REGISTER_ROPE_V3 message
-// (modules/blend_v3.py). Its presence proves the vLLM connector negotiated
+// BlendModule.cb_register_rope on every CB_REGISTER_ROPE message
+// (modules/blend.py). Its presence proves the vLLM connector negotiated
 // the CacheBlend rope handshake with the engine.
 var cbRopeRegisteredLine = regexp.MustCompile(`Registered CB rope state for instance \d+`)
 

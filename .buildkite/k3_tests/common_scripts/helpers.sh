@@ -5,6 +5,76 @@
 # Track background PIDs for cleanup
 TRACKED_PIDS=()
 
+github_https_remote_url() {
+    local remote_url="$1"
+    case "$remote_url" in
+        https://*|http://*)
+            printf '%s\n' "$remote_url"
+            ;;
+        git@github.com:*)
+            printf 'https://github.com/%s\n' "${remote_url#git@github.com:}"
+            ;;
+        ssh://git@github.com/*)
+            printf 'https://github.com/%s\n' "${remote_url#ssh://git@github.com/}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Merge the PR base branch into the current checkout for Buildkite PR builds.
+# Buildkite's checkout step may leave the pod on the raw PR head commit rather
+# than a synthetic merge commit, so tests can miss conflicts/regressions that
+# only appear once the latest base branch is merged in.
+merge_pr_base_branch() {
+    local pr_number="${BUILDKITE_PULL_REQUEST:-false}"
+    if [[ -z "${pr_number}" || "${pr_number}" == "false" ]]; then
+        echo "--- :git: Not a PR build; skipping base-branch pre-merge"
+        return 0
+    fi
+
+    local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-dev}"
+    local remote_name="${1:-origin}"
+    local merge_ref="refs/remotes/${remote_name}/${base_branch}"
+    local fetch_source="${remote_name}"
+    local remote_url
+    remote_url="$(git remote get-url "${remote_name}")"
+
+    # The checkout phase may have SSH available even when the test container
+    # does not. Convert GitHub SSH remotes to HTTPS so the pre-merge fetch is
+    # portable across the different K3 job images.
+    if fetch_source="$(github_https_remote_url "${remote_url}")"; then
+        :
+    else
+        fetch_source="${remote_name}"
+    fi
+
+    echo "--- :git: Pre-merging ${remote_name}/${base_branch} into PR head"
+
+    git fetch --no-tags "${fetch_source}" \
+        "+refs/heads/${base_branch}:${merge_ref}"
+
+    if git merge-base --is-ancestor "${merge_ref}" HEAD; then
+        echo "  Current checkout already contains ${remote_name}/${base_branch}"
+        return 0
+    fi
+
+    local git_user_name
+    git_user_name="$(git config --get user.name || true)"
+    if [[ -z "${git_user_name}" ]]; then
+        git config user.name "buildkite-ci"
+    fi
+
+    local git_user_email
+    git_user_email="$(git config --get user.email || true)"
+    if [[ -z "${git_user_email}" ]]; then
+        git config user.email "buildkite-ci@lmcache.ai"
+    fi
+
+    GIT_MERGE_AUTOEDIT=no git merge --no-ff --no-edit "${merge_ref}"
+}
+
 # Check that all visible GPUs have sufficient free memory.
 # Fails fast with a clear message if a host-level process is hogging GPU memory.
 # Usage: check_gpu_health [min_free_percent]

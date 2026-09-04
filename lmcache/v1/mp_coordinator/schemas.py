@@ -27,7 +27,7 @@ import numpy as np
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
-from lmcache.v1.mp_coordinator.key_directory import Placement
+from lmcache.v1.mp_coordinator.views.key_directory import Placement
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -179,13 +179,20 @@ class QuotaConfigResponse(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """Combined quota and usage for a single ``cache_salt``.
+    """Combined quota and usage for a single ``cache_salt``, on one tier.
+
+    Every field describes the tier the request asked for. Quotas are
+    enforced on L2 only, so an ``l1`` request reports L1 usage with
+    ``quota_exists=False`` — never the L2 quota, which governs different
+    bytes.
 
     Attributes:
         cache_salt: The tenant identifier.
-        quota_limit_gb: The byte budget in GiB (0.0 if no quota set).
-        quota_exists: Whether an explicit quota is registered.
-        usage_gb: Current usage in GiB.
+        quota_limit_gb: The byte budget in GiB (0.0 if no quota applies
+            to the requested tier).
+        quota_exists: Whether an explicit quota is registered for the
+            requested tier.
+        usage_gb: Current usage in GiB on the requested tier.
     """
 
     cache_salt: str
@@ -195,25 +202,91 @@ class StatusResponse(BaseModel):
 
 
 class StatusListResponse(BaseModel):
-    """Reply to ``GET /quota``.
+    """Reply to ``GET /quota``, scoped to the requested tier.
 
     Attributes:
-        total_gb: Aggregate usage in GiB.
-        by_cache_salt: Per-tenant breakdown with quota and usage.
+        total_gb: Aggregate usage in GiB on the requested tier.
+        by_cache_salt: Per-tenant breakdown with quota and usage. Rows
+            come from the tier's usage plus the quotas that apply to it,
+            so an ``l1`` listing holds only salts with L1 usage.
     """
 
     total_gb: float
     by_cache_salt: list[StatusResponse]
 
 
+# -- Memory pressure ---------------------------------------------------------
+
+
+class ModuleMemoryStatus(BaseModel):
+    """Usage joined to declared capacity for one memory compartment.
+
+    Attributes:
+        tier: ``l1`` or ``l2``.
+        backend: Storage backend within the tier.
+        shared: Set for a fleet-shared pool, whose bytes are counted once
+            for the fleet, not once per mounting instance.
+        used_bytes: Bytes held, from the admitted cache-event stream.
+        capacity_bytes: Declared capacity, or ``0`` if none was declared.
+        usage_ratio: ``used_bytes / capacity_bytes``, or ``None`` when no
+            capacity was declared -- ``None`` rather than a sentinel, which
+            would read as real occupancy. Values above ``1.0`` are not
+            clamped: they mean the declared cap disagrees with what the
+            tier admitted.
+    """
+
+    tier: Tier
+    backend: str
+    shared: bool
+    used_bytes: int
+    capacity_bytes: int
+    usage_ratio: float | None = None
+
+
+class InstanceMemoryStatus(BaseModel):
+    """One MP server's memory compartments.
+
+    Attributes:
+        instance_id: The server this describes.
+        registered: Whether it is currently in the instance registry. A
+            deregistered server can still hold L2 bytes, so ``False`` is
+            valid.
+        declared_capacity: Whether any capacity was declared. When
+            ``False``, every module's ``usage_ratio`` is ``None``.
+        modules: Privately-owned compartments, sorted by tier then backend.
+            Shared pools are reported at the fleet level instead.
+    """
+
+    instance_id: str
+    registered: bool
+    declared_capacity: bool
+    modules: list[ModuleMemoryStatus] = Field(default_factory=list)
+
+
+class FleetMemoryResponse(BaseModel):
+    """Fleet-wide memory view: every server plus the shared pools.
+
+    Attributes:
+        instances: Per-server status, sorted by ``instance_id``.
+        shared_modules: Fleet-shared compartments, counted once. Capacity is
+            reported only when every declaring server agrees; a disagreement
+            reads as undeclared.
+    """
+
+    instances: list[InstanceMemoryStatus] = Field(default_factory=list)
+    shared_modules: list[ModuleMemoryStatus] = Field(default_factory=list)
+
+
 # -- Key directory -----------------------------------------------------------
 
 
-class DirectoryEventsRequest(BaseModel):
-    """Body of ``POST /directory/events``.
+class CacheEventsRequest(BaseModel):
+    """Body of ``POST /events``.
 
     Attributes:
         batches: Event batches to apply, in emission order per instance.
+            Includes ``config`` batches, which declare capacity rather than
+            report placements.
     """
 
     batches: list[CacheEventBatch] = Field(default_factory=list)
@@ -239,8 +312,8 @@ class DirectoryEventsRequest(BaseModel):
         return value
 
 
-class DirectoryEventsResponse(BaseModel):
-    """Reply to ``POST /directory/events``.
+class CacheEventsResponse(BaseModel):
+    """Reply to ``POST /events``.
 
     Attributes:
         applied: Batches applied to the directory.
@@ -319,18 +392,21 @@ class DirectoryLookupRequest(BaseModel):
 
 
 class DirectoryKeyPlacements(BaseModel):
-    """Placements and token ids for one resolved key.
+    """Placements, token ids, and access count for one resolved key.
 
     Attributes:
         key: The resolved key, echoed back.
         placements: Known placements; empty when the directory knows
             nothing about the key.
         token_ids: The chunk's token ids; empty when unknown.
+        access_count: ``ACCESS`` entries applied to the key since its
+            creation.
     """
 
     key: EncodedObjectKey
     placements: list[Placement] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
+    access_count: int = 0
 
 
 class DirectoryLookupResponse(BaseModel):
@@ -355,11 +431,14 @@ class DirectoryKeyInfo(BaseModel):
         key: The listed key.
         placements: The key's placements that matched the listing filters.
         num_tokens: Token ids known for the key's chunk (``0`` = unknown).
+        access_count: ``ACCESS`` entries applied to the key since its
+            creation.
     """
 
     key: EncodedObjectKey
     placements: list[Placement] = Field(default_factory=list)
     num_tokens: int = 0
+    access_count: int = 0
 
 
 class DirectoryListResponse(BaseModel):

@@ -66,6 +66,11 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
     ctx.event_bus.publish.assert_called_once()
     # Exactly-once: the job is removed after a non-None result.
     assert "req" not in module._prefetch_jobs
+    # The hit length is recorded on the session so free_lookup_locks can
+    # later reconstruct which keys the prefetch read-locked.
+    ctx.session_manager.get_or_create.assert_called_once_with("req")
+    session = ctx.session_manager.get_or_create.return_value
+    session.record_prefetch_result.assert_called_once_with(4, (0,))
 
 
 def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():

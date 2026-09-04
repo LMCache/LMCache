@@ -22,7 +22,7 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1BackendType, ObjectKey, Tier
+from lmcache.v1.distributed.api import CapacitySnapshot, L1BackendType, ObjectKey, Tier
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
@@ -30,7 +30,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.schemas import DirectoryEventsRequest
+from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
@@ -60,7 +60,7 @@ class CacheEventSink(ABC):
         """Deliver ``batches`` to the directory, in list order.
 
         Args:
-            batches: The batches to deliver; never empty.
+            batches: The batches to deliver.
 
         Raises:
             CacheEventPublishError: If delivery failed. Retrying and
@@ -74,7 +74,7 @@ class CacheEventSink(ABC):
 
 
 class HttpCacheEventSink(CacheEventSink):
-    """Sink that POSTs batches to the coordinator's ``/directory/events``.
+    """Sink that POSTs batches to the coordinator's ``/events``.
 
     Owns a synchronous HTTP client: publishing happens on the event
     bus's drain thread, so the request timeout bounds how long a flush
@@ -90,19 +90,19 @@ class HttpCacheEventSink(CacheEventSink):
         self._client = httpx.Client(timeout=timeout)
 
     def publish(self, batches: list[CacheEventBatch]) -> None:
-        """Deliver ``batches`` via one ``POST /directory/events`` request.
+        """Deliver ``batches`` via one ``POST /events`` request.
 
         Args:
-            batches: The batches to deliver; never empty.
+            batches: The batches to deliver.
 
         Raises:
             CacheEventPublishError: If the request failed or returned
                 a non-2xx status.
         """
-        body = DirectoryEventsRequest(batches=batches)
+        body = CacheEventsRequest(batches=batches)
         try:
             resp = self._client.post(
-                f"{self._base_url}/directory/events",
+                f"{self._base_url}/events",
                 json=body.model_dump(mode="json"),
             )
             resp.raise_for_status()
@@ -186,6 +186,14 @@ class CacheEventSubscriber(EventSubscriber):
         # Consecutive same-identity entries append to the last pending
         # batch; an identity change starts a new one (order-preserving).
         self._pending_batches: list[_PendingBatch] = []
+        # At most one pending declaration: each is the whole topology, so
+        # a newer one supersedes rather than queues behind an older.
+        self._pending_capacity: CapacitySnapshot | None = None
+        # Numbered here, beside _seq, and for the same reason: the bus
+        # drains on one thread, so neither counter needs a lock, and the
+        # number cannot come apart from the topology it labels. Coalesced
+        # publishes therefore share one revision instead of burning several.
+        self._capacity_revision = 0
         # Chunk hash → token content from token-binding events (published
         # ahead of the write-finished events), used to stamp STORE
         # entries. LRU-bounded; a miss stamps nothing.
@@ -202,6 +210,7 @@ class CacheEventSubscriber(EventSubscriber):
             EventType.L2_KEYS_DELETED: self._on_l2_delete,
             EventType.L2_KEYS_ACCESSED: self._on_l2_access,
             EventType.MP_TOKENS: self._on_tokens,
+            EventType.SM_CAPACITY_CHANGED: self._on_capacity_changed,
             # TODO: decouple the flush tick from the eviction loop (e.g. a
             # bus-owned periodic hook) so cache-event freshness does not
             # silently depend on the eviction loop's cadence.
@@ -213,16 +222,21 @@ class CacheEventSubscriber(EventSubscriber):
 
         Publish failures are logged and the drained list is dropped.
         """
-        if not self._pending_batches:
+        if not self._pending_batches and self._pending_capacity is None:
             return
         pending_batches = self._pending_batches
         self._pending_batches = []
+        capacity = self._pending_capacity
+        self._pending_capacity = None
         ts = time.time()
-        batches = [
+        # Declaration first, so a flush that also carries placements gives
+        # the coordinator its denominator before the bytes it divides.
+        batches = self._capacity_batches(capacity, ts)
+        batches += [
             CacheEventBatch(
                 instance_id=self._instance_id,
                 incarnation=self._incarnation,
-                seq=self._seq + offset + 1,
+                seq=self._seq + len(batches) + offset + 1,
                 event_type=pending.event_type,
                 tier=pending.tier,
                 backend=pending.backend,
@@ -232,16 +246,58 @@ class CacheEventSubscriber(EventSubscriber):
             )
             for offset, pending in enumerate(pending_batches)
         ]
-        self._seq += len(pending_batches)
+        self._seq += len(batches)
         try:
             self._sink.publish(batches)
         except CacheEventPublishError as e:
+            # Placement batches are lost for good, but a declaration is the
+            # whole topology, so restore it for the next flush. A newer one
+            # arriving first just supersedes it.
+            if capacity is not None and self._pending_capacity is None:
+                self._pending_capacity = capacity
             logger.warning(
                 "Dropping %d cache-event batches (instance %s): %s",
                 len(batches),
                 self._instance_id,
                 e,
             )
+
+    def _capacity_batches(
+        self, capacity: "CapacitySnapshot | None", ts: float
+    ) -> list[CacheEventBatch]:
+        """Expand one declaration into a ``config`` batch per compartment.
+
+        Bumps the revision once and stamps every batch of the declaration
+        with it, which is what lets the coordinator tell a fresh declaration
+        from a continuation and retire compartments the new one omits.
+
+        Args:
+            capacity: The declaration to expand, or ``None`` for no
+                declaration this flush.
+            ts: Emitter wall-clock seconds to stamp the batches with.
+
+        Returns:
+            One batch per compartment, seq-numbered from the current
+            cursor; empty when there is nothing to declare.
+        """
+        if capacity is None:
+            return []
+        self._capacity_revision += 1
+        return [
+            CacheEventBatch(
+                instance_id=self._instance_id,
+                incarnation=self._incarnation,
+                seq=self._seq + offset + 1,
+                event_type=CacheEventType.CONFIG,
+                tier=module.tier,
+                backend=module.backend,
+                shared=module.shared,
+                ts=ts,
+                capacity_bytes=module.capacity_bytes,
+                capacity_revision=self._capacity_revision,
+            )
+            for offset, module in enumerate(capacity.modules)
+        ]
 
     def shutdown(self) -> None:
         """Flush buffered events and close the sink. Called by
@@ -250,6 +306,12 @@ class CacheEventSubscriber(EventSubscriber):
         self._sink.close()
 
     # -- Event handlers (bus drain thread) ------------------------------------
+
+    def _on_capacity_changed(self, event: Event) -> None:
+        """Hold the new declaration for the next flush."""
+        snapshot: CapacitySnapshot = event.metadata["snapshot"]
+        self._pending_capacity = snapshot
+        self._flush_if_due()
 
     def _on_tick(self, event: Event) -> None:
         self._flush_if_due()
@@ -262,8 +324,8 @@ class CacheEventSubscriber(EventSubscriber):
 
     def _on_l1_access(self, event: Event) -> None:
         keys: list[ObjectKey] = event.metadata["keys"]
-        # ACCESS refreshes key-level recency only; it carries no
-        # placement identity, so the backend is empty by contract.
+        # ACCESS updates key-level recency and access count only; it
+        # carries no placement identity, so the backend is empty by contract.
         self._record(
             CacheEventType.ACCESS,
             Tier.L1,

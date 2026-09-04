@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.schemas import encode_tokens
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def _client() -> TestClient:
@@ -58,7 +59,7 @@ def _batch(
 
 
 def _post_events(client: TestClient, batches: list[dict]) -> dict:
-    resp = client.post("/directory/events", json={"batches": batches})
+    resp = client.post("/events", json={"batches": batches})
     assert resp.status_code == 200
     return resp.json()
 
@@ -168,7 +169,9 @@ def test_lookup_tokens_invalid_model_name_is_400():
 # -- Stats -------------------------------------------------------------------
 
 
-def test_stats_reports_counts_and_gap_flag():
+def test_stats_reports_counts_and_per_instance_l1_keys():
+    """Directory contents only — per-emitter stream state (incarnation,
+    seq, gap flag) lives on the ingest gate and is not exposed here."""
     with _client() as client:
         _post_events(client, [_batch(seq=1)])
         _post_events(client, [_batch(seq=5, entries=[{"key": _key(h="bb")}])])
@@ -180,11 +183,10 @@ def test_stats_reports_counts_and_gap_flag():
         data = client.get("/directory/stats").json()
         assert data["num_keys"] == 2
         assert data["num_placements"] == 3
-        instance = data["instances"]["node-a"]
-        assert instance["incarnation"] == 1
-        assert instance["last_seq"] == 6
-        assert instance["gap_detected"] is True
-        assert instance["num_l1_keys"] == 2
+        # Both keys got an L1 placement from node-a; the third batch added
+        # an L2 placement, which the L1 index does not count.
+        assert data["l1_keys_by_instance"]["node-a"] == 2
+        assert "instances" not in data
 
 
 # -- Token bindings ----------------------------------------------------------
@@ -201,7 +203,7 @@ def test_store_entry_with_tokens_populates_bindings():
         data = _post_events(client, [_batch(entries=[entry])])
         assert data == {"applied": 1, "duplicates": 0, "stale": 0}
 
-        key_directory = client.app.state.ctx.key_directory
+        key_directory = client.app.state.ctx.views.get(KeyDirectory)
         assert key_directory.get_token_ids([bytes.fromhex("aa")]) == [(1, 2, 3)]
 
 
@@ -341,6 +343,36 @@ def test_lookup_keys_form_returns_placements_and_tokens():
         assert results[1]["placements"] == []
 
 
+def test_lookup_and_listing_report_access_counts():
+    def _access(seq: int) -> dict:
+        return _batch(
+            seq=seq, event_type="access", backend="", entries=[{"key": _key(h="aa")}]
+        )
+
+    with _client() as client:
+        _post_events(
+            client,
+            [
+                _batch(
+                    seq=1,
+                    entries=[
+                        {"key": _key(h="aa"), "size_bytes": 1},
+                        {"key": _key(h="bb"), "size_bytes": 1},
+                    ],
+                ),
+                _access(seq=2),
+                _access(seq=3),
+            ],
+        )
+
+        results = _lookup(client, [_key(h="aa"), _key(h="bb"), _key(h="ff")])["results"]
+        assert [r["access_count"] for r in results] == [2, 0, 0]
+
+        listed = client.get("/directory/keys").json()["keys"]
+        by_hash = {row["key"]["chunk_hash_hex"]: row["access_count"] for row in listed}
+        assert by_hash == {"aa": 2, "bb": 0}
+
+
 def test_lookup_malformed_key_is_rejected():
     with _client() as client:
         resp = client.post("/directory/lookup", json={"keys": [_key(h="zz")]})
@@ -365,20 +397,20 @@ def test_lookup_requires_exactly_one_form():
 
 def test_tier_all_is_rejected():
     with _client() as client:
-        resp = client.post("/directory/events", json={"batches": [_batch(tier="all")]})
+        resp = client.post("/events", json={"batches": [_batch(tier="all")]})
         assert resp.status_code == 422
 
 
 def test_seq_zero_is_rejected():
     with _client() as client:
-        resp = client.post("/directory/events", json={"batches": [_batch(seq=0)]})
+        resp = client.post("/events", json={"batches": [_batch(seq=0)]})
         assert resp.status_code == 422
 
 
 def test_malformed_key_hex_is_rejected():
     with _client() as client:
         resp = client.post(
-            "/directory/events",
+            "/events",
             json={"batches": [_batch(entries=[{"key": _key(h="zz")}])]},
         )
         assert resp.status_code == 422
