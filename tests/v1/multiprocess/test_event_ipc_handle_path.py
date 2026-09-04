@@ -14,7 +14,6 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType
 
 
 class _FakeEventBackend:
@@ -116,17 +115,10 @@ def test_worker_exports_events_through_platform_backend(
         lambda kv_caches: list(kv_caches.values()),
     )
 
-    sent: list[tuple[RequestType, list[object]]] = []
-
-    def send_request(
-        _client: object,
-        request_type: RequestType,
-        payload: list[object],
-    ) -> MessagingFuture:
-        sent.append((request_type, payload))
-        if request_type == RequestType.REGISTER_KV_CACHE:
-            return _resolved_future(True)
-        return MessagingFuture()
+    client = MagicMock()
+    client.register_kv_cache.return_value = _resolved_future(True)
+    client.store.return_value = MessagingFuture()
+    client.retrieve.return_value = MessagingFuture()
 
     context = worker_transfer.LMCacheDrivenTransferContext()
     kv_caches = {"layer_0": torch.empty(1)}
@@ -136,9 +128,8 @@ def test_worker_exports_events_through_platform_backend(
         "model",
         1,
         1,
-        MagicMock(),
+        client,
         1.0,
-        send_request,
     )
     stream = MagicMock(name="current_stream")
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
@@ -166,14 +157,8 @@ def test_worker_exports_events_through_platform_backend(
 
     assert isinstance(store_future, DeviceMessagingFuture)
     assert isinstance(retrieve_future, DeviceMessagingFuture)
-    assert sent[1] == (
-        RequestType.STORE,
-        ["key", 1, [[0]], b"completion-handle"],
-    )
-    assert sent[2] == (
-        RequestType.RETRIEVE,
-        ["key", 1, [[0]], b"completion-handle", 2],
-    )
+    client.store.assert_called_once_with("key", 1, [[0]], b"completion-handle")
+    client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2)
     assert [call[0] for call in backend.calls] == [
         "check",
         "create",

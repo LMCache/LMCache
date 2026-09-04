@@ -48,3 +48,16 @@ def test_deprecated_cb_aliases_are_not_separate_members() -> None:
     # (one definition per member) is unaffected by them.
     names = {member.name for member in RequestType}
     assert not names & set(DEPRECATED_CB_ALIASES)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "P2P_LOOKUP_AND_LOCK",
+        "P2P_QUERY_LOOKUP_RESULTS",
+        "P2P_UNLOCK_OBJECTS",
+        "GET_EXPERIMENTAL",
+    ],
+)
+def test_compatibility_aliases_do_not_reuse_later_auto_values(name: str) -> None:
+    assert RequestType[name].name == name

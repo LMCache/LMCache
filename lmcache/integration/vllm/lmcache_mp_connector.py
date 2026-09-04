@@ -66,7 +66,6 @@ try:
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         ParallelStrategy,
-        send_lmcache_request,
     )
 
     try:
@@ -413,14 +412,11 @@ def build_parallel_strategy_from_vllm_config(
     )
 
 
-def _ensure_zmq_scheme(server_url: str) -> str:
-    """Ensure a ZMQ server URL carries a transport scheme.
+def _ensure_transport_scheme(server_url: str) -> str:
+    """Ensure a multiprocess server URL carries a transport scheme.
 
-    ZeroMQ requires an explicit transport (e.g. ``tcp://``) in the address;
-    a bare ``host:port`` such as ``127.0.0.1:5557`` is rejected with
-    ``ZMQError: Invalid argument``. Users naturally configure
-    ``lmcache.mp.host`` as a plain IP/hostname, so prepend ``tcp://`` when no
-    scheme is present.
+    Preserve explicit schemes so the request client factory can select the
+    transport. Bare endpoints retain the legacy ZMQ TCP behavior.
 
     Args:
         server_url: A server URL, with or without a ``<scheme>://`` prefix.
@@ -507,9 +503,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # Normalize so a bare host:port (no transport scheme) is accepted;
-        # ZMQ requires an explicit transport such as ``tcp://``.
-        server_urls = [_ensure_zmq_scheme(u) for u in server_urls]
+        # Preserve explicit transport schemes and default bare host:port
+        # endpoints to the legacy ZMQ TCP transport.
+        server_urls = [_ensure_transport_scheme(u) for u in server_urls]
 
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
@@ -618,7 +614,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
                 ctx = FeatureContext(
                     worker_adapter=self.worker_adapter,
-                    send_lmcache_request=send_lmcache_request,
                 )
                 requested = (
                     {TRANSFER_QUERY} if self.transfer_intermediate_tensors else set()
