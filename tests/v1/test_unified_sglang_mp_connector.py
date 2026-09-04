@@ -71,14 +71,6 @@ class _IPCCacheServerKey:
         self.__dict__.update(kwargs)
 
 
-class _RequestType:
-    LOOKUP = object()
-    QUERY_PREFETCH_STATUS = object()
-    WAIT_PREFETCH_STATUS = object()
-    FREE_LOOKUP_LOCKS = object()
-    END_SESSION = object()
-
-
 class TestUnifiedLMCacheMPConnector(unittest.TestCase):
     def setUp(self):
         self.connector = object.__new__(UnifiedLMCacheMPConnector)
@@ -154,23 +146,20 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.connector._lookups = {}
         self.connector._active_sessions = set()
         self.connector._lookup_leader = True
-        self.connector._mq_client = object()
-        self.connector._send_request = Mock()
+        self.connector._req_client = Mock()
         self.connector._track_control_future = Mock()
 
-        protocol = ModuleType("lmcache.v1.multiprocess.protocol")
-        protocol.RequestType = _RequestType
-        with patch.dict("sys.modules", {"lmcache.v1.multiprocess.protocol": protocol}):
-            operation = self.connector.submit_lookup(
-                "short-request",
-                [1, 2, 3],
-                local_hit_tokens=0,
-                cache_salt="",
-            )
-            self.connector.end_session("short-request")
+        operation = self.connector.submit_lookup(
+            "short-request",
+            [1, 2, 3],
+            local_hit_tokens=0,
+            cache_salt="",
+        )
+        self.connector.end_session("short-request")
 
         self.assertEqual(operation.total_hit_tokens, 0)
-        self.connector._send_request.assert_not_called()
+        self.connector._req_client.lookup.assert_not_called()
+        self.connector._req_client.end_session.assert_not_called()
         self.connector._track_control_future.assert_not_called()
 
     def test_submitted_lookup_tracks_server_session(self):
@@ -179,34 +168,32 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.connector._lookups = {}
         self.connector._active_sessions = set()
         self.connector._lookup_leader = True
-        self.connector._mq_client = object()
+        self.connector._req_client = Mock()
+        self.connector._req_client.lookup.return_value = _Future(False)
         self.connector._create_key = Mock(return_value=object())
-        self.connector._send_request = Mock(return_value=_Future(False))
         self.connector._sync_success = lambda success: success
 
-        protocol = ModuleType("lmcache.v1.multiprocess.protocol")
-        protocol.RequestType = _RequestType
-        with patch.dict("sys.modules", {"lmcache.v1.multiprocess.protocol": protocol}):
-            self.connector.submit_lookup(
-                "lookup-request",
-                [1, 2, 3, 4],
-                local_hit_tokens=0,
-                cache_salt="",
-            )
+        self.connector.submit_lookup(
+            "lookup-request",
+            [1, 2, 3, 4],
+            local_hit_tokens=0,
+            cache_salt="",
+        )
 
         self.assertIn("lookup-request", self.connector._active_sessions)
 
     def test_poll_lookup_uses_short_lived_status_queries(self):
         self.connector.chunk_size = 4
         self.connector._lookup_leader = True
-        self.connector._mq_client = object()
+        self.connector._req_client = Mock()
         self.connector._sync_leader_int = lambda value: value
         self.connector._store_submitted_tokens = {}
         pending_query = _ResultFuture(False, None)
         completed_query = _ResultFuture(True, 3)
-        self.connector._send_request = Mock(
-            side_effect=[pending_query, completed_query]
-        )
+        self.connector._req_client.query_prefetch_status.side_effect = [
+            pending_query,
+            completed_query,
+        ]
         operation = LMCacheLookupOperation(
             request_id="lookup-request",
             token_ids=list(range(16)),
@@ -215,26 +202,23 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             submission_future=_ResultFuture(True, None),
         )
 
-        protocol = ModuleType("lmcache.v1.multiprocess.protocol")
-        protocol.RequestType = _RequestType
-        with patch.dict("sys.modules", {"lmcache.v1.multiprocess.protocol": protocol}):
-            # Submit one non-blocking status query. An outstanding query must
-            # not be duplicated by subsequent scheduler polls.
-            self.assertIsNone(self.connector.poll_lookup(operation))
-            self.assertIsNone(self.connector.poll_lookup(operation))
-            self.assertEqual(self.connector._send_request.call_count, 1)
+        # Submit one non-blocking status query. An outstanding query must
+        # not be duplicated by subsequent scheduler polls.
+        self.assertIsNone(self.connector.poll_lookup(operation))
+        self.assertIsNone(self.connector.poll_lookup(operation))
+        self.assertEqual(self.connector._req_client.query_prefetch_status.call_count, 1)
 
-            # A None response means prefetch is still running. The following
-            # scheduler pass issues a fresh query, which returns the final hit.
-            pending_query.ready = True
-            self.assertIsNone(self.connector.poll_lookup(operation))
-            self.assertIsNone(self.connector.poll_lookup(operation))
-            self.assertEqual(self.connector.poll_lookup(operation), 12)
+        # A None response means prefetch is still running. The following
+        # scheduler pass issues a fresh query, which returns the final hit.
+        pending_query.ready = True
+        self.assertIsNone(self.connector.poll_lookup(operation))
+        self.assertIsNone(self.connector.poll_lookup(operation))
+        self.assertEqual(self.connector.poll_lookup(operation), 12)
 
-        self.assertEqual(self.connector._send_request.call_count, 2)
-        for call in self.connector._send_request.call_args_list:
-            self.assertIs(call.args[1], _RequestType.QUERY_PREFETCH_STATUS)
-            self.assertEqual(call.args[2], ["lookup-request"])
+        self.assertEqual(self.connector._req_client.query_prefetch_status.call_count, 2)
+        self.connector._req_client.query_prefetch_status.assert_called_with(
+            "lookup-request"
+        )
         self.assertTrue(operation.locks_held)
         self.assertEqual(self.connector._store_submitted_tokens["lookup-request"], 12)
 
@@ -656,9 +640,9 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector._lookup_leader = True
         connector.kv_world_size = 2
-        connector._mq_client = object()
+        connector._req_client = Mock()
+        connector._req_client.free_lookup_locks.return_value = _Future(True)
         connector._track_control_future = Mock()
-        connector._send_request = Mock(return_value=_Future(True))
         connector._create_key = Mock(return_value="prefix-key")
         lookup = LMCacheLookupOperation(
             request_id="request",
@@ -669,20 +653,12 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             locks_held=True,
         )
         connector._lookups = {lookup.request_id: lookup}
-        protocol = ModuleType("lmcache.v1.multiprocess.protocol")
-        protocol.RequestType = _RequestType
-
-        with patch.dict("sys.modules", {"lmcache.v1.multiprocess.protocol": protocol}):
-            connector.free_lookup_locks("request", start=0, end=4)
+        connector.free_lookup_locks("request", start=0, end=4)
 
         connector._create_key.assert_called_once_with(
             lookup, start=0, end=4, worker_id=None
         )
-        connector._send_request.assert_called_once_with(
-            connector._mq_client,
-            _RequestType.FREE_LOOKUP_LOCKS,
-            ["prefix-key", 2],
-        )
+        connector._req_client.free_lookup_locks.assert_called_once_with("prefix-key", 2)
         self.assertEqual(lookup.lock_start, 4)
         self.assertTrue(lookup.locks_held)
         self.assertIs(connector._lookups["request"], lookup)

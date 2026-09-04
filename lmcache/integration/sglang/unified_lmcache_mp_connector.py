@@ -144,6 +144,9 @@ class UnifiedLMCacheMPConnector:
             # First Party
             from lmcache.v1.config import load_engine_config_with_overrides
             from lmcache.v1.multiprocess.mq import MessageQueueClient
+            from lmcache.v1.multiprocess.transport.zmq_impl import (
+                ZmqMultiprocessClient,
+            )
         except ImportError as exc:
             raise ImportError(
                 "LMCacheUnifiedRadixCache requires the `lmcache` package and "
@@ -341,7 +344,9 @@ class UnifiedLMCacheMPConnector:
             self._kernel_group_to_engine_group,
         ) = self._build_engine_group_info_specs()
         self._context = zmq.Context.instance()
-        self._mq_client = MessageQueueClient(self.server_url, self._context)
+        self._req_client = ZmqMultiprocessClient(
+            MessageQueueClient(self.server_url, self._context)
+        )
         self._transfer_ctx: Any = None
         self._event_backend: Any = None
         self._registered = False
@@ -473,24 +478,8 @@ class UnifiedLMCacheMPConnector:
             tensor_offset += len(group.kv_tensors)
         return specs, tuple(spec["engine_group_id"] for spec in specs)
 
-    @staticmethod
-    def _send_request(mq_client: Any, request_type: Any, payloads: list[Any]):
-        # First Party
-        from lmcache.v1.multiprocess.protocol import get_response_class
-
-        return mq_client.submit_request(
-            request_type, payloads, get_response_class(request_type)
-        )
-
     def _get_chunk_size(self) -> int:
-        # First Party
-        from lmcache.v1.multiprocess.protocol import RequestType
-
-        return int(
-            self._send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, []).result(
-                timeout=self._mq_timeout
-            )
-        )
+        return int(self._req_client.get_chunk_size().result(timeout=self._mq_timeout))
 
     @property
     def is_lookup_leader(self) -> bool:
@@ -553,9 +542,8 @@ class UnifiedLMCacheMPConnector:
                 self.model_name,
                 self.kv_world_size,
                 self.blocks_in_chunk,
-                self._mq_client,
+                self._req_client,
                 self._mq_timeout,
-                self._send_request,
                 layout_hints={"kv_list_layout": "unified"},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.SGLANG,
@@ -571,14 +559,11 @@ class UnifiedLMCacheMPConnector:
             return
 
         def heartbeat() -> None:
-            # First Party
-            from lmcache.v1.multiprocess.protocol import RequestType
-
             while not self._heartbeat_stop.wait(self._heartbeat_interval):
                 try:
-                    self._send_request(
-                        self._mq_client, RequestType.PING, [self.instance_id]
-                    ).result(timeout=self._heartbeat_interval)
+                    self._req_client.ping(self.instance_id).result(
+                        timeout=self._heartbeat_interval
+                    )
                 except Exception:
                     logger.warning("LMCache MP heartbeat failed", exc_info=True)
 
@@ -628,9 +613,6 @@ class UnifiedLMCacheMPConnector:
         local_hit_tokens: int,
         cache_salt: str,
     ) -> LMCacheLookupOperation:
-        # First Party
-        from lmcache.v1.multiprocess.protocol import RequestType
-
         operation = LMCacheLookupOperation(
             request_id=request_id,
             token_ids=list(token_ids),
@@ -649,10 +631,8 @@ class UnifiedLMCacheMPConnector:
                 key = self._create_key(
                     operation, start=0, end=aligned_end, worker_id=None
                 )
-                operation.submission_future = self._send_request(
-                    self._mq_client,
-                    RequestType.LOOKUP,
-                    [key, self.kv_world_size],
+                operation.submission_future = self._req_client.lookup(
+                    key, self.kv_world_size
                 )
             except Exception:
                 logger.exception("LMCache lookup submission failed for %s", request_id)
@@ -667,9 +647,6 @@ class UnifiedLMCacheMPConnector:
 
     def poll_lookup(self, operation: LMCacheLookupOperation) -> Optional[int]:
         """Return total hit tokens, or ``None`` while lookup+prefetch runs."""
-        # First Party
-        from lmcache.v1.multiprocess.protocol import RequestType
-
         if operation.total_hit_tokens is not None:
             return operation.total_hit_tokens
         result = -1
@@ -681,10 +658,8 @@ class UnifiedLMCacheMPConnector:
                     result = -1
                 elif operation.completion_future is None:
                     operation.submission_future.result(timeout=0)
-                    operation.completion_future = self._send_request(
-                        self._mq_client,
-                        RequestType.QUERY_PREFETCH_STATUS,
-                        [operation.request_id],
+                    operation.completion_future = (
+                        self._req_client.query_prefetch_status(operation.request_id)
                     )
                     result = -1
                 elif not operation.completion_future.query():
@@ -1152,16 +1127,9 @@ class UnifiedLMCacheMPConnector:
             return
 
         if self.is_lookup_leader:
-            # First Party
-            from lmcache.v1.multiprocess.protocol import RequestType
-
             key = self._create_key(operation, start=start, end=end, worker_id=None)
             self._track_control_future(
-                self._send_request(
-                    self._mq_client,
-                    RequestType.FREE_LOOKUP_LOCKS,
-                    [key, self.kv_world_size],
-                )
+                self._req_client.free_lookup_locks(key, self.kv_world_size)
             )
         operation.lock_start = end
         if end == operation.total_hit_tokens:
@@ -1169,20 +1137,13 @@ class UnifiedLMCacheMPConnector:
             self._lookups.pop(request_id, None)
 
     def end_session(self, request_id: str) -> None:
-        # First Party
-        from lmcache.v1.multiprocess.protocol import RequestType
-
         # A local lookup object can represent an aligned-empty lookup for
         # which no LOOKUP RPC was sent. Only _active_sessions proves that a
         # LOOKUP or STORE reached the server and requires END_SESSION.
         was_active = request_id in self._active_sessions
         self._lookups.pop(request_id, None)
         if was_active and self.is_lookup_leader:
-            self._track_control_future(
-                self._send_request(
-                    self._mq_client, RequestType.END_SESSION, [request_id]
-                )
-            )
+            self._track_control_future(self._req_client.end_session(request_id))
         self._active_sessions.discard(request_id)
 
     def finish_request(self, request_id: str) -> None:
@@ -1194,15 +1155,10 @@ class UnifiedLMCacheMPConnector:
             self.end_session(request_id)
 
     def clear(self) -> bool:
-        # First Party
-        from lmcache.v1.multiprocess.protocol import RequestType
-
         success = True
         try:
             if self.is_lookup_leader:
-                self._send_request(self._mq_client, RequestType.CLEAR, []).result(
-                    timeout=self._mq_timeout
-                )
+                self._req_client.clear().result(timeout=self._mq_timeout)
         except Exception:
             logger.exception("Failed to clear LMCache MP storage")
             success = False
@@ -1212,9 +1168,6 @@ class UnifiedLMCacheMPConnector:
         if self._closed:
             return
         self._closed = True
-        # First Party
-        from lmcache.v1.multiprocess.protocol import RequestType
-
         self.end_all_sessions()
         self._flush_control_futures()
         self._heartbeat_stop.set()
@@ -1223,15 +1176,13 @@ class UnifiedLMCacheMPConnector:
             self._heartbeat_thread = None
         if self._registered:
             try:
-                self._send_request(
-                    self._mq_client,
-                    RequestType.UNREGISTER_KV_CACHE,
-                    [self.instance_id],
-                ).result(timeout=self._mq_timeout)
+                self._req_client.unregister_kv_cache(self.instance_id).result(
+                    timeout=self._mq_timeout
+                )
             except Exception:
                 logger.warning("Failed to unregister LMCache KV tensors", exc_info=True)
             self._registered = False
         if self._transfer_ctx is not None:
             self._transfer_ctx.close()
             self._transfer_ctx = None
-        self._mq_client.close()
+        self._req_client.close()
