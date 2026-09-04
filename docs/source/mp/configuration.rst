@@ -186,6 +186,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        independently, and is what allows ``--max-num-batched-tokens`` to exceed
        twice the block size). For a non-hybrid model it makes no difference —
        every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
+   * - ``--enable``
+     - ``[]``
+     - Space-separated list of experimental transfer modules to enable.
+       Currently the only supported value is ``transfer_query`` — the
+       experimental intermediate-tensor (query) transfer path used by the
+       LMCache SDK. See :doc:`/mp/sdk` for the end-to-end configuration and
+       ``lmcache/v1/multiprocess/modules/experimental/__init__.py`` for the
+       registered feature identifiers.
 
 Lookup Hash Logging
 -------------------
