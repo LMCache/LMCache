@@ -62,23 +62,23 @@ def start_lookup_request_server(
         The started request server. The caller must close it.
     """
     if transport == "grpc":
-        server = GrpcMultiprocessServer(
+        grpc_server = GrpcMultiprocessServer(
             server_url,
             max_cpu_workers=4,
             max_gpu_workers=1,
         )
-        server.add_service("LookupService", LookupServiceImpl(lookup))
-        server.start()
-        return server
+        grpc_server.add_service("LookupService", LookupServiceImpl(lookup))
+        grpc_server.start()
+        return grpc_server
 
-    server = MessageQueueServer(server_url, zmq.Context.instance())
+    zmq_server = MessageQueueServer(server_url, zmq.Context.instance())
     blocking_types: list[RequestType] = []
     for request_type, method_name in _LOOKUP_HANDLERS.items():
         handler = getattr(lookup, method_name, None)
         if not callable(handler):
             continue
-        add_handler_helper(server, request_type, handler)
+        add_handler_helper(zmq_server, request_type, handler)
         blocking_types.append(request_type)
-    server.add_normal_thread_pool(blocking_types, max_workers=4)
-    server.start()
-    return server
+    zmq_server.add_normal_thread_pool(blocking_types, max_workers=4)
+    zmq_server.start()
+    return zmq_server
