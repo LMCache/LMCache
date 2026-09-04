@@ -204,23 +204,8 @@ class EventBus:
         if not self._config.enabled:
             return
 
-        with self._queue_lock:
-            if len(self._queue) >= self._config.max_queue_size:
-                self._discard_count += 1
-                now = time.monotonic()
-                if now - self._last_discard_warning >= 1.0:
-                    logger.warning(
-                        "EventBus queue full (max_queue_size=%d), "
-                        "%d event(s) discarded so far",
-                        self._config.max_queue_size,
-                        self._discard_count,
-                    )
-                    self._last_discard_warning = now
-                return
-
-            event.timestamp = time.time()
-            self._queue.append(event)
-        self._wake.set()
+        if self._admit_event(event, stamp_timestamp=True):
+            self._wake.set()
 
     def start(self) -> None:
         """Start the background drain thread.  No-op when disabled or
@@ -319,13 +304,14 @@ class EventBus:
             for name, sid, ts, str_meta, int_meta in native_events:
                 metadata: dict[str, Any] = dict(str_meta)
                 metadata.update(int_meta)
-                self._queue.append(
+                self._admit_event(
                     Event(
                         event_type=EventType(name),
                         session_id=sid,
                         timestamp=ts,
                         metadata=metadata,
-                    )
+                    ),
+                    stamp_timestamp=False,
                 )
 
         with self._lock:
@@ -355,6 +341,27 @@ class EventBus:
                         name,
                         event.event_type.value,
                     )
+
+    def _admit_event(self, event: Event, *, stamp_timestamp: bool) -> bool:
+        """Atomically admit one event without exceeding the queue bound."""
+        with self._queue_lock:
+            if len(self._queue) >= self._config.max_queue_size:
+                self._discard_count += 1
+                now = time.monotonic()
+                if now - self._last_discard_warning >= 1.0:
+                    logger.warning(
+                        "EventBus queue full (max_queue_size=%d), "
+                        "%d event(s) discarded so far",
+                        self._config.max_queue_size,
+                        self._discard_count,
+                    )
+                    self._last_discard_warning = now
+                return False
+
+            if stamp_timestamp:
+                event.timestamp = time.time()
+            self._queue.append(event)
+            return True
 
 
 # ---------------------------------------------------------------------------

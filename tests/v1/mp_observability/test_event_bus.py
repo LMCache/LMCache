@@ -346,6 +346,34 @@ class TestBackpressure:
         assert len(b._queue) == 1
         assert b.dropped_events_count() == 1
 
+    def test_native_ingress_shares_queue_bound_and_drop_count(self):
+        b = EventBus(EventBusConfig(enabled=True, max_queue_size=2))
+        received: list[Event] = []
+        b.subscribe(EventType.L1_READ_FINISHED, received.append)
+        b.publish(_make_event(session_id="python"))
+
+        native_ops = MagicMock()
+        native_ops.drain_recorded_events.return_value = [
+            (
+                EventType.L1_READ_FINISHED.value,
+                f"native-{index}",
+                float(index + 1),
+                {},
+                {},
+            )
+            for index in range(3)
+        ]
+
+        with (
+            patch.object(_bus_module, "_has_native_recorder", True),
+            patch.object(_bus_module, "_device_ops", native_ops, create=True),
+        ):
+            b.stop()
+
+        assert [event.session_id for event in received] == ["python", "native-0"]
+        assert received[1].timestamp == 1.0
+        assert b.dropped_events_count() == 2
+
 
 # ---------------------------------------------------------------------------
 # Self-monitoring accessors
