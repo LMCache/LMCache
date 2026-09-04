@@ -26,8 +26,7 @@ RULE_TEMPLATE = (
     "cite the rule number you applied, and keep the answer short. "
 )
 QUESTION = (
-    "\n\nQuestion: List the secret codewords of rules 3, 17, and 41, "
-    "one per line."
+    "\n\nQuestion: List the secret codewords of rules 3, 17, and 41, one per line."
 )
 # Closes Qwen3.5's <think> block, as its chat template does for
 # enable_thinking=false; /v1/completions applies no template.
@@ -139,9 +138,7 @@ def main() -> int:
     prompt = build_prompt(args.num_rules)
 
     before_queries, before_hits = scrape_external_counters(args.port)
-    text, prompt_tokens = send_request(
-        args.port, args.model, prompt, args.max_tokens
-    )
+    text, prompt_tokens = send_request(args.port, args.model, prompt, args.max_tokens)
     after_queries, after_hits = scrape_external_counters(args.port)
 
     external = int(after_hits - before_hits)
