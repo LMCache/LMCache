@@ -26,7 +26,7 @@ Key log messages:
    * - INFO
      - ``Retrieved N tokens in X seconds``
    * - INFO
-     - ``Prefetch request completed (L1+L2): N/M prefix hits``
+     - ``Prefetch request completed (L1+L2): N/M retained keys (X L1, Y L2) in T ms``
    * - DEBUG
      - ``MP store start: session=... device=...``
    * - DEBUG
