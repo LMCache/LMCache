@@ -138,14 +138,10 @@ class UnifiedLMCacheMPConnector:
         mla_enabled: bool = False,
     ) -> None:
         try:
-            # Third Party
-            import zmq
-
             # First Party
             from lmcache.v1.config import load_engine_config_with_overrides
-            from lmcache.v1.multiprocess.mq import MessageQueueClient
-            from lmcache.v1.multiprocess.transport.zmq_impl import (
-                ZmqMultiprocessClient,
+            from lmcache.v1.multiprocess.transport.factory import (
+                RequestClientFactory,
             )
         except ImportError as exc:
             raise ImportError(
@@ -343,10 +339,7 @@ class UnifiedLMCacheMPConnector:
             self._engine_group_info_specs,
             self._kernel_group_to_engine_group,
         ) = self._build_engine_group_info_specs()
-        self._context = zmq.Context.instance()
-        self._req_client = ZmqMultiprocessClient(
-            MessageQueueClient(self.server_url, self._context)
-        )
+        self._req_client = RequestClientFactory.create(self.server_url)
         self._transfer_ctx: Any = None
         self._event_backend: Any = None
         self._registered = False
