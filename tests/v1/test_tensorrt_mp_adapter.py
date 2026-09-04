@@ -3,7 +3,7 @@
 
 # Standard
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 from unittest.mock import MagicMock
 import importlib
 import sys
@@ -15,19 +15,18 @@ import pytest
 def _make_worker(
     trt_mp_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[Any, MagicMock]:
-    """Construct a worker through its public constructor with an MQ stub."""
+    """Construct a worker with a stub for the public request-client contract."""
     module = trt_mp_module
+    monkeypatch.setenv("LMCACHE_MQ_TIMEOUT", "5")
     monkeypatch.setattr(
         module.zmq, "Context", MagicMock(return_value=MagicMock(name="zmq_context"))
     )
-    mq_client = MagicMock(name="mq_client")
-    chunk_future = MagicMock(name="chunk_future")
-    chunk_future.result.return_value = 256
-    mq_client.submit_request.return_value = chunk_future
+    req_client = MagicMock(spec=module.RequestClient)
+    req_client.get_chunk_size.return_value.result.return_value = 256
     monkeypatch.setattr(
-        module,
-        "MessageQueueClient",
-        MagicMock(return_value=mq_client),
+        module.RequestClientFactory,
+        "create",
+        MagicMock(return_value=req_client),
     )
     llm_args = SimpleNamespace(
         kv_cache_config=SimpleNamespace(tokens_per_block=32),
@@ -37,8 +36,7 @@ def _make_worker(
         model="test-model",
     )
     worker = module.LMCacheMPKvConnectorWorker(llm_args)
-    mq_client.submit_request.reset_mock()
-    return worker, mq_client.submit_request
+    return worker, req_client
 
 
 def _successful_transfer_future(name: str) -> MagicMock:
@@ -51,7 +49,7 @@ def _successful_transfer_future(name: str) -> MagicMock:
 
 
 @pytest.fixture
-def trt_mp_module(monkeypatch: pytest.MonkeyPatch):
+def trt_mp_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """Import the adapter with its optional TensorRT-LLM API stubbed."""
 
     class _ConnectorBase:
@@ -98,32 +96,19 @@ def trt_mp_module(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_failed_retrieve_waits_for_device_result_and_fails_closed(
-    trt_mp_module,
+    trt_mp_module: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A False device transfer result cannot be treated as a loaded KV hit."""
     module = trt_mp_module
-    worker = module.LMCacheMPKvConnectorWorker.__new__(
-        module.LMCacheMPKvConnectorWorker
+    worker, req_client = _make_worker(module, monkeypatch)
+    worker.bind_connector_meta(
+        module.LMCacheMPConnectorMetadata(
+            loads={
+                7: SimpleNamespace(tokens=list(range(256)), block_ids=list(range(8)))
+            }
+        )
     )
-    key = module.IPCCacheServerKey(
-        model_name="test-model",
-        world_size=1,
-        worker_id=0,
-        num_kv_readers=1,
-        token_ids=tuple(range(32)),
-        start=0,
-        end=32,
-        request_id="7",
-    )
-    worker._metadata = module.LMCacheMPConnectorMetadata(
-        loads={7: module._BlockSpec(tokens=list(range(32)), block_ids=[3])}
-    )
-    worker._block_size = 32
-    worker._mq_client = MagicMock(name="mq_client")
-    worker._mq_timeout = 5.0
-    worker._instance_id = 42
-    worker._create_key = MagicMock(return_value=key)
 
     event = MagicMock(name="event")
     event.ipc_handle.return_value = b"producer-event"
@@ -134,8 +119,7 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     device_future.result.return_value = False
     raw_future = MagicMock(name="raw_future")
     raw_future.to_device_future.return_value = device_future
-    send_request = MagicMock(return_value=raw_future)
-    monkeypatch.setattr(module, "_send_request", send_request)
+    req_client.retrieve.return_value = raw_future
 
     with pytest.raises(RuntimeError, match="refusing to use unloaded KV blocks"):
         worker.start_load_kv(MagicMock(name="stream"))
@@ -148,8 +132,11 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     ("token_count", "block_count", "expected_block_count"),
     [
         pytest.param(2176, 68, 64, id="partial-final-chunk"),
+        pytest.param(2049, 65, 64, id="partial-final-block"),
         pytest.param(2048, 64, 64, id="chunk-aligned"),
         pytest.param(128, 4, 0, id="short-request"),
+        pytest.param(0, 0, 0, id="empty-request"),
+        pytest.param(2176, 0, 0, id="no-allocated-blocks"),
         pytest.param(2176, 63, 63, id="short-block-list-reaches-server"),
     ],
 )
@@ -162,9 +149,11 @@ def test_transfer_block_ids_match_key_range(
 ) -> None:
     """STORE and RETRIEVE use whole key chunks without mutating metadata."""
     module = trt_mp_module
-    worker, submit_request = _make_worker(trt_mp_module, monkeypatch)
+    worker, req_client = _make_worker(trt_mp_module, monkeypatch)
     tokens = list(range(token_count))
-    block_ids = list(range(block_count))
+    # Physical pages need not be contiguous or ordered by their IDs.
+    original_block_ids = [3 * i + 1 for i in reversed(range(block_count))]
+    block_ids = list(original_block_ids)
     spec = SimpleNamespace(tokens=tokens, block_ids=block_ids)
     worker.bind_connector_meta(
         module.LMCacheMPConnectorMetadata(
@@ -177,29 +166,27 @@ def test_transfer_block_ids_match_key_range(
     event.ipc_handle.return_value = b"producer-event"
     monkeypatch.setattr(module, "check_interprocess_event_support", MagicMock())
     monkeypatch.setattr(module.torch_dev, "Event", MagicMock(return_value=event))
-    submit_request.side_effect = [
-        _successful_transfer_future("retrieve"),
-        _successful_transfer_future("store"),
-    ]
+    req_client.retrieve.return_value = _successful_transfer_future("retrieve")
+    req_client.store.return_value = _successful_transfer_future("store")
 
     worker.start_load_kv(MagicMock(name="load_stream"))
     worker.wait_for_save(MagicMock(name="store_stream"))
 
-    assert block_ids == list(range(block_count))
+    assert block_ids == original_block_ids
+    assert tokens == list(range(token_count))
     if expected_block_count == 0:
-        assert submit_request.call_count == 0
+        req_client.retrieve.assert_not_called()
+        req_client.store.assert_not_called()
         return
 
-    assert submit_request.call_count == 2
-    retrieve_call, store_call = submit_request.call_args_list
-    assert retrieve_call.args[0] == module.RequestType.RETRIEVE
-    assert store_call.args[0] == module.RequestType.STORE
-    retrieve_payload = retrieve_call.args[1]
-    store_payload = store_call.args[1]
+    req_client.retrieve.assert_called_once()
+    req_client.store.assert_called_once()
+    retrieve_payload = req_client.retrieve.call_args.args
+    store_payload = req_client.store.call_args.args
     expected_end = (token_count // 256) * 256
     assert retrieve_payload[0].start == 0
     assert retrieve_payload[0].end == expected_end
-    assert retrieve_payload[2] == [list(range(expected_block_count))]
+    assert retrieve_payload[2] == [original_block_ids[:expected_block_count]]
     assert store_payload[0].start == 0
     assert store_payload[0].end == expected_end
-    assert store_payload[2] == [list(range(expected_block_count))]
+    assert store_payload[2] == [original_block_ids[:expected_block_count]]
