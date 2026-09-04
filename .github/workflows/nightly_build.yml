@@ -166,6 +166,57 @@ jobs:
             --prerelease \
             dist/rocm/*.whl
 
+  # MUSA nightly uses the same public-image build and smoke check as the
+  # release workflow, but receives a unique development version and is
+  # published to a rolling GitHub Release rather than PyPI.
+  nightly-musa-wheel:
+    name: Build MUSA nightly wheel
+    uses: ./.github/workflows/build_musa_artifacts.yml
+    with:
+      dev_version: true
+
+  publish-nightly-musa:
+    name: Publish MUSA nightly wheel
+    runs-on: ubuntu-latest
+    needs: nightly-musa-wheel
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Fetch MUSA nightly artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-musa-artifacts
+          path: dist/musa
+
+      - name: Publish MUSA wheels to rolling nightly-musa release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MUSA_VERSION: ${{ needs.nightly-musa-wheel.outputs.musa_version }}
+        run: |
+          gh release delete nightly-musa --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
+          gh release create nightly-musa \
+            --repo ${{ github.repository }} \
+            --title "Nightly $(date +'%Y-%m-%d') · Moore Threads MUSA" \
+            --notes "Nightly MUSA wheel for LMCache, built from \`dev\` on $(date +'%Y-%m-%d').
+
+          Built and smoke-tested in the validated public MUSA image. TorchMUSA,
+          the MUSA SDK, and device drivers remain host-owned and are not bundled
+          in the wheel.
+
+          Install inside the matching MUSA runtime image:
+          \`\`\`bash
+          pip install lmcache==${MUSA_VERSION} --no-deps \\
+            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-musa
+          \`\`\`" \
+            --prerelease \
+            dist/musa/*.whl
+
   nightly-build:
     name: Build image
     runs-on: ubuntu-latest

@@ -7,14 +7,16 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
-from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
+    extract_request_configs_from_request,
     mla_only,
 )
-from lmcache.utils import init_logger as lmcache_init_logger
-from lmcache.utils import check_interprocess_event_support
+from lmcache.utils import (
+    check_interprocess_event_support,
+    init_logger as lmcache_init_logger,
+)
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -200,6 +202,7 @@ class LMCacheMPRequestTracker:
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
     cache_salt: str = ""
+    request_configs: dict[str, Any] | None = None
 
     # Prompt token ids with multimodal placeholder spans replaced by values
     # derived from the items' content hashes. Empty for text-only requests.
@@ -208,6 +211,7 @@ class LMCacheMPRequestTracker:
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
+        self.request_configs = extract_request_configs_from_request(request)
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
@@ -303,6 +307,7 @@ class LMCacheMPRequestMetadata:
     direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
     cache_salt: str = ""
+    request_configs: dict[str, Any] | None = None
 
     @staticmethod
     def GetStoreMetadata(
@@ -370,6 +375,7 @@ class LMCacheMPRequestMetadata:
                 direction="STORE",
                 op=op,
                 cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
             )
 
             # Update the request tracker
@@ -437,6 +443,7 @@ class LMCacheMPRequestMetadata:
                 direction="RETRIEVE",
                 op=op,
                 cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
             )
             return ret
 
@@ -594,6 +601,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         request_ids = []
         ops = []
         cache_salts = []
+        request_configs_list = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
@@ -601,16 +609,19 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            request_configs_list.append(meta.request_configs)
 
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            event = torch_dev.Event(interprocess=True)
-            event.record()
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_retrieve_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids,
+            ops,
+            event,
+            cache_salts=cache_salts,
+            request_configs_list=request_configs_list,
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -665,22 +676,26 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         request_ids = []
         ops = []
         cache_salts = []
+        request_configs_list = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            request_configs_list.append(meta.request_configs)
 
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            event = torch_dev.Event(interprocess=True)
-            event.record()
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_store_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids,
+            ops,
+            event,
+            cache_salts=cache_salts,
+            request_configs_list=request_configs_list,
         )
 
     def get_finished(
@@ -784,6 +799,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
+            request_configs=tracker.request_configs,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -882,6 +898,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
+                        cache_salt=tracker.cache_salt,
+                        request_configs=tracker.request_configs,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",

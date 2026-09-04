@@ -7,6 +7,7 @@ persist, secondary lookup, and capacity management.
 """
 
 # Standard
+from pathlib import Path
 import inspect
 import os
 import select
@@ -41,6 +42,7 @@ from lmcache.v1.distributed.l2_adapters.nixl_store_dynamic_l2_adapter import (  
 )
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -135,12 +137,17 @@ def test_file_agent_creates_directory_before_nixl_initialization(
 # =============================================================================
 
 
-def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
+def create_object_key(
+    chunk_id: int,
+    model_name: str = "test_model",
+    cache_salt: str = "",
+) -> ObjectKey:
     """Create a test ObjectKey with the given chunk ID."""
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name=model_name,
         kv_rank=0,
+        cache_salt=cache_salt,
     )
 
 
@@ -182,6 +189,57 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
             pass
         return True
     return False
+
+
+def create_adapter_for_path(
+    file_path: Path,
+    buffer: torch.Tensor,
+    *,
+    persist_enabled: bool = False,
+    shard_dirs: bool = False,
+) -> tuple[
+    DynamicNixlStoreL2Adapter,
+    L1MemoryDesc,
+    DynamicNixlStoreL2AdapterConfig,
+]:
+    """Create a POSIX dynamic adapter using ``file_path``."""
+    l1_memory = L1MemoryDesc(
+        ptr=buffer.data_ptr(),
+        size=buffer.numel(),
+        align_bytes=PAGE_SIZE,
+    )
+    config = DynamicNixlStoreL2AdapterConfig(
+        backend="POSIX",
+        backend_params={
+            "file_path": str(file_path),
+            "use_direct_io": "false",
+            "max_capacity_gb": str(MAX_CAPACITY_GB),
+            "shard_dirs": str(shard_dirs).lower(),
+        },
+    )
+    config.persist_config = PersistConfig(persist_enabled=persist_enabled)
+    return DynamicNixlStoreL2Adapter(config, l1_memory), l1_memory, config
+
+
+def store_and_wait(
+    adapter: DynamicNixlStoreL2Adapter,
+    keys: list[ObjectKey],
+    objects: list[MemoryObj],
+) -> None:
+    """Store objects and assert successful asynchronous completion."""
+    task_id = adapter.submit_store_task(keys, objects)
+    assert wait_for_event_fd(adapter.get_store_event_fd())
+    result = adapter.pop_completed_store_tasks()[task_id]
+    assert result.is_successful()
+
+
+def list_data_files(file_path: Path) -> list[str]:
+    """Return sorted data-file paths relative to ``file_path``."""
+    return sorted(
+        str(path.relative_to(file_path))
+        for path in file_path.rglob("*.bin")
+        if path.is_file()
+    )
 
 
 # =============================================================================
@@ -608,6 +666,193 @@ class TestEndToEnd:
 
         # Unlock
         adpt.submit_unlock([key])
+
+
+# =============================================================================
+# Cache Salt Isolation Tests
+# =============================================================================
+
+
+class TestCacheSaltIsolation:
+    @pytest.mark.parametrize("shard_dirs", [False, True], ids=["flat", "sharded"])
+    def test_store_load_and_delete_are_isolated_by_salt(
+        self, tmp_path: Path, shard_dirs: bool
+    ) -> None:
+        """Store, load, and delete must preserve salt isolation."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=shard_dirs)
+        key_a = create_object_key(1, cache_salt="tenant-a")
+        key_b = create_object_key(1, cache_salt="tenant-b")
+
+        try:
+            store_and_wait(
+                adpt,
+                [key_a, key_b],
+                [
+                    create_memory_obj(buffer, page_index=0, fill_value=11.0),
+                    create_memory_obj(buffer, page_index=1, fill_value=22.0),
+                ],
+            )
+
+            assert len(list_data_files(tmp_path)) == 2
+            assert dict(adpt.get_usage().bytes_by_cache_salt) == {
+                "tenant-a": PAGE_SIZE,
+                "tenant-b": PAGE_SIZE,
+            }
+
+            load_objects: list[MemoryObj] = [
+                create_memory_obj(buffer, page_index=2, fill_value=0.0),
+                create_memory_obj(buffer, page_index=3, fill_value=0.0),
+            ]
+            load_task = adpt.submit_load_task([key_a, key_b], load_objects)
+            assert wait_for_event_fd(adpt.get_load_event_fd())
+            bitmap = adpt.query_load_result(load_task)
+            assert bitmap is not None
+            assert bitmap.test(0) and bitmap.test(1)
+            assert torch.all(
+                buffer[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32) == 11.0
+            )
+            assert torch.all(
+                buffer[3 * PAGE_SIZE : 4 * PAGE_SIZE].view(torch.float32) == 22.0
+            )
+
+            adpt.delete([key_a])
+            assert dict(adpt.get_usage().bytes_by_cache_salt) == {"tenant-b": PAGE_SIZE}
+
+            lookup_task = adpt.submit_lookup_and_lock_task(
+                [key_a, key_b], {0: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+            bitmap = adpt.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert not bitmap.test(0)
+            assert bitmap.test(1)
+
+            load_obj = create_memory_obj(buffer, page_index=2, fill_value=0.0)
+            load_task = adpt.submit_load_task([key_b], [load_obj])
+            assert wait_for_event_fd(adpt.get_load_event_fd())
+            bitmap = adpt.query_load_result(load_task)
+            assert bitmap is not None and bitmap.test(0)
+            loaded = buffer[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32)
+            assert torch.all(loaded == 22.0)
+            adpt.submit_unlock([key_b])
+        finally:
+            adpt.close()
+
+    @pytest.mark.parametrize("shard_dirs", [False, True], ids=["flat", "sharded"])
+    def test_salted_objects_recover_independently_after_restart(
+        self, tmp_path: Path, shard_dirs: bool
+    ) -> None:
+        """Persisted salted keys must recover with their original payloads."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        adpt, l1_memory, config = create_adapter_for_path(
+            tmp_path,
+            buffer,
+            persist_enabled=True,
+            shard_dirs=shard_dirs,
+        )
+        key_a = create_object_key(1, cache_salt="tenant-a")
+        key_b = create_object_key(1, cache_salt="tenant-b")
+        key_c = create_object_key(1, cache_salt="tenant-c")
+
+        try:
+            store_and_wait(
+                adpt,
+                [key_a, key_b],
+                [
+                    create_memory_obj(buffer, page_index=0, fill_value=31.0),
+                    create_memory_obj(buffer, page_index=1, fill_value=47.0),
+                ],
+            )
+        finally:
+            adpt.close()
+
+        recovered = DynamicNixlStoreL2Adapter(config, l1_memory)
+        try:
+            lookup_task = recovered.submit_lookup_and_lock_task(
+                [key_a, key_b, key_c], {0: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(recovered.get_lookup_and_lock_event_fd())
+            bitmap = recovered.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert bitmap.test(0)
+            assert bitmap.test(1)
+            assert not bitmap.test(2)
+
+            load_objects: list[MemoryObj] = [
+                create_memory_obj(buffer, page_index=2, fill_value=0.0),
+                create_memory_obj(buffer, page_index=3, fill_value=0.0),
+            ]
+            load_task = recovered.submit_load_task([key_a, key_b], load_objects)
+            assert wait_for_event_fd(recovered.get_load_event_fd())
+            bitmap = recovered.query_load_result(load_task)
+            assert bitmap is not None
+            assert bitmap.test(0) and bitmap.test(1)
+            assert torch.all(
+                buffer[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32) == 31.0
+            )
+            assert torch.all(
+                buffer[3 * PAGE_SIZE : 4 * PAGE_SIZE].view(torch.float32) == 47.0
+            )
+            assert dict(recovered.get_usage().bytes_by_cache_salt) == {
+                "tenant-a": PAGE_SIZE,
+                "tenant-b": PAGE_SIZE,
+            }
+            recovered.submit_unlock([key_a, key_b])
+        finally:
+            recovered.close()
+
+    @pytest.mark.parametrize(
+        ("shard_dirs", "path_prefix"),
+        [
+            (False, ""),
+            (True, os.path.join("83", "4e")),
+        ],
+        ids=["flat", "sharded"],
+    )
+    def test_filename_contract_preserves_legacy_and_appends_raw_salt(
+        self, tmp_path: Path, shard_dirs: bool, path_prefix: str
+    ) -> None:
+        """Filenames must preserve legacy keys and append raw salts."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=shard_dirs)
+        legacy_key = create_object_key(0x834EBC79)
+        salted_key = create_object_key(0x834EBC79, cache_salt="tenant-a")
+        missing_key = create_object_key(0x834EBC79, cache_salt="tenant-b")
+        legacy_filename = "test_model_00000000_0_834ebc79.bin"
+        salted_filename = "test_model_00000000_0_834ebc79@tenant-a.bin"
+
+        try:
+            store_and_wait(
+                adpt,
+                [legacy_key, salted_key],
+                [
+                    create_memory_obj(buffer, page_index=0, fill_value=17.0),
+                    create_memory_obj(buffer, page_index=1, fill_value=23.0),
+                ],
+            )
+            assert list_data_files(tmp_path) == sorted(
+                [
+                    os.path.join(path_prefix, legacy_filename),
+                    os.path.join(path_prefix, salted_filename),
+                ]
+            )
+
+            lookup_task = adpt.submit_lookup_and_lock_task(
+                [missing_key], {0: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+            bitmap = adpt.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert not bitmap.test(0)
+        finally:
+            adpt.close()
 
 
 # =============================================================================
