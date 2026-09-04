@@ -35,6 +35,14 @@ POLICY_REVISION = "middle-chunk-drop-v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
+    parser.add_argument(
+        "--hf-model",
+        help="HF model ID/path; defaults to --model",
+    )
+    parser.add_argument(
+        "--cache-model",
+        help="LMCache registration name; defaults to --model",
+    )
     parser.add_argument("--vllm-url", default="http://localhost:8000")
     parser.add_argument("--lmcache-url", default="http://localhost:8080")
     parser.add_argument("--lmcache-mq-url", default="tcp://localhost:6555")
@@ -208,8 +216,10 @@ def main() -> None:
             "chunk size/max tokens must be positive; use >=3 prompt chunks"
         )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    model_config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+    hf_model = args.hf_model or args.model
+    cache_model = args.cache_model or args.model
+    tokenizer = AutoTokenizer.from_pretrained(hf_model, trust_remote_code=True)
+    model_config = AutoConfig.from_pretrained(hf_model, trust_remote_code=True)
     prompt_tokens = args.chunk_size * args.prompt_chunks
     seed = tokenizer.encode(
         "Topology plans keep cache policy independent from physical layout. ",
@@ -220,7 +230,7 @@ def main() -> None:
     ctx = lmc_sdk.kvcache.connect(
         url=args.lmcache_mq_url,
         http_url=args.lmcache_url,
-        model_name=args.model,
+        model_name=cache_model,
         timeout=args.timeout,
     )
     try:
@@ -244,7 +254,9 @@ def main() -> None:
         )
         evidence.update(
             {
-                "model": args.model,
+                "served_model_name": args.model,
+                "hf_model_name": hf_model,
+                "cache_model_name": cache_model,
                 "request_stream_id": stream.request_stream_id,
                 "prefill_output_tokens": prefill.output_tokens,
                 "decode_output_tokens": decode.output_tokens,
