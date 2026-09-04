@@ -94,11 +94,11 @@ Wait until both engines are ready.
 
     curl -X POST http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
-        -d '{
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "prompt": "Explain the significance of KV cache in language models.",
-            "max_tokens": 10
-        }'
+        -d "{
+            \"model\": \"meta-llama/Meta-Llama-3.1-8B-Instruct\",
+            \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+            \"max_tokens\": 10
+        }"
 
 4. Send the same request to the engine at port 8001,
 
@@ -106,13 +106,21 @@ Wait until both engines are ready.
 
     curl -X POST http://localhost:8001/v1/completions \
         -H "Content-Type: application/json" \
-        -d '{
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "prompt": "Explain the significance of KV cache in language models.",
-            "max_tokens": 10
-        }'
+        -d "{
+            \"model\": \"meta-llama/Meta-Llama-3.1-8B-Instruct\",
+            \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+            \"max_tokens\": 10
+        }"
 
 The second request will automatically retrieve and reuse the KV cache from the first instance, significantly reducing generation time.
+
+.. note::
+
+   Prompts shorter than ``chunk_size`` (256 tokens by default) are not stored
+   unless ``save_unfull_chunk: true`` is set, so a short prompt will never
+   produce a cross-instance cache hit (the second engine reports
+   ``LMCache hit tokens: 0``). The requests above repeat the sentence to exceed
+   one full chunk, matching the P2P example below.
 
 P2P KV cache sharing
 --------------------
