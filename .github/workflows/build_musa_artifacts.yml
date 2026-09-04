@@ -28,7 +28,7 @@ env:
     LC_ALL: en_US.UTF-8
     # The public registry is reachable from GitHub-hosted runners. Keep the
     # image override available for environments that provide their own access.
-    MUSA_IMAGE: ${{ vars.MUSA_IMAGE || 'registry.mthreads.com/mcconline/musa-pytorch-release-public:rc5.2.0-v2.9.1.post1-S5000-py310' }}
+    MUSA_IMAGE: ${{ vars.MUSA_IMAGE || 'registry.mthreads.com/mcconline/musa-pytorch-release-public:rc5.1.0-v2.9.1-S5000-py310_tef' }}
     MUSA_IMAGE_DIGEST: ${{ vars.MUSA_IMAGE_DIGEST || '' }}
     MUSA_HOME: ${{ vars.MUSA_HOME || '/usr/local/musa' }}
     # Leave package installation empty: the public image supplies the build
