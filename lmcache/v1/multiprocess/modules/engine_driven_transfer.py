@@ -306,7 +306,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Args:
             payload: Struct containing all registration fields
                 (instance_id, model_name, world_size, block_size,
-                num_layers, hidden_dim_size, dtype_str, use_mla).
+                num_layers, hidden_dim_size, dtype_str, use_mla,
+                num_physical_slots).
 
         Raises:
             ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
@@ -335,13 +336,23 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
             )
 
+        num_physical_slots = payload.num_physical_slots
+        if num_physical_slots is None:
+            # Compatibility with clients from before the physical-slot field
+            # was added. Those clients require one slot per logical token.
+            num_physical_slots = self._ctx.chunk_size
+        elif num_physical_slots <= 0:
+            raise ValueError(
+                f"num_physical_slots must be positive, got {num_physical_slots}"
+            )
+
         shape = (
             torch.Size(
-                [payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+                [payload.num_layers, num_physical_slots, payload.hidden_dim_size]
             )
             if payload.use_mla
             else torch.Size(
-                [2, payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+                [2, payload.num_layers, num_physical_slots, payload.hidden_dim_size]
             )
         )
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
