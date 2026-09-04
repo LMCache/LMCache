@@ -595,6 +595,29 @@ class FSL2Adapter(L2AdapterInterface):
                 except OSError:
                     pass
 
+    def _disable_odirect(self, exc: BaseException) -> None:
+        """Permanently degrade this adapter to buffered I/O.
+
+        Whether O_DIRECT is usable depends on the file system, the
+        device stack and the alignment of the buffers handed to us --
+        none of which we can check up front.  When the first direct
+        I/O call is rejected we drop O_DIRECT for the rest of the
+        process instead of failing every subsequent store, which
+        would leave the L2 tier permanently dead while the server
+        keeps reporting no fatal error.
+        """
+        if not self._use_odirect:
+            return
+        self._use_odirect = False
+        self._os_disk_bs = 0
+        logger.warning(
+            "O_DIRECT is not usable under base_path=%s (%s: %s); "
+            "falling back to buffered I/O for the rest of this process.",
+            self._base_path,
+            type(exc).__name__,
+            exc,
+        )
+
     # ---- store ----------------------------------------------------------
 
     async def _execute_store(
@@ -634,13 +657,21 @@ class FSL2Adapter(L2AdapterInterface):
                             do_odirect = False
 
                     if do_odirect:
-                        await self._loop.run_in_executor(
-                            None,
-                            self._write_with_odirect,
-                            tmp_path,
-                            buf,
-                        )
-                    else:
+                        try:
+                            await self._loop.run_in_executor(
+                                None,
+                                self._write_with_odirect,
+                                tmp_path,
+                                buf,
+                            )
+                        except OSError as e:
+                            # O_DIRECT rejected by the kernel: turn it off
+                            # and retry this chunk buffered, rather than
+                            # failing this store and every one after it.
+                            self._disable_odirect(e)
+                            do_odirect = False
+
+                    if not do_odirect:
                         async with aiofiles.open(tmp_path, "wb") as f:
                             await f.write(buf)
 
