@@ -693,9 +693,9 @@ class LMCacheMPSchedulerAdapter:
             ev.set()
             self._health_events[url] = ev
 
-        # Heartbeat thread is created but NOT started yet.
-        # It will be lazily started on the first lookup
-        # request, by which time vLLM is fully ready.
+        # Heartbeat threads are not created or started yet.
+        # One per server is lazily created on the first lookup request, by
+        # which time vLLM is fully ready.
         self._heartbeat_interval = heartbeat_interval
         self._heartbeats: dict[str, HeartbeatThread] = {}
         self._heartbeat_lock = threading.Lock()
@@ -721,13 +721,11 @@ class LMCacheMPSchedulerAdapter:
         return all(ev.is_set() for ev in self._health_events.values())
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first use."""
-        if self._heartbeats is not None:
-            return
+        """Start one heartbeat per configured server, retrying missing heartbeats."""
         with self._heartbeat_lock:
-            if self._heartbeats is not None:
-                return
             for url, client in self.req_clients.items():
+                if url in self._heartbeats:
+                    continue
                 hb = HeartbeatThread(
                     req_client=client,
                     health_event=self._health_events[url],
@@ -967,11 +965,17 @@ class LMCacheMPSchedulerAdapter:
 
     def shutdown(self) -> None:
         """Shutdown the scheduler adapter and its resources."""
+        stop_timeout = max(5.0, self._heartbeat_interval + 1.0)
+        with self._heartbeat_lock:
+            heartbeats = tuple(self._heartbeats.values())
+            for hb in heartbeats:
+                hb.stop(timeout=stop_timeout)
+            for hb in heartbeats:
+                # ``stop`` has a bounded join timeout. Keep request clients
+                # open until any heartbeat that outlived that timeout exits.
+                hb.wait_for_stop()
         for client in self.req_clients.values():
             client.close()
-        with self._heartbeat_lock:
-            for hb in self._heartbeats.values():
-                hb.stop()
 
     def free_lookup_locks(
         self,
