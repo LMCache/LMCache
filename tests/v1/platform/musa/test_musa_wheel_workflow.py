@@ -45,7 +45,7 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     assert workflow["env"]["MUSA_IMAGE"] == (
         "${{ vars.MUSA_IMAGE || "
         "'registry.mthreads.com/mcconline/musa-pytorch-release-public:"
-        "rc5.2.0-v2.9.1.post1-S5000-py310' }}"
+        "rc5.1.0-v2.9.1-S5000-py310_tef' }}"
     )
     assert workflow["env"]["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert workflow["env"]["SKIP_AUDITWHEEL_REPAIR"] == "0"
