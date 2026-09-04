@@ -51,91 +51,36 @@ pytest --maxfail=1 --cov=lmcache \
 #   hardcoded 5s timeout under that load. Revisit if this queue ever moves
 #   to less contended hardware.
 # - test_cuda_ipc_wrapper.py, test_timeline_semaphore_event_ipc.py: whole
-#   files ignored, not deselected test-by-test. Root cause CONFIRMED
-#   2026-09-03 and is the same for every failure/hang found in both files:
-#   lmcache/v1/platform/cuda/utils.py's _import_cuda_bindings() lazily
-#   imports NVIDIA's `cuda.bindings` (cuda-python) package for raw
-#   driver-level IPC calls (cuMemGetAddressRange, cudaIpcGetMemHandle,
-#   cuCtxSetCurrent/memops for the timeline-semaphore path). That package is
-#   not installed on MACA and structurally isn't expected to work there even
-#   if it were (it binds to NVIDIA's own driver ABI, not a CUDA-API surface
-#   MACA's cu-bridge shims). Both files' own pytestmark already exclude ROCm
-#   from this exact area ("ROCm reports torch.cuda.is_available() but has no
-#   cuda.bindings" / "timeline-semaphore event IPC is NVIDIA-only
-#   (cuda.bindings memops)") -- MACA just isn't covered by that check
-#   (torch.version.hip is not None) since it's ROCm-specific.
-#
-#   Symptom is either a clean FAILED (uncaught
-#   `ModuleNotFoundError: No module named 'cuda'` inside
-#   RawCudaIPCWrapper.__init__, confirmed via isolated -v --tb=long runs) or
-#   a genuine HANG when the same crash happens inside a spawned child
-#   process instead of the test's own process: the child dies before
-#   writing to its pipe, and the parent's recv_bytes() has no timeout, so it
-#   blocks forever. Reproduced this way at least 3 times across both files
-#   (test_cuda_ipc_wrapper.py::test_close_refcounts_shared_allocation,
-#   confirmed via `timeout 25 pytest ...` -> exit 124;
-#   test_cuda_ipc_wrapper.py::test_close_releases_dead_exporters_memory and
-#   test_timeline_semaphore_event_ipc.py::test_cross_process_resolution_under_isolated_ipc,
-#   both observed stuck at the same test with zero log progress for 20-30+
-#   minutes, checked at least twice each -- not independently reproduced
-#   with their own `timeout` command, but same symptom).
-#
-#   Given how many individual tests in this specific area have turned out to
-#   be affected (discovered one hang at a time before switching to a full
-#   grep sweep, which still might not be exhaustive -- see also
-#   test_event_ipc.py, test_isolated_ipc.py, test_vllm_mp_adapter.py,
-#   test_trtllm_integration.py, tests/v1/multiprocess/test_config.py, which
-#   only reference the isolated_ipc *config switch* and were NOT excluded,
-#   since none of them actually construct RawCudaIPCWrapper or call into
-#   cuda.bindings), excluding the two whole files is the deliberate, broad
-#   choice for now rather than continuing to chase individual test functions
-#   one hang at a time. The real fix is upstream: generalize both files'
-#   ROCm-only skipif to also cover MACA (or any environment without
-#   `cuda.bindings`). Revisit narrowing this back to individual deselects
-#   once that's done or once this area gets dedicated attention.
+#   files ignored. Both depend on NVIDIA's `cuda.bindings` (cuda-python)
+#   package for raw driver-level IPC calls (lmcache/v1/platform/cuda/utils.py's
+#   _import_cuda_bindings()), which isn't installed on MACA and isn't
+#   expected to work there even if it were -- it binds to NVIDIA's own
+#   driver ABI, not a CUDA-API surface MACA's cu-bridge shims. Both files
+#   already skip this area for ROCm for the same reason; MACA just isn't
+#   covered by that check since it's ROCm-specific. Affected tests either
+#   fail cleanly or hang (a spawned child process crashes before writing to
+#   a pipe the parent blocks on with no timeout). The real fix is upstream:
+#   generalize the ROCm-only skip to cover any environment without
+#   `cuda.bindings`.
 #
 # - test_mq.py, test_cb_plan_executor_gpu.py, test_custom_types.py,
 #   test_engine_driven_transfer.py, test_free_locks.py,
 #   test_query_lookup_hits.py (whole files ignored); plus
 #   test_server_bench.py::TestUnregisterKVCache, test_key_directory.py's
 #   uint32 case, and test_torch_ops.py's two TestScenarios cases (deselected
-#   individually, since most other tests in those files pass): confirmed
-#   FAILING on 2026-09-04 (a full, no-maxfail run across the whole tests/
-#   tree, not just tests/v1/), but NOT root-caused, unlike every exclusion
-#   above this one. Parked here deliberately rather than investigated
-#   further for now.
+#   individually, since most other tests in those files pass): failing, but
+#   not root-caused, parked here deliberately rather than investigated
+#   further for now -- none of these should be assumed to be a real MACA
+#   capability gap the way the exclusions above are.
 #
-#   What IS known: most of the multiprocess/ cluster times out somewhere in
-#   an MP-server round trip (e.g. test_mq.py: "Some clients failed: Client 0:
-#   timeout"; test_cache_server.py's registered_instance fixture:
-#   `future.result(timeout=20)` -> LMCacheTimeoutError) -- somewhat similar in
-#   shape to the already-understood test_instances_usage_e2e.py timeout
-#   above, but NOT confirmed to be the same single-GPU-contention cause;
-#   could equally be a real MP-server bug specific to this environment.
-#   MACA_MPS_MODE=1 (see common-setup.sh) does NOT fix this cluster -- tested
-#   directly against test_mq.py, no change. It DOES fix a related-looking
-#   issue (test_event_ipc_ordering.py's cross-process CUDA event ordering
-#   test, previously in this same failure list), which is why that one test
-#   is NOT in the list above and needs no exclusion anymore.
-#
-#   test_key_directory.py's uint32 case has a suspicious lead not yet
-#   followed up on: it logs a numpy DeprecationWarning right at the point of
-#   the code path under test ("NumPy will stop allowing conversion of
-#   out-of-bound Python integers to integer arrays... will fail in the
-#   future"), which could mean the test's expected "left unfilled" outcome
-#   no longer matches actual numpy behavior on the version installed here.
-#   test_torch_ops.py's two cases have not been looked at individually at
-#   all -- only surfaced in the 2026-09-04 full-tree run and captured here
-#   as-is.
-#
-#   test_server_bench.py::TestUnregisterKVCache is the one case in that file
-#   NOT explained by the proxy issue below -- tested directly against the
-#   no_proxy fix and still fails, so it's a genuinely separate, uninvestigated
-#   issue, unlike its two now-removed neighbors (see common-setup.sh).
-#
-#   Revisit all of these with dedicated root-causing once there's time for
-#   it; nothing here should be assumed to be a real MACA capability gap the
-#   way the cuda.bindings-related exclusions above are.
+#   Most of the multiprocess/ cluster times out on an MP-server round trip;
+#   not yet confirmed whether that's host contention (like
+#   test_instances_usage_e2e.py above) or a real bug. MACA_MPS_MODE=1 (see
+#   common-setup.sh) does not fix this cluster. test_key_directory.py's case
+#   coincides with a numpy deprecation warning about out-of-bound integer
+#   conversion, which may mean its expected outcome no longer matches
+#   current numpy behavior -- worth checking first. Revisit all of these
+#   with dedicated root-causing when there's time for it.
 
 cat << EOF | buildkite-agent annotate --style "info"
   Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>

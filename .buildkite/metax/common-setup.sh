@@ -8,13 +8,11 @@ set -euo pipefail
 
 echo "$PWD" # for debugging
 
-# This queue's host has only tens of GB of disk, all of it shared with the
-# repo checkout, the venv, and uv's package cache -- unlike the k3_tests/
-# vendor pipelines, which run in ephemeral K8s pods that discard their entire
-# filesystem after each build. A per-build-id venv (the k3_tests/ convention)
-# would accumulate forever here, so this reuses one fixed venv path,
-# recreated from scratch each run, plus a disk-space guard so a creeping leak
-# fails loudly instead of degrading into mysterious ENOSPC errors weeks later.
+# This queue's host has limited disk space, not the effectively-unlimited
+# storage an ephemeral K8s pod gets, so this reuses one fixed venv path
+# (recreated from scratch each run) instead of a new one per build, plus a
+# disk-space guard so a creeping leak fails loudly instead of degrading into
+# mysterious ENOSPC errors weeks later.
 MIN_FREE_GB=10
 free_gb=$(df -Pk . | awk 'NR==2 {print int($4/1024/1024)}')
 if (( free_gb < MIN_FREE_GB )); then
@@ -23,22 +21,11 @@ if (( free_gb < MIN_FREE_GB )); then
     exit 1
 fi
 
-# This host's proxy (needed for GitHub/PyPI reachability -- see the
-# BUILDKITE_PULL_REQUEST-adjacent host notes) is set via the agent's own
-# environment (systemd unit), not by this script. But `urllib`/`requests`
-# honor http_proxy/https_proxy for ANY destination including 127.0.0.1
-# unless no_proxy explicitly exempts it -- several tests spin up a real
-# local HTTPServer and immediately query it (tests/cli/test_describe.py,
-# tests/cli/commands/bench/test_server_bench.py), and without this, those
-# requests get routed through the external proxy, which doesn't know what
-# to do with a random localhost port and returns a bare
-# `HTTPError: 503 Service Unavailable`. Confirmed 2026-09-04: this was
-# read as three separate "flaky" test failures (TestQueryChecksum,
-# TestFetchJson, and intermittently others) before finding the shared
-# cause; reproduced 100% (3/3) with proxy env vars set and no exemption,
-# fixed 100% (3/3) once no_proxy/NO_PROXY exempt localhost. Set
-# unconditionally here (not just when a proxy happens to be configured)
-# so this doesn't regress silently if the agent's own proxy setup changes.
+# This host's proxy (set via the agent's own environment, for GitHub/PyPI
+# reachability) is otherwise honored by urllib/requests for any destination,
+# including 127.0.0.1 -- which breaks tests that spin up a real local
+# HTTPServer and immediately query it, since the proxy has no idea what to
+# do with a random localhost port. Exempt localhost unconditionally.
 export no_proxy="127.0.0.1,localhost,${no_proxy:-}"
 export NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}"
 
@@ -48,12 +35,8 @@ export CUCC_PATH="${MACA_PATH}/tools/cu-bridge"
 export PATH="${CUCC_PATH}/bin:${CUCC_PATH}/tools:${MACA_PATH}/mxgpu_llvm/bin:${MACA_PATH}/bin:${PATH}"
 export LD_LIBRARY_PATH="${MACA_PATH}/lib:${MACA_PATH}/mxgpu_llvm/lib:${MACA_PATH}/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-# Confirmed 2026-09-04: without this, cross-process CUDA event import/wait
-# (tests/v1/platform/test_event_ipc_ordering.py's producer/consumer handoff)
-# times out waiting on a handle that never arrives; with it, the same test
-# passes in ~16s. Does NOT fix every cross-process issue on this queue --
-# tests/v1/multiprocess/test_mq.py's MP-server registration timeouts are
-# unaffected by this flag and have a separate, still-unidentified cause.
+# MetaX GPUs require this whenever multiple processes access the same GPU
+# concurrently, which several tests in this suite do.
 export MACA_MPS_MODE=1
 
 # Stale artifacts from previous runs (this queue's single agent reuses the
@@ -80,18 +63,10 @@ uv pip install -r requirements/maca_core.txt \
 BUILD_WITH_MACA=1 uv pip install -e . --no-build-isolation
 uv pip freeze
 
-# uv's package cache (~/.cache/uv by default) is what makes recreating .venv
-# from scratch each run cheap (installs hardlink from it instead of
-# re-downloading/rebuilding); it persists across builds by design. Bound its
-# growth by dropping anything not referenced by the venv just built, rather
-# than letting every historical package version pile up indefinitely.
-# Pruned here (before tests run) rather than at the end so a test failure
-# (which stops the script under set -e) doesn't skip it.
+# Keep uv's package cache from growing unbounded across builds (pruned here,
+# before tests run, so a test failure doesn't skip it).
 uv cache prune
 
-# HuggingFace model/tokenizer cache (~/.cache/huggingface), if tests/v1/
-# populates one, is NOT cleared -- unlike .venv, redownloading it every build
-# would trade a disk problem for a network/time one. If disk pressure shows
-# up again, check `du -sh ~/.cache/huggingface` first; clearing it is a
-# manual step via the existing "Kill all" pipeline (.buildkite/pipelines/clean.yml),
-# not automatic here.
+# HuggingFace model/tokenizer cache is left alone here; clear it manually
+# via the existing "Kill all" pipeline (.buildkite/pipelines/clean.yml) if
+# disk pressure shows up.

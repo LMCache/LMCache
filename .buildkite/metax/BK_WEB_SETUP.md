@@ -36,11 +36,9 @@ If you need the MetaX pipeline to run for a docs/asset-only PR, add the
 
 Label-gating (rather than running on every PR unconditionally, as the
 sglang lane does) matches the majority convention here because this queue's
-capacity is a single shared GPU/host, same constraint as AMD/XPU/MUSA. The
-smoke-test scope in `run-smoke-tests.sh` is also still a first-pass split,
-not yet validated against real per-test timing, so starting conservative
-(opt-in via label, or automatic on `dev`) is the safer default; revisit once
-real smoke-run durations are known.
+capacity is a single shared GPU/host, same constraint as AMD/XPU/MUSA.
+Starting conservative (opt-in via label, or automatic on `dev`) is the
+safer default; revisit as this queue's real usage patterns become clear.
 
 ## Required host setup
 
