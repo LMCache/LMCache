@@ -101,6 +101,119 @@ class TestScopedEviction:
 
 
 class TestEvictionAmount:
+    def test_equal_sizes_preserve_count_based_rounding(self):
+        """Uniform objects keep the original floor-based victim count."""
+        p = IsolatedLRUEvictionPolicy()
+        keys = [_key(i, "alice") for i in range(3)]
+        p.on_keys_created_with_sizes(keys, [4] * len(keys))
+
+        actions = p.get_eviction_actions(0.5, cache_salt="alice")
+
+        assert len(actions[0].keys) == 1
+
+    def test_variable_sizes_control_eviction_amount_per_salt(self):
+        """Each salt evicts the minimal LRU prefix reaching its byte target."""
+        p = IsolatedLRUEvictionPolicy()
+        keys = [_key(i, "alice") for i in range(4)]
+        for key, size in zip(keys, [1, 1, 8, 8], strict=True):
+            p.on_keys_created_with_sizes([key], [size])
+
+        actions = p.get_eviction_actions(0.5, cache_salt="alice")
+
+        assert actions[0].keys == keys[:3]
+
+    def test_failed_oversized_victim_does_not_block_bucket_progress(self):
+        """An attempted victim is deferred within its own salt bucket."""
+        p = IsolatedLRUEvictionPolicy()
+        oversized = _key(0, "alice")
+        alternatives = [_key(i, "alice") for i in range(1, 101)]
+        for key, size in zip(
+            [oversized, *alternatives],
+            [320, *([1] * 100)],
+            strict=True,
+        ):
+            p.on_keys_created_with_sizes([key], [size])
+
+        first = p.get_eviction_actions(0.2, cache_salt="alice")[0].keys
+        p.on_eviction_attempted(first)
+        second = p.get_eviction_actions(0.2, cache_salt="alice")[0].keys
+
+        assert first == [oversized]
+        assert second == alternatives[:84]
+
+    def test_other_salts_do_not_change_byte_target(self):
+        """A large object in another salt must not affect this bucket."""
+        p = IsolatedLRUEvictionPolicy()
+        alice = [_key(i, "alice") for i in range(4)]
+        for key, size in zip(alice, [1, 1, 8, 8], strict=True):
+            p.on_keys_created_with_sizes([key], [size])
+        p.on_keys_created_with_sizes([_key(100, "bob")], [1024])
+
+        actions = p.get_eviction_actions(0.5, cache_salt="alice")
+
+        assert actions[0].keys == alice[:3]
+
+    def test_size_refresh_updates_bucket_accounting(self):
+        """Re-storing a key replaces its old size in the correct bucket."""
+        p = IsolatedLRUEvictionPolicy()
+        keys = [_key(i, "alice") for i in range(2)]
+        p.on_keys_created_with_sizes(keys, [1, 9])
+
+        p.on_keys_created_with_sizes([keys[1]], [1])
+        actions = p.get_eviction_actions(0.5, cache_salt="alice")
+
+        assert actions[0].keys == [keys[0]]
+
+    def test_unsized_refresh_preserves_known_size(self):
+        """An unsized notification must not replace a bucket's byte weight."""
+        p = IsolatedLRUEvictionPolicy()
+        keys = [_key(i, "alice") for i in range(2)]
+        p.on_keys_created_with_sizes([keys[0]], [1])
+        p.on_keys_created_with_sizes([keys[1]], [9])
+
+        p.on_keys_created([keys[1]])
+        actions = p.get_eviction_actions(0.5, cache_salt="alice")
+
+        assert actions[0].keys == keys
+
+    def test_byte_mode_starts_after_last_unknown_size_arrives(self):
+        """A bucket switches from count to byte mode only when complete."""
+        p = IsolatedLRUEvictionPolicy()
+        keys = [_key(i, "alice") for i in range(2)]
+        p.on_keys_created(keys)
+        p.on_keys_created_with_sizes([keys[0]], [1])
+
+        partial = p.get_eviction_actions(0.5, cache_salt="alice")
+        p.on_keys_created_with_sizes([keys[1]], [9])
+        complete = p.get_eviction_actions(0.5, cache_salt="alice")
+
+        assert partial[0].keys == [keys[1]]
+        assert complete[0].keys == keys
+        assert p.capture()["sizes"]["alice"] == [1, 9]
+
+    def test_removal_updates_bucket_accounting(self):
+        """Removed objects no longer contribute to a bucket's byte target."""
+        p = IsolatedLRUEvictionPolicy()
+        keys = [_key(i, "alice") for i in range(3)]
+        for key, size in zip(keys, [1, 9, 2], strict=True):
+            p.on_keys_created_with_sizes([key], [size])
+
+        p.on_keys_removed([keys[1]])
+        actions = p.get_eviction_actions(0.5, cache_salt="alice")
+
+        assert actions[0].keys == [keys[0]]
+
+    def test_uniform_rounding_is_restored_after_removal(self):
+        """Removing the odd-sized object restores count-based rounding."""
+        p = IsolatedLRUEvictionPolicy()
+        keys = [_key(i, "alice") for i in range(4)]
+        p.on_keys_created_with_sizes(keys, [4, 8, 4, 4])
+
+        p.on_keys_removed([keys[1]])
+        actions = p.get_eviction_actions(0.5, cache_salt="alice")
+
+        assert len(actions[0].keys) == 1
+
     def test_at_least_one_when_ratio_positive(self):
         """Matches ``LRUEvictionPolicy`` — a positive ratio that rounds
         to zero still yields one eviction so the caller makes forward
@@ -160,3 +273,38 @@ class TestDurableState:
         assert [key.chunk_hash for key in victims[0].keys] == [
             ObjectKey.IntHash2Bytes(2)
         ]
+
+    def test_restore_preserves_heterogeneous_byte_weights(self):
+        """A checkpoint round trip must retain byte-aware victim selection."""
+        policy = IsolatedLRUEvictionPolicy()
+        keys = [_key(i, "alice") for i in range(4)]
+        for key, size in zip(keys, [1, 1, 8, 8], strict=True):
+            policy.on_keys_created_with_sizes([key], [size])
+
+        restored = IsolatedLRUEvictionPolicy()
+        restored.restore(policy.capture())
+
+        assert restored.capture() == policy.capture()
+        actions = restored.get_eviction_actions(0.5, cache_salt="alice")
+        assert actions[0].keys == keys[:3]
+
+    def test_partial_sizes_stay_in_count_mode_across_restore(self):
+        """Unknown weights are not serialized as byte sizes."""
+        keys = [_key(i, "alice") for i in range(101)]
+        legacy_state = {
+            "buckets": {"alice": [encode_key(key) for key in keys]},
+        }
+        policy = IsolatedLRUEvictionPolicy()
+        policy.restore(legacy_state)
+        policy.on_keys_created_with_sizes([keys[-1]], [512])
+
+        actions = policy.get_eviction_actions(0.2, cache_salt="alice")
+        captured = policy.capture()
+
+        assert len(actions[0].keys) == 20
+        assert "alice" not in captured["sizes"]
+
+        restored = IsolatedLRUEvictionPolicy()
+        restored.restore(captured)
+        restored_actions = restored.get_eviction_actions(0.2, cache_salt="alice")
+        assert len(restored_actions[0].keys) == 20

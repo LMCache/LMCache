@@ -303,12 +303,22 @@ class L2EvictionController(StorageControllerInterface):
     def _eviction_loop(self):
         while not self._stop_flag.is_set():
             time.sleep(1)
-            # Hold the lock across the whole pass so remove_adapter_state
-            # cannot detach (and the caller close) an adapter while we are
-            # calling into it.
-            with self._states_lock:
-                for state in self._adapter_states:
+            self._run_eviction_pass()
+
+    def _run_eviction_pass(self) -> None:
+        # Hold the lock across the whole pass so remove_adapter_state
+        # cannot detach (and the caller close) an adapter while we are
+        # calling into it.
+        with self._states_lock:
+            for state in self._adapter_states:
+                try:
                     self._check_and_evict(state)
+                except Exception:
+                    logger.exception(
+                        "L2 eviction failed for adapter_id=%d; "
+                        "retrying on the next pass.",
+                        state.adapter_id,
+                    )
 
     def _check_and_evict(self, state: L2AdapterEvictionState):
         if state.eviction_policy.support_isolation and self._quota_manager is not None:
@@ -342,6 +352,7 @@ class L2EvictionController(StorageControllerInterface):
         )
         actions = state.eviction_policy.get_eviction_actions(eviction_ratio)
         for action in actions:
+            state.eviction_policy.on_eviction_attempted(action.keys)
             self._execute_eviction_action(state.adapter, action)
 
     def _check_and_evict_by_cache_salt(self, state: L2AdapterEvictionState):
@@ -398,6 +409,7 @@ class L2EvictionController(StorageControllerInterface):
                 pending.setdefault(action.destination, []).extend(action.keys)
 
         for destination, keys in pending.items():
+            state.eviction_policy.on_eviction_attempted(keys)
             self._execute_eviction_action(
                 state.adapter,
                 EvictionAction(keys=keys, destination=destination),
