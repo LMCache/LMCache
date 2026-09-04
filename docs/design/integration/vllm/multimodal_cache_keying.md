@@ -115,7 +115,7 @@ need either substitution or an MM bypass guard):
 
 ## Verification
 
-- Unit: `lmcache/integration/vllm/tests/test_mm_hash_utils.py` (properties +
+- Unit: `tests/v1/test_mm_hash_utils.py` (properties +
   16-bit collision regression), `tests/v1/test_mp_connector_mm_keys.py`.
 - Acceptance: `tests/e2e_mm/` (real-engine matrix: cross-image isolation,
   collision pressure, chunk-boundary phases, mixed traffic, multi-image,
