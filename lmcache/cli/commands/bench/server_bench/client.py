@@ -874,6 +874,7 @@ class ServerBenchClient:
             # CPU bench tensors can coexist with process-global accelerator
             # support. Keep this workaround local until factory dispatch is
             # made device-aware.
+            transfer_context: TransferContext
             if not use_gpu and config.transfer_mode in ("auto", "engine_driven"):
                 transfer_context = EngineDrivenTransferContext()
             else:
