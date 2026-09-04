@@ -109,8 +109,19 @@ case "$ENGINE_DRIVEN_TRANSPORT" in
         ;;
 esac
 
+# The SHM-backed L1 pool needs BOTH a non-lazy allocation and an explicit
+# --shm-name: the default name "" disables the pool (and lazy allocation
+# disables it regardless), in which case engine_driven silently falls back to
+# the pickle transport. Mirrors launch-processes.sh.
+SHM_NAME_ARG=""
 if [ "${L1_USE_LAZY:-true}" = "false" ]; then
     L1_LAZY_ARG="--no-l1-use-lazy"
+    if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+        SHM_NAME_ARG="--shm-name mp_${BUILD_ID}"
+        echo "L1 lazy allocation disabled (SHM transport enabled)"
+    else
+        echo "L1 lazy allocation disabled"
+    fi
 fi
 
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
@@ -295,6 +306,7 @@ lmcache server \
     --chunk-size "$CHUNK_SIZE" \
     --l1-size-gb 80 \
     $L1_LAZY_ARG \
+    ${SHM_NAME_ARG} \
     --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" \
     --eviction-policy LRU \
     --max-workers 4 \
