@@ -334,6 +334,18 @@ def convert_tokens_to_list(
     )
 
 
+def convert_token_range_to_list(
+    tokens: Optional[Union[torch.Tensor, list[int]]], start: int, end: int
+) -> List[int]:
+    """Convert the half-open token range ``[start, end)`` to a list.
+
+    :class:`~lmcache.v1.token_database.TokenDatabase` yields half-open bounds,
+    while :func:`convert_tokens_to_list` is inclusive of its end index.  This
+    wrapper bridges the two so callers do not have to remember the difference.
+    """
+    return convert_tokens_to_list(tokens, start, end - 1)
+
+
 @dataclass
 class DiskCacheMetadata:
     path: str
