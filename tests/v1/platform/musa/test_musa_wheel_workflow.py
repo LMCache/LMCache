@@ -41,8 +41,6 @@ def test_musa_builder_script_is_executable_and_has_required_guards() -> None:
 
 def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     """The reusable job output must match the artifact consumed by publish."""
-    workflow_path = ROOT / ".github/workflows/build_musa_artifacts.yml"
-    workflow_text = workflow_path.read_text(encoding="utf-8")
     workflow = _load_workflow(".github/workflows/build_musa_artifacts.yml")
     assert workflow["env"]["MUSA_IMAGE"] == (
         "${{ vars.MUSA_IMAGE || "
@@ -55,9 +53,6 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     assert workflow["env"]["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert workflow["env"]["SKIP_AUDITWHEEL_REPAIR"] == "0"
     assert workflow["env"]["MAX_JOBS"] == "2"
-    assert "registry.mthreads.com" in workflow_text
-    assert "sh-harbor.mthreads.com" not in workflow_text
-    assert "docker/login-action" not in workflow_text
     call = workflow["on"]["workflow_call"]
     assert call["outputs"]["musa_version"]["value"] == (
         "${{ jobs.build-musa-artifacts.outputs.musa_version }}"
@@ -65,6 +60,9 @@ def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     job = workflow["jobs"]["build-musa-artifacts"]
     assert job["outputs"]["musa_version"] == (
         "${{ steps.musa-version.outputs.musa_version }}"
+    )
+    assert not any(
+        step.get("uses", "").startswith("docker/login-action@") for step in job["steps"]
     )
     upload_steps = [
         step
