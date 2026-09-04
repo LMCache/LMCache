@@ -195,15 +195,15 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
         device_ops.multi_layer_kv_transfer(
-            memory_obj.tensor,
-            kv_cache_pointers,
-            slot_mapping[start:end],
-            self.device,
-            self.page_buffer_size,
-            lmcache_native.TransferDirection.H2D,
-            self.engine_kv_format,
-            self.block_size,
-            skip_prefix_n_tokens,
+            key_value=memory_obj.tensor,
+            key_value_ptrs=kv_cache_pointers,
+            slot_mapping=slot_mapping[start:end],
+            paged_memory_device=self.device,
+            page_buffer_size=self.page_buffer_size,
+            direction=lmcache_native.TransferDirection.H2D,
+            engine_kv_format=self.engine_kv_format,
+            block_size=self.block_size,
+            skip_prefix_n_tokens=skip_prefix_n_tokens,
         )
 
     @_lmcache_nvtx_annotate
@@ -242,28 +242,28 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         with torch.xpu.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
                 device_ops.multi_layer_kv_transfer(
-                    memory_obj.tensor,
-                    kv_cache_pointers,
-                    slot_mapping[start:end],
-                    self.kvcaches[0].device,
-                    self.page_buffer_size,
-                    lmcache_native.TransferDirection.D2H,
-                    self.engine_kv_format,
-                    self.block_size,
+                    key_value=memory_obj.tensor,
+                    key_value_ptrs=kv_cache_pointers,
+                    slot_mapping=slot_mapping[start:end],
+                    paged_memory_device=self.kvcaches[0].device,
+                    page_buffer_size=self.page_buffer_size,
+                    direction=lmcache_native.TransferDirection.D2H,
+                    engine_kv_format=self.engine_kv_format,
+                    block_size=self.block_size,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches[0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
                 device_ops.multi_layer_kv_transfer(
-                    tmp_gpu_buffer,
-                    kv_cache_pointers,
-                    slot_mapping[start:end],
-                    self.kvcaches[0].device,
-                    self.page_buffer_size,
-                    lmcache_native.TransferDirection.D2H,
-                    self.engine_kv_format,
-                    self.block_size,
+                    key_value=tmp_gpu_buffer,
+                    key_value_ptrs=kv_cache_pointers,
+                    slot_mapping=slot_mapping[start:end],
+                    paged_memory_device=self.kvcaches[0].device,
+                    page_buffer_size=self.page_buffer_size,
+                    direction=lmcache_native.TransferDirection.D2H,
+                    engine_kv_format=self.engine_kv_format,
+                    block_size=self.block_size,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -395,15 +395,15 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
             device_ops.multi_layer_kv_transfer(
-                memory_obj_tensor,
-                kv_cache_pointer,
-                slot_mapping[start:end],
-                self.device,
-                self.page_buffer_size,
-                lmcache_native.TransferDirection.H2D,
-                self.engine_kv_format,
-                self.block_size,
-                skip_prefix_n_tokens,
+                key_value=memory_obj_tensor,
+                key_value_ptrs=kv_cache_pointer,
+                slot_mapping=slot_mapping[start:end],
+                paged_memory_device=self.device,
+                page_buffer_size=self.page_buffer_size,
+                direction=lmcache_native.TransferDirection.H2D,
+                engine_kv_format=self.engine_kv_format,
+                block_size=self.block_size,
+                skip_prefix_n_tokens=skip_prefix_n_tokens,
             )
 
     @_lmcache_nvtx_annotate
@@ -425,14 +425,14 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
                     device_ops.multi_layer_kv_transfer(
-                        memory_obj_tensor,
-                        kv_cache_pointer,
-                        slot_mapping[start:end],
-                        self.device,
-                        self.page_buffer_size,
-                        lmcache_native.TransferDirection.D2H,
-                        self.engine_kv_format,
-                        self.block_size,
+                        key_value=memory_obj_tensor,
+                        key_value_ptrs=kv_cache_pointer,
+                        slot_mapping=slot_mapping[start:end],
+                        paged_memory_device=self.device,
+                        page_buffer_size=self.page_buffer_size,
+                        direction=lmcache_native.TransferDirection.D2H,
+                        engine_kv_format=self.engine_kv_format,
+                        block_size=self.block_size,
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -442,14 +442,14 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                 ):
                     tmp_gpu_buffer = self.group_tmp_buffer[i][:, :, : end - start, :]
                     device_ops.multi_layer_kv_transfer(
-                        tmp_gpu_buffer,
-                        kv_cache_pointer,
-                        slot_mapping[start:end],
-                        self.device,
-                        self.page_buffer_size,
-                        lmcache_native.TransferDirection.D2H,
-                        self.engine_kv_format,
-                        self.block_size,
+                        key_value=tmp_gpu_buffer,
+                        key_value_ptrs=kv_cache_pointer,
+                        slot_mapping=slot_mapping[start:end],
+                        paged_memory_device=self.device,
+                        page_buffer_size=self.page_buffer_size,
+                        direction=lmcache_native.TransferDirection.D2H,
+                        engine_kv_format=self.engine_kv_format,
+                        block_size=self.block_size,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
