@@ -372,7 +372,7 @@ def test_mq_register_kv_cache():
     REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
     """
     # First Party
-    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.platform.backends.cuda.ipc_wrapper import CudaIPCWrapper
 
     # Create test KV cache (list of CudaIPCWrapper objects)
     kv_cache = []

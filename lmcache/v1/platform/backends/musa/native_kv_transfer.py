@@ -95,7 +95,7 @@ def try_native_multi_layer_block_kv_transfer(
     """Try native MUSA acceleration for block-based paged-KV transfer.
 
     This is the optional native fast path used by
-    ``lmcache.v1.platform.musa.ops`` behind
+    ``lmcache.v1.platform.backends.musa.ops`` behind
     ``device_ops.multi_layer_block_kv_transfer``. It hides the MUSA-specific
     eligibility checks, slot mapping, and CPU staging from the generic
     multiprocess transfer context.

@@ -384,7 +384,7 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     )
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.backends.cpu  # noqa: F401
 
     context = create_transfer_context(
         {"layer_0": torch.randn(2, 2)}, mode=MPTransferMode.LMCACHE_DRIVEN
@@ -647,7 +647,7 @@ def test_create_transfer_context_env_var_overrides_default(
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory,
     # which is required by the lmcache-driven (handle) path.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.backends.cpu  # noqa: F401
 
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "lmcache_driven")
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})

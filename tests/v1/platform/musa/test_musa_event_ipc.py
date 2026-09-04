@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 
 # First Party
+from lmcache.v1.platform.backends.musa import MusaDeviceSpec, ipc_wrapper
+from lmcache.v1.platform.backends.musa.event_ipc import MusaEventIPCBackend
 from lmcache.v1.platform.base.event_ipc import EventIPCBackend
-from lmcache.v1.platform.musa import MusaDeviceSpec, ipc_wrapper
-from lmcache.v1.platform.musa.event_ipc import MusaEventIPCBackend
 
 pytestmark = pytest.mark.musa
 

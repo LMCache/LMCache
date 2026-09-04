@@ -33,7 +33,7 @@ stream-ordered and monotonic, keeping the GEQ wait race-free.
 Only events from this backend's ``create_event`` can be exported; call
 sites constructing ``torch_dev.Event(interprocess=True)`` directly must be
 migrated before binding this backend to the device spec. See
-``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``.
+``docs/design/v1/platform/backends/cuda/timeline_semaphore_event_ipc.md``.
 """
 
 # Future
@@ -51,7 +51,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform.cuda.utils import (
+from lmcache.v1.platform.backends.cuda.utils import (
     _CHECK_CUDA,
     _cuda,
     _raw_stream_handle,

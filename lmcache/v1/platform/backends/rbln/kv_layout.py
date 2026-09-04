@@ -12,7 +12,7 @@ Detection does not squeeze: the layout is registered as its own
 ``EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS``, so the vLLM detector classifies
 what vLLM-RBLN actually allocated and holds no RBLN knowledge beyond that
 shape signature. :func:`squeeze_singleton_axis` is applied one layer lower, by
-:class:`~lmcache.v1.platform.rbln.device_ops.RblnDeviceOps`, where the paged
+:class:`~lmcache.v1.platform.backends.rbln.device_ops.RblnDeviceOps`, where the paged
 tensors are indexed to move bytes.
 """
 

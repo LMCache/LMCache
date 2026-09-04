@@ -9,7 +9,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.platform.musa import ipc_wrapper as musa_ipc
+from lmcache.v1.platform.backends.musa import ipc_wrapper as musa_ipc
 
 
 class _ResultQueue(Protocol):

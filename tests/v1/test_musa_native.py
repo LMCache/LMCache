@@ -11,7 +11,7 @@ import torch
 
 # First Party
 from lmcache.v1.platform import torch_ops as py_ops
-from lmcache.v1.platform.musa import native_kv_transfer as musa_native
+from lmcache.v1.platform.backends.musa import native_kv_transfer as musa_native
 import lmcache.lmcache_native as lmcache_native
 
 pytestmark = pytest.mark.musa
@@ -55,16 +55,18 @@ def test_native_transfer_disabled_by_default(monkeypatch: pytest.MonkeyPatch) ->
     assert musa_native.is_native_musa_kv_transfer_enabled() is False
 
 
-def test_native_transfer_module_lives_under_musa_platform() -> None:
-    """The native KV-transfer adapter belongs to the MUSA platform package."""
-    assert musa_native.__name__ == "lmcache.v1.platform.musa.native_kv_transfer"
+def test_native_transfer_module_lives_under_musa_backend() -> None:
+    """The native KV-transfer adapter belongs to the MUSA backend package."""
+    assert (
+        musa_native.__name__ == "lmcache.v1.platform.backends.musa.native_kv_transfer"
+    )
 
 
 def test_musa_device_ops_overrides_multi_layer_block_kv_transfer() -> None:
     """MusaDeviceOps overrides multi_layer_block_kv_transfer via MRO."""
     # First Party
     from lmcache.v1.platform import torch_ops
-    from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
+    from lmcache.v1.platform.backends.musa.device_ops import MusaDeviceOps
 
     assert MusaDeviceOps.device_type == "musa"
     # The override is on the class itself, not the torch baseline.
@@ -410,7 +412,7 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
 ) -> None:
     """MusaDeviceOps dispatches to native transfer when tensor-backed."""
     # First Party
-    from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
+    from lmcache.v1.platform.backends.musa.device_ops import MusaDeviceOps
 
     captured: dict[str, Any] = {}
 

@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 import torch
 
 # First Party
-from lmcache.v1.platform.rbln.kv_ops import (
+from lmcache.v1.platform.backends.rbln.kv_ops import (
     gather_blocks_to_chunk,
     scatter_chunk_to_blocks,
 )

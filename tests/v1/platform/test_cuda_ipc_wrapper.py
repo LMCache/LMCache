@@ -18,9 +18,12 @@ import torch
 
 # First Party
 from lmcache.v1.platform import resolve_kv_wrapper_factory
+from lmcache.v1.platform.backends.cuda import CudaDeviceSpec
+from lmcache.v1.platform.backends.cuda.ipc_wrapper import (
+    CudaIPCWrapper,
+    RawCudaIPCWrapper,
+)
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.cuda import CudaDeviceSpec
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper, RawCudaIPCWrapper
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 
 pytestmark = [
@@ -269,7 +272,7 @@ def test_cache_context_init_failure_rolls_back_wrappers() -> None:
     it already imported instead of pinning the worker's pool.
     """
     # First Party
-    from lmcache.v1.platform.cuda.cache_context import GPUCacheContext
+    from lmcache.v1.platform.backends.cuda.cache_context import GPUCacheContext
 
     good = [_CloseRecordingWrapper(t) for t in _make_vllm_style_kv(1)]
     bad = _CloseRecordingWrapper(

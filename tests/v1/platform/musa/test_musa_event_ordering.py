@@ -11,8 +11,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.platform.backends.musa import ipc_wrapper as musa_ipc
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
-from lmcache.v1.platform.musa import ipc_wrapper as musa_ipc
 
 
 class _QueueWriter(Protocol):
@@ -52,8 +52,8 @@ def _produce_event_handle(
     import torch_musa  # noqa: F401
 
     # First Party
+    from lmcache.v1.platform.backends.musa.ipc_wrapper import ENV_MUSA_HANDLE_TRANSFER
     from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
-    from lmcache.v1.platform.musa.ipc_wrapper import ENV_MUSA_HANDLE_TRANSFER
 
     os.environ[ENV_MUSA_HANDLE_TRANSFER] = "1"
     device = torch.device("musa:0")

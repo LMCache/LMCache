@@ -7,11 +7,12 @@ signal background loops from other threads.  On Linux it is backed by
 ``os.eventfd``; on macOS / other POSIX systems it falls back to
 ``os.pipe``.  Callers never touch ``os.eventfd`` directly.
 
-Built-in accelerator- and OS-specific implementations live in dedicated
-sub-packages so each can evolve independently:
+Built-in accelerator- and OS-specific implementations live under the
+dedicated :mod:`lmcache.v1.platform.backends` namespace so each can evolve
+independently without making generic platform modules part of discovery:
 
-* :mod:`lmcache.v1.platform.cuda` -- CUDA-backed implementations.
-* :mod:`lmcache.v1.platform.cpu`  -- CPU-only fallbacks.
+* :mod:`lmcache.v1.platform.backends.cuda` -- CUDA-backed implementations.
+* :mod:`lmcache.v1.platform.backends.cpu`  -- CPU-only fallbacks.
 
 Third-party accelerators can ship a :class:`DeviceSpec` subclass in a
 separate wheel and register it through the ``lmcache.device_plugins`` Python

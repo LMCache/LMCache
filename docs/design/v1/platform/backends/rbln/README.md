@@ -1,6 +1,6 @@
 # RBLN Device Backend
 
-Design notes for `lmcache/v1/platform/rbln/` -- the device-registry entry for
+Design notes for `lmcache/v1/platform/backends/rbln/` -- the device-registry entry for
 Rebellions NPUs. The engine is
 [vllm-rbln](https://github.com/RBLN-SW/vllm-rbln).
 

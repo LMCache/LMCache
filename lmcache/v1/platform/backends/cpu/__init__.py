@@ -3,7 +3,7 @@
 
 Defines :class:`CpuDeviceSpec` for the device registry.  The spec's
 :attr:`~CpuDeviceSpec.ipc_wrapper_cls` binds
-:class:`~lmcache.v1.platform.cpu.shm.CpuShmTensorWrapper` to the
+:class:`~lmcache.v1.platform.backends.cpu.shm.CpuShmTensorWrapper` to the
 ``"cpu"`` device, so the multiprocess adapter can dispatch by
 ``tensor.device.type`` without any if/elif chain.
 
@@ -61,8 +61,8 @@ class CpuDeviceSpec(DeviceSpec):
         backend = self._event_backend_cache
         if backend is None:
             # First Party
+            from lmcache.v1.platform.backends.cpu.stub_cpu_device import StubCPUDevice
             from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
-            from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
 
             backend = DefaultEventIPCBackend(
                 event_module=StubCPUDevice("cpu"),
@@ -74,19 +74,19 @@ class CpuDeviceSpec(DeviceSpec):
     @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
         # First Party
-        from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
+        from lmcache.v1.platform.backends.cpu.shm import CpuShmTensorWrapper
 
         return CpuShmTensorWrapper
 
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         # First Party
-        from lmcache.v1.platform.cpu.cache_context import CPUCacheContext
+        from lmcache.v1.platform.backends.cpu.cache_context import CPUCacheContext
 
         return CPUCacheContext(*args, **kwargs)
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
         # First Party
-        from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
+        from lmcache.v1.platform.backends.cpu.device_ops import CpuDeviceOps
 
         return CpuDeviceOps

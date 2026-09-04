@@ -16,13 +16,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.platform.backends.cuda.timeline_semaphore_event_ipc import (
+    TimelineSemaphoreEventIPCBackend,
+)
 from lmcache.v1.platform.base.event_ipc import (
     DefaultEventIPCBackend,
     EventIPCBackend,
     get_event_ipc_backend,
-)
-from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
-    TimelineSemaphoreEventIPCBackend,
 )
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 

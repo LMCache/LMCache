@@ -26,13 +26,13 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
-from lmcache.v1.platform.rbln.kv_layout import squeeze_singleton_axis
-from lmcache.v1.platform.rbln.kv_ops import (
+from lmcache.v1.platform.backends.rbln.kv_layout import squeeze_singleton_axis
+from lmcache.v1.platform.backends.rbln.kv_ops import (
     gather_blocks_to_chunk,
     scatter_chunk_to_blocks,
 )
+from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

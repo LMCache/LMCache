@@ -19,9 +19,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # First Party
+from lmcache.v1.platform.backends.npu.pin_memory import NpuPinMemoryBackend
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
-from lmcache.v1.platform.npu.pin_memory import NpuPinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -46,7 +46,7 @@ class NpuDeviceSpec(DeviceSpec):
     @property
     def ops_cls(self) -> type[DeviceOps]:
         # First Party
-        from lmcache.v1.platform.npu.device_ops import NpuDeviceOps
+        from lmcache.v1.platform.backends.npu.device_ops import NpuDeviceOps
 
         return NpuDeviceOps
 

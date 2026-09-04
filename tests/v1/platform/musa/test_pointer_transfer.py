@@ -10,7 +10,7 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
-from lmcache.v1.platform.musa import device_ops
+from lmcache.v1.platform.backends.musa import device_ops
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -44,7 +44,7 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
         construct,
     )
     monkeypatch.setattr(
-        "lmcache.v1.platform.musa.native_kv_transfer"
+        "lmcache.v1.platform.backends.musa.native_kv_transfer"
         ".try_native_multi_layer_block_kv_transfer",
         lambda **_kwargs: True,
     )
@@ -135,7 +135,7 @@ def test_kv_list_pointer_operands_preserve_key_then_value_order(
         construct,
     )
     monkeypatch.setattr(
-        "lmcache.v1.platform.musa.native_kv_transfer"
+        "lmcache.v1.platform.backends.musa.native_kv_transfer"
         ".try_native_multi_layer_block_kv_transfer",
         native_transfer,
     )

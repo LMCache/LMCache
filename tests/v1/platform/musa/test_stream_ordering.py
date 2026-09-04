@@ -5,7 +5,7 @@
 import pytest
 
 # First Party
-from lmcache.v1.platform.musa import device_ops
+from lmcache.v1.platform.backends.musa import device_ops
 
 
 def test_completion_is_enqueued_after_stream_synchronization(

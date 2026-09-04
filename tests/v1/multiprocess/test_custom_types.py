@@ -21,7 +21,7 @@ from lmcache.v1.multiprocess.custom_types import (
 
 def _get_cuda_ipc_wrapper():
     # First Party
-    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.platform.backends.cuda.ipc_wrapper import CudaIPCWrapper
 
     return CudaIPCWrapper
 

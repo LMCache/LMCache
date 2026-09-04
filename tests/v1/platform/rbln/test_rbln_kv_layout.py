@@ -34,7 +34,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.platform.rbln.kv_layout import (
+from lmcache.v1.platform.backends.rbln.kv_layout import (
     is_rbln_kv_layout,
     squeeze_singleton_axis,
 )

@@ -8,7 +8,7 @@ fully isolated containers and also cover tensors allocated outside
 PyTorch (e.g. TRT-LLM's ``cudaMalloc``'d pool).
 
 ``device_type="cuda"`` binds to one of the two via
-:attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`:
+:attr:`~lmcache.v1.platform.backends.cuda.CudaDeviceSpec.ipc_wrapper_cls`:
 :class:`CudaIPCWrapper` by default, :class:`RawCudaIPCWrapper` when the
 process-global isolated-IPC switch is on (see
 ``lmcache/v1/platform/isolated_ipc.py``). The multiprocess adapter
@@ -30,8 +30,8 @@ import torch
 # First Party
 from lmcache import torch_device_type
 from lmcache.logging import init_logger
+from lmcache.v1.platform.backends.cuda.utils import _cuda
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.cuda.utils import _cuda
 
 logger = init_logger(__name__)
 
@@ -134,7 +134,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
     Two caller groups use it:
 
     - the MP registration path selects it via
-      :attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`
+      :attr:`~lmcache.v1.platform.backends.cuda.CudaDeviceSpec.ipc_wrapper_cls`
       when the isolated-IPC switch is on
       (``lmcache/v1/platform/isolated_ipc.py``);
     - the TRT-LLM adapter instantiates it directly for its
@@ -157,7 +157,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
     """
 
     #: Same ``torch.device.type`` as ``CudaIPCWrapper``; exposed on
-    #: :attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`
+    #: :attr:`~lmcache.v1.platform.backends.cuda.CudaDeviceSpec.ipc_wrapper_cls`
     #: under isolated IPC, instantiated directly by the TRT-LLM adapter.
     device_type: ClassVar[str] = "cuda"
 

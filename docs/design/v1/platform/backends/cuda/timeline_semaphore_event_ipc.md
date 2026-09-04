@@ -118,7 +118,7 @@ exists. Two empirically verified requirements for reviving it:
   (observed on driver 580), so a stale handle still circulating in
   another process could silently alias fresh memory.
 - Requires `cuda-python` (`cuda.bindings`), resolved lazily on first use
-  through the package-shared accessor in `platform/cuda/utils.py` (also
+  through the package-shared accessor in `platform/backends/cuda/utils.py` (also
   used by `RawCudaIPCWrapper`), so importing lmcache never requires it.
 - NVIDIA-only for now: ROCm reports the `cuda` device type but has no
   `cuda.bindings`, so `check_event_support` fails closed there. HIP has

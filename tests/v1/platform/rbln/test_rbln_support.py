@@ -2,9 +2,9 @@
 """RBLN support unit tests that do not require RBLN hardware.
 
 These tests cover the device-backend contract documented in
-``docs/design/v1/platform/rbln/README.md``:
+``docs/design/v1/platform/backends/rbln/README.md``:
 
-- Registry discovery of :class:`~lmcache.v1.platform.rbln.RblnDeviceSpec`.
+- Registry discovery of :class:`~lmcache.v1.platform.backends.rbln.RblnDeviceSpec`.
 - Availability probing, including the case where ``torch.rbln.is_available()``
   raises because every NPU is already claimed.
 - The engine-driven-only capability surface (no IPC handle transfer, no event
@@ -25,9 +25,9 @@ import pytest
 # First Party
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform._device_detect import _detect_device, get_device_spec
+from lmcache.v1.platform.backends.rbln import RblnDeviceSpec
+from lmcache.v1.platform.backends.rbln.device_ops import RblnDeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.platform.rbln import RblnDeviceSpec
-from lmcache.v1.platform.rbln.device_ops import RblnDeviceOps
 
 # ---------------------------------------------------------------------------
 # Helpers

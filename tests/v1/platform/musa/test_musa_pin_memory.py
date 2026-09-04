@@ -13,10 +13,10 @@ import torch
 from lmcache.v1.distributed import config as distributed_config
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.memory_allocators import lazy_memory_allocator
+from lmcache.v1.platform.backends.musa import MusaDeviceSpec
+from lmcache.v1.platform.backends.musa import pin_memory as pin_memory_module
+from lmcache.v1.platform.backends.musa.pin_memory import MusaPinMemoryBackend
 from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.platform.musa import MusaDeviceSpec
-from lmcache.v1.platform.musa import pin_memory as pin_memory_module
-from lmcache.v1.platform.musa.pin_memory import MusaPinMemoryBackend
 
 
 class _FakeMusart:

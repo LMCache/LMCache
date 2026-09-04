@@ -25,9 +25,9 @@ class MusaEventIPCBackend(EventIPCBackend):
         """Create a MUSA event IPC backend.
 
         Args:
-            ipc_module: Optional adapter exposing the MUSA capability and module
-                helpers from ``platform.musa.ipc_wrapper``. It is injectable for
-                tests.
+            ipc_module: Optional adapter exposing the MUSA capability and
+                module helpers from ``platform.backends.musa.ipc_wrapper``.
+                It is injectable for tests.
         """
         self._ipc_module = ipc_module
         self._default_backend_cache: DefaultEventIPCBackend | None = None
@@ -36,7 +36,7 @@ class MusaEventIPCBackend(EventIPCBackend):
         """Return the MUSA IPC wrapper module, importing it lazily."""
         if self._ipc_module is None:
             # First Party
-            from lmcache.v1.platform.musa import ipc_wrapper
+            from lmcache.v1.platform.backends.musa import ipc_wrapper
 
             self._ipc_module = ipc_wrapper
         return self._ipc_module

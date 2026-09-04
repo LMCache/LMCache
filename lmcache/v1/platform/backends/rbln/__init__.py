@@ -16,7 +16,7 @@ an IPC handle wrapper) cannot be supported.  The spec therefore reports
 requesting ``mp_transfer_mode=lmcache_driven`` fails fast with a clear
 error rather than crashing deeper in the transfer path.
 
-See ``docs/design/v1/platform/rbln/README.md`` for the full contract.
+See ``docs/design/v1/platform/backends/rbln/README.md`` for the full contract.
 """
 
 # Future
@@ -51,7 +51,7 @@ class RblnDeviceSpec(DeviceSpec):
     @property
     def ops_cls(self) -> type[DeviceOps]:
         # First Party
-        from lmcache.v1.platform.rbln.device_ops import RblnDeviceOps
+        from lmcache.v1.platform.backends.rbln.device_ops import RblnDeviceOps
 
         return RblnDeviceOps
 

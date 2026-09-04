@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Base class for platform device specification.
 
-Each built-in accelerator sub-package (``platform/cuda``, ``platform/musa``,
-...) provides a concrete :class:`DeviceSpec` subclass that describes how to
-detect the device and which ops backend to load. External packages can expose
-the same class through the ``lmcache.device_plugins`` Python entry-point group.
+Each built-in accelerator sub-package under ``platform/backends`` (for example,
+``cuda`` or ``musa``) provides a concrete :class:`DeviceSpec` subclass that
+describes how to detect the device and which ops backend to load. External
+packages can expose the same class through the ``lmcache.device_plugins``
+Python entry-point group.
 
-The :mod:`~lmcache.v1.platform` module discovers these
-subclasses automatically at import time via ``pkgutil.iter_modules``:
-it imports each sub-package, inspects its module namespace for
+The :mod:`~lmcache.v1.platform` module discovers these subclasses automatically
+from :mod:`lmcache.v1.platform.backends` at import time via
+``pkgutil.iter_modules``: it imports each backend sub-package, inspects its
+module namespace for
 :class:`DeviceSpec` subclasses, instantiates them, and uses the
 resulting objects for device detection and backend selection.
 
@@ -21,7 +23,7 @@ implementation used when no accelerator sub-package matches the
 detected device: all capabilities default to a safe "no-op / False"
 behaviour, and ``device_type`` / ``torch_module_name`` default to an
 empty string (concrete backends -- including CPU via
-:class:`~lmcache.v1.platform.cpu.CpuDeviceSpec` -- override them).
+:class:`~lmcache.v1.platform.backends.cpu.CpuDeviceSpec` -- override them).
 """
 
 # Future
@@ -46,7 +48,7 @@ class DeviceSpec:
 
     Subclasses override the properties / methods below to describe a
     concrete accelerator. Built-in subclasses are auto-discovered from the
-    platform package, while external subclasses are registered as Python
+    ``platform.backends`` package, while external subclasses are registered as Python
     entry points.
 
     Instantiating :class:`DeviceSpec` directly yields the fallback
@@ -66,7 +68,7 @@ class DeviceSpec:
         Concrete backends override this; the base returns an empty
         string so a bare ``DeviceSpec()`` instance is never mistaken
         for a real accelerator (CPU is represented by
-        :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`).
+        :class:`~lmcache.v1.platform.backends.cpu.CpuDeviceSpec`).
         """
         return ""
 
@@ -92,7 +94,7 @@ class DeviceSpec:
 
         For example, ``"cuda"`` corresponds to ``torch.cuda``.  The
         base returns an empty string; concrete backends (including
-        :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`) override it.
+        :class:`~lmcache.v1.platform.backends.cpu.CpuDeviceSpec`) override it.
         """
         return ""
 

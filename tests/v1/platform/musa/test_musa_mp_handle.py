@@ -63,7 +63,7 @@ def test_musa_handle_transfer_disabled_by_default(
 ) -> None:
     """MUSA handle transfer is opt-in and unavailable by default."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     monkeypatch.delenv(ipc_wrapper.ENV_MUSA_HANDLE_TRANSFER, raising=False)
 
@@ -76,7 +76,7 @@ def test_musa_handle_transfer_requires_torch_musa(
 ) -> None:
     """Opt-in alone is not enough without a visible TorchMUSA runtime."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     monkeypatch.setenv(ipc_wrapper.ENV_MUSA_HANDLE_TRANSFER, "1")
     monkeypatch.setattr(ipc_wrapper, "is_torch_musa_available", lambda: False)
@@ -89,7 +89,7 @@ def test_get_torch_musa_module_imports_torch_musa_registration(
 ) -> None:
     """TorchMUSA may register ``torch.musa`` only after ``torch_musa`` import."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     fake_torch = SimpleNamespace()
     torch_musa = SimpleNamespace(is_available=lambda: True)
@@ -111,7 +111,7 @@ def test_get_torch_musa_module_import_failure_fails_closed(
 ) -> None:
     """A TorchMUSA native-extension load failure is treated as unavailable."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     def raise_loader_error(_name: str) -> object:
         raise OSError("missing TorchMUSA shared object")
@@ -127,7 +127,7 @@ def test_musa_memory_ipc_does_not_enable_handle_transfer(
 ) -> None:
     """Memory IPC alone is not enough to enable the MUSA handle path."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(
         ipc=SimpleNamespace(
@@ -152,7 +152,7 @@ def test_musa_ipc_components_do_not_require_block_transfer(
 ) -> None:
     """Memory and event IPC remain independently testable."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(
         ipc=SimpleNamespace(
@@ -177,7 +177,7 @@ def test_musa_handle_transfer_available_when_all_capabilities_present(
 ) -> None:
     """Forced MUSA handle mode is available only after all gates pass."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(
         ipc=SimpleNamespace(
@@ -200,7 +200,7 @@ def test_musa_handle_transfer_available_when_all_capabilities_present(
 def test_musa_handle_transfer_rejects_incomplete_torch_musa_runtime() -> None:
     """Missing TorchMUSA IPC symbols keep MUSA handle mode disabled."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(
         ipc=SimpleNamespace(export_tensor=lambda _tensor: object())
@@ -212,7 +212,7 @@ def test_musa_handle_transfer_rejects_incomplete_torch_musa_runtime() -> None:
 def test_musa_handle_transfer_rejects_incomplete_event_runtime() -> None:
     """Missing event operations keep MUSA handle mode disabled."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     incomplete_event = type(
         "IncompleteMusaEvent",
@@ -233,7 +233,7 @@ def test_musa_event_capability_probe_handles_opaque_event_signature(
 ) -> None:
     """An opaque Event binding is checked by probing its public constructor."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     def raise_signature(_obj: object) -> object:
         raise ValueError("opaque binding")
@@ -253,7 +253,7 @@ def test_musa_platform_discovers_factory_and_registers_capability_predicate() ->
     """The MUSA wrapper is auto-discovered while availability stays explicit."""
     # First Party
     from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
-    import lmcache.v1.platform.musa as musa_platform
+    import lmcache.v1.platform.backends.musa as musa_platform
 
     importlib.reload(musa_platform)
 
@@ -317,7 +317,7 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
 def test_musa_ipc_wrapper_rejects_non_musa_tensor() -> None:
     """The MUSA IPC wrapper never accepts CPU tensors by accident."""
     # First Party
-    from lmcache.v1.platform.musa.ipc_wrapper import MusaIPCWrapper
+    from lmcache.v1.platform.backends.musa.ipc_wrapper import MusaIPCWrapper
 
     with pytest.raises(ValueError, match="expected a MUSA tensor"):
         MusaIPCWrapper(torch.empty(4))
@@ -327,8 +327,8 @@ def test_musa_ipc_wrapper_uses_device_agnostic_wire_base() -> None:
     """MUSA handles use the device-agnostic KVCache wire base."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper, KVCache
-    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
-    from lmcache.v1.platform.musa.ipc_wrapper import MusaIPCWrapper
+    from lmcache.v1.platform.backends.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.platform.backends.musa.ipc_wrapper import MusaIPCWrapper
 
     assert issubclass(MusaIPCWrapper, DeviceIPCWrapper)
     assert not issubclass(MusaIPCWrapper, CudaIPCWrapper)
@@ -342,7 +342,7 @@ def test_musa_ipc_wrapper_does_not_serialize_receiver_owner(
     """The wire payload excludes receiver-local TorchMUSA owner state."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     class _Owner:
         tensor = torch.empty(1)
@@ -396,7 +396,7 @@ def test_musa_ipc_wrapper_closes_receiver_owner(
 ) -> None:
     """Closing the wrapper releases its receiver-side TorchMUSA owner."""
     # First Party
-    from lmcache.v1.platform.musa import ipc_wrapper
+    from lmcache.v1.platform.backends.musa import ipc_wrapper
 
     class _Owner:
         def __init__(self) -> None:

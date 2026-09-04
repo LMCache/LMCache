@@ -8,9 +8,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
+from lmcache.v1.platform.backends.musa.pin_memory import MusaPinMemoryBackend
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
-from lmcache.v1.platform.musa.pin_memory import MusaPinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -40,7 +40,7 @@ class MusaDeviceSpec(DeviceSpec):
     @property
     def ops_cls(self) -> type[DeviceOps]:
         # First Party
-        from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
+        from lmcache.v1.platform.backends.musa.device_ops import MusaDeviceOps
 
         return MusaDeviceOps
 
@@ -56,7 +56,7 @@ class MusaDeviceSpec(DeviceSpec):
     @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
         # First Party
-        from lmcache.v1.platform.musa.ipc_wrapper import MusaIPCWrapper
+        from lmcache.v1.platform.backends.musa.ipc_wrapper import MusaIPCWrapper
 
         return MusaIPCWrapper
 
@@ -72,7 +72,7 @@ class MusaDeviceSpec(DeviceSpec):
 
     def is_handle_transfer_available(self) -> bool:
         # First Party
-        from lmcache.v1.platform.musa.ipc_wrapper import (
+        from lmcache.v1.platform.backends.musa.ipc_wrapper import (
             is_musa_handle_transfer_available,
         )
 
@@ -81,7 +81,7 @@ class MusaDeviceSpec(DeviceSpec):
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         """Create the MUSA cache context for LMCache-driven transfer."""
         # First Party
-        from lmcache.v1.platform.musa.cache_context import MUSACacheContext
+        from lmcache.v1.platform.backends.musa.cache_context import MUSACacheContext
 
         return MUSACacheContext(*args, **kwargs)
 
@@ -91,7 +91,7 @@ class MusaDeviceSpec(DeviceSpec):
         backend = self._event_backend_cache
         if backend is None:
             # First Party
-            from lmcache.v1.platform.musa.event_ipc import MusaEventIPCBackend
+            from lmcache.v1.platform.backends.musa.event_ipc import MusaEventIPCBackend
 
             backend = MusaEventIPCBackend()
             self._event_backend_cache = backend

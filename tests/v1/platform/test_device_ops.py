@@ -21,10 +21,10 @@ import pytest
 from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import resolve_device_ops
+from lmcache.v1.platform.backends.cpu.device_ops import CpuDeviceOps
+from lmcache.v1.platform.backends.cuda.device_ops import CudaDeviceOps
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
-from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     KernelGroupSpec,
@@ -118,7 +118,7 @@ def test_cpu_inherits_baseline_verbatim() -> None:
 def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
     """MusaDeviceOps owns transfer and stream-ordering adaptation."""
     musa_mod = pytest.importorskip(
-        "lmcache.v1.platform.musa.device_ops",
+        "lmcache.v1.platform.backends.musa.device_ops",
         reason="musa platform package unavailable",
     )
     overridden = [
@@ -144,11 +144,11 @@ def test_musa_override_dispatches_native_first(
     import torch
 
     musa_mod = pytest.importorskip(
-        "lmcache.v1.platform.musa.device_ops",
+        "lmcache.v1.platform.backends.musa.device_ops",
         reason="musa platform package unavailable",
     )
     native_mod = pytest.importorskip(
-        "lmcache.v1.platform.musa.native_kv_transfer",
+        "lmcache.v1.platform.backends.musa.native_kv_transfer",
         reason="musa native_kv_transfer unavailable",
     )
 

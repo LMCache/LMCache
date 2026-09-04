@@ -11,10 +11,12 @@ import torch
 from lmcache.lmcache_native import EngineKVFormat
 from lmcache.utils import EngineType
 from lmcache.v1.platform import resolve_device_ops
+from lmcache.v1.platform.backends.musa.cache_context import MUSACacheContext
+from lmcache.v1.platform.backends.musa.device_ops import MusaDeviceOps
+from lmcache.v1.platform.backends.musa.ipc_wrapper import (
+    is_musa_block_transfer_available,
+)
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.musa.cache_context import MUSACacheContext
-from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
-from lmcache.v1.platform.musa.ipc_wrapper import is_musa_block_transfer_available
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 

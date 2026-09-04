@@ -10,7 +10,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.platform.musa import tensor_from_ptr
+from lmcache.v1.platform.backends.musa import tensor_from_ptr
 
 
 def test_contiguous_strides() -> None:

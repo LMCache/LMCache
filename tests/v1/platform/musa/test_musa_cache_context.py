@@ -3,7 +3,7 @@
 """Tests for MUSA cache-context IPC owner lifetime."""
 
 # First Party
-from lmcache.v1.platform.musa.cache_context import MUSACacheContext
+from lmcache.v1.platform.backends.musa.cache_context import MUSACacheContext
 
 
 def test_close_synchronizes_before_releasing_ipc_owners() -> None:

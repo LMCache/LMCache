@@ -20,8 +20,8 @@ from lmcache.v1.gpu_connector.musa_connectors import (
 )
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.platform.musa import device_ops as musa_device_ops
-from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
+from lmcache.v1.platform.backends.musa import device_ops as musa_device_ops
+from lmcache.v1.platform.backends.musa.device_ops import MusaDeviceOps
 from lmcache.v1.storage_backend.naive_serde import cachegen_encoder
 
 

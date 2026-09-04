@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``lmcache.v1.platform.cpu.shm``.
+"""Tests for ``lmcache.v1.platform.backends.cpu.shm``.
 
 Validates that the POSIX-SHM-backed wrapper can round-trip a CPU
 tensor in-process: the constructed wrapper's ``to_tensor()`` view
@@ -15,7 +15,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.posix_shm import shm_unlink
-from lmcache.v1.platform.cpu.shm import (
+from lmcache.v1.platform.backends.cpu.shm import (
     CpuShmTensorWrapper,
     migrate_to_shm_and_wrap,
     shm_create_readwrite,
@@ -118,7 +118,7 @@ def test_migrate_finalizer_unlinks_on_gc():
     import gc
 
     # First Party
-    from lmcache.v1.platform.cpu.shm import shm_map_readwrite
+    from lmcache.v1.platform.backends.cpu.shm import shm_map_readwrite
 
     src = torch.zeros((2, 2), dtype=torch.float32)
     w = migrate_to_shm_and_wrap(src)
@@ -237,7 +237,7 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
     """
     # First Party
     from lmcache.v1.platform import kv_wrap
-    from lmcache.v1.platform.cpu.shm import shm_map_readwrite
+    from lmcache.v1.platform.backends.cpu.shm import shm_map_readwrite
 
     real_wrap = kv_wrap.wrap_one_kv_cache
     state = {"n": 0, "first_name": None}
@@ -339,7 +339,7 @@ def test_migrate_segment_unlinks_only_after_last_view_dies():
     import gc
 
     # First Party
-    from lmcache.v1.platform.cpu.shm import shm_map_readwrite, shm_munmap
+    from lmcache.v1.platform.backends.cpu.shm import shm_map_readwrite, shm_munmap
 
     base = torch.zeros(2 * 64, dtype=torch.float32)
     v1, v2 = base[:64], base[64:]
@@ -383,7 +383,7 @@ def test_migrate_ignores_stale_entry_from_id_reuse():
     import weakref as _wr
 
     # First Party
-    from lmcache.v1.platform.cpu.shm import inject_stale_cache_entry_for_test
+    from lmcache.v1.platform.backends.cpu.shm import inject_stale_cache_entry_for_test
 
     # Build a tensor we will let die so we have a guaranteed-dead ref.
     ghost = torch.zeros((1,), dtype=torch.float32)

@@ -21,11 +21,11 @@ import torch
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection, is_kv_list
 from lmcache.v1.platform import torch_ops
-from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.musa import native_kv_transfer
-from lmcache.v1.platform.musa.tensor_from_ptr import (
+from lmcache.v1.platform.backends.musa import native_kv_transfer
+from lmcache.v1.platform.backends.musa.tensor_from_ptr import (
     construct_musa_tensor_from_data_pointer,
 )
+from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 _MUSA_MP_BLOCK_TRANSFER_FORMATS = {

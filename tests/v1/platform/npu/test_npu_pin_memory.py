@@ -14,9 +14,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.platform.npu import NpuDeviceSpec
-from lmcache.v1.platform.npu import pin_memory as pin_memory_module
-from lmcache.v1.platform.npu.pin_memory import NpuPinMemoryBackend
+from lmcache.v1.platform.backends.npu import NpuDeviceSpec
+from lmcache.v1.platform.backends.npu import pin_memory as pin_memory_module
+from lmcache.v1.platform.backends.npu.pin_memory import NpuPinMemoryBackend
 
 #: Page size, computed exactly like the module under test so alignment
 #: expectations hold on any host (e.g. aarch64 64K-page kernels).

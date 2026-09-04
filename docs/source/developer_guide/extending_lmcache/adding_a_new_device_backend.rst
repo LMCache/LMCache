@@ -8,7 +8,7 @@ This guide explains how to add a **new accelerator** to LMCache in
 ownership model:
 
 - **In-tree integration:** contribute and maintain the backend under
-  ``lmcache/v1/platform/<device>/`` in the LMCache repository. This fits
+  ``lmcache/v1/platform/backends/<backend>/`` in the LMCache repository. This fits
   backends that should ship, test, and release with LMCache.
 - **External wheel integration:** maintain the backend in a vendor repository
   and publish a wheel through the ``lmcache.device_plugins`` entry-point
@@ -62,14 +62,15 @@ Step 1: Choose the ownership model
 Option A — integrate in the LMCache repository
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Create a platform package directly in LMCache::
+Create a backend package directly in LMCache::
 
-    lmcache/v1/platform/foo/
+    lmcache/v1/platform/backends/foo/
     ├── __init__.py
     └── device_ops.py
 
 Define ``FooDeviceSpec`` in ``__init__.py``. LMCache scans its built-in
-platform packages, so this option needs no entry point or registration list.
+``platform.backends`` packages, so this option needs no entry point or
+registration list.
 Submit the code, tests, and device documentation in an LMCache PR; after
 merge, the backend follows the LMCache release lifecycle.
 
@@ -117,7 +118,7 @@ Step 2: Implement ``FooDeviceSpec``
 
 Create the spec in the location selected in Step 1:
 
-- In-tree: ``lmcache/v1/platform/foo/__init__.py``.
+- In-tree: ``lmcache/v1/platform/backends/foo/__init__.py``.
 - External wheel: ``src/lmcache_foo/device.py``.
 
 The implementation is the same in both layouts:
@@ -176,7 +177,7 @@ Step 3: Implement ``FooDeviceOps``
 
 Create ``device_ops.py`` next to the spec package:
 
-- In-tree: ``lmcache/v1/platform/foo/device_ops.py``.
+- In-tree: ``lmcache/v1/platform/backends/foo/device_ops.py``.
 - External wheel: ``src/lmcache_foo/device_ops.py``.
 
 .. code-block:: python
@@ -426,11 +427,11 @@ Implementation notes
 
 For concrete reference implementations, see:
 
-- ``lmcache/v1/platform/cuda/device_ops.py`` — binds the compiled
+- ``lmcache/v1/platform/backends/cuda/device_ops.py`` — binds the compiled
   ``lmcache.cuda_ops`` pybind11 extension.
-- ``lmcache/v1/platform/xpu/device_ops.py`` — binds the SYCL
+- ``lmcache/v1/platform/backends/xpu/device_ops.py`` — binds the SYCL
   ``lmcache.xpu_ops`` extension.
-- ``lmcache/v1/platform/musa/device_ops.py`` — method overrides
+- ``lmcache/v1/platform/backends/musa/device_ops.py`` — method overrides
   without a separate native module.
 
 Advanced transfer mode
@@ -466,7 +467,7 @@ checks — both must succeed, otherwise the factory raises
 
 Separately, the LMCache-driven server module also requires a
 ``BaseCacheContext`` subclass next to the backend (for example,
-``lmcache/v1/platform/foo/cache_context.py`` in-tree or
+``lmcache/v1/platform/backends/foo/cache_context.py`` in-tree or
 ``lmcache_foo/cache_context.py`` externally) **and** a matching
 ``DeviceSpec.create_cache_context`` override that lazy-imports and
 instantiates it.  The platform-agnostic factory
@@ -629,17 +630,17 @@ References
    * - Cache context factory
      - ``lmcache/v1/platform/cache_context.py``
    * - Reference ``DeviceSpec`` (CUDA)
-     - ``lmcache/v1/platform/cuda/__init__.py``
+     - ``lmcache/v1/platform/backends/cuda/__init__.py``
    * - Reference ``DeviceOps`` (CUDA, bind_native)
-     - ``lmcache/v1/platform/cuda/device_ops.py``
+     - ``lmcache/v1/platform/backends/cuda/device_ops.py``
    * - Reference ``DeviceOps`` (XPU, bind_native)
-     - ``lmcache/v1/platform/xpu/device_ops.py``
+     - ``lmcache/v1/platform/backends/xpu/device_ops.py``
    * - Reference ``DeviceOps`` (MUSA, method overrides)
-     - ``lmcache/v1/platform/musa/device_ops.py``
+     - ``lmcache/v1/platform/backends/musa/device_ops.py``
    * - Reference ``DeviceSpec`` (Neuron / Trainium, engine-driven only)
-     - ``lmcache/v1/platform/neuron/__init__.py``
+     - ``lmcache/v1/platform/backends/neuron/__init__.py``
    * - Reference ``DeviceOps`` (Neuron, torch baseline)
-     - ``lmcache/v1/platform/neuron/device_ops.py``
+     - ``lmcache/v1/platform/backends/neuron/device_ops.py``
    * - Engine-driven call site
      - ``lmcache/v1/multiprocess/transfer_context/worker_transfer.py``
        (``EngineDrivenTransferContext``, ``create_transfer_context``)

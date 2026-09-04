@@ -351,7 +351,7 @@ class TestRawCudaIPCWrapperType:
         from lmcache.v1.multiprocess.custom_types import (
             DeviceIPCWrapper,
         )
-        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+        from lmcache.v1.platform.backends.cuda.ipc_wrapper import RawCudaIPCWrapper
 
         assert issubclass(RawCudaIPCWrapper, DeviceIPCWrapper)
 
@@ -364,7 +364,7 @@ class TestRawCudaIPCWrapperType:
             DeviceIPCWrapper,
             KVCache,
         )
-        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+        from lmcache.v1.platform.backends.cuda.ipc_wrapper import RawCudaIPCWrapper
 
         assert KVCache == list[DeviceIPCWrapper]
         # Static check substitute: a concrete wrapper fits the list type.

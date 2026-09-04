@@ -21,9 +21,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.platform.backends.rbln.device_ops import RblnDeviceOps
+from lmcache.v1.platform.backends.rbln.kv_layout import squeeze_singleton_axis
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
-from lmcache.v1.platform.rbln.device_ops import RblnDeviceOps
-from lmcache.v1.platform.rbln.kv_layout import squeeze_singleton_axis
 from lmcache.v1.platform.torch_ops import multi_layer_block_kv_transfer
 import lmcache.lmcache_native as lmcache_native
 

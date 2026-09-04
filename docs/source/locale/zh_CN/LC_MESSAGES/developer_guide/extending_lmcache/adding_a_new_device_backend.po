@@ -103,8 +103,8 @@ msgid "Add a ``FooDeviceSpec``"
 msgstr "添加一个 ``FooDeviceSpec``"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:50
-msgid "Create ``lmcache/v1/platform/foo/__init__.py``:"
-msgstr "创建 ``lmcache/v1/platform/foo/__init__.py``："
+msgid "Create ``lmcache/v1/platform/backends/foo/__init__.py``:"
+msgstr "创建 ``lmcache/v1/platform/backends/foo/__init__.py``："
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:84
 msgid "Key properties:"
@@ -357,10 +357,10 @@ msgstr "在导入时保持你的 ops 模块没有副作用——它在 ``get_bac
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:256
 msgid ""
-"For concrete reference implementations, see ``lmcache/v1/platform/cuda/``"
-" and ``lmcache/v1/platform/musa/``. Both are examples of what a vendor "
+"For concrete reference implementations, see ``lmcache/v1/platform/backends/cuda/``"
+" and ``lmcache/v1/platform/backends/musa/``. Both are examples of what a vendor "
 "*may* do, not templates every new backend has to follow."
-msgstr "有关具体的参考实现，请参见 ``lmcache/v1/platform/cuda/`` 和 ``lmcache/v1/platform/musa/``。这两者都是供应商 *可能* 采取的示例，而不是每个新后端必须遵循的模板。"
+msgstr "有关具体的参考实现，请参见 ``lmcache/v1/platform/backends/cuda/`` 和 ``lmcache/v1/platform/backends/musa/``。这两者都是供应商 *可能* 采取的示例，而不是每个新后端必须遵循的模板。"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:262
 msgid "Advanced transfer mode"
@@ -380,8 +380,8 @@ msgid ""
 "ROCm is not a separate backend: under PyTorch a ROCm GPU reports "
 "``device_type == \"cuda\"`` and reuses ``CudaIPCWrapper`` (CUDA IPC) for "
 "the LMCache-driven path, so it works in AUTO mode with no extra setup.  "
-"There is currently no dedicated ``platform/rocm`` package."
-msgstr "ROCm 不是一个单独的后端：在 PyTorch 下，ROCm GPU 报告 ``device_type == \\\"cuda\\\"`` 并重用 ``CudaIPCWrapper``（CUDA IPC）用于 LMCache 驱动的路径，因此它在 AUTO 模式下工作，无需额外设置。目前没有专门的 ``platform/rocm`` 包。"
+"There is currently no dedicated ``platform/backends/rocm`` package."
+msgstr "ROCm 不是一个单独的后端：在 PyTorch 下，ROCm GPU 报告 ``device_type == \\\"cuda\\\"`` 并重用 ``CudaIPCWrapper``（CUDA IPC）用于 LMCache 驱动的路径，因此它在 AUTO 模式下工作，无需额外设置。目前没有专门的 ``platform/backends/rocm`` 包。"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:277
 msgid ""
@@ -411,11 +411,11 @@ msgstr "``DeviceSpec.is_handle_transfer_available()`` 必须返回 ``True``（�
 msgid ""
 "Separately, the LMCache-driven server module also requires a "
 "``BaseCacheContext`` subclass under "
-"``lmcache/v1/platform/foo/cache_context.py``.  ``create_cache_context`` "
+"``lmcache/v1/platform/backends/foo/cache_context.py``.  ``create_cache_context`` "
 "discovers it lazily at runtime and raises ``ValueError`` if no backend "
 "matches the device type; it manages the KV cache layout and pointers used"
 " for IPC transfer."
-msgstr "另外，基于 LMCache 的服务器模块还需要一个位于 ``lmcache/v1/platform/foo/cache_context.py`` 的 ``BaseCacheContext`` 子类。``create_cache_context`` 在运行时懒惰地发现它，并在没有后端与设备类型匹配时引发 ``ValueError``；它管理用于 IPC 传输的 KV Cache 布局和指针。"
+msgstr "另外，基于 LMCache 的服务器模块还需要一个位于 ``lmcache/v1/platform/backends/foo/cache_context.py`` 的 ``BaseCacheContext`` 子类。``create_cache_context`` 在运行时懒惰地发现它，并在没有后端与设备类型匹配时引发 ``ValueError``；它管理用于 IPC 传输的 KV Cache 布局和指针。"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:298
 msgid ""
@@ -495,16 +495,16 @@ msgid "Reference ``DeviceSpec`` (engine-driven baseline)"
 msgstr "参考 ``DeviceSpec`` （引擎驱动的基线）"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:356
-msgid "``lmcache/v1/platform/cuda/__init__.py``"
-msgstr "``lmcache/v1/platform/cuda/__init__.py``"
+msgid "``lmcache/v1/platform/backends/cuda/__init__.py``"
+msgstr "``lmcache/v1/platform/backends/cuda/__init__.py``"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:357
 msgid "Reference ``DeviceSpec`` (LMCache-driven capable)"
 msgstr "参考 ``DeviceSpec``（支持 LMCache 的能力）"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:358
-msgid "``lmcache/v1/platform/musa/__init__.py``"
-msgstr "``lmcache/v1/platform/musa/__init__.py``"
+msgid "``lmcache/v1/platform/backends/musa/__init__.py``"
+msgstr "``lmcache/v1/platform/backends/musa/__init__.py``"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:359
 msgid "Engine-driven call site"

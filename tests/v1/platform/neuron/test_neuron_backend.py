@@ -15,8 +15,8 @@ import pytest
 
 # First Party
 from lmcache.v1.platform import resolve_device_ops
+from lmcache.v1.platform.backends.neuron import NeuronDeviceSpec
 from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.neuron import NeuronDeviceSpec
 import lmcache.v1.platform as platform_pkg
 
 

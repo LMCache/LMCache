@@ -10,9 +10,10 @@ import pytest
 
 # First Party
 from lmcache.v1.platform import _device_detect
+from lmcache.v1.platform.backends.cuda import CudaDeviceSpec
+from lmcache.v1.platform.backends.rocm import RocmDeviceSpec
 from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.platform.cuda import CudaDeviceSpec
-from lmcache.v1.platform.rocm import RocmDeviceSpec
+import lmcache.v1.utils.subclass_discovery as subclass_discovery_module
 
 
 class _ExternalDeviceSpec(DeviceSpec):
@@ -126,6 +127,31 @@ def _set_entry_points(
         "entry_points",
         fake_entry_points,
     )
+
+
+def test_builtin_discovery_is_scoped_to_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic platform modules must not participate in backend discovery."""
+    scanned_packages: list[object] = []
+
+    def fake_discover_subclasses(
+        package: object,
+        _base_class: type[DeviceSpec],
+        **_kwargs: Any,
+    ) -> Any:
+        scanned_packages.append(package)
+        return iter(())
+
+    monkeypatch.setattr(
+        subclass_discovery_module,
+        "discover_subclasses",
+        fake_discover_subclasses,
+    )
+    _set_entry_points(monkeypatch, [])
+
+    assert _device_detect._build_backend_registry() == {}
+    assert scanned_packages == ["lmcache.v1.platform.backends"]
 
 
 def test_external_device_spec_is_added_to_registries(

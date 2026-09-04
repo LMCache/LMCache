@@ -6,7 +6,7 @@ accelerator: client and LMCache mp server map the **same** physical
 pages so transfers are pointer-shuffles rather than memcpys.
 
 Bound to ``device_type="cpu"`` via
-:attr:`~lmcache.v1.platform.cpu.CpuDeviceSpec.ipc_wrapper_cls`, so the
+:attr:`~lmcache.v1.platform.backends.cpu.CpuDeviceSpec.ipc_wrapper_cls`, so the
 multiprocess adapter can dispatch by ``tensor.device.type`` without
 any if/elif chain.
 """

@@ -2,7 +2,7 @@
 """ROCm platform primitives built on PyTorch's CUDA-compatible surface."""
 
 # First Party
-from lmcache.v1.platform.cuda import CudaDeviceSpec
+from lmcache.v1.platform.backends.cuda import CudaDeviceSpec
 
 
 class RocmDeviceSpec(CudaDeviceSpec):

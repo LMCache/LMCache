@@ -288,7 +288,7 @@ jobs:
       # Exercises LMCacheDrivenTransferContext (server-side IPC handle
       # path) rather than the worker-side gather/scatter copy. On CPU it
       # resolves to CpuShmTensorWrapper, bound to the device through
-      # CpuDeviceSpec.ipc_wrapper_cls (lmcache/v1/platform/cpu/shm.py).
+      # CpuDeviceSpec.ipc_wrapper_cls (lmcache/v1/platform/backends/cpu/shm.py).
       # `Server bench — LMCache-driven` already covers this transport,
       # but nothing covered it end-to-end through vLLM.
       - name: vLLM e2e — LMCache-driven
