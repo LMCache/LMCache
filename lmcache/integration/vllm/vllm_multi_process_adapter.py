@@ -747,11 +747,9 @@ class LMCacheMPSchedulerAdapter:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
-        Sends a LOOKUP request to every server and returns without waiting
-        for the acknowledgement, so the scheduler thread is never blocked on
-        a server round trip here.  ``check_lookup_result`` polls the
-        acknowledgement (non-blocking) and, once every server has acked,
-        queries the prefetch result.
+        Sends LOOKUP to every server without waiting for the ack, so the
+        scheduler thread is not blocked here.  ``check_lookup_result``
+        polls the acks and then queries the prefetch result.
 
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
@@ -1025,12 +1023,8 @@ class LMCacheMPSchedulerAdapter:
         """
         Notify LMCache server to remove the session for a finished request.
 
-        If the request's LOOKUP has not been acknowledged yet (the request was
-        aborted while its lookup was still in flight), this first waits for
-        the acknowledgement so END_SESSION can never be processed by the
-        server before the LOOKUP it is meant to clean up after.  A LOOKUP
-        that is not acknowledged within the MQ timeout marks that server
-        unhealthy and END_SESSION is not sent.
+        For unacked lookup results, this function will block waiting until
+        they are acked.
 
         Args:
             request_id: The ID of the finished request.
@@ -1040,10 +1034,6 @@ class LMCacheMPSchedulerAdapter:
 
         ack = self._unacked_lookups.pop(request_id, None)
         if ack is not None:
-            # LOOKUP and END_SESSION share a server thread pool and may be
-            # reordered. A late LOOKUP would re-create the session and lock
-            # chunks that nothing releases. This only blocks on the rare
-            # abort-while-lookup-in-flight path.
             remaining = max(
                 0.0, self._mq_timeout - (time.monotonic() - ack.submitted_at)
             )
