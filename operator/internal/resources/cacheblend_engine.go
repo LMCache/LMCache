@@ -26,9 +26,8 @@ import (
 
 const (
 	// cbEngineType is the value of the --engine-type flag that selects the
-	// CacheBlend V3 engine on the lmcache server binary. The server maps the
-	// value "blend" to BlendV3Module; "blend_v3" is no longer recognized
-	// (lmcache/v1/multiprocess/server.py).
+	// CacheBlend engine on the lmcache server binary. The server maps the
+	// value "blend" to BlendModule (lmcache/v1/multiprocess/server.py).
 	cbEngineType = "blend"
 
 	// cbL1AlignBytes is the value of the --l1-align-bytes flag required by the
@@ -84,12 +83,13 @@ func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1al
 		PodLabels:          spec.PodLabels,
 		ServiceAccountName: spec.ServiceAccountName,
 		PriorityClassName:  spec.PriorityClassName,
+		HostIPC:            spec.HostIPC,
 		Privileged:         spec.Privileged,
 		ExtraArgs:          spec.ExtraArgs,
 	}
 }
 
-// BuildCBEngineArgs returns the server CLI args for the blend_v3 engine: the
+// BuildCBEngineArgs returns the server CLI args for the blend engine: the
 // proven LMCacheEngine serialization (--host/--port/--l1-size-gb/--chunk-size/
 // eviction/prometheus/L2) plus the CacheBlend-specific --engine-type blend and
 // --l1-align-bytes flags. The blend flags are inserted before the user-supplied
@@ -108,12 +108,14 @@ func BuildCBEngineArgs(spec *lmcachev1alpha1.CacheBlendEngineSpec) []string {
 	return args
 }
 
-// BuildCBEngineDaemonSet constructs the DaemonSet for the blend_v3 engine of the
+// BuildCBEngineDaemonSet constructs the DaemonSet for the blend engine of the
 // given CacheBlendEngine. It reuses the shared GPU/security pod-template
-// scaffolding (hostIPC, runtimeClassName=nvidia, NVIDIA_VISIBLE_DEVICES=all,
-// privileged only when spec.privileged=true (default false), CPU+memory-only
-// resources with no nvidia.com/gpu claim) so the engine shares the node's GPU
-// via CUDA IPC, and adds the blend-specific server args.
+// scaffolding (host /dev/shm sharing for CUDA IPC — hostPath mount by default,
+// host IPC namespace when spec.hostIPC=true — runtimeClassName=nvidia,
+// NVIDIA_VISIBLE_DEVICES=all, privileged only when spec.privileged=true
+// (default false), CPU+memory-only resources with no nvidia.com/gpu claim) so
+// the engine shares the node's GPU via CUDA IPC, and adds the blend-specific
+// server args.
 func BuildCBEngineDaemonSet(engine *lmcachev1alpha1.CacheBlendEngine) *appsv1.DaemonSet {
 	engineSpec := cbSpecToEngineSpec(&engine.Spec)
 	return buildDaemonSetCore(
@@ -127,7 +129,7 @@ func BuildCBEngineDaemonSet(engine *lmcachev1alpha1.CacheBlendEngine) *appsv1.Da
 
 // BuildCBEngineLookupService creates the node-local lookup Service
 // (internalTrafficPolicy=Local) for the CacheBlendEngine, so opted-in vLLM pods
-// reach the blend_v3 engine on their own node.
+// reach the blend engine on their own node.
 func BuildCBEngineLookupService(engine *lmcachev1alpha1.CacheBlendEngine) *corev1.Service {
 	return buildLookupServiceCore(engine.Name, engine.Namespace, cbSpecToEngineSpec(&engine.Spec))
 }
@@ -140,9 +142,11 @@ func BuildCBEngineMetricsService(engine *lmcachev1alpha1.CacheBlendEngine) *core
 
 // BuildCBConnectionConfigMap creates the <engine>-connection ConfigMap carrying
 // the CBKVConnector kv-transfer-config JSON (design §7). The JSON points vLLM at
-// the node-local Service (lmcache.mp.host) and carries the blend tunables
-// cb.check_layer and cb.recomp_ratio read from spec.Blend (defaults are pinned by
-// SetDefaults: checkLayer=1, recompRatio=0.15).
+// the node-local Service (lmcache.mp.host) and carries the blend tunables read
+// from spec.Blend: cb.check_layer and cb.recomp_ratio (defaults are pinned by
+// SetDefaults: checkLayer=1, recompRatio=0.15), plus cb.partial_bucket when
+// spec.Blend.partialBucket is set (unset omits the key, leaving the connector's
+// padding disabled).
 func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev1.ConfigMap {
 	spec := &engine.Spec
 	// Use the same default (5555) as BuildContainerArgs/getServerPort so the
@@ -160,6 +164,9 @@ func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev
 	extra := map[string]any{
 		"cb.check_layer":  checkLayer,
 		"cb.recomp_ratio": recompRatio,
+	}
+	if spec.Blend != nil && spec.Blend.PartialBucket != nil {
+		extra["cb.partial_bucket"] = *spec.Blend.PartialBucket
 	}
 
 	return buildConnectionConfigMapCore(

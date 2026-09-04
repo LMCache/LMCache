@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 import enum
 
 # Third Party
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.v1.utils import ConstantList
 import torch
@@ -16,6 +17,7 @@ import torch
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
+    extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
@@ -30,11 +32,14 @@ class LMCacheMPRequestState(enum.Enum):
     State machine:
     PREFETCHING -- update_state_after_alloc --> WAITING_FOR_LOAD
     WAITING_FOR_LOAD -- process_loading_requests --> READY
+    READY -- failed async load --> BYPASS_LMCACHE
+    BYPASS_LMCACHE -- update_state_after_alloc --> READY
     """
 
     PREFETCHING = enum.auto()
     WAITING_FOR_LOAD = enum.auto()
     READY = enum.auto()
+    BYPASS_LMCACHE = enum.auto()
 
 
 @dataclass
@@ -68,12 +73,14 @@ class LMCacheMPRequestTracker:
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
     cache_salt: str = ""
+    request_configs: dict[str, Any] | None = None
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
+        self.request_configs = extract_request_configs_from_request(request)
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
@@ -95,7 +102,11 @@ class LMCacheMPRequestTracker:
         update_stage_after_alloc"""
         return (
             self.num_lmcache_hit_tokens > self.num_vllm_hit_tokens
-            and self.state != LMCacheMPRequestState.READY
+            and self.state
+            not in (
+                LMCacheMPRequestState.READY,
+                LMCacheMPRequestState.BYPASS_LMCACHE,
+            )
         )
 
     def is_ready_for_retrieving(self) -> bool:
@@ -171,6 +182,7 @@ class LMCacheMPRequestMetadata:
     direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
     cache_salt: str = ""
+    request_configs: dict[str, Any] | None = None
 
     @staticmethod
     def GetStoreMetadata(
@@ -258,6 +270,7 @@ class LMCacheMPRequestMetadata:
                 direction="STORE",
                 op=op,
                 cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
             )
 
             # Update the request tracker
@@ -334,6 +347,7 @@ class LMCacheMPRequestMetadata:
                 direction="RETRIEVE",
                 op=op,
                 cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
             )
             return ret
 
@@ -370,3 +384,25 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 
     def __repr__(self):
         return self.__str__()
+
+
+@dataclass
+class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
+    """Worker -> Scheduler metadata for completed store events.
+
+    Each worker reports {req_id: 1} for newly completed stores.
+    ``aggregate()`` sums counts across workers within a step.
+    The scheduler-side manager accumulates across steps and processes
+    a store completion only when count reaches ``world_size``.
+    """
+
+    completed_store_requests: dict[str, int]
+
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        assert isinstance(other, LMCacheMPWorkerMetadata)
+        merged = dict(self.completed_store_requests)
+        for k, v in other.completed_store_requests.items():
+            merged[k] = merged.get(k, 0) + v
+        return LMCacheMPWorkerMetadata(completed_store_requests=merged)
