@@ -562,6 +562,65 @@ class TestLoadInterface:
         # Data should be copied
         assert torch.all(load_obj.raw_data == 42.0)
 
+    def test_load_transfer_failure_reports_failure_and_releases_handle(
+        self, adapter, monkeypatch
+    ):
+        """A failed NIXL transfer should fail the batch and release its handle."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        key = create_object_key(1)
+
+        store_obj = create_memory_obj(buf, page_index=0, fill_value=42.0)
+        store_fd = adpt.get_store_event_fd()
+        load_fd = adpt.get_load_event_fd()
+        adpt.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        created_handles: list[object] = []
+        released_handles: list[object] = []
+        get_handle = adpt.nixl_agent.get_storage_to_mem_handle
+        release_handle = adpt.nixl_agent.release_handle
+
+        def record_created_handle(
+            mem_indices: list[int], storage_indices: list[int]
+        ) -> object:
+            handle = get_handle(mem_indices, storage_indices)
+            created_handles.append(handle)
+            return handle
+
+        async def fail_transfer(_handle: object) -> None:
+            raise RuntimeError("injected NIXL load failure")
+
+        def record_released_handle(handle: object) -> None:
+            released_handles.append(handle)
+            release_handle(handle)
+
+        monkeypatch.setattr(
+            adpt.nixl_agent,
+            "get_storage_to_mem_handle",
+            record_created_handle,
+        )
+        monkeypatch.setattr(adpt.nixl_agent, "post_non_blocking", fail_transfer)
+        monkeypatch.setattr(
+            adpt.nixl_agent,
+            "release_handle",
+            record_released_handle,
+        )
+
+        load_obj = create_memory_obj(buf, page_index=1, fill_value=0.0)
+        task_id = adpt.submit_load_task([key], [load_obj])
+
+        assert wait_for_event_fd(load_fd, timeout=5.0)
+        bitmap = adpt.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.test(0) is False
+        assert torch.all(load_obj.raw_data == 0.0)
+        assert listener.accessed == []
+        assert len(created_handles) == 1
+        assert released_handles == created_handles
+
     def test_query_load_result_returns_none_for_unknown_task(self, adapter):
         """Querying an unknown task ID should return None."""
         adpt, _ = adapter
