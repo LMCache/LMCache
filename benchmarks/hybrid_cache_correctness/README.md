@@ -45,3 +45,28 @@ Recommended experiment axes are cache off/L1/L2/L1+L2, BF16/FP8, aligned and
 unaligned prefixes, concurrency 1/8/32/64, graph mode, preemption/abort, and
 first/exact/partial reuse. Results from different hardware or capture contracts
 must not be combined as one performance score.
+
+## Live exact-prefix end-to-end check
+
+With an LMCache server on ports 6555/8080 and a vLLM server on port 8000
+started with `LMCacheMPConnector`, `--no-enable-prefix-caching`, and
+`--return-tokens-as-token-ids`, run:
+
+```bash
+python -m benchmarks.hybrid_cache_correctness.live_e2e \
+  --model Qwen/Qwen3-0.6B \
+  --output-dir /tmp/lmcache-hybrid-correctness-e2e
+```
+
+The driver makes two deterministic multi-step requests with the same prompt
+and cache salt. For every accepted token it captures the real vLLM token,
+log-probability and top-k set, retrieves the real contiguous KV tensor through
+the LMCache SDK, hashes its bytes, and records request/cache/lifecycle state.
+The second request exercises exact-prefix reuse, then the driver writes both
+traces and their comparison report outside the source tree and exits non-zero
+on the first mismatch. The reported timings are diagnostic values from that
+run; they are not a cross-machine performance score.
+
+The SDK does not expose vLLM's internal GPU block table, so this adapter labels
+`physical_page_ids` as the observed LMCache contiguous chunk ordinals. It does
+not present those ordinals as engine page addresses.
