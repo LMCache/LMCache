@@ -618,13 +618,22 @@ class MessageQueueServer:
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:
                 msg = self.socket.recv_multipart()
-                assert len(msg) >= 3, (
-                    "Expected at least 3 message parts "
-                    "[identity, request_uid, request_type, *payloads]"
-                )
+                if len(msg) < 3:
+                    logger.error(
+                        "Malformed request: expected at least 3 message parts "
+                        "[identity, request_uid, request_type, *payloads], got %d",
+                        len(msg),
+                    )
+                    continue
 
                 identity, b_request_uid, b_request_type, *payloads = msg
-                request_type = msgspec_decode(b_request_type, cls=RequestType)
+                try:
+                    request_type = msgspec_decode(b_request_type, cls=RequestType)
+                except Exception:
+                    logger.exception(
+                        "Failed to decode request type; dropping malformed request"
+                    )
+                    continue
 
                 if handler_entry := self.handlers.get(request_type):
                     try:

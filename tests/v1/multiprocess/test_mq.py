@@ -690,6 +690,61 @@ def test_shared_loop_dispatch():
         server.close()
 
 
+def test_server_survives_malformed_request_headers() -> None:
+    """Malformed peers must not terminate the shared server polling loop."""
+    # Standard
+    from unittest.mock import patch
+
+    # First Party
+    from lmcache.v1.multiprocess import mq as mq_module
+
+    server_url = "tcp://127.0.0.1:16021"
+    context = zmq.Context.instance()
+
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    malformed = context.socket(zmq.DEALER)
+    malformed.setsockopt(zmq.LINGER, 0)
+    malformed.connect(server_url)
+    healthy: MessageQueueClient | None = None
+    short_header_seen = threading.Event()
+    undecodable_type_seen = threading.Event()
+    try:
+        with (
+            patch.object(
+                mq_module.logger,
+                "error",
+                side_effect=lambda *_args, **_kwargs: short_header_seen.set(),
+            ),
+            patch.object(
+                mq_module.logger,
+                "exception",
+                side_effect=lambda *_args, **_kwargs: undecodable_type_seen.set(),
+            ),
+        ):
+            # ROUTER prepends the peer identity. This first message therefore
+            # has only two frames at the server and lacks a request type.
+            malformed.send_multipart([msgspec.msgpack.encode(1)])
+            assert short_header_seen.wait(timeout=5)
+
+            # This message has enough frames, but its request type is invalid
+            # MessagePack and must fail decoding without killing the loop.
+            malformed.send_multipart([msgspec.msgpack.encode(2), b"\xc1"])
+            assert undecodable_type_seen.wait(timeout=5)
+
+        healthy = MessageQueueClient(server_url, context)
+        response = healthy.submit_request(RequestType.NOOP, [])
+        assert response.result(timeout=5) == "NOOP_OK"
+        assert server.worker_thread.is_alive()
+    finally:
+        if healthy is not None:
+            healthy.close()
+        malformed.close()
+        server.close()
+
+
 def test_client_survives_undecodable_response() -> None:
     """
     Test that an undecodable response does not stop later requests working.
