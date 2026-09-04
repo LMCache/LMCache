@@ -633,6 +633,78 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
     assert tracker.state == LMCacheMPRequestState.READY
 
 
+def test_abort_during_pending_retrieve_does_not_report_store(fake_adapter) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    retrieve_future = MagicMock(name="retrieve_future")
+    retrieve_future.query.return_value = False
+    adapter.retrieve_futures["req-1"] = (retrieve_future, [7])
+
+    finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
+
+    assert finished_stores == set()
+    assert finished_retrieves == set()
+
+    finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
+
+    assert finished_stores == set()
+    assert finished_retrieves == set()
+
+
+def test_abort_when_retrieve_finishes_reports_only_retrieve(fake_adapter) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    retrieve_future = MagicMock(name="retrieve_future")
+    retrieve_future.query.return_value = True
+    retrieve_future.result.return_value = True
+    adapter.retrieve_futures["req-1"] = (retrieve_future, [7])
+
+    finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
+
+    assert finished_stores == set()
+    assert finished_retrieves == {"req-1"}
+
+
+def test_abort_after_retrieve_completion_does_not_report_store(fake_adapter) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    retrieve_future = MagicMock(name="retrieve_future")
+    retrieve_future.query.return_value = True
+    retrieve_future.result.return_value = True
+    adapter.retrieve_futures["req-1"] = (retrieve_future, [7])
+
+    finished_stores, finished_retrieves = adapter.get_finished(set())
+    assert finished_stores == set()
+    assert finished_retrieves == {"req-1"}
+
+    adapter.mark_aborted_retrieves({"req-1"})
+    finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
+
+    assert finished_stores == set()
+    assert finished_retrieves == set()
+
+    finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
+
+    assert finished_stores == set()
+    assert finished_retrieves == set()
+
+
+def test_unhealthy_worker_preserves_aborted_retrieve_suppression(
+    fake_adapter,
+) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    adapter.mark_aborted_retrieves({"req-1"})
+    adapter._health_event.clear()
+
+    finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
+
+    assert finished_stores == set()
+    assert finished_retrieves == set()
+
+    adapter._health_event.set()
+    finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
+
+    assert finished_stores == set()
+    assert finished_retrieves == set()
+
+
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
     """instance_id is a 63-bit int, not the PID, and unique per adapter."""
     adapter, _send_mock, _ = fake_adapter
