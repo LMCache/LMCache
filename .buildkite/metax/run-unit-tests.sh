@@ -62,25 +62,6 @@ pytest --maxfail=1 --cov=lmcache \
 #   a pipe the parent blocks on with no timeout). The real fix is upstream:
 #   generalize the ROCm-only skip to cover any environment without
 #   `cuda.bindings`.
-#
-# - test_mq.py, test_cb_plan_executor_gpu.py, test_custom_types.py,
-#   test_engine_driven_transfer.py, test_free_locks.py,
-#   test_query_lookup_hits.py (whole files ignored); plus
-#   test_server_bench.py::TestUnregisterKVCache, test_key_directory.py's
-#   uint32 case, and test_torch_ops.py's two TestScenarios cases (deselected
-#   individually, since most other tests in those files pass): failing, but
-#   not root-caused, parked here deliberately rather than investigated
-#   further for now -- none of these should be assumed to be a real MACA
-#   capability gap the way the exclusions above are.
-#
-#   Most of the multiprocess/ cluster times out on an MP-server round trip;
-#   not yet confirmed whether that's host contention (like
-#   test_instances_usage_e2e.py above) or a real bug. MACA_MPS_MODE=1 (see
-#   common-setup.sh) does not fix this cluster. test_key_directory.py's case
-#   coincides with a numpy deprecation warning about out-of-bound integer
-#   conversion, which may mean its expected outcome no longer matches
-#   current numpy behavior -- worth checking first. Revisit all of these
-#   with dedicated root-causing when there's time for it.
 
 cat << EOF | buildkite-agent annotate --style "info"
   Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
