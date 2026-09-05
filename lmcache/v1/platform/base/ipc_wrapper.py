@@ -111,6 +111,14 @@ class DeviceIPCWrapper:
         """
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release process-local resources held for reconstruction.
+
+        Called by cache-context teardown once the tensors returned by
+        :meth:`to_tensor` are no longer used. The default is a no-op.
+        """
+        return None
+
     def __eq__(self, other: object) -> bool:
         # ``isinstance`` first so type-checkers can narrow ``other`` to
         # ``DeviceIPCWrapper`` before we touch its attributes; the

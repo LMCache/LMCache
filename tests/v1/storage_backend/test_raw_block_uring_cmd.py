@@ -86,13 +86,14 @@ def _run_uring_cmd_build_error_probe(device_path: str) -> None:
             [lba_size] * len(buffers),
         )
 
-        try:
-            raw_device.wait_iouring(batch_id)
-        except ValueError as error:
-            if "offset must be aligned to LBA size" not in str(error):
-                raise
-        else:
+        results, errors = raw_device.wait_iouring(batch_id)
+        if results != [True, False, True]:
+            raise AssertionError(f"unexpected completion results: {results}")
+        middle_errors = [error for index, error in errors if index == 1]
+        if not middle_errors:
             raise AssertionError("expected the unaligned middle SQE build to fail")
+        if "offset must be aligned to LBA size" not in middle_errors[0]:
+            raise AssertionError(f"unexpected middle SQE error: {middle_errors[0]}")
     finally:
         raw_device.close()
         for buffer in buffers:
@@ -507,7 +508,7 @@ def test_uring_cmd_batched_read_handles_unaligned_buffer() -> None:
         total_lens = [total_len] * len(offsets)
 
         batch_id = raw_dev.batched_read(offsets, buffers, total_lens)
-        raw_dev.wait_iouring(batch_id)
+        assert raw_dev.wait_iouring(batch_id) == ([True] * len(offsets), [])
     finally:
         raw_dev.close()
 
@@ -521,7 +522,7 @@ def test_uring_cmd_batched_read_short_buffer_uses_bounce() -> None:
         total_len = 8192
         buf = bytearray(4096)
         batch_id = raw_dev.batched_read([0], [buf], [total_len])
-        raw_dev.wait_iouring(batch_id)
+        assert raw_dev.wait_iouring(batch_id) == ([True], [])
     finally:
         raw_dev.close()
 
@@ -538,7 +539,7 @@ def test_uring_cmd_batched_read_independent_per_item_bounce_decision() -> None:
         total_lens = [total_len, total_len]
 
         batch_id = raw_dev.batched_read(offsets, buffers, total_lens)
-        raw_dev.wait_iouring(batch_id)
+        assert raw_dev.wait_iouring(batch_id) == ([True, True], [])
     finally:
         raw_dev.close()
 

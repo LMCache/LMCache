@@ -197,6 +197,68 @@ def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
         )
 
 
+def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
+    """Registration identifies flat single-head pools as split K/V MHA."""
+    adapter_mod, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+    req_client = MagicMock(name="rpc_client")
+    req_client.register_kv_cache.return_value = SimpleNamespace(
+        result=MagicMock(return_value=None)
+    )
+
+    class FakeHeartbeatThread:
+        def __init__(
+            self,
+            req_client: object,
+            health_event: threading.Event,
+            interval: float,
+            instance_id: int | None,
+        ) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "zmq",
+        SimpleNamespace(Context=SimpleNamespace(instance=lambda: object())),
+    )
+    request_client_factory = MagicMock(name="request_client_factory")
+    request_client_factory.create.return_value = req_client
+    monkeypatch.setattr(
+        adapter_mod,
+        "RequestClientFactory",
+        request_client_factory,
+    )
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda _client: 4)
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "get_device_spec",
+        lambda _device_type: SimpleNamespace(is_handle_transfer_available=lambda: True),
+    )
+    monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", lambda tensor: tensor)
+
+    k_pool = [torch.empty(4, 1, 8) for _ in range(2)]
+    v_pool = [torch.empty(4, 1, 8) for _ in range(2)]
+    LMCacheMPConnector(
+        sgl_config=SimpleNamespace(model_path="test-model"),
+        tp_size=1,
+        rank=0,
+        page_size=2,
+        host="127.0.0.1",
+        port=5556,
+        k_pool=k_pool,
+        v_pool=v_pool,
+    )
+
+    req_client.register_kv_cache.assert_called_once()
+    assert req_client.register_kv_cache.call_args.args[5] == {
+        "tokens_per_block": 2,
+        "kv_list_layout": "k_v",
+    }
+
+
 @pytest.mark.parametrize(
     ("k_pool", "v_pool", "message"),
     [
@@ -230,13 +292,9 @@ def test_mp_connector_validates_pools_before_opening_mq(
 
 
 def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    _, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=False)
-
-    def _fail_send(*args, **kwargs):
-        pytest.fail("send_lmcache_request must not be called when unhealthy")
-
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", _fail_send)
+    conn.req_client = MagicMock(name="rpc_client")
 
     future = conn.store_kv_async(_store_metadata(num_tokens=4 * _CHUNK_SIZE))
 
@@ -244,24 +302,22 @@ def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> 
     assert future.query() is True
     # Unhealthy connector stored nothing -> the future must report failure.
     assert future.result(timeout=0) is False
+    conn.req_client.store.assert_not_called()
 
 
 def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
     monkeypatch,
 ) -> None:
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    _, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
-
-    def _fail_send(*args, **kwargs):
-        pytest.fail("send_lmcache_request must not be called with no aligned range")
-
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", _fail_send)
+    conn.req_client = MagicMock(name="rpc_client")
 
     # Fewer tokens than one chunk -> aligned_end == 0 -> no wire send.
     future = conn.store_kv_async(_store_metadata(num_tokens=_CHUNK_SIZE - 1))
 
     assert isinstance(future, MessagingFuture)
     assert future.result(timeout=0) is True
+    conn.req_client.store.assert_not_called()
 
 
 def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
@@ -269,7 +325,7 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
 ) -> None:
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
-    conn.mq_client = object()  # type: ignore[assignment]
+    conn.req_client = MagicMock(name="rpc_client")
     conn.instance_id = 123
     conn.device = "cpu"
     # Stub the helpers store_kv_async calls so we exercise only its own logic.
@@ -278,11 +334,7 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
 
     sentinel = _SpyFuture()
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
-    monkeypatch.setattr(
-        adapter_mod,
-        "send_lmcache_request",
-        lambda mq_client, request_type, payload: _FakeRaw(sentinel),
-    )
+    conn.req_client.store.return_value = _FakeRaw(sentinel)
 
     future = conn.store_kv_async(_store_metadata(num_tokens=4 * _CHUNK_SIZE))
 
@@ -299,21 +351,18 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     """The producer event outlives daemon import through the returned future."""
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     connector = _make_connector(healthy=True)
-    connector.mq_client = object()  # type: ignore[assignment]
+    connector.req_client = MagicMock(name="rpc_client")
     connector.instance_id = 123
     connector.device = "cpu"
     connector.model_name = "test-model"
     connector.tp_size = 1
     connector.worker_id = 0
     sentinel = _SpyFuture()
+    raw = _FakeRaw(sentinel)
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
-    monkeypatch.setattr(
-        adapter_mod,
-        "send_lmcache_request",
-        lambda mq_client, request_type, payload: _FakeRaw(sentinel),
-    )
+    connector.req_client.retrieve.return_value = raw
 
-    future = connector._submit_retrieve(
+    raw_future, future = connector._submit_retrieve(
         request_id="request-1",
         token_ids=[1, 2],
         offset=0,
@@ -321,9 +370,71 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
         block_ids=[0],
     )
 
+    assert raw_future is raw
     assert future is sentinel
     assert len(sentinel.retained_references) == 1
     assert isinstance(sentinel.retained_references[0], _FakeEvent)
+
+
+@pytest.mark.parametrize(
+    ("event_handle", "expected_free_ranges"),
+    [
+        (b"", [(0, _CHUNK_SIZE)]),
+        (
+            b"completion-event",
+            [(0, _CHUNK_SIZE), (_CHUNK_SIZE, 2 * _CHUNK_SIZE)],
+        ),
+    ],
+)
+def test_retrieve_failure_uses_single_cleanup_owner(
+    event_handle: bytes,
+    expected_free_ranges: list[tuple[int, int]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event-free failure must not repeat server-side lock cleanup."""
+    adapter_mod, _, _completed_future, _, LoadMetadata, _ = _import_adapter_symbols()
+    connector = _make_connector(healthy=True)
+    connector.req_client = MagicMock(name="rpc_client")
+    connector.model_name = "test-model"
+    connector.tp_size = 2
+    connector.worker_id = 0
+    connector.page_size = _CHUNK_SIZE
+    connector._pending_lookups = {
+        "request-1": SimpleNamespace(
+            token_ids=list(range(2 * _CHUNK_SIZE)),
+            matched_token_num=2 * _CHUNK_SIZE,
+            locks_held=True,
+        )
+    }
+    connector._pending_lookups_lock = threading.Lock()
+    connector._slot_mapping_to_block_ids = MagicMock(return_value=[1])
+
+    free_ranges: list[tuple[int, int]] = []
+
+    def record_free_request(key: Any, _tp_size: int) -> MessagingFuture[bool]:
+        free_ranges.append((key.start, key.end))
+        return _completed_future(True)
+
+    connector.req_client.free_lookup_locks.side_effect = record_free_request
+
+    raw_future: MessagingFuture[tuple[bytes, bool]] = MessagingFuture()
+    raw_future.set_result((event_handle, False))
+    connector._submit_retrieve = MagicMock(
+        return_value=(raw_future, _completed_future(False))
+    )
+    token_ids = connector._pending_lookups["request-1"].token_ids
+    metadata = LoadMetadata(
+        token_ids=token_ids,
+        slot_mapping=torch.arange(2 * _CHUNK_SIZE),
+        offset=_CHUNK_SIZE,
+        request_id="request-1",
+    )
+
+    with pytest.raises(RuntimeError, match="LMCache MP retrieve failed"):
+        connector.retrieve_kv(metadata)
+
+    assert free_ranges == expected_free_ranges
+    assert connector._pending_lookups["request-1"].locks_held is False
 
 
 def test_layerwise_load_forwards_partial_slot_mapping_offset() -> None:

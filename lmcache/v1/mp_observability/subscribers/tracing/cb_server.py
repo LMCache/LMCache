@@ -3,27 +3,21 @@
 """OTel tracing subscriber for Cache Blending (CB) operations.
 
 Creates a root ``"cb.request"`` span per session wrapping all CB child spans.
-Opens at ``CB_REQUEST_START``; closes at ``CB_REQUEST_END``, deferred until
-any in-flight GPU store/retrieve callbacks complete **and** until
-``CB_STORE_FINAL_SUBMITTED`` has been received (if a retrieve was submitted).
+Opens at ``CB_REQUEST_START``; closes at ``CB_REQUEST_END``, deferred while a
+GPU retrieve submitted for the session is still in flight:
 
-On the HIT path the lifecycle is:
+  CB_REQUEST_START → cb.lookup (+ sub-spans)
+      → CB_RETRIEVE_SUBMITTED → cb.retrieve (+ cb.scatter) → CB_RETRIEVE_END
+      → CB_REQUEST_END
 
-  CB_RETRIEVE_SUBMITTED → [retrieve GPU op] → CB_RETRIEVE_END
-      → [inference, ~hundreds of ms, pending_gpu_ops==0 here]
-  CB_STORE_FINAL_SUBMITTED → CB_REQUEST_END → [store GPU op] → CB_STORE_FINAL_END
+The request ends at the last ``CB_RETRIEVE_END``. The ``CB_RETRIEVE_SUBMITTED``
+sentinel matters at TP>1: a worker whose retrieve is a no-op publishes
+``CB_REQUEST_END`` on the CPU while another worker's scatter is still on the
+stream, so the root close is gated on ``_pending_gpu_ops[sid] == 0``. A request
+whose lookup found nothing to retrieve (miss, or prefix-only) never reaches a
+retrieve, so ``cb_unified_lookup`` publishes ``CB_REQUEST_END`` itself.
 
-During inference ``_pending_gpu_ops`` is 0, so a stray ``CB_REQUEST_END``
-(e.g. from a second CB lookup call that misses) would
-otherwise close the root span prematurely.  ``_waiting_for_store_final``
-bridges this gap: it is populated by ``CB_RETRIEVE_SUBMITTED`` and cleared by
-``CB_STORE_FINAL_SUBMITTED``, so the root span cannot close until both
-conditions hold simultaneously:
-
-* ``_pending_gpu_ops[sid] == 0``
-* ``sid not in _waiting_for_store_final``
-
-``cb.request`` is the trace root: blend_v3 owns the CB lookup end-to-end (prefix
+``cb.request`` is the trace root: the blend module owns the CB lookup end-to-end (prefix
 + non-prefix legs, direct against the storage manager), so a CB request never
 opens an MP ``"request"`` span to nest under. The optional
 :class:`~lmcache.v1.mp_observability.subscribers.tracing.span_registry\
@@ -58,8 +52,8 @@ class BlendTracingSubscriber(EventSubscriber):
     """Creates OTel spans from CB (Cache Blending) START/END event pairs.
 
     Each session gets one root ``"cb.request"`` span that nests all child
-    spans (``cb.lookup``, ``cb.store_pre_computed``, ``cb.retrieve``,
-    ``cb.store_final``).  The root is opened at ``CB_REQUEST_START`` and
+    spans (``cb.lookup`` and its sub-spans, ``cb.retrieve`` and
+    ``cb.scatter``).  The root is opened at ``CB_REQUEST_START`` and
     closed at ``CB_REQUEST_END``, with deferral if GPU ops are still in
     flight.
 
@@ -69,21 +63,19 @@ class BlendTracingSubscriber(EventSubscriber):
 
     # Maps each START event to its span name (used for creation and registry key).
     _SPAN_DEFS: dict[EventType, str] = {
-        EventType.CB_STORE_PRE_COMPUTED_START: "cb.store_pre_computed",
         EventType.CB_LOOKUP_START: "cb.lookup",
         EventType.CB_RETRIEVE_START: "cb.retrieve",
-        EventType.CB_STORE_FINAL_START: "cb.store_final",
-        # V3 lookup sub-spans (nest under cb.lookup, see _SPAN_PARENTS).
+        # Lookup sub-spans (nest under cb.lookup, see _SPAN_PARENTS).
         EventType.CB_FINGERPRINT_MATCH_START: "cb.fingerprint_match",
         EventType.CB_PREFIX_LOOKUP_START: "cb.prefix_lookup",
         EventType.CB_COORDINATOR_MATCH_START: "cb.coordinator_match",
         EventType.CB_SPARSE_PREFETCH_START: "cb.sparse_prefetch",
-        # V3 retrieve sub-span (nests under cb.retrieve).
+        # Retrieve sub-span (nests under cb.retrieve).
         EventType.CB_SCATTER_START: "cb.scatter",
     }
 
     # Child span -> parent span name for nesting; absent => nest under the
-    # cb.request root (the default for the top-level lookup/retrieve/store spans).
+    # cb.request root (the default for the top-level lookup/retrieve spans).
     _SPAN_PARENTS: dict[str, str] = {
         "cb.fingerprint_match": "cb.lookup",
         "cb.prefix_lookup": "cb.lookup",
@@ -93,10 +85,8 @@ class BlendTracingSubscriber(EventSubscriber):
     }
 
     _END_TO_START: dict[EventType, EventType] = {
-        EventType.CB_STORE_PRE_COMPUTED_END: EventType.CB_STORE_PRE_COMPUTED_START,
         EventType.CB_LOOKUP_END: EventType.CB_LOOKUP_START,
         EventType.CB_RETRIEVE_END: EventType.CB_RETRIEVE_START,
-        EventType.CB_STORE_FINAL_END: EventType.CB_STORE_FINAL_START,
         EventType.CB_FINGERPRINT_MATCH_END: EventType.CB_FINGERPRINT_MATCH_START,
         EventType.CB_PREFIX_LOOKUP_END: EventType.CB_PREFIX_LOOKUP_START,
         EventType.CB_COORDINATOR_MATCH_END: EventType.CB_COORDINATOR_MATCH_START,
@@ -105,13 +95,7 @@ class BlendTracingSubscriber(EventSubscriber):
     }
 
     # END events that correspond to a SUBMITTED sentinel (decrement ops counter)
-    _GPU_OP_END_EVENTS: frozenset[EventType] = frozenset(
-        {
-            EventType.CB_STORE_PRE_COMPUTED_END,
-            EventType.CB_RETRIEVE_END,
-            EventType.CB_STORE_FINAL_END,
-        }
-    )
+    _GPU_OP_END_EVENTS: frozenset[EventType] = frozenset({EventType.CB_RETRIEVE_END})
 
     def __init__(self, registry: SpanRegistry | None = None) -> None:
         self._registry = registry if registry is not None else SpanRegistry()
@@ -123,33 +107,21 @@ class BlendTracingSubscriber(EventSubscriber):
         self._pending_gpu_ops: dict[str, int] = {}
 
         # session_id -> REQUEST_END timestamp saved when GPU ops are in flight
-        # or when a store_final is still expected
         self._deferred_session_end_ts: dict[str, float] = {}
-
-        # Sessions where CB_RETRIEVE_SUBMITTED was seen but CB_STORE_FINAL_SUBMITTED
-        # has not yet arrived.  Prevents premature root-span closure during the
-        # inference window when _pending_gpu_ops is transiently 0.
-        self._waiting_for_store_final: set[str] = set()
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the event-to-callback mapping for this subscriber."""
         return {
             # Root span lifecycle
             EventType.CB_REQUEST_START: self._on_request_start,
-            EventType.CB_STORE_PRE_COMPUTED_SUBMITTED: self._on_submitted,
             EventType.CB_RETRIEVE_SUBMITTED: self._on_submitted,
-            EventType.CB_STORE_FINAL_SUBMITTED: self._on_submitted,
             EventType.CB_REQUEST_END: self._on_session_end,
             # Child spans
-            EventType.CB_STORE_PRE_COMPUTED_START: self._on_start,
-            EventType.CB_STORE_PRE_COMPUTED_END: self._on_end,
             EventType.CB_LOOKUP_START: self._on_start,
             EventType.CB_LOOKUP_END: self._on_end,
             EventType.CB_RETRIEVE_START: self._on_start,
             EventType.CB_RETRIEVE_END: self._on_end,
-            EventType.CB_STORE_FINAL_START: self._on_start,
-            EventType.CB_STORE_FINAL_END: self._on_end,
-            # V3 lookup sub-spans (nested under cb.lookup)
+            # Lookup sub-spans (nested under cb.lookup)
             EventType.CB_FINGERPRINT_MATCH_START: self._on_start,
             EventType.CB_FINGERPRINT_MATCH_END: self._on_end,
             EventType.CB_PREFIX_LOOKUP_START: self._on_start,
@@ -158,12 +130,13 @@ class BlendTracingSubscriber(EventSubscriber):
             EventType.CB_COORDINATOR_MATCH_END: self._on_end,
             EventType.CB_SPARSE_PREFETCH_START: self._on_start,
             EventType.CB_SPARSE_PREFETCH_END: self._on_end,
-            # V3 retrieve sub-span (nested under cb.retrieve, GPU-timed)
+            # Retrieve sub-span (nested under cb.retrieve, GPU-timed)
             EventType.CB_SCATTER_START: self._on_start,
             EventType.CB_SCATTER_END: self._on_end,
             # Point events
             EventType.CB_FINGERPRINTS_REGISTERED: self._on_point,
             EventType.CB_CHUNKS_EVICTED: self._on_point,
+            EventType.CB_RETRIEVE_NOOP: self._on_point,
         }
 
     # ------------------------------------------------------------------
@@ -188,7 +161,6 @@ class BlendTracingSubscriber(EventSubscriber):
             self._registry.clear_session(sid)
         self._pending_gpu_ops.clear()
         self._deferred_session_end_ts.clear()
-        self._waiting_for_store_final.clear()
 
     # ------------------------------------------------------------------
     # Root span handlers
@@ -197,8 +169,8 @@ class BlendTracingSubscriber(EventSubscriber):
     def _on_request_start(self, event: Event) -> None:
         """Create the ``"cb.request"`` root span.
 
-        blend_v3 owns the CB lookup end-to-end, so a CB request never opens an MP
-        ``"request"`` span — ``cb.request`` is the trace root.
+        The blend module owns the CB lookup end-to-end, so a CB request never
+        opens an MP ``"request"`` span — ``cb.request`` is the trace root.
 
         Args:
             event: ``CB_REQUEST_START`` event with ``session_id`` set.
@@ -219,37 +191,23 @@ class BlendTracingSubscriber(EventSubscriber):
         )
 
     def _on_submitted(self, event: Event) -> None:
-        """Increment the in-flight GPU-ops counter and update store-final tracking.
-
-        ``CB_RETRIEVE_SUBMITTED`` marks the session as waiting for a store_final,
-        bridging the inference gap where ``_pending_gpu_ops`` is transiently 0.
-        ``CB_STORE_FINAL_SUBMITTED`` clears that marker (store_final has arrived).
+        """Increment the in-flight GPU-ops counter for the session.
 
         Args:
-            event: One of ``CB_STORE_PRE_COMPUTED_SUBMITTED``,
-                ``CB_RETRIEVE_SUBMITTED``, or ``CB_STORE_FINAL_SUBMITTED``.
+            event: ``CB_RETRIEVE_SUBMITTED``, published on the CPU before the
+                retrieve's GPU work is enqueued.
         """
         if not _HAS_OTEL:
             return
         sid = event.session_id
         self._pending_gpu_ops[sid] = self._pending_gpu_ops.get(sid, 0) + 1
-        if event.event_type == EventType.CB_RETRIEVE_SUBMITTED:
-            self._waiting_for_store_final.add(sid)
-        elif event.event_type == EventType.CB_STORE_FINAL_SUBMITTED:
-            self._waiting_for_store_final.discard(sid)
 
     def _on_session_end(self, event: Event) -> None:
-        """Close the root span, or defer if GPU ops are in flight or store_final
-        is pending.
+        """Close the root span, or defer while a GPU retrieve is in flight.
 
-        Defers when either condition holds:
-        * ``_pending_gpu_ops[sid] > 0`` — a GPU callback is still in flight.
-        * ``sid in _waiting_for_store_final`` — retrieve completed but
-          ``CB_STORE_FINAL_SUBMITTED`` has not yet arrived (inference window).
-
-        Always overwrites any previously saved deferred timestamp so the
-        ``CB_REQUEST_END`` from ``cb_store_final`` (the correct logical end)
-        supersedes an earlier one from a concurrent lookup miss.
+        Always overwrites any previously saved deferred timestamp so the latest
+        ``CB_REQUEST_END`` (the correct logical end) supersedes an earlier one
+        from a sibling worker's no-op retrieve.
 
         Args:
             event: ``CB_REQUEST_END`` event carrying the logical end timestamp.
@@ -257,10 +215,7 @@ class BlendTracingSubscriber(EventSubscriber):
         if not _HAS_OTEL:
             return
         sid = event.session_id
-        if (
-            self._pending_gpu_ops.get(sid, 0) == 0
-            and sid not in self._waiting_for_store_final
-        ):
+        if self._pending_gpu_ops.get(sid, 0) == 0:
             self._close_request_span(sid, event.timestamp)
         else:
             self._deferred_session_end_ts[sid] = event.timestamp
@@ -303,7 +258,7 @@ class BlendTracingSubscriber(EventSubscriber):
     def _on_end(self, event: Event) -> None:
         """Close a pending child span and handle GPU-ops counter deferral.
 
-        For GPU-backed END events (store_pre_computed, retrieve, store_final),
+        For the GPU-backed ``CB_RETRIEVE_END``,
         decrements the in-flight counter; if it reaches zero and a deferred
         session-end timestamp exists, closes the root span using the GPU
         callback timestamp so that ``cb.request`` end_time reflects when
@@ -377,19 +332,22 @@ class BlendTracingSubscriber(EventSubscriber):
             if (
                 sid in self._deferred_session_end_ts
                 and self._pending_gpu_ops.get(sid, 0) == 0
-                and sid not in self._waiting_for_store_final
             ):
                 self._deferred_session_end_ts.pop(sid)
                 # Use the GPU callback timestamp so cb.request end_time reflects
-                # when inference + the GPU copy actually finished, not when
-                # cb_store_final was submitted on the CPU.
+                # when the scatter actually finished, not when the sibling
+                # worker's CB_REQUEST_END landed on the CPU.
                 self._close_request_span(sid, event.timestamp)
 
     def _on_point(self, event: Event) -> None:
         """Emit an instant span for point events (no paired END).
 
         Args:
-            event: ``CB_FINGERPRINTS_REGISTERED`` or ``CB_CHUNKS_EVICTED``.
+            event: ``CB_FINGERPRINTS_REGISTERED``, ``CB_CHUNKS_EVICTED``, or
+                ``CB_RETRIEVE_NOOP``. The first two run outside the originating
+                request's span and so routinely land as trace roots of their
+                own; only ``CB_RETRIEVE_NOOP`` reliably nests under
+                ``cb.request``.
         """
         if not _HAS_OTEL:
             return
@@ -426,4 +384,3 @@ class BlendTracingSubscriber(EventSubscriber):
                 pass
         self._pending_gpu_ops.pop(session_id, None)
         self._deferred_session_end_ts.pop(session_id, None)
-        self._waiting_for_store_final.discard(session_id)
