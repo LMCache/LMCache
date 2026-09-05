@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.protocols.base import RequestType
 
 
 class RequestClient(Protocol):
@@ -99,6 +100,10 @@ class RequestClient(Protocol):
     def get_chunk_size(self) -> MessagingFuture[Any]: ...
 
     def ping(self, instance_id: int | None) -> MessagingFuture[Any]: ...
+
+    def ping_registered(
+        self, instance_id: int, expected_registration_types: list[RequestType]
+    ) -> MessagingFuture[Any]: ...
 
     def report_block_allocation(
         self,

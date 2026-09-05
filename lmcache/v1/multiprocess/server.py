@@ -226,6 +226,14 @@ def _build_modules(
         for m in transfer_modules
         if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
     ]
+    registration_targets: dict[RequestType, InstanceLivenessTarget] = {}
+    for module in liveness_targets:
+        if isinstance(module, LMCacheDrivenTransferModule):
+            registration_targets[RequestType.REGISTER_KV_CACHE] = module
+        elif isinstance(module, EngineDrivenTransferModule):
+            registration_targets[
+                RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+            ] = module
 
     blend_module: EngineModule | None = None
     mirror_state_owner: InstanceLivenessTarget | None = None
@@ -298,11 +306,13 @@ def _build_modules(
         module = QStoreModule(ctx)
         experimental_modules.append(module)
         liveness_targets.append(module)
+        registration_targets[RequestType.REGISTER_Q_CACHE] = module
         experimental_transfer.append(enabled_module)
 
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
+        registration_targets=registration_targets,
         mirror_state_owner=mirror_state_owner,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,

@@ -29,6 +29,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
@@ -129,13 +130,27 @@ def test_gpu_ping_and_transfer_latch_independently() -> None:
     assert module._cache_contexts[1].has_liveness_signal is False
     assert module._cache_contexts[1].has_transfer_activity is False
 
-    module.touch_instance(1)
+    assert module.touch_instance(1) is True
     assert module._cache_contexts[1].has_liveness_signal is True
     assert module._cache_contexts[1].has_transfer_activity is False
 
     module.get_and_touch_context_entry(1, transfer_activity=True)
     assert module._cache_contexts[1].has_transfer_activity is True
-    module.touch_instance(999)  # absent -> no error
+    assert module.touch_instance(999) is False
+
+
+def test_other_context_types_report_registration_presence() -> None:
+    non_gpu = _bare_non_gpu_module()
+    non_gpu._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
+        MagicMock(), "m", 1, 0.0
+    )
+    qstore = _bare_q_module()
+    qstore._q_contexts[1] = ContextEntry(MagicMock(), "q", 1, last_seen=0.0)
+
+    assert non_gpu.touch_instance(1) is True
+    assert non_gpu.touch_instance(999) is False
+    assert qstore.touch_instance(1) is True
+    assert qstore.touch_instance(999) is False
 
 
 @pytest.mark.parametrize(
@@ -292,12 +307,14 @@ class _FakeTarget:
 
     def __init__(self) -> None:
         self.touched: list[int] = []
+        self.registered: set[int] = set()
         self.to_reap: list[int] = []
         self.dropped: list[int] = []
         self.count = 0
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         self.touched.append(instance_id)
+        return instance_id in self.registered
 
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
@@ -329,6 +346,51 @@ def test_management_ping_touches_targets() -> None:
     assert mgmt.ping(42) is True
     assert mgmt.ping(None) is True
     assert target.touched == [42]
+
+
+@pytest.mark.parametrize(
+    ("gpu_present", "qstore_present", "expected_missing"),
+    [
+        (True, True, []),
+        (False, True, [RequestType.REGISTER_KV_CACHE]),
+        (True, False, [RequestType.REGISTER_Q_CACHE]),
+        (
+            False,
+            False,
+            [RequestType.REGISTER_KV_CACHE, RequestType.REGISTER_Q_CACHE],
+        ),
+    ],
+)
+def test_registration_aware_ping_distinguishes_contexts(
+    gpu_present: bool,
+    qstore_present: bool,
+    expected_missing: list[RequestType],
+) -> None:
+    gpu = _FakeTarget()
+    qstore = _FakeTarget()
+    if gpu_present:
+        gpu.registered.add(42)
+    if qstore_present:
+        qstore.registered.add(42)
+    mgmt = ManagementModule(
+        MagicMock(),
+        registration_targets={
+            RequestType.REGISTER_KV_CACHE: gpu,
+            RequestType.REGISTER_Q_CACHE: qstore,
+        },
+    )
+
+    assert (
+        mgmt.ping_registered(
+            42,
+            [RequestType.REGISTER_KV_CACHE, RequestType.REGISTER_Q_CACHE],
+        )
+        == expected_missing
+    )
+    assert gpu.touched == [42]
+    assert qstore.touched == [42]
+    # Compatibility PING still reports server availability for an absent ID.
+    assert mgmt.ping(999) is True
 
 
 def test_management_reaper_reaps_and_drops() -> None:

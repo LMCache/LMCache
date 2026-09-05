@@ -82,7 +82,7 @@ class InstanceLivenessTarget(Protocol):
     touches a module's private state directly.
     """
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         """Refresh the worker's last-seen time and record a PING.
 
         A no-op if the instance is not tracked (already reaped or never
@@ -90,8 +90,11 @@ class InstanceLivenessTarget(Protocol):
 
         Args:
             instance_id: The worker's opaque instance ID.
+        Returns:
+            True when the registration exists and was refreshed; False when
+            it is absent or this target owns no liveness state.
         """
-        return
+        return False
 
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float

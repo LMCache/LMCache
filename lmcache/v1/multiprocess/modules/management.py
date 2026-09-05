@@ -2,7 +2,7 @@
 """Management and utility operations for the MPCacheServer."""
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import threading
 
 # First Party
@@ -40,6 +40,8 @@ class ManagementModule:
             whose per-context registrations are refreshed on PING and scanned
             for staleness, plus any state mirror (e.g. ``BlendModule``)
             notified via ``drop_instance_state`` when an instance is reaped.
+        registration_targets: Registration request types mapped to the owning
+            liveness target for registration-aware worker heartbeats.
         mirror_state_owner: The liveness target whose reaps invalidate mirrored
             per-instance state. Reaps from other contexts with the same
             ``instance_id`` do not notify mirrors.
@@ -56,6 +58,8 @@ class ManagementModule:
         self,
         ctx: MPCacheServerContext,
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
+        registration_targets: Mapping[RequestType, InstanceLivenessTarget]
+        | None = None,
         mirror_state_owner: InstanceLivenessTarget | None = None,
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
@@ -64,6 +68,7 @@ class ManagementModule:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
+        self._registration_targets = dict(registration_targets or {})
         self._mirror_state_owner = mirror_state_owner
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
@@ -108,6 +113,11 @@ class ManagementModule:
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(RequestType.PING, self.ping, ThreadPoolType.NORMAL),
+            HandlerSpec(
+                RequestType.PING_REGISTERED,
+                self.ping_registered,
+                ThreadPoolType.NORMAL,
+            ),
             HandlerSpec(RequestType.NOOP, self.debug, ThreadPoolType.SYNC),
             HandlerSpec(
                 RequestType.REPORT_BLOCK_ALLOCATION,
@@ -161,6 +171,24 @@ class ManagementModule:
             for target in self._liveness_targets:
                 target.touch_instance(instance_id)
         return True
+
+    def ping_registered(
+        self,
+        instance_id: int,
+        expected_registration_types: list[RequestType],
+    ) -> list[RequestType]:
+        """Refresh expected registrations and return any that are absent.
+
+        Each target checks existence and refreshes ``last_seen`` under its
+        registry lock, so a successful result cannot race a reap on that
+        target between a separate check and touch.
+        """
+        missing: list[RequestType] = []
+        for request_type in expected_registration_types:
+            target = self._registration_targets.get(request_type)
+            if target is None or not target.touch_instance(instance_id):
+                missing.append(request_type)
+        return missing
 
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan: reap stale contexts and drop owned mirrors.

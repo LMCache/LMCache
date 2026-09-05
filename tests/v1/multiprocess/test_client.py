@@ -119,6 +119,23 @@ def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
     ]
 
 
+def test_registration_aware_ping_delegates_to_zmq_request_envelope() -> None:
+    transport = _RecordingMessageQueueClient()
+    client = ZmqMultiprocessClient(transport)
+    request_type = RequestType.PING_REGISTERED
+
+    future = client.ping_registered(7, [RequestType.REGISTER_KV_CACHE])
+
+    assert future.result(timeout=0) is request_type
+    assert transport.calls == [
+        (
+            request_type,
+            [7, [RequestType.REGISTER_KV_CACHE]],
+            get_response_class(request_type),
+        )
+    ]
+
+
 def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
     transport = _RecordingMessageQueueClient()
     client = ZmqMultiprocessClient(transport)
