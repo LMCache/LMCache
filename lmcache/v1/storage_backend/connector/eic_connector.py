@@ -367,7 +367,7 @@ class EICConnector(RemoteConnector):
 
         perf_timer.start("alloc_mem")
         obj_size = memory_obj.get_size()
-        data_ptr = memory_obj.tensor.data_ptr()
+        data_ptr = memory_obj.raw_tensor.data_ptr()
         data_keys = eic.StringVector()
         data_vals = eic.IOBuffers()
         data_keys.append(key_str)
@@ -449,7 +449,7 @@ class EICConnector(RemoteConnector):
         perf_timer = PerformanceTimer(key_str, "put_data")
         perf_timer.start("total_cost")
         kv_bytes = memory_obj.byte_array
-        kv_tensor = memory_obj.tensor
+        kv_tensor = memory_obj.raw_tensor
         kv_shapes = memory_obj.get_shapes()
         kv_dtypes = memory_obj.get_dtypes()
         memory_format = memory_obj.get_memory_format()
@@ -548,7 +548,7 @@ class EICConnector(RemoteConnector):
 
             # Get memory object data
             kv_bytes = memory_obj.byte_array
-            kv_tensor = memory_obj.tensor
+            kv_tensor = memory_obj.raw_tensor
             kv_shapes = memory_obj.get_shapes()
             kv_dtypes = memory_obj.get_dtypes()
             memory_format = memory_obj.get_memory_format()
