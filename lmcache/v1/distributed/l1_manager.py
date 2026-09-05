@@ -50,13 +50,16 @@ class L1ObjectState:
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
 
+    write_completed: bool = False
+    """Whether the current contents have been published by a completed write."""
+
     def available_for_read(self) -> bool:
         """Check if the object is available for read.
 
         Returns:
-            True if the object is not write-locked, False otherwise.
+            True if the write completed and its write lock is released.
         """
-        return not self.write_lock.is_locked()
+        return self.write_completed and not self.write_lock.is_locked()
 
     def available_for_write(self) -> bool:
         """Check if the object is available for write.
@@ -142,7 +145,7 @@ class L1Manager:
           |  None  | <---------------------------------------+
           +--------+                                         |
             |   ^                                            |
-            |   | (write lock expired)                       | delete()
+            |   | (delete())                                 | delete()
             |   |                                            |
     reserve |   +----------------------+                     |
     write() |                          |                     |
@@ -173,6 +176,9 @@ class L1Manager:
                                      v     |
                                    (...)  (...)
                                (Higher Counts)
+
+    Expired write reservations remain unreadable and can be deleted.
+    Non-temporary objects can be reserved for another update.
 
     For every operation on list of keys, the operation is atomic
     """
@@ -264,8 +270,7 @@ class L1Manager:
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_NOT_READABLE: The key exists but is not
-                readable.
+            KEY_NOT_READABLE: The key has an active or unfinished write.
         """
         total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
@@ -484,6 +489,7 @@ class L1Manager:
                 continue
 
             entry.write_lock.lock()
+            entry.write_completed = False
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -580,6 +586,7 @@ class L1Manager:
                 continue
 
             entry.write_lock.unlock()
+            entry.write_completed = True
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
             successful_keys_meta.append(self._object_meta(entry.memory_obj))
@@ -651,6 +658,7 @@ class L1Manager:
                 continue
 
             entry.write_lock.unlock()
+            entry.write_completed = True
             for _ in range(total):
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
