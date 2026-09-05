@@ -50,7 +50,9 @@ def check_interprocess_event_support() -> None:
     """Check if the current backend supports interprocess device events.
 
     This compatibility helper delegates to the platform event IPC backend for
-    the active device type.
+    the active device type. Call it only after process-wide IPC configuration
+    has been finalized; mode-aware integrations should validate through their
+    selected transfer context instead.
 
     Raises:
         RuntimeError: If the active backend does not support event IPC.

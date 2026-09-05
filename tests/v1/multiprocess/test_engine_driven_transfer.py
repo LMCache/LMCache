@@ -407,6 +407,33 @@ def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
     assert isinstance(context, EngineDrivenTransferContext)
 
 
+def test_auto_non_cuda_context_does_not_require_event_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AUTO non-CUDA routing must not resolve an interprocess event backend."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+
+    class MusaDevice:
+        type = "musa"
+
+    monkeypatch.setattr(worker_transfer, "get_device", lambda _tensor: MusaDevice())
+    monkeypatch.setattr(worker_transfer, "_supports_async_primitives", lambda: False)
+
+    def fail_event_backend_resolution(_device: object) -> None:
+        pytest.fail("engine-driven transfer must not resolve an event IPC backend")
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "get_event_ipc_backend",
+        fail_event_backend_resolution,
+    )
+
+    context = worker_transfer.create_transfer_context({"layer_0": MagicMock()})
+
+    assert isinstance(context, worker_transfer.EngineDrivenTransferContext)
+
+
 def test_create_transfer_context_invalid_mode_raises() -> None:
     """Unknown mode strings must raise a clear ValueError."""
     # First Party
