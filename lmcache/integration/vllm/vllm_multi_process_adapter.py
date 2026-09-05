@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessagingFuture
+from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
@@ -284,6 +285,25 @@ def send_ping(
         return False
 
 
+def send_registered_ping(
+    req_client: RequestClient,
+    timeout: float,
+    instance_id: int,
+    expected_registration_types: Sequence[RequestType],
+) -> list[RequestType] | None:
+    """Return missing registrations, or None when the server is unreachable."""
+    try:
+        future = req_client.ping_registered(
+            instance_id, list(expected_registration_types)
+        )
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        return None
+    except Exception:
+        logger.debug("Registration-aware ping failed with exception", exc_info=True)
+        return None
+
+
 @dataclass
 class ParallelStrategy:
     mla_only: bool
@@ -421,7 +441,7 @@ def _normalize_adapter_init_args(
 
 
 class HeartbeatThread(PeriodicThread):
-    """Periodically checks server health via PING.
+    """Periodically checks server health and optional worker registrations.
 
     Manages a threading.Event that adapters use to gate operations.
     When unhealthy, the adapter enters degraded mode; if the server
@@ -434,6 +454,7 @@ class HeartbeatThread(PeriodicThread):
         health_event: threading.Event,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         instance_id: int | None = None,
+        expected_registration_types: Callable[[], Sequence[RequestType]] | None = None,
     ):
         """
         Args:
@@ -446,6 +467,9 @@ class HeartbeatThread(PeriodicThread):
             instance_id: The worker's instance ID sent with each PING so the
                 server can refresh its liveness, or None for an untracked
                 prober (the scheduler adapter).
+            expected_registration_types: Optional thread-safe snapshot
+                provider. When present, the heartbeat also verifies that the
+                worker's server-side Contexts still exist.
         """
         super().__init__(
             name="lmcache-heartbeat",
@@ -456,8 +480,9 @@ class HeartbeatThread(PeriodicThread):
         self._health_event = health_event
         self._interval = interval
         self._instance_id = instance_id
+        self._expected_registration_types = expected_registration_types
 
-        # Optional callback invoked on the unhealthy->healthy edge,
+        # Optional callback invoked after an outage or missing registration,
         # before the health event is set. See register_recover_callback.
         def noop() -> bool:
             return True
@@ -465,10 +490,12 @@ class HeartbeatThread(PeriodicThread):
         self._recover_callback: Callable[[], bool] = noop
 
     def register_recover_callback(self, callback: Callable[[], bool]) -> None:
-        """Register a callback fired on the unhealthy->healthy transition.
+        """Register a callback fired after an outage or missing registration.
 
-        The callback runs **before** the health event is set. It must
-        return ``True`` on success (event will be set) or ``False`` on
+        It runs on an unhealthy-to-healthy transition and whenever a reachable
+        server reports an expected Context missing. The callback runs
+        **before** the health event is set. It must return ``True`` on success
+        (event will be set) or ``False`` on
         failure (event will stay cleared, and the next heartbeat will
         invoke the callback again on the next successful PING).
 
@@ -494,9 +521,29 @@ class HeartbeatThread(PeriodicThread):
         UNREGISTER must not re-register a ghost context.
         """
         was_healthy = self._health_event.is_set()
-        healthy = send_ping(
-            self._req_client, timeout=self._interval, instance_id=self._instance_id
-        )
+        missing_registrations: list[RequestType] = []
+        if (
+            self._expected_registration_types is not None
+            and self._instance_id is not None
+        ):
+            expected = self._expected_registration_types()
+            ping_result = send_registered_ping(
+                self._req_client,
+                timeout=self._interval,
+                instance_id=self._instance_id,
+                expected_registration_types=expected,
+            )
+            server_reachable = ping_result is not None
+            if ping_result is not None:
+                missing_registrations = ping_result
+            healthy = server_reachable and not missing_registrations
+        else:
+            server_reachable = send_ping(
+                self._req_client,
+                timeout=self._interval,
+                instance_id=self._instance_id,
+            )
+            healthy = server_reachable
 
         if self.stop_requested:
             return ThreadRunSummary(
@@ -504,15 +551,28 @@ class HeartbeatThread(PeriodicThread):
                 message="stop requested; skipping health update",
             )
 
+        registration_missing = server_reachable and bool(missing_registrations)
+        if registration_missing:
+            # Make the degraded state visible before registration is rebuilt.
+            self._health_event.clear()
+            logger.warning(
+                "LMCache server is reachable but worker registrations are "
+                "missing: %s; triggering recovery",
+                [request_type.name for request_type in missing_registrations],
+            )
+
         need_trigger_recover = (
-            healthy and not was_healthy and self._recover_callback is not None
+            server_reachable
+            and (registration_missing or not was_healthy)
+            and self._recover_callback is not None
         )
 
         # Try to call recover callback
         if need_trigger_recover:
-            logger.warning(
-                "LMCache server is healthy again, triggering recovery callback"
-            )
+            if not registration_missing:
+                logger.warning(
+                    "LMCache server is healthy again, triggering recovery callback"
+                )
             # If the callback fails, it should not become healthy
             healthy = self._recover_callback()
 
@@ -1281,6 +1341,10 @@ class LMCacheMPWorkerAdapter:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
+        self._recovery_lock = threading.Lock()
+        self._registration_lock = threading.Lock()
+        self._primary_registration_type: RequestType | None = None
+        self._additional_registration_types: set[RequestType] = set()
         if 3 * heartbeat_interval > _SERVER_REAP_TIMEOUT_FLOOR_SECONDS:
             logger.warning(
                 "lmcache.mp.heartbeat_interval is %.1fs, so 3 x "
@@ -1320,10 +1384,10 @@ class LMCacheMPWorkerAdapter:
     def is_healthy(self) -> bool:
         """Whether the LMCache server is healthy.
 
-        Reflects the most recent heartbeat result. KV cache
-        re-registration on the unhealthy->healthy transition is handled
-        by the heartbeat thread itself via ``register_recover_callback``,
-        so this property only reads the shared event.
+        Reflects the most recent heartbeat result. KV cache re-registration
+        after an outage or a missing-registration response is handled by the
+        heartbeat thread via ``register_recover_callback``, so this property
+        only reads the shared event.
         """
         return self._health_event.is_set()
 
@@ -1424,6 +1488,12 @@ class LMCacheMPWorkerAdapter:
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
             )
+            primary_type = (
+                RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+                if isinstance(transfer_ctx, EngineDrivenTransferContext)
+                else RequestType.REGISTER_KV_CACHE
+            )
+            self._record_primary_registration(primary_type)
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to "
@@ -1439,8 +1509,8 @@ class LMCacheMPWorkerAdapter:
         ``last_seen``, so an idle registered worker is not reaped before its
         first request. Store/retrieve paths also call this method defensively;
         the idempotent guard prevents duplicate threads. The recover callback
-        still re-registers on a genuine unhealthy->healthy edge (server
-        restart).
+        re-registers after a server outage or when a registration-aware
+        heartbeat reports that a Context was reaped.
         """
         if self._heartbeat is not None:
             return
@@ -1452,10 +1522,29 @@ class LMCacheMPWorkerAdapter:
                 health_event=self._health_event,
                 interval=self._heartbeat_interval,
                 instance_id=self.instance_id,
+                expected_registration_types=self._expected_registrations_snapshot,
             )
             heartbeat.register_recover_callback(self._reregister_kv_caches_callback)
             heartbeat.start()
             self._heartbeat = heartbeat
+
+    def _record_primary_registration(self, request_type: RequestType) -> None:
+        """Record the one primary KV Context acknowledged by the server."""
+        with self._registration_lock:
+            self._primary_registration_type = request_type
+
+    def _record_additional_registration(self, request_type: RequestType) -> None:
+        """Record an additional Context after its registration ACK."""
+        with self._registration_lock:
+            self._additional_registration_types.add(request_type)
+
+    def _expected_registrations_snapshot(self) -> list[RequestType]:
+        """Return a stable snapshot for the heartbeat thread."""
+        with self._registration_lock:
+            expected = set(self._additional_registration_types)
+            if self._primary_registration_type is not None:
+                expected.add(self._primary_registration_type)
+        return sorted(expected, key=lambda request_type: request_type.value)
 
     def _heartbeat_stop_requested(self) -> bool:
         """Whether a created heartbeat thread has a stop requested.
@@ -1467,15 +1556,20 @@ class LMCacheMPWorkerAdapter:
         return heartbeat is not None and heartbeat.stop_requested
 
     def _reregister_kv_caches_callback(self) -> bool:
-        """Heartbeat recover callback: re-register KV caches after the
-        server returns. Runs on the heartbeat thread, before the health
-        event is set.
+        """Heartbeat recovery callback: re-register KV caches after an outage
+        or a missing-registration response. Runs on the heartbeat thread,
+        before the health event is set.
 
         Returns:
             ``True`` if nothing needs re-registering or registration
             succeeds; ``False`` on failure or a requested heartbeat stop
             (event stays cleared; retried on the next successful PING).
         """
+        with self._recovery_lock:
+            return self._reregister_kv_caches_locked()
+
+    def _reregister_kv_caches_locked(self) -> bool:
+        """Re-register while serialized with shutdown."""
         if not self.kv_caches:
             # Nothing was registered yet (server flapped before the
             # very first register_kv_caches). Treat as success so the
@@ -2072,31 +2166,32 @@ class LMCacheMPWorkerAdapter:
             if self._heartbeat is not None:
                 self._heartbeat.stop()
 
-        logger.info("Unregistering kv caches")
-        try:
-            if isinstance(self.transfer_ctx, EngineDrivenTransferContext):
-                future = self.req_client.unregister_kv_cache_engine_driven_context(
-                    self.instance_id
+        with self._recovery_lock:
+            logger.info("Unregistering kv caches")
+            try:
+                if isinstance(self.transfer_ctx, EngineDrivenTransferContext):
+                    future = self.req_client.unregister_kv_cache_engine_driven_context(
+                        self.instance_id
+                    )
+                else:
+                    future = self.req_client.unregister_kv_cache(self.instance_id)
+                future.result(timeout=self._mq_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "LMCache server did not respond to unregister within %ss. "
+                    "Proceeding with shutdown.",
+                    self._mq_timeout,
                 )
-            else:
-                future = self.req_client.unregister_kv_cache(self.instance_id)
-            future.result(timeout=self._mq_timeout)
-        except TimeoutError:
-            logger.warning(
-                "LMCache server did not respond to unregister within %ss. "
-                "Proceeding with shutdown.",
-                self._mq_timeout,
-            )
 
-        if self.dispatcher is not None:
-            dispatch(self.dispatcher, "shutdown")
+            if self.dispatcher is not None:
+                dispatch(self.dispatcher, "shutdown")
 
-        if self.transfer_ctx is not None:
-            self.transfer_ctx.close()
-            self.transfer_ctx = None
+            if self.transfer_ctx is not None:
+                self.transfer_ctx.close()
+                self.transfer_ctx = None
 
-        self.req_client.close()
-        self.request_telemetry.close()
+            self.req_client.close()
+            self.request_telemetry.close()
 
     # Helper functions
     def _update_and_get_finished_store(
