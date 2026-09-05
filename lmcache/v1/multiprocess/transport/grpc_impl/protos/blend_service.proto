@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// BlendService wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+import "lmcache/v1/multiprocess/transport/grpc_impl/protos/common.proto";
+
+message CbMatchResult {
+  int64 old_st = 1;
+  int64 old_ed = 2;
+  int64 cur_st = 3;
+  int64 cur_ed = 4;
+  bytes hash = 5;
+}
+
+message CbUnregisterRopeRequest {
+  int64 instance_id = 1;
+}
+
+message CbUnregisterRopeResponse {}
+
+message CbRetrievePreComputedRequest {
+  IpcCacheServerKey key = 1;
+  repeated CbMatchResult cb_match_result = 2;
+  repeated BlockIdGroup gpu_block_ids = 3;
+  int64 instance_id = 4;
+  bytes event_ipc_handle = 5;
+}
+
+message CbRetrievePreComputedResponse {
+  EventIpcHandleResult result = 1;
+}
+
+message CbUnifiedLookupRequest {
+  IpcCacheServerKey key = 1;
+  int64 tp_size = 2;
+}
+
+message CbUnifiedLookupPayload {
+  int64 prefix_coverage_tokens = 1;
+  repeated CbMatchResult non_prefix_segments = 2;
+  repeated CbMatchResult segmented_prefix_segments = 3;
+}
+
+message CbUnifiedLookupResponse {
+  optional CbUnifiedLookupPayload payload = 1;
+}
+
+message RopeWindow {
+  repeated int64 values = 1;
+}
+
+message CbRegisterRopeRequest {
+  int64 instance_id = 1;
+  repeated DeviceIpcWrapper cos_sin_caches_ipc = 2;
+  int64 head_size = 3;
+  bool is_neox_style = 4;
+  repeated int64 group_to_cache = 5;
+  repeated RopeWindow group_rot = 6;
+}
+
+message CbRegisterRopeResponse {}
+
+service BlendService {
+  rpc CbRegisterRope(CbRegisterRopeRequest) returns (CbRegisterRopeResponse);
+  rpc CbUnregisterRope(CbUnregisterRopeRequest)
+      returns (CbUnregisterRopeResponse);
+  rpc CbRetrievePreComputed(CbRetrievePreComputedRequest)
+      returns (CbRetrievePreComputedResponse);
+  rpc CbUnifiedLookup(CbUnifiedLookupRequest) returns (CbUnifiedLookupResponse);
+}

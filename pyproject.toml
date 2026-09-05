@@ -12,6 +12,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
+    "grpcio-tools==1.78.0",
     "torch==2.13.0",
     "wheel",
 ]
@@ -151,6 +152,13 @@ disallow_untyped_calls = false
 warn_return_any = false
 
 follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = [
+    "lmcache.v1.multiprocess.transport.grpc_impl.protos.*",
+]
+ignore_errors = true
+follow_imports = "skip"
 
 [tool.codespell]
 ignore-words-list = "afterall,allready,notin,te,cann"

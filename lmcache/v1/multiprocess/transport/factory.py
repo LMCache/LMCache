@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Request client factory selected by endpoint URL scheme."""
+"""Request client factory with a temporary gRPC validation override."""
 
 # Standard
-from typing import Any
+from typing import Any, Literal
 
 # First Party
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 _ZMQ_SCHEMES = frozenset({"inproc", "ipc", "tcp"})
 _GRPC_SCHEMES = frozenset({"grpc", "grpc+unix"})
+TransportKind = Literal["zmq", "grpc"]
 
 
 def _normalize_server_url(server_url: str) -> tuple[str, str]:
@@ -25,6 +26,21 @@ def _normalize_server_url(server_url: str) -> tuple[str, str]:
     return scheme, f"{scheme}://{target}"
 
 
+def effective_transport(configured_transport: TransportKind) -> TransportKind:
+    """Return the transport used for the current migration step.
+
+    Args:
+        configured_transport: Transport selected by configuration or URL scheme.
+
+    Returns:
+        The transport implementation to instantiate.
+    """
+    # FIXME(maobaolong): CI must exercise gRPC regardless of configuration in
+    # this stacked PR. Before merge, replace this line with:
+    #     return configured_transport
+    return "grpc"
+
+
 class RequestClientFactory:
     """Create a transport-specific request client from a server URL."""
 
@@ -34,11 +50,12 @@ class RequestClientFactory:
         *,
         context: Any | None = None,
     ) -> RequestClient:
-        """Create a request client selected by ``server_url`` scheme.
+        """Create a request client for the normalized ``server_url``.
 
-        Bare ``host:port`` endpoints retain the existing behavior and default
-        to ``tcp://``. ZMQ handles ``tcp://``, ``ipc://``, and ``inproc://``;
-        gRPC handles ``grpc://`` and ``grpc+unix://``.
+        This migration step temporarily sends every recognized endpoint scheme
+        through gRPC so CI exercises the new transport end to end. The ZMQ and
+        gRPC implementations both remain available for scheme-based selection
+        after this validation override is removed.
 
         Args:
             server_url: Multiprocess server endpoint, optionally without a
@@ -47,24 +64,26 @@ class RequestClientFactory:
                 transports that do not need a context may ignore it.
 
         Returns:
-            A method-oriented request client for the selected transport.
+            A method-oriented gRPC request client during this validation step.
 
         Raises:
             ValueError: If the URL is empty, malformed, or uses an unsupported
                 scheme.
-            NotImplementedError: If the selected transport is recognized but
-                its implementation is not available yet.
         """
         scheme, normalized_url = _normalize_server_url(server_url)
         if scheme in _ZMQ_SCHEMES:
-            # First Party
-            from lmcache.v1.multiprocess.transport import zmq_impl
-
-            return zmq_impl.create_request_client(
-                normalized_url,
-                context=context,
+            configured_transport: TransportKind = "zmq"
+        elif scheme in _GRPC_SCHEMES:
+            configured_transport = "grpc"
+        else:
+            supported = sorted(_ZMQ_SCHEMES | _GRPC_SCHEMES)
+            raise ValueError(
+                f"Unsupported request client URL scheme {scheme!r}; "
+                f"supported schemes: {supported}"
             )
-        if scheme in _GRPC_SCHEMES:
+
+        transport = effective_transport(configured_transport)
+        if transport == "grpc":
             # First Party
             from lmcache.v1.multiprocess.transport import grpc_impl
 
@@ -73,8 +92,10 @@ class RequestClientFactory:
                 context=context,
             )
 
-        supported = sorted(_ZMQ_SCHEMES | _GRPC_SCHEMES)
-        raise ValueError(
-            f"Unsupported request client URL scheme {scheme!r}; "
-            f"supported schemes: {supported}"
+        # First Party
+        from lmcache.v1.multiprocess.transport import zmq_impl
+
+        return zmq_impl.create_request_client(
+            normalized_url,
+            context=context,
         )

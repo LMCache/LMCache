@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.transport import factory as transport_factory
 from lmcache.v1.multiprocess.transport import grpc_impl, zmq_impl
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
@@ -21,20 +22,38 @@ from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
         ("inproc://lmcache", "inproc://lmcache"),
     ],
 )
-def test_factory_selects_zmq_by_scheme(
+def test_factory_temporarily_forces_zmq_schemes_to_grpc(
     monkeypatch: pytest.MonkeyPatch,
     server_url: str,
     normalized_url: str,
 ) -> None:
-    client = MagicMock(name="zmq_request_client")
+    client = MagicMock(name="grpc_request_client")
     create = MagicMock(return_value=client)
     context = object()
-    monkeypatch.setattr(zmq_impl, "create_request_client", create)
+    monkeypatch.setattr(grpc_impl, "create_request_client", create)
 
     result = RequestClientFactory.create(server_url, context=context)
 
     assert result is client
     create.assert_called_once_with(normalized_url, context=context)
+
+
+def test_configured_zmq_path_remains_available_without_ci_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(name="zmq_request_client")
+    create = MagicMock(return_value=client)
+    monkeypatch.setattr(
+        transport_factory,
+        "effective_transport",
+        lambda configured_transport: configured_transport,
+    )
+    monkeypatch.setattr(zmq_impl, "create_request_client", create)
+
+    result = RequestClientFactory.create("tcp://localhost:5555")
+
+    assert result is client
+    create.assert_called_once_with("tcp://localhost:5555", context=None)
 
 
 @pytest.mark.parametrize(
@@ -58,11 +77,6 @@ def test_factory_selects_grpc_by_scheme(
 
     assert result is client
     create.assert_called_once_with(normalized_url, context=context)
-
-
-def test_factory_reports_unavailable_grpc_implementation() -> None:
-    with pytest.raises(NotImplementedError, match="not available yet"):
-        RequestClientFactory.create("grpc://localhost:5555")
 
 
 @pytest.mark.parametrize("server_url", ["", "grpc://", "http://localhost:5555"])
