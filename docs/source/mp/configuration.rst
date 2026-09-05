@@ -754,6 +754,13 @@ All connector-level options are passed through
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.report_block_allocations``
+     - ``true``
+     - Publish per-step GPU block allocation records for L0 observability.
+       Set to ``false`` to skip scheduler-thread record construction and the
+       downstream serialization and ZMQ sends. L0 block-allocation logs and
+       metrics are then unavailable; cache lookup and transfer behavior is
+       unchanged.
    * - ``lmcache.mp.lazy_offload``
      - ``false``
      - Defer store operations and submit finished requests in FIFO batches.

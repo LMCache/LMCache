@@ -633,6 +633,53 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
     assert tracker.state == LMCacheMPRequestState.READY
 
 
+def test_disabled_block_allocation_reports_skip_scheduler_output() -> None:
+    """Disabling L0 allocation telemetry avoids all per-step record work."""
+    pytest.importorskip("vllm")
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._report_block_allocations_enabled = False
+    connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
+
+    # ``object()`` has none of SchedulerOutput's fields, so this call proves
+    # the disabled path returns before traversing requests or token lists.
+    connector._report_block_allocation_deltas(object())  # type: ignore[arg-type]
+
+    connector.scheduler_adapter.report_block_allocations.assert_not_called()
+
+
+def test_enabled_block_allocation_reports_preserve_existing_records() -> None:
+    """The default path still reports the same block and token payload."""
+    pytest.importorskip("vllm")
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._report_block_allocations_enabled = True
+    connector._group_tokens_per_block = {0: 4}
+    connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
+    tracker = MagicMock(name="tracker")
+    tracker.allocated_block_ids = {0: [7, 8]}
+    tracker.get_token_ids.return_value = list(range(8))
+    connector.request_trackers = {"req-1": tracker}
+
+    scheduler_output = MagicMock(name="scheduler_output")
+    scheduler_output.scheduled_new_reqs = [MagicMock(req_id="req-1")]
+    scheduler_output.scheduled_cached_reqs.req_ids = []
+
+    connector._report_block_allocation_deltas(scheduler_output)
+
+    records = connector.scheduler_adapter.report_block_allocations.call_args.args[0]
+    assert len(records) == 1
+    assert records[0].req_id == "req-1"
+    assert records[0].new_block_ids == [7, 8]
+    assert records[0].new_token_ids == list(range(8))
+
+
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
     """instance_id is a 63-bit int, not the PID, and unique per adapter."""
     adapter, _send_mock, _ = fake_adapter
