@@ -19,8 +19,12 @@ set -euo pipefail
 PIPELINE_FILE="${1:?Usage: upload-pipeline.sh <path/to/pipeline.yml>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# shellcheck source=helpers.sh
+source "${SCRIPT_DIR}/helpers.sh"
 # shellcheck source=path-filter.sh
 source "${SCRIPT_DIR}/path-filter.sh"
+
+merge_pr_base_branch
 
 if should_skip_ci; then
     echo "+++ :fast_forward: Skipping CI — only trivial files changed"
