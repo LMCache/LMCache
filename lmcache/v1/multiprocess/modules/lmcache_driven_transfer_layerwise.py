@@ -12,6 +12,7 @@ declared by :class:`LMCacheDrivenTransferModule`.
 # Standard
 from dataclasses import dataclass, field
 from typing import Any, Sequence, cast
+import os
 import struct
 import threading
 
@@ -43,6 +44,42 @@ logger = init_logger(__name__)
 # call and instead issues a separate H2D copy per layer. Still layer-wise:
 # there is no per-chunk fallback on this path.
 _warned_layerwise_fallback = False
+
+# Diagnostic instrumentation for the layer-wise batching path. Off by
+# default; set LMCACHE_LAYERWISE_DEBUG=1 to have each object group report
+# its kernel-group structure and the layer-batch sizes it actually
+# achieved. Both are logged once per group so a steady-state benchmark
+# is not flooded.
+_LAYERWISE_DEBUG = os.getenv("LMCACHE_LAYERWISE_DEBUG", "0").lower() not in (
+    "0",
+    "",
+    "false",
+    "no",
+)
+_dbg_logged_groups: set[tuple[int, int]] = set()
+
+
+def _dbg_run_lengths(all_layers: list) -> list[tuple[int, int]]:
+    """Run-length encode the kernel-group id sequence of ``all_layers``.
+
+    A merged layer batch cannot span a kernel-group boundary, so these run
+    lengths are the hard ceiling on the achievable batch size regardless of
+    the configured ``layerwise_batch_size``.
+
+    Args:
+        all_layers: ``(kg_info_idx, local_idx, global_layer_idx)`` triples
+            in global layer order.
+
+    Returns:
+        ``(kernel_group_index, run_length)`` pairs in layer order.
+    """
+    runs: list[list[int]] = []
+    for kg_idx, _, _ in all_layers:
+        if runs and runs[-1][0] == kg_idx:
+            runs[-1][1] += 1
+        else:
+            runs.append([kg_idx, 1])
+    return [(kg, n) for kg, n in runs]
 
 
 def transfer_kv_layerwise(
@@ -199,6 +236,41 @@ def transfer_kv_layerwise(
         # once here (not per request) since the cached list is reused.
         all_layers.sort(key=lambda x: x[2])
 
+        if _LAYERWISE_DEBUG:
+            logger.info(
+                "layerwise[group %s]: %d entries across %d kernel group(s), "
+                "%d bytes/chunk total; kg runs (kg, len)=%s",
+                object_group_id,
+                len(all_layers),
+                len(kg_infos),
+                sum(
+                    i["per_layer_bytes"] * len(i["kg"].layer_indices) for i in kg_infos
+                ),
+                _dbg_run_lengths(all_layers),
+            )
+            for dbg_idx, dbg_info in enumerate(kg_infos):
+                dbg_sd = dbg_info["sd"]
+                dbg_kg = dbg_info["kg"]
+                logger.info(
+                    "layerwise[group %s]:   kg %d (id=%s): %d layer(s), "
+                    "kv_size=%d nh=%d hs=%d hidden=%d elt=%dB "
+                    "slots/chunk=%d per_layer_bytes=%d buffer=%d "
+                    "layer_indices=%s",
+                    object_group_id,
+                    dbg_idx,
+                    dbg_info["kernel_group_id"],
+                    len(dbg_kg.layer_indices),
+                    dbg_sd.kv_size,
+                    dbg_sd.nh,
+                    dbg_sd.hs,
+                    dbg_kg.hidden_dim_size,
+                    dbg_sd.element_size,
+                    dbg_info["slots_per_chunk"],
+                    dbg_info["per_layer_bytes"],
+                    dbg_info["total_buffer_bytes"],
+                    list(dbg_kg.layer_indices),
+                )
+
         _lw_cache[cache_key] = (kg_infos, all_layers)
 
     if not all_layers:
@@ -289,6 +361,8 @@ def transfer_kv_layerwise(
     # [K0,V0,K1,V1,...] where consecutive layers are contiguous.
     num_all_layers = len(all_layers)
     layer_batch_start = 0
+    if _LAYERWISE_DEBUG:
+        dbg_batches: list[tuple[int, bool]] = []
 
     while layer_batch_start < num_all_layers:
         # Determine batch: consecutive same-kg layers, up to layerwise_batch_size
@@ -326,6 +400,9 @@ def transfer_kv_layerwise(
             and info.get("all_block_ids") is not None
             and max_chunks_per_pass >= 1
         )
+
+        if _LAYERWISE_DEBUG:
+            dbg_batches.append((n_in_batch, bool(can_merge)))
 
         if can_merge:
             # --- N-layer merged path: single execute call, multiple BatchSteps
@@ -610,6 +687,26 @@ def transfer_kv_layerwise(
             event_export_callback(first_gl, n_in_batch, layer_events[first_gl])
 
         layer_batch_start = batch_end
+
+    if _LAYERWISE_DEBUG and dbg_batches:
+        dbg_key = (object_group_id, layerwise_batch_size)
+        if dbg_key not in _dbg_logged_groups:
+            _dbg_logged_groups.add(dbg_key)
+            sizes: dict[int, int] = {}
+            for n_in_batch, _ in dbg_batches:
+                sizes[n_in_batch] = sizes.get(n_in_batch, 0) + 1
+            merged = sum(1 for _, ok in dbg_batches if ok)
+            logger.info(
+                "layerwise[group %s]: requested batch=%d -> %d batch(es), "
+                "%d merged / %d per-layer; achieved size histogram "
+                "{size: count}=%s",
+                object_group_id,
+                layerwise_batch_size,
+                len(dbg_batches),
+                merged,
+                len(dbg_batches) - merged,
+                dict(sorted(sizes.items())),
+            )
 
 
 @dataclass

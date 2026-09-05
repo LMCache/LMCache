@@ -8,6 +8,7 @@ for the whole retrieve to land.
 """
 
 # Standard
+import os
 import re
 
 # First Party
@@ -25,6 +26,14 @@ logger = init_logger(__name__)
 # "model.layers.5.self_attn".
 _LAYER_RE = re.compile(r"model\.layers\.(\d+)")
 
+_LAYERWISE_DEBUG = os.getenv("LMCACHE_LAYERWISE_DEBUG", "0").lower() not in (
+    "0",
+    "",
+    "false",
+    "no",
+)
+_dbg_seen_names: set[str] = set()
+
 
 class LMCacheLayerwiseMPWorkerAdapter(LMCacheMPWorkerAdapter):
     """Worker adapter that loads KV cache one layer batch at a time."""
@@ -38,6 +47,15 @@ class LMCacheLayerwiseMPWorkerAdapter(LMCacheMPWorkerAdapter):
         Returns:
             An unregistered :class:`LMCacheLayerwiseTransferContext`.
         """
+        if _LAYERWISE_DEBUG:
+            # Same dict, and so the same order, that
+            # create_engine_group_infos_from_vllm enumerates to assign the
+            # registration indices the producer keys its events by.
+            logger.info(
+                "kv_caches registration order (%d entries): %s",
+                len(kv_caches),
+                list(kv_caches.keys()),
+            )
         return LMCacheLayerwiseTransferContext()
 
     @_lmcache_nvtx_annotate
@@ -91,6 +109,18 @@ class LMCacheLayerwiseMPWorkerAdapter(LMCacheMPWorkerAdapter):
             RuntimeError: If this adapter is bound to a per-chunk transfer
                 context, which cannot order KV loads per layer.
         """
+        if _LAYERWISE_DEBUG and layer_name not in _dbg_seen_names:
+            if len(_dbg_seen_names) < 8:
+                m = _LAYER_RE.search(layer_name)
+                logger.info(
+                    "layerwise-adapter: wait_for_layer_load(%r) -> regex %s, "
+                    "ctx=%s, %d pending retrieve future(s)",
+                    layer_name,
+                    f"idx={m.group(1)}" if m else "NO MATCH",
+                    type(self.transfer_ctx).__name__,
+                    len(self.retrieve_futures),
+                )
+            _dbg_seen_names.add(layer_name)
         transfer_ctx = self.transfer_ctx
         if transfer_ctx is None:
             # Called before register_kv_caches or after shutdown, so there is

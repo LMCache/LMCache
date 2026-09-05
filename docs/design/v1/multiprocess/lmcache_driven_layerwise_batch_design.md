@@ -359,6 +359,93 @@ Layerwise transfer context registered (batch=N, pool_size=...)
 Notes: Keeping mode off `REGISTER_KV_CACHE` is deliberate: it leaves the
 per-chunk protocol byte-for-byte unchanged when layer-wise is disabled.
 
+### 6.2 Debug Telemetry: `LMCACHE_LAYERWISE_DEBUG`
+
+The layer-wise path is silent by default. Set `LMCACHE_LAYERWISE_DEBUG=1` on
+**both** the vLLM process and the `lmcache server` process to enable telemetry:
+each side emits a different half, and neither half is much use alone. Any value
+other than `0`, `false`, `no` or empty enables it.
+
+```bash
+LMCACHE_LAYERWISE_DEBUG=1 lmcache server ...
+LMCACHE_LAYERWISE_DEBUG=1 vllm serve ...
+```
+
+That covers every summary below, all of which are logged at info level. The
+per-frame timeline is logged at debug level, so it additionally needs
+`LMCACHE_LOG_LEVEL=DEBUG` (it defaults to `INFO`):
+
+```bash
+LMCACHE_LAYERWISE_DEBUG=1 LMCACHE_LOG_LEVEL=DEBUG vllm serve ...
+```
+
+| Emitted by | Source | Contents |
+| --- | --- | --- |
+| vLLM worker | `vllm_multi_process_adapter_layerwise.py` | `kv_caches` registration order; the layer names vLLM asks for and the index `_LAYER_RE` resolves each to |
+| vLLM worker | `futures_layerwise.py` | per-request wait summary: call count, stream-wait count, drain and total time, requested against announced index ranges |
+| vLLM worker | `futures_layerwise.py` | per-retrieve frame summary: frame count, layers covered, blocking waits, arrival span; plus one line per frame, with its event pool slot, at debug level |
+| `lmcache server` | `modules/lmcache_driven_transfer_layerwise.py` | per object group: entry count, kernel-group count, bytes per chunk, kernel-group run lengths; plus the achieved batch-size histogram |
+
+A wait summary looks like this:
+
+```
+layerwise-wait: 64 call(s), 16 stream wait(s), drain 6.92 ms, total 7.36 ms;
+requested idx 0..63 (64 distinct), announced idx 0..63 (64 entries)
+```
+
+How to read it:
+
+- **`stream wait(s)` is `call(s)` divided by the batch size, mechanically.**
+  `_import_partial` maps `count` consecutive layers onto one pooled event, and
+  `wait_for_layer` skips `wait_event` whenever the event matches the previous
+  one. So this counts event batching, *not* how many layers had already landed.
+  A ratio other than `1/N` means the batching is not what was configured.
+- **`drain` is the number that carries information.** It is CPU time spent in
+  `_drain_until_layer` blocking on producer frames, so it measures how far
+  behind the transfer was running. `total` tracks `drain` closely, because
+  `wait_event` is an asynchronous stream operation that costs the CPU almost
+  nothing.
+- **`requested` must be a subset of `announced`.** The two index spaces
+  coincide only while every transformer layer owns exactly one KV cache; see
+  1.1 for that scope limit.
+
+A frame summary sits next to it, covering the same retrieve. This is the
+direct evidence that the reply really is streamed:
+
+```
+layerwise-frames: 16 frame(s) covering layers 0..63, 3 blocking wait(s);
+arrival +1.24..48.10 ms
+```
+
+How to read it:
+
+- **The arrival span is the pipelining signal.** Frames spread across the span
+  mean the consumer sees layer batches as they land. Every frame arriving at
+  effectively the same timestamp means the server answered in one burst and
+  nothing overlapped, whatever the configured batch size says.
+- **`blocking wait(s)` counts the waits that actually had to stop for a
+  frame.** Small against `call(s)` means frames arrive ahead of demand; equal
+  to the frame count means the consumer never got ahead of the producer.
+- **The layer coverage is the producer's index space, not vLLM's.** These are
+  the indices `_export_cb` sends, which are registration order; the indices
+  `wait_for_layer` is called with come from `_LAYER_RE`. Comparing this span
+  against `requested idx` in the wait summary is what exposes the mismatch
+  described in 1.1.
+
+At debug level every frame also logs as it is imported, including the event
+pool slot it names. That slot is currently always the batch's first layer, so
+it carries no extra information today; it is logged because the wire format
+allows the producer to pick a different slot and the consumer already honours
+whatever it is sent:
+
+```
+layerwise-frame: layers 0..3 -> ipc event idx 0 (+1.24 ms)
+```
+
+With the flag off nothing is allocated, no counter is updated and no
+`perf_counter()` is called. Every site, the counter initialisers included, sits
+behind a module-level flag that is read once at import.
+
 ---
 
 ## 7. Layout Uniformity & Mixed-Mode Considerations
