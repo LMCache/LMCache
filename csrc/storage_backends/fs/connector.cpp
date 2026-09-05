@@ -28,22 +28,23 @@ std::string FSConnector::replace_all(const std::string& str,
 
 std::string FSConnector::key_to_filename(const std::string& key) {
   // Input key format (from _object_key_to_string):
-  //   Unsalted: <model_name>@<kv_rank_hex>@<chunk_hash_hex>
-  //   Salted  : <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
+  //   Legacy unsalted: <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+  //   Legacy salted  : <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
+  //   Current unsalted:
+  //     <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
+  //   Current salted appends @<cache_salt> to the current unsalted shape.
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
   //   Unsalted: <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
   //   Salted  :
   //   <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
   //
-  // The unsalted 3-field shape is bit-identical to the pre-cache_salt
-  // format, so existing cache directories remain valid.
-  //
-  // NOTE: both model_name and cache_salt are forbidden from containing
-  // '@' (invariant enforced on the Python side), so splitting on '@'
-  // is unambiguous — no marker, no rsplit.
+  // Four fields are intentionally not interpreted: that shape can be a
+  // legacy salted key or a current unsalted key, and both map correctly by
+  // preserving every field after kv_rank verbatim.
 
-  // Split on '@' — must yield 3 (unsalted) or 4 (salted) fields.
+  // Current ObjectKey serialization has four or five fields; three-field
+  // legacy keys remain readable for cache compatibility.
   std::vector<std::string> parts;
   size_t start = 0;
   for (size_t pos = 0; pos <= key.size(); ++pos) {
@@ -52,34 +53,28 @@ std::string FSConnector::key_to_filename(const std::string& key) {
       start = pos + 1;
     }
   }
-  if (parts.size() != 3 && parts.size() != 4) {
+  if (parts.size() < 3 || parts.size() > 5) {
     throw std::runtime_error(
-        "FSConnector: malformed key (expected 3 or 4 '@'-separated fields): " +
+        "FSConnector: malformed key (expected 3 to 5 '@'-separated fields): " +
         key);
   }
 
   const std::string& model_name = parts[0];
   const std::string& kv_rank_hex = parts[1];
-  const std::string& chunk_hash = parts[2];
-  const std::string cache_salt = parts.size() == 4 ? parts[3] : std::string();
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
 
-  // Emit filename. Salt is appended at the tail so the unsalted shape
-  // matches what older builds wrote to disk.
+  // Emit the model and normalized rank, preserving all remaining fields.
   std::string result;
-  result.reserve(safe_model.size() + kv_rank_hex.size() + chunk_hash.size() +
-                 cache_salt.size() + 32);
+  result.reserve(key.size() + 16);
   result += safe_model;
   result += KEY_SEP;
   result += "0x";
   result += kv_rank_hex;
-  result += KEY_SEP;
-  result += chunk_hash;
-  if (!cache_salt.empty()) {
+  for (size_t i = 2; i < parts.size(); ++i) {
     result += KEY_SEP;
-    result += cache_salt;
+    result += parts[i];
   }
   result += FILE_EXT;
   return result;
