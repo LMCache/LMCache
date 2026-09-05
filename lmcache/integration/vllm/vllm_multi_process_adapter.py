@@ -722,10 +722,14 @@ class LMCacheMPSchedulerAdapter:
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first use."""
-        if self._heartbeats is not None:
+        # NOTE: _heartbeats is initialized to {}, never None — an `is not None`
+        # guard here always returns immediately and the scheduler-side
+        # heartbeat thread never starts (the worker adapter uses a None
+        # sentinel and the correct guard). Guard on truthiness instead.
+        if self._heartbeats:
             return
         with self._heartbeat_lock:
-            if self._heartbeats is not None:
+            if self._heartbeats:
                 return
             for url, client in self.req_clients.items():
                 hb = HeartbeatThread(
