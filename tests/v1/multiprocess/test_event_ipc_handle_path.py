@@ -259,7 +259,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     monkeypatch.setattr(
         module,
         "get_and_touch_context_entry",
-        lambda instance_id: entry,
+        lambda instance_id, **kwargs: entry,
     )
     key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
 

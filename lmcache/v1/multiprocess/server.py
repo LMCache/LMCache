@@ -219,15 +219,24 @@ def _build_modules(
 
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
-    # Targets the reaper scans (and reap-notifies). The transfer modules own
-    # per-instance liveness; BlendModule is appended below as a state mirror.
+    # Targets the reaper scans. The transfer modules own per-context liveness;
+    # BlendModule is appended below as a state mirror of the GPU KV context.
     liveness_targets: list[InstanceLivenessTarget] = [
         m
         for m in transfer_modules
         if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
     ]
+    registration_targets: dict[RequestType, InstanceLivenessTarget] = {}
+    for module in liveness_targets:
+        if isinstance(module, LMCacheDrivenTransferModule):
+            registration_targets[RequestType.REGISTER_KV_CACHE] = module
+        elif isinstance(module, EngineDrivenTransferModule):
+            registration_targets[
+                RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+            ] = module
 
     blend_module: EngineModule | None = None
+    mirror_state_owner: InstanceLivenessTarget | None = None
     if mp_config.engine_type == "blend":
         if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
@@ -271,8 +280,9 @@ def _build_modules(
             enable_dedup_content=mp_config.enable_dedup_content,
         )
         blend_module = blend
-        # The blend module mirrors per-instance CB rope state, so the reaper
-        # must notify it via drop_instance_state when an instance is reaped.
+        # Blend mirrors the GPU KV context's CB rope state. QStore and other
+        # contexts sharing the instance ID must not invalidate that mirror.
+        mirror_state_owner = transfer_module
         liveness_targets.append(blend)
 
     # Experimental intermediate tensor transfer modules
@@ -296,11 +306,14 @@ def _build_modules(
         module = QStoreModule(ctx)
         experimental_modules.append(module)
         liveness_targets.append(module)
+        registration_targets[RequestType.REGISTER_Q_CACHE] = module
         experimental_transfer.append(enabled_module)
 
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
+        registration_targets=registration_targets,
+        mirror_state_owner=mirror_state_owner,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
         experimental_transfer=experimental_transfer,

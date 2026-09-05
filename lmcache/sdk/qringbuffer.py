@@ -17,6 +17,7 @@ from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.gpu_connector.utils import get_device
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.protocols.base import RequestType
 
 if TYPE_CHECKING:
     # Third Party
@@ -635,6 +636,7 @@ class QRingBufferAdapter:
                 layout_hints=vllm_layout_hints(),
                 engine_group_infos=self.q_engine_group_infos,
             )
+            self._adapter._record_additional_registration(RequestType.REGISTER_Q_CACHE)
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to Q ring registration within "

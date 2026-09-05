@@ -9,7 +9,11 @@ This module defines the protocol for:
 """
 
 # First Party
-from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
+from lmcache.v1.multiprocess.protocols.base import (
+    HandlerType,
+    ProtocolDefinition,
+    RequestType,
+)
 
 # Define request names for this protocol group
 REQUEST_NAMES = [
@@ -17,6 +21,7 @@ REQUEST_NAMES = [
     "GET_CHUNK_SIZE",
     "GET_EXPERIMENTAL",
     "PING",
+    "PING_REGISTERED",
 ]
 
 
@@ -54,6 +59,14 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "PING": ProtocolDefinition(
             payload_classes=[int | None],
             response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Registration-aware worker ping
+        # Payload: worker instance ID and the registrations it expects.
+        # Returns: the subset that no longer exists on the server.
+        "PING_REGISTERED": ProtocolDefinition(
+            payload_classes=[int, list[RequestType]],
+            response_class=list[RequestType],
             handler_type=HandlerType.BLOCKING,
         ),
         # Get the enabled experimental intermediate tensor transfer types

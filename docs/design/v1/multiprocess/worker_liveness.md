@@ -18,70 +18,86 @@ silently binds it to the stale context — wrong IPC handles, corrupted transfer
 
 ## 2. Design Overview
 
-The server already receives a periodic signal from every actively serving worker:
-the heartbeat PING. The design adds the worker's `instance_id` to that message,
-stamps `last_seen` on the per-instance entries that already exist, and runs one
-periodic scan that reaps entries silent longer than a timeout via the same cleanup
-as a client unregister. The heartbeat keeps its lazy start (first store/retrieve)
-and starts healthy; a live worker pings every interval, refreshing its `last_seen`,
-so it is never reaped while alive. Entries that never produced a liveness signal
-fall under a generous registration grace. Recovery reuses existing client
-machinery: on a genuine outage the heartbeat's pings fail, clearing `health_event`;
-when the server returns the unhealthy-to-healthy edge fires the recover callback,
-which re-registers — a noop when the entry survived.
+The server tracks two independent observations on each registered transfer
+context: PING proves heartbeat participation, while the first real transfer
+through that context proves its request-serving path has been exercised. The
+heartbeat starts after KV cache registration and refreshes `last_seen`, but the
+normal reap timeout applies to a context only after both signals have arrived.
+Until then, the larger registration grace protects model warmup and CUDA Graph
+capture without letting a context whose worker dies during startup leak forever.
+The worker heartbeat uses a registration-aware request: the server both proves
+availability and reports any expected Context that no longer exists. Missing
+registrations trigger the existing idempotent re-registration callback even
+when the server itself never became unhealthy.
 
-```
-engine worker adapter                            MP server
-+---------------------------+                   +--------------------------------------+
-| HeartbeatThread           |   PING [id]       | ManagementModule                     |
-|  (instance_id, 10s)  -----+------------------>|  ping(id) -> touch_instance(id)      |
-|  lazy start on first req, |   (NORMAL pool)   |  reaper thread (scan = timeout/4)    |
-|   (starts healthy)        |                   |   -> reap_stale_instances(           |
-|  unhealthy->healthy edge  |                   |        timeout, registration_grace)  |
-|   -> re-register callback |   REGISTER        |   -> drop_instance_state(id) fan-out |
-|                           +------------------>|        |                |            |
-| register_kv_caches        |   STORE/RETRIEVE  |        v                v            |
-|  (no pings until traffic) |   (refresh too)   | LMCacheDriven/          Blend        |
-|                           |                   |  EngineDriven           (CB rope     |
-|                           |                   |  TransferModule          dropped)    |
-|                           |                   |  Entry{.., last_seen,               |
-|                           |                   |   has_liveness_signal}               |
-+---------------------------+                   |  _lock (leaf); pop -> cleanup        |
-                                                +--------------------------------------+
+```text
+Worker REGISTER -> start heartbeat
+       |
+       +-- PING_REGISTERED(id, expected) --> Server checks and touches Contexts
+       |                                      |
+       |<------------- missing types ---------+
+       |
+       +-- missing -> idempotent re-registration
+       +-- STORE/RETRIEVE -> latch transfer activity
+
+Server Reaper: use normal timeout only after PING + transfer; otherwise grace.
 ```
 
 ## 3. Protocol Change
 
-The PING payload changes in place from `[]` to `[int | None]`; the response stays
-`bool`, always `True` (`None` marks an untracked prober such as the scheduler
-adapter, which registers nothing and is never reapable). PING keeps its BLOCKING
-dispatch on the NORMAL thread pool. SYNC dispatch was considered but rejected:
-SYNC runs on the MQ main loop, where a slow `REGISTER_KV_CACHE` (also SYNC) would
-block PING and make a live worker look dead. Sharing the NORMAL pool is in fact
-desirable — if the pool cannot answer PING within the heartbeat timeout, the
-worker *should* enter degraded mode (the same back-pressure signal). The payload
-change is wire-visible, so both sides upgrade together (Section 7).
+The existing `PING([int | None]) -> bool` operation is unchanged. It reports
+server availability and refreshes matching Contexts; `None` marks an untracked
+prober such as the scheduler adapter. It remains BLOCKING on the NORMAL pool so
+a slow SYNC registration cannot stall heartbeat dispatch on the MQ main loop.
+
+`PING_REGISTERED(instance_id, expected_registration_types)` is an internal vLLM
+worker operation. It atomically checks and refreshes each expected GPU KV,
+engine-driven KV, or QStore Context and returns the missing registration types.
+An empty list means that the server is reachable and every expected Context is
+present; a transport timeout means that the server is unreachable. The request
+is separate so scheduler, SGLang, and ATOM PING callers keep their existing wire
+contract.
 
 ## 4. Instance ID Generation
 
-The worker adapter replaces `os.getpid()` with
-`uuid.uuid4().int & ((1 << 63) - 1)`, INFO-logged at construction so operators can
-correlate reap warnings with a specific pod. `uuid4` reads OS entropy (identically
-seeded processes cannot collide); the 63-bit mask keeps the value int64-safe.
-Every id-carrying request reads the same field, so no other payloads change.
+The worker adapter replaces `os.getpid()` with an INFO-logged, int64-safe UUID.
+This prevents a restarted container from reusing a dead worker's PID and stale
+Context. Every id-carrying request reads the same field.
 
 ## 5. Server Side
 
-### 5.1 Liveness state and two-tier windows
+### 5.1 Liveness state and two-signal activation
 
-`ContextEntry` (LMCache-driven) and `EngineDrivenContextEntry` gain
-`last_seen: float` (`time.monotonic()`) and `has_liveness_signal: bool`, latched
-only by PING. The flag selects the staleness window: an entry that has pinged
-provably runs the heartbeat protocol and is judged on the reap timeout; one that
-never pinged (e.g. still warming under lazy start) is judged on the generous
-registration grace. `last_seen` is refreshed by PING (`touch_instance`: refresh
-if present, never insert), register (create and NOOP paths), and every transfer
-path, so a worker mid-transfer is never reaped; traffic never latches the flag.
+`ContextEntry` (LMCache-driven and QStore) and `EngineDrivenContextEntry` hold
+`last_seen`, `has_liveness_signal` (latched by PING), and
+`has_transfer_activity` (latched by a real store/retrieve or prepare/commit).
+The normal reap timeout applies only when both booleans are true; every other
+state uses registration grace. PING, registration, and transfer all refresh
+`last_seen`.
+
+Activation is scoped to each registered transfer context, not shared globally
+by `instance_id`. PING is fanned out to every context registered for that
+worker, while a transfer activates only the context that serves it. For example,
+a GPU KV retrieve activates the GPU KV context but not an optional QStore
+context; the QStore context retains registration grace until its own first
+`STORE_Q`. This prevents one transfer path from shortening another context's
+startup protection. A context that is never used is still cleaned up after a
+silent registration-grace interval.
+
+Mirrored state retains the same ownership boundary. Blend rope state is owned
+by the GPU KV context, so only reaping that context drops the mirror. Reaping an
+independently activated QStore context with the same `instance_id` does not
+invalidate a still-protected GPU/Blend context.
+
+| PING seen | Transfer seen | Reap window |
+|---|---|---|
+| No | No | Registration grace |
+| Yes | No | Registration grace (startup or request-idle) |
+| No | Yes | Registration grace (legacy client without heartbeat) |
+| Yes | Yes | Normal reap timeout |
+
+Metadata-only Blend operations do not mark transfer activity. The actual
+`CB_RETRIEVE_PRE_COMPUTED` scatter does.
 
 ### 5.2 Locking
 
@@ -98,24 +114,17 @@ readers use the locked accessors `get_and_touch_context_entry` (get-and-refresh)
 
 ### 5.3 Reaper
 
-`ManagementModule` (the PING owner) owns the reaper thread, scanning every
-`reap_timeout / 4`. Each scan calls `reap_stale_instances` on every target: under
-the module lock, collect ids whose staleness exceeds their window and pop them;
-outside the lock, run the same cleanup as a client unregister and log a WARNING
-per instance (repeated reaps of one id signal a too-small timeout). Reaped ids are
-then passed to `drop_instance_state(id)` on every target; `BlendModule` drops
-the reaped instance's per-instance CB state (e.g. rope state) there. (It no longer
-mirrors the GPU cache context — that mirror was removed upstream, so reaping the
-GPU entry now frees the context directly.) Collect+pop shares the module lock with
-register's refresh, serializing every register-vs-reap race; on close, the reaper
-is stopped and joined before any module clears state.
+`ManagementModule` scans every `reap_timeout / 4`. A target atomically selects
+and pops stale ids under its module lock, then performs unregister-equivalent
+cleanup outside the lock. Only a GPU KV reap invalidates GPU-owned Blend mirror
+state. On close, the reaper stops before modules clear their state.
 
 ### 5.4 Public protocol and config
 
 ```python
 class InstanceLivenessTarget(Protocol):
     # All methods default to a no-op; an implementer overrides only its role.
-    def touch_instance(self, instance_id: int) -> None: ...
+    def touch_instance(self, instance_id: int) -> bool: ...
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]: ...
@@ -126,43 +135,57 @@ class InstanceLivenessTarget(Protocol):
 One protocol covers both reaper-driven roles. The transfer modules override the
 liveness methods (`touch`/`reap`/`count`); `BlendModule` overrides only
 `drop_instance_state` to drop its mirrored CB state. `ManagementModule` receives
-all targets in a single injected list. (Earlier a separate one-method
+all targets in a single injected list and the GPU KV target as the owner whose
+reaps invalidate that mirror. Reaps from QStore or other contexts do not fan out
+mirror cleanup. (Earlier a separate one-method
 `InstanceReapListener` held `drop_instance_state`; it was folded in since only
 `BlendModule` ever implemented it.)
 
+The existing `tracked_instances` status key is retained for compatibility, but
+its value is the number of registered contexts across liveness owners. A worker
+with both GPU KV and QStore contexts therefore contributes two.
+
 Config: `worker_reap_timeout_seconds` (default `120.0`; `0` disables, otherwise
 `>= 30.0`) and `worker_registration_grace_seconds` (default `3600.0`; `>=` the
-reap timeout — a tighter grace would reap warming workers faster than crashed
-ones), with matching CLI flags. Keep the timeout `>= 3 x` the client's
+reap timeout). For each registered transfer context, the grace is the maximum
+silent period before both activation signals exist, not merely a wait for the
+first PING. Keep the timeout `>= 3 x` the client's
 `lmcache.mp.heartbeat_interval` so a few missed pings never reap a live worker;
 the worker adapter warns at startup when `3 x interval` exceeds the 30 s floor.
 
 ## 6. Adapter Side
 
-### 6.1 Lazy start
+### 6.1 Registration-time start
 
-The heartbeat keeps its lazy start on first store/retrieve — no pings during
-warmup; the registration grace covers that window. It starts healthy (the event
-is set at construction), so the first store/retrieve is not gated. A live worker
-then pings every interval, refreshing its server-side `last_seen`, so it is never
-reaped while alive — no re-registration is needed at start. The recover callback
-re-registers only on a genuine recovery edge (Section 6.2). A retrieve dropped
-while the server is unhealthy is still reported via `get_finished` so async loads
-cannot hang.
+Adapter construction does not start the heartbeat because the server has no KV
+cache context for the worker yet. A successful `register_kv_caches` call starts
+it immediately, before the first store/retrieve, and the existing idempotent
+guard lets request paths retain defensive start calls without creating duplicate
+threads. After each successful registration ACK, the adapter records the actual
+primary Context type; QStore is added only after its own ACK. The heartbeat
+starts healthy (the event is set at construction), so
+registration and the first request are not gated. A live worker then pings every
+interval, refreshing `last_seen`; these PINGs do not claim request-serving
+readiness. The first real transfer latches that second signal and moves the entry
+to the normal reap window. Each heartbeat also verifies the recorded Context
+types. A missing Context clears health and invokes recovery even if the server
+remained reachable; a failed re-registration remains unhealthy and retries on
+the next heartbeat. A retrieve dropped while unhealthy is still reported via
+`get_finished` so async loads cannot hang.
 
 ### 6.2 Recovery after a reap
 
 ```
-T0        outage begins; pings time out -> health_event cleared, traffic stops
+T0        heartbeat is starved while the server remains available
 T0+120s   server: entry stale -> reap pops it, frees GPUCacheContext/IPC,
           layout-desc refcount; blend rope state dropped via listener <- leak fixed
-T1        connectivity back; next ping succeeds -> unhealthy->healthy edge
-T1        recover callback re-registers (id absent -> fresh context) before
-          health_event is set; traffic resumes             <- exactly one context
+T1        worker resumes; PING_REGISTERED returns the missing Context type
+T1        health_event is cleared; recover callback re-registers the same
+          instance_id before health_event is set; traffic resumes
 ```
 
-A shorter outage hits the NOOP register path, which refreshes `last_seen` and
-builds nothing — the server never asks a worker to re-register.
+The same callback still handles a full server outage. If all Contexts survived,
+the idempotent register path refreshes `last_seen` and builds nothing.
 
 ### 6.3 Shutdown
 
@@ -175,10 +198,14 @@ stop is already requested — a straggling cycle cannot re-create a ghost contex
 
 | Scenario | Behavior |
 |---|---|
-| Worker crash (SIGKILL, no UNREGISTER) after serving | Pings stop; reaped within ~`timeout + timeout/4`. Context, IPC handles, layout-desc refcount, and non-GPU strategy released via the same cleanup as a clean unregister; blend rope state dropped via the reap listener. The bug being fixed. |
-| Worker crash during warmup (registered, never pinged) | Reaped on the registration grace. Bounded leak instead of a permanent one. |
-| Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (heartbeat never started). Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is never reaped regardless of traffic. |
+| Worker crash (SIGKILL, no UNREGISTER) after serving | Both signals are latched; pings stop and the entry is reaped within ~`timeout + timeout/4`, using normal unregister cleanup. |
+| Worker dies during startup | Before both signals exist, prolonged silence is reaped on registration grace. The startup leak stays bounded. |
+| Worker remains alive but receives no traffic | Registration starts heartbeat; each PING refreshes registration grace, so request-idle time alone never reaps it. |
+| Worker continues warmup after registration | PING does not end startup protection. A temporarily starved heartbeat has the larger grace; silence beyond that grace is treated as startup death. |
+| Legacy client transfers but sends no PING | Transfer activity alone retains registration grace, preserving compatibility while keeping cleanup bounded. |
+| Worker has multiple registered contexts | Each context activates on its own first real transfer. An unused optional context retains registration grace and is cleaned up if it stays silent beyond that bound. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
-| Partition shorter than the reap window | No reap. On heal, the recover callback re-registers; the NOOP path refreshes `last_seen`; zero context churn. |
+| Server stays healthy but a Context is reaped | The next registration-aware heartbeat reports the missing type and triggers idempotent re-registration; detection takes at most one heartbeat interval. A transfer already entering the path may fall back once. |
+| Partition shorter than the reap window | No reap. On heal, the recovery path is idempotent; an existing Context is only refreshed. |
 | Worker crash + restart | The new process gets a fresh uuid-derived id and a fresh entry; the dead id is reaped independently. No PID-reuse aliasing. |
-| Mixed client/server versions | Every PING fails the payload-count check; the client sits permanently unhealthy. Loud, never silent corruption; upgrade both sides together. |
+| New worker with an old server | `PING_REGISTERED` is unsupported, so the worker becomes unhealthy rather than silently transferring without a Context. Upgrade both sides together. |

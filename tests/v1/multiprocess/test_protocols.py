@@ -5,6 +5,7 @@
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
 from lmcache.v1.multiprocess.protocols import initialize_protocols
 from lmcache.v1.multiprocess.protocols.base import RequestType
 
@@ -25,6 +26,26 @@ DEPRECATED_CB_ALIASES = {
 def test_every_request_type_has_a_definition() -> None:
     definitions = initialize_protocols()
     assert set(definitions) == set(RequestType)
+
+
+def test_registration_aware_ping_protocol_is_registered() -> None:
+    definitions = initialize_protocols()
+    request_type = RequestType.PING_REGISTERED
+
+    definition = definitions[request_type]
+    assert definition.payload_classes == [int, list[RequestType]]
+    assert definition.response_class == list[RequestType]
+
+
+def test_registration_type_list_round_trips_on_the_wire() -> None:
+    registration_types = [
+        RequestType.REGISTER_KV_CACHE,
+        RequestType.REGISTER_Q_CACHE,
+    ]
+
+    encoded = msgspec_encode(registration_types, cls=list[RequestType])
+
+    assert msgspec_decode(encoded, cls=list[RequestType]) == registration_types
 
 
 def test_blend_requests_are_registered() -> None:
@@ -57,6 +78,7 @@ def test_deprecated_cb_aliases_are_not_separate_members() -> None:
         "P2P_QUERY_LOOKUP_RESULTS",
         "P2P_UNLOCK_OBJECTS",
         "GET_EXPERIMENTAL",
+        "PING_REGISTERED",
     ],
 )
 def test_compatibility_aliases_do_not_reuse_later_auto_values(name: str) -> None:

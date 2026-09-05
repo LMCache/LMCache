@@ -326,6 +326,24 @@ def test_mq_noop_request():
     )
 
 
+def test_mq_registration_aware_ping_round_trip() -> None:
+    """Registration types survive a real client/server ZMQ round trip."""
+    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:16556")
+    helper.register_handler(
+        RequestType.PING_REGISTERED,
+        test_mq_handler_helpers.ping_registered_handler,
+    )
+
+    helper.run_test(
+        request_type=RequestType.PING_REGISTERED,
+        payloads=[
+            7,
+            [RequestType.REGISTER_KV_CACHE, RequestType.REGISTER_Q_CACHE],
+        ],
+        expected_response=[RequestType.REGISTER_Q_CACHE],
+    )
+
+
 def test_mq_noop_multiple_requests():
     """
     Test MessageQueue with multiple NOOP requests.

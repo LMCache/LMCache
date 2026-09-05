@@ -6,6 +6,7 @@ layer selection.
 
 # Standard
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
@@ -14,9 +15,11 @@ import torch
 # First Party
 from lmcache.sdk.qringbuffer import (
     QRingBuffer,
+    QRingBufferAdapter,
     attention_layer_names_from_vllm,
     get_tensor,
 )
+from lmcache.v1.multiprocess.protocols.base import RequestType
 
 BLOCK_SIZE = 8
 HIDDEN_DIM = 16
@@ -34,6 +37,38 @@ def _ring(
         dtype=dtype,
         device=torch.device("cpu"),
     )
+
+
+def _q_adapter_for_registration() -> tuple[QRingBufferAdapter, MagicMock]:
+    worker = MagicMock(name="worker_adapter")
+    worker.instance_id = 7
+    worker.world_size = 1
+    worker.blocks_in_chunk = 2
+    worker._mq_timeout = 3.0
+    q_adapter = QRingBufferAdapter(worker, "model##query")
+    q_adapter.q_ring = MagicMock(tensors={"layer.0": MagicMock()})
+    q_adapter.q_engine_group_infos = []
+    return q_adapter, worker
+
+
+def test_q_registration_is_expected_only_after_ack() -> None:
+    q_adapter, worker = _q_adapter_for_registration()
+
+    q_adapter._send_register_q_ring_request()
+
+    worker._record_additional_registration.assert_called_once_with(
+        RequestType.REGISTER_Q_CACHE
+    )
+
+
+def test_failed_q_registration_is_not_expected() -> None:
+    q_adapter, worker = _q_adapter_for_registration()
+    worker.transfer_ctx.register_q.side_effect = TimeoutError
+
+    with pytest.raises(ConnectionError):
+        q_adapter._send_register_q_ring_request()
+
+    worker._record_additional_registration.assert_not_called()
 
 
 def test_allocate_zero_returns_empty_without_consuming() -> None:

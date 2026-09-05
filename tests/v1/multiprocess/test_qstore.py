@@ -17,10 +17,12 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.modules import blend as blend_mod
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
+from lmcache.v1.multiprocess.protocols.base import RequestType
 
 REGISTER_ARGS = ("model##query", 2)
 
@@ -67,6 +69,8 @@ def test_register_inserts_unlatched_entry(monkeypatch) -> None:
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
     assert entry is not None
+    assert entry.has_liveness_signal is False
+    assert entry.has_transfer_activity is False
 
 
 def test_duplicate_register_refreshes_without_rebuilding(monkeypatch) -> None:
@@ -87,15 +91,26 @@ def test_duplicate_register_refreshes_without_rebuilding(monkeypatch) -> None:
 
 
 def test_reap_uses_two_tier_windows() -> None:
-    """Check that the reaper uses two time windows to decide which entries to drop.
-    This is a verbatim copy from tests/v1/multiprocess/test_worker_liveness.py"""
+    """Normal timeout requires PING and Q transfer; PING alone keeps grace."""
     module = _module()
     old = time.monotonic() - 1000.0
     module._q_contexts.update(
         {
-            1: ContextEntry(MagicMock(), *REGISTER_ARGS, old, True),
-            2: ContextEntry(MagicMock(), *REGISTER_ARGS, old, False),
-            3: ContextEntry(MagicMock(), *REGISTER_ARGS, time.monotonic(), True),
+            1: ContextEntry(
+                MagicMock(),
+                *REGISTER_ARGS,
+                old,
+                has_liveness_signal=True,
+                has_transfer_activity=True,
+            ),
+            2: ContextEntry(MagicMock(), *REGISTER_ARGS, old, has_liveness_signal=True),
+            3: ContextEntry(
+                MagicMock(),
+                *REGISTER_ARGS,
+                time.monotonic(),
+                has_liveness_signal=True,
+                has_transfer_activity=True,
+            ),
         }
     )
 
@@ -215,6 +230,7 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
 
     assert ok is False
     assert handle == b"event-handle"
+    assert module._q_contexts[1].has_transfer_activity is True
     assert stub_device[0].records == 1
     cast(MagicMock, ctx.storage_manager.reserve_write).assert_not_called()
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
@@ -235,6 +251,12 @@ class _FakeQStore:
         self.ctx = ctx
 
 
+class _FakeBlend:
+    def __init__(self, ctx, transfer_module, **kwargs) -> None:
+        self.ctx = ctx
+        self.transfer_module = transfer_module
+
+
 @pytest.fixture
 def stub_server_modules(monkeypatch):
     """Stub the server's module constructors. Returns the ManagementModule mock.
@@ -245,6 +267,7 @@ def stub_server_modules(monkeypatch):
     monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
     monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
     monkeypatch.setattr(server_mod, "QStoreModule", _FakeQStore)
+    monkeypatch.setattr(blend_mod, "BlendModule", _FakeBlend)
     management = MagicMock(name="ManagementModule")
     monkeypatch.setattr(server_mod, "ManagementModule", management)
     return management
@@ -287,6 +310,46 @@ def test_server_builds_q_store_module(stub_server_modules) -> None:
     kwargs = stub_server_modules.call_args.kwargs
     assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
     assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
+    assert isinstance(
+        kwargs["registration_targets"][RequestType.REGISTER_KV_CACHE],
+        _FakeLMCacheDriven,
+    )
+    assert isinstance(
+        kwargs["registration_targets"][RequestType.REGISTER_Q_CACHE],
+        _FakeQStore,
+    )
+
+
+def test_server_auto_mode_maps_both_primary_registration_types(
+    stub_server_modules,
+) -> None:
+    _build(stub_server_modules, supported_transfer_mode="auto")
+
+    targets = stub_server_modules.call_args.kwargs["registration_targets"]
+    assert isinstance(targets[RequestType.REGISTER_KV_CACHE], _FakeLMCacheDriven)
+    assert isinstance(
+        targets[RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT],
+        _FakeEngineDriven,
+    )
+
+
+def test_server_wires_gpu_context_as_blend_mirror_owner(
+    stub_server_modules,
+) -> None:
+    """QStore reaps must not invalidate Blend's GPU-owned mirror."""
+    _build(
+        stub_server_modules,
+        engine_type="blend",
+        enable=[TRANSFER_QUERY],
+        supported_transfer_mode="lmcache_driven",
+    )
+
+    kwargs = stub_server_modules.call_args.kwargs
+    owner = kwargs["mirror_state_owner"]
+    assert isinstance(owner, _FakeLMCacheDriven)
+    assert owner in kwargs["liveness_targets"]
+    assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
+    assert any(isinstance(t, _FakeBlend) for t in kwargs["liveness_targets"])
 
 
 def test_server_builds_nothing_when_no_feature_is_enabled(

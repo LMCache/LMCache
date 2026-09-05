@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import KeyType
+from lmcache.v1.multiprocess.protocols.base import RequestType
 
 # ==============================================================================
 # NOOP Request Handlers
@@ -27,6 +28,18 @@ def noop_handler() -> str:
     Takes no arguments and returns a simple string response.
     """
     return "NOOP_OK"
+
+
+def ping_registered_handler(
+    instance_id: int, expected_registration_types: list[RequestType]
+) -> list[RequestType]:
+    """Return one missing registration to exercise enum-list wire encoding."""
+    assert instance_id == 7
+    assert expected_registration_types == [
+        RequestType.REGISTER_KV_CACHE,
+        RequestType.REGISTER_Q_CACHE,
+    ]
+    return [RequestType.REGISTER_Q_CACHE]
 
 
 # ==============================================================================

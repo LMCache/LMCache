@@ -102,15 +102,15 @@ class MPServerConfig:
     the same id. Set via ``--instance-id``; defaults to a random UUID v4."""
 
     worker_reap_timeout_seconds: float = 120.0
-    """Silence budget (seconds) after which a ping-proven worker's KV cache
-    registration is reaped. 0 disables worker reaping. Keep it >= 3 x the
-    engine adapter's heartbeat interval so a few missed pings never reap a live
-    worker."""
+    """Silence budget (seconds) after which an active transfer registration is
+    reaped. A registration becomes active after its context has observed both
+    PING and a real transfer. 0 disables worker reaping. Keep it >= 3 x the
+    engine adapter's heartbeat interval."""
 
     worker_registration_grace_seconds: float = 3600.0
-    """Silence budget (seconds) for a worker that registered but has never
-    sent a PING (model warmup, or death before its first request). Must be
-    >= worker_reap_timeout_seconds."""
+    """Silence budget (seconds) for each transfer registration before its
+    context has observed both PING and real transfer activity. PING refreshes
+    this startup window. Must be >= worker_reap_timeout_seconds."""
 
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
@@ -397,17 +397,18 @@ def add_mp_server_args(
         "--worker-reap-timeout-seconds",
         type=float,
         default=120.0,
-        help="Silence budget (s) before a ping-proven worker's KV cache "
-        "registration is reaped. 0 disables reaping. Must be >= 3 x the "
-        "engine adapter's heartbeat interval. Default is 120.",
+        help="Silence budget (s) before an active transfer registration is "
+        "reaped. Active means its context has observed both PING and a real "
+        "transfer. 0 disables reaping. Keep it >= 3 x the engine adapter's "
+        "heartbeat interval. Default is 120.",
     )
     mp_group.add_argument(
         "--worker-registration-grace-seconds",
         type=float,
         default=3600.0,
-        help="Silence budget (s) for a worker that registered but never "
-        "pinged (model warmup or early death). Must be >= the worker reap "
-        "timeout. Default is 3600.",
+        help="Silence budget (s) for each transfer registration before its "
+        "context has observed both PING and real transfer activity. Must be "
+        ">= the worker reap timeout. Default is 3600.",
     )
     mp_group.add_argument(
         "--enable-segmented-prefix",

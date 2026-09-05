@@ -26,6 +26,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     ParallelStrategy,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 
@@ -49,6 +50,7 @@ class FakeHeartbeatThread:
         health_event: threading.Event | None = None,
         interval: float = 0.0,
         instance_id: int | None = None,
+        expected_registration_types: Callable[[], list[RequestType]] | None = None,
     ) -> None:
         self.req_client = req_client
         self.health_event = (
@@ -56,6 +58,7 @@ class FakeHeartbeatThread:
         )
         self.interval = interval
         self.instance_id = instance_id
+        self.expected_registration_types = expected_registration_types
         # Snapshot of the health event at construction time: lets tests
         # assert the adapter starts the heartbeat healthy (event still set).
         self.health_event_set_at_init = self.health_event.is_set()
@@ -214,6 +217,7 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
 
     assert adapter.kv_caches is new_caches
     req_client.register_kv_cache.assert_called_once()
+    assert adapter._expected_registrations_snapshot() == [RequestType.REGISTER_KV_CACHE]
 
 
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
@@ -225,6 +229,23 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
         fake_tensor = MagicMock()
         fake_tensor.device.type = "cuda"
         adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    assert FakeHeartbeatThread.instances == []
+    assert adapter._expected_registrations_snapshot() == []
+
+
+def test_repeated_registration_starts_only_one_heartbeat(fake_adapter) -> None:
+    """Repeated successful registration keeps one worker heartbeat."""
+    adapter, req_client, _ = fake_adapter
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    kv_caches = {"layer.0": fake_tensor}
+
+    adapter.register_kv_caches(kv_caches)
+    adapter.register_kv_caches(kv_caches)
+
+    assert req_client.register_kv_cache.call_count == 2
+    assert len(FakeHeartbeatThread.instances) == 1
 
 
 def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
@@ -248,6 +269,9 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     assert adapter.kv_caches is cpu_kv
     req_client.register_kv_cache_engine_driven_context.assert_called_once()
     assert len(req_client.register_kv_cache_engine_driven_context.call_args.args) == 1
+    assert adapter._expected_registrations_snapshot() == [
+        RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+    ]
     assert adapter.create_recorded_event() is None
 
 
@@ -663,15 +687,18 @@ def test_instance_id_logged_at_info_on_construction(fake_adapter, monkeypatch) -
     assert any(str(adapter.instance_id) in msg for msg in messages)
 
 
-def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
-    """The lazy create path starts the heartbeat healthy (no pessimistic
-    clear) and wires the recover callback before ``start()``; the first
-    store is not gated. Idempotent on re-entry (no second thread)."""
+def test_registration_starts_heartbeat_before_first_request(
+    fake_adapter, monkeypatch
+) -> None:
+    """Successful registration starts the heartbeat healthy and wires the
+    recover callback before ``start()``. Later requests are idempotent."""
     adapter, _send_mock, _ = fake_adapter
-    adapter.transfer_ctx = MagicMock()
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
     assert adapter.is_healthy  # the constructor leaves the event set
 
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert len(FakeHeartbeatThread.instances) == 1
     heartbeat = FakeHeartbeatThread.instances[0]
@@ -680,13 +707,16 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     assert heartbeat.health_event_set_at_init is True
     # The recover callback is wired before start() (for genuine recovery).
     assert heartbeat.calls == ["register_recover_callback", "start"]
+    assert heartbeat.expected_registration_types is not None
+    assert heartbeat.expected_registration_types() == [RequestType.REGISTER_KV_CACHE]
     assert adapter.is_healthy
-    assert adapter.transfer_ctx.submit_store.call_count == 1
 
-    # Re-entry is idempotent: no new thread.
-    adapter.submit_store_request("req-2", _op([[1]]), MagicMock())
+    # Store and retrieve keep the registration-started heartbeat idempotent.
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    adapter.submit_retrieve_request("req-2", _op([[1]]), MagicMock())
     assert len(FakeHeartbeatThread.instances) == 1
-    assert adapter.transfer_ctx.submit_store.call_count == 2
+    assert contexts[0].submit_store.call_count == 1
+    assert contexts[0].submit_retrieve.call_count == 1
 
 
 def test_heartbeat_first_ping_runs_callback_before_setting_event(
@@ -718,6 +748,83 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
         heartbeat.stop(timeout=10.0)
 
     assert event_state_during_callback == [False]
+
+
+@pytest.mark.parametrize(
+    ("ping_result", "expected_health", "expected_recovery_calls"),
+    [
+        pytest.param(
+            [RequestType.REGISTER_KV_CACHE], True, 1, id="missing-registration"
+        ),
+        pytest.param(None, False, 0, id="server-unreachable"),
+        pytest.param([], True, 0, id="registration-complete"),
+    ],
+)
+def test_registered_ping_drives_health_and_recovery(
+    monkeypatch,
+    ping_result: list[RequestType] | None,
+    expected_health: bool,
+    expected_recovery_calls: int,
+) -> None:
+    """Distinguish a missing Context from server failure and a complete ACK."""
+    monkeypatch.setattr(
+        adapter_mod,
+        "send_registered_ping",
+        lambda req_client,
+        timeout,
+        instance_id,
+        expected_registration_types: ping_result,
+    )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(
+        req_client=MagicMock(name="req_client"),
+        health_event=health_event,
+        interval=60.0,
+        instance_id=7,
+        expected_registration_types=lambda: [RequestType.REGISTER_KV_CACHE],
+    )
+    event_state_during_callback: list[bool] = []
+
+    def recover() -> bool:
+        event_state_during_callback.append(health_event.is_set())
+        return True
+
+    heartbeat.register_recover_callback(recover)
+
+    assert heartbeat._execute().message == (
+        "healthy" if expected_health else "unhealthy"
+    )
+    assert health_event.is_set() is expected_health
+    assert len(event_state_during_callback) == expected_recovery_calls
+    if expected_recovery_calls:
+        assert event_state_during_callback == [False]
+
+
+def test_missing_registration_retries_after_recovery_failure(monkeypatch) -> None:
+    missing = [RequestType.REGISTER_KV_CACHE]
+    monkeypatch.setattr(
+        adapter_mod,
+        "send_registered_ping",
+        lambda req_client, timeout, instance_id, expected_registration_types: missing,
+    )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(
+        req_client=MagicMock(name="req_client"),
+        health_event=health_event,
+        interval=60.0,
+        instance_id=7,
+        expected_registration_types=lambda: missing,
+    )
+    recover = MagicMock(side_effect=[False, True])
+    heartbeat.register_recover_callback(recover)
+
+    assert heartbeat._execute().message == "unhealthy"
+    assert not health_event.is_set()
+    assert heartbeat._execute().message == "healthy"
+    assert health_event.is_set()
+    assert recover.call_count == 2
 
 
 def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
@@ -777,8 +884,9 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
     stray heartbeat ping can race the closing req_client."""
     adapter, req_client, future = fake_adapter
-    adapter.transfer_ctx = MagicMock()
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
     heartbeat = FakeHeartbeatThread.instances[0]
 
     stop_state_at_unregister: list[bool] = []
@@ -795,10 +903,56 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     assert stop_state_at_unregister == [True]
 
 
+def test_shutdown_waits_for_inflight_recovery_before_unregister(
+    fake_adapter, monkeypatch
+) -> None:
+    """An in-flight recovery must finish before shutdown unregisters, so a
+    delayed REGISTER cannot recreate a Context after UNREGISTER."""
+    adapter, req_client, future = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.recover_callback is not None
+
+    recovery_entered = threading.Event()
+    release_recovery = threading.Event()
+    call_order: list[str] = []
+
+    def blocked_register(_kv_caches) -> None:
+        recovery_entered.set()
+        assert release_recovery.wait(timeout=10.0)
+        call_order.append("register")
+
+    monkeypatch.setattr(adapter, "_send_register_kv_caches_request", blocked_register)
+
+    def unregister(_instance_id: int):
+        call_order.append("unregister")
+        return future
+
+    req_client.unregister_kv_cache.side_effect = unregister
+    recovery_thread = threading.Thread(target=heartbeat.recover_callback)
+    shutdown_thread = threading.Thread(target=adapter.shutdown)
+
+    recovery_thread.start()
+    assert recovery_entered.wait(timeout=10.0)
+    shutdown_thread.start()
+    time.sleep(0.05)
+    assert call_order == []
+    release_recovery.set()
+    recovery_thread.join(timeout=10.0)
+    shutdown_thread.join(timeout=10.0)
+
+    assert not recovery_thread.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert call_order == ["register", "unregister"]
+    contexts[0].close.assert_called_once_with()
+
+
 def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
-    """shutdown() on an adapter whose heartbeat was never lazily started
-    (cold shutdown before any traffic) still sends UNREGISTER and does
-    not raise."""
+    """Shutdown before KV cache registration still sends UNREGISTER and
+    does not raise."""
     adapter, req_client, _future = fake_adapter
 
     adapter.shutdown()

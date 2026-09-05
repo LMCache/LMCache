@@ -10,7 +10,7 @@ protocols/
 ├── __init__.py         # Protocol initialization and registration
 ├── base.py             # Common types (HandlerType, ProtocolDefinition, RequestType)
 ├── engine.py           # Engine operations (REGISTER/UNREGISTER, STORE, RETRIEVE, LOOKUP, PREPARE/COMMIT, ...)
-├── controller.py       # Controller operations (CLEAR, GET_CHUNK_SIZE, PING)
+├── controller.py       # Controller operations (CLEAR, GET_CHUNK_SIZE, PING, PING_REGISTERED)
 ├── debug.py            # Debug operations (NOOP)
 ├── blend.py            # CacheBlend rope + unified lookup + retrieve (CB_REGISTER_ROPE, CB_UNREGISTER_ROPE, CB_RETRIEVE_PRE_COMPUTED, CB_UNIFIED_LOOKUP)
 ├── observability.py    # Observability events (REPORT_BLOCK_ALLOCATION)
@@ -212,6 +212,8 @@ Cache management and configuration:
 - `CLEAR`: Clear all caches in the server
 - `GET_CHUNK_SIZE`: Get the chunk size configuration
 - `PING`: Liveness / worker probe (payload: sender's worker instance id or `None`)
+- `PING_REGISTERED`: Internal worker probe that also returns missing expected
+  registration types
 
 ### Debug Operations (`debug.py`)
 Testing and monitoring:
