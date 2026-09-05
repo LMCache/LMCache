@@ -479,10 +479,10 @@ func (r *LMCacheEngineReconciler) reconcileRESPAuthSecret(ctx context.Context, e
 	}
 
 	// Update existing — apply ownerRef, data, and labels.
+	patch := client.MergeFrom(existing.DeepCopy())
 	if err := ctrl.SetControllerReference(engine, existing, r.Scheme); err != nil {
 		return err
 	}
-	patch := client.MergeFrom(existing.DeepCopy())
 	existing.Data = desired.Data
 	existing.Labels = desired.Labels
 	return r.Patch(ctx, existing, patch)
