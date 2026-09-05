@@ -29,6 +29,8 @@ smaller model and a shorter dataset to fit the T4's memory.
 
 | Notebook | Strategy | Needs query tensor? |
 | --- | --- | --- |
+| [topology_aware_token_dropping.ipynb](./topology_aware_token_dropping.ipynb) | Runnable notebook wrapper with service health checks and assertions over the live topology-plan result. | No |
+| [topology_aware_token_dropping.py](./topology_aware_token_dropping.py) | Expands a fenced semantic plan against the live dense-cache topology, applies its physical range through `modify_kv()`, and proves that a stale generation fails closed. | No |
 | [random_token_dropping.ipynb](./random_token_dropping.ipynb) | Drops a random subset of past tokens. Uses the KV cache only. | No |
 | [snapkv_token_dropping.ipynb](./snapkv_token_dropping.ipynb) | SnapKV: keeps the first and last window, as well as the tokens the recent-window queries attend to most. Needs each request's query tensor to score importance. | Yes |
 | [rkv_token_dropping.ipynb](./rkv_token_dropping.ipynb) | R-KV: SnapKV's importance term minus a **redundancy** term, so a token is kept only if it is both attended-to and says something new. Three optimized variants live in [rkv_variants/](./rkv_variants). | Yes |
@@ -138,6 +140,37 @@ passes. However, it can also be configured via `"lmcache.mp.q.ring_depth":2`.
 The random-dropping example, being the simplest example that demonstrates 
 decode throughput improvement, does **not** need this patch or flag. It only
 works with the KV cache.
+
+### Running the topology-aware example
+
+Start LMCache and vLLM with the same settings used by the random-dropping
+example, including a 256-token LMCache chunk size and
+`--return-tokens-as-token-ids`. Then run:
+
+```sh
+python examples/token_dropping/topology_aware_token_dropping.py
+```
+
+The equivalent notebook entry point is
+[`topology_aware_token_dropping.ipynb`](./topology_aware_token_dropping.ipynb).
+It reuses the script above, checks both live services first, and asserts the
+expected cache edit and stale-generation result.
+
+For an offline deployment where vLLM logs a local snapshot path as
+`cache_model_name`, keep `--model` as the served API alias and pass that exact
+path to both `--hf-model` and `--cache-model`:
+
+```sh
+python examples/token_dropping/topology_aware_token_dropping.py \
+  --hf-model /path/to/snapshot \
+  --cache-model /path/to/snapshot
+```
+
+The script performs a real prefill, expands a logical middle-chunk
+invalidation into physical entry and byte ranges, uses that expansion to edit
+and store the live KV tensor, and resumes decode. Its JSON output also shows
+that replaying the same plan against a new request generation emits no physical
+operations and requires recomputation.
 
 ## Dataset
 
