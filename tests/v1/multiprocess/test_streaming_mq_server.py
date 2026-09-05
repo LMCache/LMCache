@@ -30,7 +30,6 @@ from lmcache.v1.multiprocess.mq import (
 from lmcache.v1.multiprocess.mq_streaming import (
     StreamingMessageQueueServer,
     StreamingRequestHandler,
-    submit_streaming_request,
 )
 from lmcache.v1.multiprocess.protocol import (
     HandlerType,
@@ -126,7 +125,7 @@ def streaming_pair():
 def _submit(client: MessageQueueClient) -> tuple[LayerwiseRawFuture, queue.Queue]:
     partials: queue.Queue = queue.Queue()
     raw: LayerwiseRawFuture = LayerwiseRawFuture(partials)
-    submit_streaming_request(client, REQUEST_TYPE, _payloads(), raw)
+    client.submit_streaming_request(REQUEST_TYPE, _payloads(), raw)
     return raw, partials
 
 

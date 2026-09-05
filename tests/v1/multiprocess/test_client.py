@@ -81,6 +81,9 @@ def test_business_callers_create_clients_through_factory() -> None:
     implementation_tests = {
         repo_root / "tests/v1/multiprocess/test_client.py",
         repo_root / "tests/v1/multiprocess/test_mq.py",
+        # Exercise the queue client itself rather than calling through it.
+        repo_root / "tests/v1/multiprocess/test_streaming_mq_server.py",
+        repo_root / "tests/v1/multiprocess/test_layerwise_retrieve_submit_ordering.py",
     }
     violations: list[str] = []
     for source_root in (repo_root / "lmcache", repo_root / "tests"):

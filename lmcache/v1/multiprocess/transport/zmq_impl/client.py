@@ -28,6 +28,34 @@ class ZmqMultiprocessClient(RequestClient):
     def __init__(self, message_queue_client: MessageQueueClient) -> None:
         self._message_queue_client = message_queue_client
 
+    def register_layerwise_ipc_event_pool(
+        self, instance_id: int
+    ) -> MessagingFuture[Any]:
+        """Import the server's per-layer IPC event pool."""
+        return self._call(RequestType.REGISTER_LAYERWISE_IPC_EVENT_POOL, instance_id)
+
+    def retrieve_layerwise(
+        self,
+        key: Any,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: Any,
+        skip_first_n_tokens: int,
+        future: Any,
+    ) -> MessagingFuture[Any]:
+        """Retrieve one chunk layer by layer.
+
+        The server answers with one frame per layer batch. Unlike the other
+        methods the future is supplied by the caller, because it carries the
+        per-layer state and has to be bound to the pending-request table
+        before the first frame can arrive.
+        """
+        return self._message_queue_client.submit_streaming_request(
+            RequestType.RETRIEVE_LAYERWISE,
+            [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens],
+            future,
+        )
+
     def register_kv_cache(
         self,
         instance_id: int,

@@ -13,7 +13,7 @@ anything, and that it reports itself incomplete until the closing frame.
 
 # Standard
 from dataclasses import fields
-from typing import Any
+from typing import Any, cast
 import itertools
 import queue
 import struct
@@ -25,12 +25,12 @@ import pytest
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.futures_layerwise import LayerwiseRawFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.mq_streaming import submit_streaming_request
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.transfer_context import worker_transfer_layerwise
 from lmcache.v1.multiprocess.transfer_context.worker_transfer_layerwise import (
     LMCacheLayerwiseTransferContext,
 )
+from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 
 
 class _RecordingClient:
@@ -49,6 +49,18 @@ class _RecordingClient:
         self.pending_futures: dict[int, Any] = {}
         self.input_queue: queue.Queue = queue.Queue()
         self._polling_loop = self._Loop(self)
+
+    def submit_streaming_request(self, request_type, request_payloads, future):
+        """Real streaming submit, driven against this stub's plumbing."""
+        return MessageQueueClient.submit_streaming_request(
+            self, request_type, request_payloads, future
+        )
+
+    def submit_request(self, *args: Any, **kwargs: Any):
+        pytest.fail(
+            "submit_retrieve must not route through submit_request: the "
+            "per-chunk path cannot carry a pre-built, self-re-arming future"
+        )
 
     class _Loop:
         def __init__(self, client: "_RecordingClient") -> None:
@@ -121,11 +133,7 @@ def _make_context(client: _RecordingClient) -> LMCacheLayerwiseTransferContext:
     # ``Any`` so the stub collaborators below can stand in for the concrete
     # client/backend/pool types the context annotates.
     ctx: Any = object.__new__(LMCacheLayerwiseTransferContext)
-    ctx._mq_client = client
-    ctx._send_request = lambda *a, **kw: pytest.fail(
-        "submit_retrieve must not route through _send_request: the per-chunk "
-        "path cannot carry a pre-built, self-re-arming future"
-    )
+    ctx._req_client = ZmqMultiprocessClient(cast(MessageQueueClient, client))
     ctx._device = 0
     ctx._event_backend = _StubEventBackend()
     ctx._event_pool = _StubEventPool()
@@ -246,9 +254,9 @@ def test_partial_frame_re_registers_the_future():
 def test_streaming_submit_matches_the_base_client():
     """The streaming helper must build the same request as ``submit_request``.
 
-    ``submit_streaming_request`` duplicates the request-building half of
-    ``MessageQueueClient.submit_request`` so that the per-chunk path carries
-    nothing about streaming.  This pins the two together: the comparison is
+    ``MessageQueueClient.submit_streaming_request`` duplicates the
+    request-building half of ``submit_request`` so that the per-chunk path
+    carries nothing about streaming.  This pins the two together: the comparison is
     driven by ``dataclasses.fields``, so a field added to ``WrappedRequest``
     and populated by the base path fails here until the copy catches up.
     """
@@ -259,7 +267,7 @@ def test_streaming_submit_matches_the_base_client():
     base_request = base_client.input_queue.get_nowait()
 
     stream_client = _make_bare_client()
-    submit_streaming_request(
+    MessageQueueClient.submit_streaming_request(
         stream_client,
         RequestType.RETRIEVE_LAYERWISE,
         ["payload", 7],
