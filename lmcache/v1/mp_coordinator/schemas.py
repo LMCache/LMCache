@@ -592,6 +592,31 @@ class PinResponse(BaseModel):
     status: str
 
 
+class PinnedKeyInfo(BaseModel):
+    """One L2-pinned key as listed by ``GET /cache/pins``.
+
+    Attributes:
+        key: The pinned key.
+        pin_count: Active pins on the key. Each ``DELETE /cache/pins`` that
+            resolves to the key lowers it by one; a force delete removes it.
+    """
+
+    key: EncodedObjectKey
+    pin_count: int = 0
+
+
+class PinListResponse(BaseModel):
+    """Reply to ``GET /cache/pins``.
+
+    Attributes:
+        total: Pinned keys matching the filters.
+        pins: The requested page of them, in first-pinned order.
+    """
+
+    total: int = 0
+    pins: list[PinnedKeyInfo] = Field(default_factory=list)
+
+
 class DeleteRequest(BaseModel):
     """Body of ``POST /cache/delete`` on the coordinator.
 
