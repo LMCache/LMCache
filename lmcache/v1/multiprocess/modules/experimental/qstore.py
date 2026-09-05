@@ -327,18 +327,27 @@ class QStoreModule(InstanceLivenessTarget):
         Args:
             instance_id: The worker instance ID (shared with its KV cache).
         """
+        if not self._drop_instance_state(instance_id):
+            logger.warning("No registered Q ring found for instance ID %d", instance_id)
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        """Release this module's state during unified instance cleanup."""
+        self._drop_instance_state(instance_id)
+
+    def _drop_instance_state(self, instance_id: int) -> bool:
+        """Pop and release one Q-ring registration if present."""
         with self._lock:
             popped = [
                 e for e in (self._q_contexts.pop(instance_id, None),) if e is not None
             ]
         if not popped:
-            logger.warning("No registered Q ring found for instance ID %d", instance_id)
-            return
+            return False
 
         # No scalar binding: `popped` must stay the only reference so
         # _release_entries' reclaim actually unmaps the IPC segments.
         self._release_entries(popped)
         logger.info("Unregistered Q ring for instance ID %d", instance_id)
+        return True
 
     @_lmcache_nvtx_annotate
     def store_q(

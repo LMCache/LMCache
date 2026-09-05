@@ -111,11 +111,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
-                self.unregister_kv_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
                 RequestType.PREPARE_STORE,
                 self.prepare_store,
                 ThreadPoolType.AFFINITY,
@@ -404,19 +399,28 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Args:
             instance_id: The worker instance identifier.
         """
+        if not self._drop_instance_state(instance_id):
+            logger.warning(
+                "No registered non-GPU context found for instance ID %d",
+                instance_id,
+            )
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        """Release this module's state during unified instance cleanup."""
+        self._drop_instance_state(instance_id)
+
+    def _drop_instance_state(self, instance_id: int) -> bool:
+        """Pop and release one non-GPU registration if present."""
         with self._lock:
             entry = self._engine_driven_contexts.pop(instance_id, None)
             if entry is not None:
                 self._strategies.pop(instance_id, None)
         if entry is None:
-            logger.warning(
-                "No registered non-GPU context found for instance ID %d",
-                instance_id,
-            )
-            return
+            return False
 
         self._release_entry(instance_id, entry)
         logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
+        return True
 
     @_lmcache_nvtx_annotate
     def prepare_store(
