@@ -1224,7 +1224,6 @@ class TestClientMultiWorker:
             tensor_refs.append(weakref.ref(tensor))
             return [tensor], [object()], [], []
 
-        monkeypatch.setattr(sv_helpers, "_make_event_handle", lambda: b"")
         monkeypatch.setattr(
             sv_helpers,
             "_allocate_cpu_shm_kv_cache",
@@ -1465,6 +1464,7 @@ def test_handle_mode_keeps_exported_event_alive_until_reply(
     event_ref: weakref.ReferenceType[_ExportedEvent] | None = None
 
     def make_exported_event(
+        event_backend: object | None,
         use_gpu: bool = True,
     ) -> tuple[_ExportedEvent, bytes]:
         nonlocal event_ref

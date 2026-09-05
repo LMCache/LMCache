@@ -69,6 +69,7 @@ def _make_connector(healthy: bool = True) -> Any:
         conn._health_event.set()
     conn._lmcache_chunk_size = _CHUNK_SIZE
     conn._mq_timeout = 5.0
+    conn._event_backend = _FakeEventBackend()
     return conn
 
 
@@ -106,7 +107,11 @@ class _FakeRaw:
     def __init__(self, future: MessagingFuture) -> None:
         self._future = future
 
-    def to_device_future(self, device=None) -> MessagingFuture:
+    def to_device_future(
+        self,
+        device=None,
+        event_backend=None,
+    ) -> MessagingFuture:
         return self._future
 
 
@@ -119,6 +124,17 @@ class _FakeEvent:
 
     def ipc_handle(self) -> bytes:
         return b"fake-ipc-handle"
+
+
+class _FakeEventBackend:
+    def create_event(self, device: object) -> _FakeEvent:
+        return _FakeEvent()
+
+    def record_event(self, event: _FakeEvent, stream: object) -> None:
+        event.record(stream)
+
+    def export_event(self, event: _FakeEvent, device: object) -> bytes:
+        return event.ipc_handle()
 
 
 class _FakeTorchDev:
@@ -334,15 +350,6 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
 
     sentinel = _SpyFuture()
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
-    monkeypatch.setattr(adapter_mod, "create_event", lambda device: _FakeEvent())
-    monkeypatch.setattr(
-        adapter_mod,
-        "record_event",
-        lambda event, device, stream: event.record(stream),
-    )
-    monkeypatch.setattr(
-        adapter_mod, "export_event", lambda event, device: event.ipc_handle()
-    )
     conn.req_client.store.return_value = _FakeRaw(sentinel)
 
     future = conn.store_kv_async(_store_metadata(num_tokens=4 * _CHUNK_SIZE))
@@ -369,15 +376,6 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     sentinel = _SpyFuture()
     raw = _FakeRaw(sentinel)
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
-    monkeypatch.setattr(adapter_mod, "create_event", lambda device: _FakeEvent())
-    monkeypatch.setattr(
-        adapter_mod,
-        "record_event",
-        lambda event, device, stream: event.record(stream),
-    )
-    monkeypatch.setattr(
-        adapter_mod, "export_event", lambda event, device: event.ipc_handle()
-    )
     connector.req_client.retrieve.return_value = raw
 
     raw_future, future = connector._submit_retrieve(

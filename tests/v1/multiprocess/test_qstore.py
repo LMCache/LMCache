@@ -43,9 +43,12 @@ def _stub_registration(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Creates a stub for the create_cache_context call to test
     register_q_cache()."""
     create = MagicMock(return_value=MagicMock(num_layers=2))
+    event_backend = MagicMock(name="event_backend")
     monkeypatch.setattr(qstore_mod, "create_cache_context", create)
     monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(qstore_mod, "check_event_support", lambda device: None)
+    monkeypatch.setattr(
+        qstore_mod, "get_event_ipc_backend", lambda device: event_backend
+    )
     return create
 
 
@@ -182,7 +185,10 @@ class _FakeEventBackend:
         self.created.append(event)
         return event
 
-    def record_event(self, event: _FakeEvent, device, stream=None) -> None:
+    def check_event_support(self, device) -> None:
+        return None
+
+    def record_event(self, event: _FakeEvent, stream=None) -> None:
         event.record(stream)
 
     def export_event(self, event: _FakeEvent, device) -> bytes:
@@ -191,7 +197,7 @@ class _FakeEventBackend:
     def import_event(self, handle: bytes, device) -> _FakeEvent:
         return _FakeEvent.from_ipc_handle(device, handle)
 
-    def wait_event(self, event: _FakeEvent, device, stream=None) -> None:
+    def wait_event(self, event: _FakeEvent, stream=None) -> None:
         event.wait(stream)
 
 
@@ -210,12 +216,7 @@ def stub_device(monkeypatch):
         "torch_dev",
         SimpleNamespace(device=_null, stream=_null, Event=_FakeEvent),
     )
-    monkeypatch.setattr(qstore_mod, "check_event_support", lambda device: None)
-    monkeypatch.setattr(qstore_mod, "create_event", backend.create_event)
-    monkeypatch.setattr(qstore_mod, "record_event", backend.record_event)
-    monkeypatch.setattr(qstore_mod, "export_event", backend.export_event)
-    monkeypatch.setattr(qstore_mod, "import_event", backend.import_event)
-    monkeypatch.setattr(qstore_mod, "wait_event", backend.wait_event)
+    monkeypatch.setattr(qstore_mod, "get_event_ipc_backend", lambda device: backend)
     return backend
 
 
@@ -237,7 +238,10 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     cache_context.kv_layer_groups_manager.num_kernel_groups = 1
     cache_context.calculate_num_blocks.return_value = 2  # 2 chunks * 2 = 4 needed
     module._q_contexts[1] = ContextEntry(
-        cache_context, *REGISTER_ARGS, time.monotonic()
+        cache_context,
+        *REGISTER_ARGS,
+        time.monotonic(),
+        event_backend=stub_device,
     )
 
     handle, ok = module.store_q(MagicMock(), 1, [[0, 1, 2]], b"peer-handle")

@@ -62,11 +62,7 @@ try:
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
     from lmcache.v1.multiprocess.transport.base import RequestClient
-    from lmcache.v1.platform.base.event_ipc import (
-        create_event,
-        export_event,
-        record_event,
-    )
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,
@@ -575,7 +571,10 @@ def _poll_prefetch_status(
     return None
 
 
-def _make_exported_event(use_gpu: bool = True) -> tuple[object | None, bytes]:
+def _make_exported_event(
+    event_backend: EventIPCBackend | None,
+    use_gpu: bool = True,
+) -> tuple[object | None, bytes]:
     """Create and export the producer event for handle-mode bench requests.
 
     CPU mode does not need a cross-process event (SHM mappings are
@@ -584,16 +583,12 @@ def _make_exported_event(use_gpu: bool = True) -> tuple[object | None, bytes]:
     """
     if not use_gpu:
         return None, b""
+    if event_backend is None:
+        raise RuntimeError("GPU handle mode requires an initialized event backend")
     device = torch_dev.current_device()
-    event = create_event(device)
-    record_event(event, device)
-    return event, export_event(event, device)
-
-
-def _make_event_handle(use_gpu: bool = True) -> bytes:
-    """Backward-compatible handle-only wrapper for tests and callers."""
-    _event, handle = _make_exported_event(use_gpu)
-    return handle
+    event = event_backend.create_event(device)
+    event_backend.record_event(event, None)
+    return event, event_backend.export_event(event, device)
 
 
 def _build_server_slot_views(
@@ -804,6 +799,7 @@ def _send_store(
     chunk_size: int = 0,
     server_pool: "mmap.mmap | None" = None,
     instance_id: int = _INSTANCE_ID,
+    event_backend: EventIPCBackend | None = None,
 ) -> str:
     """Store KV cache blocks. Returns status string.
 
@@ -823,7 +819,7 @@ def _send_store(
         num_tokens = key.end - key.start
         num_blocks = num_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
-        event, event_handle = _make_exported_event(use_gpu)
+        event, event_handle = _make_exported_event(event_backend, use_gpu)
         keep_alive = (event,) if event is not None else ()
         result = _wait_for_result(
             client.store(
@@ -878,6 +874,7 @@ def _send_retrieve(
     client_tensors: list["torch.Tensor"] | None = None,
     server_pool: "mmap.mmap | None" = None,
     instance_id: int = _INSTANCE_ID,
+    event_backend: EventIPCBackend | None = None,
 ) -> str:
     """Retrieve KV cache blocks. Returns status.
 
@@ -897,7 +894,7 @@ def _send_retrieve(
         hit_tokens = hit_chunks * chunk_size
         num_blocks = hit_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
-        event, event_handle = _make_exported_event(use_gpu)
+        event, event_handle = _make_exported_event(event_backend, use_gpu)
         keep_alive = (event,) if event is not None else ()
         result = _wait_for_result(
             client.retrieve(

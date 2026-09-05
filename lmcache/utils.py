@@ -59,9 +59,10 @@ def check_interprocess_event_support() -> None:
     """
     # First Party
     from lmcache import torch_device_type
-    from lmcache.v1.platform.base.event_ipc import check_event_support
+    from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
-    check_event_support(torch_device_type)
+    backend = get_event_ipc_backend(torch_device_type)
+    backend.check_event_support(torch_device_type)
 
 
 # Math utility functions

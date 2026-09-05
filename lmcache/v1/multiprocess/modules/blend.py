@@ -64,13 +64,6 @@ from lmcache.v1.multiprocess.token_hasher import (
     update_table_id_numba,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
-from lmcache.v1.platform.base.event_ipc import (
-    create_event,
-    export_event,
-    import_event,
-    record_event,
-    wait_event,
-)
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -2702,6 +2695,12 @@ class BlendModule(InstanceLivenessTarget):
                 "send CB_REGISTER_ROPE before CB_RETRIEVE_PRE_COMPUTED."
             )
         gpu_context = entry.cache_context
+        event_backend = entry.event_backend
+        if event_backend is None:
+            raise RuntimeError(
+                "Blend event backend is not initialized; register the KV cache "
+                "before submitting retrieve requests"
+            )
         rope_state = self._cb_rope_state[instance_id]
         chunk_size = self._ctx.chunk_size
         # Blend's read set: attention (+ standalone aux), never recurrent-state
@@ -2754,9 +2753,9 @@ class BlendModule(InstanceLivenessTarget):
                 torch_dev.device(gpu_context.device),
                 torch_dev.stream(gpu_context.stream),
             ):
-                done_event = create_event(gpu_context.device)
-                record_event(done_event, gpu_context.device, gpu_context.stream)
-                handle = export_event(done_event, gpu_context.device)
+                done_event = event_backend.create_event(gpu_context.device)
+                event_backend.record_event(done_event, gpu_context.stream)
+                handle = event_backend.export_event(done_event, gpu_context.device)
 
             if publish:
                 self._event_bus.publish(
@@ -2952,7 +2951,7 @@ class BlendModule(InstanceLivenessTarget):
             torch_dev.device(gpu_context.device),
             torch_dev.stream(retrieve_stream),
         ):
-            event = create_event(gpu_context.device)
+            event = event_backend.create_event(gpu_context.device)
 
             # Resolve each kernel group's block table + block size once, selected
             # by engine_group_idx (kernel groups may share one). CPU tables only;
@@ -3001,8 +3000,10 @@ class BlendModule(InstanceLivenessTarget):
                 ),
             )
 
-            vllm_event = import_event(event_ipc_handle, gpu_context.device)
-            wait_event(vllm_event, gpu_context.device, retrieve_stream)
+            vllm_event = event_backend.import_event(
+                event_ipc_handle, gpu_context.device
+            )
+            event_backend.wait_event(vllm_event, retrieve_stream)
 
             # Stage marks for the scatter_ms log line (CPU enqueue wall time):
             # fetch = L1 prefetched read, plan = flat-plan table build,
@@ -3040,8 +3041,11 @@ class BlendModule(InstanceLivenessTarget):
                                 session_id=key.request_id,
                             ),
                         )
-                        record_event(event, gpu_context.device, retrieve_stream)
-                        return export_event(event, gpu_context.device), False
+                        event_backend.record_event(event, retrieve_stream)
+                        return (
+                            event_backend.export_event(event, gpu_context.device),
+                            False,
+                        )
 
                     # Per-token scatter handles any cur_st. Each match owns n_read
                     # consecutive memory objects (chunk-major).
@@ -3250,10 +3254,10 @@ class BlendModule(InstanceLivenessTarget):
                 )
                 # Valid server event + False (never echo the client handle; see
                 # the memory_objs-None path above).
-                record_event(event, gpu_context.device, retrieve_stream)
-                return export_event(event, gpu_context.device), False
+                event_backend.record_event(event, retrieve_stream)
+                return event_backend.export_event(event, gpu_context.device), False
 
-            record_event(event, gpu_context.device, retrieve_stream)
+            event_backend.record_event(event, retrieve_stream)
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
@@ -3293,4 +3297,4 @@ class BlendModule(InstanceLivenessTarget):
                 session_id=key.request_id,
             ),
         )
-        return export_event(event, gpu_context.device), True
+        return event_backend.export_event(event, gpu_context.device), True

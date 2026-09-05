@@ -157,14 +157,15 @@ that bypass the backend break under isolated IPC:
   falls back to `create_recorded_event` or public-state reconstruction
   for vendored adapters. That preserves engine-driven local events while
   routing LMCache-driven transfers through `create_event` /
-  `record_event` on the resolved backend. The event objects still satisfy
+  `record_event` on the cached backend. The event objects still satisfy
   the existing `IPCEvent` duck protocol, so `event.wait(stream)` call
   sites keep working. Server (`lmcache_driven_transfer.py`) and worker
   futures (`futures.py`) were already fully backend-routed.
-- **Migrated**: SGLang and TRT-LLM adapters already route producer-event
-  creation through backend `create_event` / `record_event`.
+- **Migrated**: SGLang and TRT-LLM adapters resolve and validate their event
+  backend during initialization or KV registration, then route producer-event
+  creation through its `create_event` / `record_event` methods.
 - **Migrated for event handles**: CacheBlend and qstore server modules now
-  return `export_event(...)` on the resolved backend instead of raw
+  return `export_event(...)` on the registration-cached backend instead of raw
   `event.ipc_handle()` bytes. The switch still defaults to off because the
   raw KV-wrapper work (already outside the event-IPC abstraction; see
   `event_ipc_abstraction.md` non-goals) remains before hostIPC-free

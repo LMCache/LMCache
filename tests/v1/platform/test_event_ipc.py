@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import cast
 import inspect
 
 # Third Party
@@ -12,13 +11,7 @@ from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.event_ipc import (
     DefaultEventIPCBackend,
     EventIPCBackend,
-    check_event_support,
-    create_event,
-    export_event,
     get_event_ipc_backend,
-    import_event,
-    record_event,
-    wait_event,
 )
 from lmcache.v1.platform.cpu import CpuDeviceSpec
 from lmcache.v1.platform.cuda import CudaDeviceSpec
@@ -298,27 +291,3 @@ def test_protocol_signatures_match_default_backend():
     for name in proto_methods:
         assert callable(getattr(DefaultEventIPCBackend, name))
         assert inspect.signature(getattr(DefaultEventIPCBackend, name)) is not None
-
-
-def test_public_event_helpers_use_registered_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The platform helpers keep callers independent of backend event APIs."""
-    backend = DefaultEventIPCBackend(
-        event_module=_FakeEventModule(), device_type="fake"
-    )
-    monkeypatch.setattr(
-        platform, "get_device_spec", lambda device_type: _FakeDeviceSpec(backend)
-    )
-
-    check_event_support("fake")
-    event = cast(_FakeEvent, create_event("fake"))
-    record_event(event, "fake", "stream")
-    handle = export_event(event, "fake")
-    imported = cast(_FakeEvent, import_event(handle, "fake"))
-    wait_event(imported, "fake", "stream")
-
-    assert isinstance(event, _FakeEvent)
-    assert handle == b"handle-bytes"
-    assert ("record", "stream") in event.calls
-    assert ("wait", "stream") in imported.calls
