@@ -30,6 +30,7 @@ import torch
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
 from lmcache.banner import print_banner_once
+from lmcache.integration.vllm.dcp_gather import maybe_dcp_load, maybe_dcp_save
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -786,6 +787,11 @@ class LMCacheConnectorV1Impl:
         if self.lmcache_engine is None:
             return
 
+        # Decode-context-parallel: fetch + scatter each rank's KV shard (see
+        # dcp_gather.py). No-op / returns False when DCP is inactive.
+        if maybe_dcp_load(self, metadata):
+            return
+
         self.layerwise_retrievers = []
 
         for idx, request in enumerate(metadata.requests):
@@ -1124,6 +1130,12 @@ class LMCacheConnectorV1Impl:
                     next(layerwise_storer)
                 # unpin the kv caches according to req_id
                 self.lmcache_engine.lookup_unpin(request.req_id)
+            return
+
+        # Decode-context-parallel: the latent KV is sharded across DCP ranks, so
+        # gather each rank's shard before storing (see dcp_gather.py). No-op /
+        # returns False when DCP is inactive.
+        if maybe_dcp_save(self, connector_metadata):
             return
 
         assert len(self.kv_caches) > 0
