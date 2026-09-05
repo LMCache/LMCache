@@ -15,7 +15,8 @@ LMCache currently supports integration with:
 
 - **vLLM**
 - **SGLang**
-- **TRT-LLM** (coming soon)
+- **TRT-LLM**
+- **ATOM**
 
 Integration with vLLM
 ---------------------
