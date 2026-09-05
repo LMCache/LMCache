@@ -1,0 +1,55 @@
+# CacheBlendEngine — PD (Prefill-Decode) disaggregation.
+#
+# A single CacheBlendEngine DaemonSet serves BOTH prefiller and decoder vLLM
+# pods on every node. Blending is a prefill-time operation, so the two PD
+# roles are asymmetric. The connection ConfigMap carries three keys:
+#
+#   kv-transfer-config.json            — bare CBKVConnector (fallback, no NIXL)
+#   kv-transfer-config-prefiller.json  — MultiConnector(kv_producer):
+#                                          NixlConnector + CBKVConnector
+#   kv-transfer-config-decoder.json    — bare NixlConnector (kv_consumer):
+#                                          the decoder only receives KV from
+#                                          the prefiller and does not blend
+#
+# The webhook selects the correct key based on the lmcache.ai/pd-role
+# annotation on each vLLM pod, alongside the usual CacheBlend opt-in:
+#
+#   labels:
+#     lmcache.ai/cacheblend-inject: "true"
+#   annotations:
+#     lmcache.ai/cacheblend-engine: "my-cacheblend-pd"
+#     lmcache.ai/pd-role: "prefiller"   # or "decoder"
+#
+# The webhook also injects into opted-in vLLM pods:
+#   VLLM_NIXL_SIDE_CHANNEL_HOST = pod's own IP (downward API status.podIP)
+#   VLLM_NIXL_SIDE_CHANNEL_PORT = spec.pd.nixlSideChannelPort (5558 default)
+#
+# PREREQUISITES:
+#   1. Deploy this engine (payloadImage must point at the CacheBlend plugin
+#      payload, as for any CacheBlendEngine).
+#   2. Deploy prefiller and decoder vLLM pods with the opt-in label plus the
+#      pd-role annotations (see vllm_pd_disaggregation.yaml for the pod
+#      shape; swap the lmcache annotations for the cacheblend ones above).
+#   3. Deploy a vllm-router pointing at the prefiller and decoder Services.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: CacheBlendEngine
+metadata:
+  name: my-cacheblend-pd
+  namespace: default
+spec:
+  l1:
+    sizeGB: 100
+
+  blend:
+    checkLayer: 1
+    recompRatio: 0.15
+
+  injection:
+    payloadImage:
+      repository: registry.example.com/lmcache/cacheblend-payload
+      tag: pinned
+
+  pd:
+    nixlSideChannelPort: 5558
+    nixlLoadFailurePolicy: fail
+    # enforceHandshakeCompat: false   # only when prefiller/decoder run different vLLM builds

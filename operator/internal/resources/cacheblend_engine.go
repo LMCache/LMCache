@@ -17,9 +17,12 @@ limitations under the License.
 package resources
 
 import (
+	"fmt"
+
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
@@ -146,7 +149,8 @@ func BuildCBEngineMetricsService(engine *lmcachev1alpha1.CacheBlendEngine) *core
 // from spec.Blend: cb.check_layer and cb.recomp_ratio (defaults are pinned by
 // SetDefaults: checkLayer=1, recompRatio=0.15), plus cb.partial_bucket when
 // spec.Blend.partialBucket is set (unset omits the key, leaving the connector's
-// padding disabled).
+// padding disabled). When spec.PD is set the ConfigMap instead carries three
+// role-keyed configs (see buildCBPDConnectionConfigMap).
 func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev1.ConfigMap {
 	spec := &engine.Spec
 	// Use the same default (5555) as BuildContainerArgs/getServerPort so the
@@ -169,6 +173,10 @@ func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev
 		extra["cb.partial_bucket"] = *spec.Blend.PartialBucket
 	}
 
+	if spec.PD != nil {
+		return buildCBPDConnectionConfigMap(engine.Name, engine.Namespace, port, spec.PD, extra)
+	}
+
 	return buildConnectionConfigMapCore(
 		engine.Name,
 		engine.Namespace,
@@ -177,6 +185,55 @@ func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev
 		port,
 		extra,
 	)
+}
+
+// buildCBPDConnectionConfigMap produces the PD ConfigMap for a CacheBlendEngine.
+// Unlike the LMCacheEngine PD ConfigMap, the two roles are asymmetric: blending
+// is a prefill-time operation, so only the prefiller pairs the CacheBlend
+// connector with NIXL in a MultiConnector, while the decoder — which only
+// receives KV from the prefiller — uses a bare NixlConnector.
+//
+// The ConfigMap carries three data keys (same names as the LMCacheEngine PD
+// ConfigMap, selected by the webhook from the lmcache.ai/pd-role annotation):
+//   - kv-transfer-config.json: bare CBKVConnector (fallback, no NIXL)
+//   - KVTransferConfigPrefillerDataKey: MultiConnector wrapping
+//     NixlConnector (kv_producer) and CBKVConnector (kv_both)
+//   - KVTransferConfigDecoderDataKey: bare NixlConnector (kv_consumer)
+//
+// Parameters:
+//   - name, namespace: the owning engine's identity.
+//   - port: the engine server port.
+//   - pd: the PDSpec from the engine (must not be nil).
+//   - cbExtra: the CacheBlend kv_connector_extra_config keys (cb.check_layer,
+//     cb.recomp_ratio, optional cb.partial_bucket) for the CBKVConnector.
+func buildCBPDConnectionConfigMap(
+	name, namespace string,
+	port int32,
+	pd *lmcachev1alpha1.PDSpec,
+	cbExtra map[string]any,
+) *corev1.ConfigMap {
+	svcHost := fmt.Sprintf("%s.%s.svc.cluster.local", LookupServiceName(name), namespace)
+	prefillerJSON := buildMultiConnectorJSON(
+		"kv_producer", cbKVConnector, cbKVConnectorModulePath, svcHost, port, pd, cbExtra)
+	decoderJSON := buildNixlOnlyJSON("kv_consumer", pd)
+
+	// Fallback: bare CBKVConnector config (no NIXL) for pods that don't set
+	// the pd-role annotation, identical to a non-PD engine's config.
+	fallbackCM := buildConnectionConfigMapCore(
+		name, namespace, cbKVConnector, cbKVConnectorModulePath, port, cbExtra)
+
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ConnectionConfigMapName(name),
+			Namespace: namespace,
+			Labels:    StandardLabels(name),
+		},
+		Data: map[string]string{
+			"kv-transfer-config.json":        fallbackCM.Data["kv-transfer-config.json"],
+			KVTransferConfigPrefillerDataKey: string(prefillerJSON),
+			KVTransferConfigDecoderDataKey:   string(decoderJSON),
+		},
+	}
 }
 
 // CBServiceMonitorEnabled reports whether a ServiceMonitor should be created for
