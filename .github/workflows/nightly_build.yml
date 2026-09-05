@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   nightly-wheels:
+    if: github.repository == 'LMCache/LMCache'
     name: Build and publish nightly wheels
     runs-on: ubuntu-latest
     permissions:
@@ -218,6 +219,7 @@ jobs:
             dist/musa/*.whl
 
   nightly-build:
+    if: github.repository == 'LMCache/LMCache'
     name: Build image
     runs-on: ubuntu-latest
     steps:
@@ -388,7 +390,7 @@ jobs:
   nightly-pin-or-report-vllm:
     name: Pin or report vLLM
     needs: nightly-verify-cpu-vllm
-    if: always()
+    if: always() && github.repository == 'LMCache/LMCache'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
