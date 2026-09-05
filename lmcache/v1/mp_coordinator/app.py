@@ -37,6 +37,7 @@ from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventConsumer,
 )
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.observability import register_key_directory_metrics
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -54,6 +55,7 @@ from lmcache.v1.mp_coordinator.persistence.store import (
 )
 from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -124,6 +126,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Before the checkpoint, so a restored key arrives already pinned.
     metadata_persister.load()
     load_checkpoint(checkpoint_store, checkpoint_components)
+    if config.metrics_enabled:
+        register_key_directory_metrics(views.get(KeyDirectory))
 
     ctx = CoordinatorContext(
         views=views,
