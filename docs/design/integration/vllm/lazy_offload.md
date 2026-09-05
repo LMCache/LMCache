@@ -332,7 +332,7 @@ not add policy-specific branches to the connector.
 |-------|----------------|
 | `LMCacheMPConnector` | Forward vLLM lifecycle events and apply returned actions |
 | `LazyOffloadManager` | Own lifecycle interpretation, scheduler-side orchestration, and GPU block side effects |
-| `LazyOffloadRequestRegistry` | Own request phase, epoch, and submitted-store batches |
+| `LazyOffloadRequestRegistry` | Own request phase and submitted-store batches |
 | `OffloadPolicy` (`EvictionAwareStoreQueue`, `FIFOOffloadPolicy`) | Make buffering and drain decisions |
 
 Two policies are available:
@@ -343,10 +343,11 @@ Two policies are available:
   admission-time block hashes and preserves prefix closure. Its full queue
   contract is in
   [lazy_offload_policy/eviction_aware.md](lazy_offload_policy/eviction_aware.md).
-- `FIFO` remains available as an explicit legacy fallback. It preserves the
+- `FIFO` remains available and is selected explicitly. It preserves the
   original count-triggered behavior and drains completed requests after the
-  configured request threshold and
-  validates their block hashes immediately before submission.
+  configured request threshold. It reads no GPU state of its own; the
+  manager validates the block hashes of everything it emits, as it does for
+  every policy.
 
 Policies do not receive lifecycle events; the manager derives finished and
 blocked request-id sets from the registry and passes those as inputs to one
@@ -358,12 +359,12 @@ empty-buffer facts with registry state to authorize session teardown.
 
 For either policy, the manager coalesces each request's released chunks into
 one store operation, calls `BlockPool.touch()` to pin its surviving blocks,
-and records those block ids in the request's controller-owned state until
-every worker rank reports completion. Each request id has an explicit store
-epoch and at most one submitted batch. Preemption reset advances the epoch
-before tracker recreation; finished-id reuse advances it at successor arrival.
-An old batch retains its submission epoch while a successor becomes active, so
-its receipt can release pins without ending the successor's shared session.
+and records those block ids in the request's manager-owned state until
+every worker rank reports completion. Each request id has at most one
+submitted batch. A preemption reset or a finished-id reuse marks an
+outstanding batch orphaned: its receipt still releases its pins, but its
+failure is never charged to the request generation now using the id, and the
+receipt does not end the successor's shared session prematurely.
 Overlapping emission remains a logic error because worker receipts are keyed
 only by request id. The completion receipt balances the pins with
 `free_blocks()`, returning the blocks to vLLM's own placement for a freed
@@ -380,7 +381,7 @@ lmcache.mp.lazy_offload_horizon_steps = 2.5
 lmcache.mp.lazy_offload_max_drain_per_step = 64
 lmcache.mp.lazy_offload_max_deferral_seconds = 0.0     # 0: no deadline
 
-# Explicit legacy FIFO mode only
+# Explicit FIFO mode only
 lmcache.mp.lazy_offload_threshold = 100
 lmcache.mp.lazy_offload_select_count = 10
 ```
@@ -393,10 +394,8 @@ connector therefore fails construction when lazy offload is enabled without
 ### 2.1 Scheduler-step flow
 
 1. `GetStoreMetadata` produces each newly storable contiguous token range.
-2. The manager tags it with the request's current store epoch, snapshots its
-   block hashes, and buffers it in the selected policy instead of sending it
-   to the worker immediately; mixing two epochs in one request's pending list
-   is rejected as an invariant violation.
+2. The manager snapshots its block hashes and buffers it in the selected
+   policy instead of sending it to the worker immediately.
 3. On a token-producing scheduler step, the connector forwards the scheduler
    output to `LazyOffloadManager`, which observes allocation pressure and
    drains the selected policy once.

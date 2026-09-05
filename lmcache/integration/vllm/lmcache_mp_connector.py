@@ -380,9 +380,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._dcp_size = dcp_size
 
         # Lazy offload configuration: when enabled, store operations are
-        # buffered and drained by the configured policy. EVICTION_AWARE is
-        # the default and releases stores when their GPU blocks face imminent
-        # eviction instead of submitting every store at every step.
+        # buffered and drained by the configured policy.
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
         )
@@ -871,14 +869,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if ret is None:
             return None, True
 
-        # Save the vLLM hit count even when LMCache misses (ret == 0):
-        # GetStoreMetadata needs it to cover the prefix-cache-hit tokens,
-        # whose KV is computed but was never scheduled for this request.
-        # Without it a follower request over a hot cached prefix stores
-        # nothing at all. The count is rounded down to a boundary aligned
-        # for every engine group (e.g. a full-prompt APC hit reports
-        # ``num_prompt_tokens - 1``), so the retrieve-skip range stays
-        # paged-chunk-aligned in all groups.
+        # Save the vLLM hit count even when LMCache misses. It is rounded
+        # down to a boundary aligned for every engine group (a full-prompt
+        # APC hit reports num_prompt_tokens - 1), so the retrieve-skip
+        # range stays paged-chunk-aligned in all groups.
         tracker.num_vllm_hit_tokens = (
             num_computed_tokens
             // self._hit_alignment_tokens

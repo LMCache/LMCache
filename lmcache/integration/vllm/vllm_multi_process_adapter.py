@@ -1968,6 +1968,10 @@ class LMCacheMPWorkerAdapter:
         :meth:`get_completed_store_requests`); this set is the additional
         integrity signal telling the scheduler to break the requests'
         stored-prefix chains.
+
+        Returns:
+            The request ids that failed, or None when none did. The set is
+            cleared by the call, so each failure is reported once.
         """
         if not self._failed_store_requests:
             return None

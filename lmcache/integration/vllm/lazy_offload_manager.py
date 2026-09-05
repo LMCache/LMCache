@@ -4,10 +4,28 @@
 The boundary between ``LMCacheMPConnector`` and the lazy-offload policies: it
 owns policy dispatch, GPU block pinning, store-batch coalescing, completion
 handling and deferred session release. The connector only forwards events.
+
+Terms used here and in ``lazy_offload_state``, on top of the policy-facing
+ones defined in ``lazy_offload_policy.base``:
+
+- **Request generation**: one use of a request id. vLLM recreates a tracker
+  under the same id when it resumes a preempted request, and a later,
+  unrelated request may reuse the id of a finished one, so one id can
+  outlive several generations.
+- **Receipt**: a worker's report that a submitted store batch ended, in
+  success or in failure. The batch settles once every worker has reported.
+- **Pin**: the reference this class takes on a GPU block so that vLLM cannot
+  recycle it while the worker is still reading it. The receipt releases it.
+- **Orphaned**: said of a batch whose generation ended before its receipt
+  arrived. Its pins are still released, but its failure is not charged to
+  the generation now holding the id.
+- **Token ledger**: the one token-id list a request's buffered operations
+  share. The tracker hands out a fresh copy of the whole sequence with every
+  operation, which deferral would otherwise retain once per operation.
 """
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 # First Party
@@ -36,8 +54,17 @@ logger = init_logger(__name__)
 class StoreCompletionTracker(Protocol):
     """Aggregate per-worker completion counts for one submitted store."""
 
-    def update_pending_store_count(self, request_id: str, count: int) -> bool:
+    def update_pending_store_count(self, request_id: str, count: int, /) -> bool:
         """Record ``count`` new worker receipts for ``request_id``.
+
+        The parameters are positional-only: the implementer names the first
+        one ``req_id``, so a keyword call would not bind.
+
+        Args:
+            request_id: The request whose in-flight store batch the receipts
+                belong to.
+            count: Worker completions newly reported for that batch, added
+                to the ones already counted.
 
         Returns:
             True once the submitted batch has every expected completion.
@@ -49,8 +76,16 @@ class StoreCompletionTracker(Protocol):
 class LazyOffloadActions:
     """Explicit connector effects produced by one lazy-offload event.
 
-    ``stores_to_submit`` is coalesced metadata whose blocks this class has
-    already pinned; ``sessions_to_end`` have settled and may be released.
+    Attributes:
+        stores_to_submit: What to store now, one coalesced operation per
+            request, whose GPU blocks this class has already pinned. The
+            caller submits each and the receipt unpins them.
+        sessions_to_end: Requests whose LMCache session the caller may
+            release: either they have settled (finished, nothing buffered,
+            no batch in flight), or a new request is taking over the id and
+            the previous holder's deferred teardown has to happen first.
+            The caller must apply these before opening a session of its
+            own for the same id.
     """
 
     stores_to_submit: list[LMCacheMPRequestMetadata] = field(default_factory=list)
@@ -58,7 +93,16 @@ class LazyOffloadActions:
 
 
 def _new_blocks(scheduler_output: "SchedulerOutput") -> int:
-    """Gross block ids handed out this step, driving the consumption EMA."""
+    """Count the GPU blocks one scheduler step handed out.
+
+    Args:
+        scheduler_output: The step's schedule, whose newly scheduled and
+            cached requests carry the block ids allocated to them.
+
+    Returns:
+        The gross count over all requests and cache groups, which
+        drives the policy's estimate of free-queue consumption.
+    """
     groups = [request.block_ids for request in scheduler_output.scheduled_new_reqs]
     groups.extend(
         request_block_ids
@@ -77,6 +121,15 @@ def _coalesce_store_metadata(
 
     The worker tracks one in-flight store future per request, so a drained
     batch must be submitted as a single operation.
+
+    Args:
+        request_metas: One request's buffered STORE metadata, in prefix
+            order, each covering the token range that follows the one
+            before it.
+
+    Returns:
+        A single STORE metadata spanning the whole range, carrying the
+        concatenated block ids of every cache group.
 
     Raises:
         ValueError: If the input is empty, non-contiguous, or changes cache
@@ -123,8 +176,9 @@ class LazyOffloadManager:
 
     The only lazy-offload object exposed to the connector: it turns scheduler
     events into policy signals, pins and unpins vLLM GPU blocks, and returns
-    connector actions. Every method other than :meth:`bind_block_pool` raises
-    ``ValueError`` until the pool is bound. Scheduler thread only.
+    connector actions. Every method other than :meth:`bind_block_pool` and
+    :meth:`log_final_stats` raises ``ValueError`` until the pool is bound.
+    Scheduler thread only.
     """
 
     def __init__(
@@ -148,12 +202,18 @@ class LazyOffloadManager:
         self._gpu_block_pool: "BlockPool | None" = None
         self._policy: OffloadPolicy | None = None
         self._requests = LazyOffloadRequestRegistry()
+        # One token ledger per request whose operations are buffered.
+        self._token_ledgers: dict[str, list[int]] = {}
 
     def bind_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the scheduler's GPU block pool and build the policy.
 
         Idempotent for the same pool; rebinding a different one would
         silently invalidate every buffered hash snapshot.
+
+        Args:
+            gpu_block_pool: The scheduler's block pool, from which the
+                manager reads block hashes and which it pins into.
 
         Raises:
             ValueError: If a different pool is bound, or the policy name or
@@ -170,14 +230,30 @@ class LazyOffloadManager:
         self._policy = create_offload_policy(self._configs, gpu_block_pool)
 
     def add_store_candidate(self, metadata: LMCacheMPRequestMetadata) -> None:
-        """Buffer one STORE metadata produced by the request tracker."""
+        """Buffer one STORE metadata produced by the request tracker.
+
+        The block hashes are read here, at admission, so that the policy
+        holds the snapshot the data was stored under.
+
+        One request's operations must be offered in token order, each
+        starting where the previous one ended: they are submitted as one
+        coalesced store, which a gap makes impossible.
+
+        The operation is rebound to the request's token ledger before it is
+        buffered, so deferring N operations of one request costs one copy of
+        the token sequence rather than N.
+
+        Args:
+            metadata: The store operation offered by the tracker: the token
+                range and the GPU blocks holding its KV. Its ``op`` is not
+                mutated; a rebound copy is buffered instead.
+        """
         pool = self._require_block_pool()
         block_hashes: BlockHashes = {
             block_id: pool.blocks[block_id].block_hash
             for block_id in metadata.op.flat_block_ids
         }
-        epoch = self._requests.ensure_active(metadata.request_id)
-        self._require_policy().add(metadata, block_hashes, epoch)
+        self._require_policy().add(self._rebind_tokens(metadata), block_hashes)
 
     def on_scheduler_step(
         self, scheduler_output: "SchedulerOutput"
@@ -187,8 +263,18 @@ class LazyOffloadManager:
         A zero-token step returns no actions: vLLM takes its no-forward path
         and would discard metadata produced by that step.
 
+        Args:
+            scheduler_output: The step's schedule, supplying the block
+                pressure the drain decision reads.
+
         Returns:
             Stores to submit and sessions made releasable by the drain.
+
+        Raises:
+            ValueError: If no GPU block pool has been bound, or if a
+                request's buffered operations are not contiguous.
+            RuntimeError: If the policy emitted for a request that
+                already has a store batch in flight.
         """
         if not scheduler_output.total_num_scheduled_tokens:
             return LazyOffloadActions()
@@ -205,6 +291,13 @@ class LazyOffloadManager:
         can make it releasable by the accompanying receipt. Stale receipts in
         ``completed_store_counts`` are filtered here.
 
+        Args:
+            failed_request_ids: Requests whose submitted store failed on at
+                least one worker.
+            completed_store_counts: Worker completions newly reported this
+                round, keyed by request id. A batch settles once its count
+                reaches the number of workers.
+
         Returns:
             Sessions made releasable by completed batches.
         """
@@ -212,9 +305,9 @@ class LazyOffloadManager:
         for request_id in failed_request_ids:
             if not self._requests.has_in_flight(request_id):
                 continue
-            if not self._requests.in_flight_is_current(request_id):
-                # A reset or id reuse advanced the epoch: the old batch still
-                # owns pins, but cannot break the current prefix chain.
+            if self._requests.in_flight_is_orphaned(request_id):
+                # A reset or id reuse detached the batch: it still owns its
+                # pins, but cannot break the current prefix chain.
                 continue
             dropped = self._require_policy().mark_store_failed(request_id)
             logger.warning(
@@ -242,11 +335,14 @@ class LazyOffloadManager:
                 request_id
             ) and self._requests.can_end_session(request_id):
                 actions.sessions_to_end.append(request_id)
-                self._release_current_session(request_id)
+                self._release_session(request_id)
         return actions
 
     def on_request_finished(self, request_id: str) -> LazyOffloadActions:
         """Record request completion and decide whether its session can end.
+
+        Args:
+            request_id: The request vLLM reported as finished.
 
         Returns:
             A session-release action only when no store is pending or in
@@ -257,12 +353,21 @@ class LazyOffloadManager:
             return LazyOffloadActions()
         if self._requests.has_in_flight(request_id):
             return LazyOffloadActions()
-        self._release_current_session(request_id)
+        self._release_session(request_id)
         return LazyOffloadActions(sessions_to_end=[request_id])
 
-    def on_request_reset(self, request_id: str) -> int:
-        """Drop the operations a preemption reset invalidated; count them."""
+    def on_request_reset(self, request_id: str) -> None:
+        """Drop the operations a preemption reset invalidated.
+
+        The resumed request restarts at token zero and no longer owns the
+        blocks its buffered operations point at, so any batch it already
+        submitted is detached from it here.
+
+        Args:
+            request_id: The preempted request.
+        """
         self._requests.reset(request_id)
+        self._token_ledgers.pop(request_id, None)
         dropped = self._require_policy().drop_request(request_id)
         if dropped:
             logger.info(
@@ -270,14 +375,21 @@ class LazyOffloadManager:
                 dropped,
                 request_id,
             )
-        return dropped
 
     def on_request_arrived(self, request_id: str) -> LazyOffloadActions:
         """Reclaim residual state if a new request reuses a finished id.
 
+        Args:
+            request_id: The id whose tracker vLLM just created, which may be
+                a first arrival, a preempted request coming back, or a new
+                request taking over a finished id.
+
         Returns:
-            A predecessor session-release action when no in-flight batch is
-            already carrying that release; otherwise an empty action.
+            A session-release action for the predecessor when the id is
+            reused and nothing of the predecessor is in flight. With a batch
+            still in flight the release is skipped and never happens on its
+            own: a session is keyed by request id, so ending it now would
+            end the successor's too. The successor's own teardown covers it.
         """
         reused_finished_id = self._requests.is_finished(request_id)
         predecessor_in_flight = self._requests.has_in_flight(request_id)
@@ -285,6 +397,7 @@ class LazyOffloadManager:
         if not reused_finished_id:
             return LazyOffloadActions()
         self._require_policy().discard_for_reuse(request_id)
+        self._token_ledgers.pop(request_id, None)
         if predecessor_in_flight:
             return LazyOffloadActions()
         logger.info(
@@ -304,7 +417,26 @@ class LazyOffloadManager:
         scheduler_output: "SchedulerOutput",
         pool: "BlockPool",
     ) -> LazyOffloadActions:
-        """Apply one policy-neutral drain plan and its GPU side effects."""
+        """Apply one policy-neutral drain plan and its GPU side effects.
+
+        Each emitted operation is re-validated against the hash snapshot the
+        policy kept, pinned, and coalesced into one submission per request.
+        A request whose snapshot no longer matches loses that operation and
+        every later one of the same drain.
+
+        Args:
+            scheduler_output: The step's schedule, converted into the
+                block-pressure signals the policy reads.
+            pool: The bound GPU block pool, touched and pinned here.
+
+        Returns:
+            The stores to submit and the sessions the drain made releasable.
+
+        Raises:
+            RuntimeError: If the policy emitted for a request that already
+                has a store batch in flight, which would make the worker's
+                receipts ambiguous.
+        """
         drain = self._require_policy().drain(
             DrainSignals(
                 new_blocks_allocated=_new_blocks(scheduler_output),
@@ -318,11 +450,6 @@ class LazyOffloadManager:
         )
         actions = LazyOffloadActions()
         for item in drain.items:
-            if not self._requests.is_current_epoch(item.request_id, item.epoch):
-                raise RuntimeError(
-                    f"request {item.request_id!r} emitted stale store epoch "
-                    f"{item.epoch}"
-                )
             if self._requests.has_in_flight(item.request_id):
                 raise RuntimeError(
                     f"request {item.request_id!r} emitted while a store batch "
@@ -344,7 +471,7 @@ class LazyOffloadManager:
                 ):
                     logger.warning(
                         "Block hashes missing or mismatched for request %s, "
-                        "dropping its remaining chunks",
+                        "dropping its remaining store operations",
                         item.request_id,
                     )
                     pool.free_blocks(blocks)
@@ -358,22 +485,69 @@ class LazyOffloadManager:
         for request_id in drain.emptied_request_ids:
             if self._requests.can_end_session(request_id):
                 actions.sessions_to_end.append(request_id)
-                self._release_current_session(request_id)
+                self._release_session(request_id)
         return actions
 
-    def _release_current_session(self, request_id: str) -> None:
-        """Clear policy and controller state for a settled current epoch."""
+    def _rebind_tokens(
+        self, metadata: LMCacheMPRequestMetadata
+    ) -> LMCacheMPRequestMetadata:
+        """Point one operation at its request's token ledger.
+
+        The tracker builds a fresh list of the request's whole token
+        sequence for every operation it produces. Under lazy offload those
+        lists are retained until the operation is submitted, so a long
+        request would hold one copy per buffered operation. Each list is a
+        prefix of the next -- vLLM only appends -- so the ledger absorbs the
+        new tail and every buffered operation of the request shares it.
+
+        Args:
+            metadata: The store operation as the tracker produced it.
+
+        Returns:
+            A copy whose ``op.token_ids`` is the shared ledger. The caller's
+            metadata is left untouched.
+        """
+        tokens = metadata.op.token_ids
+        ledger = self._token_ledgers.get(metadata.request_id)
+        if ledger is None:
+            ledger = list(tokens)
+            self._token_ledgers[metadata.request_id] = ledger
+        elif len(tokens) > len(ledger):
+            ledger.extend(tokens[len(ledger) :])
+        return replace(metadata, op=replace(metadata.op, token_ids=ledger))
+
+    def _release_session(self, request_id: str) -> None:
+        """Clear policy and registry state for a settled request.
+
+        Args:
+            request_id: The request whose session the caller is ending.
+        """
         self._require_policy().release_request(request_id)
         self._requests.session_ended(request_id)
+        self._token_ledgers.pop(request_id, None)
 
     def _require_policy(self) -> OffloadPolicy:
-        """Return the bound policy or reject an invalid lifecycle call."""
+        """Return the bound policy or reject an invalid lifecycle call.
+
+        Returns:
+            The policy built at bind time.
+
+        Raises:
+            ValueError: If no GPU block pool has been bound yet.
+        """
         if self._policy is None:
             raise ValueError("lazy offload GPU block pool is not bound")
         return self._policy
 
     def _require_block_pool(self) -> "BlockPool":
-        """Return the bound block pool or reject an invalid lifecycle call."""
+        """Return the bound block pool or reject an invalid lifecycle call.
+
+        Returns:
+            The scheduler's GPU block pool.
+
+        Raises:
+            ValueError: If no GPU block pool has been bound yet.
+        """
         if self._gpu_block_pool is None:
             raise ValueError("lazy offload GPU block pool is not bound")
         return self._gpu_block_pool

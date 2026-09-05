@@ -22,7 +22,9 @@ operation whose blocks come under eviction pressure.
   whole queue -- nothing at danger depth 0.
 - **`PendingStoreOp`** -- one deferred store: opaque `store_metadata` (the
   ready `LMCacheMPRequestMetadata`), the covered blocks' hash snapshot taken
-  at admission, the op's token range, and its admission timestamp.
+  at admission, and its admission timestamp. Its request id and token range
+  are not copied out: the buffer is keyed by request id and holds each
+  request's ops in token order.
 - **`EvictionAwareStoreQueue`** -- the policy object, one per connector.
 
 ## Per-step protocol (policy-caller obligations)
@@ -30,7 +32,7 @@ operation whose blocks come under eviction pressure.
 `LazyOffloadManager` is the production caller; the connector only forwards
 lifecycle events to it.
 
-1. Route each `GetStoreMetadata` result to `add(meta, block_hashes, epoch)`
+1. Route each `GetStoreMetadata` result to `add(meta, block_hashes)`
    instead of the step metadata. The queue takes custody or drops the
    operation itself. Two are dropped here and logged:
    - A **hash-less covered block**. Its later eviction is undetectable
@@ -49,7 +51,7 @@ lifecycle events to it.
    validation included, until their receipt.
 3. For every item in `LazyOffloadDrain.items` (already ordered): pin
    (`touch`) its blocks, coalesce each request's released ops into one store
-   op, register the submitted batch and its epoch, and put it into this
+   op, register the submitted batch, and put it into this
    step's connector metadata. `emptied_request_ids` is only a buffer
    transition -- teardown additionally requires the registry to say the
    request is finished with no submitted batch.
@@ -59,18 +61,20 @@ lifecycle events to it.
 5. On `request_finished`, record `FINISHED` in the registry; end immediately
    only under the same predicate, otherwise a later drain or receipt applies
    it.
-6. On preemption tracker reset, advance the epoch and call `drop_request(id)`:
-   buffered ops and prefix-validity state are discarded; an already submitted
-   batch stays registered and blocks new emission until its receipt. An abort
-   is **not** a drop: its buffered ops remain storable until drained.
-7. On a failed receipt, compare the batch epoch with the current request
-   epoch. A current-epoch failure calls `mark_store_failed(id)`, which drops
-   held-back ops and marks the prefix broken; an old-epoch failure never
-   enters the policy. Both paths complete the receipt and unpin.
-8. On request-id reuse, detect the `FINISHED` predecessor in the registry,
-   advance the epoch, and call `discard_for_reuse(id)`. With a submitted batch
-   outstanding, the id-keyed session spans both epochs and ends once through
-   the successor's lifecycle. (vLLM's HTTP layer randomizes external ids, but
+6. On preemption tracker reset, call `drop_request(id)`: buffered ops and
+   prefix-validity state are discarded; an already submitted batch stays
+   registered -- now marked orphaned -- and blocks new emission until its
+   receipt. An abort is **not** a drop: its buffered ops remain storable
+   until drained.
+7. On a failed receipt, check whether the submitted batch is orphaned. A
+   non-orphaned failure calls `mark_store_failed(id)`, which drops held-back
+   ops and marks the prefix broken; an orphaned batch's failure never enters
+   the policy, because it cannot break the prefix of the request generation
+   now using the id. Both paths complete the receipt and unpin.
+8. On request-id reuse, detect the `FINISHED` predecessor in the registry and
+   call `discard_for_reuse(id)`. With a submitted batch outstanding, that
+   batch is marked orphaned and the id-keyed session spans both generations,
+   ending once through the successor's lifecycle. (vLLM's HTTP layer randomizes external ids, but
    direct engine callers and `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION=1` reach
    this path.)
 
@@ -130,11 +134,11 @@ request's hash snapshots: cost proportional to the pressure window plus the
 buffered blocks, both small -- pending depth is bounded by concurrent
 requests, and each check is a dict lookup and a comparison.
 
-Request lifecycle is not policy state. The controller registry owns request
-phase, epoch, and submitted batches; the policy receives blocked request ids
-as a drain input and retains only prefix validity, a consequence of its own
-store decisions. `release_request`, `drop_request`, and `discard_for_reuse`
-clear that non-pending state at controller-defined epoch boundaries, so
+Request lifecycle is not policy state. The manager's registry owns request
+phase and submitted batches; the policy receives blocked request ids as a
+drain input and retains only prefix validity, a consequence of its own store
+decisions. `release_request`, `drop_request`, and `discard_for_reuse` clear
+that non-pending state at manager-defined lifecycle boundaries, so
 completed request ids do not accumulate.
 
 ## Observability
@@ -162,7 +166,11 @@ Two log hooks:
 
   `rejected_unhashed` and `rejected_prefix_broken` stay out (those ops are
   turned away before `admitted`), and `emitted_overdue` is a weight beside
-  the equation, not a term of it.
+  the equation, not a term of it. `emitted` means handed to the manager, not
+  submitted: the manager re-reads the hashes before pinning and can still
+  drop an op there. That drop is a WARNING line and no counter, and for this
+  policy it is unreachable, since `drain()` checked the same hashes
+  synchronously a moment earlier.
 - Connector `shutdown()` calls `log_final_stats()`, which emits the exact
   final ledger. Best-effort: `vllm serve` under SIGINT can beat scheduler
   shutdown to it -- that is why the periodic line exists. A log reader takes

@@ -26,7 +26,7 @@ Enable Lazy Offload
 -------------------
 
 Pass the lazy-offload options in vLLM's ``kv_connector_extra_config``. The
-example below selects the legacy FIFO policy explicitly, starting offload
+example below selects the FIFO policy explicitly, starting offload
 after 20 requests have finished and selecting up to 10 requests per batch;
 omit ``lmcache.mp.lazy_offload_policy`` to get the eviction-aware default:
 
