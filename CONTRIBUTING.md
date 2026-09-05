@@ -89,9 +89,16 @@ your PR will be reviewed against.
 
 Push the branch to your fork and open a PR against `dev`.
 
-- **Title** — prefix it with the type of change so the change set is easy to scan:
-  `[Bugfix]`, `[Build]`, `[CI]`, `[Core]`, `[Doc]`, `[Misc]`, `[Model]`, `[Test]`.
-  Include every prefix that applies if the change spans categories.
+- **Title** — start with a tag saying what kind of change it is, so the commit log stays easy
+  to scan. Two forms are in wide use on `dev`, and either is fine:
+  - a bracketed type — `[Bugfix]`, `[Build]`, `[CI]`, `[Core]`, `[Doc]`, `[Misc]`,
+    `[Model]`, `[Test]`
+  - a conventional-commit type — `fix:`, `feat:`, `docs:`, `ci:`, `refactor:`, `perf:`,
+    `test:`, `chore:`, `build:`
+
+  Naming the component as well helps reviewers spot their area quickly — as a second bracket
+  (`[MP][Bugfix] ...`) or as a conventional-commit scope (`fix(mp): ...`). Include every type
+  that applies if the change spans categories.
 - **Description** — fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md): what the PR
   does and why it is needed, anything reviewers should look at first, and the checkboxes for
   user-facing docs and unit tests.
