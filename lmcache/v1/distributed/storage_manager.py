@@ -162,6 +162,7 @@ class StorageManager:
             adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_prefetch_policy(config.prefetch_policy),
             max_in_flight=config.prefetch_max_in_flight,
+            load_admission_wait_seconds=config.prefetch_load_admission_wait_seconds,
         )
         self._prefetch_controller.start()
 
