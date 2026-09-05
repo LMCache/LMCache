@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
+from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
@@ -57,6 +58,15 @@ def _bare_non_gpu_module() -> EngineDrivenTransferModule:
     return module
 
 
+def _bare_q_module() -> QStoreModule:
+    """A QStoreModule with only its per-registration liveness state."""
+    module = QStoreModule.__new__(QStoreModule)
+    module._ctx = MagicMock(name="q_ctx")
+    module._q_contexts = {}
+    module._lock = threading.Lock()
+    return module
+
+
 def _stub_gpu_registration_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub Event IPC lookup for liveness tests unrelated to event handling."""
     monkeypatch.setattr(
@@ -67,7 +77,7 @@ def _stub_gpu_registration_backend(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
-    """register_kv_cache inserts an entry that is not yet ping-proven."""
+    """Registration starts with neither activation signal latched."""
     _stub_gpu_registration_backend(monkeypatch)
     monkeypatch.setattr(
         gpu_mod,
@@ -84,11 +94,11 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
     assert entry is not None and entry.has_liveness_signal is False
+    assert entry.has_transfer_activity is False
 
 
 def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
-    """Re-registering a known instance refreshes last_seen but does not
-    rebuild the context or latch the ping-proven flag."""
+    """Re-registering refreshes last_seen without latching either signal."""
     _stub_gpu_registration_backend(monkeypatch)
     create = MagicMock(
         return_value=MagicMock(
@@ -106,40 +116,115 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
     assert create.call_count == 1  # not rebuilt
     assert module._cache_contexts[1].last_seen > 0.0  # refreshed
     assert module._cache_contexts[1].has_liveness_signal is False
+    assert module._cache_contexts[1].has_transfer_activity is False
 
 
-def test_gpu_touch_latches_get_does_not() -> None:
-    """touch_instance marks ping-proven; get_and_touch_context_entry only refreshes."""
+def test_gpu_ping_and_transfer_latch_independently() -> None:
+    """PING and a real transfer latch separate activation signals."""
     module = _bare_gpu_module()
     module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, last_seen=0.0)
 
     module.get_and_touch_context_entry(1)
     assert module._cache_contexts[1].last_seen > 0.0
     assert module._cache_contexts[1].has_liveness_signal is False
+    assert module._cache_contexts[1].has_transfer_activity is False
 
     module.touch_instance(1)
     assert module._cache_contexts[1].has_liveness_signal is True
+    assert module._cache_contexts[1].has_transfer_activity is False
+
+    module.get_and_touch_context_entry(1, transfer_activity=True)
+    assert module._cache_contexts[1].has_transfer_activity is True
     module.touch_instance(999)  # absent -> no error
 
 
-def test_gpu_reap_two_tier_windows() -> None:
-    """Ping-proven entries reap at the timeout; never-pinged ones survive
-    until the larger registration grace."""
+@pytest.mark.parametrize(
+    ("age", "pinged", "transferred", "expected"),
+    [
+        (1000.0, False, False, []),
+        (1000.0, True, False, []),
+        (1000.0, False, True, []),
+        (1000.0, True, True, [1]),
+        (4000.0, True, False, [1]),
+    ],
+)
+def test_gpu_reap_requires_ping_and_transfer(
+    age: float, pinged: bool, transferred: bool, expected: list[int]
+) -> None:
+    """Only both signals select normal timeout; startup grace stays bounded."""
     module = _bare_gpu_module()
-    old = time.monotonic() - 1000.0
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, old, True)
-    module._cache_contexts[2] = ContextEntry(MagicMock(), "m", 1, old, False)
-    module._cache_contexts[3] = ContextEntry(
-        MagicMock(), "m", 1, time.monotonic(), True
+    module._cache_contexts[1] = ContextEntry(
+        MagicMock(),
+        "m",
+        1,
+        time.monotonic() - age,
+        has_liveness_signal=pinged,
+        has_transfer_activity=transferred,
     )
 
     reaped = module.reap_stale_instances(120.0, 3600.0)
 
-    assert reaped == [1]  # only the ping-proven stale entry
-    assert module.tracked_instance_count() == 2
-    cast(
-        MagicMock, module._ctx.layout_desc_registry.unregister
-    ).assert_called_once_with("m", 1)
+    assert reaped == expected
+    assert module.tracked_instance_count() == (0 if expected else 1)
+
+
+@pytest.mark.parametrize("active_context", ["gpu", "qstore"])
+def test_multi_context_reap_preserves_mirror_ownership(
+    active_context: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GPU and Q registrations activate and clean up independently."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend import BlendModule
+
+    gpu = _bare_gpu_module()
+    qstore = _bare_q_module()
+    gpu._cache_contexts[7] = ContextEntry(MagicMock(), "kv", 1)
+    qstore._q_contexts[7] = ContextEntry(MagicMock(), "q", 1)
+    blend = BlendModule.__new__(BlendModule)
+    blend._cb_rope_state = {7: MagicMock()}
+
+    reaper = MagicMock()
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.modules.management.create_periodic_thread",
+        MagicMock(return_value=reaper),
+    )
+    mgmt = ManagementModule(
+        MagicMock(),
+        liveness_targets=[gpu, qstore, blend],
+        mirror_state_owner=gpu,
+        worker_reap_timeout_seconds=120.0,
+        worker_registration_grace_seconds=3600.0,
+    )
+
+    try:
+        mgmt.ping(7)
+        if active_context == "gpu":
+            gpu.get_and_touch_context_entry(7, transfer_activity=True)
+        else:
+            qstore.get_and_touch_context_entry(7, transfer_activity=True)
+
+        normal_stale = time.monotonic() - 200.0
+        gpu._cache_contexts[7].last_seen = normal_stale
+        qstore._q_contexts[7].last_seen = normal_stale
+        mgmt._reap_cycle()
+
+        if active_context == "gpu":
+            assert gpu.tracked_instance_count() == 0
+            assert qstore.tracked_instance_count() == 1
+            assert 7 not in blend._cb_rope_state
+            qstore._q_contexts[7].last_seen = time.monotonic() - 4000.0
+        else:
+            assert qstore.tracked_instance_count() == 0
+            assert gpu.tracked_instance_count() == 1
+            assert 7 in blend._cb_rope_state
+            gpu._cache_contexts[7].last_seen = time.monotonic() - 4000.0
+
+        mgmt._reap_cycle()
+        assert gpu.tracked_instance_count() == 0
+        assert qstore.tracked_instance_count() == 0
+        assert 7 not in blend._cb_rope_state
+    finally:
+        mgmt.close()
 
 
 def test_gpu_unregister_cleans_up() -> None:
@@ -162,11 +247,16 @@ def test_non_gpu_reap_pops_strategy_as_pair() -> None:
     module = _bare_non_gpu_module()
     old = time.monotonic() - 1000.0
     module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
-        MagicMock(), "m", 1, old, True
+        MagicMock(),
+        "m",
+        1,
+        old,
+        has_liveness_signal=True,
+        has_transfer_activity=True,
     )
     module._strategies[1] = MagicMock()
     module._engine_driven_contexts[2] = non_gpu_mod.EngineDrivenContextEntry(
-        MagicMock(), "m", 1, old, False
+        MagicMock(), "m", 1, old, has_liveness_signal=True
     )
     module._strategies[2] = MagicMock()
 
@@ -174,7 +264,7 @@ def test_non_gpu_reap_pops_strategy_as_pair() -> None:
 
     assert reaped == [1]
     assert 1 not in module._strategies  # strategy popped with the entry
-    assert 2 in module._strategies  # never-pinged survives on grace
+    assert 2 in module._strategies  # PING-only startup survives on grace
 
 
 def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
@@ -190,7 +280,8 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
     entry, resolved = module._resolve_for_transfer(1)
     assert resolved is strategy
     assert entry.last_seen > 0.0
-    assert entry.has_liveness_signal is False  # traffic does not latch
+    assert entry.has_liveness_signal is False
+    assert entry.has_transfer_activity is True
 
     with pytest.raises(ValueError, match="not registered"):
         module._resolve_for_transfer(999)
@@ -246,6 +337,7 @@ def test_management_reaper_reaps_and_drops() -> None:
     mgmt = ManagementModule(
         MagicMock(),
         liveness_targets=[target],
+        mirror_state_owner=target,
         worker_reap_timeout_seconds=0.4,
         worker_registration_grace_seconds=0.8,
     )

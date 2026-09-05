@@ -226,6 +226,22 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
         fake_tensor.device.type = "cuda"
         adapter.register_kv_caches({"layer.0": fake_tensor})
 
+    assert FakeHeartbeatThread.instances == []
+
+
+def test_repeated_registration_starts_only_one_heartbeat(fake_adapter) -> None:
+    """Repeated successful registration keeps one worker heartbeat."""
+    adapter, send_mock, _ = fake_adapter
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    kv_caches = {"layer.0": fake_tensor}
+
+    adapter.register_kv_caches(kv_caches)
+    adapter.register_kv_caches(kv_caches)
+
+    assert send_mock.call_count == 2
+    assert len(FakeHeartbeatThread.instances) == 1
+
 
 def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     fake_adapter, monkeypatch
@@ -663,15 +679,18 @@ def test_instance_id_logged_at_info_on_construction(fake_adapter, monkeypatch) -
     assert any(str(adapter.instance_id) in msg for msg in messages)
 
 
-def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
-    """The lazy create path starts the heartbeat healthy (no pessimistic
-    clear) and wires the recover callback before ``start()``; the first
-    store is not gated. Idempotent on re-entry (no second thread)."""
+def test_registration_starts_heartbeat_before_first_request(
+    fake_adapter, monkeypatch
+) -> None:
+    """Successful registration starts the heartbeat healthy and wires the
+    recover callback before ``start()``. Later requests are idempotent."""
     adapter, _send_mock, _ = fake_adapter
-    adapter.transfer_ctx = MagicMock()
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
     assert adapter.is_healthy  # the constructor leaves the event set
 
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert len(FakeHeartbeatThread.instances) == 1
     heartbeat = FakeHeartbeatThread.instances[0]
@@ -681,12 +700,13 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     # The recover callback is wired before start() (for genuine recovery).
     assert heartbeat.calls == ["register_recover_callback", "start"]
     assert adapter.is_healthy
-    assert adapter.transfer_ctx.submit_store.call_count == 1
 
-    # Re-entry is idempotent: no new thread.
-    adapter.submit_store_request("req-2", _op([[1]]), MagicMock())
+    # Store and retrieve keep the registration-started heartbeat idempotent.
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    adapter.submit_retrieve_request("req-2", _op([[1]]), MagicMock())
     assert len(FakeHeartbeatThread.instances) == 1
-    assert adapter.transfer_ctx.submit_store.call_count == 2
+    assert contexts[0].submit_store.call_count == 1
+    assert contexts[0].submit_retrieve.call_count == 1
 
 
 def test_heartbeat_first_ping_runs_callback_before_setting_event(
@@ -777,8 +797,9 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
     stray heartbeat ping can race the closing req_client."""
     adapter, req_client, future = fake_adapter
-    adapter.transfer_ctx = MagicMock()
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
     heartbeat = FakeHeartbeatThread.instances[0]
 
     stop_state_at_unregister: list[bool] = []
@@ -796,9 +817,8 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
 
 
 def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
-    """shutdown() on an adapter whose heartbeat was never lazily started
-    (cold shutdown before any traffic) still sends UNREGISTER and does
-    not raise."""
+    """Shutdown before KV cache registration still sends UNREGISTER and
+    does not raise."""
     adapter, req_client, _future = fake_adapter
 
     adapter.shutdown()

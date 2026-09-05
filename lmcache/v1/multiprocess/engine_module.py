@@ -68,7 +68,7 @@ class EngineModule(Protocol):
 class InstanceLivenessTarget(Protocol):
     """A module the periodic reaper drives, in either or both of two roles.
 
-    * **Liveness owner** -- tracks per-worker registrations keyed by
+    * **Liveness owner** -- tracks per-context registrations keyed by
       ``instance_id``, refreshed on PING and scanned for staleness
       (``touch_instance`` / ``reap_stale_instances`` /
       ``tracked_instance_count``). The transfer modules fill this role.
@@ -83,7 +83,7 @@ class InstanceLivenessTarget(Protocol):
     """
 
     def touch_instance(self, instance_id: int) -> None:
-        """Refresh the worker's last-seen time and mark it ping-proven.
+        """Refresh the worker's last-seen time and record a PING.
 
         A no-op if the instance is not tracked (already reaped or never
         registered), or for a target that owns no liveness state.
@@ -98,14 +98,14 @@ class InstanceLivenessTarget(Protocol):
     ) -> list[int]:
         """Evict and clean up workers that have gone silent.
 
-        An instance that has sent at least one PING is judged against
-        ``reap_timeout_s``; one that has never pinged (warming up, or dead
-        before its first request) is judged against ``registration_grace_s``.
+        A registered context is judged against ``reap_timeout_s`` only after
+        that context has observed both PING and real transfer activity.
+        Otherwise it retains ``registration_grace_s``.
 
         Args:
-            reap_timeout_s: Silence budget for ping-proven instances.
-            registration_grace_s: Silence budget for never-pinged instances;
-                must be >= ``reap_timeout_s``.
+            reap_timeout_s: Silence budget for active instances.
+            registration_grace_s: Silence budget before activation; must be
+                >= ``reap_timeout_s``.
 
         Returns:
             The instance IDs reaped during this scan; empty for a target
