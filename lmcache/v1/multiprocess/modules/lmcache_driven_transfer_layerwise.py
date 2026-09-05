@@ -389,7 +389,7 @@ def transfer_kv_layerwise(
                             gpu_dst,
                             src_ptr,
                             n_bytes,
-                            memory_obj.meta.address,
+                            memory_obj.meta.address + src_layer_offset,
                         )
                     )
 
@@ -475,7 +475,7 @@ def transfer_kv_layerwise(
                                 gpu_dst,
                                 src_ptr,
                                 per_layer_bytes,
-                                memory_obj.meta.address,
+                                memory_obj.meta.address + src_offset,
                             )
                         )
 
@@ -518,7 +518,7 @@ def transfer_kv_layerwise(
                             src_ptr,
                             per_layer_bytes,
                             lmcache_native.TransferDirection.H2D,
-                            memory_obj.meta.address,
+                            memory_obj.meta.address + src_offset,
                             pin_chunk_size,
                         )
                         all_gpu_ptrs_fb.append(gpu_dst)
@@ -562,7 +562,7 @@ def transfer_kv_layerwise(
                                 src_ptr,
                                 per_layer_bytes,
                                 lmcache_native.TransferDirection.H2D,
-                                memory_obj.meta.address,
+                                memory_obj.meta.address + src_offset,
                                 pin_chunk_size,
                             )
                             tmp_gpu_buffers.append(gpu_dst)
