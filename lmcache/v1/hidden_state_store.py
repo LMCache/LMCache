@@ -9,6 +9,7 @@ when ``config.enable_hidden_state_cache`` is True and exposed as
 
 # Standard
 from collections import OrderedDict
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
 
 # Third Party
@@ -289,6 +290,23 @@ class HiddenStateStore:
         """Return True if a chunk is cached for ``(key, layer_idx)``."""
         layer_map = self._chunks.get(key)
         return layer_map is not None and layer_idx in layer_map
+
+    def coverage(
+        self,
+        chunks: Iterable["tuple[int, int, CacheEngineKey]"],
+        layer_idxs: Sequence[int] = (0,),
+    ) -> int:
+        """Return how many leading tokens have every layer in ``layer_idxs`` cached.
+
+        The walk stops at the first gap, so the result is a prefix length
+        directly comparable with the token count ``lookup`` reports for KV.
+        """
+        covered = 0
+        for _start, end, key in chunks:
+            if not all(self.has_chunk(key, layer_idx) for layer_idx in layer_idxs):
+                break
+            covered = end
+        return covered
 
     def drop_key(self, key: CacheEngineKey) -> bool:
         """Manually drop all HS layers for ``key``. Test/admin use."""
