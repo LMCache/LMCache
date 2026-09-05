@@ -8,17 +8,29 @@ here, inside the future itself, rather than in the message queue.
 
 # Standard
 from typing import Any, Optional, TypeVar
+import os
 import queue
 import struct
+import time
 
 # First Party
 from lmcache import torch_dev
+from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 from lmcache.v1.platform.base.event_pool import EventPool
 
 T = TypeVar("T")
+
+logger = init_logger(__name__)
+
+_LAYERWISE_DEBUG = os.getenv("LMCACHE_LAYERWISE_DEBUG", "0").lower() not in (
+    "0",
+    "",
+    "false",
+    "no",
+)
 
 
 class LayerwiseRawFuture(MessagingFuture[tuple[bytes, bool, T]]):
@@ -98,6 +110,16 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
         self._last_waited_event: object | None = None
         self._event_pool = event_pool
         self._layer_event_map: dict[int, Any] = {}
+        if _LAYERWISE_DEBUG:
+            self._dbg_waits = 0
+            self._dbg_stream_waits = 0
+            self._dbg_drain_s = 0.0
+            self._dbg_total_s = 0.0
+            self._dbg_requested: set[int] = set()
+            self._dbg_logged = False
+            self._dbg_blocking_waits = 0
+            self._dbg_frames: list[tuple[int, int, int, float]] = []
+            self._dbg_t0 = time.perf_counter()
         self._partial_queue: "queue.Queue[bytes | None]" = queue.Queue()
         self.raw_future_: LayerwiseRawFuture[T] = LayerwiseRawFuture(
             self._partial_queue
@@ -110,6 +132,16 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
         evt = self._event_pool.event_at(pool_idx)
         for i in range(first_layer, first_layer + count):
             self._layer_event_map[i] = evt
+        if _LAYERWISE_DEBUG:
+            dt = time.perf_counter() - self._dbg_t0
+            self._dbg_frames.append((first_layer, count, pool_idx, dt))
+            logger.debug(
+                "layerwise-frame: layers %d..%d -> ipc event idx %d (+%.2f ms)",
+                first_layer,
+                first_layer + count - 1,
+                pool_idx,
+                dt * 1e3,
+            )
 
     def _drain_until_layer(self, target_layer_idx: int) -> None:
         """Block-drain the partial queue until *target_layer_idx* is available."""
@@ -157,9 +189,17 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
                 *layer_idx*, which would leave the caller reading KV that
                 was never transferred.
         """
+        t0 = time.perf_counter() if _LAYERWISE_DEBUG else 0.0
+        if _LAYERWISE_DEBUG:
+            self._dbg_waits += 1
+            self._dbg_requested.add(layer_idx)
         evt = self._layer_event_map.get(layer_idx)
         if evt is None:
+            t_drain = time.perf_counter() if _LAYERWISE_DEBUG else 0.0
             self._drain_until_layer(layer_idx)
+            if _LAYERWISE_DEBUG:
+                self._dbg_drain_s += time.perf_counter() - t_drain
+                self._dbg_blocking_waits += 1
             evt = self._layer_event_map.get(layer_idx)
         if evt is None:
             # _drain_until_layer() only returns without the layer once it
@@ -183,6 +223,10 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             current_stream = torch_dev.current_stream(self.device_)
             self._event_backend.wait_event(evt, current_stream)
             self._last_waited_event = evt
+            if _LAYERWISE_DEBUG:
+                self._dbg_stream_waits += 1
+        if _LAYERWISE_DEBUG:
+            self._dbg_total_s += time.perf_counter() - t0
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         flag = self.raw_future_.wait(timeout)
@@ -195,6 +239,40 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             self._event_backend.synchronize_event(
                 self._layer_event_map[last_layer], self.device_
             )
+        if _LAYERWISE_DEBUG and not self._dbg_logged:
+            self._dbg_logged = True
+            req = self._dbg_requested
+            keys = self._layer_event_map.keys()
+            logger.info(
+                "layerwise-wait: %d call(s), %d stream wait(s), "
+                "drain %.2f ms, total %.2f ms; requested idx %s "
+                "(%d distinct), announced idx %s (%d entries)",
+                self._dbg_waits,
+                self._dbg_stream_waits,
+                self._dbg_drain_s * 1e3,
+                self._dbg_total_s * 1e3,
+                f"{min(req)}..{max(req)}" if req else "none",
+                len(req),
+                f"{min(keys)}..{max(keys)}" if keys else "none",
+                len(keys),
+            )
+            frames = self._dbg_frames
+            if frames:
+                logger.info(
+                    "layerwise-frames: %d frame(s) covering layers %d..%d, "
+                    "%d blocking wait(s); arrival +%.2f..%.2f ms",
+                    len(frames),
+                    min(f[0] for f in frames),
+                    max(f[0] + f[1] - 1 for f in frames),
+                    self._dbg_blocking_waits,
+                    frames[0][3] * 1e3,
+                    frames[-1][3] * 1e3,
+                )
+            else:
+                logger.info(
+                    "layerwise-frames: no intermediate frame arrived; the "
+                    "retrieve was answered by the closing frame alone"
+                )
         return True
 
     def result(self, timeout: Optional[float] = None) -> T:
