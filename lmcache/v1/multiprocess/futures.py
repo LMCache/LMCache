@@ -172,6 +172,60 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.event_ = event
         self._raw_response_processed = True
 
+    def prepare(self, timeout: Optional[float] = None) -> T:
+        """Import the remote completion event without waiting for it.
+
+        Args:
+            timeout: Maximum time to wait for the raw server response. ``None``
+                waits indefinitely.
+
+        Returns:
+            The result carried by the raw response.
+
+        Raises:
+            LMCacheTimeoutError: If the server response is not available within
+                ``timeout``.
+
+        Notes:
+            This waits only until the server has submitted device work and
+            returned its completion-event handle. It does not synchronize that
+            event on the CPU.
+        """
+        if not self._raw_response_processed:
+            if not self.raw_future_.wait(timeout):
+                raise LMCacheTimeoutError(
+                    "DeviceMessagingFuture raw result not available within timeout"
+                )
+            self._on_raw_future_complete()
+
+        assert self.result_ is not None
+        return self.result_
+
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> T:
+        """Make ``stream`` wait for remote device work without blocking the CPU.
+
+        Args:
+            stream: Device stream that consumes the remotely produced data.
+            timeout: Maximum time to wait for the raw server response. ``None``
+                waits indefinitely.
+
+        Returns:
+            The result carried by the raw server response.
+
+        Raises:
+            LMCacheTimeoutError: If the server response is not available within
+                ``timeout``.
+
+        Notes:
+            The call may wait for the server to return an event handle, but
+            device completion is ordered by a stream wait rather than a host
+            synchronization.
+        """
+        result = self.prepare(timeout)
+        if self.event_ is not None:
+            self._event_backend.wait_event(self.event_, stream)
+        return result
+
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
         Wait for the future to be done, ordered through the device event.

@@ -154,6 +154,14 @@ enum class EngineKVFormat : int {
   One list entry per layer; each entry is a (K, V) pair of paged tensors.
   */
   NL_X_TWO_X_NB_BS_NH_HS = 16,
+
+  /*
+  used by:
+  - SGLang unified MP independently allocated K/V components
+  physical shape per entry: [num_blocks, block_size, num_heads, head_size]
+  Each entry is one component plane; K and V are separate list entries.
+  */
+  NL_X_NB_BS_NH_HS = 17,
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -269,6 +277,9 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
     case EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS:
       facts.is_layer_list = true;
       facts.is_kv_second_tuple = true;
+      break;
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:
+      facts.is_layer_list = true;
       break;
     default:
       unsupported_engine_kv_format();

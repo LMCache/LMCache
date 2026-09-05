@@ -80,9 +80,11 @@ __device__ inline size_t calculate_engine_global_offset(
     // Content-size HND: L tensors [NB, NH, BS, CS]; same empty K/V axis as
     // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == content_size).
     return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_CS ||
+                       format == EngineKVFormat::NL_X_NB_BS_NH_HS) {
     // Content-size NHD: L tensors [NB, BS, NH, CS]; same empty K/V axis as
-    // NL_X_NB_NH_BS_CS, tokens before heads within a block.
+    // NL_X_NB_NH_BS_CS, tokens before heads within a block. Independent
+    // SGLang components share the same addressing with HS as the content.
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
     // TRT-LLM cross-layer HND: single tensor [NB, NL, 2, NH, BS, HS]
@@ -356,6 +358,9 @@ __global__ void multi_layer_block_transfer_kernel(
       break;                                                            \
     case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
       LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_HS);       \
       break;                                                            \
     case EngineKVFormat::NL_X_NB_BSV_BSS:                               \
       LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);        \

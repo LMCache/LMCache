@@ -26,6 +26,17 @@ class SGLANG_Detector(EngineDetector):
         kv_caches: DiscoverableKVCache,
         layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
+        if layout_hints.get("kv_list_layout") == "unified":
+            list_depth, tensor_ndim, _ = measure_list_depth_until_tensor(kv_caches)
+            if list_depth != 1:
+                return None, kv_caches
+            if tensor_ndim == 3:
+                return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
+            if tensor_ndim == 4:
+                return lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS, kv_caches
+            return None, kv_caches
+
+        # TODO(chunxiaozheng): maybe we can delete the code when unified is stable
         # MP non-MLA path: a flat list[2*NL] of 3-D tensors (K layers then V layers)
         # plus explicit K/V-list-layout and tokens-per-block hints. Regroup
         # into [K_layers, V_layers] and reshape each
