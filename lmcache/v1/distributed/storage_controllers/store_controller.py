@@ -239,6 +239,7 @@ class StoreController(StorageControllerInterface):
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
+        self._policy.validate_adapters(adapter_descriptors)
 
         # Adapters that are being drained and will be removed after all
         # the in-flight operations are done.

@@ -6,6 +6,7 @@ Tests are written against the StorePolicy contract defined in store_policy.py.
 """
 
 # Third Party
+import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -13,6 +14,8 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConf
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     DefaultStorePolicy,
+    StripedStorePolicy,
+    rendezvous_adapter_index_for_key,
 )
 
 # =============================================================================
@@ -32,6 +35,13 @@ def make_object_key(chunk_id: int) -> ObjectKey:
 def make_descriptor(index: int) -> AdapterDescriptor:
     """Create an AdapterDescriptor for testing."""
     config = MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=10.0)
+    return AdapterDescriptor(index=index, config=config)
+
+
+def make_stable_descriptor(index: int, placement_id: str) -> AdapterDescriptor:
+    """Create a descriptor with a persistent placement identifier."""
+    config = MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=10.0)
+    config.placement_id = placement_id
     return AdapterDescriptor(index=index, config=config)
 
 
@@ -117,3 +127,89 @@ class TestDefaultStorePolicyDeletions:
         result = policy.select_l1_deletions([])
 
         assert result == []
+
+
+class TestStripedStorePolicy:
+    """Stable rendezvous placement contract."""
+
+    def test_each_key_has_one_owner(self) -> None:
+        policy = StripedStorePolicy()
+        keys = [make_object_key(i) for i in range(1000)]
+        adapters = [make_stable_descriptor(i, f"disk-{i}") for i in range(4)]
+
+        targets = policy.select_store_targets(keys, adapters)
+        routed_keys = [key for values in targets.values() for key in values]
+
+        assert set(routed_keys) == set(keys)
+        assert len(routed_keys) == len(keys)
+
+    def test_runtime_order_does_not_change_owner(self) -> None:
+        keys = [make_object_key(i) for i in range(100)]
+        original = [make_stable_descriptor(i, f"disk-{i}") for i in range(4)]
+        reordered = [original[2], original[0], original[3], original[1]]
+        original_by_index = {adapter.index: adapter for adapter in original}
+        reordered_by_index = {adapter.index: adapter for adapter in reordered}
+
+        original_owners = [
+            original_by_index[
+                rendezvous_adapter_index_for_key(key, original)
+            ].placement_id
+            for key in keys
+        ]
+        reordered_owners = [
+            reordered_by_index[
+                rendezvous_adapter_index_for_key(key, reordered)
+            ].placement_id
+            for key in keys
+        ]
+
+        assert original_owners == reordered_owners
+
+    def test_adding_disk_only_remaps_approximately_ideal_share(self) -> None:
+        keys = [make_object_key(i) for i in range(10_000)]
+        before = [make_stable_descriptor(i, f"disk-{i}") for i in range(8)]
+        after = before + [make_stable_descriptor(8, "disk-8")]
+        before_by_index = {adapter.index: adapter for adapter in before}
+        after_by_index = {adapter.index: adapter for adapter in after}
+
+        remapped = 0
+        for key in keys:
+            before_owner = before_by_index[
+                rendezvous_adapter_index_for_key(key, before)
+            ].placement_id
+            after_owner = after_by_index[
+                rendezvous_adapter_index_for_key(key, after)
+            ].placement_id
+            remapped += before_owner != after_owner
+
+        ratio = remapped / len(keys)
+        assert 0.09 < ratio < 0.14
+
+    def test_removing_disk_preserves_other_owners(self) -> None:
+        keys = [make_object_key(i) for i in range(2000)]
+        before = [make_stable_descriptor(i, f"disk-{i}") for i in range(8)]
+        after = before[:-1]
+        before_by_index = {adapter.index: adapter for adapter in before}
+        after_by_index = {adapter.index: adapter for adapter in after}
+
+        for key in keys:
+            before_owner = before_by_index[
+                rendezvous_adapter_index_for_key(key, before)
+            ].placement_id
+            after_owner = after_by_index[
+                rendezvous_adapter_index_for_key(key, after)
+            ].placement_id
+            if before_owner != "disk-7":
+                assert after_owner == before_owner
+
+    def test_missing_or_duplicate_placement_id_is_rejected(self) -> None:
+        key = make_object_key(0)
+        with pytest.raises(ValueError, match="stable placement_id"):
+            rendezvous_adapter_index_for_key(key, [make_descriptor(0)])
+
+        duplicate = [
+            make_stable_descriptor(0, "same-disk"),
+            make_stable_descriptor(1, "same-disk"),
+        ]
+        with pytest.raises(ValueError, match="unique"):
+            rendezvous_adapter_index_for_key(key, duplicate)

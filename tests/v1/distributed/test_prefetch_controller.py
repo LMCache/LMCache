@@ -31,6 +31,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
 )
@@ -45,9 +46,11 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
+    StripedPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
+    StripedStorePolicy,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 from tests.v1.distributed.utils import should_use_lazy_alloc
@@ -156,6 +159,13 @@ def make_descriptor(index: int) -> AdapterDescriptor:
     """Create an AdapterDescriptor for testing."""
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
     return AdapterDescriptor(index=index, config=config)
+
+
+def make_stable_descriptor(index: int) -> AdapterDescriptor:
+    """Create a descriptor with a restart-stable test disk identity."""
+    descriptor = make_descriptor(index)
+    descriptor.config.placement_id = f"disk-{index}"
+    return descriptor
 
 
 def store_keys_in_l2(
@@ -513,6 +523,41 @@ class TestMultiAdapterPrefetch:
         ctrl.stop()
         for a in adapters:
             a.close()
+
+    def test_stable_striped_owner_round_trip(self, l1_manager: L1Manager) -> None:
+        """Striped store and targeted prefetch agree across three adapters."""
+        adapters = [make_adapter(), make_adapter(), make_adapter()]
+        descriptors = [make_stable_descriptor(i) for i in range(3)]
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(12)]
+        store_targets = StripedStorePolicy().select_store_targets(keys, descriptors)
+
+        for adapter_index, adapter_keys in store_targets.items():
+            store_keys_in_l2(adapters[adapter_index], adapter_keys, layout)
+        for key in keys:
+            assert sum(adapter.debug_has_key(key) for adapter in adapters) == 1
+
+        controller_adapters: list[L2AdapterInterface] = [*adapters]
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=controller_adapters,
+            adapter_descriptors=descriptors,
+            policy=StripedPrefetchPolicy(),
+        )
+        ctrl.start()
+        try:
+            request_id = ctrl.submit_prefetch_request(
+                PrefetchRequestSpec(keys, {0: layout})
+            )
+            assert wait_for_prefetch_result(ctrl, request_id) == len(keys)
+
+            read_results = l1_manager.unsafe_read(keys)
+            assert all(read_results[key][0] == L1Error.SUCCESS for key in keys)
+            l1_manager.finish_read(keys)
+        finally:
+            ctrl.stop()
+            for adapter in adapters:
+                adapter.close()
 
 
 # =============================================================================

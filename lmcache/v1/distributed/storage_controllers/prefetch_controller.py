@@ -175,6 +175,38 @@ def trim_load_plan_with_mask(
     return trimmed_plan
 
 
+def remap_lookup_bitmap(
+    subset_bitmap: Bitmap,
+    key_indices: list[int],
+    num_keys: int,
+) -> Bitmap:
+    """Remap a targeted lookup result into global request positions.
+
+    Args:
+        subset_bitmap: Bitmap indexed relative to the adapter's key subset.
+        key_indices: Global request index for every subset position.
+        num_keys: Total number of keys in the request.
+
+    Returns:
+        Bitmap of size ``num_keys`` with matching global positions set.
+
+    Raises:
+        ValueError: If the adapter bitmap refers past ``key_indices`` or a
+            mapped global index is outside the request.
+    """
+    global_bitmap = Bitmap(num_keys)
+    for subset_index in subset_bitmap.get_indices_list():
+        if subset_index >= len(key_indices):
+            raise ValueError(
+                "adapter returned an out-of-range targeted lookup bitmap index"
+            )
+        global_index = key_indices[subset_index]
+        if global_index < 0 or global_index >= num_keys:
+            raise ValueError("prefetch policy returned an out-of-range key index")
+        global_bitmap.set(global_index)
+    return global_bitmap
+
+
 # Poll timeout in milliseconds for the prefetch loop
 PREFETCH_LOOP_POLL_TIMEOUT_MS = 500
 
@@ -213,6 +245,9 @@ class InFlightPrefetchRequest:
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     # Lookup phase: adapter_idx -> bitmap (populated as results arrive)
     lookup_results: dict[int, Bitmap] = field(default_factory=dict)
+    # Targeted lookup maps each adapter's subset-local bitmap positions back
+    # to indices in ``keys``. ``None`` means the request was broadcast.
+    lookup_key_indices: dict[int, list[int]] | None = None
     # L2 read locks currently held (adapter_idx -> key indices).
     # _release_l2_locks subtracts keys as their locks are returned.
     l2_adapter2readlocks: dict[int, Bitmap] = field(default_factory=dict)
@@ -292,6 +327,7 @@ class PrefetchController(StorageControllerInterface):
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
+        self._policy.validate_adapters(adapter_descriptors)
         self._max_in_flight = max_in_flight
 
         # Adapters that are being drained and will be removed after all
@@ -879,8 +915,7 @@ class PrefetchController(StorageControllerInterface):
         request_id: PrefetchRequestId,
         spec: PrefetchRequestSpec,
     ) -> None:
-        """Read-lock L1-resident keys, then submit lookup_and_lock to all
-        live (non-draining) adapters for a new request."""
+        """Read-lock L1 keys and submit policy-routed L2 lookups."""
         l1_readlocks = self._lock_l1_keys(
             spec.keys, spec.num_kv_readers, spec.policy, spec.attn_desc
         )
@@ -908,11 +943,43 @@ class PrefetchController(StorageControllerInterface):
             self._finish_request(request)
             return
 
-        for adapter_id, adapter in routing_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(
-                spec.keys, spec.group_layout_descs
-            )
-            request.pending_lookup_tasks[adapter_id] = task_id
+        routing_descriptors = [
+            descriptor
+            for adapter_id, descriptor in self._adapter_descriptors.items()
+            if adapter_id in routing_adapters
+        ]
+        lookup_targets = self._policy.select_lookup_targets(
+            spec.keys, routing_descriptors
+        )
+        if lookup_targets is None:
+            for adapter_id, adapter in routing_adapters.items():
+                task_id = adapter.submit_lookup_and_lock_task(
+                    spec.keys, spec.group_layout_descs
+                )
+                request.pending_lookup_tasks[adapter_id] = task_id
+        else:
+            request.lookup_key_indices = {}
+            for adapter_id, key_indices in lookup_targets.items():
+                if adapter_id not in routing_adapters:
+                    raise ValueError(
+                        f"prefetch policy selected unavailable adapter {adapter_id}"
+                    )
+                if not key_indices:
+                    continue
+                if any(index < 0 or index >= len(spec.keys) for index in key_indices):
+                    raise ValueError(
+                        "prefetch policy returned an out-of-range key index"
+                    )
+                subset_keys = [spec.keys[index] for index in key_indices]
+                task_id = routing_adapters[adapter_id].submit_lookup_and_lock_task(
+                    subset_keys, spec.group_layout_descs
+                )
+                request.pending_lookup_tasks[adapter_id] = task_id
+                request.lookup_key_indices[adapter_id] = list(key_indices)
+
+        if not request.pending_lookup_tasks:
+            self._finish_request(request)
+            return
         self._in_flight_requests[request_id] = request
         self._status_in_flight_count += 1
         self._status_lookup_phase_count += 1
@@ -1238,7 +1305,7 @@ class PrefetchController(StorageControllerInterface):
         request: InFlightPrefetchRequest,
         signaled_adapters: set[int],
     ) -> None:
-        """Query pending lookup-and-lock results from signaled adapters."""
+        """Query lookup results and normalize them to global key indices."""
         for adapter_idx in list(request.pending_lookup_tasks):
             if adapter_idx not in signaled_adapters:
                 continue
@@ -1248,8 +1315,16 @@ class PrefetchController(StorageControllerInterface):
             )
             if result is None:
                 continue
-            request.lookup_results[adapter_idx] = result
-            request.l2_adapter2readlocks[adapter_idx] = result
+            if request.lookup_key_indices is None:
+                global_result = result
+            else:
+                global_result = remap_lookup_bitmap(
+                    result,
+                    request.lookup_key_indices[adapter_idx],
+                    len(request.keys),
+                )
+            request.lookup_results[adapter_idx] = global_result
+            request.l2_adapter2readlocks[adapter_idx] = global_result
             del request.pending_lookup_tasks[adapter_idx]
 
     def _poll_load_results(

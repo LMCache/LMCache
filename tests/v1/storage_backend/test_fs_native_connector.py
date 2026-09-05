@@ -2,6 +2,7 @@
 """Tests for the native C++ filesystem connector."""
 
 # Standard
+from pathlib import Path
 from typing import Any
 import ctypes
 import os
@@ -10,6 +11,10 @@ import time
 
 # Third Party
 import pytest
+
+# First Party
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.l2_adapters.fs_key_codec import object_key_to_filename
 
 
 def _import_fs_client() -> type:
@@ -93,7 +98,7 @@ def test_odirect_read_does_not_split_for_read_ahead(tmp_path) -> None:
         pytest.skip("filesystem block size is unavailable")
 
     size = block_size * 2
-    key = "test_model@00000000@0123456789abcdef"
+    key = "test_model@00000000@0@0123456789abcdef"
     _source_raw, source = _aligned_memoryview(size, block_size)
     _dest_raw, dest = _aligned_memoryview(size, block_size)
     _fill(source)
@@ -119,7 +124,7 @@ def test_odirect_fails_for_misaligned_buffer(tmp_path) -> None:
         pytest.skip("filesystem block size is unavailable")
 
     size = block_size * 2
-    key = "test_model@00000000@fedcba9876543210"
+    key = "test_model@00000000@0@fedcba9876543210"
     _source_raw, source = _misaligned_memoryview(size, block_size)
     _fill(source)
 
@@ -128,5 +133,51 @@ def test_odirect_fails_for_misaligned_buffer(tmp_path) -> None:
         store = _submit_and_wait(client, "submit_batch_set", key, source)
         assert not store[1]
         assert "O_DIRECT buffer address is not aligned" in store[2]
+    finally:
+        client.close()
+
+
+def test_serialized_key_matches_reversible_filename_codec(tmp_path: Path) -> None:
+    """The C++ connector must emit filenames the restart scanner can decode."""
+    LMCacheFSClient = _import_fs_client()
+    key = ObjectKey(
+        chunk_hash=bytes.fromhex("0123456789abcdef"),
+        model_name="org/test-model",
+        kv_rank=0x01020304,
+        object_group_id=2,
+        cache_salt="tenant-a",
+    )
+    serialized = "org/test-model@01020304@2@0123456789abcdef@tenant-a"
+    source = memoryview(bytearray(b"test-data"))
+
+    client = LMCacheFSClient(str(tmp_path), 1, "", False, 0)
+    try:
+        store = _submit_and_wait(client, "submit_batch_set", serialized, source)
+        assert store[1], store[2]
+        assert (tmp_path / object_key_to_filename(key)).read_bytes() == bytes(source)
+    finally:
+        client.close()
+
+
+def test_delete_distinguishes_existing_and_missing_files(tmp_path: Path) -> None:
+    """A successful delete reports whether the flat cache file existed."""
+    LMCacheFSClient = _import_fs_client()
+    serialized = "test-model@00000000@0@0123456789abcdef"
+    source = memoryview(bytearray(b"test-data"))
+
+    client = LMCacheFSClient(str(tmp_path), 1, "", False, 0)
+    try:
+        store = _submit_and_wait(client, "submit_batch_set", serialized, source)
+        assert store[1], store[2]
+
+        first_id = client.submit_batch_delete([serialized])
+        first_delete = _wait_for_completion(client, first_id)
+        assert first_delete[1], first_delete[2]
+        assert first_delete[3] == [True]
+
+        second_id = client.submit_batch_delete([serialized])
+        second_delete = _wait_for_completion(client, second_id)
+        assert second_delete[1], second_delete[2]
+        assert second_delete[3] == [False]
     finally:
         client.close()
