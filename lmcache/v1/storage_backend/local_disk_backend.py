@@ -721,7 +721,17 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # TODO(Jiayi): Please recover the metadata in a more
         # elegant way in the future.
-        cached_positions = self.dict[key].cached_positions
+        # The disk read above runs without disk_lock (by design — see
+        # the comment in get_blocking). A concurrent remove(force=True)
+        # can evict this key during that unlocked window; re-acquire the
+        # lock only for the brief dict lookup and treat an evicted key as
+        # a cache miss so the caller sees None instead of a KeyError.
+        with self.disk_lock:
+            disk_meta = self.dict.get(key)
+            if disk_meta is None:
+                memory_obj.ref_count_down()
+                return None
+            cached_positions = disk_meta.cached_positions
         memory_obj.metadata.cached_positions = cached_positions
 
         return memory_obj
