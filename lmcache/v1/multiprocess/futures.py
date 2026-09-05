@@ -78,9 +78,9 @@ class MessagingFuture(Generic[T]):
         """Set a request exception and mark this future as complete.
 
         Note:
-            The current ZMQ transport does not call this method; only unit tests
-            exercise it in this change. It is part of the shared future interface
-            for asynchronous transports such as gRPC to propagate RPC failures.
+            The ZMQ client uses this method for local outbound failures before a
+            request reaches the server. Asynchronous transports such as gRPC can
+            also use it to propagate RPC failures.
 
         Args:
             exception: Failure raised while processing the request.
