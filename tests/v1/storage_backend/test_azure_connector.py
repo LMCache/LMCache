@@ -227,13 +227,8 @@ class TestAzureConnector:
         payload = bytes(range(256)) * (size // 256) + bytes(size % 256)
         blob_client.get_blob_properties = AsyncMock(return_value=MagicMock(size=size))
 
-        async def fake_readinto(buf):
-            mv = memoryview(buf).cast("B")
-            mv[: len(payload)] = payload[: len(mv)]
-            return len(payload)
-
         downloader = MagicMock()
-        downloader.readinto = AsyncMock(side_effect=fake_readinto)
+        downloader.readall = AsyncMock(return_value=payload)
         blob_client.download_blob = AsyncMock(return_value=downloader)
 
         key = create_test_key(3)

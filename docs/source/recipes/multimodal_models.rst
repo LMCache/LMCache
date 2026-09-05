@@ -15,10 +15,10 @@ requests through the same KV pathway as text-only models.
 The one multimodal-specific concern is **cache keying**: vLLM emits identical
 placeholder token ids for every image, so raw token ids cannot distinguish
 images. LMCache handles this automatically by overwriting each placeholder
-span with a value derived from the image's content hash (``mm_hash``) before
-key hashing -- same text with different images gets distinct cache entries,
-and no configuration is required. This applies to both the in-process
-connector and MP mode.
+span with a per-position value sequence derived from the image's full content
+hash (``mm_hash``) before key hashing -- same text with different images gets
+distinct cache entries, and no configuration is required. This applies to
+both the in-process connector and MP mode.
 
 Vision-encoder outputs are a separate, optional cache -- see
 :doc:`../non_kv_cache/encoder_cache` (in-process mode only; not yet available

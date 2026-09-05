@@ -42,6 +42,9 @@ echo "=== Cleanup complete ==="
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 cp /tmp/build_${BUILD_ID}_*.log "${REPO_ROOT}/" 2>/dev/null || true
+if [[ -d "${RESULTS_DIR:-}" ]]; then
+    cp -a "$RESULTS_DIR" "${REPO_ROOT}/ci_results_${BUILD_ID}"
+fi
 
 # Wait for GPU memory to be fully released
 echo "Waiting 5 seconds for GPU memory to be released..."
