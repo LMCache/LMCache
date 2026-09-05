@@ -33,12 +33,18 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   `POST /events` per flush, batches in list order. Failures
   raise `CacheEventPublishError`; the caller decides retry vs drop
   (both are safe, see above).
-- A future **Kafka sink** produces to a topic with the message key set
-  to `instance_id`, so one partition carries one instance's stream —
-  partition FIFO is exactly the per-instance FIFO the directory needs.
-  The coordinator side gains a consumer that feeds
-  the coordinator's `EventGate`; the subscriber and producers are
-  untouched.
+- **`KafkaCacheEventSink`** produces one JSON record per batch with the
+  message key set to `instance_id`, so Kafka assigns one instance's
+  records to one partition. The producer enables idempotence, requires
+  `acks=all`, and waits for every delivery report before `publish`
+  succeeds. The JSON value uses the existing `CacheEventsRequest`
+  envelope with exactly one batch, keeping the HTTP and Kafka wire
+  vocabulary identical.
+
+The Kafka sink is producer-side only in this milestone. Until
+coordinator-side Kafka consumption lands, retained records are not
+consumed by the coordinator; direct HTTP remains the default end-to-end
+transport.
 
 ## Batching and sequencing (inside the subscriber)
 
@@ -170,11 +176,20 @@ semantics need no change.
 
 ## Wiring and configuration
 
-Enabled in the MP HTTP server lifespan when a coordinator URL is set
-and `--coordinator-event-reporting` (or
-`LMCACHE_COORDINATOR_EVENT_REPORTING`) is on;
-`--coordinator-event-flush-interval` paces the subscriber's
-event-driven flushes (default 1s).
+Enabled in the MP HTTP server lifespan when
+`--coordinator-event-reporting` (or
+`LMCACHE_COORDINATOR_EVENT_REPORTING`) is on. HTTP delivery additionally
+requires a coordinator URL. Kafka publication is independent of HTTP
+coordinator registration and does not require that URL.
+`--coordinator-event-flush-interval` paces the subscriber's event-driven
+flushes (default 1s).
+
+`--coordinator-event-transport kafka` selects Kafka instead of HTTP and
+requires `--coordinator-kafka-bootstrap-servers`. The topic defaults to
+`lmcache-cache-events`; `--coordinator-kafka-delivery-timeout` bounds how
+long one flush waits for broker acknowledgement. Matching
+`LMCACHE_COORDINATOR_KAFKA_*` environment variables are available for
+deployments that configure the server through its environment.
 
 ## Known limitations (follow-ups)
 
