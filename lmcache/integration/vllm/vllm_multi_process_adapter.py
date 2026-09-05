@@ -721,13 +721,11 @@ class LMCacheMPSchedulerAdapter:
         return all(ev.is_set() for ev in self._health_events.values())
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first use."""
-        if self._heartbeats is not None:
-            return
+        """Start and backfill one heartbeat for each configured server."""
         with self._heartbeat_lock:
-            if self._heartbeats is not None:
-                return
             for url, client in self.req_clients.items():
+                if url in self._heartbeats:
+                    continue
                 hb = HeartbeatThread(
                     req_client=client,
                     health_event=self._health_events[url],
@@ -967,11 +965,11 @@ class LMCacheMPSchedulerAdapter:
 
     def shutdown(self) -> None:
         """Shutdown the scheduler adapter and its resources."""
-        for client in self.req_clients.values():
-            client.close()
         with self._heartbeat_lock:
             for hb in self._heartbeats.values():
-                hb.stop()
+                hb.stop(timeout=self._heartbeat_interval + 1.0)
+        for client in self.req_clients.values():
+            client.close()
 
     def free_lookup_locks(
         self,
