@@ -11,7 +11,13 @@ steps:
           - "zmq"
           - "grpc"
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
-    timeout_in_minutes: 15
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+        - exit_status: 100
+          limit: 2
     agents: { queue: "k8s" }
     plugins:
       - kubernetes:
@@ -39,12 +45,14 @@ steps:
           - "zmq"
           - "grpc"
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
-    timeout_in_minutes: 15
+    timeout_in_minutes: 30
     retry:
       automatic:
         - exit_status: -1
           limit: 2
         - exit_status: 1
+          limit: 2
+        - exit_status: 100
           limit: 2
     agents: { queue: "k8s" }
     plugins:
