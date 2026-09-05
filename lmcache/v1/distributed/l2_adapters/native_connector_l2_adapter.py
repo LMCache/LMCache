@@ -23,8 +23,10 @@ from __future__ import annotations
 # Standard
 from collections import defaultdict
 from typing import Any
+import dataclasses
 import select
 import threading
+import weakref
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -36,6 +38,7 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2TaskId,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -81,6 +84,16 @@ def _obj_to_memoryview(
     return obj.byte_array  # type: ignore[return-value]
 
 
+@dataclasses.dataclass
+class _PendingStoreTask:
+    """Aggregation state for one store task split into uniform-size
+    sub-batches (see ``submit_store_task``)."""
+
+    remaining: int
+    ok: bool = True
+    bytes_stored: int = 0
+
+
 class NativeConnectorL2Adapter(L2AdapterInterface):
     """
     Wraps a pybind-wrapped C++ IStorageConnector to
@@ -101,6 +114,17 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOOKUP = "lookup"
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
+
+    # Process-wide gauge dispatch: the OTel SDK only honors the first registration
+    # of a gauge name, so ``lmcache_mp.l2_adapter_pending_entries`` is registered
+    # once and its callback aggregates over every live adapter tracked here.
+    # ``close()`` is the removal path (the demux thread keeps its adapter alive
+    # until then); the weak references are a backstop for adapters whose thread
+    # already exited without a ``close()`` call.  ``_gauge_lock`` guards the set
+    # and the register-once flag against the OTel scrape thread.
+    _gauge_registered: bool = False
+    _gauge_instances: "weakref.WeakSet[NativeConnectorL2Adapter]" = weakref.WeakSet()
+    _gauge_lock: threading.Lock = threading.Lock()
 
     def __init__(
         self,
@@ -129,6 +153,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             int,
             tuple[str, L2TaskId, int, list[ObjectKey] | None],
         ] = {}
+
+        # Store tasks split into uniform-size sub-batches:
+        # task_id → aggregation state across its native futures
+        self._pending_store_tasks: dict[L2TaskId, _PendingStoreTask] = {}
 
         # Completed results (same pattern as MockL2Adapter)
         self._completed_stores: dict[L2TaskId, L2StoreResult] = {}
@@ -159,6 +187,24 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # Lock for all shared state above
         self._lock = threading.Lock()
+
+        # Leak gauge: track this instance and register the process-wide
+        # gauge on first construction.
+        with NativeConnectorL2Adapter._gauge_lock:
+            NativeConnectorL2Adapter._gauge_instances.add(self)
+            if not NativeConnectorL2Adapter._gauge_registered:
+                NativeConnectorL2Adapter._gauge_registered = True
+                register_gauge(
+                    "lmcache.l2_adapter",
+                    "lmcache_mp.l2_adapter_pending_entries",
+                    (
+                        "Entries in each pending-state dict of live native L2 "
+                        "adapters, tagged by ``l2_name`` and ``map``. A series "
+                        "that keeps growing without returning to zero points "
+                        "at a native completion that never arrived."
+                    ),
+                    NativeConnectorL2Adapter.collect_pending_entries_observations,
+                )
 
         # Background demux thread
         self._stop = threading.Event()
@@ -195,19 +241,61 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         memviews = [_obj_to_memoryview(obj) for obj in objects]
         per_key_sizes = [obj.get_size() for obj in objects]
 
+        # Native connectors require every buffer in a batch to share one
+        # size: the pybind wrapper takes the first buffer's size as
+        # batch_chunk_num_bytes and the C++ side rejects any other size
+        # ("buffer size mismatch"), failing the whole batch. Real store
+        # batches can mix sizes (e.g. a trailing partial chunk, or
+        # heterogeneous object groups), so group the keys by buffer size
+        # and submit one native batch per size, aggregated under a single
+        # task id.
+        size_groups: dict[int, list[int]] = {}
+        for idx, memview in enumerate(memviews):
+            size_groups.setdefault(memview.nbytes, []).append(idx)
+        # An empty submit keeps its native error behavior via one empty call.
+        index_groups = list(size_groups.values()) or [[]]
+
         # Register pending op BEFORE submit to avoid race
         # with demux thread. The native submit is
         # non-blocking so holding the lock is brief.
         with self._lock:
             task_id = self._get_next_task_id()
-            future_id = int(self._client.submit_batch_set(key_strings, memviews))
-            self._pending_ops[future_id] = (
-                self._OP_STORE,
-                task_id,
-                len(keys),
-                None,
+            self._pending_store_tasks[task_id] = _PendingStoreTask(
+                remaining=len(index_groups)
             )
-            self._pending_store_sizes[future_id] = (list(keys), per_key_sizes)
+            submitted = 0
+            try:
+                for indices in index_groups:
+                    future_id = int(
+                        self._client.submit_batch_set(
+                            [key_strings[i] for i in indices],
+                            [memviews[i] for i in indices],
+                        )
+                    )
+                    self._pending_ops[future_id] = (
+                        self._OP_STORE,
+                        task_id,
+                        len(indices),
+                        None,
+                    )
+                    self._pending_store_sizes[future_id] = (
+                        [keys[i] for i in indices],
+                        [per_key_sizes[i] for i in indices],
+                    )
+                    submitted += 1
+            except Exception:
+                if submitted == 0:
+                    # Nothing in flight: drop the task and let the caller
+                    # see the native error, as before.
+                    self._pending_store_tasks.pop(task_id, None)
+                else:
+                    # Some sub-batches are in flight; shrink the aggregate
+                    # so their completions still close the task, marked
+                    # failed.
+                    state = self._pending_store_tasks[task_id]
+                    state.remaining = submitted
+                    state.ok = False
+                raise
 
         return task_id
 
@@ -345,6 +433,59 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # Status Interface
     # ---------------------------------------------------------------
 
+    def get_pending_entry_counts(self) -> dict[str, int]:
+        """Entry counts of the pending-state dicts, keyed by dict name.
+
+        Feeds ``collect_pending_entries_observations`` (the
+        ``lmcache_mp.l2_adapter_pending_entries`` gauge callback).  Zero
+        counts are included so a backlog draining back to zero stays
+        observable.
+
+        ``len()`` on a dict is atomic under the CPython GIL, so reading
+        from the OTel scrape thread without ``_lock`` is safe; the
+        snapshot may be one mutation stale, which is fine at scrape
+        cadence.
+
+        Returns:
+            ``{"pending_ops": <n>, "pending_store_tasks": <n>,
+            "pending_store_sizes": <n>}``.
+        """
+        return {
+            "pending_ops": len(self._pending_ops),
+            "pending_store_tasks": len(self._pending_store_tasks),
+            "pending_store_sizes": len(self._pending_store_sizes),
+        }
+
+    @classmethod
+    def collect_pending_entries_observations(
+        cls,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Aggregate pending-entry counts across live adapters.
+
+        Callback for the ``lmcache_mp.l2_adapter_pending_entries`` gauge.
+        Counts that share the same ``(l2_name, map)`` attribute pair are
+        summed, so two adapters registered under the same type name
+        report one combined series.  Adapters removed by ``close()``
+        report nothing.
+
+        Returns:
+            A list of ``(count, attrs)`` tuples where ``attrs`` is
+            ``{"l2_name": <adapter type name>, "map": <dict name>}``,
+            one per distinct pair over all live adapters.
+        """
+        with cls._gauge_lock:
+            adapters = list(cls._gauge_instances)
+        totals: dict[tuple[str, str], int] = {}
+        for adapter in adapters:
+            for map_name, count in adapter.get_pending_entry_counts().items():
+                pair = (adapter._type_name, map_name)
+                totals[pair] = totals.get(pair, 0) + count
+        observations: list[tuple[int | float, dict[str, object]]] = [
+            (count, {"l2_name": l2_name, "map": map_name})
+            for (l2_name, map_name), count in totals.items()
+        ]
+        return observations
+
     def report_status(self) -> dict[str, Any]:
         """Return a status dict for this native-connector L2 adapter.
 
@@ -369,6 +510,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
 
     def close(self) -> None:
+        with NativeConnectorL2Adapter._gauge_lock:
+            NativeConnectorL2Adapter._gauge_instances.discard(self)
         self._stop.set()
         self._demux_thread.join(timeout=5)
 
@@ -451,7 +594,19 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     if op_type == self._OP_STORE:
                         store_info = self._pending_store_sizes.pop(fid, None)
-                        task_bytes = 0
+                        state = self._pending_store_tasks.get(task_id)
+                        if state is None:
+                            # Should not happen; recover with a
+                            # single-sub-batch aggregate.
+                            state = _PendingStoreTask(remaining=1)
+                            self._pending_store_tasks[task_id] = state
+                        if not ok:
+                            state.ok = False
+                            logger.warning(
+                                "Native store sub-batch failed (%d keys): %s",
+                                num_keys,
+                                error,
+                            )
                         if ok and store_info is not None:
                             store_keys, sizes = store_info
                             for key, size in zip(store_keys, sizes, strict=True):
@@ -466,12 +621,17 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     self._key_sizes[key] = size
                                     keys_stored.append(key)
                                     sizes_stored.append(size)
-                                    task_bytes += size
+                                    state.bytes_stored += size
                                 else:
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
-                        self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
-                        self._store_efd.notify()
+                        state.remaining -= 1
+                        if state.remaining <= 0:
+                            self._pending_store_tasks.pop(task_id, None)
+                            self._completed_stores[task_id] = L2StoreResult(
+                                state.ok, state.bytes_stored
+                            )
+                            self._store_efd.notify()
 
                     elif op_type == self._OP_LOOKUP:
                         bitmap = Bitmap(num_keys)
