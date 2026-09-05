@@ -122,9 +122,9 @@ class TransferResult:
 class RequestContext:
     """Resolved token and block geometry for one request."""
 
-    seq_no: int
+    sequence_id: int
     request_id: str
-    label: str
+    request_kind: str
     token_ids: tuple[int, ...]
     num_full_tokens: int
     total_chunks: int
@@ -194,16 +194,16 @@ class ServerBenchClient:
 
     def create_request(
         self,
-        seq_no: int,
+        sequence_id: int,
         request_id: str,
-        label: str,
+        request_kind: str,
     ) -> RequestContext | None:
         """Create a request with resolved token and block ranges.
 
         Args:
-            seq_no: Sequence number used to generate tokens and block offsets.
+            sequence_id: Sequence ID used to generate tokens and block offsets.
             request_id: Server session ID.
-            label: Label used in logs.
+            request_kind: Request kind used in logs.
 
         Returns:
             The request, or ``None`` if it has no full chunk.
@@ -216,26 +216,26 @@ class ServerBenchClient:
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import _build_token_ids
 
-        token_ids = tuple(_build_token_ids(seq_no, self._config.num_tokens))
+        token_ids = tuple(_build_token_ids(sequence_id, self._config.num_tokens))
         num_full_tokens = (len(token_ids) // self._chunk_size) * self._chunk_size
         if num_full_tokens == 0:
             self._log(
                 "  [seq %d/%s] SKIP: %d tokens < chunk_size %d"
-                % (seq_no, label, len(token_ids), self._chunk_size)
+                % (sequence_id, request_kind, len(token_ids), self._chunk_size)
             )
             return None
 
         num_blocks = num_full_tokens // self._block_size
         usable_blocks = max(self._num_blocks - num_blocks, 1)
         return RequestContext(
-            seq_no=seq_no,
+            sequence_id=sequence_id,
             request_id=request_id,
-            label=label,
+            request_kind=request_kind,
             token_ids=token_ids,
             num_full_tokens=num_full_tokens,
             total_chunks=num_full_tokens // self._chunk_size,
             chunk_size=self._chunk_size,
-            block_offset=(seq_no * num_blocks) % usable_blocks,
+            block_offset=(sequence_id * num_blocks) % usable_blocks,
             num_blocks=num_blocks,
         )
 
@@ -270,7 +270,10 @@ class ServerBenchClient:
         started_at = time.monotonic()
         if not _send_lookup(req_client, lookup_key, tp_size=len(self._workers)):
             latency_ms = (time.monotonic() - started_at) * 1000
-            self._log("  [seq %d/%s] LOOKUP timeout" % (request.seq_no, request.label))
+            self._log(
+                "  [seq %d/%s] LOOKUP timeout"
+                % (request.sequence_id, request.request_kind)
+            )
             return LookupResult(
                 hit_chunks=0,
                 total_chunks=request.total_chunks,
@@ -285,8 +288,8 @@ class ServerBenchClient:
         self._log(
             "  [seq %d/%s] LOOKUP: %d/%d chunks hit (%.1f ms)"
             % (
-                request.seq_no,
-                request.label,
+                request.sequence_id,
+                request.request_kind,
                 hit_chunks,
                 request.total_chunks,
                 latency_ms,
@@ -379,8 +382,8 @@ class ServerBenchClient:
         self._log(
             "  [seq %d/%s] STORE: %s (%d tokens, %.1f ms, %d writers)"
             % (
-                request.seq_no,
-                request.label,
+                request.sequence_id,
+                request.request_kind,
                 status,
                 token_count,
                 latency_ms,
@@ -472,8 +475,8 @@ class ServerBenchClient:
         self._log(
             "  [seq %d/%s] RETRIEVE: %s (%d tokens, %.1f ms, %d workers)"
             % (
-                request.seq_no,
-                request.label,
+                request.sequence_id,
+                request.request_kind,
                 status,
                 token_count,
                 latency_ms,
@@ -588,19 +591,17 @@ class ServerBenchClient:
             digest = hashlib.md5("".join(checksums).encode()).hexdigest()[:16]
             self._log(
                 "  [seq %d/%s] CHECKSUM: %s (%d chunks)"
-                % (request.seq_no, request.label, digest, len(checksums))
+                % (
+                    request.sequence_id,
+                    request.request_kind,
+                    digest,
+                    len(checksums),
+                )
             )
         return checksums
 
     def end_session(self, request: RequestContext) -> None:
-        """End one Server-side request session.
-
-        Args:
-            request: Request whose session should end.
-
-        Raises:
-            RuntimeError: If the client is not started.
-        """
+        """End the request's Server-side session."""
         req_client = self._require_started()
 
         # First Party
