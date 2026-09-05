@@ -8,6 +8,7 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import cache_identity_revision
 from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
     DeviceIPCWrapper,
 )
@@ -61,8 +62,15 @@ class IPCCacheServerKey:
     cache_salt: str = ""
 
     # Request-scoped LMCache configuration passed across the IPC boundary.
-    # It is metadata, not part of cache identity.
+    # Most values are metadata; the strict lmcache.cache_identity.* subset is
+    # projected into cache_identity_revision below.
     request_configs: dict[str, Any] | None = field(default=None, compare=False)
+
+    # Derived locally from request_configs and part of equality/hash. msgspec
+    # includes init=False dataclass fields when encoding, but ignores the wire
+    # value and recomputes it in __post_init__ when decoding. Older decoders
+    # ignore this unknown map field; old payloads derive the default "".
+    cache_identity_revision: str = field(init=False, default="")
 
     # Number of workers that retrieve this key's object; the server reserves
     # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
@@ -85,6 +93,11 @@ class IPCCacheServerKey:
                 f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
                 f"(got {len(self.cache_salt)})"
             )
+        object.__setattr__(
+            self,
+            "cache_identity_revision",
+            cache_identity_revision(self.request_configs),
+        )
 
     # Helper function for unit tests only
     @classmethod

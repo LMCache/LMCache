@@ -16,6 +16,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.cache_identity import namespace_chunk_hashes
 
 if TYPE_CHECKING:
     # First Party
@@ -489,15 +490,15 @@ def ipc_key_to_object_keys(
     When the ipc_key's worker_id is None, each chunk hash is exploded into
     multiple ObjectKeys (one per worker in world_size).
 
-    ``cache_salt`` is read directly from ``ipc_key`` so the produced
-    ObjectKeys are per-user isolated whenever the sender set a non-empty
-    salt. There is intentionally no separate ``cache_salt`` parameter —
-    duplicating the source of truth would risk silent isolation bugs
-    where a caller passes ``ipc_key`` but forgets the salt.
+    ``cache_salt`` and the validated cache-identity revision are read directly
+    from ``ipc_key``. The revision domain-separates each chunk hash before the
+    ObjectKey is built; an empty revision preserves the legacy hash exactly.
+    There are intentionally no separate parameters for these fields because
+    duplicating the source of truth would risk silent isolation bugs.
 
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
-            and cache_salt.
+            cache_salt, and cache identity revision.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
 
@@ -506,6 +507,8 @@ def ipc_key_to_object_keys(
         for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
+    identity_revision = ipc_key.cache_identity_revision
+    namespaced_chunk_hashes = namespace_chunk_hashes(chunk_hashes, identity_revision)
 
     # The (chunk_hash, kv_rank) expansion is independent of the object group,
     # so compute it once and reuse it for every group.
@@ -541,7 +544,7 @@ def ipc_key_to_object_keys(
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
             )
-            for chunk_hash in chunk_hashes
+            for chunk_hash in namespaced_chunk_hashes
             for kv_rank in kv_ranks
         ]
         for object_group_id in object_group_ids

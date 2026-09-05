@@ -152,3 +152,34 @@ def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
         assert isinstance(hash_val, int), f"Expected int, got {type(hash_val)}"
         # Must fit in uint64 (msgpack range: 0 to 2**64 - 1)
         assert 0 <= hash_val <= 2**64 - 1
+
+
+def test_process_tokens_materializes_cache_identity_once_per_request() -> None:
+    """Chunk keys carry one digest tag instead of the structured identity."""
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=16, backend="cpu")
+    db = ChunkedTokenDatabase(cfg, dumb_metadata())
+    request_configs = {
+        "lmcache.cache_identity.model_revision": "model-a",
+        "lmcache.cache_identity.tokenizer_revision": "tokenizer-a",
+        "lmcache.cache_identity.weight_revision": "weights-42",
+        "lmcache.cache_identity.topology_fingerprint": "dense,tp=1",
+        "lmcache.cache_identity.backend_revision": "flash-attention-3",
+        "lmcache.cache_identity.kv_dtype": "bfloat16",
+        "lmcache.ttl": 60,
+    }
+
+    results = list(
+        db.process_tokens(
+            tokens=generate_tokens(32, "cpu"), request_configs=request_configs
+        )
+    )
+
+    assert len(results) == 2
+    for _, _, key in results:
+        assert key.request_configs["lmcache.ttl"] == 60
+        assert "lmcache.tag.cache_identity_revision" in key.request_configs
+        assert not any(
+            name.startswith("lmcache.cache_identity.") for name in key.request_configs
+        )
+    assert "lmcache.cache_identity.weight_revision" in request_configs
+    assert "lmcache.tag.cache_identity_revision" not in request_configs
