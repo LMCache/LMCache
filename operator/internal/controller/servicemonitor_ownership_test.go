@@ -80,7 +80,15 @@ var _ = Describe("ServiceMonitor ownership when monitoring is disabled", func() 
 					}
 
 					monitor := &monitoringv1.ServiceMonitor{
-						ObjectMeta: metav1.ObjectMeta{Name: meta.Name, Namespace: meta.Namespace},
+						ObjectMeta: metav1.ObjectMeta{
+							Name: meta.Name, Namespace: meta.Namespace,
+							Labels:      map[string]string{"managed-by": "user"},
+							Annotations: map[string]string{"description": "custom monitor"},
+						},
+						Spec: monitoringv1.ServiceMonitorSpec{
+							Selector:  metav1.LabelSelector{MatchLabels: map[string]string{"app": "custom"}},
+							Endpoints: []monitoringv1.Endpoint{{Port: "metrics", Path: "/custom-metrics"}},
+						},
 					}
 					if ownership != "unowned" {
 						ref := metav1.OwnerReference{
@@ -98,6 +106,8 @@ var _ = Describe("ServiceMonitor ownership when monitoring is disabled", func() 
 							ref.UID = "previous-owner"
 						case "non-controller reference":
 							ref.Controller = ptr.To(false)
+						case "unspecified controller reference":
+							ref.Controller = nil
 						}
 						monitor.OwnerReferences = []metav1.OwnerReference{ref}
 					}
@@ -126,6 +136,8 @@ var _ = Describe("ServiceMonitor ownership when monitoring is disabled", func() 
 							Expect(err).NotTo(HaveOccurred())
 							Expect(got.OwnerReferences).To(Equal(original.OwnerReferences))
 							Expect(got.Spec).To(Equal(original.Spec))
+							Expect(got.Labels).To(Equal(original.Labels))
+							Expect(got.Annotations).To(Equal(original.Annotations))
 						}
 					}
 				},
@@ -134,6 +146,7 @@ var _ = Describe("ServiceMonitor ownership when monitoring is disabled", func() 
 				Entry("monitor owned by another resource with the same name", "another resource", false),
 				Entry("monitor owned by an earlier resource with the same name", "previous incarnation", false),
 				Entry("non-controller owner reference", "non-controller reference", false),
+				Entry("owner reference without a controller flag", "unspecified controller reference", false),
 			)
 		})
 	}
