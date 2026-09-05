@@ -108,10 +108,10 @@ The concrete backend owns their types and ABI details.
 ```text
 lmcache/v1/platform/base/event_ipc.py     # protocol, lookup, default backend
 lmcache/v1/platform/base/device_spec.py  # optional DeviceSpec capability
-lmcache/v1/platform/cpu/__init__.py      # CPU stub backend registration
-lmcache/v1/platform/cuda/__init__.py     # CUDA backend registration
-lmcache/v1/platform/musa/event_ipc.py    # MUSA capability gate and adapter
-lmcache/v1/platform/musa/ipc_wrapper.py  # MUSA availability and torch.musa loader
+lmcache/v1/platform/backends/cpu/__init__.py      # CPU stub backend registration
+lmcache/v1/platform/backends/cuda/__init__.py     # CUDA backend registration
+lmcache/v1/platform/backends/musa/event_ipc.py    # MUSA capability gate and adapter
+lmcache/v1/platform/backends/musa/ipc_wrapper.py  # MUSA availability and torch.musa loader
 ```
 
 ### Default backend
@@ -137,7 +137,7 @@ accelerator's event implementation.
 
 ### MUSA backend
 
-`MusaEventIPCBackend` lives under `lmcache/v1/platform/musa/`. It first checks
+`MusaEventIPCBackend` lives under `lmcache/v1/platform/backends/musa/`. It first checks
 `is_musa_event_ipc_available()` from `musa/ipc_wrapper.py`, then adapts the
 current TorchMUSA event API through `DefaultEventIPCBackend`:
 
@@ -148,7 +148,7 @@ handle = event.ipc_handle()
 remote_event = torch_musa.Event.from_ipc_handle(device, handle)
 ```
 
-The generic layer does not import `platform.musa`; only the MUSA `DeviceSpec`
+The generic layer does not import `platform.backends.musa`; only the MUSA `DeviceSpec`
 and backend do. If the opt-in MUSA event API is unavailable,
 `check_event_support()` raises a device-named `RuntimeError`. Memory IPC and
 server-side block transfer are separate capabilities and are not required to
@@ -269,11 +269,11 @@ injected event modules.
 
 ## Review Checklist
 
-- [ ] Generic handle-path modules do not import `platform.musa`.
+- [ ] Generic handle-path modules do not import `platform.backends.musa`.
 - [ ] Generic handle-path modules do not branch on a concrete device type.
 - [ ] `CUDAMessagingFuture` and `to_cuda_future` remain compatible aliases.
 - [ ] Concrete device specs explicitly register their event IPC backends.
 - [ ] Missing specs and unsupported event IPC fail without fallback.
-- [ ] MUSA event behavior is isolated under `platform/musa`.
+- [ ] MUSA event behavior is isolated under `platform/backends/musa`.
 - [ ] Unsupported event IPC fails before unsafe memory access.
 - [ ] Platform and future tests cover import/export and stream ordering.

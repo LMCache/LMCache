@@ -3,9 +3,9 @@
 
 The concrete implementations live in their respective sub-packages:
 
-* :class:`~lmcache.v1.platform.cuda.cache_context.GPUCacheContext` --
+* :class:`~lmcache.v1.platform.backends.cuda.cache_context.GPUCacheContext` --
   CUDA-backed.
-* :class:`~lmcache.v1.platform.cpu.cache_context.CPUCacheContext` --
+* :class:`~lmcache.v1.platform.backends.cpu.cache_context.CPUCacheContext` --
   CPU-only fallback (POSIX-SHM-backed KV tensors).
 
 :func:`create_cache_context` keeps the dispatch out of the call site

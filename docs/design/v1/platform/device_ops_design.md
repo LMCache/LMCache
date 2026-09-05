@@ -25,7 +25,7 @@ what it accelerates and inherits the torch baseline for everything else.
 | Compiled SYCL ops | `PYBIND11_MODULE(xpu_ops)` — 12 ops + 2 enums (+`GPUKVFormat`); **24 ops fall back to torch** | `csrc/sycl/pybind_sycl.cpp` |
 | Torch/CPU reference | `torch_ops.py` — 36 ops (migrated from former `python_ops_fallback.py`) | `lmcache/v1/platform/torch_ops.py` |
 | Shared types | `lmcache_native` owns `TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `StagingCopy`, `LaunchVar`, `BatchStep`, `KernelGroupSpec`; `ops_types.py` re-exports them and adds `set_shape_desc_dtype` fallback glue | `csrc/lmcache_native/pybind.cpp`, `lmcache/v1/platform/ops_types.py` |
-| MUSA ops | Python override: 1 native op, rest inherited | `lmcache/v1/platform/musa/device_ops.py` |
+| MUSA ops | Python override: 1 native op, rest inherited | `lmcache/v1/platform/backends/musa/device_ops.py` |
 | HPU ops | None — uses torch baseline entirely | (via `DeviceOps` inheritance) |
 | Runtime selection | `device_ops = resolve_device_ops(torch_device_type)` | `lmcache/__init__.py` |
 | Device detection | `_device_detect.py`: registry, torch device probe, `current_device_spec` | `lmcache/v1/platform/_device_detect.py` |
@@ -173,7 +173,7 @@ classDiagram
 ### 4.1 CPU — the base (no overrides)
 
 ```python
-# platform/cpu/device_ops.py
+# platform/backends/cpu/device_ops.py
 class CpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "cpu"
     # No overrides. Inherited methods -> torch_ops ARE the CPU backend.
@@ -182,7 +182,7 @@ class CpuDeviceOps(DeviceOps):
 ### 4.2 CUDA (& ROCm) — bulk-bind the whole module
 
 ```python
-# platform/cuda/device_ops.py
+# platform/backends/cuda/device_ops.py
 class CudaDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "cuda"
 
@@ -204,7 +204,7 @@ class CudaDeviceOps(DeviceOps):
 ### 4.3 XPU — 12 SYCL + 24 torch
 
 ```python
-# platform/xpu/device_ops.py
+# platform/backends/xpu/device_ops.py
 class XpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "xpu"
 
@@ -223,10 +223,10 @@ class XpuDeviceOps(DeviceOps):
 ### 4.4 MUSA — one native override, extracted as module-level function
 
 ```python
-# platform/musa/device_ops.py
+# platform/backends/musa/device_ops.py
 def _musa_multi_layer_block_kv_transfer(...) -> None:
     """Native MUSA block transfer when tensor-backed; else torch baseline."""
-    from lmcache.v1.platform.musa.native_kv_transfer import (
+    from lmcache.v1.platform.backends.musa.native_kv_transfer import (
         try_native_multi_layer_block_kv_transfer,
     )
     object_tensors = _tensor_list(lmcache_objects_ptrs)
@@ -250,7 +250,7 @@ class MusaDeviceOps(DeviceOps):
 ### 4.5 HPU — inherit the baseline
 
 ```python
-# platform/hpu/device_ops.py
+# platform/backends/hpu/device_ops.py
 class HpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "hpu"
     # All 36 inherited from the torch baseline.
@@ -285,11 +285,11 @@ class DeviceSpec:
             self._ops_cache = ops
         return ops
 
-# platform/cuda/__init__.py
+# platform/backends/cuda/__init__.py
 class CudaDeviceSpec(DeviceSpec):
     @property
     def ops_cls(self) -> type[DeviceOps]:
-        from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
+        from lmcache.v1.platform.backends.cuda.device_ops import CudaDeviceOps
         return CudaDeviceOps
 ```
 

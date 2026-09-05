@@ -9,7 +9,7 @@ Historically all of these handle wrappers subclassed `CudaIPCWrapper`:
 ```text
 CudaIPCWrapper
 ├── RawCudaIPCWrapper      (TRT-LLM raw cudaMalloc pool)
-└── CpuShmTensorWrapper    (CPU POSIX-SHM, in platform/cpu/shm.py)
+└── CpuShmTensorWrapper    (CPU POSIX-SHM, in platform/backends/cpu/shm.py)
 ```
 
 In fact a CPU shared-memory wrapper and a TRT-LLM raw-pointer wrapper are not CUDA caching-allocator tensors, yet they inherited `_share_cuda_`- based machinery they never used. It also made non-CUDA backends impossible to add cleanly.

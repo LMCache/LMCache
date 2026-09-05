@@ -644,7 +644,7 @@ class ServerBenchClient:
             worker.ipc_wrappers.clear()
         if any(worker.shm_mappings for worker in self._workers):
             # First Party
-            from lmcache.v1.platform.cpu.shm import shm_munmap
+            from lmcache.v1.platform.backends.cpu.shm import shm_munmap
 
             for worker in self._workers:
                 for address, size in worker.shm_mappings:
@@ -670,7 +670,7 @@ class ServerBenchClient:
 
         if self._shm_names:
             # First Party
-            from lmcache.v1.platform.cpu.shm import shm_unlink
+            from lmcache.v1.platform.backends.cpu.shm import shm_unlink
 
             for name in self._shm_names:
                 try:
@@ -847,7 +847,7 @@ class ServerBenchClient:
             from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
         else:
             # First Party
-            from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
+            from lmcache.v1.platform.backends.cpu.shm import CpuShmTensorWrapper
 
         for rank in range(config.tp_size):
             instance_id = _INSTANCE_ID_BASE + rank

@@ -292,5 +292,5 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)
-        assert "lmcache.v1.platform.musa" not in source
+        assert "lmcache.v1.platform.backends.musa" not in source
         assert 'device.type == "musa"' not in source

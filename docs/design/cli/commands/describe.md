@@ -344,7 +344,7 @@ module's own fields.
 
 ### 4. Expose engine KV format, shape, and attention backend in `kv_cache_layout`
 
-**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/platform/cuda/cache_context.py`, `lmcache/v1/multiprocess/server.py`
+**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/platform/backends/cuda/cache_context.py`, `lmcache/v1/multiprocess/server.py`
 
 Helper functions in `utils.py` (derived from `legible_print_engine_kv_format()`):
 - `get_engine_kv_shape_description(engine_kv_format)` — symbolic shape (e.g., `NL x [2, NB, BS, NH, HS]`)

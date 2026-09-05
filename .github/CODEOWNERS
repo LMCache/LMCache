@@ -33,7 +33,7 @@
 # Platform
 /lmcache/v1/platform/                  @maobaolong @hlin99
 /lmcache/v1/platform/base/event_ipc.py @maobaolong @hlin99 @andyluo7
-/lmcache/v1/platform/rocm/             @maobaolong @hlin99 @andyluo7
+/lmcache/v1/platform/backends/rocm/     @maobaolong @hlin99 @andyluo7
 
 # Lookup client
 /lmcache/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen

@@ -2,7 +2,7 @@
 
 ## Why a second wrapper
 
-The default `CudaIPCWrapper` in `platform/cuda/ipc_wrapper.py` calls
+The default `CudaIPCWrapper` in `platform/backends/cuda/ipc_wrapper.py` calls
 `tensor.untyped_storage()._share_cuda_()` to publish the storage over
 CUDA IPC. That path only works when the storage is owned by PyTorch's
 caching allocator. TRT-LLM's KV pool is published via

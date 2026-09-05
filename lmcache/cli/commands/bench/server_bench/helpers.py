@@ -65,7 +65,7 @@ try:
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
     from lmcache.v1.multiprocess.transport.base import RequestClient
-    from lmcache.v1.platform.cpu.shm import (
+    from lmcache.v1.platform.backends.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,
     )

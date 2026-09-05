@@ -56,7 +56,7 @@ if not (torch_dev.is_available() and torch_device_type == "cuda"):
     )
 
 # First Party
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper  # noqa: E402
+from lmcache.v1.platform.backends.cuda.ipc_wrapper import CudaIPCWrapper  # noqa: E402
 
 if not _has_working_new_shared_cuda():
     pytest.skip(

@@ -40,7 +40,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+from lmcache.v1.platform.backends.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
 

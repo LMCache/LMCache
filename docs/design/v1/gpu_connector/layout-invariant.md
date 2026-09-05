@@ -257,7 +257,7 @@ consumer code must never do any of the following — it queries via the
   only way in — no test-only shortcuts, no cached topology fields; the
   manager exposes only `kv_layer_groups`, `num_groups`, and
   `get_shape_desc`.
-- **`lmcache/v1/platform/cuda/cache_context.py::GPUCacheContext`** —
+- **`lmcache/v1/platform/backends/cuda/cache_context.py::GPUCacheContext`** —
   constructs the manager directly at init, delegates
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /

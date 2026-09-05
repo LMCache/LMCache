@@ -73,9 +73,9 @@ really provides:
 
 The **isolated IPC** setting removes both: KV-cache registration switches
 to raw CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/ipc_wrapper.md``) and event ordering to
+(``docs/design/v1/platform/backends/cuda/ipc_wrapper.md``) and event ordering to
 timeline-semaphore events carried over CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``). Both
+(``docs/design/v1/platform/backends/cuda/timeline_semaphore_event_ipc.md``). Both
 rendezvous in the kernel driver, so they work across containers that
 share nothing -- no host IPC namespace, no common ``/dev/shm``, no
 ``--ipc host``. It must be enabled on **both** sides of a deployment:

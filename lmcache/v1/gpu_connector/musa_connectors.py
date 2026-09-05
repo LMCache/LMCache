@@ -35,7 +35,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.platform.musa.native_kv_transfer import (
+from lmcache.v1.platform.backends.musa.native_kv_transfer import (
     try_native_from_gpu,
     try_native_to_gpu,
 )
