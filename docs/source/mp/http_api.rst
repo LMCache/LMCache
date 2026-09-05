@@ -689,10 +689,8 @@ after a rename"). They are **not** on the inference data path.
 field (default ``l2``). ``GET /cache/objects`` lists L2 only.
 
 The coordinator's eviction loop uses ``DELETE /cache/objects`` automatically (see
-:doc:`coordinator` — "L2 usage tracking and eviction"); the
-``GET /cache/objects`` endpoint also powers the coordinator's startup
-resync. Manual ``curl`` usage is reserved for ad-hoc operator
-actions and debugging.
+:doc:`coordinator` — "L2 usage tracking and eviction"). Manual ``curl``
+usage is reserved for ad-hoc operator actions and debugging.
 
 ``DELETE /cache/objects``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -707,7 +705,7 @@ adapter must be configured, else ``503``; a pure ``l1`` delete needs no adapter.
 Per-key successful L2 deletions fire ``on_l2_keys_deleted`` on the
 adapter's listeners — when the coordinator is wired (see
 ``--coordinator-event-reporting``), the deletions show up at the
-coordinator's ``POST /quota/events`` as ``"type": "delete"`` events. The
+coordinator's ``POST /events`` as ``delete`` events. The
 coordinator's eviction + usage trackers learn about the deletion from
 that event flow, not from the response of this call.
 

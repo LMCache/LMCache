@@ -155,16 +155,13 @@ def check_torch_musa_event_support(torch_musa: object) -> bool:
 
 
 def is_musa_block_transfer_available() -> bool:
-    """Return whether server-side MUSA block transfer is production-ready.
-
-    Memory and event IPC can be validated independently. Forced MUSA handle
-    mode remains unavailable until the server-side MUSA block-transfer
-    primitive is implemented and validated.
+    """Return whether the built-in MUSA block-transfer path is available.
 
     Returns:
-        ``False`` while the server-side block-transfer path is unavailable.
+        ``True`` because ``MusaDeviceOps`` provides a torch implementation and
+        uses the optional native implementation only as an acceleration path.
     """
-    return False
+    return True
 
 
 def is_musa_memory_ipc_available() -> bool:

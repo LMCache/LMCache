@@ -17,7 +17,6 @@ torch / zmq.
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from typing import Any
 import ctypes
 import hashlib
@@ -60,13 +59,12 @@ try:
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
     from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
-    from lmcache.v1.multiprocess.protocols.base import RequestType
     from lmcache.v1.multiprocess.protocols.engine import (
         RegisterEngineDrivenContextResponse,
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
+    from lmcache.v1.multiprocess.transport.base import RequestClient
     from lmcache.v1.platform.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,
@@ -119,9 +117,16 @@ _MODEL_NAME = "test-model"
 _WORLD_SIZE = 1
 _INSTANCE_ID = 0
 
+# TP > 1 support: each simulated worker registers under a distinct
+# ``instance_id`` so the server can hold one context per rank. Kept
+# well above legacy ``_INSTANCE_ID = 0`` so single-worker bench runs
+# and the multi-worker path never collide on the server side.
+_INSTANCE_ID_BASE = 1000
+
 # Default KV shape spec matching the original defaults:
 # 32 layers, (2, num_blocks=1024, block_size=16, 8 heads, 128 head_size)
 _DEFAULT_SHAPE_SPEC = "(2,1024,16,8,128):float16:32"
+
 
 # ------------------------------------------------------------------ #
 #  Low-level helpers                                                   #
@@ -136,18 +141,15 @@ _DEFAULT_RPC_TIMEOUT_S = 10.0
 _TIMEOUT = object()
 
 
-def _call(
-    client: MessageQueueClient,
-    request_type: RequestType,
-    payloads: list,
+def _wait_for_result(
+    future: MessagingFuture[Any],
     timeout_s: float = _DEFAULT_RPC_TIMEOUT_S,
 ) -> Any:
-    """Submit a request through ``MessageQueueClient`` and block.
+    """Wait for an RPC future and convert a timeout to ``_TIMEOUT``.
 
     Returns the decoded response (possibly ``None`` for void replies)
     on success, or the sentinel ``_TIMEOUT`` on RPC timeout.
     """
-    future: MessagingFuture[Any] = client.submit_request(request_type, payloads)
     try:
         return future.result(timeout=timeout_s)
     except TimeoutError:
@@ -173,11 +175,14 @@ def _make_key(
     start: int = 0,
     end: int = 0,
     worker_id: int | None = None,
+    world_size: int = _WORLD_SIZE,
+    num_kv_readers: int = 1,
 ) -> IPCCacheServerKey:
     """Build an IPCCacheServerKey."""
     return IPCCacheServerKey(
         model_name=_MODEL_NAME,
-        world_size=_WORLD_SIZE,
+        world_size=world_size,
+        num_kv_readers=num_kv_readers,
         worker_id=worker_id,
         token_ids=token_ids,
         start=start,
@@ -194,6 +199,60 @@ def _make_key(
 # ------------------------------------------------------------------ #
 #  GPU KV cache allocation                                             #
 # ------------------------------------------------------------------ #
+
+
+# The server's vLLM detector identifies MLA layers by tensor rank: each
+# layer must be rank-3 ``(NB, BS, HS)`` (see ``VLLM_Detector.discover``
+# in ``lmcache/v1/gpu_connector/kv_format/detectors/vllm.py``). Classical
+# split-K/V is rank-5 ``(2, NB, BS, NH, HS)``. Sharing this shape recipe
+# across all allocation / gather / scatter helpers keeps the bench in
+# sync with the detector contract regardless of transfer mode.
+def _is_mla_kv_size(kv_size: int) -> bool:
+    """``kv_size == 1`` marks a single-plane KV group (MLA / fused-K/V).
+
+    Single source of truth for "is this group MLA?". Derived helpers
+    (:func:`_make_alloc_shape`, :func:`_tensor_is_mla`) express the same
+    contract in shape-space so that alloc / gather / scatter / checksum
+    paths never diverge.
+    """
+    return kv_size == 1
+
+
+def _tensor_is_mla(t: "torch.Tensor") -> bool:
+    """Inverse of :func:`_is_mla_kv_size` at the tensor level.
+
+    Client tensors produced by :func:`_make_alloc_shape` are rank-3
+    ``(NB, BS, hidden)`` for MLA groups and rank-5
+    ``(kv, NB, BS, NH, HS)`` for classical K/V groups. Checking
+    ``dim() == 3`` here (instead of scattering the literal across
+    gather / scatter / checksum) keeps every consumer routed through
+    the same rule the allocator used.
+    """
+    return t.dim() == 3
+
+
+def _make_alloc_shape(
+    kv_size: int,
+    num_blocks: int,
+    block_size: int,
+    num_heads: int,
+    head_size: int,
+) -> tuple[int, ...]:
+    """Per-layer paged tensor shape, honouring the MLA rank-3 contract."""
+    if _is_mla_kv_size(kv_size):
+        return (num_blocks, block_size, num_heads * head_size)
+    return (kv_size, num_blocks, block_size, num_heads, head_size)
+
+
+def _group_alloc_shape(shape_desc) -> tuple[int, ...]:
+    """``_make_alloc_shape`` variant reading fields off a ``shape_desc``."""
+    return _make_alloc_shape(
+        shape_desc.kv_size,
+        shape_desc.nb,
+        shape_desc.bs,
+        shape_desc.nh,
+        shape_desc.hs,
+    )
 
 
 def _allocate_gpu_kv_cache(
@@ -249,11 +308,11 @@ def _allocate_gpu_kv_cache(
         tensors: list[torch.Tensor] = []
         for g in groups:
             sd = g.shape_desc
-            g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
+            g_shape = _group_alloc_shape(sd)
             tensors.extend(_alloc(g_shape, g.dtype) for _ in range(sd.nl))
         return tensors
 
-    shape = (kv_size, num_blocks, block_size, num_heads, head_size)
+    shape = _make_alloc_shape(kv_size, num_blocks, block_size, num_heads, head_size)
     return [_alloc(shape, dtype) for _ in range(num_layers)]
 
 
@@ -264,7 +323,12 @@ _allocate_kv_cache = _allocate_gpu_kv_cache
 def _allocate_cpu_shm_kv_cache(
     groups: list[KVLayerGroupInfo],
     shm_prefix: str,
-) -> tuple[list[torch.Tensor], list[CpuShmTensorWrapper], list[str]]:
+) -> tuple[
+    list[torch.Tensor],
+    list[CpuShmTensorWrapper],
+    list[str],
+    list[tuple[int, int]],
+]:
     """Allocate paged CPU KV cache tensors backed by POSIX SHM.
 
     For each (group, layer) we ``shm_open`` a fresh segment and
@@ -275,8 +339,7 @@ def _allocate_cpu_shm_kv_cache(
     zero-copy across processes (matching the GPU CUDA-IPC path).
 
     Returns:
-        ``(tensors, wrappers, shm_names)``. ``shm_names`` is kept
-        so the caller can ``shm_unlink`` on shutdown.
+        Tensors, wrappers, SHM names, and ``(address, size)`` mappings.
     """
     # Fixed seed so the deterministic random fill below produces
     # reproducible checksums across cold/warm bench iterations.
@@ -284,10 +347,11 @@ def _allocate_cpu_shm_kv_cache(
     tensors: list[torch.Tensor] = []
     wrappers: list[CpuShmTensorWrapper] = []
     shm_names: list[str] = []
+    shm_mappings: list[tuple[int, int]] = []
     layer_idx = 0
     for g_idx, g in enumerate(groups):
         sd = g.shape_desc
-        g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
+        g_shape = _group_alloc_shape(sd)
         for _ in range(sd.nl):
             n_elems = 1
             for d in g_shape:
@@ -310,12 +374,13 @@ def _allocate_cpu_shm_kv_cache(
             tensors.append(t)
             wrappers.append(CpuShmTensorWrapper(t, name))
             shm_names.append(name)
+            shm_mappings.append((addr, nbytes))
             layer_idx += 1
-    return tensors, wrappers, shm_names
+    return tensors, wrappers, shm_names, shm_mappings
 
 
 def _send_register_kv_cache(
-    client: MessageQueueClient,
+    client: RequestClient,
     instance_id: int = 0,
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
@@ -324,6 +389,7 @@ def _send_register_kv_cache(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     engine_group_infos: "list[EngineGroupInfo] | None" = None,
+    num_physical_slots: int | None = None,
 ) -> "bool | RegisterEngineDrivenContextResponse":
     """Register a KV cache context with the MP server.
 
@@ -343,6 +409,9 @@ def _send_register_kv_cache(
     tensors (which the HND layout can swap with ``num_heads``). ``None``
     sends an empty list (single non-hybrid group, geometry discovered
     from the tensors).
+
+    ``num_physical_slots`` is required in data mode and describes the exact
+    physical-slot axis of each gathered chunk. Handle mode ignores it.
     """
     if use_handle is None:
         use_handle = use_gpu
@@ -356,21 +425,24 @@ def _send_register_kv_cache(
         if layout_hints:
             hints.update(layout_hints)
         # TODO(maobaolong): Make the engine type configurable
-        payloads = [
-            instance_id,
-            kv_caches,
-            model_name,
-            world_size,
-            EngineType.VLLM,
-            hints,
-            list(engine_group_infos or ()),
-        ]
-        result = _call(client, RequestType.REGISTER_KV_CACHE, payloads)
+        result = _wait_for_result(
+            client.register_kv_cache(
+                instance_id,
+                kv_caches,
+                model_name,
+                world_size,
+                EngineType.VLLM,
+                hints,
+                list(engine_group_infos or ()),
+            )
+        )
         return result is not _TIMEOUT
 
     # CPU mode: use the non-GPU context registration protocol.
+    if num_physical_slots is None:
+        raise ValueError("num_physical_slots is required in data mode")
     # layout_hints carries num_layers, num_heads, head_size, block_size,
-    # dtype.  hidden_dim_size = num_heads * head_size (NHD layout).
+    # dtype, kv_size.  hidden_dim_size = num_heads * head_size (NHD).
     hints_d: dict = layout_hints or {}
     num_layers = int(hints_d.get("num_layers", 32))
     num_heads = hints_d.get("num_heads", 8)
@@ -383,6 +455,14 @@ def _send_register_kv_cache(
     if not isinstance(head_size, int):
         head_size = 128
     hidden_dim_size = int(num_heads) * int(head_size)
+    # ``kv_size`` == 1 marks an MLA group (single-plane KV: no separate
+    # K/V leading dim). The server uses ``use_mla`` to decide whether
+    # the SHM chunk shape is ``(NL, chunk, hidden)`` or
+    # ``(2, NL, chunk, hidden)``. ``"mixed"`` (heterogeneous specs) is
+    # not representable in a single data-mode register, so we default
+    # to non-MLA in that case.
+    kv_size_hint = hints_d.get("kv_size", 2)
+    use_mla = isinstance(kv_size_hint, int) and _is_mla_kv_size(kv_size_hint)
     payload = RegisterEngineDrivenContextPayload(
         instance_id=instance_id,
         model_name=model_name,
@@ -391,11 +471,10 @@ def _send_register_kv_cache(
         num_layers=num_layers,
         hidden_dim_size=hidden_dim_size,
         dtype_str=dtype_str,
-        use_mla=False,
+        use_mla=use_mla,
+        num_physical_slots=num_physical_slots,
     )
-    result = _call(
-        client, RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT, [payload]
-    )
+    result = _wait_for_result(client.register_kv_cache_engine_driven_context(payload))
     if result is _TIMEOUT:
         return False
     # The data-mode register reply carries the server's SHM pool name
@@ -406,7 +485,7 @@ def _send_register_kv_cache(
 
 
 def _send_unregister_kv_cache(
-    client: MessageQueueClient,
+    client: RequestClient,
     instance_id: int = 0,
     use_handle: bool = True,
 ) -> bool:
@@ -427,7 +506,7 @@ def _send_unregister_kv_cache(
     reply, so success is distinguished from an RPC timeout only.
 
     Args:
-        client: The MP message-queue client.
+        client: The MP request client.
         instance_id: The instance ID used at registration time. Must match
             the ``instance_id`` passed to :func:`_send_register_kv_cache`.
         use_handle: ``True`` for the handle path (GPU CUDA-IPC / CPU SHM),
@@ -437,30 +516,36 @@ def _send_unregister_kv_cache(
         ``True`` if the server acknowledged the call, ``False`` on RPC
         timeout.
     """
-    request_type = (
-        RequestType.UNREGISTER_KV_CACHE
+    future = (
+        client.unregister_kv_cache(instance_id)
         if use_handle
-        else RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+        else client.unregister_kv_cache_engine_driven_context(instance_id)
     )
-    result = _call(client, request_type, [instance_id])
+    result = _wait_for_result(future)
     return result is not _TIMEOUT
 
 
 def _send_lookup(
-    client: MessageQueueClient,
+    client: RequestClient,
     key: IPCCacheServerKey,
+    tp_size: int = 1,
 ) -> bool:
     """LOOKUP — submit a prefix lookup.
+
+    The server reserves ``key.num_kv_readers`` read locks per chunk
+    (each reader's RETRIEVE releases one; see
+    ``IPCCacheServerKey.require_num_kv_readers``). ``tp_size`` is
+    a legacy wire field the server ignores.
 
     The server-side handler returns ``None`` (void) on success, so
     we only distinguish RPC timeout from a completed call.
     """
-    result = _call(client, RequestType.LOOKUP, [key, 1])
+    result = _wait_for_result(client.lookup(key, tp_size))
     return result is not _TIMEOUT
 
 
 def _poll_prefetch_status(
-    client: MessageQueueClient,
+    client: RequestClient,
     request_id: str,
     max_polls: int = 50,
     poll_interval: float = 0.05,
@@ -472,11 +557,7 @@ def _poll_prefetch_status(
     (str), not an integer job handle.
     """
     for _ in range(max_polls):
-        result = _call(
-            client,
-            RequestType.QUERY_PREFETCH_STATUS,
-            [request_id],
-        )
+        result = _wait_for_result(client.query_prefetch_status(request_id))
         if result is _TIMEOUT:
             # RPC timeout — treat as giving up on this poll cycle.
             return None
@@ -554,21 +635,34 @@ def _gather_paged_to_flat_chunks(
     blocks_per_chunk = chunk_size // block_size
     num_chunks = num_blocks // blocks_per_chunk
     num_layers = len(tensors)
+    # Client tensors are rank-3 ``(NB, BS, hidden)`` in MLA mode and
+    # rank-5 ``(kv, NB, BS, NH, HS)`` otherwise (see
+    # :func:`_tensor_is_mla`). The block-axis lives at dim 0 for MLA
+    # and dim 1 for classical; per-layer flats stack into a 3D or 4D
+    # chunk to match the server's single-plane / split-K/V commit shape.
+    first_is_mla = bool(tensors) and _tensor_is_mla(tensors[0])
     chunks: list[torch.Tensor] = []
     for c in range(num_chunks):
         start_b = block_offset + c * blocks_per_chunk
         per_layer: list[torch.Tensor] = []
         for t in tensors:
-            # paged: (2, NB, BS, NH, HS) -> slice block range ->
-            # (2, blocks_per_chunk, BS, NH, HS) -> flatten to
-            # (2, chunk_size, NH*HS).
-            sliced = t.narrow(1, start_b, blocks_per_chunk)
-            kv, _, bs, nh, hs = sliced.shape
-            flat = sliced.contiguous().view(kv, blocks_per_chunk * bs, nh * hs)
+            if _tensor_is_mla(t):
+                # MLA: (NB, BS, hidden) -> (chunk_size, hidden).
+                sliced = t.narrow(0, start_b, blocks_per_chunk)
+                _, bs, hidden = sliced.shape
+                flat = sliced.contiguous().view(blocks_per_chunk * bs, hidden)
+            else:
+                # Classical: (kv, NB, BS, NH, HS) -> (kv, chunk_size, NH*HS).
+                sliced = t.narrow(1, start_b, blocks_per_chunk)
+                kv, _, bs, nh, hs = sliced.shape
+                flat = sliced.contiguous().view(kv, blocks_per_chunk * bs, nh * hs)
             per_layer.append(flat)
-        # Stack along a new layer dim -> (2, NL, chunk_size, hidden).
-        chunk = torch.stack(per_layer, dim=1).contiguous()
-        if chunk.shape[1] != num_layers:
+        # MLA per-layer flats are 2D; classical are 3D. Stack picks the
+        # right rank automatically: dim=0 for MLA yields (NL, chunk, hidden);
+        # dim=1 for classical yields (kv, NL, chunk, hidden).
+        stack_dim = 0 if first_is_mla else 1
+        chunk = torch.stack(per_layer, dim=stack_dim).contiguous()
+        if chunk.shape[stack_dim] != num_layers:
             raise RuntimeError(
                 "unexpected chunk shape %s (NL mismatch)" % (chunk.shape,)
             )
@@ -598,14 +692,25 @@ def _scatter_flat_chunks_to_paged(
     blocks_per_chunk = chunk_size // block_size
     for c, chunk in enumerate(chunks):
         start_b = block_offset + c * blocks_per_chunk
+        # MLA chunks are 3D ``(NL, chunk, hidden)`` (kv_size == 1 is
+        # folded away by the server), classical K/V chunks are 4D
+        # ``(kv, NL, chunk, hidden)``. Client tensors match: MLA rank-3
+        # ``(NB, BS, hidden)`` vs. classical rank-5 ``(kv, NB, BS, NH, HS)``
+        # -- both derived from the same :func:`_is_mla_kv_size` contract
+        # via :func:`_tensor_is_mla`.
+        chunk_is_mla = _tensor_is_mla(chunk)
         for layer_idx, t in enumerate(tensors):
-            kv, _, bs, nh, hs = t.shape
-            target = t.narrow(1, start_b, blocks_per_chunk)
-            # chunk[:, layer_idx] is (chunk_size, hidden); reshape
-            # back to (2, blocks_per_chunk, BS, NH, HS).
-            flat = chunk[:, layer_idx]
-            reshaped = flat.reshape(kv, blocks_per_chunk, bs, nh, hs)
-            target.copy_(reshaped)
+            if _tensor_is_mla(t):
+                # MLA: block axis at dim 0.
+                target = t.narrow(0, start_b, blocks_per_chunk)
+                flat = chunk[layer_idx] if chunk_is_mla else chunk[:, layer_idx]
+                nb, bs, hidden = target.shape
+                target.copy_(flat.reshape(nb, bs, hidden))
+            else:
+                kv, _, bs, nh, hs = t.shape
+                target = t.narrow(1, start_b, blocks_per_chunk)
+                flat = chunk[layer_idx] if chunk_is_mla else chunk[:, layer_idx]
+                target.copy_(flat.reshape(kv, blocks_per_chunk, bs, nh, hs))
 
 
 # ------------------------------------------------------------------ #
@@ -643,12 +748,13 @@ def _compute_client_checksums(
         end_b = start_b + blocks_per_chunk
         h = hashlib.md5()
         for t in tensors:
-            # Paged layout: dim 1 is the block dim for both kv-major
-            # ``(kv, NB, BS, NH, HS)`` and MLA ``(NB, BS, NH, HS)``
-            # tensors. ``contiguous().numpy().tobytes()`` survives
-            # non-contiguous slices and dtype quirks (bfloat16 has no
-            # numpy view, but uint8 reinterpret works after slice).
-            view = t.narrow(1, start_b, end_b - start_b).contiguous()
+            # Block axis is dim 0 for MLA rank-3 tensors ``(NB, BS, hidden)``
+            # and dim 1 for classical rank-5 ``(kv, NB, BS, NH, HS)``.
+            # ``contiguous().numpy().tobytes()`` survives non-contiguous
+            # slices and dtype quirks (bfloat16 has no numpy view, but
+            # uint8 reinterpret works after slice).
+            block_dim = 0 if _tensor_is_mla(t) else 1
+            view = t.narrow(block_dim, start_b, end_b - start_b).contiguous()
             h.update(view.view(torch.uint8).numpy().tobytes())
         checksums.append(h.hexdigest())
     return checksums
@@ -668,11 +774,12 @@ def _zero_fill_client_blocks(
     pages were never overwritten in the first place).
     """
     for t in tensors:
-        t.narrow(1, block_offset, num_blocks).zero_()
+        block_dim = 0 if _tensor_is_mla(t) else 1
+        t.narrow(block_dim, block_offset, num_blocks).zero_()
 
 
 def _send_store(
-    client: MessageQueueClient,
+    client: RequestClient,
     key: IPCCacheServerKey,
     block_offset: int = 0,
     block_size: int = 16,
@@ -682,6 +789,7 @@ def _send_store(
     client_tensors: list["torch.Tensor"] | None = None,
     chunk_size: int = 0,
     server_pool: "mmap.mmap | None" = None,
+    instance_id: int = _INSTANCE_ID,
 ) -> str:
     """Store KV cache blocks. Returns status string.
 
@@ -701,19 +809,20 @@ def _send_store(
         num_tokens = key.end - key.start
         num_blocks = num_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
-        payloads = [
-            key,
-            _INSTANCE_ID,
-            [block_ids] * num_engine_group_infos,
-            _make_event_handle(),
-        ]
-        result = _call(client, RequestType.STORE, payloads)
+        result = _wait_for_result(
+            client.store(
+                key,
+                instance_id,
+                [block_ids] * num_engine_group_infos,
+                _make_event_handle(),
+            )
+        )
         if result is _TIMEOUT:
             return "timeout"
         return "stored" if result[1] else "store_failed"
 
     # CPU mode: PREPARE_STORE -> COMMIT_STORE
-    prep = _call(client, RequestType.PREPARE_STORE, [key, _INSTANCE_ID])
+    prep = _wait_for_result(client.prepare_store(key, instance_id))
     if prep is _TIMEOUT:
         return "timeout"
     if server_pool is not None and client_tensors is not None and chunk_size > 0:
@@ -733,14 +842,14 @@ def _send_store(
             for slot_view, chunk_idx in zip(slot_views, chunk_indices, strict=False):
                 if 0 <= chunk_idx < len(full_chunks):
                     slot_view.copy_(full_chunks[chunk_idx].view(slot_view.shape))
-    commit = _call(client, RequestType.COMMIT_STORE, [key, _INSTANCE_ID, b""])
+    commit = _wait_for_result(client.commit_store(key, instance_id, b""))
     if commit is _TIMEOUT:
         return "timeout"
     return "stored" if commit else "store_failed"
 
 
 def _send_retrieve(
-    client: MessageQueueClient,
+    client: RequestClient,
     key: IPCCacheServerKey,
     chunk_size: int,
     hit_chunks: int,
@@ -751,6 +860,7 @@ def _send_retrieve(
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
     server_pool: "mmap.mmap | None" = None,
+    instance_id: int = _INSTANCE_ID,
 ) -> str:
     """Retrieve KV cache blocks. Returns status.
 
@@ -770,20 +880,21 @@ def _send_retrieve(
         hit_tokens = hit_chunks * chunk_size
         num_blocks = hit_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
-        payloads = [
-            key,
-            _INSTANCE_ID,
-            [block_ids] * num_engine_group_infos,
-            _make_event_handle(),
-            0,  # skip_first_n_tokens
-        ]
-        result = _call(client, RequestType.RETRIEVE, payloads)
+        result = _wait_for_result(
+            client.retrieve(
+                key,
+                instance_id,
+                [block_ids] * num_engine_group_infos,
+                _make_event_handle(),
+                0,  # skip_first_n_tokens
+            )
+        )
         if result is _TIMEOUT:
             return "timeout"
         return "retrieved" if result[1] else "retrieve_failed"
 
     # CPU mode: PREPARE_RETRIEVE -> COMMIT_RETRIEVE
-    prep = _call(client, RequestType.PREPARE_RETRIEVE, [key, _INSTANCE_ID])
+    prep = _wait_for_result(client.prepare_retrieve(key, instance_id))
     if prep is _TIMEOUT:
         return "timeout"
     if not prep.success:
@@ -803,18 +914,18 @@ def _send_retrieve(
                 )
             except (RuntimeError, ValueError) as exc:
                 print("  [WARNING] retrieve scatter failed: %s" % exc)
-    commit = _call(client, RequestType.COMMIT_RETRIEVE, [key, _INSTANCE_ID])
+    commit = _wait_for_result(client.commit_retrieve(key, instance_id))
     if commit is _TIMEOUT:
         return "timeout"
     return "retrieved" if commit else "retrieve_failed"
 
 
 def _send_end_session(
-    client: MessageQueueClient,
+    client: RequestClient,
     request_id: str,
 ) -> None:
     """END_SESSION — clean up server-side session state."""
-    _call(client, RequestType.END_SESSION, [request_id])
+    _wait_for_result(client.end_session(request_id))
 
 
 # ------------------------------------------------------------------ #
@@ -828,6 +939,7 @@ def _query_checksum(
     num_blocks: int,
     block_size: int,
     chunk_size: int,
+    instance_id: int = _INSTANCE_ID,
 ) -> list[str] | None:
     """Query KV cache checksums via the HTTP API.
 
@@ -839,6 +951,11 @@ def _query_checksum(
     type — if a future endpoint variant returns a per-layer
     ``dict`` we log and skip the comparison rather than letting
     ``str.join`` crash.
+
+    ``instance_id`` selects the GPU context to hash. TP > 1 registers
+    one context per rank so the caller must pass a real, registered
+    ``instance_id`` — the default of ``0`` only works for the single
+    legacy worker path.
     """
     blocks = list(range(block_offset, block_offset + num_blocks))
     # The MP /cache/checksums endpoint is block-native: its chunk_size counts
@@ -853,7 +970,12 @@ def _query_checksum(
     chunk_size_blocks = chunk_size // block_size
     url = "%s/cache/checksums" % http_base
     payload = json.dumps(
-        {"block_ids": blocks, "chunk_size": chunk_size_blocks, "layerwise": False}
+        {
+            "block_ids": blocks,
+            "chunk_size": chunk_size_blocks,
+            "instance_id": instance_id,
+            "layerwise": False,
+        }
     ).encode()
     try:
         req = urllib.request.Request(
@@ -882,277 +1004,13 @@ def _query_checksum(
 
 
 # ------------------------------------------------------------------ #
-#  Per-request flow                                                    #
-# ------------------------------------------------------------------ #
-
-
-@dataclass
-class RequestResult:
-    """Result of a single request pass (cold or warm).
-
-    Carries both the checksum list (for correctness verification) and
-    per-operation latency measurements (for metrics aggregation).
-    """
-
-    checksums: list[str] | None = None
-    lookup_ms: float | None = None
-    retrieve_ms: float | None = None
-    store_ms: float | None = None
-    hit_chunks: int = 0
-    total_chunks: int = 0
-    store_tokens: int = 0
-    retrieve_tokens: int = 0
-
-
-def _process_request(
-    client: MessageQueueClient,
-    seq_no: int,
-    num_tokens: int,
-    chunk_size: int,
-    pass_label: str,
-    http_base: str = "",
-    block_size: int = 16,
-    total_blocks: int = 1024,
-    num_engine_group_infos: int = 1,
-    use_gpu: bool = True,
-    use_handle: bool | None = None,
-    client_tensors: list["torch.Tensor"] | None = None,
-    server_pool: "mmap.mmap | None" = None,
-) -> RequestResult | None:
-    """Run the full lookup -> retrieve/store flow.
-
-    When ``client_tensors`` is provided (data-mode self-check), the
-    flow gains two extra steps:
-
-    * cold pass: hash the paged block range *before* ``STORE``, so
-      the digest captures the ground-truth KV bytes.
-    * warm pass: zero-fill the same block range *before*
-      ``RETRIEVE``, then hash *after* ``RETRIEVE``. cold == warm
-      proves the server returned the exact bytes we sent.
-
-    Handle mode keeps the historical server-side
-    ``/cache/checksums`` path; client tensors are not consulted (in
-    handle mode the client and server share the same SHM/IPC
-    pages, so a client-side hash equals itself by construction).
-    """
-    token_ids = _build_token_ids(seq_no, num_tokens)
-    request_id = "req-%d-%s" % (seq_no, pass_label)
-
-    # Align end to chunk_size (only full chunks)
-    num_full_tokens = (len(token_ids) // chunk_size) * chunk_size
-    if num_full_tokens == 0:
-        print(
-            "  [seq %d/%s] SKIP: %d tokens < chunk_size %d"
-            % (seq_no, pass_label, len(token_ids), chunk_size)
-        )
-        return None
-
-    # Key for lookup (worker_id=None)
-    lookup_key = _make_key(
-        token_ids,
-        request_id,
-        start=0,
-        end=num_full_tokens,
-    )
-
-    # 1. LOOKUP
-    t0 = time.monotonic()
-    if not _send_lookup(client, lookup_key):
-        print("  [seq %d/%s] LOOKUP timeout" % (seq_no, pass_label))
-        return None
-
-    # 2. QUERY_PREFETCH_STATUS (poll by request_id)
-    hit_chunks = _poll_prefetch_status(client, lookup_key.request_id)
-    if hit_chunks is None:
-        hit_chunks = 0
-
-    total_chunks = num_full_tokens // chunk_size
-    miss_chunks = total_chunks - hit_chunks
-    hit_tokens = hit_chunks * chunk_size
-    lookup_ms = (time.monotonic() - t0) * 1000
-
-    print(
-        "  [seq %d/%s] LOOKUP: %d/%d chunks hit "
-        "(%.1f ms)"
-        % (
-            seq_no,
-            pass_label,
-            hit_chunks,
-            total_chunks,
-            lookup_ms,
-        )
-    )
-
-    # Block offset: each request uses a different block
-    # range so that different requests touch different data.
-    # Wrap with modulo and clamp so the entire range
-    # [block_offset, block_offset + num_blocks) stays
-    # within [0, total_blocks).
-    num_blocks = num_full_tokens // block_size
-    usable = max(total_blocks - num_blocks, 1)
-    block_offset = (seq_no * num_blocks) % usable
-
-    # Client-side self-check (data mode only). cold pass: snapshot
-    # ground truth before STORE. warm pass: zero out the slice so
-    # a successful RETRIEVE must overwrite every byte.
-    cold_ground_truth: list[str] | None = None
-    if client_tensors is not None:
-        if pass_label == "cold" and miss_chunks > 0:
-            store_block_off = block_offset + (hit_tokens // block_size)
-            store_num_blocks = (num_full_tokens - hit_tokens) // block_size
-            cold_ground_truth = _compute_client_checksums(
-                client_tensors,
-                store_block_off,
-                store_num_blocks,
-                block_size,
-                chunk_size,
-            )
-        if pass_label == "warm" and hit_chunks > 0:
-            retr_num_blocks = hit_tokens // block_size
-            _zero_fill_client_blocks(
-                client_tensors,
-                block_offset,
-                retr_num_blocks,
-            )
-
-    # 3. RETRIEVE hit portion
-    retrieve_ms: float = 0.0
-    store_ms: float = 0.0
-    if hit_chunks > 0:
-        retrieve_key = _make_key(
-            token_ids,
-            request_id,
-            start=0,
-            end=hit_tokens,
-            worker_id=0,
-        )
-        t1 = time.monotonic()
-        status = _send_retrieve(
-            client,
-            retrieve_key,
-            chunk_size,
-            hit_chunks,
-            block_offset=block_offset,
-            block_size=block_size,
-            num_engine_group_infos=num_engine_group_infos,
-            use_gpu=use_gpu,
-            use_handle=use_handle,
-            client_tensors=client_tensors,
-            server_pool=server_pool,
-        )
-        retrieve_ms = (time.monotonic() - t1) * 1000
-        print(
-            "  [seq %d/%s] RETRIEVE: %s "
-            "(%d tokens, %.1f ms)"
-            % (
-                seq_no,
-                pass_label,
-                status,
-                hit_tokens,
-                retrieve_ms,
-            )
-        )
-
-    # 4. STORE miss portion
-    if miss_chunks > 0:
-        store_start = hit_tokens
-        store_end = num_full_tokens
-        store_key = _make_key(
-            token_ids,
-            request_id,
-            start=store_start,
-            end=store_end,
-            worker_id=0,
-        )
-        t2 = time.monotonic()
-        store_block_off = block_offset + (hit_tokens // block_size)
-        status = _send_store(
-            client,
-            store_key,
-            block_offset=store_block_off,
-            block_size=block_size,
-            num_engine_group_infos=num_engine_group_infos,
-            use_gpu=use_gpu,
-            use_handle=use_handle,
-            client_tensors=client_tensors,
-            chunk_size=chunk_size,
-            server_pool=server_pool,
-        )
-        store_ms = (time.monotonic() - t2) * 1000
-        print(
-            "  [seq %d/%s] STORE: %s "
-            "(%d tokens, %.1f ms)"
-            % (
-                seq_no,
-                pass_label,
-                status,
-                store_end - store_start,
-                store_ms,
-            )
-        )
-
-    # 5. Compute checksums.
-    #   * data mode (client_tensors set):
-    #       cold -> ground truth captured pre-STORE
-    #       warm -> hash post-RETRIEVE; cold == warm proves the
-    #               server returned the exact bytes we wrote.
-    #   * handle mode: query /cache/checksums on the server, which
-    #     reads the shared SHM/IPC pages directly.
-    checksums: list[str] | None = None
-    if client_tensors is not None and num_full_tokens > 0:
-        if pass_label == "cold":
-            checksums = cold_ground_truth
-        elif pass_label == "warm" and hit_chunks > 0:
-            retr_num_blocks = hit_tokens // block_size
-            checksums = _compute_client_checksums(
-                client_tensors,
-                block_offset,
-                retr_num_blocks,
-                block_size,
-                chunk_size,
-            )
-    elif http_base and num_full_tokens > 0:
-        checksums = _query_checksum(
-            http_base,
-            block_offset,
-            num_blocks,
-            block_size,
-            chunk_size,
-        )
-    if checksums:
-        digest = hashlib.md5("".join(checksums).encode()).hexdigest()[:16]
-        print(
-            "  [seq %d/%s] CHECKSUM: %s (%d chunks)"
-            % (
-                seq_no,
-                pass_label,
-                digest,
-                len(checksums),
-            )
-        )
-
-    # 6. END_SESSION
-    _send_end_session(client, request_id)
-    return RequestResult(
-        checksums=checksums,
-        lookup_ms=lookup_ms,
-        retrieve_ms=retrieve_ms if hit_chunks > 0 else None,
-        store_ms=store_ms if miss_chunks > 0 else None,
-        hit_chunks=hit_chunks,
-        total_chunks=total_chunks,
-        store_tokens=(num_full_tokens - hit_tokens) if miss_chunks > 0 else 0,
-        retrieve_tokens=hit_tokens if hit_chunks > 0 else 0,
-    )
-
-
-# ------------------------------------------------------------------ #
 #  Server query helper                                                 #
 # ------------------------------------------------------------------ #
 
 
-def _get_chunk_size(client: MessageQueueClient) -> int:
+def _get_chunk_size(client: RequestClient) -> int:
     """Query the server's chunk size."""
-    result = _call(client, RequestType.GET_CHUNK_SIZE, [])
+    result = _wait_for_result(client.get_chunk_size())
     if result is _TIMEOUT or result is None:
         return 256  # fallback
     return int(result)

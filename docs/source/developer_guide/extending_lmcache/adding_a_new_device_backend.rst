@@ -4,11 +4,23 @@ Adding a New Device Backend
 ===========================
 
 This guide explains how to add a **new accelerator** to LMCache in
-**Multiprocess (MP) mode**.
+**Multiprocess (MP) mode**. Device vendors can choose either supported
+ownership model:
 
-**For basic users:** read :ref:`Part 1 <part-1-basic>` only — adding a
-``DeviceSpec`` is all you need to get your device working with the
-built-in Python fallback ops.
+- **In-tree integration:** contribute and maintain the backend under
+  ``lmcache/v1/platform/<device>/`` in the LMCache repository. This fits
+  backends that should ship, test, and release with LMCache.
+- **External wheel integration:** maintain the backend in a vendor repository
+  and publish a wheel through the ``lmcache.device_plugins`` entry-point
+  group. This fits backends that need an independent release cadence or own
+  native-package distribution.
+
+Both models implement the same ``DeviceSpec`` and ``DeviceOps`` interfaces
+and use the same runtime detection and dispatch paths.
+
+**For basic users:** read :ref:`Part 1 <part-1-basic>` only — a ``DeviceSpec``
+and a ``DeviceOps`` subclass are all you need to use the built-in torch
+baseline ops.
 
 **For advanced users:** continue to :ref:`Part 2 <part-2-performance>`
 for native ops and advanced transfer modes.
@@ -16,13 +28,13 @@ for native ops and advanced transfer modes.
 .. _part-1-basic:
 
 Part 1 — Basic Function Enabling
---------------------------------
+---------------------------------
 
-For the majority of devices, a single ``DeviceSpec`` class is
-sufficient.  LMCache ships with a complete Python fallback ops
-(``lmcache/python_ops_fallback.py``) that works on any device
-supporting standard PyTorch tensor operations — **no custom kernels
-required**.
+For the majority of devices, a ``DeviceSpec`` class plus a minimal
+``DeviceOps`` subclass are sufficient.  LMCache ships with a complete
+torch baseline ops layer (``lmcache/v1/platform/torch_ops.py``) that
+works on any device supporting standard PyTorch tensor operations —
+**no custom kernels required**.
 
 Prerequisites
 ~~~~~~~~~~~~~
@@ -44,24 +56,96 @@ Your PyTorch backend should support:
 
 - ``tensor.to(device)`` / ``tensor.cpu()`` (host↔device transfers)
 
-Add a ``FooDeviceSpec``
-~~~~~~~~~~~~~~~~~~~~~~~
+Step 1: Choose the ownership model
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Create ``lmcache/v1/platform/foo/__init__.py``:
+Option A — integrate in the LMCache repository
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Create a platform package directly in LMCache::
+
+    lmcache/v1/platform/foo/
+    ├── __init__.py
+    └── device_ops.py
+
+Define ``FooDeviceSpec`` in ``__init__.py``. LMCache scans its built-in
+platform packages, so this option needs no entry point or registration list.
+Submit the code, tests, and device documentation in an LMCache PR; after
+merge, the backend follows the LMCache release lifecycle.
+
+Option B — maintain an external wheel
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use a ``src`` layout so the wheel owns only its vendor namespace::
+
+    lmcache-foo-device/
+    ├── pyproject.toml
+    └── src/
+        └── lmcache_foo/
+            ├── __init__.py
+            ├── device.py
+            └── device_ops.py
+
+The project must declare one entry point in the
+``lmcache.device_plugins`` group. Its name is the lowercase
+``DeviceSpec.backend_name`` and its value points to the ``DeviceSpec`` class:
+
+.. code-block:: toml
+
+    # pyproject.toml
+    [build-system]
+    requires = ["setuptools>=77", "wheel"]
+    build-backend = "setuptools.build_meta"
+
+    [project]
+    name = "lmcache-foo-device"
+    version = "0.1.0"
+    dependencies = ["lmcache"]
+
+    [project.entry-points."lmcache.device_plugins"]
+    foo = "lmcache_foo.device:FooDeviceSpec"
+
+    [tool.setuptools.packages.find]
+    where = ["src"]
+
+Pin ``lmcache`` to the version range tested by your plugin before publishing
+it. LMCache treats ``DeviceSpec`` and ``DeviceOps`` as the plugin interface;
+incompatible interface changes should be caught by that dependency range.
+
+Step 2: Implement ``FooDeviceSpec``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Create the spec in the location selected in Step 1:
+
+- In-tree: ``lmcache/v1/platform/foo/__init__.py``.
+- External wheel: ``src/lmcache_foo/device.py``.
+
+The implementation is the same in both layouts:
 
 .. code-block:: python
 
     # SPDX-License-Identifier: Apache-2.0
-    """foo-specific platform primitives."""
+    """LMCache platform registration for Foo devices."""
+
+    from __future__ import annotations
+
+    from typing import TYPE_CHECKING
 
     from lmcache.v1.platform.base.device_spec import DeviceSpec
 
+    if TYPE_CHECKING:
+        from lmcache.v1.platform.base.device_ops import DeviceOps
+
 
     class FooDeviceSpec(DeviceSpec):
-        """foo device specification for LMCache registry discovery."""
+        """Foo device specification for LMCache registry discovery."""
 
         @property
         def device_type(self) -> str:
+            return "foo"
+
+        @property
+        def backend_name(self) -> str:
             return "foo"
 
         @property
@@ -69,8 +153,10 @@ Create ``lmcache/v1/platform/foo/__init__.py``:
             return "foo"
 
         @property
-        def ops_module(self) -> str | None:
-            return None
+        def ops_cls(self) -> type[DeviceOps]:
+            from .device_ops import FooDeviceOps
+
+            return FooDeviceOps
 
         def is_available(self) -> bool:
             """Check backend availability without importing lmcache.__init__."""
@@ -81,28 +167,72 @@ Create ``lmcache/v1/platform/foo/__init__.py``:
             except Exception:
                 return False
 
+For an external wheel, the entry-point target must be the class itself, not a
+class instance or factory. For either model, the class must have a no-argument
+constructor; LMCache instantiates it once per process and caches it.
+
+Step 3: Implement ``FooDeviceOps``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Create ``device_ops.py`` next to the spec package:
+
+- In-tree: ``lmcache/v1/platform/foo/device_ops.py``.
+- External wheel: ``src/lmcache_foo/device_ops.py``.
+
+.. code-block:: python
+
+    # SPDX-License-Identifier: Apache-2.0
+    """Foo ops backend."""
+
+    from __future__ import annotations
+
+    from typing import ClassVar
+
+    from lmcache.v1.platform.base.device_ops import DeviceOps
+
+
+    class FooDeviceOps(DeviceOps):
+        device_type: ClassVar[str] = "foo"
+
+        def ensure_native(self) -> None:
+            """Keep the torch baseline until native ops are available."""
+            return None
+
+.. note::
+
+   If you have no native extension yet, leave ``ensure_native`` as a no-op.
+   The torch baseline handles everything. See :ref:`Part 2
+   <part-2-performance>` when the backend also ships native code.
+
 Key properties:
 
 .. list-table::
    :header-rows: 1
 
-   * - Property
+   * - Property / Method
      - Required
      - Purpose
-   * - ``device_type``
+   * - ``DeviceSpec.device_type``
      - yes
-     - Device type string (e.g. ``"cuda"``, ``"musa"``)
-   * - ``torch_module_name``
+     - Device type string (e.g. ``"cuda"``, ``"musa"``, ``"xpu"``)
+   * - ``DeviceSpec.backend_name``
+     - yes
+     - Unique LMCache selector for one concrete backend implementation
+   * - ``DeviceSpec.torch_module_name``
      - yes
      - Attribute on the ``torch`` package (e.g. ``"cuda"`` →
        ``torch.cuda``)
-   * - ``ops_module``
+   * - ``DeviceSpec.ops_cls``
      - no
-     - Ops module path; leave the base-class default (``None``) for
-       pure fallback, or override in :ref:`Part 2 <part-2-performance>`
-   * - ``is_available()``
+     - Returns the ``DeviceOps`` subclass for this device.
+       Base returns ``DeviceOps`` itself (pure torch baseline).
+   * - ``DeviceSpec.is_available()``
      - yes
      - Returns ``True`` when the device is usable
+   * - ``DeviceOps.ensure_native()``
+     - no
+     - Called once on first use; override to bind native ops.
+       Base is a no-op (e.g. ``HpuDeviceOps`` inherits it unchanged).
 
 .. note::
 
@@ -112,30 +242,73 @@ Key properties:
    PyTorch itself (like ``torch.cuda``) a plain
    ``torch.foo.is_available()`` is enough.
 
-That's it.  Defining this class is enough for auto-discovery — no
-global list or manual registration call is required.  All ops
-automatically route through ``lmcache.python_ops_fallback``, which is
-not performant but is functionally applicable to any device that
-supports the standard PyTorch tensor surface.  Later, each device can
-provide its own ops (Python, C, CUDA, Rust, or any language exposing
-Python bindings) to override the fallback function-by-function.
+Step 4: Install the selected integration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For an in-tree backend, build or install LMCache normally from the branch
+containing the platform package. Once merged and released, users receive the
+backend with LMCache itself.
+
+For an external backend, build the vendor project with any PEP 517 frontend,
+then install its wheel in the same Python environment as LMCache and the
+serving engine:
+
+.. code-block:: bash
+
+    python -m pip install build
+    python -m build --wheel
+    python -m pip install dist/lmcache_foo_device-0.1.0-py3-none-any.whl
+
+Restart every LMCache and serving-engine process after installing either
+integration. The platform registry is built once and cached for the lifetime
+of each process.
+
+Neither model requires editing a global device-name list. All ops route
+through ``torch_ops.py`` until the backend overrides them.
+
+External wheel loading rules
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- ``DeviceSpec.device_type`` is the torch-facing device category (for example,
+  ``"cuda"``). Multiple backends may intentionally share one ``device_type``.
+- ``DeviceSpec.backend_name`` is the LMCache-specific selector for one concrete
+  backend implementation. It must be a unique, non-empty lowercase string.
+- For external wheels, the entry-point name must match
+  ``DeviceSpec.backend_name``.
+- Duplicate ``backend_name`` values are ignored after the first deterministic
+  match.
+- A plugin that cannot be imported, resolves to the wrong object type, or
+  raises during construction is logged and skipped. Other devices remain
+  usable.
+- Entry-point modules are imported while the platform registry initializes.
+  Import base interfaces such as
+  ``lmcache.v1.platform.base.device_spec.DeviceSpec`` directly and keep ops,
+  native libraries, IPC wrappers, and cache contexts behind lazy properties.
+- Installed entry-point packages are executable Python code. Only install
+  wheels from sources you trust.
 
 Verification
 ~~~~~~~~~~~~
 
-Start LMCache server:
+Start LMCache server.  The worker below uses the engine-driven
+transfer path, which the server only loads when
+``--supported-transfer-mode`` is ``engine_driven`` or ``auto`` (the
+default is ``lmcache_driven``):
 
 .. code-block:: bash
 
-    lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555
+    lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555 \
+        --supported-transfer-mode engine_driven
 
-Run vLLM with MP connector.  If multiple accelerators are visible on
-the host, set ``DEVICE_TYPE`` to force LMCache to pick the new backend
-instead of auto-detecting:
+Run vLLM with MP connector. If you want a specific torch device category, set
+``DEVICE_TYPE``. Backends that share one device type are selected automatically
+when exactly one reports available. If multiple backends report available, set
+``LMCACHE_DEVICE_BACKEND`` to select the exact implementation:
 
 .. code-block:: bash
 
-    export DEVICE_TYPE=foo            # optional; only when auto-detection picks the wrong device
+    export DEVICE_TYPE=foo             # optional; selects the torch-facing device type
+    export LMCACHE_DEVICE_BACKEND=foo  # optional; disambiguates multiple available backends
 
     vllm serve <your-model> \
         --kv-transfer-config '{
@@ -159,24 +332,24 @@ instead of auto-detecting:
    additional capability checks.  For the ``lmcache_driven`` mode
    (IPC zero-copy), see :ref:`Advanced transfer mode <part-2-performance>`.
 
-Check the LMCache logs — with ``ops_module = None`` you should see::
+Check the LMCache logs::
 
     torch_dev=..., torch_device_type=foo
-    Custom ops not supported for device: foo, using fallback ops.
 
-This confirms your ``DeviceSpec`` was discovered and the Python
-fallback is active.  (Once you set ``ops_module`` in
-:ref:`Part 2 <part-2-performance>`, the second line becomes
-``Using backend: foo_device.ops`` instead.)
+This confirms your ``DeviceSpec`` was discovered and the torch
+baseline is active. When ``LMCACHE_DEVICE_BACKEND`` is set, LMCache also binds
+the backend whose ``backend_name`` matches that value.
 
 Debugging checklist:
 
 - [ ] ``torch.foo.is_available()`` returns ``True``.
-- [ ] Set ``DEVICE_TYPE=foo`` to force selection if not picked up
-  automatically.
-- [ ] Log shows either ``Custom ops not supported for device: foo,
-  using fallback ops.`` (pure fallback) or
-  ``Using backend: foo_device.ops`` (custom ops loaded).
+- [ ] For an external wheel,
+  ``importlib.metadata.entry_points(group="lmcache.device_plugins")`` includes
+  ``foo`` and points to ``FooDeviceSpec``.
+- [ ] If another available backend shares ``device_type="foo"``, set
+  ``LMCACHE_DEVICE_BACKEND=foo`` to disambiguate them.
+- [ ] Set ``DEVICE_TYPE=foo`` to force the torch-facing device category if not
+  picked up automatically.
 - [ ] Engine-driven transfer works end-to-end (check the LMCache logs
   to confirm whether the SHM or Pickle sub-path is chosen — both
   should succeed).
@@ -186,29 +359,31 @@ Debugging checklist:
 .. _part-2-performance:
 
 Part 2 — Performance Optimization
----------------------------------
+----------------------------------
 
 Once basic functionality is verified, add device-specific
 optimizations.
 
-Device-specific ops
-~~~~~~~~~~~~~~~~~~~
+Device-specific ops via ``bind_native``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The generic ops interface is defined in
-``lmcache/python_ops_fallback.py``.  Each vendor may replace any
-subset of these functions with a device-specific implementation; the
-choice of language (C, CUDA, SYCL, Python, Rust, …) and packaging is
-entirely up to the vendor.  LMCache only cares that the resulting
-symbols are importable from Python.
+The ``DeviceOps`` base class delegates every op to the torch baseline
+in ``lmcache/v1/platform/torch_ops.py``.  Each vendor may replace any
+subset of these functions with a device-specific implementation.
 
-**How it works.** At import time, ``get_backend(device_type)`` imports
-the module named by your ``DeviceSpec.ops_module`` and merges its
-symbols over ``python_ops_fallback``:
+**How it works.** When ``ensure_native()`` calls
+``self.bind_native(native_module)``, the method walks the module's
+public symbols and rebinds them as instance attributes — overriding the
+base-class methods that delegate to ``torch_ops``:
 
 .. code-block:: text
 
-    callers  →  lmcache.c_ops  →  foo_device.ops          (functions you defined)
-                               →  lmcache.python_ops_fallback  (everything else)
+    callers  →  lmcache.device_ops (DeviceOps instance)
+                                           │
+                                     bind_native() overlay:
+                                       ├── native.multi_layer_kv_transfer  ← vendor CUDA/SYCL kernel
+                                       ├── native.calculate_cdf            ← vendor kernel
+                                       └── (everything else)               ← torch_ops baseline
 
 Integration contract
 ^^^^^^^^^^^^^^^^^^^^
@@ -217,46 +392,46 @@ Regardless of how you build your ops module, the following contract
 must hold:
 
 - **Same symbol names.** Every function you override must be exposed
-  under the exact name used in ``python_ops_fallback`` (e.g.
+  under the exact name used in ``torch_ops.py`` (e.g.
   ``multi_layer_block_kv_transfer``).
 - **Same call signature.** Positional/keyword arguments, argument
-  order and semantics must match the fallback; callers invoke the
-  merged module without knowing which backend answered.
-- **Importable Python module.** ``ops_module`` is a fully-qualified
-  Python module path (``importlib.import_module`` must succeed).  How
-  the module gets there — a pure-Python file, a pybind11 extension,
-  a ctypes wrapper, a Rust ``PyO3`` module, etc. — is your choice.
+  order and semantics must match the baseline; callers invoke the
+  ``DeviceOps`` instance without knowing which backend answered.
+- **Importable Python module.** Your native module must be importable
+  via ``import`` (how it gets there — a pure-Python file, a pybind11
+  extension, a ctypes wrapper, a Rust ``PyO3`` module, etc. — is your
+  choice).
 - **Partial override is allowed.** You do not have to reimplement
-  every function.  Anything you leave out keeps using the Python
-  fallback, so incremental optimization is supported.
-- **Point ``DeviceSpec.ops_module`` at the module** once it is
-  reachable on ``sys.path``:
-
-  .. code-block:: python
-
-      class FooDeviceSpec(DeviceSpec):
-          @property
-          def ops_module(self) -> str | None:
-              return "foo_device.ops"   # any importable module path
+  every function.  Anything you leave out keeps using the torch
+  baseline, so incremental optimization is supported.
+- **Types from the native module are also bound.** ``bind_native``
+  also binds types (classes) — this is how native plan types like
+  ``StagingCopy``, ``KernelGroupSpec``, etc. overlay the stubs in
+  ``ops_types.py``.
 
 Implementation notes
 ^^^^^^^^^^^^^^^^^^^^
 
 - ``multi_layer_block_kv_transfer`` and ``lmcache_memcpy_async`` are
   the hot entry points for both engine-driven and LMCache-driven
-  transfer; other functions in ``python_ops_fallback`` can be
-  overridden as needed.
+  transfer; other functions in ``torch_ops.py`` can be overridden as
+  needed.
 - If you fall back to the generic path from inside a device-specific
   wrapper (e.g. when inputs are unsupported), call the corresponding
-  ``lmcache.python_ops_fallback`` function directly to preserve
+  ``lmcache.v1.platform.torch_ops`` function directly to preserve
   semantics.
-- Keep your ops module free of side effects at import time — it is
-  imported eagerly during ``get_backend()``.
+- ``ensure_native()`` is called once when ``DeviceSpec.get_ops()``
+  first creates the singleton. It is safe to fail soft (log a warning
+  and return without binding).
 
-For concrete reference implementations, see
-``lmcache/v1/platform/cuda/`` and ``lmcache/v1/platform/musa/``.
-Both are examples of what a vendor *may* do, not templates every new
-backend has to follow.
+For concrete reference implementations, see:
+
+- ``lmcache/v1/platform/cuda/device_ops.py`` — binds the compiled
+  ``lmcache.cuda_ops`` pybind11 extension.
+- ``lmcache/v1/platform/xpu/device_ops.py`` — binds the SYCL
+  ``lmcache.xpu_ops`` extension.
+- ``lmcache/v1/platform/musa/device_ops.py`` — method overrides
+  without a separate native module.
 
 Advanced transfer mode
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -269,15 +444,16 @@ handle transfer can still opt into LMCache-driven explicitly (below).
 
 .. note::
 
-   ROCm is not a separate backend: under PyTorch a ROCm GPU reports
-   ``device_type == "cuda"`` and reuses ``CudaIPCWrapper`` (CUDA IPC)
-   for the LMCache-driven path, so it works in AUTO mode with no extra
-   setup.  There is currently no dedicated ``platform/rocm`` package.
+   Under PyTorch a ROCm GPU reports ``device_type == "cuda"``. LMCache
+   registers a distinct ``RocmDeviceSpec`` with ``backend_name == "rocm"``
+   while reusing the CUDA platform's ops, cache context, and IPC wrapper.
+   CUDA and ROCm availability checks are mutually exclusive, so AUTO mode
+   selects the correct backend without extra configuration.
 
 When the caller (or ``LMCACHE_MP_TRANSFER_MODE``) explicitly requests
 ``lmcache_driven``, ``_build_lmcache_driven_context`` performs two hard
 checks — both must succeed, otherwise the factory raises
-``ValueError`` (no silent fallback):
+``ValueError`` (no silent degradation):
 
 1. Your ``DeviceSpec`` subclass must bind a ``DeviceIPCWrapper``
    subclass (exposing a ``wrap`` classmethod) via
@@ -289,8 +465,9 @@ checks — both must succeed, otherwise the factory raises
    lacks IPC handle transfer).
 
 Separately, the LMCache-driven server module also requires a
-``BaseCacheContext`` subclass under
-``lmcache/v1/platform/foo/cache_context.py`` **and** a matching
+``BaseCacheContext`` subclass next to the backend (for example,
+``lmcache/v1/platform/foo/cache_context.py`` in-tree or
+``lmcache_foo/cache_context.py`` externally) **and** a matching
 ``DeviceSpec.create_cache_context`` override that lazy-imports and
 instantiates it.  The platform-agnostic factory
 ``lmcache.v1.platform.cache_context.create_cache_context`` dispatches
@@ -317,7 +494,7 @@ event-IPC backend.  The capability is declared by
 * CUDA-style event APIs can use
   ``DefaultEventIPCBackend(event_module=..., device_type=...)``.
 * Devices with a different event ABI should implement an
-  ``EventIPCBackend`` in their own ``lmcache/v1/platform/foo/`` package.
+  ``EventIPCBackend`` next to their in-tree or external backend.
 * Concrete device specs should cache the backend because request futures
   may query this property repeatedly.
 
@@ -391,7 +568,7 @@ Override these methods in your ``DeviceSpec``:
             Lazy import so the accelerator-specific module is only
             pulled in when the LMCache-driven path is actually used.
             """
-            from lmcache.v1.platform.foo.ipc_wrapper import FooIPCWrapper
+            from .ipc_wrapper import FooIPCWrapper
 
             return FooIPCWrapper
 
@@ -413,7 +590,7 @@ Override these methods in your ``DeviceSpec``:
             Required for LMCache-driven mode; the base-class default
             raises ``NotImplementedError``.
             """
-            from lmcache.v1.platform.foo.cache_context import FooCacheContext
+            from .cache_context import FooCacheContext
 
             return FooCacheContext(*args, **kwargs)
 
@@ -434,20 +611,35 @@ References
      - Path
    * - Device spec base
      - ``lmcache/v1/platform/base/device_spec.py``
+   * - Device ops base
+     - ``lmcache/v1/platform/base/device_ops.py``
+   * - Torch ops baseline
+     - ``lmcache/v1/platform/torch_ops.py``
+   * - Ops types and enums
+     - ``lmcache/v1/platform/ops_types.py``
    * - Event IPC base
      - ``lmcache/v1/platform/base/event_ipc.py``
-   * - Backend loading
-     - ``lmcache/v1/platform/__init__.py``
-   * - Python fallback
-     - ``lmcache/python_ops_fallback.py``
+   * - Backend loading (``resolve_device_ops`` / ``_detect_device``)
+     - ``lmcache/v1/platform/_device_detect.py`` and
+       ``lmcache/v1/platform/__init__.py``
+   * - Package-level ``device_ops`` resolution
+     - ``lmcache/__init__.py``
    * - Cache context base
      - ``lmcache/v1/platform/base/cache_context.py``
    * - Cache context factory
      - ``lmcache/v1/platform/cache_context.py``
-   * - Reference ``DeviceSpec`` (engine-driven baseline)
+   * - Reference ``DeviceSpec`` (CUDA)
      - ``lmcache/v1/platform/cuda/__init__.py``
-   * - Reference ``DeviceSpec`` (LMCache-driven capable)
-     - ``lmcache/v1/platform/musa/__init__.py``
+   * - Reference ``DeviceOps`` (CUDA, bind_native)
+     - ``lmcache/v1/platform/cuda/device_ops.py``
+   * - Reference ``DeviceOps`` (XPU, bind_native)
+     - ``lmcache/v1/platform/xpu/device_ops.py``
+   * - Reference ``DeviceOps`` (MUSA, method overrides)
+     - ``lmcache/v1/platform/musa/device_ops.py``
+   * - Reference ``DeviceSpec`` (Neuron / Trainium, engine-driven only)
+     - ``lmcache/v1/platform/neuron/__init__.py``
+   * - Reference ``DeviceOps`` (Neuron, torch baseline)
+     - ``lmcache/v1/platform/neuron/device_ops.py``
    * - Engine-driven call site
      - ``lmcache/v1/multiprocess/transfer_context/worker_transfer.py``
        (``EngineDrivenTransferContext``, ``create_transfer_context``)

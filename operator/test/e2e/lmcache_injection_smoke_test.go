@@ -65,7 +65,7 @@ var _ = Describe("LMCacheEngine injection webhook smoke", func() {
 		// namespace, cleaned up by the namespace's DeferCleanup. No teardown.
 	})
 
-	It("stamps the vLLM pod and injects --kv-transfer-config + hostIPC + PYTHONHASHSEED", func() {
+	It("stamps the vLLM pod and injects --kv-transfer-config + /dev/shm sharing + PYTHONHASHSEED", func() {
 		By("applying a minimal LMCacheEngine")
 		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "inject-smoke")
 		Expect(err).NotTo(HaveOccurred())
@@ -102,7 +102,8 @@ var _ = Describe("LMCacheEngine injection webhook smoke", func() {
 			g.Expect(pod.Annotations).To(HaveKeyWithValue("lmcache.ai/lmcache-injected", "true"),
 				"webhook did not stamp lmcache-injected=true; injection did not fire "+
 					"(skip-reason=%q)", pod.Annotations["lmcache.ai/lmcache-skip-reason"])
-			g.Expect(pod.Spec.HostIPC).To(BeTrue(), "webhook did not inject hostIPC=true")
+			g.Expect(pod.Spec.HostIPC).To(BeFalse(), "webhook must not inject hostIPC by default")
+			g.Expect(podHasDevShmHostPath(pod)).To(BeTrue(), "webhook did not inject the /dev/shm hostPath volume")
 
 			args := vllmContainerArgs(pod)
 			g.Expect(argValue(args, "--kv-transfer-config")).To(ContainSubstring("LMCacheMPConnector"),
@@ -195,7 +196,7 @@ var _ = Describe("LMCacheEngine injection webhook smoke", func() {
 			g.Expect(pod.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: pullSecret}))
 
 			By("connection wiring still applied alongside staging")
-			g.Expect(pod.Spec.HostIPC).To(BeTrue())
+			g.Expect(podHasDevShmHostPath(pod)).To(BeTrue())
 			g.Expect(argValue(vllmContainerArgs(pod), "--kv-transfer-config")).To(ContainSubstring("LMCacheMPConnector"))
 		}, 60*time.Second, 2*time.Second).Should(Succeed())
 

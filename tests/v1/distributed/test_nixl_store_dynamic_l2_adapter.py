@@ -7,6 +7,8 @@ persist, secondary lookup, and capacity management.
 """
 
 # Standard
+from pathlib import Path
+import inspect
 import os
 import select
 import shutil
@@ -26,13 +28,21 @@ from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L2AdapterListener,
 )
 from lmcache.v1.distributed.l2_adapters.config import PersistConfig  # noqa: E402
-from lmcache.v1.distributed.l2_adapters.nixl_store_dynamic_l2_adapter import (  # noqa: E402
+from lmcache.v1.distributed.l2_adapters.nixl_store_agents.dynamic_nixl_store_agent import (  # noqa: E402, E501
+    DynamicNixlStorageAgent,
+    _object_key_to_filename,
+    _object_key_to_relpath,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_store_agents.file_dynamic_nixl_store_agent import (  # noqa: E402, E501
+    FileDynamicNixlStorageAgent,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_store_dynamic_l2_adapter import (  # noqa: E402, E501
     DynamicNixlStoreL2Adapter,
     DynamicNixlStoreL2AdapterConfig,
-    _object_key_to_filename,
 )
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -44,18 +54,18 @@ _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 class _RecordingListener(L2AdapterListener):
     """Listener that records all events for inspection in tests."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.stored: list[list[ObjectKey]] = []
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         self.stored.append(list(keys))
 
-    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
         self.accessed.append(list(keys))
 
-    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
         self.deleted.append(list(keys))
 
 
@@ -79,17 +89,65 @@ if torch_device_type == "xpu":
         allow_module_level=True,
     )
 
+
+def test_dynamic_nixl_storage_agent_is_abstract() -> None:
+    """The backend-neutral storage agent must only be used via a subclass."""
+    assert inspect.isabstract(DynamicNixlStorageAgent)
+    assert issubclass(FileDynamicNixlStorageAgent, DynamicNixlStorageAgent)
+    assert not inspect.isabstract(FileDynamicNixlStorageAgent)
+
+
+def test_file_agent_creates_directory_before_nixl_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory creation failure must not initialize NIXL resources."""
+    base_initialized = False
+
+    def fake_base_init(
+        self: DynamicNixlStorageAgent,
+        device: str,
+        backend: str,
+        backend_params: dict[str, str],
+        l1_memory_desc: L1MemoryDesc,
+    ) -> None:
+        del self, device, backend, backend_params, l1_memory_desc
+        nonlocal base_initialized
+        base_initialized = True
+
+    def raise_permission_error(path: str, exist_ok: bool) -> None:
+        del path, exist_ok
+        raise PermissionError("cannot create storage directory")
+
+    monkeypatch.setattr(DynamicNixlStorageAgent, "__init__", fake_base_init)
+    monkeypatch.setattr(os, "makedirs", raise_permission_error)
+
+    with pytest.raises(PermissionError, match="cannot create storage directory"):
+        FileDynamicNixlStorageAgent(
+            device="cpu",
+            backend="POSIX",
+            backend_params={"file_path": "/unwritable", "use_direct_io": "false"},
+            l1_memory_desc=L1MemoryDesc(ptr=0, size=0, align_bytes=1),
+        )
+
+    assert not base_initialized
+
+
 # =============================================================================
 # Test Helpers
 # =============================================================================
 
 
-def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
+def create_object_key(
+    chunk_id: int,
+    model_name: str = "test_model",
+    cache_salt: str = "",
+) -> ObjectKey:
     """Create a test ObjectKey with the given chunk ID."""
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name=model_name,
         kv_rank=0,
+        cache_salt=cache_salt,
     )
 
 
@@ -131,6 +189,57 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
             pass
         return True
     return False
+
+
+def create_adapter_for_path(
+    file_path: Path,
+    buffer: torch.Tensor,
+    *,
+    persist_enabled: bool = False,
+    shard_dirs: bool = False,
+) -> tuple[
+    DynamicNixlStoreL2Adapter,
+    L1MemoryDesc,
+    DynamicNixlStoreL2AdapterConfig,
+]:
+    """Create a POSIX dynamic adapter using ``file_path``."""
+    l1_memory = L1MemoryDesc(
+        ptr=buffer.data_ptr(),
+        size=buffer.numel(),
+        align_bytes=PAGE_SIZE,
+    )
+    config = DynamicNixlStoreL2AdapterConfig(
+        backend="POSIX",
+        backend_params={
+            "file_path": str(file_path),
+            "use_direct_io": "false",
+            "max_capacity_gb": str(MAX_CAPACITY_GB),
+            "shard_dirs": str(shard_dirs).lower(),
+        },
+    )
+    config.persist_config = PersistConfig(persist_enabled=persist_enabled)
+    return DynamicNixlStoreL2Adapter(config, l1_memory), l1_memory, config
+
+
+def store_and_wait(
+    adapter: DynamicNixlStoreL2Adapter,
+    keys: list[ObjectKey],
+    objects: list[MemoryObj],
+) -> None:
+    """Store objects and assert successful asynchronous completion."""
+    task_id = adapter.submit_store_task(keys, objects)
+    assert wait_for_event_fd(adapter.get_store_event_fd())
+    result = adapter.pop_completed_store_tasks()[task_id]
+    assert result.is_successful()
+
+
+def list_data_files(file_path: Path) -> list[str]:
+    """Return sorted data-file paths relative to ``file_path``."""
+    return sorted(
+        str(path.relative_to(file_path))
+        for path in file_path.rglob("*.bin")
+        if path.is_file()
+    )
 
 
 # =============================================================================
@@ -202,6 +311,32 @@ def adapter_with_persist():
     yield adpt, buffer, tmp_dir, l1_memory, config
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# =============================================================================
+# Dynamic Storage Agent Tests
+# =============================================================================
+
+
+class TestDynamicStorageAgent:
+    """Tests for storage-agent selection and common agent behavior."""
+
+    def test_file_backend_creates_file_storage_agent(self, adapter) -> None:
+        """A file backend selects the file-specific storage agent."""
+        adpt, _, _ = adapter
+
+        assert isinstance(adpt.nixl_agent, FileDynamicNixlStorageAgent)
+
+    def test_storage_agent_calculates_and_validates_page_indices(self, adapter) -> None:
+        """The shared agent validates ranges and returns their page indices."""
+        adpt, _, _ = adapter
+
+        assert adpt.nixl_agent.get_memory_indices(PAGE_SIZE, PAGE_SIZE * 2) == [1, 2]
+
+        with pytest.raises(ValueError, match="not aligned"):
+            adpt.nixl_agent.get_memory_indices(PAGE_SIZE + 1, PAGE_SIZE)
+        with pytest.raises(ValueError, match="not a multiple"):
+            adpt.nixl_agent.get_memory_indices(PAGE_SIZE, PAGE_SIZE + 1)
 
 
 # =============================================================================
@@ -305,7 +440,7 @@ class TestLookupAndLockInterface:
         adpt, _, _ = adapter
         key = create_object_key(999)
 
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -323,7 +458,7 @@ class TestLookupAndLockInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -337,7 +472,7 @@ class TestLookupAndLockInterface:
         adpt, _, _ = adapter
         key = create_object_key(1)
 
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
 
         result1 = adpt.query_lookup_and_lock_result(task_id)
@@ -363,7 +498,7 @@ class TestLoadInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -402,7 +537,7 @@ class TestLoadInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -441,7 +576,7 @@ class TestLoadInterface:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
-        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -477,7 +612,7 @@ class TestLoadInterface:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -511,7 +646,7 @@ class TestEndToEnd:
         assert completed[store_task].is_successful()
 
         # Lookup
-        lookup_task = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         bitmap = adpt.query_lookup_and_lock_result(lookup_task)
         assert bitmap is not None
@@ -534,6 +669,193 @@ class TestEndToEnd:
 
 
 # =============================================================================
+# Cache Salt Isolation Tests
+# =============================================================================
+
+
+class TestCacheSaltIsolation:
+    @pytest.mark.parametrize("shard_dirs", [False, True], ids=["flat", "sharded"])
+    def test_store_load_and_delete_are_isolated_by_salt(
+        self, tmp_path: Path, shard_dirs: bool
+    ) -> None:
+        """Store, load, and delete must preserve salt isolation."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=shard_dirs)
+        key_a = create_object_key(1, cache_salt="tenant-a")
+        key_b = create_object_key(1, cache_salt="tenant-b")
+
+        try:
+            store_and_wait(
+                adpt,
+                [key_a, key_b],
+                [
+                    create_memory_obj(buffer, page_index=0, fill_value=11.0),
+                    create_memory_obj(buffer, page_index=1, fill_value=22.0),
+                ],
+            )
+
+            assert len(list_data_files(tmp_path)) == 2
+            assert dict(adpt.get_usage().bytes_by_cache_salt) == {
+                "tenant-a": PAGE_SIZE,
+                "tenant-b": PAGE_SIZE,
+            }
+
+            load_objects: list[MemoryObj] = [
+                create_memory_obj(buffer, page_index=2, fill_value=0.0),
+                create_memory_obj(buffer, page_index=3, fill_value=0.0),
+            ]
+            load_task = adpt.submit_load_task([key_a, key_b], load_objects)
+            assert wait_for_event_fd(adpt.get_load_event_fd())
+            bitmap = adpt.query_load_result(load_task)
+            assert bitmap is not None
+            assert bitmap.test(0) and bitmap.test(1)
+            assert torch.all(
+                buffer[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32) == 11.0
+            )
+            assert torch.all(
+                buffer[3 * PAGE_SIZE : 4 * PAGE_SIZE].view(torch.float32) == 22.0
+            )
+
+            adpt.delete([key_a])
+            assert dict(adpt.get_usage().bytes_by_cache_salt) == {"tenant-b": PAGE_SIZE}
+
+            lookup_task = adpt.submit_lookup_and_lock_task(
+                [key_a, key_b], {0: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+            bitmap = adpt.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert not bitmap.test(0)
+            assert bitmap.test(1)
+
+            load_obj = create_memory_obj(buffer, page_index=2, fill_value=0.0)
+            load_task = adpt.submit_load_task([key_b], [load_obj])
+            assert wait_for_event_fd(adpt.get_load_event_fd())
+            bitmap = adpt.query_load_result(load_task)
+            assert bitmap is not None and bitmap.test(0)
+            loaded = buffer[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32)
+            assert torch.all(loaded == 22.0)
+            adpt.submit_unlock([key_b])
+        finally:
+            adpt.close()
+
+    @pytest.mark.parametrize("shard_dirs", [False, True], ids=["flat", "sharded"])
+    def test_salted_objects_recover_independently_after_restart(
+        self, tmp_path: Path, shard_dirs: bool
+    ) -> None:
+        """Persisted salted keys must recover with their original payloads."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        adpt, l1_memory, config = create_adapter_for_path(
+            tmp_path,
+            buffer,
+            persist_enabled=True,
+            shard_dirs=shard_dirs,
+        )
+        key_a = create_object_key(1, cache_salt="tenant-a")
+        key_b = create_object_key(1, cache_salt="tenant-b")
+        key_c = create_object_key(1, cache_salt="tenant-c")
+
+        try:
+            store_and_wait(
+                adpt,
+                [key_a, key_b],
+                [
+                    create_memory_obj(buffer, page_index=0, fill_value=31.0),
+                    create_memory_obj(buffer, page_index=1, fill_value=47.0),
+                ],
+            )
+        finally:
+            adpt.close()
+
+        recovered = DynamicNixlStoreL2Adapter(config, l1_memory)
+        try:
+            lookup_task = recovered.submit_lookup_and_lock_task(
+                [key_a, key_b, key_c], {0: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(recovered.get_lookup_and_lock_event_fd())
+            bitmap = recovered.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert bitmap.test(0)
+            assert bitmap.test(1)
+            assert not bitmap.test(2)
+
+            load_objects: list[MemoryObj] = [
+                create_memory_obj(buffer, page_index=2, fill_value=0.0),
+                create_memory_obj(buffer, page_index=3, fill_value=0.0),
+            ]
+            load_task = recovered.submit_load_task([key_a, key_b], load_objects)
+            assert wait_for_event_fd(recovered.get_load_event_fd())
+            bitmap = recovered.query_load_result(load_task)
+            assert bitmap is not None
+            assert bitmap.test(0) and bitmap.test(1)
+            assert torch.all(
+                buffer[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32) == 31.0
+            )
+            assert torch.all(
+                buffer[3 * PAGE_SIZE : 4 * PAGE_SIZE].view(torch.float32) == 47.0
+            )
+            assert dict(recovered.get_usage().bytes_by_cache_salt) == {
+                "tenant-a": PAGE_SIZE,
+                "tenant-b": PAGE_SIZE,
+            }
+            recovered.submit_unlock([key_a, key_b])
+        finally:
+            recovered.close()
+
+    @pytest.mark.parametrize(
+        ("shard_dirs", "path_prefix"),
+        [
+            (False, ""),
+            (True, os.path.join("83", "4e")),
+        ],
+        ids=["flat", "sharded"],
+    )
+    def test_filename_contract_preserves_legacy_and_appends_raw_salt(
+        self, tmp_path: Path, shard_dirs: bool, path_prefix: str
+    ) -> None:
+        """Filenames must preserve legacy keys and append raw salts."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        adpt, _, _ = create_adapter_for_path(tmp_path, buffer, shard_dirs=shard_dirs)
+        legacy_key = create_object_key(0x834EBC79)
+        salted_key = create_object_key(0x834EBC79, cache_salt="tenant-a")
+        missing_key = create_object_key(0x834EBC79, cache_salt="tenant-b")
+        legacy_filename = "test_model_00000000_0_834ebc79.bin"
+        salted_filename = "test_model_00000000_0_834ebc79@tenant-a.bin"
+
+        try:
+            store_and_wait(
+                adpt,
+                [legacy_key, salted_key],
+                [
+                    create_memory_obj(buffer, page_index=0, fill_value=17.0),
+                    create_memory_obj(buffer, page_index=1, fill_value=23.0),
+                ],
+            )
+            assert list_data_files(tmp_path) == sorted(
+                [
+                    os.path.join(path_prefix, legacy_filename),
+                    os.path.join(path_prefix, salted_filename),
+                ]
+            )
+
+            lookup_task = adpt.submit_lookup_and_lock_task(
+                [missing_key], {0: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+            bitmap = adpt.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert not bitmap.test(0)
+        finally:
+            adpt.close()
+
+
+# =============================================================================
 # Eviction / Delete Interface Tests
 # =============================================================================
 
@@ -552,7 +874,7 @@ class TestEvictionInterface:
         adpt.delete([key])
 
         # Lookup should miss
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         bitmap = adpt.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -572,7 +894,7 @@ class TestEvictionInterface:
         adpt.pop_completed_store_tasks()
 
         # Lock
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -580,7 +902,7 @@ class TestEvictionInterface:
         adpt.delete([key])
 
         # Should still be found
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         bitmap = adpt.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -697,12 +1019,67 @@ class TestCapacity:
             wait_for_event_fd(adpt.get_store_event_fd())
 
             # Only first key should be found
-            task_id = adpt.submit_lookup_and_lock_task([key1, key2], _EMPTY_LAYOUT)
+            task_id = adpt.submit_lookup_and_lock_task([key1, key2], {0: _EMPTY_LAYOUT})
             wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
             bitmap = adpt.query_lookup_and_lock_result(task_id)
             assert bitmap is not None
             assert bitmap.test(0)  # key1 found
             assert not bitmap.test(1)  # key2 not found
+
+            adpt.submit_unlock([key1])
+            adpt.close()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_batched_store_reports_failure_when_capacity_exceeded(self):
+        """A partial batch should preserve completed stores and report failure."""
+        tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_cap_test_")
+        try:
+            buffer = torch.empty(
+                PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+            )
+            l1_memory = L1MemoryDesc(
+                ptr=buffer.data_ptr(),
+                size=buffer.numel(),
+                align_bytes=PAGE_SIZE,
+            )
+            tiny_cap_gb = PAGE_SIZE / (1024**3)
+            config = DynamicNixlStoreL2AdapterConfig(
+                backend="POSIX",
+                backend_params={
+                    "file_path": tmp_dir,
+                    "use_direct_io": "false",
+                    "max_capacity_gb": str(tiny_cap_gb),
+                },
+            )
+            adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
+
+            key1 = create_object_key(1)
+            key2 = create_object_key(2)
+            objects = [
+                create_memory_obj(buffer, page_index=0),
+                create_memory_obj(buffer, page_index=1),
+            ]
+
+            task_id = adpt.submit_store_task([key1, key2], objects)
+            wait_for_event_fd(adpt.get_store_event_fd())
+            result = adpt.pop_completed_store_tasks()[task_id]
+
+            assert not result.is_successful()
+            assert result.bytes_transferred() == 0
+            assert adpt.get_usage().total_bytes_used == PAGE_SIZE
+
+            stored_file = os.path.join(tmp_dir, _object_key_to_filename(key1))
+            rejected_file = os.path.join(tmp_dir, _object_key_to_filename(key2))
+            assert os.path.exists(stored_file)
+            assert not os.path.exists(rejected_file)
+
+            lookup_task = adpt.submit_lookup_and_lock_task([key1, key2], _EMPTY_LAYOUT)
+            wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+            bitmap = adpt.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert bitmap.test(0)
+            assert not bitmap.test(1)
 
             adpt.submit_unlock([key1])
             adpt.close()
@@ -749,7 +1126,7 @@ class TestPersistAndSecondaryLookup:
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
         # Lookup should find the key via secondary lookup
-        task_id = adpt2.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt2.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         bitmap = adpt2.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -772,7 +1149,7 @@ class TestPersistAndSecondaryLookup:
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
         # Lookup (lazy recover) + load
-        task_id = adpt2.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt2.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         adpt2.query_lookup_and_lock_result(task_id)
 
@@ -806,7 +1183,7 @@ class TestPersistAndSecondaryLookup:
 
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
-        task_id = adpt2.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt2.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         bitmap = adpt2.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -833,7 +1210,7 @@ class TestPersistAndSecondaryLookup:
         assert usage_initial == 0.0
 
         # After a lookup, the key is populated and usage matches
-        task_id = adpt2.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt2.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         adpt2.query_lookup_and_lock_result(task_id)
 
@@ -880,3 +1257,87 @@ class TestPersistAndSecondaryLookup:
             assert not os.path.exists(data_file)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ---- 2-level hex hash-prefix subdir layout (shard_dirs) ----
+# base/<hex[:2]>/<hex[2:4]>/filename, used when shard_dirs=true, where hex is
+# chunk_hash.hex() (the same value in the filename). create_object_key(n) uses
+# IntHash2Bytes(n)=n.to_bytes(4,"big"), so hex is n as 8 zero-padded hex chars.
+
+
+def test_relpath_is_hex_hash_prefix():
+    """Path = <hex[:2]>/<hex[2:4]>/filename, using the chunk-hash hex."""
+    key = create_object_key(0x834EBC79)
+    h = key.chunk_hash.hex()  # "834ebc79"
+    parts = _object_key_to_relpath(key).split(os.sep)
+    assert len(parts) == 3
+    assert parts[0] == h[:2]  # "83"
+    assert parts[1] == h[2:4]  # "4e"
+    assert parts[2] == _object_key_to_filename(key)
+
+
+def test_relpath_subdir_matches_filename_hash_prefix():
+    """The two subdir levels are the first four hex chars of the filename hash."""
+    for n in (0x834EBC79, 0xABCD1234, 0x00FF10A2):
+        key = create_object_key(n)
+        h = key.chunk_hash.hex()
+        parts = _object_key_to_relpath(key).split(os.sep)
+        assert parts[0] == h[:2]
+        assert parts[1] == h[2:4]
+        # filename embeds the same hex, so the subdir is its leading prefix
+        assert parts[2].endswith(f"_{h}.bin")
+
+
+def test_relpath_spreads_across_all_256_top_dirs():
+    """Varying the top hash byte reaches all 256 top-level hex subdirs."""
+    tops = {
+        _object_key_to_relpath(create_object_key(i << 24)).split(os.sep)[0]
+        for i in range(256)
+    }
+    assert len(tops) == 256  # "00".."ff"
+
+
+def test_store_uses_hashed_layout_and_loads_back():
+    """Integration: a store lands in the 2-level subdir (not flat), and loads back."""
+    tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_hashed_test_")
+    buffer = torch.empty(PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu")
+    l1_memory = L1MemoryDesc(
+        ptr=buffer.data_ptr(), size=buffer.numel(), align_bytes=PAGE_SIZE
+    )
+    config = DynamicNixlStoreL2AdapterConfig(
+        backend="POSIX",
+        backend_params={
+            "file_path": tmp_dir,
+            "use_direct_io": "false",
+            "max_capacity_gb": str(MAX_CAPACITY_GB),
+            "shard_dirs": "true",
+        },
+    )
+    adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
+    try:
+        key = create_object_key(0xABCD1234)
+        store_obj = create_memory_obj(buffer, page_index=0, fill_value=42.0)
+        adpt.submit_store_task([key], [store_obj])
+        wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+
+        hashed = os.path.join(tmp_dir, _object_key_to_relpath(key))
+        flat = os.path.join(tmp_dir, _object_key_to_filename(key))
+        assert os.path.exists(hashed), "store must write to the 2-level subdir"
+        assert not os.path.exists(flat), "store must not write to the flat path"
+
+        # Load it back and verify data.
+        tid = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        adpt.query_lookup_and_lock_result(tid)
+        load_obj = create_memory_obj(buffer, page_index=1, fill_value=0.0)
+        tid = adpt.submit_load_task([key], [load_obj])
+        wait_for_event_fd(adpt.get_load_event_fd())
+        bitmap = adpt.query_load_result(tid)
+        assert bitmap is not None and bitmap.test(0)
+        loaded = buffer[PAGE_SIZE : 2 * PAGE_SIZE].view(torch.float32)
+        assert torch.all(loaded == 42.0)
+        adpt.submit_unlock([key])
+    finally:
+        adpt.close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)

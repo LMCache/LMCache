@@ -36,8 +36,8 @@ import select
 import threading
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
@@ -226,9 +226,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
-        return self._inner.submit_lookup_and_lock_task(keys, layout_desc)
+        return self._inner.submit_lookup_and_lock_task(keys, group_layout_descs)
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         return self._inner.query_lookup_and_lock_result(task_id)
@@ -330,10 +330,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         # Listeners track what's actually stored — which is inner's job.
         self._inner.register_listener(listener)
 
-    def set_backend_name(self, name: str) -> None:
-        """Forward the backend name to the inner adapter (which owns the
-        listener-notify funnel that tags cache events)."""
-        self._inner.set_backend_name(name)
+    def set_backend_identity(self, name: str, shared: bool = False) -> None:
+        """Forward the event-tagging identity to the inner adapter (which
+        owns the listener-notify funnel that tags cache events)."""
+        self._inner.set_backend_identity(name, shared)
 
     def report_status(self) -> dict:
         inner_status = self._inner.report_status()

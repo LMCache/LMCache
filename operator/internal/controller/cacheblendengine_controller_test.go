@@ -113,7 +113,7 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-connection", Namespace: "default"}})
 		})
 
-		It("should reconcile to a blend_v3 DaemonSet, Services, and connection ConfigMap with ownerRefs", func() {
+		It("should reconcile to a blend engine DaemonSet, Services, and connection ConfigMap with ownerRefs", func() {
 			controllerReconciler := &CacheBlendEngineReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
@@ -125,13 +125,13 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Verifying the blend_v3 DaemonSet")
+			By("Verifying the blend engine DaemonSet")
 			ds := &appsv1.DaemonSet{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, ds)).To(Succeed())
 			Expect(ownedBy(ds.OwnerReferences)).To(BeTrue())
 
 			podSpec := ds.Spec.Template.Spec
-			Expect(podSpec.HostIPC).To(BeTrue())
+			Expect(podSpec.HostIPC).To(BeFalse())
 			Expect(podSpec.Containers).To(HaveLen(1))
 			engineContainer := podSpec.Containers[0]
 

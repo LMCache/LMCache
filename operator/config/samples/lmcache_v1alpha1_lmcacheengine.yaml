@@ -67,9 +67,31 @@ spec:
   #   prefetchPolicy: default     # default
   #   prefetchMaxInFlight: 8      # default, max concurrent L2->L1 loads
 
+  # -- Init containers (optional) --
+  # Additional init containers run before the lmcache container starts, in
+  # order. Use to prepare state the engine can't create itself -- e.g. a
+  # raw_block L2 adapter (l2Backend.raw.type: raw_block) opens device_path
+  # expecting it to already exist at the configured size; it does not
+  # create or grow the file. Requires a matching "kv-cache-root" entry
+  # under the top-level volumes field (currently commented out above as
+  # `volumes: []`) -- add a hostPath volume there before using this.
+  # initContainers:
+  #   - name: preallocate-raw-block
+  #     image: busybox
+  #     command:
+  #       - sh
+  #       - -c
+  #       - |
+  #         test -f /mnt/kv-cache-root/lmcache-l2.raw || \
+  #           fallocate -l 10000000000 /mnt/kv-cache-root/lmcache-l2.raw || \
+  #           truncate -s 10000000000 /mnt/kv-cache-root/lmcache-l2.raw
+  #     volumeMounts:
+  #       - name: kv-cache-root
+  #         mountPath: /mnt/kv-cache-root
+
   # -- Connection-injection webhook defaults (optional) --
   # The mutating webhook always wires opted-in vLLM pods to this engine
-  # (--kv-transfer-config, hostIPC, PYTHONHASHSEED). Set injection.payloadImage to
+  # (--kv-transfer-config, the /dev/shm sharing, PYTHONHASHSEED). Set injection.payloadImage to
   # ALSO stage an lmcache code tree into the vLLM container (emptyDir + init
   # container + read-only mount + PYTHONPATH), pinning vLLM's lmcache to a
   # specific build so client and server match. Leave unset for connection-only.
@@ -124,3 +146,35 @@ spec:
 
   # -- Extra CLI flags (appended last, can override any auto-generated flag) --
   # extraArgs: []
+
+  # -- PD (Prefill-Decode) disaggregation --
+  # When set, the engine's connection ConfigMap emits three kv-transfer-config
+  # keys so a single DaemonSet instance can serve prefiller, decoder, and
+  # plain (non-PD) vLLM pods simultaneously:
+  #
+  #   kv-transfer-config.json            — bare LMCacheMPConnector (fallback,
+  #                                        for pods without lmcache.ai/pd-role)
+  #   kv-transfer-config-prefiller.json  — MultiConnector(kv_producer)
+  #   kv-transfer-config-decoder.json    — MultiConnector(kv_consumer)
+  #
+  # vLLM pods mount the ConfigMap and read the role-specific key directly, or
+  # add the lmcache.ai/pd-role annotation to have the webhook select it.
+  #
+  # NIXL RDMA note: UCX requires valid RDMA GIDs. Under standard overlay CNI
+  # the GID table inside the pod is empty; use hostNetwork: true (quick test)
+  # or SR-IOV with Multus (production) on the vLLM pods.
+  #
+  # pd:
+  #   nixlSideChannelPort: 5558        # default, NIXL side-channel port.
+  #                                    # With hostNetwork: true, use distinct
+  #                                    # values per role (e.g. 5557 / 5558)
+  #                                    # by pre-setting VLLM_NIXL_SIDE_CHANNEL_PORT
+  #                                    # in the pod env — the webhook will not
+  #                                    # override a pre-set value.
+  #   nixlLoadFailurePolicy: fail      # fail | ignore
+  #                                    # fail:   abort request if NIXL transfer fails
+  #                                    # ignore: fall back to local prefill on failure
+  #   enforceHandshakeCompat: true     # omit this key to use NIXL's own default.
+  #                                    # Set to false to disable strict version
+  #                                    # negotiation when prefiller and decoder
+  #                                    # run different vLLM builds.

@@ -172,6 +172,10 @@ class L2AdapterConfigBase(ABC):
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
 
+    #: ``True`` when this adapter mounts a storage domain shared by
+    #: several instances (e.g. one S3 bucket or shared filesystem).
+    shared: bool = False
+
     #: Populated by ``_parse_persist_config`` after ``from_dict``.
     #: Defaults to ``PersistConfig()`` (persist enabled).
     persist_config: PersistConfig = PersistConfig()
@@ -488,6 +492,7 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
         config_cls = _L2_ADAPTER_CONFIG_REGISTRY[type_name]
         try:
             adapter_cfg = config_cls.from_dict(d)
+            adapter_cfg.shared = bool(d.get("shared", False))
             adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
             adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)
             adapter_cfg.serde_config = L2AdapterConfigBase._parse_serde_config(d)

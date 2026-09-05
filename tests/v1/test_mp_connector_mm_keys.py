@@ -10,6 +10,8 @@ interfaces of ``lmcache_mp_connector``.
 
 # Standard
 from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
@@ -17,10 +19,16 @@ import pytest
 pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorRole,
+)
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
+    LMCacheMPConnector,
+)
+from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
@@ -42,6 +50,11 @@ class _FakeMMFeature:
     mm_position: _FakePlaceholder
 
 
+@dataclass
+class _FakeSamplingParams:
+    extra_args: dict[str, object] | None = None
+
+
 class _FakeRequest:
     """Duck-typed vLLM Request carrying only what the tracker reads."""
 
@@ -50,13 +63,18 @@ class _FakeRequest:
         prompt_token_ids: list[int],
         mm_features: list[_FakeMMFeature] | None = None,
         cache_salt: str = "",
+        sampling_params_extra_args: dict[str, object] | None = None,
     ):
         self.request_id = "req-0"
+        self.resumable = False
         self.cache_salt = cache_salt
         self.prompt_token_ids = list(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)
         self.all_token_ids = ConstantList(self._live_token_ids)
         self.mm_features = mm_features or []
+        self.sampling_params = _FakeSamplingParams(
+            extra_args=sampling_params_extra_args
+        )
 
     def append_decode_token(self, token_id: int):
         """Simulate vLLM appending a decode token to the live token list."""
@@ -117,6 +135,52 @@ def test_decode_tokens_appended_unchanged():
     assert tracker.get_token_ids() == [1, 2, fill, fill, 3, 500, 501]
 
 
+def test_tracker_extracts_request_configs():
+    tracker = LMCacheMPRequestTracker(
+        _FakeRequest(
+            [1, 2, 3, 4],
+            sampling_params_extra_args={
+                "kv_transfer_params": {
+                    "lmcache.skip_save": True,
+                    "lmcache.priority": "high",
+                    "temperature": 0.8,
+                }
+            },
+        )
+    )
+
+    assert tracker.request_configs == {
+        "lmcache.skip_save": True,
+        "lmcache.priority": "high",
+    }
+
+
+def test_eager_prefetch_forwards_request_configs():
+    request = _FakeRequest(
+        [1, 2, 3],
+        sampling_params_extra_args={
+            "kv_transfer_params": {"lmcache.skip_save": True},
+        },
+    )
+    tracker = LMCacheMPRequestTracker(request)
+    scheduler_adapter = MagicMock()
+    connector = SimpleNamespace(
+        role=KVConnectorRole.SCHEDULER,
+        _eager_prefetch=True,
+        scheduler_adapter=scheduler_adapter,
+        _get_or_create_request_tracker=MagicMock(return_value=tracker),
+    )
+
+    LMCacheMPConnector.on_new_request(connector, request)
+
+    scheduler_adapter.maybe_submit_lookup_request.assert_called_once_with(
+        request.request_id,
+        token_ids=[1, 2, 3],
+        cache_salt="",
+        request_configs={"lmcache.skip_save": True},
+    )
+
+
 def _prepare_storable_tracker(request: _FakeRequest) -> LMCacheMPRequestTracker:
     """Give the tracker enough scheduled tokens and blocks to emit one
     store op covering the whole 8-token prompt (chunk size 4)."""
@@ -140,6 +204,24 @@ def test_store_metadata_uses_mm_adjusted_token_ids():
     assert metadata.op.token_ids == [1, 2, fill, fill, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
+
+
+def test_store_metadata_preserves_request_configs():
+    tracker = _prepare_storable_tracker(
+        _FakeRequest(
+            list(range(8)),
+            sampling_params_extra_args={
+                "kv_transfer_params": {"lmcache.skip_save": True}
+            },
+        )
+    )
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, lmcache_tokens_per_chunk=4, group_tokens_per_block=[4]
+    )
+
+    assert metadata is not None
+    assert metadata.request_configs == {"lmcache.skip_save": True}
 
 
 def test_retrieve_metadata_uses_mm_adjusted_token_ids():

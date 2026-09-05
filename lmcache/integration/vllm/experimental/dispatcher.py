@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import (
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
         LMCacheMPConnectorMetadata,
     )
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
@@ -46,7 +46,6 @@ class QTensorFeature:
             q_model_name=LMCacheSDKCacheKind.QUERY.server_model_name(
                 ctx.worker_adapter.model_name
             ),
-            send_lmcache_request=ctx.send_lmcache_request,
         )
         self._capture = QRingBufferCapture(ctx.worker_adapter, self._q_ring_adapter)
 
@@ -103,7 +102,6 @@ class FeatureContext:
     """
 
     worker_adapter: LMCacheMPWorkerAdapter
-    send_lmcache_request: Callable[..., Any]
 
 
 FeatureFactory = Callable[[FeatureContext], "QTensorFeature"]
