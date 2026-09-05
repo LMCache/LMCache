@@ -198,7 +198,7 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `RawBlockL2Adapter`        | ✓ (skips locked) | ✓ | stored, accessed, deleted |
 | `FSL2Adapter`              | ✓ (best-effort) | total only (no max cap) | stored, accessed, deleted |
-| `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
+| `NativeConnectorL2Adapter` | ✓ (serializes with lookup/store, via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, accessed, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:
 
@@ -208,6 +208,19 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 2. The adapter must be configured with `max_capacity_gb > 0` to enable client-side
    size tracking for `get_usage()`. Without it, `get_usage()` returns `(-1, -1)` and
    the eviction controller will not trigger.
+
+Lookup, store, and delete submissions are serialized per key. An earlier lookup
+or store pins its keys before the delete eligibility check, while a lookup
+submitted after a delete treats the overlapping keys as misses until that delete
+completes. A store batch with any key covered by a pending delete is deferred as
+a whole; after all overlaps complete (successfully or not), the batch is submitted
+from the delete completion path before another delete can interleave.
+
+A native delete that does not complete within 30 seconds remains quarantined
+until its required completion arrives. During that interval, later deletes skip
+the affected keys, lookups for those keys resolve as misses, and stores containing
+those keys fail so their buffers are not retained indefinitely. Store, lookup,
+load, and delete submissions for unrelated keys continue.
 
 **Note on `FSL2Adapter`:** `delete()` and the listener events are implemented, so
 the base class tracks `total_bytes_used` from the store / delete notifications.
