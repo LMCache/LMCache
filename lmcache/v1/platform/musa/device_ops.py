@@ -12,14 +12,14 @@ the CUDA host-callback ABI.
 from __future__ import annotations
 
 # Standard
-from typing import ClassVar, TypeAlias, cast
+from typing import Any, ClassVar, TypeAlias, cast
 import ctypes
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.lmcache_native import EngineKVFormat, TransferDirection, is_kv_list
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.musa import native_kv_transfer
@@ -212,7 +212,7 @@ def _reconstruct_paged_layers(
 ) -> _PagedLayers:
     """Normalize pointer-form paged operands to non-owning MUSA views."""
     expected_layers = int(shape_desc.nl)
-    separate_kv_lists = is_kv_list(engine_kv_format)
+    separate_kv_lists = engine_kv_format.is_kv_list
     if separate_kv_lists:
         nested_layers = _kv_layer_lists(value)
         if nested_layers is not None:
@@ -353,7 +353,7 @@ class TorchMusaBlockTransfer:
             direction,
             shape_desc,
             lmcache_chunk_size,
-            engine_kv_format,
+            cast(Any, engine_kv_format),
             skip_prefix_n_blocks,
         )
 

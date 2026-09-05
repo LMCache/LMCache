@@ -471,7 +471,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             normalized_kv_caches, self.engine_kv_format
         )
         self.head_size = get_head_size(normalized_kv_caches, self.engine_kv_format)
-        self.use_mla = lmcache_native.is_mla(self.engine_kv_format)
+        self.use_mla = self.engine_kv_format.is_mla
         self.dtype = get_dtype(normalized_kv_caches, self.engine_kv_format)
         self.num_heads = (
             1

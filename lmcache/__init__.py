@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # First Party
+from lmcache.kv_layout import KVLayout, install_on_native_module
 from lmcache.logging import init_logger
 
 # --------------------------
@@ -11,13 +12,21 @@ from lmcache.v1.platform import torch_device_type as torch_device_type
 
 try:
     # First Party
+    import lmcache.lmcache_native as lmcache_native
+
+    install_on_native_module(lmcache_native)
+except ImportError:
+    pass
+
+try:
+    # First Party
     from lmcache._version import __version__
 except ImportError:
     __version__ = "unknown"
 
 logger = init_logger(__name__)
 
-__all__ = ["__version__", "torch_dev", "torch_device_type"]
+__all__ = ["__version__", "KVLayout", "torch_dev", "torch_device_type"]
 
 
 try:
