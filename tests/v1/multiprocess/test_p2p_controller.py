@@ -6,9 +6,11 @@ definitions, MemoryLayoutDesc wire serialization, and server handlers.
 
 # Standard
 from unittest.mock import MagicMock
+import threading
 
 # Third Party
 import httpx
+import pytest
 import torch
 
 # First Party
@@ -265,6 +267,102 @@ def test_query_lookup_results_exactly_once():
         TransferChannelAddress(offset=-1, size=0)
     ]
     assert controller.p2p_query_lookup_results(task_id) is None
+
+
+def test_query_lookup_results_is_single_consumer_under_concurrency():
+    """Concurrent queries must not consume or read one task twice."""
+    controller, ctx = _make_controller()
+    key = _make_key(0)
+    ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
+        l1_found_indices=(0,)
+    )
+    task_id = controller.p2p_lookup_and_lock([key], {0: _make_layout_desc()})
+
+    first_query_entered = threading.Event()
+    release_first_query = threading.Event()
+    second_query_done = threading.Event()
+    query_calls = 0
+    query_calls_lock = threading.Lock()
+
+    def query_prefetch_status(_handle: object) -> Bitmap:
+        """Hold the first status query open while the second caller runs."""
+        nonlocal query_calls
+        with query_calls_lock:
+            query_calls += 1
+            call_number = query_calls
+        if call_number == 1:
+            first_query_entered.set()
+            assert release_first_query.wait(timeout=1)
+        return Bitmap(1, 1)
+
+    ctx.storage_manager.query_prefetch_status.side_effect = query_prefetch_status
+    ctx.storage_manager.unsafe_read.return_value = (
+        [key],
+        [MagicMock(shm_offset=100, shm_byte_length=10)],
+    )
+
+    first_result: list[list[TransferChannelAddress] | None] = []
+    second_result: list[list[TransferChannelAddress] | None] = []
+
+    def query_first() -> None:
+        first_result.append(controller.p2p_query_lookup_results(task_id))
+
+    def query_second() -> None:
+        second_result.append(controller.p2p_query_lookup_results(task_id))
+        second_query_done.set()
+
+    first_thread = threading.Thread(target=query_first)
+    second_thread = threading.Thread(target=query_second)
+    first_thread.start()
+    assert first_query_entered.wait(timeout=1)
+    second_thread.start()
+
+    try:
+        # The second caller must observe the claim and finish without waiting
+        # for the first status query or starting another storage operation.
+        assert second_query_done.wait(timeout=1)
+    finally:
+        release_first_query.set()
+        first_thread.join(timeout=1)
+        second_thread.join(timeout=1)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert first_result == [[TransferChannelAddress(offset=100, size=10)]]
+    assert second_result == [None]
+    assert query_calls == 1
+    ctx.storage_manager.unsafe_read.assert_called_once_with([key])
+    assert controller.report_status()["active_p2p_lookup_jobs"] == 0
+
+
+def test_query_lookup_results_releases_claim_after_status_failure():
+    """A failed status query must leave the task available for retry."""
+    controller, ctx = _make_controller()
+    key = _make_key(0)
+    ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
+        l1_found_indices=(0,)
+    )
+    task_id = controller.p2p_lookup_and_lock([key], {0: _make_layout_desc()})
+
+    ctx.storage_manager.query_prefetch_status.side_effect = [
+        RuntimeError("status query failed"),
+        Bitmap(1, 1),
+    ]
+    ctx.storage_manager.unsafe_read.return_value = (
+        [key],
+        [MagicMock(shm_offset=100, shm_byte_length=10)],
+    )
+
+    with pytest.raises(RuntimeError, match="status query failed"):
+        controller.p2p_query_lookup_results(task_id)
+
+    assert controller.report_status()["active_p2p_lookup_jobs"] == 1
+    assert controller.p2p_query_lookup_results(task_id) == [
+        TransferChannelAddress(offset=100, size=10)
+    ]
+    assert controller.report_status()["active_p2p_lookup_jobs"] == 0
+    assert ctx.storage_manager.query_prefetch_status.call_count == 2
+    ctx.storage_manager.unsafe_read.assert_called_once_with([key])
 
 
 def test_query_lookup_results_unknown_task():
