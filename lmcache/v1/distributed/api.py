@@ -50,6 +50,27 @@ class L1BackendType(str, enum.Enum):
     GDS = "gds"
 
 
+@dataclass(frozen=True)
+class L1ObjectSnapshot:
+    """Independent byte snapshot of one node-local L1 object.
+
+    Attributes:
+        data: Logical object bytes, copied out of the backing allocation.
+        size_bytes: Number of logical bytes in ``data``.
+        backend: L1 storage medium that backed the source object.
+        memory_format: Stable name of the source object's memory format.
+        shapes: JSON-safe per-kernel-group tensor shapes, in layout order.
+        dtypes: Per-kernel-group dtype names, in layout order.
+    """
+
+    data: bytes
+    size_bytes: int
+    backend: L1BackendType
+    memory_format: str
+    shapes: tuple[tuple[int, ...], ...]
+    dtypes: tuple[str, ...]
+
+
 class TrimPolicy(enum.Enum):
     """How to pick the retained subset of found keys for a prefetch.
 

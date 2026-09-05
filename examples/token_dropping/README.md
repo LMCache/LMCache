@@ -17,7 +17,7 @@ throughput by 1.5-1.7x. The example also demonstrates that the generation
 accuracy is unaffected, even improved, by a good token dropping algorithm 
 (SnapKV was chosen for this demonstration).
 
-These examples use the LMCache SDK to do this: the SDK **retrieves** a 
+These examples use the LMCache SDK to do this: the SDK **retrieves** a
 request's cached tensors, **modifies** them, and **stores** them back for vLLM
 to decode from. Users only need to supply the token dropping function, and the
 SDK's batch and stream APIs does the job in an offline manner.

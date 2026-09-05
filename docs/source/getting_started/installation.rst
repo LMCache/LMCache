@@ -89,7 +89,7 @@ runtime, see :doc:`compatibility` before installing.
                             The wheel excludes torch and the ROCm runtime libraries (they bind to the
                             host image at runtime). Match the wheel's minor torch/ROCm version to your
                             container; for other bases, use the **From Source** tab.
-                            
+
                         .. note::
 
                             The ROCm wheel carries a ``+rocm7.2`` PEP 440 local version, so

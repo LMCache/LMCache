@@ -149,6 +149,10 @@ compatibility with the vLLM-embedded API server.
        ``keys``, ``tier``, ``force``, ``adapter``). ``force`` deletes L1 keys
        even if locked.
    * - POST
+     - ``/cache/objects/download``
+     - Download one node-local L1 object by exact ``EncodedObjectKey`` as raw
+       bytes. Supports DRAM and Device-DAX; GDS is not yet supported.
+   * - POST
      - ``/cache/prefetches``
      - Warm a node's L1 by loading a token sequence from L2 ahead of traffic;
        returns a ``request_id``.
@@ -662,10 +666,10 @@ When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
 Cache Objects And Prefetch
 --------------------------
 
-Two endpoints — ``DELETE /cache/objects`` and ``GET /cache/objects`` — let
-operators purge keys from a configured cache backend and enumerate what is
-currently resident. (To enumerate the configured backends themselves, use
-``GET /config/adapters`` in the config group.)
+Three endpoints under ``/cache/objects`` let operators purge keys, enumerate
+resident L2 objects, and download one node-local L1 object by exact key. (To
+enumerate the configured backends themselves, use ``GET /config/adapters`` in
+the config group.)
 
 A further pair — ``POST /cache/prefetches`` and
 ``GET /cache/prefetches/{request_id}`` — lets an operator (or the
@@ -791,6 +795,71 @@ with ``ok=false`` and an ``error`` field carrying the reason.
             ]
         }'
     # -> {"deleted": 2, "skipped": 0, "ok": true}
+
+``POST /cache/objects/download``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Download an independent snapshot of one object currently resident in this MP
+server's L1. The endpoint is node-local and accepts an exact
+``EncodedObjectKey``; it does not resolve tokens, query the coordinator, select
+a remote placement, or fall back to L2.
+
+The source object is protected only while its logical bytes and layout metadata
+are copied. Protection is released before the HTTP response is sent. Inspection
+does not update LRU state and is not counted as a normal cache retrieve.
+
+**Request body:**
+
+.. code-block:: json
+
+    {
+      "key": {
+        "chunk_hash_hex": "abc123",
+        "model_name": "meta-llama/Llama-3-8B",
+        "kv_rank": 0,
+        "object_group_id": 0,
+        "cache_salt": "user-a"
+      }
+    }
+
+Only one key is accepted per request. The key uses the same
+``EncodedObjectKey`` schema documented for ``DELETE /cache/objects`` above.
+
+**Response** (``200 OK``):
+
+- ``Content-Type: application/octet-stream``
+- Body: the object's logical raw bytes, excluding allocator alignment padding.
+- ``X-LMCache-Object-Metadata``: compact JSON containing ``size_bytes``,
+  ``backend``, ``memory_format``, and ordered ``shapes`` / ``dtypes`` arrays.
+
+For example, the metadata header may contain:
+
+.. code-block:: json
+
+    {"size_bytes":4194304,"backend":"dram","memory_format":"undefined","shapes":[[2,256,8,128]],"dtypes":["torch.bfloat16"]}
+
+DRAM and Device-DAX L1 objects are supported. GDS objects require a separate
+DMA/staging path and return ``501`` in this version.
+
+**HTTP status codes:**
+
+- ``200``: snapshot returned.
+- ``400``: malformed hex or another ``ObjectKey`` invariant violation.
+- ``404``: the exact key is not resident in this node's L1.
+- ``409``: the object exists but is temporarily unreadable, such as while a
+  writer holds it.
+- ``422``: request-body schema validation failure.
+- ``501``: the object is backed by unsupported GDS L1 storage.
+- ``503``: the MP server context is not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -sS -X POST http://localhost:8080/cache/objects/download \
+        -H 'Content-Type: application/json' \
+        -d '{"key":{"chunk_hash_hex":"aa","model_name":"m","kv_rank":0}}' \
+        -D object.headers -o object.bin
 
 ``GET /cache/objects``
 ~~~~~~~~~~~~~~~~~~~~~~

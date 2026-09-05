@@ -15,6 +15,8 @@ from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
+    L1BackendType,
+    L1ObjectSnapshot,
     MemoryLayoutDesc,
     ModuleMemoryCapacity,
     ObjectKey,
@@ -178,6 +180,54 @@ class StorageManager:
         )
 
     # External APIs for serving engine integration code to call
+    def snapshot_l1_object(
+        self, key: ObjectKey
+    ) -> tuple[L1Error, L1ObjectSnapshot | None]:
+        """Copy one node-local L1 object into an independent CPU snapshot.
+
+        The method owns the complete inspection lifecycle: it atomically
+        acquires read protection, copies metadata and logical bytes, and releases
+        protection before returning. Inspection does not touch LRU state or emit
+        normal L1-read observability events.
+
+        Args:
+            key: Exact object key to locate in this node's L1 cache.
+
+        Returns:
+            ``(SUCCESS, snapshot)`` on success. Missing, temporarily unreadable,
+            and unsupported-backend results return their corresponding
+            :class:`L1Error` with ``None``.
+
+        Note:
+            DRAM and Device-DAX objects are CPU-addressable. GDS objects are
+            rejected because their bytes require a GPU staging/DMA path.
+        """
+        with self._l1_manager.protected_read_for_inspection(key) as (error, obj):
+            if error != L1Error.SUCCESS or obj is None:
+                return error, None
+
+            backend = self._l1_manager.get_backend_type(obj)
+            if backend == L1BackendType.GDS:
+                return L1Error.UNSUPPORTED_BACKEND, None
+
+            shapes = tuple(
+                tuple(int(dim) for dim in shape) for shape in obj.get_shapes()
+            )
+            dtypes = tuple(str(dtype) for dtype in obj.get_dtypes())
+            memory_format = obj.get_memory_format().name.lower()
+            data = memoryview(obj.byte_array).cast("B").tobytes()
+            return (
+                L1Error.SUCCESS,
+                L1ObjectSnapshot(
+                    data=data,
+                    size_bytes=len(data),
+                    backend=backend,
+                    memory_format=memory_format,
+                    shapes=shapes,
+                    dtypes=dtypes,
+                ),
+            )
+
     @enable_tracing()
     def reserve_write(
         self,

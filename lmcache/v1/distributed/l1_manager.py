@@ -4,14 +4,15 @@ Managing objects and memory for L1 cache
 """
 
 # Standard
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal
+from typing import Iterator, Literal
 import threading
 
 # First Party
 from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
@@ -242,6 +243,39 @@ class L1Manager:
         with self._lock:
             self._registered_listeners.append(listener)
 
+    @contextmanager
+    def protected_read_for_inspection(
+        self, key: ObjectKey
+    ) -> Iterator[L1OperationResult]:
+        """Protect one object for a read-only management inspection.
+
+        Lookup and read-lock acquisition are atomic under the manager lock. The
+        yielded object remains protected from ordinary eviction and non-force
+        deletion until the context exits. Unlike :meth:`reserve_read`, this
+        lifecycle does not emit normal-read listener callbacks or observability
+        events and does not touch LRU state.
+
+        Args:
+            key: Object key to protect for inspection.
+
+        Yields:
+            ``(L1Error, MemoryObj | None)``. ``SUCCESS`` includes the protected
+            object; missing and temporarily unreadable objects include ``None``.
+
+        Note:
+            The protection uses the configured read-lock TTL. Force deletion or
+            force clearing retains its existing ability to ignore active locks.
+        """
+        with self._lock:
+            result = self._reserve_read_locked([key], total=1, emit_events=False)[key]
+
+        try:
+            yield result
+        finally:
+            if result[0] == L1Error.SUCCESS:
+                with self._lock:
+                    self._finish_read_locked([key], total=1, emit_events=False)
+
     @l1_mgr_synchronized
     def reserve_read(
         self,
@@ -268,35 +302,11 @@ class L1Manager:
                 readable.
         """
         total = _validate_read_locks(read_locks)
-        ret: dict[ObjectKey, L1OperationResult] = {}
-        successful_keys: list[ObjectKey] = []
-        for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                ret[key] = (L1Error.KEY_NOT_EXIST, None)
-                continue
-
-            if not entry.available_for_read():
-                ret[key] = (L1Error.KEY_NOT_READABLE, None)
-                continue
-
-            # TODO(perf): support a count argument in
-            # TTLLock.lock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
-            ret[key] = (L1Error.SUCCESS, entry.memory_obj)
-            successful_keys.append(key)
-
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_reserved_read(successful_keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_READ_RESERVED,
-                metadata={"keys": successful_keys},
-            )
+        return self._reserve_read_locked(
+            keys,
+            total=total,
+            emit_events=True,
         )
-        return ret
 
     @l1_mgr_synchronized
     def unsafe_read(
@@ -367,74 +377,11 @@ class L1Manager:
                 read inconsistent data.
         """
         total = _validate_read_locks(read_locks)
-        need_to_free: list[MemoryObj] = []
-        need_to_free_keys: list[ObjectKey] = []
-        ret: dict[ObjectKey, L1Error] = {}
-        successful_keys: list[ObjectKey] = []
-
-        for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                logger.warning(
-                    "L1Manager: finish read on non-existing key %s, "
-                    "potential inconsistent data might be read",
-                    key,
-                )
-                ret[key] = L1Error.KEY_NOT_EXIST
-                continue
-
-            if entry.write_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish read on write-locked key %s, "
-                    "potential inconsistent data might be read",
-                    key,
-                )
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                continue
-
-            if not entry.read_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish read on non-read-locked key %s, "
-                    "potential inconsistent data might be read",
-                    key,
-                )
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                continue
-
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
-            if entry.is_temporary and not entry.read_lock.is_locked():
-                # NOTE: temporary objects shouldn't have write-locks
-                need_to_free.append(entry.memory_obj)
-                need_to_free_keys.append(key)
-                del self._objects[key]
-
-            ret[key] = L1Error.SUCCESS
-            successful_keys.append(key)
-
-        freed_meta = [self._object_meta(obj) for obj in need_to_free]
-        self._memory_manager.free(need_to_free)
-
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_read_finished(successful_keys)
-            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_READ_FINISHED,
-                metadata={"keys": successful_keys},
-            )
+        return self._finish_read_locked(
+            keys,
+            total=total,
+            emit_events=True,
         )
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": need_to_free_keys, "meta": freed_meta},
-            )
-        )
-
-        return ret
 
     @l1_mgr_synchronized
     def reserve_write(
@@ -842,6 +789,17 @@ class L1Manager:
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
 
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
+        """Return the storage medium backing an L1 memory object.
+
+        Args:
+            memory_obj: Object allocated by this manager.
+
+        Returns:
+            The object's L1 backend type.
+        """
+        return self._memory_manager.get_backend_type(memory_obj)
+
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
         with self._lock:
@@ -918,6 +876,121 @@ class L1Manager:
             num_read_locked,
         )
         return mem_check_result
+
+    def _reserve_read_locked(
+        self,
+        keys: list[ObjectKey],
+        total: int,
+        emit_events: bool,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Acquire read locks while the caller holds the manager lock."""
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                ret[key] = (L1Error.KEY_NOT_EXIST, None)
+                continue
+
+            if not entry.available_for_read():
+                ret[key] = (L1Error.KEY_NOT_READABLE, None)
+                continue
+
+            # TODO(perf): support a count argument in TTLLock.lock() to avoid
+            # Python for-loop overhead (TTLLock is C++ std::atomic).
+            for _ in range(total):
+                entry.read_lock.lock()
+            ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+            successful_keys.append(key)
+
+        if emit_events:
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_reserved_read(successful_keys)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_RESERVED,
+                    metadata={"keys": successful_keys},
+                )
+            )
+        return ret
+
+    def _finish_read_locked(
+        self,
+        keys: list[ObjectKey],
+        total: int,
+        emit_events: bool,
+    ) -> dict[ObjectKey, L1Error]:
+        """Release read locks while the caller holds the manager lock."""
+        need_to_free: list[MemoryObj] = []
+        need_to_free_keys: list[ObjectKey] = []
+        ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
+
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                logger.warning(
+                    "L1Manager: finish read on non-existing key %s, "
+                    "potential inconsistent data might be read",
+                    key,
+                )
+                ret[key] = L1Error.KEY_NOT_EXIST
+                continue
+
+            if entry.write_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish read on write-locked key %s, "
+                    "potential inconsistent data might be read",
+                    key,
+                )
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
+
+            if not entry.read_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish read on non-read-locked key %s, "
+                    "potential inconsistent data might be read",
+                    key,
+                )
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
+
+            # TODO(perf): support a count argument in TTLLock.unlock() to avoid
+            # Python for-loop overhead (TTLLock is C++ std::atomic).
+            for _ in range(total):
+                entry.read_lock.unlock()
+            if entry.is_temporary and not entry.read_lock.is_locked():
+                # NOTE: temporary objects shouldn't have write-locks
+                need_to_free.append(entry.memory_obj)
+                need_to_free_keys.append(key)
+                del self._objects[key]
+
+            ret[key] = L1Error.SUCCESS
+            successful_keys.append(key)
+
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
+        self._memory_manager.free(need_to_free)
+
+        for listener in self._registered_listeners:
+            if emit_events:
+                listener.on_l1_keys_read_finished(successful_keys)
+            if emit_events or need_to_free_keys:
+                listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
+        if emit_events:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_FINISHED,
+                    metadata={"keys": successful_keys},
+                )
+            )
+        if emit_events or need_to_free_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_EVICTED,
+                    metadata={"keys": need_to_free_keys, "meta": freed_meta},
+                )
+            )
+        return ret
 
     def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
         """Build the listener-facing metadata for one resident object."""

@@ -28,7 +28,8 @@ class MPHTTPContext:
     Attributes:
         engine: The node's cache engine (``MPCacheServer``); the diagnostics
             handlers (clear / checksums) reach engine internals directly.
-        object_service: Key-addressed L1/L2 delete, adapter / object listing.
+        object_service: L1 download, key-addressed L1/L2 delete, and adapter /
+            object listing.
         prefetch_service: Warm-prefetch submit / status (owns the job table).
     """
 
