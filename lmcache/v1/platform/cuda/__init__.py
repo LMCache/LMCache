@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from typing import TYPE_CHECKING, Any
+import os
 
 # First Party
 from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -108,6 +109,8 @@ class CudaDeviceSpec(DeviceSpec):
 
     @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
+        if os.environ.get("LMCACHE_DISABLE_SHM_PIN") == "1":
+            return None
         return CudaPinMemoryBackend
 
     @property

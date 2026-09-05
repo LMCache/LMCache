@@ -29,6 +29,8 @@ LMCACHE_DIR="${LMCACHE_DIR:-$REPO_ROOT}"
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 
 DOCUMENT_LENGTH="${DOCUMENT_LENGTH:-10000}"
 NUM_DOCUMENTS="${NUM_DOCUMENTS:-30}"
@@ -111,10 +113,33 @@ fi
 echo "--- Launching LMCache MP server with L2 config ---"
 L2_ADAPTER_JSON="{\"type\":\"mock\",\"max_size_gb\":${L2_MAX_SIZE_GB},\"mock_bandwidth_gb\":${L2_BANDWIDTH_GB}}"
 
-# Determine GPU to use
+# Configure device affinity and preserve the transfer mode used by the
+# initial launcher when this script replaces the LMCache/vLLM pair.
 GPU_DEVICE="${GPU_FOR_VLLM:-0}"
+DEVICE_AFFINITY_VAR="CUDA_VISIBLE_DEVICES"
+VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="cuda")
+if [ "$TORCH_DEVICE_TYPE" = "xpu" ]; then
+    DEVICE_AFFINITY_VAR="ZE_AFFINITY_MASK"
+    VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="xpu")
+    unset CUDA_VISIBLE_DEVICES || true
+    if [ -f /opt/intel/oneapi/setvars.sh ]; then
+        # shellcheck disable=SC1091
+        source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+    fi
+fi
 
-CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
+L1_LAZY_ARG=""
+SHM_NAME_ARG=""
+if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+    L1_LAZY_ARG="--no-l1-use-lazy"
+    if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+        SHM_NAME_ARG="--shm-name ${BUILD_ID}_2"
+    fi
+fi
+TRANSFER_MODE_ARG="--supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+
+env "${DEVICE_AFFINITY_VAR}=${GPU_DEVICE}" \
+    "${VLLM_DEVICE_ENV[@]}" \
 lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy noop \
@@ -125,6 +150,9 @@ lmcache server \
     --metrics-sample-rate 1.0 \
     --http-port "$METRICS_HTTP_PORT" \
     --port "$LMCACHE_PORT" \
+    ${L1_LAZY_ARG} \
+    ${SHM_NAME_ARG} \
+    ${TRANSFER_MODE_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache_l2.log" 2>&1 &
 
 NEW_LMCACHE_PID=$!
@@ -134,27 +162,64 @@ echo "Waiting for LMCache L2 to initialize..."
 sleep 10
 
 echo "--- Launching vLLM with LMCache ---"
-# Compute GPU memory utilization for large GPUs
 GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_DEVICE}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-if [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
+if [ "$TORCH_DEVICE_TYPE" = "cuda" ]; then
+    GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_DEVICE}" | tr -d ' ')
+    GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
+    if [ "$GPU_MEMORY_GB" -gt 90 ]; then
+        GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
+    fi
+fi
+
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASH_ATTN}"
+ATTENTION_BACKEND_ARG=""
+if [ "$ATTENTION_BACKEND" != "auto" ]; then
+    ATTENTION_BACKEND_ARG="--attention-backend $ATTENTION_BACKEND"
+fi
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
+MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
+ENFORCE_EAGER_ARG=""
+if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
+    ENFORCE_EAGER_ARG="--enforce-eager"
+fi
+PREFIX_CACHING_ARG=""
+if [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "true" ]; then
+    PREFIX_CACHING_ARG="--no-enable-prefix-caching"
+fi
+CHUNKED_PREFILL_ARG=""
+if [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "1" ] || [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "true" ]; then
+    CHUNKED_PREFILL_ARG="--no-enable-chunked-prefill"
+fi
+MAX_NUM_BATCHED_TOKENS_ARG=""
+if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
+    MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
+fi
+MAX_NUM_SEQS_ARG=""
+if [ -n "${MAX_NUM_SEQS:-}" ]; then
+    MAX_NUM_SEQS_ARG="--max-num-seqs ${MAX_NUM_SEQS}"
 fi
 
 # Unset VLLM_PORT in child env so vLLM's torch.distributed picks a free port
 env -u VLLM_PORT \
-    CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
+    "${DEVICE_AFFINITY_VAR}=${GPU_DEVICE}" \
+    "${VLLM_DEVICE_ENV[@]}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
+    VLLM_BATCH_INVARIANT="${BATCH_INVARIANT:-1}" \
     PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
-    --attention-backend FLASH_ATTN \
+    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
+    $ATTENTION_BACKEND_ARG \
     --port "$VLLM_PORT" \
     --no-async-scheduling \
+    $MAX_MODEL_LEN_ARG \
+    $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
+    $PREFIX_CACHING_ARG \
+    $MAX_NUM_BATCHED_TOKENS_ARG \
+    $CHUNKED_PREFILL_ARG \
+    $MAX_NUM_SEQS_ARG \
     > "/tmp/build_${BUILD_ID}_vllm_l2.log" 2>&1 &
 
 NEW_VLLM_PID=$!

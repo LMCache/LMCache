@@ -26,9 +26,9 @@ NUM_PROMPTS="${NUM_PROMPTS:-50}"
 RANDOM_INPUT_LEN="${RANDOM_INPUT_LEN:-10000}"
 RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1}"
 RANDOM_SEED="${RANDOM_SEED:-42}"
-
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
 
 # Output directory
 FT_DIR="$RESULTS_DIR/fault_tolerance"
@@ -42,8 +42,28 @@ echo "Bench: $NUM_PROMPTS prompts, input_len=$RANDOM_INPUT_LEN, output_len=$RAND
 echo "Results dir: $FT_DIR"
 echo ""
 
+wait_for_port_release() {
+    local port="$1"
+    local service="$2"
+    local timeout_seconds=60
+    local deadline=$(( $(date +%s) + timeout_seconds ))
+
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local listener_pids
+        if ! timeout 1 bash -c "</dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
+            return 0
+        fi
+        listener_pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+        listener_pids="${listener_pids:-unknown}"
+        echo "Waiting for previous $service listener on port $port: $listener_pids"
+        sleep 2
+    done
+
+    echo "Previous $service listener still holds port $port: $listener_pids"
+    return 1
+}
+
 # ── Step 0: Restart LMCache + vLLM with fresh state ─────────
-# Previous steps may have left processes in an unknown state.
 # Restart both so vLLM registers its GPU context with the new server.
 echo "============================================"
 echo "=== Restarting LMCache + vLLM ==="
@@ -51,8 +71,23 @@ echo "============================================"
 
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 GPU_DEVICE="${GPU_FOR_VLLM:-0}"
+RESTART_SHM_NAME="${BUILD_ID}_2"
 
-# Kill existing LMCache + vLLM (keep baseline on line 3)
+# Device affinity is parameterized so the same fault-injection flow runs on
+# CUDA and XPU without duplicating the test script.
+DEVICE_AFFINITY_VAR="CUDA_VISIBLE_DEVICES"
+VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="cuda")
+if [ "$TORCH_DEVICE_TYPE" = "xpu" ]; then
+    DEVICE_AFFINITY_VAR="ZE_AFFINITY_MASK"
+    VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="xpu")
+    unset CUDA_VISIBLE_DEVICES || true
+    if [ -f /opt/intel/oneapi/setvars.sh ]; then
+        # shellcheck disable=SC1091
+        source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+    fi
+fi
+
+# Kill existing LMCache + vLLM (keep baseline on line 3).
 if [ -f "$PID_FILE" ]; then
     OLD_LMCACHE_PID=$(sed -n '1p' "$PID_FILE")
     OLD_VLLM_PID=$(sed -n '2p' "$PID_FILE")
@@ -60,51 +95,109 @@ if [ -f "$PID_FILE" ]; then
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "Killing PID $pid"
             kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
         fi
     done
     sleep 2
 fi
 
-# Launch LMCache with L1 config
-CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
+# launch-processes.sh owns these background children, so this shell cannot
+# wait on their PIDs. A released listener is the observable shutdown boundary.
+if ! wait_for_port_release "$LMCACHE_PORT" "LMCache"; then
+    exit 1
+fi
+if ! wait_for_port_release "$VLLM_PORT" "vLLM"; then
+    exit 1
+fi
+
+# Match the engine-driven L1 configuration used for the initial server, while
+# assigning this restarted server a distinct shared-memory segment.
+L1_LAZY_ARG=""
+SHM_NAME_ARG=""
+if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+    L1_LAZY_ARG="--no-l1-use-lazy"
+    if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+        SHM_NAME_ARG="--shm-name ${RESTART_SHM_NAME}"
+    fi
+fi
+TRANSFER_MODE_ARG="--supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+
+# Launch LMCache with L1 config.
+env "${DEVICE_AFFINITY_VAR}=${GPU_DEVICE}" \
+    "${VLLM_DEVICE_ENV[@]}" \
 lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
     --port "$LMCACHE_PORT" \
+    ${L1_LAZY_ARG} \
+    ${SHM_NAME_ARG} \
+    ${TRANSFER_MODE_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache_ft.log" 2>&1 &
 
 NEW_LMCACHE_PID=$!
 echo "LMCache server started (PID=$NEW_LMCACHE_PID)"
 sleep 10
 
-# Launch vLLM with LMCache
+# Launch vLLM with LMCache.
 GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_DEVICE}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-if [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
+if [ "$TORCH_DEVICE_TYPE" = "cuda" ]; then
+    GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_DEVICE}" | tr -d ' ')
+    GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
+    if [ "$GPU_MEMORY_GB" -gt 90 ]; then
+        GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
+    fi
 fi
 
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASH_ATTN}"
+BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
+ENFORCE_EAGER_ARG=""
+if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
+    ENFORCE_EAGER_ARG="--enforce-eager"
+fi
+PREFIX_CACHING_ARG=""
+if [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "true" ]; then
+    PREFIX_CACHING_ARG="--no-enable-prefix-caching"
+fi
+CHUNKED_PREFILL_ARG=""
+if [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "1" ] || [ "${VLLM_DISABLE_CHUNKED_PREFILL:-false}" = "true" ]; then
+    CHUNKED_PREFILL_ARG="--no-enable-chunked-prefill"
+fi
+MAX_NUM_BATCHED_TOKENS_ARG=""
+if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
+    MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
+fi
+MAX_NUM_SEQS_ARG=""
+if [ -n "${MAX_NUM_SEQS:-}" ]; then
+    MAX_NUM_SEQS_ARG="--max-num-seqs ${MAX_NUM_SEQS}"
+fi
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
+MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
+
 env -u VLLM_PORT \
-    CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
+    "${DEVICE_AFFINITY_VAR}=${GPU_DEVICE}" \
+    "${VLLM_DEVICE_ENV[@]}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
+    VLLM_BATCH_INVARIANT="${BATCH_INVARIANT}" \
     PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
-    --attention-backend FLASH_ATTN \
+    --attention-backend "$ATTENTION_BACKEND" \
     --port "$VLLM_PORT" \
     --no-async-scheduling \
+    $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
+    $PREFIX_CACHING_ARG \
+    $MAX_MODEL_LEN_ARG \
+    $MAX_NUM_BATCHED_TOKENS_ARG \
+    $CHUNKED_PREFILL_ARG \
+    $MAX_NUM_SEQS_ARG \
     > "/tmp/build_${BUILD_ID}_vllm_ft.log" 2>&1 &
 
 NEW_VLLM_PID=$!
 echo "vLLM started (PID=$NEW_VLLM_PID)"
 
-# Update PID file
+# Update PID file.
 if [ -f "$PID_FILE" ]; then
     sed -i "1s/.*/$NEW_LMCACHE_PID/" "$PID_FILE"
     sed -i "2s/.*/$NEW_VLLM_PID/" "$PID_FILE"
@@ -115,8 +208,8 @@ fi
 
 if ! wait_for_server "$VLLM_PORT" 300; then
     echo "vLLM failed to start"
-    tail -50 "/tmp/build_${BUILD_ID}_lmcache_ft.log" || true
-    tail -50 "/tmp/build_${BUILD_ID}_vllm_ft.log" || true
+    tail -200 "/tmp/build_${BUILD_ID}_lmcache_ft.log" || true
+    tail -200 "/tmp/build_${BUILD_ID}_vllm_ft.log" || true
     exit 1
 fi
 echo ""

@@ -753,6 +753,24 @@ class EngineDrivenTransferContext(TransferContext):
             instance_id,
             supported_transfer_mode,
         )
+        self._after_register()
+
+    def create_recorded_event(self) -> IPCEvent | None:
+        """Return no event for the synchronous engine-driven transfer path.
+
+        Returns:
+            ``None`` because store and retrieve synchronize the active device
+            before accessing or releasing KV-cache buffers.
+
+        Raises:
+            RuntimeError: If :meth:`register` has not completed.
+        """
+        if self._engine_driven_context is None:
+            raise RuntimeError(
+                "Engine-driven transfer context is not registered. "
+                "Call register() before creating transfer events."
+            )
+        return None
 
     def create_recorded_event(self) -> IPCEvent | None:
         """Return no event for the synchronous engine-driven transfer path.
@@ -865,6 +883,10 @@ class EngineDrivenTransferContext(TransferContext):
 
     def flush_inflight_stores(self) -> None:
         pass
+
+    def _after_register(self) -> None:
+        """Run subclass initialization that depends on registered KV layout."""
+        return None
 
 
 def create_transfer_context(

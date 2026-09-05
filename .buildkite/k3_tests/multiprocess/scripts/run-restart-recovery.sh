@@ -31,12 +31,15 @@ BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
+GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
 
 # Bench parameters — small enough for CI but big enough to register
 # a non-trivial l1_write_keys count per round.
 NUM_REQUESTS="${RR_NUM_REQUESTS:-100}"
 REQUEST_LEN="${RR_REQUEST_LEN:-5000}"
 KV_CACHE_VOLUME="${RR_KV_CACHE_VOLUME:-5}"
+TOKENS_PER_GB_KVCACHE="${RR_TOKENS_PER_GB_KVCACHE:-}"
 
 # Recovery timing
 RECOVER_TIMEOUT="${RR_RECOVER_TIMEOUT:-150}"
@@ -61,8 +64,15 @@ run_bench_round() {
     local label="$1"
     local seed=$2
     local out_subdir="$OUT_DIR/$label"
+    local tokens_per_gb_arg=()
     mkdir -p "$out_subdir"
     echo "--- bench round: $label ---"
+
+    if [ -n "$TOKENS_PER_GB_KVCACHE" ]; then
+        tokens_per_gb_arg=(
+            --tokens-per-gb-kvcache "$TOKENS_PER_GB_KVCACHE"
+        )
+    fi
 
     if ! lmcache bench engine \
         --engine-url "http://localhost:${VLLM_PORT}" \
@@ -71,6 +81,7 @@ run_bench_round() {
         --rp-num-requests "$NUM_REQUESTS" \
         --rp-request-length "$REQUEST_LEN" \
         --kv-cache-volume "$KV_CACHE_VOLUME" \
+        "${tokens_per_gb_arg[@]}" \
         --no-interactive \
         --no-csv \
         --json \
@@ -128,6 +139,34 @@ print(int(total))
 EOF
 }
 
+wait_for_l1_writes_to_settle() {
+    local timeout_seconds=60
+    local deadline=$(( $(date +%s) + timeout_seconds ))
+    local previous=-1
+    local stable_samples=0
+
+    echo "Waiting for asynchronous L1 stores to settle..."
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local current
+        current=$(scrape_l1_write_keys) || return 1
+
+        if [ "$current" -eq "$previous" ]; then
+            stable_samples=$((stable_samples + 1))
+            if [ "$stable_samples" -ge 3 ]; then
+                echo "L1 writes settled at $current chunks."
+                return 0
+            fi
+        else
+            previous=$current
+            stable_samples=0
+        fi
+        sleep 5
+    done
+
+    echo "FAIL: L1 writes did not settle within ${timeout_seconds}s"
+    return 1
+}
+
 wait_for_lmcache_http() {
     local deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -142,8 +181,8 @@ wait_for_lmcache_http() {
 }
 
 wait_for_worker_reregister() {
-    # Poll /status until cache_context_meta has at least one entry,
-    # which proves the vLLM worker re-registered with the new server.
+    # lmcache_driven workers populate cache_context_meta; engine_driven
+    # workers instead populate non_cuda_context_meta.
     local deadline=$(( $(date +%s) + RECOVER_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local count
@@ -152,7 +191,8 @@ import json, urllib.request
 try:
     body = urllib.request.urlopen("http://localhost:${LMCACHE_HTTP_PORT}/status", timeout=5).read()
     data = json.loads(body)
-    print(len(data.get("cache_context_meta", {})))
+    context_meta = data.get("cache_context_meta") or data.get("non_cuda_context_meta", {})
+    print(len(context_meta))
 except Exception:
     print(0)
 EOF
@@ -182,12 +222,40 @@ restart_lmcache() {
     sleep 60
 
     echo "Relaunching LMCache on port ${LMCACHE_PORT} / HTTP ${LMCACHE_HTTP_PORT}..."
+    local device_affinity_var="CUDA_VISIBLE_DEVICES"
+    local vllm_device_env=(VLLM_TARGET_DEVICE="cuda")
+    local l1_lazy_arg=""
+    local shm_name_arg=""
+    local transfer_mode_arg="--supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+
+    if [ "$TORCH_DEVICE_TYPE" = "xpu" ]; then
+        device_affinity_var="ZE_AFFINITY_MASK"
+        vllm_device_env=(VLLM_TARGET_DEVICE="xpu")
+        unset CUDA_VISIBLE_DEVICES || true
+        if [ -f /opt/intel/oneapi/setvars.sh ]; then
+            # shellcheck disable=SC1091
+            source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+        l1_lazy_arg="--no-l1-use-lazy"
+        if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+            shm_name_arg="--shm-name ${BUILD_ID}_2"
+        fi
+    fi
+
+    env "${device_affinity_var}=${GPU_FOR_VLLM}" \
+        "${vllm_device_env[@]}" \
     lmcache server \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
         --max-workers "$MAX_WORKERS" \
         --port "$LMCACHE_PORT" \
         --http-port "$LMCACHE_HTTP_PORT" \
+        ${l1_lazy_arg} \
+        ${shm_name_arg} \
+        ${transfer_mode_arg} \
         > "/tmp/build_${BUILD_ID}_lmcache_restart.log" 2>&1 &
 
     local new_pid=$!
@@ -200,10 +268,25 @@ restart_lmcache() {
 
 # ── Step 1: Bench round 1 ────────────────────────────────────
 echo "============================================"
+echo "=== Waiting for initial worker registration ==="
+echo "============================================"
+if ! wait_for_worker_reregister; then
+    echo "--- lmcache log (last 80 lines) ---"
+    tail -80 "/tmp/build_${BUILD_ID}_lmcache.log" 2>/dev/null || true
+    echo "--- vllm log (last 80 lines) ---"
+    tail -80 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
+    exit 1
+fi
+
+echo "============================================"
 echo "=== Round 1: bench against original server ==="
 echo "============================================"
 if ! run_bench_round "round1" "41"; then
     echo "FAIL: round 1 bench failed"
+    exit 1
+fi
+
+if ! wait_for_l1_writes_to_settle; then
     exit 1
 fi
 
@@ -250,6 +333,10 @@ if ! run_bench_round "round2" "42"; then
     echo "FAIL: round 2 bench failed"
     echo "--- vllm log (last 80 lines) ---"
     tail -80 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
+    exit 1
+fi
+
+if ! wait_for_l1_writes_to_settle; then
     exit 1
 fi
 
