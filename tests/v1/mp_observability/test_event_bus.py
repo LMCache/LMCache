@@ -446,6 +446,20 @@ class TestGlobalSingleton:
         assert get_event_bus() is new
         assert get_event_bus() is not old
 
+    def test_init_stops_previous_bus(self):
+        old = init_event_bus(EventBusConfig(enabled=True))
+        subscriber = _RecordingSubscriber()
+        subscriber.shutdown = MagicMock(wraps=subscriber.shutdown)
+        old.register_subscriber(subscriber)
+        old.start()
+
+        new = init_event_bus(EventBusConfig(enabled=False))
+
+        assert get_event_bus() is new
+        assert old._thread is not None
+        assert old._thread.is_alive() is False
+        subscriber.shutdown.assert_called_once_with()
+
     def test_default_singleton_is_disabled(self):
         bus = get_event_bus()
         assert bus._config.enabled is False
