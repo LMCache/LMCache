@@ -179,22 +179,32 @@ func prepareInjection(
 }
 
 // applyIPCSharing wires the pod for cross-pod CUDA IPC with the node-local
-// engine, mirroring the engine's spec.hostIPC mode. By default (hostIPC=false)
-// it mounts the host's /dev/shm into the target container via hostPath — the
-// CUDA IPC requirement is that both processes see the same /dev/shm
-// tmpfs (PyTorch's CUDA IPC handles reference a ref-counter file there). When
-// the engine opts into hostIPC, the pod instead joins the host IPC namespace,
-// which exposes the host's /dev/shm without a mount. A pod that already has
-// hostIPC enabled also needs no /dev/shm mount. Other user-supplied wiring is
-// left untouched: an existing mount at /dev/shm or an existing volume named
-// "lmcache-dev-shm" suppresses the injection.
+// engine, mirroring the engine's IPC mode. By default (hostIPC=false,
+// isolatedIPC=false) it mounts the host's /dev/shm into the target container
+// via hostPath — the CUDA IPC requirement is that both processes see the same
+// /dev/shm tmpfs (PyTorch's CUDA IPC handles reference a ref-counter file
+// there). When the engine opts into hostIPC, the pod instead joins the host
+// IPC namespace, which exposes the host's /dev/shm without a mount. A pod
+// that already has hostIPC enabled also needs no /dev/shm mount.
+//
+// When the engine runs isolated IPC (which overrides hostIPC), the handles
+// rendezvous in the kernel driver and nothing is shared with the engine at
+// all; the pod instead gets a pod-private memory-backed /dev/shm for vLLM's
+// own workers (Kubernetes' 64Mi default is too small for them, and today
+// they incidentally ride the host mount).
+//
+// In every mode, user-supplied wiring is left untouched: an existing mount at
+// /dev/shm or an existing volume named "lmcache-dev-shm" suppresses the
+// injection.
 //
 // Parameters:
 //   - pod: the decoded pod (mutated in place: hostIPC or volumes).
 //   - target: the resolved vLLM container (mutated in place: volume mount).
 //   - hostIPC: the engine's resolved spec.hostIPC value.
-func applyIPCSharing(pod *corev1.Pod, target *corev1.Container, hostIPC bool) {
-	if hostIPC {
+//   - isolatedIPC: the engine's resolved isolated-IPC mode
+//     (LMCacheEngineSpec.IsolatedIPCEnabled); takes priority over hostIPC.
+func applyIPCSharing(pod *corev1.Pod, target *corev1.Container, hostIPC, isolatedIPC bool) {
+	if hostIPC && !isolatedIPC {
 		pod.Spec.HostIPC = true
 	}
 	if pod.Spec.HostIPC {
@@ -208,7 +218,11 @@ func applyIPCSharing(pod *corev1.Pod, target *corev1.Container, hostIPC bool) {
 		resources.HasDevShmVolume(pod.Spec.Volumes) {
 		return
 	}
-	pod.Spec.Volumes = append(pod.Spec.Volumes, resources.BuildDevShmVolume())
+	if isolatedIPC {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, resources.BuildPrivateDevShmVolume())
+	} else {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, resources.BuildDevShmVolume())
+	}
 	target.VolumeMounts = append(target.VolumeMounts, resources.BuildDevShmVolumeMount())
 }
 

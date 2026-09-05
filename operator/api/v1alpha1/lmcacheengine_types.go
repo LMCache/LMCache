@@ -535,10 +535,31 @@ type LMCacheEngineSpec struct {
 	// unverified without hostIPC, so gpuVendor "amd" deployments should set it
 	// to true. When true, the /dev/shm hostPath mount is omitted (the shared
 	// namespace already exposes the host's /dev/shm). The injection webhook
-	// mirrors this setting on opted-in vLLM pods. Default: false.
+	// mirrors this setting on opted-in vLLM pods. Ignored when isolatedIPC
+	// resolves to true (see isolatedIPC). Default: false.
 	// +optional
 	// +kubebuilder:default=false
 	HostIPC *bool `json:"hostIPC,omitempty"`
+
+	// isolatedIPC makes the engine and the opted-in vLLM pods exchange KV
+	// caches and completion events through driver-level CUDA IPC alone
+	// (LMCache's --isolated-ipc mode): no host IPC namespace and no shared
+	// /dev/shm are needed, so pods stay fully isolated. Unset means auto:
+	// enabled for gpuVendor "nvidia", disabled for "amd" (the isolated-IPC
+	// backends are NVIDIA-only). It deliberately carries no static default:
+	// the effective value depends on gpuVendor, so the operator resolves it
+	// wherever it reads the spec, and an explicit value always wins. When it
+	// resolves to true it takes priority over hostIPC and the /dev/shm
+	// sharing: the engine pod gets neither, the server is started with
+	// --isolated-ipc, the connection ConfigMap carries lmcache.mp.isolated_ipc,
+	// and the injection webhook gives opted-in vLLM pods a pod-private
+	// memory-backed /dev/shm instead of the host mount. Requires an LMCache
+	// image that understands --isolated-ipc; set to false to keep the legacy
+	// /dev/shm-sharing wiring (e.g. for older images, or for allocators backed
+	// by the CUDA VMM API, which driver-level CUDA IPC cannot share — vLLM
+	// sleep mode / expandable segments).
+	// +optional
+	IsolatedIPC *bool `json:"isolatedIPC,omitempty"`
 
 	// privileged runs the engine container in privileged mode. On some clusters
 	// this is required for the engine to see all node GPUs (for CUDA IPC) without
