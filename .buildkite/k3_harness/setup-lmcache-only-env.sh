@@ -20,5 +20,11 @@ echo "--- :python: Installing LMCache from source (no vLLM)"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 uv pip install -e . --no-build-isolation
 
+# Editable installs do not run setuptools' build_py hook. Install the pinned
+# generator and create the ignored bindings required when server.py is imported.
+uv pip install -r requirements/proto.txt
+echo "--- :gear: Generating LMCache gRPC bindings"
+python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py"
+
 echo "--- :white_check_mark: Environment ready (LMCache only, no vLLM)"
 python -c "import lmcache; print('LMCache installed from source')"

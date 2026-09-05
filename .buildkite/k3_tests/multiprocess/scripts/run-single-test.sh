@@ -22,6 +22,7 @@ export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
+export DEFAULT_MODEL="${DEFAULT_MODEL:-Qwen/Qwen3-14B}"
 export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
 
 case "${LMCACHE_REQUEST_TRANSPORT}" in
@@ -89,9 +90,9 @@ elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # vLLM's default paged-block size is 16 tokens. Matching it keeps this
     # test's expected LMCache chunk counts exact and small.
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
-    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else
-    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 fi
 export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 export MAX_WORKERS="${MAX_WORKERS:-4}"
@@ -121,8 +122,12 @@ SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp dsv4_flash_tp "
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
+# Respect an explicit environment override from a device-specific wrapper
+# before applying the default baseline heuristic below.
 BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
-if [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
+if [ -n "${LAUNCH_BASELINE:-}" ]; then
+    export LAUNCH_BASELINE
+elif [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
     export LAUNCH_BASELINE=true
 else
     export LAUNCH_BASELINE=false
