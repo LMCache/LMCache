@@ -615,10 +615,23 @@ class LMCacheEngine:
             objects (on CPU) and puts the memory objects of layer i-1 to the
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
+
+            The generator yields ``num_layers + 1`` times on **every** path,
+            including the ones that skip the store (freeze mode, or an
+            unhealthy engine). Callers commit to that number of advances
+            before they can know the outcome -- the vLLM v1 connector
+            advances once per layer in ``save_kv_layer`` and once more in
+            ``wait_for_save`` -- so a path that yields fewer times raises
+            ``StopIteration`` inside the serving loop.
         """
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
             logger.warning("LMCache is unhealthy, skipping store_layer operation")
+            # Callers commit to a fixed number of advances before they can know
+            # whether the store will be skipped, so every exit path has to yield
+            # the same number of times (see the docstring).
+            for _ in range(self.num_layers + 1):
+                yield
             return
 
         assert self.storage_manager is not None
@@ -650,9 +663,12 @@ class LMCacheEngine:
                 "Freeze mode enabled, skipping store_layer for %d tokens",
                 num_to_store_tokens,
             )
-            # Still need to yield to avoid StopIteration
+            # Still need to yield to avoid StopIteration: once per layer plus
+            # the final yield the hit and miss paths below both reach.
             for layer_id in range(self.num_layers):
                 yield
+            self.stats_monitor.on_store_finished(monitor_req_id, 0)
+            yield
             return
 
         starts = []
