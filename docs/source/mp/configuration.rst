@@ -771,6 +771,12 @@ All connector-level options are passed through
      - ``10``
      - Maximum number of finished requests selected each time the
        lazy-offload threshold is met.
+   * - ``lmcache.mp.enable_lookup``
+     - ``true``
+     - When ``false``, the connector skips all LMCache lookups and only
+       stores KV caches. Useful in vLLM MultiConnector topologies where
+       another connector (e.g. Mooncake) handles KV loading and LMCache
+       is only used as an offload/distributed store.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
