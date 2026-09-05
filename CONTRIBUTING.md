@@ -100,10 +100,35 @@ Push the branch to your fork and open a PR against `dev`.
 - **Open it as a draft** if you want early feedback on unfinished work, and mark it ready for
   review when it is done.
 
-Opening the PR triggers the code-quality and test workflows. Both must pass before a
-maintainer will merge; if one fails, read the job log, push a fix, and the checks re-run.
+### 5. What CI runs on your PR
 
-### 5. Ask for a review in Slack
+Opening or updating a PR triggers a set of GitHub Actions workflows, plus a DCO check and a
+Buildkite pipeline that report back as PR checks. The path filters mostly separate
+operator-only changes from everything else, so a docs-only PR still runs most of the matrix.
+
+| Check | Runs on | Covers |
+|---|---|---|
+| **DCO** | every PR | every commit carries a `Signed-off-by` trailer |
+| **Code Quality** | every PR outside `operator/` | `pre-commit run --all-files` — ruff, ruff-format, isort, mypy, codespell, clang-format, and the repo's local hooks (SPDX headers, banned APIs) |
+| **Test** | PRs to `dev` and `release-**` outside `operator/` | CPU-only unit tests, `pytest -m "not (cuda or musa or xpu or npu or neuron)"`, on Python 3.10–3.13 |
+| **CPU device** | every PR outside `operator/` | server benchmarks and vLLM end-to-end tests on CPU, on `ubuntu-22.04` and `macos-latest` |
+| **CodeQL** | PRs to `dev` | static analysis of the Python code and the Actions workflows |
+| **Operator CI** | PRs touching `operator/` | the Go operator's own build and test suite |
+| **actionlint** | PRs touching `.github/workflows/` | workflow-file linting |
+| **PR Full Build** | PRs carrying the `full` label | builds the sdist and the CUDA, CLI, and cu129 wheels. The label is applied automatically when auto-merge is enabled on a PR, so it is normally a maintainer's doing rather than something you add |
+
+GPU coverage does not run in GitHub Actions. It runs on Buildkite — unit tests on a GPU
+runner plus the vLLM integration suite — and posts its own `buildkite/...` check, so read
+that one too rather than only the green Actions checks.
+
+All of this runs on draft PRs as well, so you can open a draft and let CI tell you what is
+broken before you ask anyone to look.
+
+If a check fails, open its log from the **Checks** tab on the PR, reproduce and fix it
+locally, and push again. Every push re-runs the checks and cancels the previous in-flight
+run for that PR.
+
+### 6. Ask for a review in Slack
 
 Opening a PR does not notify a particular person. [`CODEOWNERS`](.github/CODEOWNERS)
 automatically requests review from the owners of the paths you touched, but the reliable way
@@ -120,7 +145,7 @@ the paths you changed — the goal is simply that a specific person knows the PR
 Please do follow up if your PR goes quiet: a PR with no activity for 60 days is marked
 `stale` and closed 30 days after that.
 
-### 6. Review, revisit, merge
+### 7. Review, revisit, merge
 
 - Maintainers review against [Section 9 of the coding standard](docs/coding_standards.md#9-code-review-process).
   Reading it first tells you what they will look for.
