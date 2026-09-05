@@ -957,6 +957,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self._cleanup_request_tracker(request.request_id)
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
+        # Drop lookup state for a request aborted before its lookup was
+        # consumed (update_state_after_alloc never ran for it).
+        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
         return True, return_params
 
