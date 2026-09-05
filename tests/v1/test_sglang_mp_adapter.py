@@ -69,6 +69,7 @@ def _make_connector(healthy: bool = True) -> Any:
         conn._health_event.set()
     conn._lmcache_chunk_size = _CHUNK_SIZE
     conn._mq_timeout = 5.0
+    conn._event_backend = _FakeEventBackend()
     return conn
 
 
@@ -106,7 +107,11 @@ class _FakeRaw:
     def __init__(self, future: MessagingFuture) -> None:
         self._future = future
 
-    def to_device_future(self, device=None) -> MessagingFuture:
+    def to_device_future(
+        self,
+        device=None,
+        event_backend=None,
+    ) -> MessagingFuture:
         return self._future
 
 
@@ -119,6 +124,17 @@ class _FakeEvent:
 
     def ipc_handle(self) -> bytes:
         return b"fake-ipc-handle"
+
+
+class _FakeEventBackend:
+    def create_event(self, device: object) -> _FakeEvent:
+        return _FakeEvent()
+
+    def record_event(self, event: _FakeEvent, stream: object) -> None:
+        event.record(stream)
+
+    def export_event(self, event: _FakeEvent, device: object) -> bytes:
+        return event.ipc_handle()
 
 
 class _FakeTorchDev:

@@ -69,12 +69,17 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     worker._req_client = MagicMock(name="req_client")
     worker._mq_timeout = 5.0
     worker._instance_id = 42
+    worker._device = "cpu"
     worker._create_key = MagicMock(return_value=SimpleNamespace())
 
     event = MagicMock(name="event")
     event.ipc_handle.return_value = b"producer-event"
-    monkeypatch.setattr(module, "check_interprocess_event_support", MagicMock())
-    monkeypatch.setattr(module.torch_dev, "Event", MagicMock(return_value=event))
+    event_backend = MagicMock(name="event_backend")
+    event_backend.create_event.return_value = event
+    event_backend.export_event.side_effect = (
+        lambda exported_event, device: exported_event.ipc_handle()
+    )
+    worker._event_backend = event_backend
 
     device_future = MagicMock(name="device_future")
     device_future.result.return_value = False
@@ -85,5 +90,8 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     with pytest.raises(RuntimeError, match="refusing to use unloaded KV blocks"):
         worker.start_load_kv(MagicMock(name="stream"))
 
-    raw_future.to_device_future.assert_called_once_with()
+    raw_future.to_device_future.assert_called_once_with(
+        device="cpu",
+        event_backend=event_backend,
+    )
     device_future.result.assert_called_once_with(timeout=5.0)

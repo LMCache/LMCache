@@ -8,12 +8,15 @@ Covers:
 """
 
 # Standard
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 import argparse
+import gc
 import json
 import threading
 import time
+import weakref
 
 # Third Party
 import msgspec
@@ -1270,7 +1273,6 @@ class TestClientMultiWorker:
             tensor_refs.append(weakref.ref(tensor))
             return [tensor], [object()], [], []
 
-        monkeypatch.setattr(sv_helpers, "_make_event_handle", lambda: b"")
         monkeypatch.setattr(
             sv_helpers,
             "_allocate_cpu_shm_kv_cache",
@@ -1400,3 +1402,144 @@ class TestClientMultiWorker:
             "LOOKUP payload tp_size must equal simulated tp "
             "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])
         )
+
+
+class _ExportedEvent:
+    pass
+
+
+class _LifetimeCheckingFuture:
+    def __init__(
+        self,
+        result: tuple[int, bool],
+        get_event_ref: Callable[[], weakref.ReferenceType[_ExportedEvent] | None],
+    ) -> None:
+        self._result = result
+        self._get_event_ref = get_event_ref
+        self.event_was_alive_during_result = False
+
+    def result(self, timeout: float | None = None) -> tuple[int, bool]:
+        event_ref = self._get_event_ref()
+        self.event_was_alive_during_result = (
+            event_ref is not None and event_ref() is not None
+        )
+        return self._result
+
+
+class _LifetimeCheckingClient:
+    def __init__(self, future: _LifetimeCheckingFuture) -> None:
+        self.future = future
+        self.calls: list[tuple[RequestType, list[object]]] = []
+
+    def store(
+        self,
+        key: object,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> _LifetimeCheckingFuture:
+        self.calls.append(
+            (RequestType.STORE, [key, instance_id, block_ids, event_ipc_handle])
+        )
+        return self.future
+
+    def retrieve(
+        self,
+        key: object,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        skip_first_n_tokens: int,
+    ) -> _LifetimeCheckingFuture:
+        self.calls.append(
+            (
+                RequestType.RETRIEVE,
+                [
+                    key,
+                    instance_id,
+                    block_ids,
+                    event_ipc_handle,
+                    skip_first_n_tokens,
+                ],
+            )
+        )
+        return self.future
+
+
+@pytest.mark.parametrize(
+    ("request_type", "invoke", "expected_status"),
+    [
+        (
+            RequestType.STORE,
+            lambda helpers, client, key: helpers._send_store(  # noqa: SLF001
+                client,
+                key,
+                block_size=2,
+                num_engine_group_infos=1,
+                use_gpu=True,
+                use_handle=True,
+            ),
+            "stored",
+        ),
+        (
+            RequestType.RETRIEVE,
+            lambda helpers, client, key: helpers._send_retrieve(  # noqa: SLF001
+                client,
+                key,
+                chunk_size=2,
+                hit_chunks=1,
+                block_size=2,
+                num_engine_group_infos=1,
+                use_gpu=True,
+                use_handle=True,
+            ),
+            "retrieved",
+        ),
+    ],
+)
+def test_handle_mode_keeps_exported_event_alive_until_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    request_type: RequestType,
+    invoke,
+    expected_status: str,
+) -> None:
+    """A blocking handle-mode RPC keeps its producer event until the reply."""
+    # First Party
+    from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+
+    event_ref: weakref.ReferenceType[_ExportedEvent] | None = None
+
+    def make_exported_event(
+        event_backend: object | None,
+        use_gpu: bool = True,
+    ) -> tuple[_ExportedEvent, bytes]:
+        nonlocal event_ref
+        event = _ExportedEvent()
+        event_ref = weakref.ref(event)
+        return event, b"evt-handle"
+
+    future = _LifetimeCheckingFuture((0, True), lambda: event_ref)
+    client = _LifetimeCheckingClient(future)
+    key = _make_key((0, 9906, 9906, 9906), request_id="req-handle")
+
+    monkeypatch.setattr(
+        sv_helpers,
+        "_make_exported_event",
+        make_exported_event,
+    )
+
+    status = invoke(sv_helpers, client, key)
+
+    assert status == expected_status
+    assert client.calls == [
+        (
+            request_type,
+            [key, 0, [[0, 1]], b"evt-handle"]
+            if request_type is RequestType.STORE
+            else [key, 0, [[0]], b"evt-handle", 0],
+        )
+    ]
+    assert future.event_was_alive_during_result is True
+    assert event_ref is not None
+    gc.collect()
+    assert event_ref() is None

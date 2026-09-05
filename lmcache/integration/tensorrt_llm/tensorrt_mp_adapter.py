@@ -34,12 +34,16 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType, check_interprocess_event_support
+from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
 from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
@@ -274,6 +278,8 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
         self._instance_id = os.getpid()
         self._registered = False
+        self._device: torch.device | None = None
+        self._event_backend: EventIPCBackend | None = None
 
         # Third Party
         import tensorrt_llm
@@ -343,6 +349,9 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             "head_dim": head_dim,
         }
 
+        event_backend = get_event_ipc_backend(kv_cache_tensor.device)
+        event_backend.check_event_support(kv_cache_tensor.device)
+
         future = self._req_client.register_kv_cache(
             self._instance_id,
             wrapped,
@@ -352,9 +361,12 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             layout_hints,
             [],
         )
+
         try:
             future.result(timeout=self._mq_timeout)
             self._registered = True
+            self._device = kv_cache_tensor.device
+            self._event_backend = event_backend
             logger.info(
                 "LMCache MP worker: registered KV caches "
                 "(tensor_shape=%s, NH=%d, BS=%d, HS=%d)",
@@ -376,10 +388,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             return
 
         t0 = time.perf_counter()
-        # Not all backends support interprocess Events (CUDA IPC specific)
-        check_interprocess_event_support()
-        event = torch_dev.Event(interprocess=True)
-        event.record(stream)
+        event = self._create_and_record_event(stream)
 
         for req_id, spec in meta.loads.items():
             if not spec.tokens or not spec.block_ids:
@@ -392,10 +401,13 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                         key,
                         self._instance_id,
                         [spec.block_ids],
-                        event.ipc_handle(),
+                        self._export_event(event),
                         0,  # skip_first_n_tokens
                     )
-                    .to_device_future()
+                    .to_device_future(
+                        device=self._device,
+                        event_backend=self._event_backend,
+                    )
                     .result(timeout=self._mq_timeout)
                 )
             except Exception as e:
@@ -435,10 +447,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             return
 
         t0 = time.perf_counter()
-        # Not all backends support interprocess Events (CUDA IPC specific)
-        check_interprocess_event_support()
-        event = torch_dev.Event(interprocess=True)
-        event.record(stream)
+        event = self._create_and_record_event(stream)
 
         for req_id, spec in meta.saves.items():
             if not spec.tokens or not spec.block_ids:
@@ -451,9 +460,12 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                         key,
                         self._instance_id,
                         [spec.block_ids],
-                        event.ipc_handle(),
+                        self._export_event(event),
                     )
-                    .to_device_future()
+                    .to_device_future(
+                        device=self._device,
+                        event_backend=self._event_backend,
+                    )
                     .result(timeout=self._mq_timeout)
                 )
                 if not success:
@@ -481,3 +493,23 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
     ) -> Tuple[List[int], List[int]]:
         """All operations are synchronous — nothing is ever pending."""
         return [], []
+
+    def _create_and_record_event(self, stream: object) -> object:
+        """Create and record an event for the registered KV cache device."""
+        if self._device is None or self._event_backend is None:
+            raise RuntimeError(
+                "LMCache MP worker: KV caches must be registered before "
+                "submitting transfer requests"
+            )
+        event = self._event_backend.create_event(self._device)
+        self._event_backend.record_event(event, stream)
+        return event
+
+    def _export_event(self, event: object) -> bytes:
+        """Export ``event`` with the backend selected at registration."""
+        if self._device is None or self._event_backend is None:
+            raise RuntimeError(
+                "LMCache MP worker: KV caches must be registered before "
+                "submitting transfer requests"
+            )
+        return self._event_backend.export_event(event, self._device)

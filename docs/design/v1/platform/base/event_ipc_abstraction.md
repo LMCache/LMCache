@@ -195,25 +195,25 @@ resolution; the selection is module-level, not spec-instance state, so every
 
 ```text
 Worker adapter
-  create/record producer event using its existing device API
-  get_event_ipc_backend(device)
-  export_event(producer_event, device)
+  after mode/config selection: resolve and validate event_backend once
+  event_backend.create_event / record_event / export_event
   send event handle in STORE/RETRIEVE
 
 Server: lmcache_driven_transfer.py
-  get_event_ipc_backend(cache_context.device)
-  check_event_support(device)
-  import_event(worker_handle, device)
-  wait_event(imported_event, cache_context.stream)
+  at KV registration: resolve, validate, and cache event_backend in ContextEntry
+  event_backend.import_event / wait_event
   enqueue KV transfer
-  create_event(device), record_event(done_event, stream)
-  export_event(done_event, device)
+  event_backend.create_event / record_event / export_event
 
 Worker: futures.py
-  get_event_ipc_backend(device)
-  import_event(server_handle, device)
-  query_event / wait_event / synchronize_event
+  reuse the transfer context's cached event_backend
+  event_backend.import_event / query_event / wait_event / synchronize_event
 ```
+
+Backend lookup and capability validation belong to initialization or cache
+registration, after process-wide IPC configuration is finalized. Request hot
+paths call the cached backend directly; they do not repeat platform discovery
+or support probing for each event operation.
 
 The following generic modules use only the platform API:
 
@@ -227,7 +227,8 @@ alias for `to_device_future()`.
 
 ## Error Contract
 
-`check_event_support(device)` runs before any cross-process memory transfer.
+`event_backend.check_event_support(device)` runs once during initialization or
+registration, before any cross-process memory transfer.
 The default backend rejects missing `Event`, missing `interprocess` support, or
 missing `Event.from_ipc_handle`. The MUSA backend additionally rejects a
 disabled/unavailable MUSA event API, a missing TorchMUSA module, or an event

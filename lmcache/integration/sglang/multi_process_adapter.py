@@ -36,6 +36,10 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform import get_device_spec
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
 from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
 
 if TYPE_CHECKING:
@@ -186,6 +190,8 @@ class LMCacheMPConnector:
         self.worker_id = rank
         self.page_size = page_size
         self.device = device
+        self._event_backend: EventIPCBackend = get_event_ipc_backend(device)
+        self._event_backend.check_event_support(device)
         self.model_name = sgl_config.model_path
         self.num_layers = len(k_pool)
         self.tp_group = tp_group
@@ -456,8 +462,8 @@ class LMCacheMPConnector:
         MessagingFuture[tuple[bytes, bool]],
         MessagingFuture[bool],
     ]:
-        event = torch_dev.Event(interprocess=True)
-        event.record(torch_dev.current_stream())
+        event = self._event_backend.create_event(self.device)
+        self._event_backend.record_event(event, torch_dev.current_stream())
         raw_future: MessagingFuture[tuple[bytes, bool]] = self.req_client.retrieve(
             self._create_key(
                 token_ids,
@@ -469,10 +475,13 @@ class LMCacheMPConnector:
             # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
             # non-hybrid, so wrap the flat list as a single group.
             [block_ids],
-            event.ipc_handle(),
+            self._event_backend.export_event(event, self.device),
             skip_prefix_n_blocks,
         )
-        future = raw_future.to_device_future(device=self.device)
+        future = raw_future.to_device_future(
+            device=self.device,
+            event_backend=self._event_backend,
+        )
         # The daemon imports this IPC event after the request crosses the wire.
         # Retain the exporting event until the returned future is released so
         # its underlying handle cannot be destroyed during that interval.
@@ -609,8 +618,8 @@ class LMCacheMPConnector:
         block_ids = self._slot_mapping_to_block_ids(
             store_metadata.kv_indices[:aligned_end]
         )
-        event = torch_dev.Event(interprocess=True)
-        event.record(torch_dev.current_stream())
+        event = self._event_backend.create_event(self.device)
+        self._event_backend.record_event(event, torch_dev.current_stream())
         future = self.req_client.store(
             self._create_key(
                 store_metadata.token_ids,
@@ -622,8 +631,11 @@ class LMCacheMPConnector:
             # STORE takes per-group block IDs (list[list[int]]); SGLang is
             # non-hybrid, so wrap the flat list as a single group.
             [block_ids],
-            event.ipc_handle(),
-        ).to_device_future(device=self.device)
+            self._event_backend.export_event(event, self.device),
+        ).to_device_future(
+            device=self.device,
+            event_backend=self._event_backend,
+        )
         # Keep the exporting device event alive until the caller releases the
         # future. Since we return without blocking, the local ``event`` would
         # otherwise be garbage-collected immediately, destroying the underlying
@@ -645,8 +657,8 @@ class LMCacheMPConnector:
         block_ids = self._slot_mapping_to_block_ids(
             store_metadata.kv_indices[:aligned_end]
         )
-        event = torch_dev.Event(interprocess=True)
-        event.record(torch_dev.current_stream())
+        event = self._event_backend.create_event(self.device)
+        self._event_backend.record_event(event, torch_dev.current_stream())
         success = (
             self.req_client.store(
                 self._create_key(
@@ -659,9 +671,12 @@ class LMCacheMPConnector:
                 # STORE takes per-group block IDs (list[list[int]]); SGLang is
                 # non-hybrid, so wrap the flat list as a single group.
                 [block_ids],
-                event.ipc_handle(),
+                self._event_backend.export_event(event, self.device),
             )
-            .to_device_future(device=self.device)
+            .to_device_future(
+                device=self.device,
+                event_backend=self._event_backend,
+            )
             .result(timeout=self._mq_timeout)
         )
         # END_SESSION is owned by ``LMCRadixCache.cache_finished_req`` so
