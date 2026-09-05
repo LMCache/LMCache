@@ -66,6 +66,13 @@ Please try to classify PRs for easy understanding of the type of changes. The PR
 
     If the PR spans more than one category, please include all relevant prefixes
 
+A conventional-commit type is equally acceptable in place of the bracket, and is in wide use
+on :code:`dev`: :code:`fix:`, :code:`feat:`, :code:`docs:`, :code:`ci:`, :code:`refactor:`,
+:code:`perf:`, :code:`test:`, :code:`chore:`, :code:`build:`.
+
+Naming the component as well helps reviewers spot their area quickly -- as a second bracket
+(:code:`[MP][Bugfix] ...`) or as a conventional-commit scope (:code:`fix(mp): ...`).
+
 It's best to break your contribution into smaller PRs with incremental changes, and include a good description of the changes. We require new unit tests to be contributed with any new functionality added and docs if user facing changes.
 
 Before sending pull requests, make sure your changes pass code quality checks and unit tests. These checks will run when the pull request builds. Alternatively, you can run the checks manually on your local machine `as specified in Development <#development>`_ .
