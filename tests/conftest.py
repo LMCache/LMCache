@@ -698,6 +698,8 @@ def lmserver_v1_process(request):
 
     # Start the process
     max_retries = 5
+    server_started = False
+    last_error = ""
     while max_retries > 0:
         max_retries -= 1
         port_number = random.randint(10000, 65500)
@@ -713,15 +715,28 @@ def lmserver_v1_process(request):
 
         successful = False
         if proc.poll() is not None:
-            successful = True
+            last_error = (
+                f"LMCache server exited during startup with return code "
+                f"{proc.returncode}"
+            )
         else:
             successful = ensure_connection("localhost", port_number)
+            if not successful:
+                last_error = (
+                    f"LMCache server did not accept TCP connections on "
+                    f"localhost:{port_number}"
+                )
 
         if not successful:
-            proc.terminate()
-            proc.wait()
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait()
         else:
+            server_started = True
             break
+
+    if not server_started:
+        pytest.fail(f"Failed to start LMCache server after 5 attempts: {last_error}")
 
     # Yield control back to the test until it finishes
     server_url = f"lm://localhost:{port_number}"
