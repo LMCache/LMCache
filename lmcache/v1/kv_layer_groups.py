@@ -245,8 +245,46 @@ class KernelGroupInfo:
 
     @property
     def hidden_dim_size(self) -> int:
-        """Hidden dimension size (``num_heads * head_size``)."""
+        """Physical engine hidden dimension (``num_heads * head_size``)."""
         return self.shape_desc.nh * self.shape_desc.hs
+
+    def get_lmcache_shape(self, num_tokens: int) -> torch.Size:
+        """Return this group's stable LMCache memory-object shape.
+
+        ``shape_desc`` describes the physical engine pool. Fused formats use
+        one plane whose trailing content packs K and V, while LMCache's
+        ``KV_2LTD`` objects keep two canonical planes. Normalizing here keeps
+        allocations identical before and after the layer-groups manager is
+        registered in :class:`LMCacheMetadata`.
+
+        Args:
+            num_tokens: Number of tokens represented by the memory object.
+
+        Returns:
+            The canonical LMCache tensor shape for this kernel group.
+
+        Raises:
+            ValueError: If a fused format reports an odd packed head size.
+        """
+        kv_size = self.shape_desc.kv_size
+        head_size = self.shape_desc.hs
+        if self.engine_kv_format is not None:
+            # Import lazily to avoid the kv_format -> utils -> kv_layer_groups
+            # cycle during module initialization.
+            # First Party
+            from lmcache.v1.gpu_connector.kv_format import get_spec_class
+
+            if get_spec_class(self.engine_kv_format).is_fused_packed:
+                if head_size % 2 != 0:
+                    raise ValueError(
+                        "fused K/V content size must contain two equal K/V "
+                        f"halves, got {head_size}"
+                    )
+                kv_size = 2
+                head_size //= 2
+        return torch.Size(
+            [kv_size, self.num_layers, num_tokens, self.shape_desc.nh * head_size]
+        )
 
     @property
     def slots_per_block(self) -> int:

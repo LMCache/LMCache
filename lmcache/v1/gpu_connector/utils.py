@@ -366,6 +366,40 @@ def get_head_size(
     return get_spec(kv_caches, engine_kv_format).head_size(layer_idx)
 
 
+def get_transfer_head_size(
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int = 0,
+) -> int:
+    """Return the per-K/V head size expected by token-transfer kernels.
+
+    Fused formats expose their packed trailing content size through
+    :func:`get_head_size`. Transfer kernels address K and V independently, so
+    they require the size of one half instead. Non-fused and MLA formats use
+    their reported head size unchanged.
+
+    Args:
+        kv_caches: Registered KV-cache tensors.
+        engine_kv_format: Detected physical engine layout.
+        layer_idx: Layer whose geometry should be inspected.
+
+    Returns:
+        The per-K/V head size in tensor elements.
+
+    Raises:
+        ValueError: If a fused format reports an odd packed content size.
+    """
+    head_size = get_head_size(kv_caches, engine_kv_format, layer_idx)
+    if get_spec_class(engine_kv_format).is_fused_packed:
+        if head_size % 2 != 0:
+            raise ValueError(
+                "fused K/V content size must contain two equal K/V halves, "
+                f"got {head_size}"
+            )
+        return head_size // 2
+    return head_size
+
+
 def get_tokens_per_layer(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
