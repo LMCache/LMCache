@@ -23,14 +23,11 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.futures_layerwise import LayerwiseDeviceMessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.mq_streaming import submit_streaming_request
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     IPCEvent,
     LMCacheDrivenTransferContext,
-    SendRequest,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.base.event_pool import EventPool
 
 logger = init_logger(__name__)
@@ -51,9 +48,8 @@ class LMCacheLayerwiseTransferContext(LMCacheDrivenTransferContext):
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
-        mq_client: MessageQueueClient,
+        req_client: RequestClient,
         mq_timeout: float,
-        send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
@@ -70,18 +66,13 @@ class LMCacheLayerwiseTransferContext(LMCacheDrivenTransferContext):
             model_name,
             world_size,
             _blocks_in_chunk,
-            mq_client,
+            req_client,
             mq_timeout,
-            send_request,
             layout_hints=layout_hints,
             engine_group_infos=engine_group_infos,
             engine_type=engine_type,
         )
-        future = send_request(
-            mq_client,
-            RequestType.REGISTER_LAYERWISE_IPC_EVENT_POOL,
-            [instance_id],
-        )
+        future = req_client.register_layerwise_ipc_event_pool(instance_id)
         try:
             layerwise_batch, pool_handles = future.result(timeout=mq_timeout)
         except TimeoutError:
@@ -154,8 +145,7 @@ class LMCacheLayerwiseTransferContext(LMCacheDrivenTransferContext):
                 engine-side writes.
         """
         if (
-            self._mq_client is None
-            or self._send_request is None
+            self._req_client is None
             or self._device is None
             or self._event_backend is None
         ):
@@ -168,19 +158,21 @@ class LMCacheLayerwiseTransferContext(LMCacheDrivenTransferContext):
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         # The server answers a layer-wise retrieve with one message per
         # layer batch, so the future has to exist, and know how to re-arm
-        # itself, before the request reaches the polling loop.  That is what
-        # ``submit_streaming_request`` arranges; the per-chunk
-        # ``submit_request`` is left untouched by this path.
+        # itself, before the request reaches the polling loop.  That is why
+        # ``retrieve_layerwise`` takes the future as an argument; the
+        # per-chunk request path is left untouched.
         layerwise_future: LayerwiseDeviceMessagingFuture = (
             LayerwiseDeviceMessagingFuture(
                 device=self._device,
                 event_pool=self._event_pool,
             )
         )
-        submit_streaming_request(
-            self._mq_client,
-            RequestType.RETRIEVE_LAYERWISE,
-            [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens],
+        self._req_client.retrieve_layerwise(
+            key,
+            instance_id,
+            block_ids,
+            event_ipc_handle,
+            skip_first_n_tokens,
             layerwise_future.raw_future_,
         )
         return layerwise_future

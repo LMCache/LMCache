@@ -21,10 +21,8 @@ from typing import Any, Callable, Optional
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.futures_layerwise import LayerwiseRawFuture
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
-    MessageQueueClient,
     MessageQueueServer,
     RequestHandlerBase,
     ResponseType,
@@ -165,47 +163,3 @@ class StreamingMessageQueueServer(MessageQueueServer):
             self.add_streaming_handler(request_type, payload_clss, handler)
             return
         super().add_handler(request_type, payload_clss, handler_type, handler)
-
-
-def submit_streaming_request(
-    client: MessageQueueClient,
-    request_type: RequestType,
-    request_payloads: list[Any],
-    future: LayerwiseRawFuture,
-) -> LayerwiseRawFuture:
-    """Submit a request whose reply arrives as several frames.
-
-    The streaming counterpart of ``MessageQueueClient.submit_request``.  It
-    exists separately so the per-chunk client keeps no notion of multi-frame
-    replies: the only difference is that the future is supplied by the
-    caller and bound to the pending-request table first, so it can re-arm
-    itself between frames.  Binding must happen before the request reaches
-    the polling loop, because a reply can land the moment it does.
-
-    The request-building below deliberately mirrors
-    ``MessageQueueClient.submit_request``; the two are pinned together by
-    ``test_streaming_submit_matches_the_base_client`` so this copy cannot
-    silently fall behind.
-
-    Args:
-        client: The client to submit through.
-        request_type: The type of the request.
-        request_payloads: The payloads of the request.
-        future: The future to complete, created by the caller so that
-            per-layer state is attached before any frame can arrive.
-
-    Returns:
-        The same future, now registered with the polling loop.
-    """
-    request_uid = next(client._request_counter)
-    future.bind_registry(client.pending_futures, request_uid)
-    client.input_queue.put(
-        MessageQueueClient.WrappedRequest(
-            request_uid=request_uid,
-            future=future,
-            request_type=request_type,
-            request_payloads=request_payloads,
-        )
-    )
-    client._polling_loop.notify()
-    return future
