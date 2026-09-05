@@ -12,5 +12,11 @@
 # at that index) won't resolve it. See the "LMCache on MACA" installation
 # docs for the index URL. --no-deps (the documented default self-compile
 # flow) skips this file's contents entirely either way.
+#
+# triton is needed by lmcache.v1.compute.attention.triton_kernels. Unlike
+# mainstream PyPI torch (which pulls in a compatible triton automatically),
+# MACA's own torch wheel does not declare it as a dependency, so it must be
+# installed explicitly -- also from MetaX's pip index, not PyPI.
 
 mcpy
+triton
