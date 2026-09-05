@@ -654,3 +654,113 @@ class TestSubmitPutTask:
         memory_obj.get_physical_size.assert_not_called()
         memory_obj.ref_count_up.assert_not_called()
         callback.assert_not_called()
+
+
+class TestRestartPersistence:
+    """Regression tests for issue #1175.
+
+    KV chunks written to the local disk backend must remain reusable after a
+    process restart.  A restart is modelled by dropping a backend and creating
+    a brand-new one over the same directory: the new backend starts with an
+    empty in-memory index (``self.dict``), so it must rebuild index entries
+    from what is already on disk instead of forcing recomputation.
+    """
+
+    _SHAPE = torch.Size([28, 2, 256, 8, 128])
+    _DTYPE = torch.bfloat16
+    _FMT = MemoryFormat.KV_2LTD
+
+    def _make_backend(self, disk_path, loop, cpu_backend) -> LocalDiskBackend:
+        config = create_test_config(disk_path)
+        return LocalDiskBackend(
+            config=config,
+            loop=loop,
+            local_cpu_backend=cpu_backend,
+            dst_device=f"{torch_device_type}:0",
+        )
+
+    def _nbytes(self) -> int:
+        n = self._DTYPE.itemsize
+        for s in self._SHAPE:
+            n *= s
+        return n
+
+    def _store(self, backend: LocalDiskBackend, key: CacheEngineKey) -> bytes:
+        """Persist a chunk through the backend exactly like
+        ``async_save_bytes_to_disk`` does: write the raw ``.pt`` file, then
+        register the key via ``insert_key``.
+        """
+        path = backend._key_to_path(key)
+        data = os.urandom(self._nbytes())
+        with open(path, "wb") as f:
+            f.write(data)
+        backend.insert_key(
+            key,
+            size=len(data),
+            shape=self._SHAPE,
+            dtype=self._DTYPE,
+            fmt=self._FMT,
+        )
+        return data
+
+    def test_contains_after_restart(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """contains() must find a chunk written before a restart."""
+        key = create_test_key(300)
+        b1 = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+        data = self._store(b1, key)
+        assert b1.contains(key)
+        path = b1._key_to_path(key)
+
+        # --- restart: fresh backend over the same directory ---
+        b2 = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+        assert os.path.exists(path), "the .pt file must survive the restart"
+        assert len(b2.dict) == 0, "a fresh backend starts with an empty index"
+
+        assert b2.contains(key), "cached chunk should be reusable after restart"
+
+        mem = b2.get_blocking(key)
+        assert mem is not None
+        assert bytes(mem.byte_array) == data, "recovered data must be intact"
+        local_cpu_backend.memory_allocator.close()
+
+    def test_batched_async_contains_after_restart(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """The async (batched) lookup path must also recover from disk."""
+        keys = [create_test_key(i) for i in range(310, 313)]
+        b1 = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+        for k in keys:
+            self._store(b1, k)
+
+        b2 = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+        n = async_loop.run_until_complete(
+            b2.batched_async_contains("lookup", keys, pin=False)
+        )
+        assert n == len(keys)
+        local_cpu_backend.memory_allocator.close()
+
+    def test_no_recovery_without_data(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """A key that was never stored is still a miss after a restart."""
+        b = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+        assert not b.contains(create_test_key(320))
+        local_cpu_backend.memory_allocator.close()
+
+    def test_inflight_write_not_recovered(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """A chunk whose write is still in progress must not be recovered as a
+        hit, because its file/metadata may be incomplete."""
+        key = create_test_key(330)
+        b1 = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+        self._store(b1, key)
+
+        b2 = self._make_backend(temp_disk_path, async_loop, local_cpu_backend)
+        b2.disk_worker.insert_put_task(key)
+        assert not b2.contains(key), "in-flight write must not be a recovered hit"
+        b2.disk_worker.remove_put_task(key)
+        assert b2.contains(key), "recovery succeeds once the write completes"
+        local_cpu_backend.memory_allocator.close()

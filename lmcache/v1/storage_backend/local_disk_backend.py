@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
+import json
 import os
 import threading
 import time
@@ -15,7 +16,13 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    TORCH_DTYPE_TO_STR_DTYPE,
+    CacheEngineKey,
+    DiskCacheMetadata,
+    _lmcache_nvtx_annotate,
+)
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -207,13 +214,124 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> str:
         return os.path.join(self.path, key.to_string().replace("/", "-") + ".pt")
 
+    def _meta_path(self, path: str) -> str:
+        """Sidecar path holding the metadata needed to reconstruct a chunk.
+
+        The ``.pt`` file stores raw KV bytes only (see ``write_file``), so
+        shape / dtype / format are persisted alongside it to survive a
+        restart (issue #1175).
+        """
+        return path + ".meta"
+
+    def _persist_metadata(
+        self,
+        path: str,
+        size: int,
+        shape: Optional[torch.Size],
+        dtype: Optional[torch.dtype],
+        fmt: Optional[MemoryFormat],
+        cached_positions: Optional[torch.Tensor],
+    ) -> None:
+        """Write the sidecar metadata for a stored chunk.
+
+        The write is atomic (temp file + ``os.replace``) so a crash mid-write
+        never leaves a half-written sidecar that recovery would trust.
+        """
+        meta = {
+            "size": int(size),
+            "shape": list(shape) if shape is not None else None,
+            "dtype": (
+                TORCH_DTYPE_TO_STR_DTYPE.get(dtype) if dtype is not None else None
+            ),
+            "fmt": fmt.value if fmt is not None else None,
+            "cached_positions": (
+                cached_positions.tolist() if cached_positions is not None else None
+            ),
+        }
+        meta_path = self._meta_path(path)
+        tmp_path = meta_path + ".tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(meta, f)
+            os.replace(tmp_path, meta_path)
+        except OSError as e:
+            logger.warning("Failed to persist disk cache metadata for %s: %s", path, e)
+
+    def _recover_from_disk(self, key: CacheEngineKey) -> bool:
+        """Rebuild an in-memory index entry from a chunk already on disk.
+
+        A fresh backend starts with an empty ``self.dict``, so a chunk written
+        by a previous run would be a miss and get recomputed (issue #1175).
+        When an in-memory lookup misses, we fall back to the filesystem: if the
+        deterministic ``.pt`` path and its sidecar both exist, the entry is
+        reconstructed and inserted into ``self.dict``.
+
+        :returns: True if the key is now present in ``self.dict``.
+        """
+        # A chunk whose write is still in flight may have an incomplete file
+        # or no sidecar yet — never recover it.
+        if self.exists_in_put_tasks(key):
+            return False
+
+        path = self._key_to_path(key)
+        meta_path = self._meta_path(path)
+        if not (os.path.exists(path) and os.path.exists(meta_path)):
+            return False
+
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            shape = torch.Size(meta["shape"]) if meta.get("shape") is not None else None
+            dtype_str = meta.get("dtype")
+            dtype = (
+                STR_DTYPE_TO_TORCH_DTYPE[dtype_str] if dtype_str is not None else None
+            )
+            fmt = MemoryFormat(meta["fmt"]) if meta.get("fmt") is not None else None
+            cached_positions = (
+                torch.tensor(meta["cached_positions"])
+                if meta.get("cached_positions") is not None
+                else None
+            )
+            size = int(meta.get("size", os.path.getsize(path)))
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as e:
+            logger.warning(
+                "Failed to recover disk cache metadata from %s: %s", meta_path, e
+            )
+            return False
+
+        with self.disk_lock:
+            if key in self.dict:
+                # Another thread recovered it first.
+                return True
+            self.dict[key] = DiskCacheMetadata(
+                path, size, shape, dtype, cached_positions, fmt, 0
+            )
+            self.cache_policy.update_on_put(key)
+            self.current_cache_size += size
+            self.usage += size
+
+        self.stats_monitor.update_local_storage_usage(self.usage)
+        return True
+
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
+        with self.disk_lock:
+            if key in self.dict:
+                if pin:
+                    self.dict[key].pin()
+                    # vllm lookup sets pin to True
+                    self.keys_in_request.append(key)
+                return True
+
+        # Miss in memory: the chunk may still be on disk from a previous run
+        # (issue #1175). Attempt lazy recovery before declaring a miss.
+        if not self._recover_from_disk(key):
+            return False
+
         with self.disk_lock:
             if key not in self.dict:
                 return False
             if pin:
                 self.dict[key].pin()
-                # vllm lookup sets pin to True
                 self.keys_in_request.append(key)
             return True
 
@@ -273,6 +391,13 @@ class LocalDiskBackend(StorageBackendInterface):
 
             os.remove(path)
 
+            # Remove the recovery sidecar too so it cannot outlive its data
+            # (issue #1175).
+            try:
+                os.remove(self._meta_path(path))
+            except FileNotFoundError:
+                pass
+
             if force:
                 self.cache_policy.update_on_force_evict(key)
 
@@ -306,6 +431,12 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.dict[key] = DiskCacheMetadata(
                     path, size, shape, dtype, cached_positions, fmt, 0
                 )
+
+        # Persist a sidecar so this chunk can be recovered after a restart
+        # (issue #1175). Only for newly stored keys — an existing key already
+        # has its sidecar on disk.
+        if not has_stored:
+            self._persist_metadata(path, size, shape, dtype, fmt, cached_positions)
 
         # Push kv admit msg with batching
         if self.batched_msg_sender is not None and not has_stored:
@@ -612,10 +743,17 @@ class LocalDiskBackend(StorageBackendInterface):
         pin: bool = False,
     ) -> int:
         num_hit_counts = 0
-        with self.disk_lock:
-            for key in keys:
+        for key in keys:
+            with self.disk_lock:
+                present = key in self.dict
+            # Fall back to disk for chunks cached before a restart (#1175).
+            if not present:
+                present = self._recover_from_disk(key)
+            if not present:
+                break
+            with self.disk_lock:
                 if key not in self.dict:
-                    return num_hit_counts
+                    break
                 if pin:
                     self.dict[key].pin()
                     self.keys_in_request.append(key)
