@@ -49,7 +49,7 @@ agents:
 
 steps:
   - label: ":pipeline: Upload pipeline"
-    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/xpu/pipeline.yml
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/xpu/unittests/pipeline.yml
 ```
 
 ## What this pipeline does
