@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
+#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4
+#              | hma_lm_eval_qwen3_5 | hma_faithfulness_qwen3_5 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
 #              | restart_recovery | lazy_offload | gds_smoke_test
 #
@@ -60,6 +61,20 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     export BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
     export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
     export LIMIT="${LIMIT:-300}"
+elif [ "$TEST_NAME" = "hma_faithfulness_qwen3_5" ]; then
+    # Single-request transfer-faithfulness test on the same Mamba/GDN hybrid
+    # as hma_lm_eval_qwen3_5 (see run-hma-faithfulness.sh). One in-flight
+    # request at temperature 0 is deterministic even for GDN, so it compares
+    # the store and hit completions exactly instead of within a tolerance.
+    export MODEL="${MODEL:-Qwen/Qwen3.5-0.8B}"
+    export ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
+    # LMCache chunk size must be a multiple of the unified vLLM block size (544).
+    export CHUNK_SIZE="${CHUNK_SIZE:-544}"
+    # GDN supports only the 'align' Mamba cache mode.
+    export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
+    export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-544}"
+    # GDN has no batch-invariant kernels.
+    export BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
 elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
     # Self-contained test: run-kimi-linear-tp.sh owns the server lifecycle and
     # all launch flags (TP=2, trust-remote-code, align, chunk/batch sizes). Only
@@ -161,6 +176,9 @@ case "$TEST_NAME" in
         ;;
     hma_lm_eval_qwen3_5)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
+        ;;
+    hma_faithfulness_qwen3_5)
+        exec_script="${SCRIPT_DIR}/run-hma-faithfulness.sh"
         ;;
     vllm_bench)
         exec_script="${SCRIPT_DIR}/run-vllm-bench.sh"

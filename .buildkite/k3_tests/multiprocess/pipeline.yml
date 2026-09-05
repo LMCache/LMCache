@@ -222,6 +222,25 @@ steps:
 
       # Temporarily disabled: hma_lm_eval_gemma4.
 
+      # Checks that KV served by LMCache reproduces the engine-computed
+      # completion exactly on a Mamba/GDN hybrid. One arm per attention
+      # backend: FLASHINFER sub-pages the attention tensor and FLASH_ATTN
+      # does not, so they take different LMCache transfer paths.
+      - label: ":compression: hma_faithfulness_qwen3_5 / {{matrix.backend}}"
+        command: |
+          export ATTENTION_BACKEND="{{matrix.backend}}"
+          .buildkite/k3_tests/multiprocess/run.sh hma_faithfulness_qwen3_5
+        matrix:
+          setup:
+            backend:
+              - "FLASH_ATTN"
+              - "FLASHINFER"
+        timeout_in_minutes: 20
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: fault_tolerance"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
         timeout_in_minutes: 30
