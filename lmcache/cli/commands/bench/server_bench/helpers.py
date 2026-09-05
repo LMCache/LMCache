@@ -146,19 +146,22 @@ _TIMEOUT = object()
 def _wait_for_result(
     future: MessagingFuture[Any],
     timeout_s: float = _DEFAULT_RPC_TIMEOUT_S,
-    retain_refs: tuple[object, ...] = (),
+    keep_alive: tuple[object, ...] = (),
 ) -> Any:
     """Wait for an RPC future and convert a timeout to ``_TIMEOUT``.
 
     Returns the decoded response (possibly ``None`` for void replies)
-    on success, or the sentinel ``_TIMEOUT`` on RPC timeout.
+    on success, or the sentinel ``_TIMEOUT`` on RPC timeout. Objects in
+    ``keep_alive`` remain strongly referenced for the duration of the wait.
     """
-    for ref in retain_refs:
-        future.retain_reference(ref)
     try:
         return future.result(timeout=timeout_s)
     except TimeoutError:
         return _TIMEOUT
+    finally:
+        # Keep resources such as exported IPC events alive until the blocking
+        # RPC wait finishes without transferring their ownership to the future.
+        _ = keep_alive
 
 
 # ------------------------------------------------------------------ #
@@ -821,7 +824,7 @@ def _send_store(
         num_blocks = num_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
         event, event_handle = _make_exported_event(use_gpu)
-        retain_refs = (event,) if event is not None else ()
+        keep_alive = (event,) if event is not None else ()
         result = _wait_for_result(
             client.store(
                 key,
@@ -829,7 +832,7 @@ def _send_store(
                 [block_ids] * num_engine_group_infos,
                 event_handle,
             ),
-            retain_refs=retain_refs,
+            keep_alive=keep_alive,
         )
         if result is _TIMEOUT:
             return "timeout"
@@ -895,7 +898,7 @@ def _send_retrieve(
         num_blocks = hit_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
         event, event_handle = _make_exported_event(use_gpu)
-        retain_refs = (event,) if event is not None else ()
+        keep_alive = (event,) if event is not None else ()
         result = _wait_for_result(
             client.retrieve(
                 key,
@@ -904,7 +907,7 @@ def _send_retrieve(
                 event_handle,
                 0,  # skip_first_n_tokens
             ),
-            retain_refs=retain_refs,
+            keep_alive=keep_alive,
         )
         if result is _TIMEOUT:
             return "timeout"

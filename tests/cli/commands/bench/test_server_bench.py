@@ -8,12 +8,15 @@ Covers:
 """
 
 # Standard
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 import argparse
+import gc
 import json
 import threading
 import time
+import weakref
 
 # Third Party
 import msgspec
@@ -1356,20 +1359,30 @@ class TestClientMultiWorker:
         )
 
 
-class _RetainingFuture:
-    def __init__(self, result):
+class _ExportedEvent:
+    pass
+
+
+class _LifetimeCheckingFuture:
+    def __init__(
+        self,
+        result: tuple[int, bool],
+        get_event_ref: Callable[[], weakref.ReferenceType[_ExportedEvent] | None],
+    ) -> None:
         self._result = result
-        self.retained_references: list[object] = []
+        self._get_event_ref = get_event_ref
+        self.event_was_alive_during_result = False
 
-    def retain_reference(self, value: object) -> None:
-        self.retained_references.append(value)
-
-    def result(self, timeout=None):
+    def result(self, timeout: float | None = None) -> tuple[int, bool]:
+        event_ref = self._get_event_ref()
+        self.event_was_alive_during_result = (
+            event_ref is not None and event_ref() is not None
+        )
         return self._result
 
 
-class _RetainingClient:
-    def __init__(self, future: _RetainingFuture) -> None:
+class _LifetimeCheckingClient:
+    def __init__(self, future: _LifetimeCheckingFuture) -> None:
         self.future = future
         self.calls: list[tuple[RequestType, list[object]]] = []
 
@@ -1379,7 +1392,7 @@ class _RetainingClient:
         instance_id: int,
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
-    ) -> _RetainingFuture:
+    ) -> _LifetimeCheckingFuture:
         self.calls.append(
             (RequestType.STORE, [key, instance_id, block_ids, event_ipc_handle])
         )
@@ -1392,7 +1405,7 @@ class _RetainingClient:
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int,
-    ) -> _RetainingFuture:
+    ) -> _LifetimeCheckingFuture:
         self.calls.append(
             (
                 RequestType.RETRIEVE,
@@ -1439,25 +1452,34 @@ class _RetainingClient:
         ),
     ],
 )
-def test_handle_mode_retains_exported_event_until_reply(
+def test_handle_mode_keeps_exported_event_alive_until_reply(
     monkeypatch: pytest.MonkeyPatch,
     request_type: RequestType,
     invoke,
     expected_status: str,
 ) -> None:
-    """Single-shot handle-mode RPCs must retain the exported producer event."""
+    """A blocking handle-mode RPC keeps its producer event until the reply."""
     # First Party
     from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
 
-    event = object()
-    future = _RetainingFuture((0, True))
-    client = _RetainingClient(future)
+    event_ref: weakref.ReferenceType[_ExportedEvent] | None = None
+
+    def make_exported_event(
+        use_gpu: bool = True,
+    ) -> tuple[_ExportedEvent, bytes]:
+        nonlocal event_ref
+        event = _ExportedEvent()
+        event_ref = weakref.ref(event)
+        return event, b"evt-handle"
+
+    future = _LifetimeCheckingFuture((0, True), lambda: event_ref)
+    client = _LifetimeCheckingClient(future)
     key = _make_key((0, 9906, 9906, 9906), request_id="req-handle")
 
     monkeypatch.setattr(
         sv_helpers,
         "_make_exported_event",
-        lambda use_gpu=True: (event, b"evt-handle"),
+        make_exported_event,
     )
 
     status = invoke(sv_helpers, client, key)
@@ -1471,4 +1493,7 @@ def test_handle_mode_retains_exported_event_until_reply(
             else [key, 0, [[0]], b"evt-handle", 0],
         )
     ]
-    assert future.retained_references == [event]
+    assert future.event_was_alive_during_result is True
+    assert event_ref is not None
+    gc.collect()
+    assert event_ref() is None
