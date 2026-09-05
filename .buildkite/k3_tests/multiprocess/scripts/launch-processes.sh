@@ -16,20 +16,38 @@ CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
+VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:?VLLM_TARGET_DEVICE must be exported by the test entry point}"
+DEVICE_AFFINITY_VAR="${DEVICE_AFFINITY_VAR:?DEVICE_AFFINITY_VAR must be exported by the test entry point}"
+GPU_MEMORY_PROBE_ENABLED="${GPU_MEMORY_PROBE_ENABLED:-1}"
+BATCH_INVARIANT_DEFAULT="${BATCH_INVARIANT_DEFAULT:-1}"
+
+VLLM_DEVICE_ENV=(VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}")
 
 # K8s assigns exactly 2 GPUs as devices 0 and 1 (overridable for local runs).
 GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
 GPU_FOR_BASELINE="${GPU_FOR_BASELINE:-1}"
-echo "Using GPU $GPU_FOR_VLLM for vLLM with LMCache"
-echo "Using GPU $GPU_FOR_BASELINE for vLLM baseline"
+echo "Using CARD $GPU_FOR_VLLM for vLLM with LMCache"
+echo "Using CARD $GPU_FOR_BASELINE for vLLM baseline"
 
 # Check GPU memory and set gpu-memory-utilization for very large GPUs.
 # Without this, vLLM allocates so much KV cache that APC covers all prefixes
 # and LMCache's cache path is never exercised, making the test pass vacuously.
 GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_FOR_VLLM}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
+GPU_MEMORY_GB=0
+if [ "${GPU_MEMORY_PROBE_ENABLED}" = "1" ] || [ "${GPU_MEMORY_PROBE_ENABLED}" = "true" ]; then
+    GPU_MEMORY_MB=$(
+        env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
+        python3 - <<'PY'
+from lmcache import torch_dev
+
+print(torch_dev.get_device_properties(0).total_memory // (1024 * 1024))
+PY
+    )
+    GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
+    echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
+else
+    echo "GPU memory probe disabled"
+fi
 
 if [ -n "${GPU_MEMORY_UTILIZATION:-}" ]; then
     # Explicit override (e.g. large models like gemma-4-31B whose ~63GB of
@@ -51,12 +69,20 @@ if [ -n "$ATTENTION_BACKEND" ] && [ "$ATTENTION_BACKEND" != "auto" ]; then
     ATTENTION_BACKEND_ARG="--attention-backend $ATTENTION_BACKEND"
 fi
 
-# Optionally run vLLM in eager mode (skip CUDA graph capture) for both servers.
+# Optional low-level backend override for A/B debugging.
+# Example: VLLM_ATTENTION_BACKEND=XFORMERS (or TRITON_ATTN) to bypass FA2.
+VLLM_ATTENTION_BACKEND_ENV=()
+if [ -n "${VLLM_ATTENTION_BACKEND:-}" ]; then
+    echo "Using VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND}"
+    VLLM_ATTENTION_BACKEND_ENV=(VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND}")
+fi
+
+# Optionally run vLLM in eager mode (skip graph capture) for both servers.
 # Off by default: verified to break the bit-exact run1 == run2 check in the
 # determinism tests (lm_eval) -- eager changes the kernel path enough to diverge
 # across the cold/warm batch difference even under VLLM_BATCH_INVARIANT. Enable
-# (ENFORCE_EAGER=1) only for large models whose CUDA-graph capture would
-# otherwise time out at launch (those tests use a tolerance, not bit-exactness).
+# (ENFORCE_EAGER=1) only for large models whose graph capture would otherwise
+# time out at launch (those tests use a tolerance, not bit-exactness).
 ENFORCE_EAGER_ARG=""
 if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
     ENFORCE_EAGER_ARG="--enforce-eager"
@@ -74,13 +100,21 @@ if [ -n "${CHUNK_SIZE:-}" ]; then
     CHUNK_SIZE_ARG="--chunk-size ${CHUNK_SIZE}"
 fi
 
-# vLLM batch-invariant mode. On by default; GDN/Mamba backends do not support it.
-BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
+# vLLM batch-invariant mode is configurable per device entry point.
+BATCH_INVARIANT="${BATCH_INVARIANT:-${BATCH_INVARIANT_DEFAULT}}"
 
-# Mamba KV cache mode + prefix caching, set only for hybrid Mamba models.
+# Prefix-caching policy. Default behavior is unchanged: ordinary models rely on
+# vLLM's existing default, while hybrid Mamba models explicitly enable prefix
+# caching. Tests that need to force LMCache retrieve can opt out with
+# VLLM_DISABLE_PREFIX_CACHING=true.
+PREFIX_CACHING_ARG=""
 MAMBA_ARGS=""
-if [ -n "${MAMBA_CACHE_MODE:-}" ]; then
-    MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE} --enable-prefix-caching"
+if [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "true" ]; then
+    echo "Disabling vLLM prefix caching via --no-enable-prefix-caching"
+    PREFIX_CACHING_ARG="--no-enable-prefix-caching"
+elif [ -n "${MAMBA_CACHE_MODE:-}" ]; then
+    MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE}"
+    PREFIX_CACHING_ARG="--enable-prefix-caching"
 fi
 
 # Max tokens per scheduler step. Empty -> vLLM default.
@@ -101,14 +135,29 @@ if [ "${SEPARATE_OBJECT_GROUPS:-0}" = "1" ] || [ "${SEPARATE_OBJECT_GROUPS:-0}" 
     SEPARATE_OBJECT_GROUPS_ARG="--separate-object-groups"
 fi
 
+# Server-side transfer paths. The server default flipped from 'auto' to
+# 'lmcache_driven' (#4447), so steps that force the engine-driven worker path
+# (LMCACHE_MP_TRANSFER_MODE=engine_driven, set by the pipeline matrix) must
+# tell the server to load it. Mirror the worker-side mode env; set explicitly
+# rather than relying on the server default so the test is robust to default
+# changes.
+TRANSFER_MODE_ARG="--supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+
 # L1 lazy allocation mode. Default is lazy (--l1-use-lazy). Set L1_USE_LAZY=false
-# to disable lazy allocation, which enables POSIX SHM-backed L1 pool for the
-# engine_driven SHM transfer path. When lazy is enabled (default), the SHM pool
-# is disabled and engine_driven falls back to pickle transport.
+# to disable lazy allocation, which allows a POSIX SHM-backed L1 pool for the
+# engine_driven SHM transfer path. The pool also needs an explicit --shm-name:
+# the default "" disables it (and lazy allocation disables it regardless), in
+# which case engine_driven falls back to pickle transport.
 L1_LAZY_ARG=""
+SHM_NAME_ARG=""
 if [ "${L1_USE_LAZY:-true}" = "false" ]; then
     L1_LAZY_ARG="--no-l1-use-lazy"
-    echo "L1 lazy allocation disabled (SHM transport enabled)"
+    if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+        SHM_NAME_ARG="--shm-name mp_${BUILD_ID}"
+        echo "L1 lazy allocation disabled (SHM transport enabled)"
+    else
+        echo "L1 lazy allocation disabled"
+    fi
 fi
 
 # Store PIDs in a file so cleanup.sh can find them
@@ -129,7 +178,8 @@ if [ -n "${GDS_L1_PATH:-}" ]; then
     GDS_L1_ARG="--gds-l1-path ${GDS_L1_PATH}"
 fi
 
-CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
+env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
+    "${VLLM_DEVICE_ENV[@]}" \
 lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
@@ -138,6 +188,8 @@ lmcache server \
     --port "$LMCACHE_PORT" \
     ${GDS_L1_ARG} \
     ${L1_LAZY_ARG} \
+    ${SHM_NAME_ARG} \
+    ${TRANSFER_MODE_ARG} \
     ${SEPARATE_OBJECT_GROUPS_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
@@ -159,22 +211,68 @@ echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
 echo "Port: $vllm_port"
 
-CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
-VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-VLLM_SERVER_DEV_MODE=1 \
-VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
-PYTHONHASHSEED=0 \
-vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
-    $ATTENTION_BACKEND_ARG \
-    --port "$vllm_port" \
-    --no-async-scheduling \
-    $MAX_MODEL_LEN_ARG \
-    $ENFORCE_EAGER_ARG \
-    $GPU_MEMORY_UTIL_ARG \
-    $MAMBA_ARGS \
-    $MAX_NUM_BATCHED_TOKENS_ARG \
-    > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
+# Lazy offload settings are configurable so benchmarks can trade immediate
+# cache availability for batched store throughput without changing this script.
+KV_TRANSFER_CONFIG="$(
+    LMCACHE_PORT="${LMCACHE_PORT}" \
+    LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
+    LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
+    python3 - <<'PY'
+import json
+import os
+
+extra_config = {
+    "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
+    "lmcache.mp.mq_timeout": 10,
+}
+if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
+    extra_config.update(
+        {
+            "lmcache.mp.lazy_offload": True,
+            "lmcache.mp.lazy_offload_policy": "FIFO",
+            "lmcache.mp.lazy_offload_threshold": int(
+                os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
+            ),
+            "lmcache.mp.lazy_offload_select_count": int(
+                os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
+            ),
+        }
+    )
+
+print(
+    json.dumps(
+        {
+            "kv_connector": "LMCacheMPConnector",
+            "kv_role": "kv_both",
+            "kv_load_failure_policy": "recompute",
+            "kv_connector_extra_config": extra_config,
+        }
+    )
+)
+PY
+)"
+echo "LMCache KV transfer configuration: ${KV_TRANSFER_CONFIG}"
+
+env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
+    "${VLLM_DEVICE_ENV[@]}" \
+    "${VLLM_ATTENTION_BACKEND_ENV[@]}" \
+    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+    VLLM_SERVER_DEV_MODE=1 \
+    VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
+    PYTHONHASHSEED=0 \
+    vllm serve "$MODEL" \
+        --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
+        $ATTENTION_BACKEND_ARG \
+        --port "$vllm_port" \
+        --no-async-scheduling \
+        $MAX_MODEL_LEN_ARG \
+        $ENFORCE_EAGER_ARG \
+        $GPU_MEMORY_UTIL_ARG \
+        $MAMBA_ARGS \
+        $PREFIX_CACHING_ARG \
+        $MAX_NUM_BATCHED_TOKENS_ARG \
+        > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
 VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
@@ -187,19 +285,22 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
     echo "=== Launching vLLM baseline ==="
     echo "Port: $vllm_baseline_port"
 
-    CUDA_VISIBLE_DEVICES="${GPU_FOR_BASELINE}" \
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
-    PYTHONHASHSEED=0 \
-    vllm serve "$MODEL" \
-        $ATTENTION_BACKEND_ARG \
-        --port "$vllm_baseline_port" \
-        --no-async-scheduling \
-        $MAX_MODEL_LEN_ARG \
-        $ENFORCE_EAGER_ARG \
-        $GPU_MEMORY_UTIL_ARG \
-        > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
+    env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_BASELINE}" \
+        "${VLLM_DEVICE_ENV[@]}" \
+        "${VLLM_ATTENTION_BACKEND_ENV[@]}" \
+        VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+        VLLM_SERVER_DEV_MODE=1 \
+        VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
+        PYTHONHASHSEED=0 \
+        vllm serve "$MODEL" \
+            $ATTENTION_BACKEND_ARG \
+            --port "$vllm_baseline_port" \
+            --no-async-scheduling \
+            $MAX_MODEL_LEN_ARG \
+            $ENFORCE_EAGER_ARG \
+            $GPU_MEMORY_UTIL_ARG \
+            $PREFIX_CACHING_ARG \
+            > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 
     VLLM_BASELINE_PID=$!
     echo "$VLLM_BASELINE_PID" >> "$PID_FILE"

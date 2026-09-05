@@ -30,9 +30,9 @@ pytestmark = [
 
 try:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    import lmcache.cuda_ops as cuda_ops
 except ImportError:
-    lmc_ops = None
+    cuda_ops = None
 
 
 def _tuple_kv_to_blob(
@@ -134,7 +134,7 @@ def test_extract_and_load_back(num_tokens):
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(num_layers):
-            lmc_ops.load_and_reshape_flash(
+            cuda_ops.load_and_reshape_flash(
                 memory_obj_new.tensor,
                 kv_cache[layer_id][0],
                 kv_cache[layer_id][1],
@@ -159,7 +159,7 @@ def test_extract_and_load_back(num_tokens):
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
         for layer_id in range(num_layers):
-            lmc_ops.reshape_and_cache_back_flash(
+            cuda_ops.reshape_and_cache_back_flash(
                 memory_obj_new.tensor,
                 kv_cache_new[layer_id][0],
                 kv_cache_new[layer_id][1],
@@ -227,7 +227,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(num_layers):
-            lmc_ops.load_and_reshape_flash(
+            cuda_ops.load_and_reshape_flash(
                 memory_obj_old.tensor,
                 kv_cache_force_old[layer_id][0],
                 kv_cache_force_old[layer_id][1],
@@ -259,7 +259,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers,
             slot_mapping_temp,
@@ -295,7 +295,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers_new,
             slot_mapping_temp,
@@ -390,7 +390,7 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
         mem_obj_shape = torch.Size([1, num_layers, len(slot_mapping_temp), head_size])
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers,
             slot_mapping_temp,
@@ -438,7 +438,7 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers_new,
             slot_mapping_temp,
@@ -505,7 +505,7 @@ def test_single_layer_kernel(num_tokens, token_major, engine_kv_format):
         )
 
     for layer_id in range(num_layers):
-        lmc_ops.single_layer_kv_transfer(
+        cuda_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache[layer_id],
             slot_mapping,
@@ -513,7 +513,7 @@ def test_single_layer_kernel(num_tokens, token_major, engine_kv_format):
             engine_kv_format,
             token_major,
         )
-        lmc_ops.single_layer_kv_transfer(
+        cuda_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache_new[layer_id],
             slot_mapping,
@@ -581,7 +581,7 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
             [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
         )
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping_temp,
@@ -612,7 +612,7 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
         kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_list[chunk_id].tensor,
             kv_cache_pointers_new,
             slot_mapping_temp,
@@ -686,7 +686,7 @@ def test_single_layer_kernel_hnd(num_tokens, token_major, engine_kv_format):
         )
 
     for layer_id in range(num_layers):
-        lmc_ops.single_layer_kv_transfer(
+        cuda_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache[layer_id],
             slot_mapping,
@@ -694,7 +694,7 @@ def test_single_layer_kernel_hnd(num_tokens, token_major, engine_kv_format):
             engine_kv_format,
             token_major,
         )
-        lmc_ops.single_layer_kv_transfer(
+        cuda_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache_new[layer_id],
             slot_mapping,
@@ -777,7 +777,7 @@ def test_lmcache_memcpy_async():
                 big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             )
 
-        lmc_ops.lmcache_memcpy_async(
+        cuda_ops.lmcache_memcpy_async(
             big_gpu_tensor.data_ptr() + start,
             big_cpu_tensor.data_ptr() + start,
             end - start,
@@ -805,7 +805,7 @@ def test_lmcache_memcpy_async():
                 big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             )
 
-        lmc_ops.lmcache_memcpy_async(
+        cuda_ops.lmcache_memcpy_async(
             big_cpu_tensor.data_ptr() + start,
             big_gpu_tensor.data_ptr() + start,
             end - start,
@@ -899,7 +899,7 @@ def test_lmcache_memcpy_async_int8_hidden132():
         gpu_tensor[start_bytes:end_bytes].zero_()
 
         # H2D copy
-        lmc_ops.lmcache_memcpy_async(
+        cuda_ops.lmcache_memcpy_async(
             gpu_tensor.data_ptr() + start_bytes,
             cpu_tensor.data_ptr() + start_bytes,
             nbytes,
@@ -931,7 +931,7 @@ def test_lmcache_memcpy_async_int8_hidden132():
 
         cpu_dst[start_bytes:end_bytes].zero_()
 
-        lmc_ops.lmcache_memcpy_async(
+        cuda_ops.lmcache_memcpy_async(
             cpu_dst.data_ptr() + start_bytes,
             gpu_src.data_ptr() + start_bytes,
             nbytes,

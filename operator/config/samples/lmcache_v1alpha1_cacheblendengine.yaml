@@ -4,7 +4,7 @@ metadata:
   name: my-cacheblend
   namespace: default
 spec:
-  # -- Container image (the LMCache blend_v3 ENGINE image) --
+  # -- Container image (the LMCache blend ENGINE image) --
   # The engine runs `lmcache server --engine-type blend`. If this image lives
   # in a PRIVATE registry, set imagePullSecrets (the Secret must exist in this
   # namespace).
@@ -81,7 +81,8 @@ spec:
 # ---------------------------------------------------------------------------
 # To enable CacheBlend on a vLLM pod, label it for the webhook and annotate it
 # with this engine's name. The pod (and this engine) must run in a namespace
-# labeled `pod-security.kubernetes.io/enforce=privileged` (hostIPC is injected).
+# labeled `pod-security.kubernetes.io/enforce=privileged` (a hostPath /dev/shm
+# mount is injected).
 #
 #   metadata:
 #     labels:

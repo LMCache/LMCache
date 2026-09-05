@@ -15,6 +15,17 @@ name: Build ROCm Artifacts
 
 on:
     workflow_call:
+        inputs:
+            dev_version:
+                description: >-
+                    Build a .devN pre-release instead of the current release
+                    version. Mirrors setuptools_scm guess-next-dev, so nightly
+                    ROCm wheels are versioned like the cu130/cu129 nightlies
+                    (e.g. 0.5.4.dev15+rocm7.2) and never collide with a
+                    published release.
+                type: boolean
+                default: false
+                required: false
         outputs:
             rocm_version:
                 description: >-
@@ -91,11 +102,22 @@ jobs:
 
             - name: Get base version for rocm wheel
               id: rocm-version
+              env:
+                DEV_VERSION: ${{ inputs.dev_version }}
               run: |
+                LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
                 if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
                   BASE="${GITHUB_REF_NAME#v}"
+                elif [[ "${DEV_VERSION}" == "true" && -n "${LATEST_TAG}" ]]; then
+                  # guess-next-dev, matching setuptools_scm and therefore the
+                  # cu130/cu129 nightlies: bump the patch of the newest release
+                  # and append the commit count since that tag.
+                  COMMITS=$(git rev-list --count "${LATEST_TAG}..HEAD")
+                  IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
+                  BASE="${MAJOR}.${MINOR}.$((PATCH + 1)).dev${COMMITS}"
                 else
-                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
+                  BASE="${LATEST_TAG#v}"
+                  BASE="${BASE:-0.0.0.dev}"
                 fi
                 echo "ROCM_VERSION=${BASE}+${ROCM_LOCAL_VERSION}" >> "$GITHUB_ENV"
                 echo "rocm_version=${BASE}+${ROCM_LOCAL_VERSION}" >> "$GITHUB_OUTPUT"
@@ -121,7 +143,7 @@ jobs:
                 name: release-rocm-artifacts
                 path: dist/
 
-# On-device validation (loading the compiled c_ops and running the real
+# On-device validation (loading the compiled cuda_ops and running the real
 # KV-transfer kernels on gfx942/gfx950) requires AMD Instinct hardware, which
 # GitHub-hosted runners do not provide and LMCache does not maintain a
 # self-hosted runner for. It is therefore run manually on AMD hardware:

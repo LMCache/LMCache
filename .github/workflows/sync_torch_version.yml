@@ -30,7 +30,7 @@ jobs:
       # The published lmcache wheel is installed next to *stable* vLLM (see
       # docker/Dockerfile image-release). Syncing the torch pin from vLLM main
       # would run the wheel's build-time torch ahead of the torch actually
-      # installed at runtime, producing a silent `lmcache.c_ops` ABI mismatch.
+      # installed at runtime, producing a silent `lmcache.cuda_ops` ABI mismatch.
       # `/releases/latest` excludes drafts and pre-releases.
       - name: Resolve latest stable vLLM release
         id: vllm
@@ -168,7 +168,7 @@ jobs:
 
             The pin tracks stable rather than vLLM main because the published
             wheel is installed alongside stable vLLM; a pin ahead of stable
-            makes `lmcache.c_ops` fail to load against the installed torch.
+            makes `lmcache.cuda_ops` fail to load against the installed torch.
 
             This PR was generated automatically by GitHub Actions.
           labels: |

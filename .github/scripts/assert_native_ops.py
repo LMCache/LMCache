@@ -2,17 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fail if LMCache's compiled extension is missing or cannot be loaded.
 
-``import lmcache.c_ops`` cannot detect a broken extension: ``lmcache/__init__``
-registers a shim under that name, and ``CudaDeviceOps.ensure_native()`` swallows
-the ``ImportError`` and falls back to the torch baseline.  Loading the file
+``CudaDeviceOps.ensure_native()`` swallows an ``ImportError`` from
+``lmcache.cuda_ops`` and falls back to the torch baseline. Loading the file
 directly is what actually runs ``dlopen``, so a torch ABI mismatch surfaces as
 the ``undefined symbol`` error it really is.
 
-The probed name must keep ``c_ops`` as its last component -- CPython derives the
+The probed name must keep ``cuda_ops`` as its last component -- CPython derives the
 ``PyInit_`` symbol from it.  No GPU needed: symbols resolve when the extension
 loads, not when a kernel launches.
 
-Usage: ``assert_native_ops.py [module]``  (default ``lmcache.c_ops``)
+Usage: ``assert_native_ops.py [module]``  (default ``lmcache.cuda_ops``)
 """
 
 # Future
@@ -31,7 +30,7 @@ import torch
 
 def main() -> int:
     """Load the extension and report whether it resolved. Returns 0 on success."""
-    module = sys.argv[1] if len(sys.argv) > 1 else "lmcache.c_ops"
+    module = sys.argv[1] if len(sys.argv) > 1 else "lmcache.cuda_ops"
     package, _, stem = module.rpartition(".")
 
     spec = importlib.util.find_spec(package)

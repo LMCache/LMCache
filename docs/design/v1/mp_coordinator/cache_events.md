@@ -2,7 +2,7 @@
 
 Module: `lmcache/v1/mp_coordinator/cache_events.py`
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
-Consumer: `lmcache/v1/mp_coordinator/key_directory.py` (see
+Consumer: `lmcache/v1/mp_coordinator/views/key_directory.py` (see
 [key_directory.md](key_directory.md))
 
 This is the emission half of the key directory (M1 of the control-plane
@@ -126,10 +126,11 @@ listener plumbing or a dedicated flush task:
   trade for a self-contained protocol (see
   [key_directory.md](key_directory.md) — Token index).
   `ACCESS` batches carry an **empty backend**: the directory only
-  refreshes key-level recency on access, so there is no placement
-  identity to name — the vocabulary requires a non-empty backend for
-  `store`/`delete` only. The subscriber is single-threaded by design —
-  everything runs on the bus's drain thread, so it needs no locking.
+  refreshes key-level recency and access count on access, so there is
+  no placement identity to name. The vocabulary requires a non-empty
+  backend for `store`/`delete` only. The subscriber is single-threaded
+  by design - everything runs on the bus's drain thread, so it needs no
+  locking.
 - **Threading.** The bus dispatches on one drain thread, which is
   exactly the per-instance FIFO the directory needs. The subscriber
   self-paces delivery: recording flushes when `flush_interval` has

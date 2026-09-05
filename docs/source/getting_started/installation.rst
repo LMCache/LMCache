@@ -8,6 +8,9 @@ Installation
 Install LMCache
 ---------------
 
+For guidance on choosing a vLLM release, LMCache release channel, and native
+runtime, see :doc:`compatibility` before installing.
+
 .. tab-set::
 
     .. tab-item:: Python (pip / uv)
@@ -60,7 +63,7 @@ Install LMCache
                             ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
                             build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
 
-                    .. tab-item:: ROCm
+                    .. tab-item:: ROCm / torch 2.11
 
                         The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
                         **gfx950** (MI350X / MI355X) in one fat binary, and is ABI-matched to the
@@ -86,13 +89,134 @@ Install LMCache
                             The wheel excludes torch and the ROCm runtime libraries (they bind to the
                             host image at runtime). Match the wheel's minor torch/ROCm version to your
                             container; for other bases, use the **From Source** tab.
-
+                            
                         .. note::
 
                             The ROCm wheel carries a ``+rocm7.2`` PEP 440 local version, so
                             ``pip show lmcache`` reports which build is installed and the ROCm
                             build can be requested explicitly. A bare ``lmcache==${VERSION}``
                             also resolves it, since ``==`` ignores the local segment.
+
+                    .. tab-item:: Intel XPU
+
+                        The Intel XPU wheel is ABI-matched to the upstream
+                        ``vllm/vllm-openai-xpu:v0.26.0`` image (torch 2.12.0+xpu and oneAPI/SYCL).
+                        It is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
+
+                        Install directly inside the matching upstream vLLM XPU container. Torch and the
+                        oneAPI/SYCL runtime are already present, so ``--no-deps`` preserves that runtime stack:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/dri --shm-size=4g \
+                                --entrypoint bash vllm/vllm-openai-xpu:v0.26.0
+
+                            VERSION=0.5.3  # replace with target release
+                            pip install lmcache==${VERSION}+xpu --no-deps \
+                                --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
+
+                        .. note::
+
+                            The wheel excludes torch and oneAPI/SYCL runtime libraries, which bind to the
+                            host image at runtime. Match the wheel's torch and oneAPI versions to the
+                            container; for other bases, use the **From Source** tab.
+
+                            ``--no-index`` restricts pip to the GitHub Release asset, preventing it from
+                            selecting a same-version CUDA wheel from PyPI.
+
+                        .. note::
+
+                            The XPU wheel carries a ``+xpu`` PEP 440 local version, so
+                            ``pip show lmcache`` reports which build is installed and the XPU
+                            build can be requested explicitly. A bare ``lmcache==${VERSION}``
+                            also resolves it, since ``==`` ignores the local segment.
+
+                    .. tab-item:: Moore Threads MUSA
+
+                        The MUSA wheel is built in the validated TorchMUSA/MUSA SDK
+                        image used by the release workflow and is published to a
+                        dedicated `GitHub Release <https://github.com/LMCache/LMCache/releases>`__.
+                        It is not uploaded to PyPI because TorchMUSA is distributed
+                        by Moore Threads rather than the public PyPI index.
+
+                        Start a matching MUSA runtime image. The image must provide
+                        ``torch_musa``, the MUSA SDK libraries, and (for the native
+                        transfer fast path) ``musa_aiter``:
+
+                        .. code-block:: bash
+
+                            docker run -it --privileged --network=host \
+                                -e MTHREADS_VISIBLE_DEVICES=all \
+                                --entrypoint bash \
+                                sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci@sha256:75c8c1012cf49caf6dd99dbbfd33931ef100d035647083b999eaf0092d94edba
+
+                            VERSION=0.5.5  # replace with target release
+                            pip install lmcache==${VERSION}+musa --no-deps \
+                                --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-musa
+
+                        .. note::
+
+                            ``--no-deps`` is required: it preserves the image's
+                            vendor-pinned TorchMUSA stack instead of resolving the
+                            generic ``torch`` dependency from PyPI. ``--no-index``
+                            prevents pip from selecting a same-version CUDA wheel.
+
+                            The current MUSA profile ships LMCache's Python MUSA
+                            integration and common native modules. MUSA-specific
+                            fused kernels remain supplied by the optional
+                            ``musa_aiter`` package; build from source if your
+                            vendor image uses a different native extension.
+
+                        .. note::
+
+                            The wheel carries a ``+musa`` PEP 440 local version,
+                            so ``pip show lmcache`` identifies the accelerator
+                            variant. A bare ``lmcache==${VERSION}`` also matches
+                            this wheel, but the explicit local version avoids
+                            accidentally selecting the CUDA artifact.
+
+                    .. tab-item:: ROCm 7.2.4 / torch 2.10
+
+                        This wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
+                        **gfx950** (MI350X / MI355X). It is built and smoke-tested in the
+                        public AMD PyTorch image
+                        ``rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0``
+                        pinned at digest
+                        ``sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e``.
+                        It does not require the ATOM image.
+
+                        The supported ABI tuple is exact:
+
+                        * AMD wheel source:
+                          `torch-2.10.0+rocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl
+                          <https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.10.0%2Brocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl>`__
+                        * torch runtime version: ``2.10.0+rocm7.2.4.git3d3aa833``
+                          (git ``3d3aa833db84eed6b7f5595cb5f162c2f78300a4``)
+                        * ROCm ``7.2.4`` with HIP runtime ``7.2.53211``
+                        * Python/platform tag: ``cp312-cp312-manylinux_2_39_x86_64``
+                        * C++ ABI: ``_GLIBCXX_USE_CXX11_ABI=1``
+
+                        Install the matching wheel inside that pinned image:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash \
+                                rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
+
+                            VERSION=0.5.4  # replace with target release
+                            pip install \
+                                lmcache==${VERSION}+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1 \
+                                --no-deps \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rocm-torch210
+
+                        The wheel links torch and ROCm libraries from the container at runtime.
+                        Other torch 2.10, ROCm 7.2.x, Python, or C++ ABI combinations are not
+                        covered by this artifact; build from source for those environments.
 
             .. tab-item:: Nightly
 
@@ -123,6 +247,34 @@ Install LMCache
                                 --extra-index-url https://download.pytorch.org/whl/cu129 \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-cu129 \
                                 --index-strategy unsafe-best-match
+
+                    .. tab-item:: ROCm 7.2
+
+                        Run inside an upstream vLLM ROCm container so torch and the ROCm
+                        runtime are already present, then install with ``--no-deps``:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash vllm/vllm-openai-rocm:v0.26.0
+
+                            pip install lmcache --pre --no-deps --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-rocm
+
+                        Nightly ROCm wheels are versioned like the CUDA nightlies with the
+                        ROCm local segment appended, e.g. ``0.5.4.dev15+rocm7.2``.
+
+                        .. note::
+
+                            ``--no-index`` is required here. ``--find-links`` only *adds* a
+                            source, so without it pip also considers PyPI — and under PEP 440 a
+                            pre-release such as ``0.5.4rc4`` outranks ``0.5.4.dev15+rocm7.2``, so
+                            ``--pre`` would install the CUDA wheel instead. The stable tab does
+                            not need it because ``lmcache==${VERSION}+rocm7.2`` is an exact pin
+                            that only the ROCm release can satisfy. ``--no-deps`` is what makes
+                            ``--no-index`` safe here: torch and the ROCm runtime come from the
+                            container, so nothing else needs resolving.
 
             .. tab-item:: From Source
 
@@ -210,6 +362,56 @@ Install LMCache
                             # Build LMCache with SYCL backend.
                             BUILD_WITH_SYCL=1 uv pip install --no-build-isolation -e .
 
+                    .. tab-item:: MetaX MACA
+
+                        MACA is CUDA-compatible: a MACA-enabled torch build reports
+                        ``device.type == "cuda"``, so LMCache's existing CUDA-compatible
+                        connector path works without a separate device backend. There is no
+                        prebuilt MACA wheel or CI build -- this is a self-compile-only path,
+                        built with a MACA-enabled torch already installed via MetaX's own
+                        toolchain (not from PyPI).
+
+                        .. code-block:: bash
+
+                            # Puts the MACA SDK's cu-bridge nvcc-compatible compiler on PATH
+                            # and its runtime libs on LD_LIBRARY_PATH -- required before the
+                            # build step below, so torch.utils.cpp_extension can locate it.
+                            # Adjust MACA_PATH to your actual MACA SDK install root.
+                            export MACA_PATH=/opt/maca
+                            export CUCC_PATH=${MACA_PATH}/tools/cu-bridge
+                            export PATH=${CUCC_PATH}/bin:${CUCC_PATH}/tools:${MACA_PATH}/mxgpu_llvm/bin:${MACA_PATH}/bin:${PATH}
+                            export LD_LIBRARY_PATH=${MACA_PATH}/lib:${MACA_PATH}/mxgpu_llvm/lib:${MACA_PATH}/ompi/lib:${LD_LIBRARY_PATH}
+
+                            git clone https://github.com/LMCache/LMCache.git
+                            cd LMCache
+
+                            # Assumes a MACA-enabled torch is already installed/active in this
+                            # environment (e.g. inside a vllm-metax container).
+
+                            # Need to install these packages manually to avoid build isolation
+                            pip install -r requirements/build.txt
+
+                            # --no-deps skips install_requires entirely, including
+                            # requirements/common.txt's cufile-python/nvtx (NVIDIA-only,
+                            # not needed on MACA) and the unpinned generic "torch" entry
+                            # (which would otherwise risk resolving over the MACA build).
+                            # Install any other runtime deps you actually need yourself first --
+                            # MP mode needs mcpy (MetaX's cupy equivalent), published on MetaX's
+                            # own pip index rather than PyPI:
+                            #   pip install mcpy -i https://repos.metax-tech.com/r/maca-pypi/simple \
+                            #       --trusted-host repos.metax-tech.com
+
+                            # SETUPTOOLS_SCM_PRETEND_VERSION makes the wheel filename and
+                            # lmcache.__version__ carry the MACA build identity (mirrors how
+                            # torch's own ROCm wheels are named e.g. torch-2.11.0+rocm7.2-...).
+                            # Derives the base version from this checkout's own git tag (so
+                            # it never needs manual updates across releases) and appends a
+                            # +maca<build> local segment -- set MACA_AI_VERSION to your MACA
+                            # SDK/build number, or leave it at the default below.
+                            BASE_VERSION=$(python -m setuptools_scm)
+                            SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+maca${MACA_AI_VERSION:-0.0.0.0}" \
+                            BUILD_WITH_MACA=1 pip install --no-deps --no-build-isolation -e .
+
 
     .. tab-item:: Docker
 
@@ -257,7 +459,7 @@ Install LMCache
 
                 .. code-block:: bash
 
-                    docker pull intel/vllm:0.17.0-xpu
+                    docker pull vllm/vllm-openai-xpu:v0.26.0
 
         See :ref:`docker_deployment` for running the container and ROCm images.
 
@@ -297,4 +499,4 @@ Verify Installation
 
 .. code-block:: bash
 
-    python -c "import lmcache.c_ops"
+    python -c "import lmcache.cuda_ops"

@@ -109,7 +109,7 @@ type CacheBlendEngineSpec struct {
 	// +kubebuilder:validation:Enum=nvidia;amd
 	GPUVendor *string `json:"gpuVendor,omitempty"`
 
-	// image defines the container image to use for the blend_v3 engine. This
+	// image defines the container image to use for the blend engine. This
 	// may be a PRIVATE image; use imagePullSecrets to pull it.
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`
@@ -203,6 +203,22 @@ type CacheBlendEngineSpec struct {
 	// priorityClassName is the priority class for the pods.
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// hostIPC runs the pod in the host's IPC namespace. Cross-pod CUDA IPC does
+	// not require it on NVIDIA stacks: the operator instead mounts the host's
+	// /dev/shm into the engine pod (hostPath), which is the requirement —
+	// PyTorch's CUDA IPC handles reference a shared-memory ref-counter file in
+	// /dev/shm that both processes must open by name. It therefore defaults to
+	// false. Set it to true only where the hostPath /dev/shm mount is
+	// unavailable (e.g. blocked by an admission policy) or where the GPU stack
+	// still needs a shared IPC namespace; the AMD (ROCm) HIP IPC path is
+	// unverified without hostIPC, so gpuVendor "amd" deployments should set it
+	// to true. When true, the /dev/shm hostPath mount is omitted (the shared
+	// namespace already exposes the host's /dev/shm). The injection webhook
+	// mirrors this setting on opted-in vLLM pods. Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostIPC *bool `json:"hostIPC,omitempty"`
 
 	// privileged runs the engine container in privileged mode. On some clusters
 	// this is required for the engine to see all node GPUs (for CUDA IPC) without

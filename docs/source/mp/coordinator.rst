@@ -25,82 +25,199 @@ Expected log output:
 
     LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
 
-The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
-``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, ``--trigger-watermark``, ``--chunk-size``,
-``--hash-algorithm``, ``--enable-blend-lookup``, ``--blend-probe-stride``,
-and ``--timeout-keep-alive``;
-any flag overrides the matching environment variable below. See
-:doc:`/cli/coordinator` for details.
-Equivalently, the coordinator can still be launched as a module with
-``python3 -m lmcache.v1.mp_coordinator``.
+See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
+coordinator can be launched as a module with
+``python3 -m lmcache.v1.mp_coordinator``, which accepts the same flags.
 
 Configuration
 -------------
 
-The coordinator is configured through ``LMCACHE_MP_COORDINATOR_*`` environment
-variables:
+The coordinator is configured through CLI flags only; every flag left unset
+keeps the default below.
 
 .. list-table::
    :header-rows: 1
    :widths: 38 14 48
 
-   * - Environment variable
+   * - Flag
      - Default
      - Description
-   * - ``LMCACHE_MP_COORDINATOR_HOST``
+   * - ``--host``
      - ``0.0.0.0``
      - Host the HTTP server binds to.
-   * - ``LMCACHE_MP_COORDINATOR_PORT``
+   * - ``--port``
      - ``9300``
      - Port the HTTP server binds to.
-   * - ``LMCACHE_MP_COORDINATOR_INSTANCE_TIMEOUT``
+   * - ``--instance-timeout``
      - ``30``
      - Seconds without a heartbeat after which a server is dropped from the
        fleet.
-   * - ``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``
+   * - ``--health-check-interval``
      - ``10``
      - Seconds between health-check sweeps that expire stale MP-server
        registrations. ``0`` disables the stale-instance eviction loop; it does
        **not** affect the ``/quota`` L2 eviction loop (see
-       ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` below).
-   * - ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``
+       ``--eviction-check-interval`` below).
+   * - ``--eviction-check-interval``
      - ``5``
      - Seconds between L2 eviction sweeps. ``0`` disables the loop.
-   * - ``LMCACHE_MP_COORDINATOR_EVICTION_RATIO``
+   * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of tracked keys (by count) to evict per cycle (0.0 to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_TRIGGER_WATERMARK``
+   * - ``--trigger-watermark``
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``
+   * - ``--chunk-size``
      - ``256``
      - Tokens per KV chunk: the CacheBlend match unit and the unit used to
        resolve pin ``token_ids`` to keys. Must equal the MP servers'
        ``--chunk-size``.
-   * - ``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``
+   * - ``--hash-algorithm``
      - ``blake3``
      - Token hash algorithm for pin key resolution. Must equal the MP servers'
        ``--hash-algorithm``. ``blake3`` is self-contained; other algorithms
        require vLLM importable in the coordinator process.
-   * - ``LMCACHE_MP_COORDINATOR_ENABLE_BLEND_LOOKUP``
-     - ``False``
+   * - ``--enable-blend-lookup``
+     - off
      - Index stored chunk content so ``POST /directory/blend-lookup`` can serve
        fleet CacheBlend reuse. Off by default: hashing content costs CPU on
        every store. Also requires the MP servers'
        ``--coordinator-event-reporting``.
-   * - ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``
+   * - ``--blend-probe-stride``
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
        for full recall. Ignored unless blend lookup is on.
-   * - ``LMCACHE_MP_COORDINATOR_TIMEOUT_KEEP_ALIVE``
+   * - ``--checkpoint-path``
+     - (empty)
+     - File the coordinator's derived state is checkpointed to. Empty
+       disables it and the coordinator starts cold after every restart.
+   * - ``--checkpoint-interval``
+     - ``60``
+     - Seconds between checkpoint writes; ``0`` writes only on a clean stop.
+       Ignored without a path. Does not affect the metadata file, which is
+       written whenever pins or quotas change.
+   * - ``--metadata-path``
+     - (empty)
+     - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
+       is stored in. Empty means that state is lost on restart.
+   * - ``--extra-config``
+     - (empty)
+     - JSON object of settings the core flags do not name, read by whichever
+       view or controller looks for them. ``controller_packages`` is read by
+       the coordinator itself: a list of importable paths to load
+       out-of-tree controllers from.
+   * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response``.
+   * - ``--disable-metrics``
+     - off
+     - Skip OpenTelemetry metrics initialization. Metrics are on by default;
+       pass this flag and the local ``/metrics`` endpoint returns 404.
+   * - ``--otlp-endpoint``
+     - unset
+     - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
+       mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
+       local ``/metrics`` endpoint returns 404.
+
+Loading your own controllers
+----------------------------
+
+A **controller** gives the coordinator behaviour of its own — fleet-wide L2
+eviction is one, warm-prefetch dispatch is another. Add yours by putting it in
+any importable package and naming that package in ``--extra-config``. The
+package imports from lmcache; nothing in lmcache imports it.
+
+.. code-block:: python
+
+    # acme_controllers/reaper.py
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from fastapi import APIRouter
+    from lmcache.v1.mp_coordinator.controllers.base import Controller
+    from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+
+
+    class ReaperController(Controller):
+        @classmethod
+        def from_config(cls, config, views):
+            obj = cls()
+            obj.registry = views.get(InstanceRegistry)                  # a shared view
+            obj.interval = config.extra_config.get("acme.interval", 30.0)
+            obj.last_seen = 0
+            return obj
+
+        @asynccontextmanager
+        async def run(self, runtime):                    # background work
+            task = asyncio.create_task(self._sweep())    # 1. start
+            try:
+                yield                                    # 2. serve
+            finally:
+                task.cancel()                            # 3. stop
+
+        def get_routers(self):                           # your endpoints
+            router = APIRouter()
+
+            @router.get("/acme/reaper")
+            async def status():
+                return {"last_seen": self.last_seen}
+
+            return (router,)
+
+        async def _sweep(self):
+            while True:
+                await asyncio.sleep(self.interval)
+                self.last_seen = len(self.registry.all_instances())
+
+``run`` is an async context manager and must do three things, in order:
+
+1. **Start** the background work.
+2. ``yield`` **exactly once** — the coordinator serves for the duration of
+   that yield.
+3. **Stop** the work in a ``finally``, so teardown runs whether shutdown was
+   clean or an exception unwound the stack.
+
+The same JSON names the package and carries the controller's own settings:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "acme.interval": 10
+    }'
+
+    curl -s http://localhost:9300/acme/reaper
+    # -> {"last_seen": 2}
+
+Every hook is optional: write only ``run``, only ``get_routers``, or add
+``consume`` to receive the cache-event stream and ``get_durable_components`` to
+have your state checkpointed. Name a package — scanned entire, so a controller
+that outgrows one file can be a directory — or a single module. A name that
+does not import raises at startup; a controller that raises while starting is
+logged and skipped. Views cannot be added this way: they are the coordinator's
+own shared state, which your controller reads.
+
+Coordinator metrics export
+--------------------------
+
+Metrics are enabled by default. Without an OTLP endpoint, Prometheus scrapes
+the coordinator's existing FastAPI port; no separate metrics server or port is
+created:
+
+.. code-block:: bash
+
+   curl http://localhost:9300/metrics
+
+Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
+OpenTelemetry Collector instead. In OTLP push mode, and when
+``--disable-metrics`` is set, ``GET /metrics`` returns 404. This infrastructure
+does not itself define coordinator business metrics; instruments register with
+the shared OpenTelemetry provider as coordinator capabilities add them.
 
 Connecting MP servers
 ---------------------
@@ -161,6 +278,9 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
   named server (warm prefetch, pin/unpin, and delete, with more to come).
+- **Fleet memory** -- the ``/instances/usage`` endpoints: how full each
+  server's memory compartments are, joining event-derived usage against the
+  capacity each server declares on the same event stream. Read-only.
 - **CacheBlend fragment lookup** -- ``POST /directory/blend-lookup``: finds
   cached chunk content anywhere inside a query sequence, using the blend index
   derived from the key directory's token bindings. Server-to-coordinator only;
@@ -169,6 +289,15 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
 types live in ``lmcache/v1/mp_coordinator/schemas.py``.
+
+.. tip::
+
+   The read-only endpoints below can be read without ``curl`` and ``jq``.
+   ``lmcache query coordinator --api NAME`` fetches one of them — ``usage``,
+   ``instances``, ``health``, ``directory``, ``keys``, ``quota``,
+   ``quota-config``, ``prefetch``, or ``metrics`` — and prints it as an
+   aligned table with byte counts and ratios already formatted. See
+   :doc:`/cli/query`.
 
 Fleet membership and health
 ---------------------------
@@ -214,7 +343,6 @@ startup.
      - int
      - Optional (default ``0``). ZMQ message-queue port P2P peers send
        lookup/unlock RPCs to; ``0`` when P2P is disabled.
-
 **Response** (``200 OK``):
 
 .. code-block:: json
@@ -401,8 +529,7 @@ selects LRU keys to evict. Each batch carries the server's ``instance_id``,
 scoped to that instance, so replays are deduplicated and lost batches are
 detected.
 
-**Active eviction loop.** Every
-``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` seconds, the
+**Active eviction loop.** Every ``--eviction-check-interval`` seconds, the
 coordinator inspects per-salt usage against the registered quotas and,
 for any salt over the trigger watermark, picks LRU victims and
 dispatches a single ``DELETE /cache/objects`` to a uniformly random registered MP
@@ -552,7 +679,10 @@ Read the quota and live usage for a single salt.
 **Path parameters:** ``cache_salt`` — tenant identifier (``_default`` for the
 empty salt).
 
-**Query parameters:** ``tier`` — optional (default ``l2``).
+**Query parameters:** ``tier`` — ``l1`` or ``l2`` (default ``l2``). Every field
+describes the requested tier. Quotas are enforced on L2 only, so an ``l1`` read
+reports L1 usage with ``quota_exists: false`` and ``quota_limit_gb: 0.0`` --
+never the L2 budget, which governs different bytes.
 
 **Response** (``200 OK``):
 
@@ -580,7 +710,12 @@ current aggregate usage. This endpoint never returns ``404`` for an unknown salt
 
 List total usage and a per-salt breakdown.
 
-**Query parameters:** ``tier`` — optional (default ``l2``).
+**Query parameters:** ``tier`` — ``l1`` or ``l2`` (default ``l2``). Every field
+describes the requested tier, and rows come from that tier's usage plus the
+quotas that apply to it -- so an ``l1`` listing holds only salts with L1 bytes,
+each with ``quota_exists: false``. ``all`` is rejected with ``400``, because a
+key resident in both tiers holds bytes in both and a cross-tier total would
+count it twice.
 
 **Response** (``200 OK``):
 
@@ -679,7 +814,8 @@ List cached keys and their placements, one page at a time.
               "shared": false
             }
           ],
-          "num_tokens": 256
+          "num_tokens": 256,
+          "access_count": 7
         }
       ]
     }
@@ -689,8 +825,9 @@ List cached keys and their placements, one page at a time.
 placements**. ``num_tokens`` reports how many token ids the directory knows for
 the key's chunk (``0`` = unknown) -- fetch the actual tokens via
 ``POST /directory/lookup``, which exists precisely so listing pages stay
-small. Pages of a changing directory may skip or repeat keys (snapshot
-semantics).
+small. ``access_count`` is the number of ``access`` events applied to the key
+since the directory first saw it. Pages of a changing directory may skip or
+repeat keys (snapshot semantics).
 
 **HTTP status codes:**
 
@@ -766,7 +903,8 @@ forms -- supply exactly one:
             {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
              "backend": "dram", "size_bytes": 8388608, "shared": false}
           ],
-          "token_ids": [15496, 11, 995]
+          "token_ids": [15496, 11, 995],
+          "access_count": 7
         }
       ]
     }
@@ -776,7 +914,8 @@ the number of keys requested); ``results`` has one entry per resolved key, in
 request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
 is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
-on, or not yet re-reported after an event gap).
+on, or not yet re-reported after an event gap). ``access_count`` is the number
+of ``access`` events applied to the key, ``0`` for unknown keys.
 
 **HTTP status codes:**
 
@@ -1108,6 +1247,118 @@ sequence returns ``status`` ``"noop"``.
         }'
     # -> {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
 
+Fleet memory
+------------
+
+The ``/instances/usage`` endpoints report how full each MP server's memory
+compartments are. A **compartment** is one thing that owns bytes: the L1 pool
+of a backing medium, or one L2 adapter. It is identified by
+``(tier, backend)`` -- the same pair cache events tag placements with.
+
+Two inputs are joined, and both ride the cache-event stream. **Usage** is
+derived from the events the servers already publish. **Capacity** arrives as
+a capacity report on the same stream -- once at startup, then whenever an
+adapter is added, removed, or reconfigured. Both are automatic; there is
+nothing to configure beyond pointing servers at a coordinator and leaving
+event reporting enabled.
+
+.. note::
+
+   Capacity travels on the event stream, so disabling event reporting
+   disables both halves together: every ``usage_ratio`` reads ``null``
+   (*unknown*) rather than a ratio against a stale declaration.
+
+These endpoints are read-only. The coordinator never evicts or throttles based
+on them.
+
+.. note::
+
+   ``usage_ratio`` is ``null`` whenever the server declared no capacity for a
+   compartment, and this is common: the ``fs``, ``mooncake``, ``p2p``, and
+   ``sagemaker`` adapters expose no capacity setting at all, and ``s3`` /
+   ``raw_block`` report one only when you set ``max_capacity_gb`` /
+   ``capacity_bytes``. A ``null`` means *unknown*, never *empty* -- do not
+   treat it as ``0``.
+
+   Ratios above ``1.0`` are reported as-is rather than capped. A compartment
+   holding more than its declared capacity means the declaration is wrong, and
+   that is worth seeing.
+
+``GET /instances/usage``
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The whole fleet: every server's compartments, plus the shared pools.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "instances": [
+        {
+          "instance_id": "server-1",
+          "registered": true,
+          "declared_capacity": true,
+          "modules": [
+            {"tier": "l1", "backend": "dram", "shared": false,
+             "used_bytes": 10737418240, "capacity_bytes": 42949672960,
+             "usage_ratio": 0.25},
+            {"tier": "l2", "backend": "fs", "shared": false,
+             "used_bytes": 7516192768, "capacity_bytes": 0,
+             "usage_ratio": null}
+          ]
+        }
+      ],
+      "shared_modules": [
+        {"tier": "l2", "backend": "s3", "shared": true,
+         "used_bytes": 4398046511104, "capacity_bytes": 17592186044416,
+         "usage_ratio": 0.25}
+      ]
+    }
+
+``shared_modules`` holds storage several servers mount -- one S3 bucket, one
+CXL region. These are counted **once for the fleet** and appear in no
+instance's ``modules``. Summing them per mounting server would multiply both
+the bytes and the capacity by the number of mounts.
+
+A server appears when it is registered, when it still holds bytes, or when it
+declared capacity. ``registered: false`` therefore means a departed server
+whose L2 data outlived it; its L1 bytes are dropped when it goes.
+
+**Example:**
+
+.. code-block:: bash
+
+    # Which servers are most heavily loaded?
+    curl -s http://localhost:9300/instances/usage | jq -r '
+      .instances[] | .instance_id as $i | .modules[]
+      | select(.usage_ratio != null)
+      | "\($i) \(.tier)/\(.backend) \((.usage_ratio*100|floor))%"'
+    # -> server-1 l1/dram 25%
+    # -> server-2 l1/dram 81%
+
+``GET /instances/{instance_id}/usage``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One server's compartments, in the same shape as an entry of ``instances``
+above.
+
+**HTTP status codes:**
+
+- ``200``: found.
+- ``404``: the coordinator knows nothing about this id -- it is not
+  registered, holds no bytes, and declared no capacity.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/instances/server-1/usage
+
+A server whose L1 pool uses the default lazy allocator grows its heap on
+demand. Capacity here is the **configured** size, not the grown heap, so a
+freshly started server correctly reads near ``0``\% rather than near full.
+
 CacheBlend fragment lookup
 --------------------------
 
@@ -1122,9 +1373,9 @@ a separate publish call. Both feeds default to off and both are required: the
 coordinator needs ``--enable-blend-lookup``, and every MP server whose chunks
 should be discoverable needs ``--coordinator-event-reporting`` (a server with a
 coordinator URL but no event reporting warns at startup and matches locally
-only). Matching is chunked at ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE`` — which
-must equal the MP servers' ``--chunk-size`` — probing every
-``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE`` positions.
+only). Matching is chunked at the coordinator's ``--chunk-size`` — which must
+equal the MP servers' ``--chunk-size`` — probing every
+``--blend-probe-stride`` positions.
 
 **Request body:**
 

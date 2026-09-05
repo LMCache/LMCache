@@ -1,29 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fleet-wide per-``cache_salt`` L2 eviction control loop.
 
-See ``docs/design/v1/mp_coordinator/l2_usage_and_eviction.md``.
+See ``docs/design/v1/mp_coordinator/usage_and_eviction.md``.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 import asyncio
+import contextlib
 
 # Third Party
 import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
-from lmcache.v1.mp_coordinator.controllers.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.controllers.base import (
+    Controller,
+    ControllerRuntime,
+)
+from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    DurableComponent,
+    PersistenceType,
+)
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.object_service import (
     MAX_DELETE_BATCH,
 )
@@ -31,38 +44,50 @@ from lmcache.v1.multiprocess.cache_control.object_service import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.api import ObjectKey
-    from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+    from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+    from lmcache.v1.mp_coordinator.discovery import Registry
+    from lmcache.v1.mp_coordinator.views.base import View
+    from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 
 logger = init_logger(__name__)
 
 
-class FleetEvictionController:
+class FleetEvictionController(Controller):
     """Per-``cache_salt`` L2 eviction controller for the fleet.
 
-    Owns the quota registry and usage view it enforces against, both
-    exposed for the ``/quota`` endpoints and both fed from
-    :meth:`consume`. :meth:`run` is the loop, :meth:`execute_evictions`
-    one pass of it.
+    Owns the quota registry it enforces (exposed for the ``/quota``
+    endpoints) and reads the fleet usage view on the ``l2`` tier.
+    :meth:`run` drives the loop, :meth:`execute_evictions` one pass of it.
 
     Args:
+        usage_manager: The fleet usage view. A consumer in its own
+            right, registered on the broadcaster **before** this
+            controller so it has accounted a batch by the time
+            :meth:`consume` reads sizes from it.
+        registry: The fleet membership view; supplies the address a
+            victim's DELETE is sent to.
         eviction_ratio: Fraction of tracked keys to evict per cycle.
         trigger_watermark: Eviction fires when usage reaches this
             fraction of the quota.
+        check_interval: Seconds between sweeps. Zero runs no loop.
     """
 
     def __init__(
         self,
+        usage_manager: CacheUsageManager,
+        registry: InstanceRegistry,
         eviction_ratio: float = 0.5,
         trigger_watermark: float = 1.0,
+        check_interval: float = 0.0,
     ) -> None:
         self._quota_manager = QuotaManager()
-        self._usage_manager = L2UsageManager()
+        self._usage_manager = usage_manager
+        self._registry = registry
         self._eviction_ratio = max(0.0, min(1.0, eviction_ratio))
         self._trigger_watermark = trigger_watermark
+        self._check_interval = check_interval
         self._policy = IsolatedLRUEvictionPolicy()
         self._in_flight_dispatches: set[asyncio.Task] = set()
-        # Reference-counted L2 pins: a key is excluded from eviction plans while
-        # its count is > 0. Not persisted across coordinator restarts.
         self._pin_counts: dict[ObjectKey, int] = {}
 
     @property
@@ -71,25 +96,31 @@ class FleetEvictionController:
         return self._quota_manager
 
     @property
-    def usage(self) -> L2UsageManager:
-        """The usage view this controller enforces against."""
-        return self._usage_manager
+    def policy(self) -> EvictionPolicy:
+        """The eviction policy, persisted as a durable component.
+
+        What it stores is the policy's business: an ordering-based policy
+        carries its order, one that derives everything from the keys
+        carries nothing.
+        """
+        return self._policy
 
     def consume(self, batch: CacheEventBatch) -> None:
-        """Apply one gate-admitted batch to usage, then the LRU.
+        """Apply one gate-admitted batch to the LRU.
 
         A delete drops the key from the LRU only once its **last** L2
         placement is gone: usage is per placement, so while another copy
         still holds bytes the key must stay evictable, or those bytes
-        could exceed quota with nothing for the planner to select. Usage
-        consuming first is what makes that size read correct.
+        could exceed quota with nothing for the planner to select. That
+        size read is correct because the usage view consumed the same
+        batch first, which registration order in ``create_app``
+        guarantees.
 
         Args:
-            batch: The admitted batch.
+            batch: The admitted batch; other tiers are ignored.
         """
         if batch.tier != Tier.L2:
             return
-        self._usage_manager.consume(batch)
         for entry in batch.entries:
             key = entry.key.to_object_key()
             if batch.event_type == CacheEventType.STORE:
@@ -97,12 +128,12 @@ class FleetEvictionController:
             elif batch.event_type == CacheEventType.ACCESS:
                 self.on_lookup(key)
             elif batch.event_type == CacheEventType.DELETE:
-                if self._usage_manager.get_key_size(key) == 0:
+                if self._usage_manager.get_key_bytes(Tier.L2, key) == 0:
                     self.on_remove(key)
 
     def fence_instance(self, instance_id: str) -> None:
-        """No-op: fencing voids L1 only, and the L2 bytes this
-        controller accounts outlive the reporting process.
+        """No-op: fencing voids L1 only, and this controller's LRU
+        tracks L2 keys, which outlive the reporting process.
 
         Args:
             instance_id: The restarted or departed instance (unused).
@@ -134,6 +165,80 @@ class FleetEvictionController:
             else:
                 self._pin_counts[key] = count - 1
 
+    @classmethod
+    def from_config(
+        cls,
+        config: "MPCoordinatorConfig",
+        views: "Registry[View]",
+    ) -> "FleetEvictionController":
+        """Build the controller from configuration and the fleet's views.
+
+        The usage view comes from the registry rather than being made
+        here: the coordinator has exactly one, and the eviction plan is
+        only correct if it reads the same bytes the fleet reported.
+
+        Args:
+            config: The coordinator configuration.
+            views: The fleet's read models.
+        """
+        return cls(
+            usage_manager=views.get(CacheUsageManager),
+            registry=views.get(InstanceRegistry),
+            eviction_ratio=config.eviction_ratio,
+            trigger_watermark=config.trigger_watermark,
+            check_interval=config.eviction_check_interval,
+        )
+
+    def get_durable_components(self) -> tuple[DurableComponent, ...]:
+        """Return the state this controller owns that must outlive the process.
+
+        Each carries its own ``persistence_type``, so a caller routes
+        them without knowing what this controller is made of.
+
+        Returns:
+            The pin table (this object), the quota limits, and the policy.
+        """
+        return (self, self._quota_manager, self._policy)
+
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """Pins are operator intent; nothing else can reconstruct them."""
+        return PersistenceType.METADATA
+
+    @property
+    def name(self) -> str:
+        """Name of the pin table's section in the metadata document."""
+        return "pins"
+
+    def capture(self) -> Mapping[str, object]:
+        """Return the pin table in its durable form.
+
+        Returns:
+            ``{"entries": [{"key": <EncodedObjectKey fields>, "count":
+            int}]}``.
+        """
+        return {
+            "entries": [
+                {"key": asdict(key.to_encoded_object_key()), "count": count}
+                for key, count in self._pin_counts.items()
+            ]
+        }
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Replace the pin table with a captured one.
+
+        The document is the coordinator's own, so values are taken as
+        written.
+
+        Args:
+            state: A :meth:`capture` value, as decoded from the
+                metadata document — see there for the shape; non-positive
+                counts are dropped.
+        """
+        entries = cast("list[Mapping[str, object]]", state["entries"])
+        restored = (_decode_pin(entry) for entry in entries)
+        self._pin_counts = {key: count for key, count in restored if count > 0}
+
     def filter_unpinned(self, keys: list[ObjectKey]) -> list[ObjectKey]:
         """Return the subset of ``keys`` with no active L2 pin, in input order.
 
@@ -160,7 +265,7 @@ class FleetEvictionController:
         eviction_plan: dict[str, list[ObjectKey]] = {}
 
         for cache_salt in tracked_salts:
-            current_bytes = self._usage_manager.get(cache_salt)
+            current_bytes = self._usage_manager.get_salt_bytes(Tier.L2, cache_salt)
             if current_bytes <= 0:
                 continue
             limit = self._quota_manager.effective_limit_bytes(cache_salt)
@@ -184,7 +289,7 @@ class FleetEvictionController:
             if keys_to_evict:
                 eviction_plan[cache_salt] = keys_to_evict
                 evict_bytes = sum(
-                    self._usage_manager.get_key_size(k) for k in keys_to_evict
+                    self._usage_manager.get_key_bytes(Tier.L2, k) for k in keys_to_evict
                 )
                 logger.info(
                     "Eviction plan for cache_salt=%r: %d keys "
@@ -201,31 +306,32 @@ class FleetEvictionController:
 
         return eviction_plan
 
-    async def run(
-        self,
-        registry: InstanceRegistry,
-        http_client: httpx.AsyncClient,
-        check_interval: float,
-    ) -> None:
-        """Run the control loop until cancelled, sleeping first.
+    @asynccontextmanager
+    async def run(self, runtime: ControllerRuntime) -> AsyncIterator[None]:
+        """Sweep on a cadence while the app serves, then drain.
+
+        A dispatch is fire-and-forget, so one the last sweep launched
+        would otherwise die with the process; the exit half waits for it.
 
         Args:
-            registry: Fleet membership; supplies the dispatch target.
-            http_client: Client for the outbound DELETE requests.
-            check_interval: Seconds between passes; must be positive.
-
-        Raises:
-            ValueError: If ``check_interval`` is not positive.
+            runtime: Supplies the client for the outbound DELETEs.
         """
-        if check_interval <= 0:
-            raise ValueError(f"check_interval must be > 0 (got {check_interval})")
-        while True:
-            await asyncio.sleep(check_interval)
-            await self.execute_evictions(registry, http_client)
+        task: asyncio.Task | None = None
+        if self._check_interval > 0:
+            task = asyncio.create_task(self._sweep_forever(runtime.http_client))
+        else:
+            logger.debug("Eviction loop disabled (check_interval=0)")
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            await self.wait_for_in_flight_dispatches()
 
     async def execute_evictions(
         self,
-        registry: InstanceRegistry,
         http_client: httpx.AsyncClient,
     ) -> dict[str, list[ObjectKey]]:
         """Compute the plan and fire-and-forget ``DELETE /cache/objects``
@@ -236,12 +342,19 @@ class FleetEvictionController:
         the dispatch tasks are spawned; the LRU clears only when the
         matching ``delete`` event comes back on the cache-event stream.
         At-least-once, safe because the delete is idempotent.
+
+        Args:
+            http_client: Client for the outbound DELETE requests.
+
+        Returns:
+            The plan dispatched, keyed by ``cache_salt``; empty when
+            there was nothing to evict or no server to send it to.
         """
         plan = self.compute_eviction_plan()
         if not plan:
             return plan
 
-        target = registry.random_instance()
+        target = self._registry.random_instance()
         if target is None:
             logger.warning(
                 "Eviction plan computed (%d salts) but no MP servers are "
@@ -274,11 +387,17 @@ class FleetEvictionController:
         """Await every outstanding fire-and-forget dispatch."""
         await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
 
+    async def _sweep_forever(self, http_client: httpx.AsyncClient) -> None:
+        """Evict on a cadence until cancelled, sleeping first."""
+        while True:
+            await asyncio.sleep(self._check_interval)
+            await self.execute_evictions(http_client)
+
     @staticmethod
     async def _dispatch_eviction(
         http_client: httpx.AsyncClient,
         url: str,
-        body: dict,
+        body: Mapping[str, object],
         instance_id: str,
         key_count: int,
         salt_count: int,
@@ -303,3 +422,23 @@ class FleetEvictionController:
             key_count,
             salt_count,
         )
+
+
+def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
+    """Rebuild one pin from the form :meth:`capture` produced.
+
+    Args:
+        entry: One ``entries`` element of the pin section.
+
+    Returns:
+        The key and its pin count.
+    """
+    fields = cast("Mapping[str, object]", entry["key"])
+    encoded = EncodedObjectKey(
+        chunk_hash_hex=str(fields["chunk_hash_hex"]),
+        model_name=str(fields["model_name"]),
+        kv_rank=cast(int, fields["kv_rank"]),
+        object_group_id=cast(int, fields["object_group_id"]),
+        cache_salt=str(fields["cache_salt"]),
+    )
+    return encoded.to_object_key(), cast(int, entry["count"])

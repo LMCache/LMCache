@@ -3,7 +3,7 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | gds_smoke_test
+#              | restart_recovery | lazy_offload | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -22,6 +22,7 @@ export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
+export DEFAULT_MODEL="${DEFAULT_MODEL:-Qwen/Qwen3-14B}"
 
 # gds_smoke_test enables the GDS L1 NVMe-slab tier
 GDS_SCRATCH="${GDS_SCRATCH:-/scratch}"
@@ -71,8 +72,16 @@ elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
     # model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to DeepSeek-V4-Flash.
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+elif [ "$TEST_NAME" = "lazy_offload" ]; then
+    # The shared GPU launcher includes these values in the real vLLM
+    # kv-transfer configuration only for this integration test.
+    export LMCACHE_MP_LAZY_OFFLOAD=true
+    # vLLM's default paged-block size is 16 tokens. Matching it keeps this
+    # test's expected LMCache chunk counts exact and small.
+    export CHUNK_SIZE="${CHUNK_SIZE:-16}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else
-    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 fi
 export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 export MAX_WORKERS="${MAX_WORKERS:-4}"
@@ -101,8 +110,12 @@ SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp dsv4_flash_tp "
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
+# Respect an explicit environment override from a device-specific wrapper
+# before applying the default baseline heuristic below.
 BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
-if [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
+if [ -n "${LAUNCH_BASELINE:-}" ]; then
+    export LAUNCH_BASELINE
+elif [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
     export LAUNCH_BASELINE=true
 else
     export LAUNCH_BASELINE=false
@@ -170,6 +183,9 @@ case "$TEST_NAME" in
     cache_stats)
         exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
         ;;
+    lazy_offload)
+        exec_script="${SCRIPT_DIR}/run-lazy-offload.sh"
+        ;;
     p2p)
         exec_script="${SCRIPT_DIR}/run-p2p.sh"
         ;;
@@ -187,7 +203,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac

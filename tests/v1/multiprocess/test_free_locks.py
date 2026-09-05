@@ -11,7 +11,6 @@ import threading
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
@@ -19,6 +18,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.transport.base import RequestClient
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -92,6 +92,7 @@ def _make_free_locks_ctx(
     chunk_hashes: list[bytes],
     windows: list[int],
     hit_chunks: int,
+    locked_gids: tuple = (),
 ) -> MagicMock:
     """Build a mock engine context for free_lookup_locks tests.
 
@@ -100,6 +101,8 @@ def _make_free_locks_ctx(
         windows: Per-object-group windows for the registered AttnWindowDesc.
         hit_chunks: Prefetch hit length recorded on the session (-1 for
             "never recorded").
+        locked_gids: The lock model recorded on the session; empty means
+            "every group" (legacy std-lookup behavior).
 
     Returns:
         The configured MagicMock context.
@@ -111,7 +114,9 @@ def _make_free_locks_ctx(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows
     )
-    ctx.session_manager.get_or_create.return_value.prefetch_hit_chunks = hit_chunks
+    session = ctx.session_manager.get_or_create.return_value
+    session.prefetch_hit_chunks = hit_chunks
+    session.prefetch_locked_gids = tuple(locked_gids)
     return ctx
 
 
@@ -136,7 +141,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, extra_count=0
+        sentinel_obj_keys, read_locks=1
     )
 
 
@@ -145,6 +150,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(num_tokens)),
         start=start,
@@ -156,7 +162,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"extra_count": 0}
+    assert kwargs == {"read_locks": 1}
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -256,6 +262,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     key = IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(256)),
         start=0,
@@ -301,10 +308,10 @@ def test_adapter_free_lookup_locks_sends_request():
     adapter._server_urls = ["tcp://test:0"]
     adapter._mq_timeout = 30.0
 
-    mock_client = MagicMock(spec=MessageQueueClient)
+    mock_client = MagicMock(spec=RequestClient)
     mock_future = MagicMock()
-    mock_client.submit_request.return_value = mock_future
-    adapter.mq_clients = {"tcp://test:0": mock_client}
+    mock_client.free_lookup_locks.return_value = mock_future
+    adapter.req_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
 
     token_ids = list(range(512))
@@ -313,24 +320,17 @@ def test_adapter_free_lookup_locks_sends_request():
         start=0,
         end=512,
         request_id="req-1",
+        request_configs={"lmcache.skip_save": True},
     )
 
-    mock_client.submit_request.assert_called_once()
-    call_args = mock_client.submit_request.call_args
-    req_type = call_args[0][0]
-    payloads = call_args[0][1]
-    assert req_type == RequestType.FREE_LOOKUP_LOCKS
-
-    # Payload should be [key, tp_size]
-    assert isinstance(payloads, list)
-    assert len(payloads) == 2
-
-    key = payloads[0]
+    mock_client.free_lookup_locks.assert_called_once()
+    key, tp_size = mock_client.free_lookup_locks.call_args.args
     assert isinstance(key, IPCCacheServerKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
     assert key.request_id == "req-1"
-    assert payloads[1] == 1  # tp_size
+    assert key.request_configs == {"lmcache.skip_save": True}
+    assert tp_size == 1
 
 
 def test_adapter_free_lookup_locks_key_matches_lookup():
@@ -355,24 +355,28 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter._heartbeat_lock = threading.Lock()
     adapter._heartbeat_interval = 5.0
 
-    mock_client = MagicMock(spec=MessageQueueClient)
+    mock_client = MagicMock(spec=RequestClient)
     mock_future = MagicMock()
     mock_future.result.return_value = None  # LOOKUP returns None
-    mock_client.submit_request.return_value = mock_future
-    adapter.mq_clients = {"tcp://test:0": mock_client}
+    mock_client.lookup.return_value = mock_future
+    mock_client.free_lookup_locks.return_value = mock_future
+    adapter.req_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
+    adapter._unacked_lookups = {}
     adapter._lookup_params = {}
 
     token_ids = list(range(512))
 
     # Submit lookup – patch heartbeat to avoid spawning a real thread
     with patch.object(adapter, "_ensure_heartbeat_started"):
-        adapter.maybe_submit_lookup_request("req-1", token_ids)
-    lookup_call = mock_client.submit_request.call_args
-    lookup_payloads = lookup_call[0][1]
-    lookup_key = lookup_payloads[0]
+        adapter.maybe_submit_lookup_request(
+            "req-1",
+            token_ids,
+            request_configs={"lmcache.skip_save": True},
+        )
+    lookup_key = mock_client.lookup.call_args.args[0]
 
-    mock_client.submit_request.reset_mock()
+    mock_client.reset_mock()
 
     # Submit free_lookup_locks with aligned end
     tokens_per_chunk = adapter.lmcache_tokens_per_chunk
@@ -382,12 +386,10 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
         start=0,
         end=aligned_end,
         request_id="req-1",
+        request_configs={"lmcache.skip_save": True},
     )
-    free_call = mock_client.submit_request.call_args
-    free_payloads = free_call[0][1]
-    assert len(free_payloads) == 2
-    free_key = free_payloads[0]
-    assert free_payloads[1] == 1  # tp_size
+    free_key, tp_size = mock_client.free_lookup_locks.call_args.args
+    assert tp_size == 1
 
     # Keys should be identical
     assert lookup_key.model_name == free_key.model_name
@@ -398,3 +400,31 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
     assert lookup_key.token_ids == free_key.token_ids
+    assert lookup_key.request_configs == free_key.request_configs
+
+
+def test_server_free_lookup_locks_honors_the_session_lock_model():
+    """A prefetch that locked only a subset of groups (the CB prefix leg:
+    recurrent + attention, never aux) must release exactly that subset --
+    releasing an unlocked group would drop another request's lock on the
+    shared object key."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    hashes = [b"h0", b"h1", b"h2"]
+    ctx = _make_free_locks_ctx(
+        hashes, windows=[1, -1, -1], hit_chunks=3, locked_gids=(0, 1)
+    )
+    module = LookupModule(ctx)
+    key = _free_locks_key(768, 0, 768)
+
+    with patch(
+        "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
+        side_effect=lambda k, hs, gids: [[f"g{gids[0]}-{h.decode()}" for h in hs]],
+    ):
+        module.free_lookup_locks(key, 1)
+
+    released = ctx.storage_manager.finish_read_prefetched.call_args[0][0]
+    # Group 0 (recurrent, window 1): only the boundary chunk. Group 1
+    # (attention): the whole hit prefix. Group 2 (standalone aux): NOTHING.
+    assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]
