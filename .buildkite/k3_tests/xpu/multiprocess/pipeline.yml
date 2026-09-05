@@ -46,7 +46,7 @@ x-pod-2xpu: &pod-2xpu
 steps:
   - group: ":xpu: Multiprocess (1-pod)"
     steps:
-      - label: ":xpu: lm_eval"
+      - label: ":xpu: lm_eval / {{matrix.request_transport}}"
         command: |
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
           export L1_USE_LAZY="false"
@@ -54,13 +54,19 @@ steps:
           export VLLM_USE_STANDALONE_COMPILE="0"
           export CPU_BUFFER_SIZE="80"
           .buildkite/k3_tests/xpu/multiprocess/run.sh lm_eval
+        matrix:
+          setup:
+            request_transport:
+              - "zmq"
+              - "grpc"
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 45
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
-      - label: ":xpu: vllm_bench"
+      - label: ":xpu: vllm_bench / {{matrix.request_transport}}"
         command: |
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
           export L1_USE_LAZY="false"
@@ -70,6 +76,12 @@ steps:
           export NUM_PROMPTS="16"
           export VLLM_DISABLE_PREFIX_CACHING="true"
           .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
+        matrix:
+          setup:
+            request_transport:
+              - "zmq"
+              - "grpc"
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 45
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }

@@ -8,6 +8,8 @@ zero changes to this file.
 
 # Standard
 from pathlib import Path
+from types import ModuleType
+import importlib.util
 import sys
 
 ROOT_DIR = Path(__file__).parent
@@ -18,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 
 # Third Party
 from setuptools import find_packages, setup  # noqa: E402
+from setuptools.command.build_py import build_py as _build_py  # noqa: E402
 
 # First Party
 from setup_extensions import BuildPolicy, BuildProfile  # noqa: E402
@@ -34,10 +37,44 @@ def _read_requirements(path: Path) -> list[str]:
     return reqs
 
 
+def _load_proto_generator() -> ModuleType:
+    """Load the proto generator without importing the LMCache package."""
+    generator_path = (
+        ROOT_DIR
+        / "lmcache"
+        / "v1"
+        / "multiprocess"
+        / "transport"
+        / "grpc_impl"
+        / "protos"
+        / "generate.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_lmcache_proto_generate", generator_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load gRPC proto generator: {generator_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _BuildPyWithGrpcStubs(_build_py):
+    """Generate ignored gRPC bindings before packaging LMCache."""
+
+    def run(self) -> None:
+        distribution_name = self.distribution.get_name().replace("_", "-").lower()
+        if distribution_name != "lmcache-cli":
+            generator = _load_proto_generator()
+            generator.generate()
+        super().run()
+
+
 if __name__ == "__main__":
     policy = BuildPolicy()
     profile = policy.resolve_profile()
     ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
+    cmdclass["build_py"] = _BuildPyWithGrpcStubs
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     extras_require: dict[str, list[str]] = {}

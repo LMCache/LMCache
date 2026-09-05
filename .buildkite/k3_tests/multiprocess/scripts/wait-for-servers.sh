@@ -151,6 +151,19 @@ wait_for_vllm_server() {
         current_time=$(date +%s)
         elapsed=$((current_time - start_time))
 
+        # Probe before enforcing the deadline so a server that becomes ready
+        # during the final polling interval is not reported as timed out.
+        # Bypass proxy for localhost checks; CI often exports http_proxy.
+        if curl --noproxy '*' -sf "$health_url" > /dev/null 2>&1; then
+            echo "$description is ready! (took ${elapsed}s)"
+            return 0
+        fi
+
+        if curl --noproxy '*' -sf "$models_url" > /dev/null 2>&1; then
+            echo "$description is ready! (took ${elapsed}s)"
+            return 0
+        fi
+
         if [ "$current_time" -ge "$end_time" ]; then
             echo "Timeout: $description did not become ready within ${MAX_WAIT_SECONDS}s"
             echo ""
@@ -171,17 +184,6 @@ wait_for_vllm_server() {
             echo "=== $description process diagnostics ==="
             print_engine_timeout_diagnostics "$logfile"
             return 1
-        fi
-
-        # Bypass proxy for localhost checks; CI often exports http_proxy.
-        if curl --noproxy '*' -sf "$health_url" > /dev/null 2>&1; then
-            echo "$description is ready! (took ${elapsed}s)"
-            return 0
-        fi
-
-        if curl --noproxy '*' -sf "$models_url" > /dev/null 2>&1; then
-            echo "$description is ready! (took ${elapsed}s)"
-            return 0
         fi
 
         echo "Waiting for $description... (${elapsed}s elapsed)"

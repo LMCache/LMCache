@@ -14,7 +14,7 @@ steps:
       - "coverage-test.xml"
       - "coverage-test/**/*"
 
-  - label: "vLLM + LMCache E2E (AMD, {{matrix.mode}})"
+  - label: "vLLM + LMCache E2E (AMD, {{matrix.mode}}, {{matrix.request_transport}})"
     timeout_in_minutes: 90
     command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}}
     matrix:
@@ -22,6 +22,10 @@ steps:
         mode:
           - "serialized"
           - "unserialized"
+        request_transport:
+          - "zmq"
+          - "grpc"
+    env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
 
     artifact_paths:
       - "*.log"

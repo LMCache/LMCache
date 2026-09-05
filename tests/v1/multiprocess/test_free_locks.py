@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Tests for the FREE_LOOKUP_LOCKS protocol: enum registration, protocol definition,
-message-queue round-trip, server handler, and client-side adapter API.
+request-transport round-trip, server handler, and client-side adapter API.
 """
 
 # Standard
 from unittest.mock import MagicMock, patch
 import threading
+
+# Third Party
+import pytest
 
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
@@ -19,12 +22,17 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
-from tests.v1.multiprocess import test_mq_handler_helpers
 from tests.v1.multiprocess.test_mq import (
-    MessageQueueTestHelper,
     create_cache_key,
+)
+from tests.v1.multiprocess.transport_test_utils import (
+    REQUEST_TRANSPORTS,
+    RequestTransport,
+    request_server_url,
+    start_lookup_request_server,
 )
 
 # ============================================================================
@@ -59,28 +67,38 @@ def test_free_locks_handler_type():
 
 
 # ============================================================================
-# Message-queue round-trip test
+# Request-transport round-trip test
 # ============================================================================
 
 
-def test_mq_free_locks():
-    """
-    Test MessageQueue with FREE_LOOKUP_LOCKS request type.
-    FREE_LOOKUP_LOCKS takes (key: KeyType) and returns None.
-    """
+class _FreeLocksHandler:
+    """Record FREE_LOOKUP_LOCKS calls from a request server."""
+
+    def __init__(self) -> None:
+        self.call: tuple[IPCCacheServerKey, int] | None = None
+
+    def free_lookup_locks(self, key: IPCCacheServerKey, tp_size: int) -> None:
+        """Record the decoded request payload."""
+        self.call = (key, tp_size)
+
+
+@pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
+def test_free_locks_request_transport(request_transport: RequestTransport) -> None:
+    """FREE_LOOKUP_LOCKS round-trips over every request transport."""
     key = create_cache_key(0)
-
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5570")
-    helper.register_handler(
-        RequestType.FREE_LOOKUP_LOCKS, test_mq_handler_helpers.free_locks_handler
+    handler = _FreeLocksHandler()
+    server_url = request_server_url(
+        request_transport,
+        15570 if request_transport == "zmq" else 15571,
     )
-
-    helper.run_test(
-        request_type=RequestType.FREE_LOOKUP_LOCKS,
-        payloads=[key, 1],
-        expected_response=None,
-        num_requests=1,
-    )
+    server = start_lookup_request_server(request_transport, server_url, handler)
+    client = RequestClientFactory.create(server_url)
+    try:
+        assert client.free_lookup_locks(key, 1).result(timeout=5) is None
+        assert handler.call == (key, 1)
+    finally:
+        client.close()
+        server.close()
 
 
 # ============================================================================

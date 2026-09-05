@@ -178,6 +178,15 @@ def test_isolated_ipc_flag_enables():
     assert _parse_mp(["--no-isolated-ipc"]).isolated_ipc is False
 
 
+def test_transport_defaults_to_zmq():
+    assert _parse_mp([]).transport == "zmq"
+    assert MPServerConfig().transport == "zmq"
+
+
+def test_transport_flag_selects_grpc():
+    assert _parse_mp(["--transport", "grpc"]).transport == "grpc"
+
+
 # -- Engine type --------------------------------------------------------------
 
 

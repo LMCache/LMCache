@@ -5,10 +5,12 @@ definitions, MemoryLayoutDesc wire serialization, and server handlers.
 """
 
 # Standard
+from typing import Literal
 from unittest.mock import MagicMock
 
 # Third Party
 import httpx
+import pytest
 import torch
 
 # First Party
@@ -153,7 +155,9 @@ def test_transfer_channel_address_validity():
 # ============================================================================
 
 
-def _make_controller() -> tuple[P2PController, MagicMock]:
+def _make_controller(
+    request_transport: Literal["zmq", "grpc"] = "zmq",
+) -> tuple[P2PController, MagicMock]:
     """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
     controller = P2PController(
@@ -161,6 +165,7 @@ def _make_controller() -> tuple[P2PController, MagicMock]:
         P2PConfig(),
         CoordinatorConfig(),
         instance_id="self",
+        request_transport=request_transport,
     )
     return controller, ctx
 
@@ -348,9 +353,15 @@ def _peer(
     )
 
 
-def test_reconcile_adds_new_peer():
+@pytest.mark.parametrize(
+    ("request_transport", "expected_scheme"),
+    [("zmq", "tcp"), ("grpc", "grpc")],
+)
+def test_reconcile_adds_new_peer(
+    request_transport: Literal["zmq", "grpc"], expected_scheme: str
+) -> None:
     """A newly discovered peer gets one P2P L2 adapter with the right urls."""
-    controller, ctx = _make_controller()
+    controller, ctx = _make_controller(request_transport)
     ctx.storage_manager.add_l2_adapter.return_value = 7
 
     controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
@@ -358,7 +369,7 @@ def test_reconcile_adds_new_peer():
     ctx.storage_manager.add_l2_adapter.assert_called_once()
     config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
     assert isinstance(config, P2PL2AdapterConfig)
-    assert config.peer_mq_server_url == "tcp://10.0.0.2:5555"
+    assert config.peer_mq_server_url == f"{expected_scheme}://10.0.0.2:5555"
     assert config.peer_transfer_channel_server_url == "tc-host:9"
     assert controller.report_status()["p2p_peers"] == ["peerA"]
 

@@ -3,7 +3,8 @@
 """Write a per-leg verify result JSON for the aggregator to consume.
 
 Runs as the last step of one ``cpu_device.yml`` matrix leg (one OS + one
-model) and writes ``verify_result.json`` to the current directory.
+model + one request transport) and writes ``verify_result.json`` to the
+current directory.
 
 The verdict comes from ``JOB_STATUS`` (GitHub's ``job.status``) rather
 than a single step outcome, so any failing step in the leg — install,
@@ -12,8 +13,8 @@ and ``INSTALL_LMC_OUTCOME`` are only used to phrase a more specific
 reason.
 
 Required env:
-    JOB_STATUS, MATRIX_OS, MATRIX_MODEL, GITHUB_RUN_ID,
-    GITHUB_SERVER_URL, GITHUB_REPOSITORY
+    JOB_STATUS, MATRIX_OS, MATRIX_MODEL, MATRIX_REQUEST_TRANSPORT,
+    GITHUB_RUN_ID, GITHUB_SERVER_URL, GITHUB_REPOSITORY
 Optional env:
     INSTALL_VLLM_OUTCOME, INSTALL_LMC_OUTCOME
 """
@@ -52,10 +53,11 @@ def resolve_vllm_version() -> str:
 JOB_STATUS = os.environ["JOB_STATUS"]
 MATRIX_OS = os.environ["MATRIX_OS"]
 MATRIX_MODEL = os.environ["MATRIX_MODEL"]
+MATRIX_REQUEST_TRANSPORT = os.environ["MATRIX_REQUEST_TRANSPORT"]
 INSTALL_VLLM = os.environ.get("INSTALL_VLLM_OUTCOME", "")
 INSTALL_LMC = os.environ.get("INSTALL_LMC_OUTCOME", "")
 
-LEG = MATRIX_OS + " / " + MATRIX_MODEL
+LEG = MATRIX_OS + " / " + MATRIX_MODEL + " / " + MATRIX_REQUEST_TRANSPORT
 
 is_ok = JOB_STATUS == "success"
 version = resolve_vllm_version()
@@ -72,6 +74,7 @@ else:
 result = {
     "os": MATRIX_OS,
     "model": MATRIX_MODEL,
+    "request_transport": MATRIX_REQUEST_TRANSPORT,
     "status": "ok" if is_ok else "failed",
     # Keep the version even for a failed leg: the aggregator reports it in
     # the tracking issue so a human can tell which build broke.

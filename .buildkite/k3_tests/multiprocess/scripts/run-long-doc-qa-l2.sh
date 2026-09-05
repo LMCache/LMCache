@@ -116,6 +116,7 @@ GPU_DEVICE="${GPU_FOR_VLLM:-0}"
 
 CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
 lmcache server \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy noop \
     --l2-store-policy skip_l1 \
@@ -150,7 +151,7 @@ env -u VLLM_PORT \
     VLLM_BATCH_INVARIANT=1 \
     PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     --attention-backend FLASH_ATTN \
     --port "$VLLM_PORT" \
     --no-async-scheduling \

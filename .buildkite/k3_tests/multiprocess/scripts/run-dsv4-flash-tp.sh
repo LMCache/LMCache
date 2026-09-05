@@ -356,6 +356,7 @@ provision_deepgemm_sm120
 # ── 1. Launch LMCache MP server with an explicit L1 pool ────
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT, L1 ${L1_SIZE_GB}GB) ==="
 lmcache server \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --host localhost \
     --port "$LMCACHE_PORT" \
     --chunk-size "$CHUNK_SIZE" \
@@ -432,7 +433,7 @@ VLLM_SERVER_DEV_MODE=1 vllm serve "$MODEL" \
     --max-model-len auto \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --port "$saved_port" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
     > "$VLLM_LOG" 2>&1 &
 VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
