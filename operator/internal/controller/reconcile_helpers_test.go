@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
@@ -288,6 +289,80 @@ var _ = Describe("reconcileRESPAuthSecret", func() {
 			Namespace: nsName,
 		}, got)).To(Succeed())
 		Expect(got.Data).To(HaveKeyWithValue("password", []byte("v2")))
+	})
+
+	It("restores the managed secret owner reference and cleans up when auth is removed", func() {
+		engine := newEngine(nsName, engineName)
+		source := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "restore-auth", Namespace: nsName},
+			Data:       map[string][]byte{"password": []byte("test-password")}, // pragma: allowlist secret
+		}
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
+		engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+				Host: "redis", Port: 6379,
+				AuthSecretRef: &lmcachev1alpha1.SecretReference{Name: source.Name},
+			},
+		}
+		Expect(k8sClient.Update(ctx, engine)).To(Succeed())
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: engineName, Namespace: nsName}}
+		_, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		key := types.NamespacedName{Name: resources.RESPAuthSecretName(engineName), Namespace: nsName}
+		managed := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, key, managed)).To(Succeed())
+		Expect(metav1.IsControlledBy(managed, engine)).To(BeTrue())
+		// Simulate metadata drift without changing the mirrored credentials.
+		managed.OwnerReferences = nil
+		Expect(k8sClient.Update(ctx, managed)).To(Succeed())
+
+		for range 2 {
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, key, managed)).To(Succeed())
+			Expect(metav1.IsControlledBy(managed, engine)).To(BeTrue())
+			Expect(managed.Data).To(Equal(source.Data))
+		}
+
+		Expect(k8sClient.Get(ctx, req.NamespacedName, engine)).To(Succeed())
+		engine.Spec.L2Backend.RESP.AuthSecretRef = nil
+		Expect(k8sClient.Update(ctx, engine)).To(Succeed())
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, managed))).To(BeTrue())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: source.Name, Namespace: nsName}, source)).To(Succeed())
+	})
+
+	It("does not change a RESP secret controlled by another engine", func() {
+		engine := newEngine(nsName, engineName)
+		other := newEngine(nsName, "other-engine")
+		source := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "conflict-auth", Namespace: nsName},
+			Data:       map[string][]byte{"password": []byte("new-password")}, // pragma: allowlist secret
+		}
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
+		managed := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: resources.RESPAuthSecretName(engineName), Namespace: nsName},
+			Data:       map[string][]byte{"password": []byte("old-password")}, // pragma: allowlist secret
+		}
+		Expect(controllerutil.SetControllerReference(other, managed, r.Scheme)).To(Succeed())
+		Expect(k8sClient.Create(ctx, managed)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, managed) })
+		original := managed.DeepCopy()
+		engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+				Host: "redis", Port: 6379,
+				AuthSecretRef: &lmcachev1alpha1.SecretReference{Name: source.Name},
+			},
+		}
+		Expect(k8sClient.Update(ctx, engine)).To(Succeed())
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: engineName, Namespace: nsName}})
+		Expect(err).To(BeAssignableToTypeOf(&controllerutil.AlreadyOwnedError{}))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: managed.Name, Namespace: nsName}, managed)).To(Succeed())
+		Expect(managed).To(Equal(original))
 	})
 
 	It("errors when the source secret is missing", func() {

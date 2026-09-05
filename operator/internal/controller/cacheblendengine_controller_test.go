@@ -30,14 +30,18 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
+	"github.com/LMCache/LMCache/internal/resources"
 )
 
 // cbeResourceName is the name of the CacheBlendEngine fixture reconciled by the
 // controller tests; the owner-reference helper checks against it.
 const cbeResourceName = "test-cbe"
+
+const cbePayloadRepository = "lmcache/cacheblend-plugin"
 
 // argsContainFlagValue reports whether the ["--flag", "value", ...] slice
 // contains the given two-token flag/value pair.
@@ -79,7 +83,7 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			if err != nil && errors.IsNotFound(err) {
 				// injection.payloadImage.repository is required by ValidateSpec
 				// (the webhook needs it to inject a valid init container).
-				payloadRepo := "lmcache/cacheblend-plugin"
+				payloadRepo := cbePayloadRepository
 				resource := &lmcachev1alpha1.CacheBlendEngine{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
@@ -209,4 +213,111 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			Expect(updated.Status.Phase).To(Equal(lmcachev1alpha1.PhasePending))
 		})
 	})
+})
+
+var _ = Describe("CacheBlend RESP auth secret ownership", func() {
+	var nsName string
+	const engineName = "test-engine"
+	BeforeEach(func() {
+		nsName = mustCreateNS(uniqueNS("cacheblend-resp-auth"))
+	})
+
+	It("restores the CacheBlend managed secret owner reference and cleans up when auth is removed", func() {
+		payloadRepo := cbePayloadRepository
+		engine := &lmcachev1alpha1.CacheBlendEngine{
+			ObjectMeta: metav1.ObjectMeta{Name: engineName, Namespace: nsName},
+			Spec: lmcachev1alpha1.CacheBlendEngineSpec{
+				L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+				Injection: &lmcachev1alpha1.InjectionSpec{
+					PayloadImage: &lmcachev1alpha1.ImageSpec{Repository: &payloadRepo},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, engine)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, engine) })
+		r := &CacheBlendEngineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		source := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "restore-auth", Namespace: nsName},
+			Data:       map[string][]byte{"password": []byte("test-password")}, // pragma: allowlist secret
+		}
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
+		engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+				Host: "redis", Port: 6379,
+				AuthSecretRef: &lmcachev1alpha1.SecretReference{Name: source.Name},
+			},
+		}
+		Expect(k8sClient.Update(ctx, engine)).To(Succeed())
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: engineName, Namespace: nsName}}
+		_, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		key := types.NamespacedName{Name: resources.RESPAuthSecretName(engineName), Namespace: nsName}
+		managed := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, key, managed)).To(Succeed())
+		Expect(metav1.IsControlledBy(managed, engine)).To(BeTrue())
+		// Simulate metadata drift without changing the mirrored credentials.
+		managed.OwnerReferences = nil
+		Expect(k8sClient.Update(ctx, managed)).To(Succeed())
+
+		for range 2 {
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, key, managed)).To(Succeed())
+			Expect(metav1.IsControlledBy(managed, engine)).To(BeTrue())
+			Expect(managed.Data).To(Equal(source.Data))
+		}
+
+		Expect(k8sClient.Get(ctx, req.NamespacedName, engine)).To(Succeed())
+		engine.Spec.L2Backend.RESP.AuthSecretRef = nil
+		Expect(k8sClient.Update(ctx, engine)).To(Succeed())
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(errors.IsNotFound(k8sClient.Get(ctx, key, managed))).To(BeTrue())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: source.Name, Namespace: nsName}, source)).To(Succeed())
+	})
+
+	It("does not change a CacheBlend RESP secret controlled by another engine", func() {
+		payloadRepo := cbePayloadRepository
+		engine := &lmcachev1alpha1.CacheBlendEngine{
+			ObjectMeta: metav1.ObjectMeta{Name: engineName, Namespace: nsName},
+			Spec: lmcachev1alpha1.CacheBlendEngineSpec{
+				L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+				Injection: &lmcachev1alpha1.InjectionSpec{
+					PayloadImage: &lmcachev1alpha1.ImageSpec{Repository: &payloadRepo},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, engine)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, engine) })
+		r := &CacheBlendEngineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		other := newEngine(nsName, "other-engine")
+		source := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "conflict-auth", Namespace: nsName},
+			Data:       map[string][]byte{"password": []byte("new-password")}, // pragma: allowlist secret
+		}
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
+		managed := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: resources.RESPAuthSecretName(engineName), Namespace: nsName},
+			Data:       map[string][]byte{"password": []byte("old-password")}, // pragma: allowlist secret
+		}
+		Expect(controllerutil.SetControllerReference(other, managed, r.Scheme)).To(Succeed())
+		Expect(k8sClient.Create(ctx, managed)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, managed) })
+		original := managed.DeepCopy()
+		engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{
+				Host: "redis", Port: 6379,
+				AuthSecretRef: &lmcachev1alpha1.SecretReference{Name: source.Name},
+			},
+		}
+		Expect(k8sClient.Update(ctx, engine)).To(Succeed())
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: engineName, Namespace: nsName}})
+		Expect(err).To(BeAssignableToTypeOf(&controllerutil.AlreadyOwnedError{}))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: managed.Name, Namespace: nsName}, managed)).To(Succeed())
+		Expect(managed).To(Equal(original))
+	})
+
 })
