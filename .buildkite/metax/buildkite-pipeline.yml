@@ -1,0 +1,8 @@
+# Paste this into the Buildkite pipeline's "Steps" editor.
+# It uploads the real pipeline definition from the repo. Keep the existing
+# MetaX runner / queue selection ("metax-maca") in the Buildkite pipeline
+# configuration.
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/metax/pipeline.yml
