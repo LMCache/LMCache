@@ -20,6 +20,7 @@ from lmcache.integration.vllm.utils import (
     try_get_vllm_kv_cache_layout,
     vllm_layout_hints,
 )
+import lmcache.integration.vllm.utils as vllm_utils
 
 UNSUPPORTED_LAYOUTS = ("LHBNC", "BHLNC")
 
@@ -142,6 +143,18 @@ class TestVllmLayoutHints:
     def test_unresolved_layout_raises_through_hints(self):
         with pytest.raises(ValueError, match="resolved"):
             vllm_layout_hints(make_unresolved_vllm_config())
+
+    def test_neuron_overrides_reported_nhd_with_hnd(self, monkeypatch):
+        """vllm-neuron reports NHD but allocates [2, NB, NH, BS, HS] (HND).
+
+        Trusting the report makes format detection read ``NH`` as ``BS``.
+        """
+        monkeypatch.setattr(vllm_utils, "torch_device_type", "neuron")
+        assert vllm_layout_hints(make_vllm_config("LBNHC")) == {"kv_layout": "HND"}
+
+    def test_non_neuron_keeps_reported_layout(self, monkeypatch):
+        monkeypatch.setattr(vllm_utils, "torch_device_type", "cuda")
+        assert vllm_layout_hints(make_vllm_config("LBNHC")) == {"kv_layout": "NHD"}
 
 
 class TestResolveVllmKVLayout:

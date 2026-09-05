@@ -22,6 +22,7 @@ from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
+from lmcache.v1.platform import torch_device_type
 
 if TYPE_CHECKING:
     # First Party
@@ -41,9 +42,26 @@ def is_false(value: str) -> bool:
 
 
 def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
-    """Build layout_hints dict by querying vLLM at runtime."""
+    """Build layout_hints dict by querying vLLM at runtime.
+
+    On Neuron the layout is forced to ``"HND"``. vllm-neuron allocates its
+    paged KV cache heads-before-block-size (``[2, NB, NH, BS, HS]``) but
+    reports vLLM's generic ``NHD`` default. Trusting that report makes format
+    detection read ``NH`` as ``BS``, yielding ``NL_X_TWO_NB_BS_NH_HS`` and a
+    ``block_size`` of ``num_kv_heads`` instead of ``NL_X_TWO_NB_NH_BS_HS``.
+    The mis-detected format then reaches the transfer kernels as a layout they
+    do not recognise, so KV stores fail with a shape mismatch.
+    """
     hints: dict[str, str] = {}
     kv_layout = try_get_vllm_kv_cache_layout(vllm_config)
+    if torch_device_type == "neuron":
+        if kv_layout is not None and kv_layout != "HND":
+            logger.info(
+                "Overriding the vLLM-reported KV cache layout %r with 'HND': "
+                "vllm-neuron allocates heads before block-size.",
+                kv_layout,
+            )
+        kv_layout = "HND"
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
     return hints  # type: ignore[return-value]
