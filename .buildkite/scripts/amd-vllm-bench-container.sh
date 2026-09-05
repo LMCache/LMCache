@@ -19,6 +19,14 @@ export BUILD_WITH_HIP=1
 export TORCH_DONT_CHECK_COMPILER_ABI=1
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 
+# This entry point invokes run-single-test.sh directly instead of going through
+# multiprocess/run.sh, so provide the shared launcher's device contract here.
+# ROCm uses the "cuda" PyTorch/vLLM device type while HIP_VISIBLE_DEVICES
+# provides the platform-specific process affinity.
+export TORCH_DEVICE_TYPE="cuda"
+export VLLM_TARGET_DEVICE="cuda"
+export DEVICE_AFFINITY_VAR="HIP_VISIBLE_DEVICES"
+
 case "${AMD_KERNEL_MODE:?AMD_KERNEL_MODE must be set}" in
     serialized)
         [[ "${AMD_SERIALIZE_KERNEL:-}" == "1" ]]
