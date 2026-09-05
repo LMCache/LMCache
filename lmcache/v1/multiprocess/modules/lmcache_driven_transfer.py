@@ -1280,6 +1280,34 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             store_succeeded,
         )
 
+    def _transfer_object_group(
+        self,
+        cache_context: BaseCacheContext,
+        block_ids_gpu: list[torch.Tensor],
+        memory_objs: Sequence[MemoryObj | None],
+        *,
+        object_group_id: int,
+        batch_size: int,
+        skip_first_n_tokens: int,
+        direction: lmcache_native.TransferDirection,
+    ) -> None:
+        """Enqueue the copy for one object group.
+
+        Every object-group copy inside :meth:`retrieve` routes through here so
+        that subclasses can substitute a different copy strategy. Call this
+        rather than :func:`transfer_kv_per_object_group` directly when adding
+        a new copy site to ``retrieve``.
+        """
+        transfer_kv_per_object_group(
+            cache_context,
+            block_ids_gpu,
+            memory_objs,
+            object_group_id=object_group_id,
+            batch_size=batch_size,
+            skip_first_n_tokens=skip_first_n_tokens,
+            direction=direction,
+        )
+
     @_lmcache_nvtx_annotate
     def retrieve(
         self,
@@ -1464,7 +1492,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             window_objs
                         )
 
-                        transfer_kv_per_object_group(
+                        self._transfer_object_group(
                             cache_context,
                             block_ids_per_group_gpu,
                             memory_objs,

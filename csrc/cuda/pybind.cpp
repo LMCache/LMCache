@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
+#include "mp_mem_kernels_layerwise.cuh"
 #include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
@@ -177,6 +178,40 @@ PYBIND11_MODULE(cuda_ops, m) {
          const std::vector<KernelGroupSpec>& kernel_group_specs,
          const std::vector<BatchStep>& batch_steps) {
         return execute_object_group_transfer(
+            static_cast<TransferDirection>(direction), device,
+            host_buffer_alignment, kernel_group_specs, batch_steps);
+      },
+      py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
+      py::arg("kernel_group_specs"), py::arg("batch_steps"),
+      py::call_guard<py::gil_scoped_release>());
+  // Layer-wise variants: separate entry points so the per-chunk
+  // signatures stay untouched and fallback parity tests pass cleanly.
+  m.def(
+      "multi_layer_block_kv_transfer_layerwise",
+      [](const torch::Tensor& paged_buffer_ptrs_tensor,
+         std::vector<int64_t> lmcache_objects_ptrs,
+         const torch::Tensor& block_ids, const torch::Device& device,
+         int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+         int engine_kv_format, int skip_prefix_n_blocks) {
+        return multi_layer_block_kv_transfer_layerwise(
+            paged_buffer_ptrs_tensor, lmcache_objects_ptrs.data(),
+            static_cast<int>(lmcache_objects_ptrs.size()), block_ids, device,
+            static_cast<TransferDirection>(direction), shape_desc,
+            lmcache_chunk_size, static_cast<EngineKVFormat>(engine_kv_format),
+            skip_prefix_n_blocks);
+      },
+      py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
+      py::arg("block_ids"), py::arg("device"), py::arg("direction"),
+      py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
+      py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
+      py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "execute_object_group_transfer_layerwise",
+      [](int direction, const torch::Device& device,
+         size_t host_buffer_alignment,
+         const std::vector<KernelGroupSpec>& kernel_group_specs,
+         const std::vector<BatchStep>& batch_steps) {
+        return execute_object_group_transfer_layerwise(
             static_cast<TransferDirection>(direction), device,
             host_buffer_alignment, kernel_group_specs, batch_steps);
       },

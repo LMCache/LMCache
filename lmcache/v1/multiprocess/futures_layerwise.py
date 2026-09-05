@@ -1,0 +1,304 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Future type for the layer-wise KV retrieve path.
+
+Kept out of :mod:`lmcache.v1.multiprocess.futures` so the default transfer
+path never imports layer-wise machinery. All partial-result handling lives
+here, inside the future itself, rather than in the message queue.
+"""
+
+# Standard
+from typing import Any, Optional, TypeVar
+import os
+import queue
+import struct
+import time
+
+# First Party
+from lmcache import torch_dev
+from lmcache.logging import init_logger
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.event_pool import EventPool
+
+T = TypeVar("T")
+
+logger = init_logger(__name__)
+
+_LAYERWISE_DEBUG = os.getenv("LMCACHE_LAYERWISE_DEBUG", "0").lower() not in (
+    "0",
+    "",
+    "false",
+    "no",
+)
+
+
+class LayerwiseRawFuture(MessagingFuture[tuple[bytes, bool, T]]):
+    """Transport future for a single layer-wise retrieve.
+
+    The server answers with one frame per layer batch.  Overriding
+    :meth:`set_result` keeps that fact inside the result handling: an
+    intermediate frame is buffered, and the future re-registers itself so
+    the frames that follow are still routed here.  Both halves live in this
+    class so the message queue needs no notion of partial results.
+    """
+
+    def __init__(self, partial_queue: "queue.Queue[bytes | None]") -> None:
+        super().__init__()
+        self._partial_queue = partial_queue
+        self._registry: Optional[dict[int, MessagingFuture[Any]]] = None
+        self._request_uid: int = -1
+
+    def bind_registry(
+        self, registry: dict[int, MessagingFuture[Any]], request_uid: int
+    ) -> None:
+        """Adopt the client's pending-request table so we can re-arm.
+
+        Must be called before the request is handed to the polling loop:
+        after that point a response can arrive at any moment, and
+        :meth:`set_result` needs the table already in place.
+
+        Args:
+            registry: The owning client's ``pending_futures`` mapping.
+            request_uid: The uid this future is registered under.
+        """
+        self._registry = registry
+        self._request_uid = request_uid
+
+    def set_result(self, result: tuple[bytes, bool, T]) -> None:
+        payload, is_final, _ = result
+        if not is_final:
+            self._partial_queue.put(payload)
+            if self._registry is not None:
+                # The client pops a future before completing it, which is
+                # right for a one-shot reply but would strand the frames
+                # still coming for this one, so put ourselves back.  Runs on
+                # the polling-loop thread, the only writer of this table.
+                self._registry[self._request_uid] = self
+            return
+        # Wake any thread blocked in _drain_until_layer() so it observes
+        # the outcome instead of waiting out the timeout.
+        self._partial_queue.put(None)
+        super().set_result(result)
+
+
+class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
+    """Future that carries per-layer IPC events for layerwise KV loading.
+
+    The server answers a layer-wise retrieve with one message per layer
+    batch.  Buffering those messages and deciding when the request is
+    complete happens in :class:`LayerwiseRawFuture` below, so the message
+    queue only ever sees "this future is not done yet".
+    :meth:`wait_for_layer` imports and waits on each handle as soon as it
+    arrives, overlapping H2D transfer of later batches with GPU attention of
+    earlier layers.
+
+    Pass :attr:`raw_future_` as the ``future`` argument of
+    ``MessageQueueClient.submit_request``.
+    """
+
+    def __init__(
+        self,
+        device: Any | None = None,
+        event_pool: EventPool | None = None,
+    ) -> None:
+        super().__init__()
+        self.result_: T | None = None
+        self.device_ = device if device is not None else torch_dev.current_device()
+        self._event_backend = get_event_ipc_backend(self.device_)
+        self._event_backend.check_event_support(self.device_)
+        self._last_waited_event: object | None = None
+        self._event_pool = event_pool
+        self._layer_event_map: dict[int, Any] = {}
+        if _LAYERWISE_DEBUG:
+            self._dbg_waits = 0
+            self._dbg_stream_waits = 0
+            self._dbg_drain_s = 0.0
+            self._dbg_total_s = 0.0
+            self._dbg_requested: set[int] = set()
+            self._dbg_logged = False
+            self._dbg_blocking_waits = 0
+            self._dbg_frames: list[tuple[int, int, int, float]] = []
+            self._dbg_t0 = time.perf_counter()
+        self._partial_queue: "queue.Queue[bytes | None]" = queue.Queue()
+        self.raw_future_: LayerwiseRawFuture[T] = LayerwiseRawFuture(
+            self._partial_queue
+        )
+
+    def _import_partial(self, b_data: bytes) -> None:
+        """Import the event described by one intermediate frame."""
+        assert self._event_pool is not None
+        first_layer, count, pool_idx = struct.unpack("<3i", b_data)
+        evt = self._event_pool.event_at(pool_idx)
+        for i in range(first_layer, first_layer + count):
+            self._layer_event_map[i] = evt
+        if _LAYERWISE_DEBUG:
+            dt = time.perf_counter() - self._dbg_t0
+            self._dbg_frames.append((first_layer, count, pool_idx, dt))
+            logger.debug(
+                "layerwise-frame: layers %d..%d -> ipc event idx %d (+%.2f ms)",
+                first_layer,
+                first_layer + count - 1,
+                pool_idx,
+                dt * 1e3,
+            )
+
+    def _drain_until_layer(self, target_layer_idx: int) -> None:
+        """Block-drain the partial queue until *target_layer_idx* is available."""
+        while target_layer_idx not in self._layer_event_map:
+            try:
+                b_data = self._partial_queue.get(timeout=60)
+            except queue.Empty:
+                raise LMCacheTimeoutError(
+                    f"Timed out waiting for the event of layer {target_layer_idx}"
+                ) from None
+            if b_data is None:
+                # Sentinel from LayerwiseRawFuture.set_result(): the closing
+                # frame arrived and no further frames are coming.  Break out
+                # so the caller can discover the outcome via the raw future.
+                break
+            self._import_partial(b_data)
+
+    def _drain_remaining(self) -> None:
+        """Non-blocking drain of any queued intermediate frames."""
+        while True:
+            try:
+                b_data = self._partial_queue.get_nowait()
+            except queue.Empty:
+                break
+            if b_data is None:
+                break
+            self._import_partial(b_data)
+
+    def _resolve_final(self) -> None:
+        """Extract the success flag from the final ZMQ response."""
+        if self.result_ is not None:
+            return
+        _, _, result = self.raw_future_.result()
+        self.result_ = result
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def wait_for_layer(self, layer_idx: int) -> None:
+        """Make the current stream wait for a specific layer's transfer.
+
+        Raises:
+            RuntimeError: If the retrieve succeeded but never announced
+                *layer_idx*, which would leave the caller reading KV that
+                was never transferred.
+        """
+        t0 = time.perf_counter() if _LAYERWISE_DEBUG else 0.0
+        if _LAYERWISE_DEBUG:
+            self._dbg_waits += 1
+            self._dbg_requested.add(layer_idx)
+        evt = self._layer_event_map.get(layer_idx)
+        if evt is None:
+            t_drain = time.perf_counter() if _LAYERWISE_DEBUG else 0.0
+            self._drain_until_layer(layer_idx)
+            if _LAYERWISE_DEBUG:
+                self._dbg_drain_s += time.perf_counter() - t_drain
+                self._dbg_blocking_waits += 1
+            evt = self._layer_event_map.get(layer_idx)
+        if evt is None:
+            # _drain_until_layer() only returns without the layer once it
+            # has seen the closing sentinel, so the exchange is over.
+            self._resolve_final()
+            if not self.result_:
+                # Failed retrieve: no KV landed, the caller recomputes this
+                # layer, and there is nothing to order the stream against.
+                # The vLLM adapter calls this for every pending retrieve,
+                # so returning quietly here is the expected path.
+                return
+            # Succeeded, yet this layer never arrived. Returning would
+            # silently skip the stream wait and let attention read KV that
+            # is not there, so surface it instead.
+            raise RuntimeError(
+                f"Layer-wise retrieve reported success but never delivered "
+                f"layer {layer_idx}; the stream closed after "
+                f"{len(self._layer_event_map)} layer(s)"
+            )
+        if evt is not self._last_waited_event:
+            current_stream = torch_dev.current_stream(self.device_)
+            self._event_backend.wait_event(evt, current_stream)
+            self._last_waited_event = evt
+            if _LAYERWISE_DEBUG:
+                self._dbg_stream_waits += 1
+        if _LAYERWISE_DEBUG:
+            self._dbg_total_s += time.perf_counter() - t0
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        flag = self.raw_future_.wait(timeout)
+        if not flag:
+            return False
+        self._resolve_final()
+        self._drain_remaining()
+        if self._layer_event_map:
+            last_layer = max(self._layer_event_map.keys())
+            self._event_backend.synchronize_event(
+                self._layer_event_map[last_layer], self.device_
+            )
+        if _LAYERWISE_DEBUG and not self._dbg_logged:
+            self._dbg_logged = True
+            req = self._dbg_requested
+            keys = self._layer_event_map.keys()
+            logger.info(
+                "layerwise-wait: %d call(s), %d stream wait(s), "
+                "drain %.2f ms, total %.2f ms; requested idx %s "
+                "(%d distinct), announced idx %s (%d entries)",
+                self._dbg_waits,
+                self._dbg_stream_waits,
+                self._dbg_drain_s * 1e3,
+                self._dbg_total_s * 1e3,
+                f"{min(req)}..{max(req)}" if req else "none",
+                len(req),
+                f"{min(keys)}..{max(keys)}" if keys else "none",
+                len(keys),
+            )
+            frames = self._dbg_frames
+            if frames:
+                logger.info(
+                    "layerwise-frames: %d frame(s) covering layers %d..%d, "
+                    "%d blocking wait(s); arrival +%.2f..%.2f ms",
+                    len(frames),
+                    min(f[0] for f in frames),
+                    max(f[0] + f[1] - 1 for f in frames),
+                    self._dbg_blocking_waits,
+                    frames[0][3] * 1e3,
+                    frames[-1][3] * 1e3,
+                )
+            else:
+                logger.info(
+                    "layerwise-frames: no intermediate frame arrived; the "
+                    "retrieve was answered by the closing frame alone"
+                )
+        return True
+
+    def result(self, timeout: Optional[float] = None) -> T:
+        flag = self.wait(timeout)
+        if not flag:
+            raise LMCacheTimeoutError(
+                "LayerwiseDeviceMessagingFuture result not available within timeout"
+            )
+        assert self.result_ is not None
+        return self.result_
+
+    def query(self) -> bool:
+        if not self.raw_future_.query():
+            return False
+        self._resolve_final()
+        self._drain_remaining()
+        if self._layer_event_map:
+            last_layer = max(self._layer_event_map.keys())
+            return self._event_backend.query_event(self._layer_event_map[last_layer])
+        return True
+
+    def set_result(self, result: T) -> None:
+        raise NotImplementedError(
+            "LayerwiseDeviceMessagingFuture does not support set_result"
+        )
+
+    @property
+    def num_layers(self) -> int:
+        return len(self._layer_event_map)
