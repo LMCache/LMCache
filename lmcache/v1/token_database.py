@@ -468,10 +468,30 @@ class SegmentTokenDatabase(TokenDatabase):
         self.sep_len = len(self.sep_tokens)
 
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
-        """Match the `sep_tokens` with sliding windows"""
+        """Split ``tokens`` on every occurrence of ``self.sep_tokens``.
 
+        The separator is matched with sliding windows of width ``self.sep_len``.
+        The tokens between consecutive separators (and the leading/trailing
+        remainders) are yielded as the resulting segments; the separator tokens
+        themselves are dropped.
+
+        :param torch.Tensor tokens: The 1-D token id tensor to split.
+
+        :returns: A generator of token segments. When the sequence cannot
+            contain a separator -- either because the separator is empty
+            (``sep_len == 0``) or because the sequence is shorter than the
+            separator (``len(tokens) < sep_len``) -- the whole sequence is
+            yielded unchanged as a single segment.
+        """
+
+        # A sequence that is shorter than the separator (or an empty separator)
+        # cannot contain a match, so it forms a single segment. Returning here
+        # is required: ``tensor.unfold`` below raises a RuntimeError when the
+        # window is wider than the tensor, and an empty separator would make
+        # every window match vacuously.
         if self.sep_len == 0 or len(tokens) < self.sep_len:
             yield tokens
+            return
 
         # Unfold into sliding windows
         # shape: (num_tokens-sep_len+1, sep_len)

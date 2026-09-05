@@ -8,6 +8,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1 import token_database
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.token_database import ChunkedTokenDatabase, SegmentTokenDatabase
 
@@ -152,3 +153,87 @@ def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
         assert isinstance(hash_val, int), f"Expected int, got {type(hash_val)}"
         # Must fit in uint64 (msgpack range: 0 to 2**64 - 1)
         assert 0 <= hash_val <= 2**64 - 1
+
+
+class _StubTokenizer:
+    """Minimal tokenizer stand-in for SegmentTokenDatabase.
+
+    SegmentTokenDatabase derives its separator as
+    ``tokenizer.encode(blend_special_str)[1:]`` -- the leading element is
+    treated as a special start token and dropped. This stub returns a fixed
+    leading id followed by the requested separator ids so that ``sep_tokens``
+    is fully controlled without downloading a real tokenizer (the only existing
+    SegmentTokenDatabase test is skipped unless Hugging Face credentials are
+    available).
+    """
+
+    def __init__(self, sep_ids: list[int]) -> None:
+        self._encoded = [0, *sep_ids]
+
+    def encode(self, text: str) -> list[int]:
+        return list(self._encoded)
+
+
+def _make_segment_db(monkeypatch, sep_ids: list[int]) -> SegmentTokenDatabase:
+    monkeypatch.setattr(
+        token_database.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: _StubTokenizer(sep_ids),
+    )
+    cfg = LMCacheEngineConfig.from_legacy(blend_special_str="<sep>")
+    metadata = dumb_metadata_with_model_name("test_model")
+    return SegmentTokenDatabase(cfg, metadata)
+
+
+def test_segment_process_tokens_shorter_than_separator(monkeypatch) -> None:
+    """A sequence shorter than the separator must be returned as a single
+    segment.
+
+    Regression test: the splitting guard previously fell through to
+    ``tensor.unfold``, which raises ``RuntimeError`` when the window is wider
+    than the tensor, crashing on any request shorter than the separator.
+    """
+    db = _make_segment_db(monkeypatch, sep_ids=[101, 102])
+    tokens = torch.tensor([7], dtype=torch.long)
+
+    results = list(db.process_tokens(tokens=tokens, make_key=False))
+
+    assert len(results) == 1
+    start, end, _ = results[0]
+    assert (start, end) == (0, 1)
+
+
+def test_segment_process_tokens_empty_separator(monkeypatch) -> None:
+    """An empty separator must yield the whole sequence as a single segment.
+
+    Regression test: with ``sep_len == 0`` the guard previously fell through
+    and every sliding window matched vacuously, exploding the input into
+    spurious empty/single-token segments.
+    """
+    db = _make_segment_db(monkeypatch, sep_ids=[])
+    tokens = torch.tensor([1, 2, 3, 4], dtype=torch.long)
+
+    results = list(db.process_tokens(tokens=tokens, make_key=False))
+
+    assert len(results) == 1
+    start, end, _ = results[0]
+    assert (start, end) == (0, 4)
+
+
+def test_segment_process_tokens_splits_on_separator(monkeypatch) -> None:
+    """The normal multi-segment split path is unchanged by the guard fix."""
+    db = _make_segment_db(monkeypatch, sep_ids=[101, 102])
+    sep = torch.tensor([101, 102], dtype=torch.long)
+    first = torch.tensor([1, 2, 3], dtype=torch.long)
+    second = torch.tensor([4, 5], dtype=torch.long)
+    tokens = torch.cat([first, sep, second])
+
+    results = list(db.process_tokens(tokens=tokens, make_key=False))
+
+    assert len(results) == 2
+    # First segment covers the tokens before the separator.
+    assert results[0][0] == 0
+    assert results[0][1] == len(first)
+    # Second segment starts after the dropped separator and runs to the end.
+    assert results[1][0] == len(first) + len(sep)
+    assert results[1][1] == len(tokens)
