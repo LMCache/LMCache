@@ -77,8 +77,7 @@ class ExtraConfigDefault(enum.Enum):
     isolated_ipc = False
 
 
-# Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
-# entry point, which still passes these as positional/keyword args.
+# Shared defaults used by the vLLM and SGLang multiprocess adapters.
 DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.value
 DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.value
 
