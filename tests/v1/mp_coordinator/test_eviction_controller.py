@@ -44,6 +44,7 @@ def _make_key(salt: str, model: str = "m", rank: int = 0, h: str = "aa") -> Obje
 def _setup(
     eviction_ratio: float = 0.5,
     trigger_watermark: float = 1.0,
+    target_watermark: float = 0.0,
     default_limit_bytes: int | None = 0,
     check_interval: float = 0.0,
     instances: tuple[MPInstance, ...] = (),
@@ -63,6 +64,7 @@ def _setup(
         registry=_make_registry(*instances),
         eviction_ratio=eviction_ratio,
         trigger_watermark=trigger_watermark,
+        target_watermark=target_watermark,
         check_interval=check_interval,
     )
     ctrl.quota.set_default_limit_bytes(default_limit_bytes)
@@ -321,6 +323,48 @@ def test_watermark_above_threshold_evicts():
 # ============================================================================
 # execute_evictions (async dispatch)
 # ============================================================================
+
+
+def test_hysteresis_evicts_down_to_target_watermark():
+    # trigger=1.0, target=0.5: once usage hits the quota, one sweep should free
+    # down to ~target*quota (500 of 1000), i.e. evict half the uniform-size keys.
+    ctrl, qs, ut = _setup(
+        eviction_ratio=0.1, trigger_watermark=1.0, target_watermark=0.5
+    )
+    qs.set_quota("a", 1000)
+    keys = [_make_key("a", h=f"{i:02x}") for i in range(10)]
+    for k in keys:
+        _store(ctrl, ut, k, 100)  # 10 x 100 = 1000 bytes, at the quota
+    result = ctrl.compute_eviction_plan()
+    # bytes_to_free = 1000 - 0.5*1000 = 500 -> ratio 0.5 -> 5 oldest keys, NOT
+    # the eviction_ratio (0.1 -> 1 key). Hysteresis frees real headroom in one
+    # pass.
+    assert len(result["a"]) == 5
+    assert result["a"] == keys[:5]  # the 5 oldest (LRU order)
+
+
+def test_target_watermark_zero_uses_legacy_ratio():
+    # target=0.0 disables hysteresis -> fall back to the fixed eviction_ratio.
+    ctrl, qs, ut = _setup(
+        eviction_ratio=0.1, trigger_watermark=1.0, target_watermark=0.0
+    )
+    qs.set_quota("a", 1000)
+    keys = [_make_key("a", h=f"{i:02x}") for i in range(10)]
+    for k in keys:
+        _store(ctrl, ut, k, 100)
+    result = ctrl.compute_eviction_plan()
+    assert len(result["a"]) == 1  # eviction_ratio 0.1 of 10 keys
+
+
+def test_hysteresis_no_eviction_below_trigger():
+    # Usage below the high watermark -> no sweep even with hysteresis on.
+    ctrl, qs, ut = _setup(
+        eviction_ratio=0.5, trigger_watermark=0.9, target_watermark=0.5
+    )
+    qs.set_quota("a", 1000)
+    for i in range(8):
+        _store(ctrl, ut, _make_key("a", h=f"{i:02x}"), 100)  # 800 < 0.9*1000
+    assert ctrl.compute_eviction_plan() == {}
 
 
 def _make_registry(*instances: MPInstance) -> InstanceRegistry:

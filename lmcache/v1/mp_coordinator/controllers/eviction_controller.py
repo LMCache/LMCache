@@ -66,9 +66,16 @@ class FleetEvictionController(Controller):
             :meth:`consume` reads sizes from it.
         registry: The fleet membership view; supplies the address a
             victim's DELETE is sent to.
-        eviction_ratio: Fraction of tracked keys to evict per cycle.
+        eviction_ratio: Fraction of tracked keys to evict per cycle. Used
+            only when ``target_watermark`` is ``0.0`` (legacy fixed-ratio).
         trigger_watermark: Eviction fires when usage reaches this
-            fraction of the quota.
+            fraction of the quota (the high watermark).
+        target_watermark: Low watermark of the hysteresis band. When
+            ``> 0.0`` (and ``< trigger_watermark``) a firing sweep evicts
+            down to ``target_watermark * quota`` in one pass instead of a
+            fixed ratio, so headroom always exists and a sustained write
+            burst can't pin usage at the cap. ``0.0`` keeps legacy
+            behaviour.
         check_interval: Seconds between sweeps. Zero runs no loop.
     """
 
@@ -78,6 +85,7 @@ class FleetEvictionController(Controller):
         registry: InstanceRegistry,
         eviction_ratio: float = 0.5,
         trigger_watermark: float = 1.0,
+        target_watermark: float = 0.0,
         check_interval: float = 0.0,
     ) -> None:
         self._quota_manager = QuotaManager()
@@ -85,6 +93,7 @@ class FleetEvictionController(Controller):
         self._registry = registry
         self._eviction_ratio = max(0.0, min(1.0, eviction_ratio))
         self._trigger_watermark = trigger_watermark
+        self._target_watermark = target_watermark
         self._check_interval = check_interval
         self._policy = IsolatedLRUEvictionPolicy()
         self._in_flight_dispatches: set[asyncio.Task] = set()
@@ -186,6 +195,7 @@ class FleetEvictionController(Controller):
             registry=views.get(InstanceRegistry),
             eviction_ratio=config.eviction_ratio,
             trigger_watermark=config.trigger_watermark,
+            target_watermark=config.target_watermark,
             check_interval=config.eviction_check_interval,
         )
 
@@ -276,7 +286,21 @@ class FleetEvictionController(Controller):
             if current_bytes < self._trigger_watermark * limit:
                 continue
 
-            effective_ratio = 1.0 if limit == 0 else self._eviction_ratio
+            if limit == 0:
+                # No quota: evict everything tracked for this salt.
+                effective_ratio = 1.0
+            elif self._target_watermark > 0.0:
+                # Hysteresis: over the high (trigger) watermark, evict down to
+                # the low (target) watermark in a single pass. KV chunks are
+                # ~uniform in size, so evicting this fraction of the LRU keys
+                # by count frees ~this fraction of the bytes, leaving usage
+                # near target*quota with headroom, so eviction never falls
+                # behind a sustained write burst (the legacy fixed-ratio sweep
+                # lets usage pin at the cap under load).
+                bytes_to_free = current_bytes - self._target_watermark * limit
+                effective_ratio = max(0.0, min(1.0, bytes_to_free / current_bytes))
+            else:
+                effective_ratio = self._eviction_ratio
             actions = self._policy.get_eviction_actions(
                 effective_ratio,
                 cache_salt=cache_salt,
