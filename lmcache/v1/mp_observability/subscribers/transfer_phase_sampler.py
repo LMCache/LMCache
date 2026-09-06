@@ -52,16 +52,21 @@ class TransferPhaseSampler(EventSubscriber):
     def _on_transfer_end(self, event: Event) -> None:
         """Pop every finished sample and publish them in one event.
 
-        No-op when the native op is unavailable or nothing has finished.
+        Publishes even when the pop is empty, carrying the ending transfer's
+        key: this event is popped after that transfer's last section, so it
+        is the tracing subscriber's signal that the transfer's samples are
+        complete (they may all have arrived in earlier batches). No-op only
+        when the native op is unavailable.
         """
         if not _HAS_TRANSFER_PHASE_TIMING:
             return
         samples = _device_ops.pop_completed_phase_timings()
-        if not samples:
-            return
         self._bus.publish(
             Event(
                 event_type=EventType.MP_TRANSFER_PHASE_SAMPLES,
-                metadata={"samples": samples},
+                metadata={
+                    "samples": samples,
+                    "ended_transfer_key": str(event.metadata.get("transfer_key", "")),
+                },
             )
         )

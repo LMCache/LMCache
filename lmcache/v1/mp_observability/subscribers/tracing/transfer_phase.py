@@ -158,8 +158,10 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
             key = self._accumulate(sample)
             if key is not None:
                 touched.add(key)
-        # Emit only what this batch fed; an untouched ended transfer is
-        # still waiting for its own samples.
+        # The batch an END published names its transfer: that pop ran after
+        # the transfer's last section, so its samples are complete even if
+        # they all arrived in earlier batches (or never existed).
+        touched.add(str(event.metadata.get("ended_transfer_key", "")))
         for key in touched:
             transfer = self._transfers.get(key)
             if transfer is not None and transfer.ended:

@@ -14,7 +14,11 @@ from lmcache.v1.mp_observability.subscribers.transfer_phase_sampler import (
 
 
 def _end_event() -> Event:
-    return Event(event_type=EventType.MP_STORE_END, session_id="s")
+    return Event(
+        event_type=EventType.MP_STORE_END,
+        session_id="s",
+        metadata={"transfer_key": "t1"},
+    )
 
 
 def test_subscribes_to_both_end_events():
@@ -39,10 +43,12 @@ def test_publishes_one_event_carrying_all_samples(monkeypatch):
     bus.publish.assert_called_once()
     event = bus.publish.call_args.args[0]
     assert event.event_type == EventType.MP_TRANSFER_PHASE_SAMPLES
-    assert event.metadata == {"samples": samples}
+    assert event.metadata == {"samples": samples, "ended_transfer_key": "t1"}
 
 
-def test_no_event_when_nothing_finished(monkeypatch):
+def test_empty_pop_still_publishes(monkeypatch):
+    """An empty pop still publishes: the event is the tracing subscriber's
+    signal to retire the ended transfer."""
     monkeypatch.setattr(mod, "_HAS_TRANSFER_PHASE_TIMING", True)
     monkeypatch.setattr(
         mod, "_device_ops", MagicMock(pop_completed_phase_timings=lambda: [])
@@ -51,7 +57,11 @@ def test_no_event_when_nothing_finished(monkeypatch):
 
     TransferPhaseSampler(bus).get_subscriptions()[EventType.MP_STORE_END](_end_event())
 
-    bus.publish.assert_not_called()
+    bus.publish.assert_called_once()
+    assert bus.publish.call_args.args[0].metadata == {
+        "samples": [],
+        "ended_transfer_key": "t1",
+    }
 
 
 def test_noop_without_native_op(monkeypatch):

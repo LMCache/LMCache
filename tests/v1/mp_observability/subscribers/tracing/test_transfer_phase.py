@@ -130,12 +130,17 @@ def _store_events(sid: str, now: float, tkey: str | None = None) -> list[Event]:
     )
 
 
-def _samples_event(samples: list, now: float, sid: str = "other") -> Event:
+def _samples_event(
+    samples: list, now: float, sid: str = "other", ended_key: str = ""
+) -> Event:
+    metadata: dict = {"samples": samples}
+    if ended_key:
+        metadata["ended_transfer_key"] = ended_key
     return Event(
         event_type=EventType.MP_TRANSFER_PHASE_SAMPLES,
         session_id=sid,
         timestamp=now,
-        metadata={"samples": samples},
+        metadata=metadata,
     )
 
 
@@ -369,3 +374,45 @@ def test_two_transfers_both_ends_before_samples(exporter):
     drops the second's spans; matching on the transfer key does not.
     """
     _two_transfer_case(exporter, "ends_first")
+
+
+def test_ended_transfer_without_samples_retires_on_the_empty_batch(exporter):
+    """A transfer that produced no samples is retired by the empty samples
+    event its END publishes: no spans, and later samples with its key are
+    ignored instead of reviving it."""
+    now = time.time()
+    sid = "req-8"
+    late = [(KERNEL, D2H, 0, 1.0, MB, sid, now + 0.002, now + 0.003)]
+    _run(
+        _store_events(sid, now)
+        + [
+            _samples_event([], now + 0.5, ended_key=sid),
+            _samples_event(late, now + 0.6),
+        ]
+    )
+    assert _spans_named(exporter, "transfer.kernel_interval") == []
+    assert _spans_named(exporter, "transfer.staging") == []
+
+
+def test_samples_all_collected_before_end_still_emit(exporter):
+    """Samples fully popped by an earlier batch, then END whose own batch is
+    empty: the span must still be emitted (regression: the ended transfer
+    used to wait for a batch that touches it, which never comes)."""
+    now = time.time()
+    sid = "req-9"
+    samples = [(KERNEL, D2H, 0, 1.0, MB, sid, now + 0.002, now + 0.003)]
+    start, store_start, store_end, req_end = _store_events(sid, now)
+    _run(
+        [
+            start,
+            store_start,
+            _samples_event(samples, now + 0.004),  # popped by another END
+            store_end,
+            req_end,
+            # this END's own pop: empty, but it names the transfer
+            _samples_event([], now + 0.5, ended_key=sid),
+        ]
+    )
+    kernel = _spans_named(exporter, "transfer.kernel_interval")
+    assert len(kernel) == 1
+    assert kernel[0].attributes["num_steps"] == 1

@@ -72,7 +72,9 @@ class EventType(Enum):
     MP_STORE_START = "mp.store.start"
     MP_STORE_END = "mp.store.end"
     # Gather/DMA phase timings popped from the native plan executor by
-    # TransferPhaseSampler on MP_*_END. Metadata: ``samples`` (list[tuple]),
+    # TransferPhaseSampler on MP_*_END. Metadata: ``samples`` (list[tuple])
+    # and ``ended_transfer_key`` (str, the ending transfer's key -- its
+    # completion signal, present even when ``samples`` is empty);
     # one (phase, direction, device_index, elapsed_ms, nbytes, transfer_key,
     # start_time_s, end_time_s) tuple per finished timed section;
     # phase/direction are TransferPhase / TransferDirection values and
