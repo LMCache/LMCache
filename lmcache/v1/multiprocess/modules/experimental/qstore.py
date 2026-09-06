@@ -68,15 +68,17 @@ class QStoreModule(InstanceLivenessTarget):
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    def get_and_touch_context_entry(self, instance_id: int) -> ContextEntry | None:
+    def get_and_touch_context_entry(
+        self, instance_id: int, *, transfer_activity: bool = False
+    ) -> ContextEntry | None:
         """Return the entry for ``instance_id``, refreshing its last-seen time.
 
         The refresh keeps an actively transferring worker from being reaped
-        even if its PINGs are briefly delayed. Does not latch the
-        ping-proven flag -- only PINGs do that.
+        even if its PINGs are briefly delayed. Transfer activity is optional.
 
         Args:
             instance_id: The worker instance ID.
+            transfer_activity: Whether this is a real Q transfer.
 
         Returns:
             The entry, or None if the instance is not (or no longer) tracked.
@@ -86,6 +88,8 @@ class QStoreModule(InstanceLivenessTarget):
             entry = self._q_contexts.get(instance_id)
             if entry is not None:
                 entry.last_seen = now
+                if transfer_activity:
+                    entry.has_transfer_activity = True
             return entry
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
@@ -98,13 +102,16 @@ class QStoreModule(InstanceLivenessTarget):
         with self._lock:
             return dict(self._q_contexts)
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked.
 
         Args:
             instance_id: The worker instance ID.
+
+        Returns:
+            True if the Context exists and was refreshed; otherwise False.
         """
         now = time.monotonic()
         with self._lock:
@@ -112,6 +119,7 @@ class QStoreModule(InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
                 entry.has_liveness_signal = True
+            return entry is not None
 
     def tracked_instance_count(self) -> int:
         """Return the number of currently registered instances."""
@@ -123,12 +131,12 @@ class QStoreModule(InstanceLivenessTarget):
     ) -> list[int]:
         """Reap Q ring registrations that have gone silent.
 
-        A ping-proven instance is judged against ``reap_timeout_s``; one
-        that has never pinged against the larger ``registration_grace_s``.
+        Both PING and Q-store activity select ``reap_timeout_s``; otherwise the
+        larger ``registration_grace_s`` applies.
 
         Args:
-            reap_timeout_s: Silence budget for ping-proven instances.
-            registration_grace_s: Silence budget for never-pinged instances.
+            reap_timeout_s: Silence budget after both signals.
+            registration_grace_s: Silence budget before both signals.
 
         Returns:
             The instance IDs reaped this scan.
@@ -142,7 +150,7 @@ class QStoreModule(InstanceLivenessTarget):
                 if now - entry.last_seen
                 > (
                     reap_timeout_s
-                    if entry.has_liveness_signal
+                    if (entry.has_liveness_signal and entry.has_transfer_activity)
                     else registration_grace_s
                 )
             ]
@@ -361,7 +369,7 @@ class QStoreModule(InstanceLivenessTarget):
         """
         st = time.perf_counter()
 
-        entry = self.get_and_touch_context_entry(instance_id)
+        entry = self.get_and_touch_context_entry(instance_id, transfer_activity=True)
         if entry is None:
             raise ValueError(f"No Q ring registered for instance ID {instance_id}")
         cache_context = entry.cache_context

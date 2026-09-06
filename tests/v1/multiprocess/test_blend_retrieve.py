@@ -24,6 +24,21 @@ import lmcache.lmcache_native as lmcache_native
 # ---------------------------------------------------------------------------
 
 
+def test_retrieve_precomputed_marks_real_transfer_activity():
+    """A real Blend retrieve activates the GPU Context, unlike metadata setup."""
+    eng = MagicMock(spec=BlendModule)
+    eng._transfer_module = MagicMock()
+    eng._transfer_module.get_and_touch_context_entry.return_value = None
+    retrieve = BlendModule.cb_retrieve_pre_computed.__get__(eng)
+
+    with pytest.raises(ValueError, match="not registered"):
+        retrieve(MagicMock(), [], [], 7, b"")
+
+    eng._transfer_module.get_and_touch_context_entry.assert_called_once_with(
+        7, transfer_activity=True
+    )
+
+
 def _native_retrieve_plan_available() -> bool:
     """Return whether the C++ native retrieve-plan interfaces are available."""
 
