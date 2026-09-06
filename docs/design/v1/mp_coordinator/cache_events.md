@@ -99,6 +99,9 @@ listener plumbing or a dedicated flush task:
   the pool fleet-wide (one pool per backend type), so the directory
   deduplicates shared-storage placements across emitters (see
   `key_directory.md` — Shared pools).
+  Each L2 STORE size is the object's absolute placement size, rather than an
+  accounting delta. An adapter that stores the same key again must therefore
+  publish its full size so a consumer can upsert or reconstruct that placement.
   The LMCache-driven store path additionally publishes
   `mp.tokens` (parallel `chunk_hashes` + `token_chunks` +
   `token_offsets`) at
