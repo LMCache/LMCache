@@ -53,8 +53,5 @@ std::unique_ptr<NixlStorageStrategy> make_nixl_storage_strategy(
 
 const char* nixl_storage_kind_name(NixlStorageKind storage_kind);
 
-std::string nixl_persistent_identity(const std::string& serialized_key,
-                                     bool shard_directories);
-
 }  // namespace connector
 }  // namespace lmcache

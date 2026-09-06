@@ -18,13 +18,12 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include "../keys.h"
 
 namespace lmcache {
 namespace connector {
 namespace {
 
-constexpr char kKeySeparator = '@';
-constexpr const char* kFileExtension = ".bin";
 std::atomic<uint64_t> next_temporary_id{1};
 
 void check_nixl(nixl_status_t status, const std::string& operation) {
@@ -222,29 +221,6 @@ void execute_transfer(nixlAgent& agent, nixlBackendH* backend,
   TransferRequest request(agent, backend, operation, local, storage,
                           static_cast<size_t>(local_descriptors.descCount()));
   request.execute(stop);
-}
-
-std::vector<std::string> split_key(const std::string& key) {
-  std::vector<std::string> fields;
-  size_t start = 0;
-  while (start <= key.size()) {
-    size_t separator = key.find(kKeySeparator, start);
-    if (separator == std::string::npos) {
-      fields.push_back(key.substr(start));
-      break;
-    }
-    fields.push_back(key.substr(start, separator - start));
-    start = separator + 1;
-  }
-  if (fields.size() != 4 && fields.size() != 5) {
-    throw std::runtime_error(
-        "malformed native key: expected four or five '@'-separated fields");
-  }
-  if (std::any_of(fields.begin(), fields.begin() + 4,
-                  [](const std::string& field) { return field.empty(); })) {
-    throw std::runtime_error("malformed native key: empty required field");
-  }
-  return fields;
 }
 
 bool parse_bool_parameter(
@@ -466,7 +442,7 @@ class NixlFileStorage final : public NixlStorageStrategy {
 
  private:
   std::filesystem::path path_for_key(const std::string& key) const {
-    return base_path_ / nixl_persistent_identity(key, shard_directories_);
+    return base_path_ / key_to_filename(key, shard_directories_);
   }
 
   void validate_direct_io(const NixlTransferBuffer& buffer) const {
@@ -507,7 +483,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
                                   buffer.length, 0));
       nixlBlobDesc object_descriptor(
           0, buffer.length, index,
-          nixl_persistent_identity(buffer.key, shard_directories_));
+          key_to_filename(buffer.key, shard_directories_));
       registration.addDesc(object_descriptor);
       storage.addDesc(object_descriptor);
     }
@@ -522,8 +498,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
     std::vector<std::string> identities;
     identities.reserve(buffers.size());
     for (const NixlTransferBuffer& buffer : buffers) {
-      identities.push_back(
-          nixl_persistent_identity(buffer.key, shard_directories_));
+      identities.push_back(key_to_filename(buffer.key, shard_directories_));
     }
     std::vector<uint8_t> results =
         query_storage(agent, backend, OBJ_SEG, identities);
@@ -558,7 +533,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
     std::vector<std::string> identities;
     identities.reserve(keys.size());
     for (const std::string& key : keys) {
-      identities.push_back(nixl_persistent_identity(key, shard_directories_));
+      identities.push_back(key_to_filename(key, shard_directories_));
     }
     return query_storage(agent, backend, OBJ_SEG, identities);
   }
@@ -581,33 +556,6 @@ class NixlObjectStorage final : public NixlStorageStrategy {
 };
 
 }  // namespace
-
-std::string nixl_persistent_identity(const std::string& serialized_key,
-                                     bool shard_directories) {
-  std::vector<std::string> fields = split_key(serialized_key);
-  std::string safe_model = fields[0];
-  size_t slash = 0;
-  while ((slash = safe_model.find('/', slash)) != std::string::npos) {
-    safe_model.replace(slash, 1, "--");
-    slash += 2;
-  }
-  std::string filename =
-      safe_model + "_" + fields[1] + "_" + fields[2] + "_" + fields[3];
-  if (fields.size() == 5 && !fields[4].empty()) {
-    filename += "@" + fields[4];
-  }
-  filename += kFileExtension;
-  if (filename.size() > 255) {
-    throw std::runtime_error(
-        "native NIXL persistent filename exceeds 255 bytes");
-  }
-  if (!shard_directories) return filename;
-  if (fields[3].size() < 4) {
-    throw std::runtime_error(
-        "shard_dirs requires a chunk hash of at least two bytes");
-  }
-  return fields[3].substr(0, 2) + "/" + fields[3].substr(2, 2) + "/" + filename;
-}
 
 std::unique_ptr<NixlStorageStrategy> make_nixl_storage_strategy(
     NixlStorageKind storage_kind,

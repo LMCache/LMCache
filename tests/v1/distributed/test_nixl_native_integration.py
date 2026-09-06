@@ -181,13 +181,13 @@ def test_posix_public_round_trip_persistence_and_mixed_load(
         adapter.close()
 
     expected_names = {
-        "org--model_0000002a_7_00112233@tenant.bin",
-        "org--model_0000002a_8_44556677.bin",
-        "org--model_0000002a_9_8899aabb.bin",
+        "org-SEP-model@0x0000002a@7@00112233@tenant.data",
+        "org-SEP-model@0x0000002a@8@44556677.data",
+        "org-SEP-model@0x0000002a@9@8899aabb.data",
     }
     assert {path.name for path in tmp_path.iterdir()} == expected_names
 
-    truncated_path = tmp_path / "org--model_0000002a_9_8899aabb.bin"
+    truncated_path = tmp_path / "org-SEP-model@0x0000002a@9@8899aabb.data"
     truncated_path.write_bytes(b"truncated")
     destinations: list[MemoryObj] = [
         _memory_obj(arena, 3 * _CHUNK_SIZE, 0),
@@ -263,8 +263,8 @@ def test_posix_rejects_out_of_arena_and_misaligned_buffers(
         _wait_for_fd(adapter.get_store_event_fd())
         assert adapter.pop_completed_store_tasks()[recovery_id].is_successful()
         assert {path.name for path in tmp_path.iterdir()} == {
-            "model_00000000_0_00000001.bin",
-            "model_00000000_0_00000002.bin",
+            "model@0x00000000@0@00000001.data",
+            "model@0x00000000@0@00000002.data",
         }
     finally:
         adapter.close()
@@ -306,7 +306,9 @@ def test_posix_cross_process_atomic_publication(tmp_path: Path) -> None:
     assert sorted(results) == [(71, True), (83, True)]
 
     paths = list(tmp_path.iterdir())
-    assert [path.name for path in paths] == ["shared--model_00000003_5_0000004d.bin"]
+    assert [path.name for path in paths] == [
+        "shared-SEP-model@0x00000003@5@0000004d.data"
+    ]
     contents = paths[0].read_bytes()
     assert len(contents) == _CHUNK_SIZE
     assert contents in {bytes([value]) * _CHUNK_SIZE for value in fill_values}
