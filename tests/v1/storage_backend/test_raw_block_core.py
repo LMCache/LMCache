@@ -21,10 +21,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
     RawBlockKeySpec,
+    encode_legacy_key,
     encode_object_key,
     normalize_raw_block_placement_ids,
     slot_identity_from_encoded_key,
@@ -443,7 +445,7 @@ def test_raw_block_core_checkpoint_uses_slot_manifest_and_header_metadata(tmp_pa
 
         state, payload = _read_latest_checkpoint(path, core)
         assert state["version"] == 2
-        assert state["slot_manifest_version"] == 1
+        assert state["slot_manifest_version"] == 2
         assert state["slot_manifest_count"] == len(specs)
         assert state["entries"] == {}
         manifest = base64.b64decode(state["slot_manifest"])
@@ -457,11 +459,9 @@ def test_raw_block_core_checkpoint_uses_slot_manifest_and_header_metadata(tmp_pa
             header = _read_slot_header(path, offset, config.header_bytes)
             assert header[:8] == b"LMCBLK01"
             record_header = header[24 : 24 + recovery_header.size]
-            magic, version, record_len, checksum = recovery_header.unpack(
-                record_header
-            )
+            magic, version, record_len, checksum = recovery_header.unpack(record_header)
             assert magic == b"LMCRCV01"
-            assert version == 1
+            assert version == 2
             record = header[
                 24 + recovery_header.size : 24 + recovery_header.size + record_len
             ]
@@ -469,6 +469,7 @@ def test_raw_block_core_checkpoint_uses_slot_manifest_and_header_metadata(tmp_pa
             record_data = json.loads(record)
             assert record_data["key"] == spec.encoded
             assert record_data["namespace"] == "object"
+            assert record_data["size"] == len(expected_payload)
             assert record_data["shape"] == [len(expected_payload)]
 
         recovered = RawBlockCore(config, key_namespace="object")
@@ -526,6 +527,169 @@ def test_raw_block_core_compact_manifest_rejects_reused_slot(tmp_path):
         if recovered is not None:
             recovered.close()
         core.close()
+
+
+@pytest.mark.parametrize("verify_on_load", [False, True])
+def test_raw_block_core_rejects_cross_layer_header_only_reuse(
+    tmp_path: Path, verify_on_load: bool
+) -> None:
+    """An uncommitted layer header must not expose another layer's payload."""
+    path = make_raw_block_file(tmp_path)
+    config = dataclasses.replace(
+        make_raw_block_core_config(path), meta_verify_on_load=verify_on_load
+    )
+    layer_keys = CacheEngineKey("raw_block_ci", 1, 0, 123, torch.uint8).split_layers(2)
+    original, replacement = [encode_legacy_key(key) for key in layer_keys]
+    assert original.encoded != replacement.encoded
+    assert original.slot_identity == replacement.slot_identity
+    payload = b"layer-0-data"
+
+    # Obtain a valid layer-1 header through a normal store on a separate file.
+    # Copying only that header models a crash before the reused slot's payload
+    # is written, without allowing close() to commit the replacement key.
+    replacement_dir = tmp_path / "replacement"
+    replacement_dir.mkdir()
+    replacement_path = make_raw_block_file(replacement_dir)
+    replacement_core = RawBlockCore(
+        make_raw_block_core_config(replacement_path), key_namespace="legacy"
+    )
+    try:
+        assert replacement_core.put_many(
+            [replacement], [make_memory_obj(b"layer-1-data")]
+        ).results == [True]
+        replacement_offset = replacement_core.entry_offset(replacement.encoded)
+        assert replacement_offset is not None
+        replacement_header = _read_slot_header(
+            replacement_path, replacement_offset, config.header_bytes
+        )
+    finally:
+        replacement_core.close()
+
+    core = RawBlockCore(config, key_namespace="legacy")
+    try:
+        assert core.put_many([original], [make_memory_obj(payload)]).results == [True]
+        core.checkpoint_now()
+        offset = core.entry_offset(original.encoded)
+        assert offset is not None
+        assert core.delete_many([original.encoded]) == [True]
+        with path.open("r+b") as device:
+            device.seek(offset)
+            device.write(replacement_header)
+            device.seek(offset + config.header_bytes)
+            assert device.read(len(payload)) == payload
+
+        recovered = RawBlockCore(config, key_namespace="legacy")
+        try:
+            assert recovered.exists_many([original.encoded, replacement.encoded]) == [
+                False,
+                False,
+            ]
+            loaded = make_empty_memory_obj(len(payload))
+            assert recovered.load_many_into([replacement.encoded], [loaded]) == [False]
+            assert memory_obj_bytes(loaded) == bytes(len(payload))
+            assert recovered.report_status()["free_slot_count"] == 1
+        finally:
+            recovered.close()
+    finally:
+        core.close()
+
+
+def test_raw_block_core_recovers_layers_with_shared_chunk_identity(
+    tmp_path: Path,
+) -> None:
+    """Committed layers sharing a chunk hash retain their own payloads."""
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    layer_keys = CacheEngineKey("raw_block_ci", 1, 0, 123, torch.uint8).split_layers(2)
+    specs = [encode_legacy_key(key) for key in layer_keys]
+    payloads = [b"layer-0-data", b"layer-1-data"]
+    core = RawBlockCore(config, key_namespace="legacy")
+    try:
+        assert core.put_many(
+            specs, [make_memory_obj(payload) for payload in payloads]
+        ).results == [True, True]
+    finally:
+        core.close()
+
+    recovered = RawBlockCore(config, key_namespace="legacy")
+    try:
+        loaded = [make_empty_memory_obj(len(payload)) for payload in payloads]
+        assert recovered.load_many_into([spec.encoded for spec in specs], loaded) == [
+            True,
+            True,
+        ]
+        assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+    finally:
+        recovered.close()
+
+
+@pytest.mark.parametrize("verify_on_load", [False, True])
+@pytest.mark.parametrize("payload_len", [4, 16])
+def test_raw_block_core_rejects_corrupt_base_payload_length(
+    tmp_path: Path, verify_on_load: bool, payload_len: int
+) -> None:
+    """A changed base-header length must not produce a successful partial load."""
+    path = make_raw_block_file(tmp_path)
+    config = dataclasses.replace(
+        make_raw_block_core_config(path), meta_verify_on_load=verify_on_load
+    )
+    spec = encode_object_key(make_object_key(40))
+    payload = b"twelve-bytes"
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        assert core.put_many([spec], [make_memory_obj(payload)]).results == [True]
+        core.checkpoint_now()
+        offset = core.entry_offset(spec.encoded)
+        assert offset is not None
+        with path.open("r+b") as device:
+            device.seek(offset + 16)
+            device.write(struct.pack("<Q", payload_len))
+
+        recovered = RawBlockCore(config, key_namespace="object")
+        try:
+            assert recovered.contains_key(spec.encoded) is False
+            loaded = make_empty_memory_obj(max(len(payload), payload_len))
+            assert recovered.load_many_into([spec.encoded], [loaded]) == [False]
+            assert memory_obj_bytes(loaded) == bytes(max(len(payload), payload_len))
+            assert recovered.report_status()["free_slot_count"] == 1
+        finally:
+            recovered.close()
+    finally:
+        core.close()
+
+
+@pytest.mark.parametrize("old_version_location", ["manifest", "record"])
+def test_raw_block_core_rejects_unsafe_compact_versions(
+    tmp_path: Path, old_version_location: str
+) -> None:
+    """Unreleased compact formats cannot bypass key and length validation."""
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    spec = encode_object_key(make_object_key(40))
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        assert core.put_many([spec], [make_memory_obj(b"twelve-bytes")]).results == [
+            True
+        ]
+        core.checkpoint_now()
+        if old_version_location == "manifest":
+            state, _ = _read_latest_checkpoint(path, core)
+            state["slot_manifest_version"] = 1
+            _write_checkpoint_state(path, core, state)
+        else:
+            offset = core.entry_offset(spec.encoded)
+            assert offset is not None
+            with path.open("r+b") as device:
+                device.seek(offset + 24 + 8)
+                device.write(struct.pack("<H", 1))
+    finally:
+        core.close()
+
+    recovered = RawBlockCore(config, key_namespace="object")
+    try:
+        assert recovered.contains_key(spec.encoded) is False
+    finally:
+        recovered.close()
 
 
 def test_raw_block_core_compact_manifest_rejects_corrupt_slot_record(tmp_path):
@@ -622,7 +786,7 @@ def test_raw_block_core_rejects_duplicate_compact_manifest_slots(tmp_path):
             "data_base_offset": core.data_base_offset(),
             "next_slot": 1,
             "key_namespace": "object",
-            "slot_manifest_version": 1,
+            "slot_manifest_version": 2,
             "slot_manifest_count": 2,
             "slot_manifest": manifest,
             "entries": {},

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 import base64
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -46,10 +47,10 @@ _CHECKPOINT_STATE_VERSION = 2
 _SLOT_HEADER_BASE_BYTES = 24
 _SLOT_HEADER_MAGIC = b"LMCBLK01"
 _SLOT_RECOVERY_MAGIC = b"LMCRCV01"
-_SLOT_RECOVERY_VERSION = 1
+_SLOT_RECOVERY_VERSION = 2
 _SLOT_RECOVERY_HEADER_STRUCT = struct.Struct("<8sHII")
 _SLOT_MANIFEST_STRUCT = struct.Struct("<IQ")
-_SLOT_MANIFEST_VERSION = 1
+_SLOT_MANIFEST_VERSION = 2
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
@@ -214,7 +215,8 @@ class _Entry:
     offset: int
     size: int
     meta: DiskCacheMetadata
-    slot_identity: int | None = None
+    # Fingerprint of the complete encoded key, including legacy layer fields.
+    checkpoint_identity: int | None = None
     has_recovery_record: bool = False
 
 
@@ -820,7 +822,7 @@ class RawBlockCore:
                     offset=inflight.offset,
                     size=inflight.meta.size,
                     meta=inflight.meta,
-                    slot_identity=key.slot_identity,
+                    checkpoint_identity=self._checkpoint_key_identity(key.encoded),
                     has_recovery_record=has_recovery_record,
                 )
                 self._meta_dirty_total += 1
@@ -1808,9 +1810,8 @@ class RawBlockCore:
             record_data = {
                 "key": encoded_key,
                 "namespace": self.key_namespace,
-                "shape": (
-                    list(metadata.shape) if metadata.shape is not None else None
-                ),
+                "size": metadata.size,
+                "shape": (list(metadata.shape) if metadata.shape is not None else None),
                 "dtype": self._checkpoint_dtype_name(metadata.dtype),
                 "fmt": self._checkpoint_fmt_name(metadata.fmt),
                 "cached_positions": self._checkpoint_cached_positions(
@@ -2130,15 +2131,14 @@ class RawBlockCore:
         fallback_entries: dict[str, dict[str, Any]] = {}
         for encoded_key, entry in indexed_entries:
             slot = self._offset_to_slot(int(entry.offset))
-            slot_identity = entry.slot_identity
-            can_use_manifest = (
+            checkpoint_identity = entry.checkpoint_identity
+            if (
                 entry.has_recovery_record
                 and 0 <= slot <= 0xFFFFFFFF
-                and slot_identity is not None
-                and 0 <= int(slot_identity) <= 0xFFFFFFFFFFFFFFFF
-            )
-            if can_use_manifest:
-                manifest.append((slot, int(slot_identity)))
+                and checkpoint_identity is not None
+                and 0 <= checkpoint_identity <= 0xFFFFFFFFFFFFFFFF
+            ):
+                manifest.append((slot, checkpoint_identity))
             else:
                 fallback_entries[encoded_key] = self._checkpoint_entry_state(entry)
 
@@ -2195,15 +2195,20 @@ class RawBlockCore:
             return None
         return cached_positions.tolist()
 
+    def _checkpoint_key_identity(self, encoded_key: str) -> int:
+        """Fingerprint the complete key independently of legacy chunk identities."""
+        digest = hashlib.blake2b(encoded_key.encode("utf-8"), digest_size=8).digest()
+        return int.from_bytes(digest, "little", signed=False)
+
     def _encode_slot_manifest(self, records: Sequence[tuple[int, int]]) -> str:
-        """Encode compact ``(slot, expected_identity)`` manifest records."""
+        """Encode compact ``(slot, full_key_fingerprint)`` manifest records."""
         payload = bytearray(len(records) * _SLOT_MANIFEST_STRUCT.size)
-        for idx, (slot, slot_identity) in enumerate(records):
+        for idx, (slot, checkpoint_identity) in enumerate(records):
             _SLOT_MANIFEST_STRUCT.pack_into(
                 payload,
                 idx * _SLOT_MANIFEST_STRUCT.size,
                 int(slot),
-                int(slot_identity),
+                checkpoint_identity,
             )
         return base64.b64encode(payload).decode("ascii")
 
@@ -2226,7 +2231,7 @@ class RawBlockCore:
         records: list[tuple[int, int]] = []
         seen_slots: set[int] = set()
         for offset in range(0, len(raw), _SLOT_MANIFEST_STRUCT.size):
-            slot, slot_identity = _SLOT_MANIFEST_STRUCT.unpack_from(raw, offset)
+            slot, checkpoint_identity = _SLOT_MANIFEST_STRUCT.unpack_from(raw, offset)
             if slot in seen_slots:
                 logger.warning(
                     "RawBlockCore checkpoint contains duplicate manifest slot %d",
@@ -2234,7 +2239,7 @@ class RawBlockCore:
                 )
                 return None
             seen_slots.add(slot)
-            records.append((int(slot), int(slot_identity)))
+            records.append((int(slot), int(checkpoint_identity)))
         return records
 
     def _checkpoint_dtype_name(self, dtype: torch.dtype | None) -> str | None:
@@ -2372,9 +2377,7 @@ class RawBlockCore:
                 return False
 
             loaded_entries = self._recover_manifest_entries(manifest, next_slot)
-            fallback_entries = self._decode_checkpoint_entries(
-                data.get("entries", {})
-            )
+            fallback_entries = self._decode_checkpoint_entries(data.get("entries", {}))
             loaded_keys = {encoded_key for encoded_key, _ in loaded_entries}
             loaded_entries.extend(
                 (encoded_key, entry)
@@ -2441,9 +2444,7 @@ class RawBlockCore:
             logger.warning("Device metadata meta_magic mismatch; ignoring metadata")
             return False
         try:
-            checkpoint_meta_version = int(
-                data.get("meta_version", self.meta_version)
-            )
+            checkpoint_meta_version = int(data.get("meta_version", self.meta_version))
         except (TypeError, ValueError):
             logger.warning("Device metadata meta_version is invalid; ignoring metadata")
             return False
@@ -2478,7 +2479,7 @@ class RawBlockCore:
         encoded_key: Any,
         entry: Any,
         *,
-        slot_identity: int | None = None,
+        checkpoint_identity: int | None = None,
         has_recovery_record: bool = False,
     ) -> Optional[tuple[str, _Entry]]:
         """Decode one checkpoint entry into the in-memory metadata model."""
@@ -2540,7 +2541,7 @@ class RawBlockCore:
             offset=offset,
             size=size,
             meta=metadata,
-            slot_identity=slot_identity,
+            checkpoint_identity=checkpoint_identity,
             has_recovery_record=has_recovery_record,
         )
 
@@ -2549,7 +2550,7 @@ class RawBlockCore:
         manifest: Sequence[tuple[int, int]],
         next_slot: int,
     ) -> list[tuple[str, _Entry]]:
-        """Recover entries whose metadata is stored in committed slot headers."""
+        """Recover entries after checking complete keys and protected lengths."""
         recovered: list[tuple[str, _Entry]] = []
         seen_keys: set[str] = set()
         for slot, expected_identity in manifest:
@@ -2560,11 +2561,13 @@ class RawBlockCore:
             if slot_header is None:
                 continue
             slot_identity, payload_len, record_data = slot_header
-            if record_data is None or int(slot_identity) != int(expected_identity):
+            if record_data is None:
                 continue
 
             encoded_key = record_data.get("key")
             if not isinstance(encoded_key, str) or encoded_key in seen_keys:
+                continue
+            if self._checkpoint_key_identity(encoded_key) != expected_identity:
                 continue
             try:
                 derived_identity = slot_identity_from_encoded_key(
@@ -2576,9 +2579,20 @@ class RawBlockCore:
             if int(derived_identity) != int(slot_identity):
                 continue
 
+            # The base-header length is outside the recovery-record CRC. Use
+            # the checksummed copy and reject disagreement even when optional
+            # legacy header verification is disabled.
+            protected_size = record_data.get("size")
+            if (
+                not isinstance(protected_size, int)
+                or isinstance(protected_size, bool)
+                or protected_size != payload_len
+            ):
+                continue
+
             checkpoint_entry = {
                 "offset": offset,
-                "size": payload_len,
+                "size": protected_size,
                 "shape": record_data.get("shape"),
                 "dtype": record_data.get("dtype"),
                 "fmt": record_data.get("fmt"),
@@ -2587,7 +2601,7 @@ class RawBlockCore:
             parsed = self._decode_checkpoint_entry(
                 encoded_key,
                 checkpoint_entry,
-                slot_identity=int(slot_identity),
+                checkpoint_identity=expected_identity,
                 has_recovery_record=True,
             )
             if parsed is None:
