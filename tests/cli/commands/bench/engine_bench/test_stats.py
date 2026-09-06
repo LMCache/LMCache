@@ -2,6 +2,9 @@
 """Tests for bench engine stats module."""
 
 # Standard
+from dataclasses import asdict
+from pathlib import Path
+from unittest.mock import patch
 import csv
 import json
 import threading
@@ -329,6 +332,72 @@ class TestStatsCollectorExport:
         assert "p50_ttft_ms" in data["results"]
         assert "p90_ttft_ms" in data["results"]
         assert data["results"]["total_requests"] == 2
+
+
+# ---------------------------------------------------------------------------
+# StatsCollector — finished timing
+# ---------------------------------------------------------------------------
+
+
+class TestFinishedTiming:
+    def test_final_stats_and_json_keep_the_same_elapsed_time(
+        self, tmp_path: Path
+    ) -> None:
+        """Reporting delays must not change a completed run's metrics."""
+        with patch("time.monotonic", return_value=100.0) as clock:
+            collector = StatsCollector()
+            collector.on_request_finished(
+                _make_result(num_input_tokens=1000, num_output_tokens=100)
+            )
+            clock.return_value = 101.0
+            final = collector.get_final_stats()
+
+            clock.return_value = 110.0
+            assert collector.get_final_stats() == final
+            path = tmp_path / "summary.json"
+            collector.export_json(str(path), _make_config())
+
+        assert final.elapsed_time == 1.0
+        assert final.input_throughput == 1000.0
+        assert final.output_throughput == 100.0
+        assert json.loads(path.read_text())["results"] == asdict(final)
+
+    def test_finish_is_idempotent(self) -> None:
+        """Repeated finish calls preserve the original measured interval."""
+        with patch("time.monotonic", return_value=0.0) as clock:
+            collector = StatsCollector()
+            collector.on_request_finished(_make_result())
+            clock.return_value = 1.0
+            collector.finish()
+            clock.return_value = 10.0
+            collector.finish()
+            assert collector.get_current_stats().elapsed_time == 1.0
+
+    def test_empty_run_can_finish_at_zero(self) -> None:
+        """A zero timestamp and zero-duration run remain valid after finish."""
+        with patch("time.monotonic", return_value=0.0) as clock:
+            collector = StatsCollector()
+            collector.finish()
+            clock.return_value = 10.0
+            final = collector.get_final_stats()
+        assert final.elapsed_time == 0.0
+        assert final.input_throughput == final.output_throughput == 0.0
+
+    def test_reset_restarts_a_finished_timer(self) -> None:
+        """Reset clears finalization so running metrics advance again."""
+        with patch("time.monotonic", return_value=100.0) as clock:
+            collector = StatsCollector()
+            collector.on_request_finished(_make_result())
+            clock.return_value = 101.0
+            collector.finish()
+
+            clock.return_value = 200.0
+            collector.reset()
+            clock.return_value = 202.0
+            assert collector.get_current_stats().elapsed_time == 2.0
+            clock.return_value = 203.0
+            assert collector.get_current_stats().elapsed_time == 3.0
+            assert collector.get_all_results() == []
 
 
 # ---------------------------------------------------------------------------
