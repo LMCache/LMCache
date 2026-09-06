@@ -40,10 +40,14 @@ class ManagementModule:
             whose per-instance registrations are refreshed on PING and scanned
             for staleness, plus any state mirror (e.g. ``BlendModule``)
             notified via ``drop_instance_state`` when an instance is reaped.
-        worker_reap_timeout_seconds: Silence budget for a ping-proven worker;
-            0 disables reaping (no thread is started).
-        worker_registration_grace_seconds: Silence budget for a worker that
-            registered but never pinged.
+        registration_targets: Registration request types mapped to the owning
+            liveness target for registration-aware worker heartbeats.
+        mirror_state_owner: The liveness target whose reaps invalidate mirrored
+            per-instance state. Reaps from other contexts with the same
+            ``instance_id`` do not notify mirrors.
+        worker_reap_timeout_seconds: Silence budget after both liveness signals;
+            0 disables reaping.
+        worker_registration_grace_seconds: Silence budget before both signals.
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
     """
@@ -107,6 +111,11 @@ class ManagementModule:
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(RequestType.PING, self.ping, ThreadPoolType.NORMAL),
+            HandlerSpec(
+                RequestType.PING_REGISTERED,
+                self.ping_registered,
+                ThreadPoolType.NORMAL,
+            ),
             HandlerSpec(RequestType.NOOP, self.debug, ThreadPoolType.SYNC),
             HandlerSpec(
                 RequestType.REPORT_BLOCK_ALLOCATION,
@@ -155,8 +164,20 @@ class ManagementModule:
                 target.touch_instance(instance_id)
         return True
 
-    def _reap_cycle(self) -> ThreadRunSummary:
-        """Run one reaper scan: reap stale workers, drop mirrored state.
+    def ping_registered(
+        self,
+        instance_id: int,
+        registration_type: RequestType,
+    ) -> bool:
+        """Refresh liveness and report whether the primary Context exists."""
+        target = self._registration_targets.get(registration_type)
+        registered = target is not None and target.touch_instance(instance_id)
+        # Preserve PING's refresh for optional Contexts without making them
+        # part of primary-registration recovery.
+        for other in self._liveness_targets:
+            if other is not target:
+                other.touch_instance(instance_id)
+        return registered
 
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan and drop mirrors owned by reaped Contexts.

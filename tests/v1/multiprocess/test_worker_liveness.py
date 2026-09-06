@@ -348,6 +348,30 @@ def test_management_ping_touches_targets() -> None:
     assert target.touched == [42]
 
 
+@pytest.mark.parametrize("primary_present", [True, False])
+def test_registration_aware_ping_checks_primary_and_touches_optional_contexts(
+    primary_present: bool,
+) -> None:
+    gpu = _FakeTarget()
+    qstore = _FakeTarget()
+    if primary_present:
+        gpu.registered.add(42)
+    qstore.registered.add(42)
+    mgmt = ManagementModule(
+        MagicMock(),
+        liveness_targets=[gpu, qstore],
+        registration_targets={
+            RequestType.REGISTER_KV_CACHE: gpu,
+        },
+    )
+
+    assert mgmt.ping_registered(42, RequestType.REGISTER_KV_CACHE) is primary_present
+    assert gpu.touched == [42]
+    assert qstore.touched == [42]
+    # Compatibility PING still reports server availability for an absent ID.
+    assert mgmt.ping(999) is True
+
+
 def test_management_reaper_reaps_and_drops() -> None:
     """The reaper scans targets and calls drop_instance_state for reaped ids."""
     target = _FakeTarget()

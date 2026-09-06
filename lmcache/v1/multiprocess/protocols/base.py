@@ -86,6 +86,9 @@ class RequestType(enum.Enum):
     # Experimental transfer intermediate tensor
     GET_EXPERIMENTAL = enum.auto()
 
+    # Internal vLLM registration-aware heartbeat; append to preserve values.
+    PING_REGISTERED = enum.auto()
+
     # Deprecated aliases must follow every auto-valued member. On Python 3.10,
     # placing aliases before auto() can reuse the preceding member's value.
     CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE

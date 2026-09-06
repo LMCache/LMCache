@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import KeyType
+from lmcache.v1.multiprocess.protocols.base import RequestType
 
 # ==============================================================================
 # NOOP Request Handlers
@@ -27,6 +28,13 @@ def noop_handler() -> str:
     Takes no arguments and returns a simple string response.
     """
     return "NOOP_OK"
+
+
+def ping_registered_handler(instance_id: int, registration_type: RequestType) -> bool:
+    """Exercise enum payload encoding for a registration-aware PING."""
+    assert instance_id == 7
+    assert registration_type is RequestType.REGISTER_KV_CACHE
+    return True
 
 
 # ==============================================================================
