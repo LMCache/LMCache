@@ -690,6 +690,29 @@ def test_shared_loop_dispatch():
         server.close()
 
 
+def test_invalid_outbound_request_does_not_block_later_requests() -> None:
+    """An invalid request fails locally without blocking the outbound queue."""
+    server_url = "tcp://127.0.0.1:16025"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        invalid: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, [123]
+        )
+        healthy: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+
+        with pytest.raises(ValueError, match="Payload count mismatch"):
+            invalid.result(timeout=5)
+        assert healthy.result(timeout=5) == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()
+
+
 def test_client_survives_undecodable_response() -> None:
     """
     Test that an undecodable response does not stop later requests working.
