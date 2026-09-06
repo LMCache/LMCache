@@ -198,6 +198,12 @@ def _build_modules(
         for m in transfer_modules
         if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
     ]
+    registration_targets: dict[str, InstanceLivenessTarget] = {}
+    for module in liveness_targets:
+        if isinstance(module, LMCacheDrivenTransferModule):
+            registration_targets["register_kv_cache"] = module
+        elif isinstance(module, EngineDrivenTransferModule):
+            registration_targets["register_kv_cache_engine_driven_context"] = module
     blend_module: EngineModule | None = None
     mirror_state_owner: InstanceLivenessTarget | None = None
     if mp_config.engine_type == "blend":
@@ -274,6 +280,7 @@ def _build_modules(
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
+        registration_targets=registration_targets,
         mirror_state_owner=mirror_state_owner,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,

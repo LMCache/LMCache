@@ -342,6 +342,23 @@ def test_server_builds_q_store_module(stub_server_modules) -> None:
     kwargs = stub_server_modules.call_args.kwargs
     assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
     assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
+    assert isinstance(
+        kwargs["registration_targets"]["register_kv_cache"],
+        _FakeLMCacheDriven,
+    )
+
+
+def test_server_auto_mode_maps_both_primary_registration_types(
+    stub_server_modules,
+) -> None:
+    _build(stub_server_modules, supported_transfer_mode="auto")
+
+    targets = stub_server_modules.call_args.kwargs["registration_targets"]
+    assert isinstance(targets["register_kv_cache"], _FakeLMCacheDriven)
+    assert isinstance(
+        targets["register_kv_cache_engine_driven_context"],
+        _FakeEngineDriven,
+    )
 
 
 def test_server_wires_gpu_context_as_blend_mirror_owner(

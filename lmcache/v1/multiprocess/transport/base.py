@@ -162,6 +162,11 @@ class RequestClient(Protocol):
     def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...
 
     @rpc_method
+    def ping_registered(
+        self, instance_id: int, registration_type: str
+    ) -> MessagingFuture[bool]: ...
+
+    @rpc_method
     def report_block_allocation(
         self,
         instance_id: int,

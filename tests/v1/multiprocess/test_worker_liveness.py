@@ -29,7 +29,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
@@ -364,6 +363,30 @@ def test_management_clear_accepts_force() -> None:
     mgmt.clear(force=True)
 
     ctx.storage_manager.clear.assert_called_once_with(force=True)
+
+
+@pytest.mark.parametrize("primary_present", [True, False])
+def test_registration_aware_ping_checks_primary_and_touches_optional_contexts(
+    primary_present: bool,
+) -> None:
+    gpu = _FakeTarget()
+    qstore = _FakeTarget()
+    if primary_present:
+        gpu.registered.add(42)
+    qstore.registered.add(42)
+    mgmt = ManagementModule(
+        MagicMock(),
+        liveness_targets=[gpu, qstore],
+        registration_targets={
+            "register_kv_cache": gpu,
+        },
+    )
+
+    assert mgmt.ping_registered(42, "register_kv_cache") is primary_present
+    assert gpu.touched == [42]
+    assert qstore.touched == [42]
+    # Compatibility PING still reports server availability for an absent ID.
+    assert mgmt.ping(999) is True
 
 
 def test_management_reaper_reaps_and_drops() -> None:

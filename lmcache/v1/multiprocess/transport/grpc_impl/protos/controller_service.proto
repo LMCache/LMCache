@@ -32,9 +32,19 @@ message PingResponse {
   bool ok = 1;
 }
 
+message PingRegisteredRequest {
+  int64 instance_id = 1;
+  string registration_type = 2;
+}
+
+message PingRegisteredResponse {
+  bool registered = 1;
+}
+
 service ControllerService {
   rpc Clear(ClearRequest) returns (ClearResponse);
   rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
   rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
   rpc Ping(PingRequest) returns (PingResponse);
+  rpc PingRegistered(PingRegisteredRequest) returns (PingRegisteredResponse);
 }
