@@ -19,8 +19,8 @@ firing, leaving the attention group paged at the backend's kernel block size
 while LMCache addressed it in scheduler block-id units -- a silent
 store/retrieve corruption with no exception and no log line.
 
-These tests run on CPU and without vLLM installed: the module's vLLM imports
-are stubbed before import, mirroring ``test_vllm_kv_cache_groups.py``.
+These tests run on CPU: the module's vLLM imports are stubbed before import,
+so they behave the same whether or not vLLM is installed.
 """
 
 # Standard
@@ -29,6 +29,7 @@ from enum import Enum
 from types import ModuleType
 from typing import TypeAlias
 from unittest.mock import patch
+import importlib
 import sys
 
 # Third Party
@@ -63,6 +64,7 @@ class _SpecKind(Enum):
     SINK_FULL_ATTENTION = "sink_full_attention"
     CROSS_ATTENTION = "cross_attention"
     MAMBA = "mamba"
+    MLA_ATTENTION = "mla_attention"
 
 
 @dataclass
@@ -87,6 +89,9 @@ class _Config:
     has_mamba_layers: bool = True
 
 
+_MODULE = "lmcache.integration.vllm.kv_cache_group_edits"
+
+
 @pytest.fixture(scope="module")
 def edits():
     """Import the module under test with its vLLM dependencies stubbed."""
@@ -98,20 +103,30 @@ def edits():
 
     vllm_pkg = ModuleType("vllm")
     vllm_v1 = ModuleType("vllm.v1")
-    with patch.dict(
-        sys.modules,
-        {
-            "vllm": vllm_pkg,
-            "vllm.v1": vllm_v1,
-            "vllm.v1.kv_cache_interface": stub,
-        },
-    ):
-        sys.modules.pop("lmcache.integration.vllm.kv_cache_group_edits", None)
-        # First Party
-        from lmcache.integration.vllm import kv_cache_group_edits
-
-        yield kv_cache_group_edits
-    sys.modules.pop("lmcache.integration.vllm.kv_cache_group_edits", None)
+    # ``from pkg import child`` returns the attribute ``pkg`` already holds, so
+    # dropping only the ``sys.modules`` entry would yield whatever binding an
+    # earlier importer left behind -- against real vLLM, no rule then matches.
+    parent = importlib.import_module("lmcache.integration.vllm")
+    previous = sys.modules.get(_MODULE)
+    try:
+        with patch.dict(
+            sys.modules,
+            {
+                "vllm": vllm_pkg,
+                "vllm.v1": vllm_v1,
+                "vllm.v1.kv_cache_interface": stub,
+            },
+        ):
+            sys.modules.pop(_MODULE, None)
+            module = importlib.import_module(_MODULE)
+            assert module.KVCacheSpecKind is _SpecKind
+            yield module
+    finally:
+        sys.modules.pop(_MODULE, None)
+        parent.__dict__.pop("kv_cache_group_edits", None)
+        if previous is not None:
+            sys.modules[_MODULE] = previous
+            parent.kv_cache_group_edits = previous
 
 
 def _attention_page_bytes() -> int:
