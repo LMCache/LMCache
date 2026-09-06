@@ -2,7 +2,7 @@
 """Management and utility operations for the MPCacheServer."""
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import threading
 
 # First Party
@@ -52,6 +52,9 @@ class ManagementModule:
         self,
         ctx: MPCacheServerContext,
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
+        registration_targets: Mapping[RequestType, InstanceLivenessTarget]
+        | None = None,
+        mirror_state_owner: InstanceLivenessTarget | None = None,
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
         experimental_transfer: Sequence[str] = (),
@@ -59,6 +62,8 @@ class ManagementModule:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
+        self._registration_targets = dict(registration_targets or {})
+        self._mirror_state_owner = mirror_state_owner
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
         self._experimental_transfer = tuple(experimental_transfer)
@@ -153,18 +158,22 @@ class ManagementModule:
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan: reap stale workers, drop mirrored state.
 
-        Each reaped instance id is passed to ``drop_instance_state`` on every
-        target; it is a no-op for targets that mirror nothing for that id.
+    def _reap_cycle(self) -> ThreadRunSummary:
+        """Run one reaper scan and drop mirrors owned by reaped Contexts.
 
         Returns:
             A summary recording how many instances were reaped this scan.
         """
         reaped: list[int] = []
+        mirror_reaped: list[int] = []
         for target in self._liveness_targets:
-            reaped.extend(
-                target.reap_stale_instances(self._reap_timeout, self._reap_grace)
+            target_reaped = target.reap_stale_instances(
+                self._reap_timeout, self._reap_grace
             )
-        for instance_id in reaped:
+            reaped.extend(target_reaped)
+            if target is self._mirror_state_owner:
+                mirror_reaped.extend(target_reaped)
+        for instance_id in mirror_reaped:
             for target in self._liveness_targets:
                 target.drop_instance_state(instance_id)
         return ThreadRunSummary(success=True, message=f"reaped={len(reaped)}")

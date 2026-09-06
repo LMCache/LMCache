@@ -68,7 +68,7 @@ class EngineModule(Protocol):
 class InstanceLivenessTarget(Protocol):
     """A module the periodic reaper drives, in either or both of two roles.
 
-    * **Liveness owner** -- tracks per-worker registrations keyed by
+    * **Liveness owner** -- tracks per-context registrations keyed by
       ``instance_id``, refreshed on PING and scanned for staleness
       (``touch_instance`` / ``reap_stale_instances`` /
       ``tracked_instance_count``). The transfer modules fill this role.
@@ -82,7 +82,7 @@ class InstanceLivenessTarget(Protocol):
     touches a module's private state directly.
     """
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked (already reaped or never
@@ -90,22 +90,23 @@ class InstanceLivenessTarget(Protocol):
 
         Args:
             instance_id: The worker's opaque instance ID.
+        Returns:
+            True when the registration exists and was refreshed; False when
+            it is absent or this target owns no liveness state.
         """
-        return
+        return False
 
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]:
         """Evict and clean up workers that have gone silent.
 
-        An instance that has sent at least one PING is judged against
-        ``reap_timeout_s``; one that has never pinged (warming up, or dead
-        before its first request) is judged against ``registration_grace_s``.
+        An instance that has sent PING and real transfer activity is judged
+        against ``reap_timeout_s``; otherwise against ``registration_grace_s``.
 
         Args:
-            reap_timeout_s: Silence budget for ping-proven instances.
-            registration_grace_s: Silence budget for never-pinged instances;
-                must be >= ``reap_timeout_s``.
+            reap_timeout_s: Silence budget after both signals.
+            registration_grace_s: Silence budget before both signals.
 
         Returns:
             The instance IDs reaped during this scan; empty for a target

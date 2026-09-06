@@ -55,6 +55,7 @@ class EngineDrivenContextEntry:
             instance (register, PING, prepare/commit). Drives reaping.
         has_liveness_signal: True once the instance has sent at least one
             PING. Selects the reap window. Latched only by PING.
+        has_transfer_activity: True after a real prepare or commit request.
     """
 
     metadata: EngineDrivenContextMetadata
@@ -62,6 +63,7 @@ class EngineDrivenContextEntry:
     world_size: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
+    has_transfer_activity: bool = False
 
 
 class EngineDrivenTransferModule(InstanceLivenessTarget):
@@ -169,13 +171,16 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             self._engine_driven_contexts.clear()
             self._strategies.clear()
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked.
 
         Args:
             instance_id: The worker instance ID.
+
+        Returns:
+            True if the Context exists and was refreshed; otherwise False.
         """
         now = time.monotonic()
         with self._lock:
@@ -183,6 +188,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
                 entry.has_liveness_signal = True
+            return entry is not None
 
     def tracked_instance_count(self) -> int:
         """Return the number of currently registered non-GPU instances."""
@@ -194,12 +200,12 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     ) -> list[int]:
         """Reap non-GPU registrations that have gone silent.
 
-        A ping-proven instance is judged against ``reap_timeout_s``; one that
-        has never pinged against the larger ``registration_grace_s``.
+        A PING-and-transfer-proven instance uses ``reap_timeout_s``; all other
+        instances use ``registration_grace_s``.
 
         Args:
-            reap_timeout_s: Silence budget for ping-proven instances.
-            registration_grace_s: Silence budget for never-pinged instances.
+            reap_timeout_s: Silence budget for fully active instances.
+            registration_grace_s: Silence budget before both signals.
 
         Returns:
             The instance IDs reaped this scan.
@@ -213,7 +219,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 if now - entry.last_seen
                 > (
                     reap_timeout_s
-                    if entry.has_liveness_signal
+                    if (entry.has_liveness_signal and entry.has_transfer_activity)
                     else registration_grace_s
                 )
             ]
@@ -224,10 +230,12 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         for iid, entry in reaped:
             self._release_entry(iid, entry)
             logger.warning(
-                "Reaped non-GPU instance %d: silent for %.1fs (pinged=%s)",
+                "Reaped non-GPU instance %d: silent for %.1fs "
+                "(pinged=%s, transfer_activity=%s)",
                 iid,
                 now - entry.last_seen,
                 entry.has_liveness_signal,
+                entry.has_transfer_activity,
             )
         return [iid for iid, _ in reaped]
 
@@ -237,8 +245,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """Return (entry, strategy) for a transfer, refreshing last_seen.
 
         Pair-atomicity guarantees the entry exists whenever the strategy
-        does. Refreshes last_seen (no latch) so an active worker is not
-        reaped mid-transfer.
+        does. Also records transfer activity.
 
         Args:
             instance_id: The worker instance ID.
@@ -259,6 +266,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                     f"instance ID {instance_id}"
                 )
             entry.last_seen = now
+            entry.has_transfer_activity = True
             return entry, strategy
 
     def _release_entry(self, instance_id: int, entry: EngineDrivenContextEntry) -> None:
