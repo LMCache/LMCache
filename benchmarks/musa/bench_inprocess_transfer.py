@@ -21,7 +21,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.platform.backends.musa.native_kv_transfer import (
+from lmcache.v1.platform.devices.musa.native_kv_transfer import (
     ENV_MUSA_NATIVE_KV_TRANSFER,
 )
 

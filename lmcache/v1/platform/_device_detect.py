@@ -10,7 +10,7 @@ that ``torch_ops`` needs from the platform package must live *outside*
 that init chain.
 
 The registry combines the :class:`DeviceSpec` subclasses shipped under
-``lmcache.v1.platform.backends`` with external subclasses published through the
+``lmcache.v1.platform.devices`` with external subclasses published through the
 ``lmcache.device_plugins`` Python entry-point group. The registry and the
 detected torch device module are both built lazily on first access and then
 cached process-wide.
@@ -114,7 +114,7 @@ def _build_backend_registry() -> "dict[str, DeviceSpec]":
         *(
             cls()
             for cls in discover_subclasses(
-                "lmcache.v1.platform.backends",
+                "lmcache.v1.platform.devices",
                 DeviceSpec,  # type: ignore[type-abstract]
                 require_defined_in_module=True,
                 on_import_error=lambda name, exc: None,
@@ -265,7 +265,7 @@ def _detect_device() -> "tuple[Any, str, str | None]":
 
     # No accelerator found -- fall back to CPU stub
     # First Party
-    from lmcache.v1.platform.backends.cpu.stub_cpu_device import StubCPUDevice
+    from lmcache.v1.platform.devices.cpu.stub_cpu_device import StubCPUDevice
 
     return StubCPUDevice("cpu"), "cpu", None
 
