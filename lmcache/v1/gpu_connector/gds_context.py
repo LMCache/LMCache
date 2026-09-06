@@ -39,14 +39,41 @@ from lmcache.v1.memory_management import GDSMemoryObject
 logger = init_logger(__name__)
 
 _SLAB_FILENAME = "lmcache_gds_slab.bin"
-_CUFILE_ALIGNMENT = 4096
-# A single GDS buffer registration / DMA is capped at 16 MiB (both cuFile and
-# hipFile); larger buffers and chunks are registered and transferred in
-# <=16 MiB regions.
-_MAX_CUFILE_REGION = 16 * 1024 * 1024
 # GDS submissions to accumulate before recording a completion event and
 # draining finished ones (keeps the live submission set bounded).
 _SUBMISSION_CHECKPOINT_EVERY = 64
+
+
+def get_raw_stream_handle(stream: object) -> int:
+    """Return the active backend's native stream handle.
+
+    MUSA streams expose ``musa_stream``; CUDA and ROCm use ``cuda_stream``.
+    Falls back to ``ptr`` for streams that expose it directly.
+
+    Args:
+        stream: A ``torch.Stream`` or platform-specific stream object.
+
+    Returns:
+        The raw stream pointer as an integer.
+
+    Raises:
+        RuntimeError: If the stream exposes none of the known attributes.
+    """
+    # MUSA: musa_stream takes precedence.
+    musa_stream = getattr(stream, "musa_stream", None)
+    if musa_stream is not None:
+        return int(musa_stream)
+    # CUDA/ROCm: cuda_stream attribute.
+    cuda_stream = getattr(stream, "cuda_stream", None)
+    if cuda_stream is not None:
+        return int(cuda_stream)
+    # Direct ptr attribute (used by some adapters).
+    ptr = getattr(stream, "ptr", None)
+    if ptr is not None:
+        return int(ptr)
+    raise RuntimeError(
+        f"stream of type {type(stream).__name__} does not expose a stream handle"
+    )
 
 
 def _validate_ugds_device(path: str) -> None:
@@ -131,9 +158,8 @@ class GDSContext:
                 exceeds the backing device capacity.
             Exception: Whatever the GDS library raises if GDS is unavailable.
         """
-        self._slab_size = (config.size_in_bytes + _CUFILE_ALIGNMENT - 1) & ~(
-            _CUFILE_ALIGNMENT - 1
-        )
+        alignment = ca.get_io_alignment()
+        self._slab_size = (config.size_in_bytes + alignment - 1) & ~(alignment - 1)
         self._backend = ca.select_backend(config.backend)
 
         # One shared slab per process (the GDSContext is a process-global
@@ -161,16 +187,17 @@ class GDSContext:
         """
         if not self.initialized:
             return
-        raw_stream = torch_dev.current_stream().cuda_stream
+        raw_stream = get_raw_stream_handle(torch_dev.current_stream())
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
+        max_region = ca.get_max_registered_region_bytes()
         with self._registry_lock:
             if raw_stream not in self._registered_streams:
                 ca.register_stream(raw_stream)
                 self._registered_streams.add(raw_stream)
-            for start in range(0, nbytes, _MAX_CUFILE_REGION):
+            for start in range(0, nbytes, max_region):
                 self._register_region_locked(
-                    buf[start : min(start + _MAX_CUFILE_REGION, nbytes)]
+                    buf[start : min(start + max_region, nbytes)]
                 )
 
     def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
@@ -182,15 +209,16 @@ class GDSContext:
         if not self.initialized:
             return
         stream = torch_dev.current_stream()
-        raw_stream = stream.cuda_stream
+        raw_stream = get_raw_stream_handle(stream)
         # No in-flight DMA on this stream may still reference the buffer.
         stream.synchronize()
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
+        max_region = ca.get_max_registered_region_bytes()
         with self._registry_lock:
-            for start in range(0, nbytes, _MAX_CUFILE_REGION):
+            for start in range(0, nbytes, max_region):
                 self._deregister_region_locked(
-                    buf[start : min(start + _MAX_CUFILE_REGION, nbytes)]
+                    buf[start : min(start + max_region, nbytes)]
                 )
             if raw_stream in self._registered_streams:
                 try:
@@ -236,7 +264,11 @@ class GDSContext:
             pos += seg_len
 
     def close(self) -> None:
-        """Sync the stream, deregister GDS state, and close the slab handle."""
+        """Sync the stream, deregister GDS state, and close the slab handle.
+
+        Finally closes the backend driver (``close_driver``) so the GDS
+        library lifecycle is not left to Python teardown ordering.
+        """
         if self._buffers:
             torch_dev.synchronize(device=self._buffers[0].device)
         with self._submissions_lock:
@@ -265,6 +297,10 @@ class GDSContext:
             except Exception as e:
                 logger.warning("GDSContext.close: slab handle close failed: %s", e)
             self._slab_handle = None
+        try:
+            ca.close_driver()
+        except Exception as e:
+            logger.warning("GDSContext.close: close_driver: %s", e)
 
     # --- Internal -----------------------------------------------------
 
@@ -395,7 +431,7 @@ class GDSContext:
         """Submit one async GDS read against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_read: slab handle not open")
-        stream_handle = torch_dev.current_stream().cuda_stream
+        stream_handle = get_raw_stream_handle(torch_dev.current_stream())
         sub = self._slab_handle.read_async(
             buf_base, size, slab_offset, dev_offset, stream_handle
         )
@@ -407,7 +443,7 @@ class GDSContext:
         """Submit one async GDS write against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_write: slab handle not open")
-        stream_handle = torch_dev.current_stream().cuda_stream
+        stream_handle = get_raw_stream_handle(torch_dev.current_stream())
         sub = self._slab_handle.write_async(
             buf_base, size, slab_offset, dev_offset, stream_handle
         )
@@ -420,7 +456,7 @@ class GDSContext:
         ops a GPU event is recorded and completed batches are released.
         """
         stream = torch_dev.current_stream()
-        raw_stream = stream.cuda_stream
+        raw_stream = get_raw_stream_handle(stream)
         with self._submissions_lock:
             st = self._submissions.get(raw_stream)
             if st is None:
