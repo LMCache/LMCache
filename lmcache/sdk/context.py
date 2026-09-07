@@ -20,6 +20,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.gpu_connector.utils import (
     DiscoverableKVCache,
     LayoutHints,
@@ -185,7 +186,7 @@ class LMCacheSDKContext:
                 lmcache_native.EngineKVFormat, kernel_group["engine_kv_format"]
             )
             probe: list[DiscoverableKVCache] = [torch.empty(inner, device="meta")]
-            use_mla = lmcache_native.is_mla(fmt)
+            use_mla = get_spec_class(fmt).is_mla
             single_tensor = use_mla or self._kind is LMCacheSDKCacheKind.QUERY
             num_kv_heads = 1 if single_tensor else get_num_heads(probe, fmt)
             block_size = get_block_size(probe, fmt)
