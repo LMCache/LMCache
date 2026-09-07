@@ -258,6 +258,68 @@ def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
     }
 
 
+def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
+    """Registration identifies flat single-head pools as split K/V MHA."""
+    adapter_mod, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+    req_client = MagicMock(name="rpc_client")
+    req_client.register_kv_cache.return_value = SimpleNamespace(
+        result=MagicMock(return_value=None)
+    )
+
+    class FakeHeartbeatThread:
+        def __init__(
+            self,
+            req_client: object,
+            health_event: threading.Event,
+            interval: float,
+            instance_id: int | None,
+        ) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "zmq",
+        SimpleNamespace(Context=SimpleNamespace(instance=lambda: object())),
+    )
+    request_client_factory = MagicMock(name="request_client_factory")
+    request_client_factory.create.return_value = req_client
+    monkeypatch.setattr(
+        adapter_mod,
+        "RequestClientFactory",
+        request_client_factory,
+    )
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda _client: 4)
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "get_device_spec",
+        lambda _device_type: SimpleNamespace(is_handle_transfer_available=lambda: True),
+    )
+    monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", lambda tensor: tensor)
+
+    k_pool = [torch.empty(4, 1, 8) for _ in range(2)]
+    v_pool = [torch.empty(4, 1, 8) for _ in range(2)]
+    LMCacheMPConnector(
+        sgl_config=SimpleNamespace(model_path="test-model"),
+        tp_size=1,
+        rank=0,
+        page_size=2,
+        host="127.0.0.1",
+        port=5556,
+        k_pool=k_pool,
+        v_pool=v_pool,
+    )
+
+    req_client.register_kv_cache.assert_called_once()
+    assert req_client.register_kv_cache.call_args.args[5] == {
+        "tokens_per_block": 2,
+        "kv_list_layout": "k_v",
+    }
+
+
 @pytest.mark.parametrize(
     ("k_pool", "v_pool", "message"),
     [
