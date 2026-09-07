@@ -44,6 +44,7 @@ from lmcache.v1.multiprocess.config import (
     add_mp_server_args,
     parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
+    validate_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
@@ -319,10 +320,20 @@ def run_cache_server(
     Returns:
         If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
+
+    Raises:
+        ValueError: If ``mp_config`` and ``storage_manager_config`` select an
+            incompatible combination of options (see
+            :func:`validate_server_config`).
     """
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)
+
+    # Reject option combinations that only one of the two configs can see
+    # (e.g. full_attention_only without separate object groups) before anything is
+    # started.
+    validate_server_config(mp_config, storage_manager_config)
 
     # mp_config.instance_id is this server's single source of identity (set via
     # --instance-id, else a random UUID v4). Project it onto the OTel

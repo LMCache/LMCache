@@ -13,8 +13,16 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.config import StorageManagerConfig
 
 logger = init_logger(__name__)
+
+FULL_ATTENTION_ONLY_STORE_POLICY = "full_attention_only"
+"""Name of the store policy that keeps sliding-window object groups out of L2.
+
+It only makes sense when sliding-window layers have object groups of their own,
+which is what ``--separate-object-groups`` produces.
+"""
 
 
 @dataclass
@@ -506,6 +514,43 @@ def add_mp_server_args(
         "experimental.__init___.py).",
     )
     return parser
+
+
+def validate_server_config(
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+) -> None:
+    """Check cross-config constraints before the cache server starts.
+
+    Some options are only meaningful in combination, and the two halves live in
+    different configs: the store policy is a storage-manager option while the
+    object-group split is an MP server option. This is the one place where both
+    are visible, so the incompatible combinations are rejected here rather than
+    failing obscurely at the first store.
+
+    Args:
+        mp_config: The parsed MP server configuration.
+        storage_manager_config: The parsed storage manager configuration.
+
+    Raises:
+        ValueError: If ``--l2-store-policy full_attention_only`` is selected without
+            ``--separate-object-groups``.
+    """
+    if storage_manager_config.store_policy != FULL_ATTENTION_ONLY_STORE_POLICY:
+        return
+
+    if not mp_config.separate_object_groups:
+        raise ValueError(
+            f"--l2-store-policy {FULL_ATTENTION_ONLY_STORE_POLICY} requires "
+            "--separate-object-groups: without it every layer shares one "
+            "full-attention object group, so no chunk is ever classified as "
+            "sliding-window and the policy degenerates to 'default'. Add "
+            "--separate-object-groups, or select --l2-store-policy default."
+        )
+
+    # Sliding-window chunks this policy keeps out of L2 are simply discarded
+    # when L1 evicts them; the commit path (--commit-policy) is what gives a
+    # finished turn's window an L2 copy before that can happen.
 
 
 def parse_args_to_mp_server_config(

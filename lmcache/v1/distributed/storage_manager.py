@@ -41,6 +41,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.object_group_classifier import ObjectGroupClassifier
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
@@ -144,6 +145,11 @@ class StorageManager:
         )
         self._l2_eviction_controller.start()
 
+        # Attention layout of every registered model, filled in by the
+        # serving layer's KV-cache registration path (which owns the model
+        # metadata) and read by object-group-aware store policies.
+        self._object_group_classifier = ObjectGroupClassifier()
+
         # Controllers receive the initial set as ordered lists; they key
         # their own copies by ``descriptor.index`` (== adapter_id) and learn
         # of later changes via add_adapter/request_remove_adapter.
@@ -151,7 +157,9 @@ class StorageManager:
             l1_manager=self._l1_manager,
             l2_adapters=list(self._l2_adapters.values()),
             adapter_descriptors=list(self._adapter_descriptors.values()),
-            policy=create_store_policy(config.store_policy),
+            policy=create_store_policy(
+                config.store_policy, self._object_group_classifier
+            ),
         )
         self._store_controller.start()
 
@@ -803,6 +811,18 @@ class StorageManager:
         storage manager creates the registry at construction time.
         """
         return self._quota_manager
+
+    @property
+    def object_group_classifier(self) -> ObjectGroupClassifier:
+        """Registry of per-model object-group attention layouts.
+
+        Object-group-aware store policies (``full_attention_only``) consult it to
+        tell full-attention chunks from sliding-window ones. The serving layer
+        registers a model's :class:`~lmcache.v1.distributed.api.AttnWindowDesc`
+        here when it registers the model's KV cache, and drops it when the
+        last worker unregisters.
+        """
+        return self._object_group_classifier
 
     @property
     def l1_memory_desc(self) -> L1MemoryDesc:
