@@ -182,8 +182,8 @@ def _build_session_end_info(request: "Request") -> SessionEndInfo:
       prompt will resume from an abort or a length cap, whose tail no
       follow-up re-sends;
     * the stop token id, which for a chat model is the turn-boundary marker
-      the model emits to end its turn (PLaMo 3 stops on ``<|plamo:tag|>``
-      because its ``generation_config.json`` lists it in ``eos_token_id``).
+      the model emits to end its turn (Qwen stops on ``<|im_end|>`` because
+      its ``generation_config.json`` lists it in ``eos_token_id``).
       vLLM fills ``stop_reason`` only for ``stop_token_ids``; a request that
       stopped on the model's own EOS leaves it None (``check_stop`` in
       ``vllm/v1/core/sched/utils.py``), which is exactly the chat case, so the
