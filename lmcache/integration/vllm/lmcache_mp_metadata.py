@@ -135,10 +135,11 @@ class LMCacheMPRequestTracker:
     ) -> None:
         """Append the block ids vLLM reported for this request in one step.
 
-        A block occupies one slot per request, so an id already in the list
-        means vLLM moved it (align-mode Mamba relocates a speculative block
-        past a skipped boundary) or freed and reallocated it. vLLM nulls the
-        old slot in place without reporting it; mirror that here.
+        vLLM never lists the same block at two slots of a request. An id that
+        is already in the list therefore means vLLM took it out of its old
+        slot (relocated an align-mode Mamba speculative block, or freed and
+        reallocated it) and wrote the null block there without reporting it.
+        Do the same here.
 
         Args:
             new_block_ids: Block ids appended this step, one list per engine

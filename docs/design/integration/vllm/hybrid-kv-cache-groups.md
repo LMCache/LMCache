@@ -174,15 +174,21 @@ logical-block granularity. See
 limits (notably: edited groups are byte-opaque — no content-aware processing,
 no cross-backend cache sharing).
 
-In `mamba_cache_mode="align"` a Mamba group's block list is sparse: a step
-writes one state, into the slot of its last token, and vLLM nulls the slots a
-multi-block step skips (EAGLE-family speculative decoding merges the prompt's
-last full block with its tail, so this is common). vLLM reports only appended
-blocks, and a speculative scratch block relocated from a skipped slot to the
-tail is reported again. `LMCacheMPRequestTracker.append_block_ids` nulls the
-old slot of a re-reported block; `all_null_chunk_masks` then drops that
-chunk's recurrent object and the next hit fails closed one chunk earlier.
-Requires `--separate-object-groups`.
+### MTP and the last prompt block
+
+With MTP, vLLM's scheduler runs the prompt's last full block and its tail in
+one prefill step, so no Mamba state is ever written for that block's
+boundary. In vLLM's own block list that position becomes the null block
+(id 0), and the speculative block that used to sit there is moved to the
+end. The connector only receives the blocks added at the end, so the tracker
+would still show the moved block at its old position and store it as the
+chunk's Mamba state, which no kernel ever wrote.
+
+A block is never listed twice for one request, so when a reported id is
+already in the tracker's list, `append_block_ids` sets the old position to 0.
+The server then sees an all-zero chunk for the Mamba group and skips it, and
+the next hit ends one chunk earlier. Needs `--separate-object-groups` and
+chunk size equal to the Mamba block size.
 
 ## Code map
 
