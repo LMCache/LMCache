@@ -90,9 +90,9 @@ that validates it away.
 An idle timer was the other candidate: commit a window that has sat in L1 for
 T seconds, on the theory that a tool loop resumes in milliseconds and a human
 does not. It does not survive contact with agents: a tool call can take an
-hour. That same fact removes the reason to treat tool boundaries differently
-at all. A window nobody will touch for an hour cannot stay in L1 either way,
-so it is committed like any other.
+hour. A window nobody will touch for an hour cannot stay in L1 either way, so
+by default it is committed like any other; the boundary-token set is where a
+deployment that knows better says so (see Configuration).
 
 ## Placement
 
@@ -141,12 +141,34 @@ timeliness, not the window.
 ## Configuration
 
 ```
---commit-policy never|stop_token          # default never = unchanged behaviour
+--commit-policy stop_token                # default; plugins may add more
 --commit-anchor generation_end|prompt_end
 --commit-boundary-tokens 151645           # Qwen: <|im_end|>
 ```
 
-`never` keeps the previous behaviour exactly, so the commit path is opt-in.
+The commit path is always live: a model with sliding-window object groups
+commits under `stop_token` unless configured otherwise, and a full-attention
+model has nothing to commit whatever the setting. There is no "off" policy.
+The one reason to want one, an L1 large enough that no window is ever
+evicted, is a sizing fact a deployment can express as its own policy if the
+extra L2 bytes matter to it.
+
+### Tool calls and answers
+
+`--commit-boundary-tokens` also decides *which* turn boundaries commit. An
+agent's turn ends either in a tool call or in a final answer, and some models
+end the two on different tokens: gpt-oss lists both `<|return|>` (200002) and
+`<|call|>` (200012) in `eos_token_id`. Listing only `200002` commits finished
+answers, only `200012` commits tool calls, and leaving the option empty
+commits both. Qwen ends both on `<|im_end|>`, so on Qwen the server cannot
+tell them apart and both commit; distinguishing them there would need the
+serving frontend's own finish reason, which the connector does not carry
+today.
+
+Both is the right default. A tool result can take an hour to come back, so a
+tool-call window cannot wait in L1 any more than an answer's can. Dropping
+tool-call boundaries only pays off in a deployment that knows its tools
+return within seconds, and that deployment can say so by listing one token.
 
 A plugin loaded through `--runtime-plugin-locations` registers its own policy
 with `register_commit_policy_factory` at import time and is then selectable by
@@ -177,7 +199,7 @@ L2, L1 = 16 GB so nothing was ever evicted), three turns of one conversation:
 Turn 1 commits exactly one window. Turns 2 and 3 add 3 and 1 files, the chunks
 their windows gained, against 3 and 1 new full-attention chunks, so every
 newly created in-window chunk is committed and nothing else. At the end L2
-holds 12 of the 36 sliding-window chunks. Under `--commit-policy never` the
+holds 12 of the 36 sliding-window chunks. With the commit path disabled the
 same conversation writes no sliding-window file at all, and the per-turn
 latencies are identical (10.0 / 2.5 / 3.3 s), which is the point of copying
 rather than moving.
@@ -186,7 +208,7 @@ Against `default` write-through, which writes every sliding-window chunk of
 every sequence, that is a third of the traffic here and less on longer
 conversations. Against eviction-only write-back, which writes nothing while
 L1 has room, it is strictly more. The trade is bytes for a bounded tail
-latency, and `--commit-policy never` declines it.
+latency.
 
 ## Known limits
 

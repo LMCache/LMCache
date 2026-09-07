@@ -205,8 +205,9 @@ class MPCacheServerContext:
             False.
         commit_config: How the ``END_SESSION`` handler decides whether a
             finished request's final sliding window is copied to L2 right
-            away. Defaults to the "never" policy, which leaves every window
-            to the eviction write-back as before.
+            away. Defaults to ``stop_token`` accepting any stop token. A
+            model without sliding-window object groups never has anything to
+            commit, whatever the policy.
     """
 
     def __init__(

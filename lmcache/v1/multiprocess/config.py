@@ -59,12 +59,11 @@ class MPServerConfig:
     sliding-window size at KV-cache registration (hybrid models). When False
     (default), all kernel groups share a single full-attention object group."""
 
-    commit_policy: str = "never"
+    commit_policy: str = "stop_token"
     """Which commit policy decides whether a finished request's final
-    sliding window is copied to L2 right away. "never" (default) changes
-    nothing: sliding-window chunks reach L2 only through the write-back on
-    eviction, as they did before this option existed. See
-    ``lmcache/v1/multiprocess/commit_policy.py``."""
+    sliding window is copied to L2 right away. Only matters for a model with
+    sliding-window object groups; a full-attention model has nothing to
+    commit. See ``lmcache/v1/multiprocess/commit_policy.py``."""
 
     commit_anchor: str = "generation_end"
     """Where a committed window ends: "generation_end" (the last chunk the
@@ -76,7 +75,9 @@ class MPServerConfig:
     commit_boundary_token_ids: list[int] = field(default_factory=list)
     """Token ids that mark a chat turn boundary, for the "stop_token" commit
     policy. Empty (default) accepts any token a request stopped on. Qwen ends
-    an assistant turn on ``<|im_end|>`` = 151645."""
+    an assistant turn on ``<|im_end|>`` = 151645. On a model that ends tool
+    calls and answers on different tokens (gpt-oss: ``<|call|>`` = 200012,
+    ``<|return|>`` = 200002) the set also chooses which of the two commit."""
 
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
@@ -357,11 +358,12 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--commit-policy",
         type=str,
-        default="never",
+        default="stop_token",
         help="Commit policy deciding whether a finished request's final "
-        "sliding window is copied to L2 immediately. 'never' (default) leaves "
-        "it to the eviction write-back; 'stop_token' commits when the model "
-        "stopped on a chat turn boundary. Plugins may register more.",
+        "sliding window is copied to L2 immediately. 'stop_token' (default) "
+        "commits when the model stopped on a chat turn boundary. Plugins may "
+        "register more. Has no effect on a model without sliding-window "
+        "object groups.",
     )
     mp_group.add_argument(
         "--commit-anchor",
@@ -381,7 +383,9 @@ def add_mp_server_args(
         default=None,
         help="Token ids that mark a chat turn boundary, for --commit-policy "
         "stop_token. Omit to accept any stop token. Qwen ends an assistant "
-        "turn on <|im_end|> = 151645.",
+        "turn on <|im_end|> = 151645. On a model with distinct tool-call and "
+        "answer stop tokens (gpt-oss: <|call|> = 200012, <|return|> = 200002) "
+        "listing only one of them commits only that kind of boundary.",
     )
     mp_group.add_argument(
         "--hash-algorithm",
