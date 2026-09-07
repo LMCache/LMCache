@@ -2,6 +2,7 @@
 """Tests for the rag-qa-quality workload."""
 
 # Standard
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 import json
 
@@ -9,6 +10,7 @@ import json
 import pytest
 
 # First Party
+from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
 from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
 from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
@@ -389,6 +391,30 @@ class TestStep:
 
 
 class TestReporting:
+    def test_truncated_answer_is_exported_as_unparsed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Truncated answers contribute to parse failures, not quality scores."""
+        workload, sender = _make_workload(
+            tmp_path,
+            monkeypatch,
+            records=_RECORDS[:1],
+            responses=[
+                "Example: <final_answer>Paris</final_answer>. "
+                "My answer: <final_answer>Ber"
+            ],
+        )
+        sender.close = AsyncMock()
+        workload.run(WarmupPolicy.SKIP)
+
+        payload = json.loads((tmp_path / "out.json").read_text())
+        assert payload["summary"]["num_samples"] == 1
+        assert payload["summary"]["num_parsed"] == 0
+        assert payload["summary"]["parse_rate"] == 0.0
+        assert payload["per_sample"][0]["parsed"] is False
+        assert payload["per_sample"][0]["answer"] == ""
+        assert payload["per_sample"][0]["f1"] is None
+
     @pytest.mark.asyncio
     async def test_metric_sections_report_quality_and_parse_rate(
         self, tmp_path, monkeypatch
