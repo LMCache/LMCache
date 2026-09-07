@@ -95,6 +95,16 @@ class _DeviceEvent(Protocol):
 _HAS_NATIVE_RETRIEVE_PLAN = hasattr(device_ops, "execute_cb_retrieve_plan_flat")
 
 
+def _min_slot_capacity(gpu_block_ids, kernel_groups, staged_kernel) -> int:
+    """Min token capacity over the staged groups; the partial-alloc gate and
+    the final scatter guard must agree on this bound, so both call here."""
+    return min(
+        len(gpu_block_ids[kernel_groups[i].engine_group_idx])
+        * kernel_groups[i].tokens_per_block
+        for i in staged_kernel
+    )
+
+
 class RetrieveMixin:
     """The CB_RETRIEVE_PRE_COMPUTED handler of ``BlendModule``: planning
     helpers first, then the handler; state lives on the composed instance."""
@@ -680,12 +690,10 @@ class RetrieveMixin:
         # -> settle before the obj-key machinery.
         if cb_match_result:
             try:
-                slot_bound = min(
-                    len(gpu_block_ids[kg.engine_group_idx]) * kg.tokens_per_block
-                    for kg in (
-                        gpu_context.kv_layer_groups_manager.kernel_groups[i]
-                        for i in staged_kernel
-                    )
+                slot_bound = _min_slot_capacity(
+                    gpu_block_ids,
+                    gpu_context.kv_layer_groups_manager.kernel_groups,
+                    staged_kernel,
                 )
             except (IndexError, TypeError):
                 slot_bound = None
@@ -912,9 +920,10 @@ class RetrieveMixin:
                     pairs: list[tuple[CBMatchResult, tuple[Any, ...]]] = []
                     # Bound by the smallest group: under HMA the sliding group
                     # has fewer blocks than the full group, so [0] isn't safe.
-                    num_slots = min(
-                        int(block_ids.shape[0]) * group_bs
-                        for block_ids, group_bs in cpu_block_tables
+                    # Same bound as the partial-alloc gate (_min_slot_capacity):
+                    # cpu_block_tables was built from these same staged groups.
+                    num_slots = _min_slot_capacity(
+                        gpu_block_ids, kgm.kernel_groups, staged_kernel
                     )
                     for r, chunk_objs in zip(
                         cb_match_result, grouped_objs, strict=True

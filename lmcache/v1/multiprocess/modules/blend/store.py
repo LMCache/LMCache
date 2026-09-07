@@ -124,6 +124,21 @@ class StoreMixin:
 
         return result
 
+    def _register_fp_job(self, job: "FpJob") -> None:
+        """Run one drained fingerprint job; caller owns ``_pending_fp_hashes``
+        bookkeeping (only the async drainer clears it)."""
+        tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+        try:
+            n_new = self._token_range_matcher.on_new_token_hashes(
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx=start_chunk_idx,
+                position_offset=position_offset,
+            )
+            self._emit_fingerprints_registered(rid, n_new)
+        except Exception:
+            logger.exception("CB fingerprint registration failed")
+
     def _drain_fingerprints_sync(self) -> None:
         """Sync-drain pending fingerprint registrations (the async drainer
         races at low max_tokens). Must not clear ``_pending_fp_hashes`` —
@@ -133,17 +148,7 @@ class StoreMixin:
                 job = self._fingerprint_queue.get_nowait()
             except QueueEmpty:
                 break
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
-            try:
-                n_new = self._token_range_matcher.on_new_token_hashes(
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx=start_chunk_idx,
-                    position_offset=position_offset,
-                )
-                self._emit_fingerprints_registered(rid, n_new)
-            except Exception:
-                logger.exception("CB fingerprint registration failed (sync drain)")
+            self._register_fp_job(job)
 
     def _emit_fingerprints_registered(self, rid: str, num_chunks: int) -> None:
         """Publish CB_FINGERPRINTS_REGISTERED for one drained registration job.
@@ -174,18 +179,10 @@ class StoreMixin:
                 job = self._fingerprint_queue.get(timeout=0.1)
             except QueueEmpty:
                 continue
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
             try:
-                n_new = self._token_range_matcher.on_new_token_hashes(
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx=start_chunk_idx,
-                    position_offset=position_offset,
-                )
-                self._emit_fingerprints_registered(rid, n_new)
-            except Exception:
-                logger.exception("CB fingerprint registration failed (async)")
+                self._register_fp_job(job)
             finally:
+                _, chunk_hashes, start_chunk_idx, *_rest = job
                 with self._pending_fp_lock:
                     self._pending_fp_hashes.difference_update(
                         chunk_hashes[start_chunk_idx:]

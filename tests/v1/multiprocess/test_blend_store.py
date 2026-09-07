@@ -48,10 +48,11 @@ def _make_engine_with_mocked_matcher():
     eng_mock._pending_fp_lock = threading.Lock()
     eng_mock._pending_fp_hashes = set()
     eng_mock._event_bus = MagicMock()
-    # Bind the real drainer + its registration-event helper to our mock.
+    # Bind the real drainer + its per-job and registration-event helpers.
     eng_mock._emit_fingerprints_registered = (
         BlendModule._emit_fingerprints_registered.__get__(eng_mock)
     )
+    eng_mock._register_fp_job = BlendModule._register_fp_job.__get__(eng_mock)
     eng_mock._drain_fingerprint_queue = BlendModule._drain_fingerprint_queue.__get__(
         eng_mock
     )

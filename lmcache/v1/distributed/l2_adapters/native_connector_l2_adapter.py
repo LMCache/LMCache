@@ -452,6 +452,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                     if op_type == self._OP_STORE:
                         store_info = self._pending_store_sizes.pop(fid, None)
                         task_bytes = 0
+                        if not ok and error:
+                            # The native failure reason is only available here.
+                            logger.warning(
+                                "L2 store task %d failed in native connector: %s",
+                                task_id,
+                                error,
+                            )
                         if ok and store_info is not None:
                             store_keys, sizes = store_info
                             for key, size in zip(store_keys, sizes, strict=True):

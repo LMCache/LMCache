@@ -40,6 +40,8 @@ def _make_engine():
     eng._event_bus = MagicMock()
     eng._token_range_matcher = MagicMock()
     eng._token_range_matcher.chunk_size = _CHUNK
+    # Both drainers run each job through the real per-job helper.
+    eng._register_fp_job = BlendModule._register_fp_job.__get__(eng)
     return eng
 
 
