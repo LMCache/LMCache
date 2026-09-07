@@ -652,8 +652,6 @@ class LookupModule:
             end_info: How the engine says the request finished.
         """
         commit_config = self._ctx.commit_config
-        if not commit_config.enabled:
-            return
         session = self._ctx.session_manager.get(request_id)
         if session is None:
             return

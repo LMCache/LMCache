@@ -32,7 +32,6 @@ from lmcache.v1.multiprocess.commit_policy import (
     CommitContext,
     CommitPolicy,
     CommitPolicyConfig,
-    NeverCommitPolicy,
     StopTokenCommitPolicy,
     create_commit_policy,
     get_registered_commit_policies,
@@ -132,22 +131,14 @@ class TestStopTokenCommitPolicy:
         assert policy.should_commit(make_context(stored_end=0)) is False
 
 
-class TestNeverCommitPolicy:
-    """Tests for the default policy."""
-
-    def test_never_refuses_a_clean_turn_boundary(self):
-        """``never`` refuses everything, whatever the request did."""
-        assert NeverCommitPolicy().should_commit(make_context()) is False
-
-
 class TestRegistry:
     """Tests for commit policy lookup by name."""
 
     def test_builtins_are_registered(self):
-        """Both built-ins are selectable by name."""
+        """The built-in policy is selectable by name."""
         names = get_registered_commit_policies()
 
-        assert {"never", "stop_token"} <= set(names)
+        assert "stop_token" in names
 
     def test_create_passes_boundary_tokens_to_stop_token(self):
         """``--commit-boundary-tokens`` reaches the policy it configures."""
@@ -373,11 +364,11 @@ class TestEndSessionCommit:
 
         assert flushed_keys(ctx) == []
 
-    def test_never_policy_issues_no_flush_at_all(self):
-        """The default configuration leaves the store path untouched."""
-        ctx, _ = run_end_session(CommitPolicyConfig())
+    def test_default_config_commits_a_clean_turn_boundary(self):
+        """The built-in default is stop_token accepting any stop token."""
+        ctx, per_group = run_end_session(CommitPolicyConfig(), stop_token_id=7)
 
-        ctx.storage_manager.flush_l1_keys_to_l2.assert_not_called()
+        assert flushed_keys(ctx) == per_group[0][4:6]
 
     def test_full_attention_only_model_commits_nothing(self):
         """Without a sliding-window group there is no window to commit."""
