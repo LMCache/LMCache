@@ -3,7 +3,7 @@
 **Steps editor**: paste the contents of `buildkite-pipeline.yml`.
 
 **GitHub trigger settings**:
-- Filter: `build.pull_request.labels includes "metax" || build.pull_request.labels includes "full" || build.branch == 'dev'`
+- Filter: `build.pull_request.labels includes "maca" || build.pull_request.labels includes "full" || build.branch == 'dev'`
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
@@ -18,7 +18,7 @@ there's no second job it could run in parallel with.
 
 | Condition | Result |
 |-----------|--------|
-| PR label includes `metax` | upload the MetaX pipeline |
+| PR label includes `maca` | upload the MetaX pipeline |
 | PR label includes `full` | upload the MetaX pipeline |
 | branch is `dev` | upload the MetaX pipeline |
 | any docs/asset-only change | path filter skips upload |
