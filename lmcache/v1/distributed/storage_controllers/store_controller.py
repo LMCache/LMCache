@@ -166,6 +166,19 @@ class StorePhase(enum.Enum):
     L2_STORE = enum.auto()
 
 
+class StoreMode(enum.Enum):
+    """Why a store task was submitted.
+
+    ``STORE`` is the write-through path: an L1 write finished and the store
+    policy chose the adapters. ``FLUSH`` is an explicit request
+    (``submit_flush``) to copy keys to every active adapter: the policy is
+    not consulted, and the keys are never deleted from L1 on completion.
+    """
+
+    STORE = "store"
+    FLUSH = "flush"
+
+
 @dataclass
 class InFlightStoreTask:
     """
@@ -182,6 +195,10 @@ class InFlightStoreTask:
     read_locked_keys: list[ObjectKey]
     """The subset of keys for which reserve_read succeeded
     (i.e., keys holding an L1 read lock that must be released)."""
+
+    mode: StoreMode = StoreMode.STORE
+    """Which path submitted this task; decides whether the store policy's
+    L1 deletions apply on completion."""
 
     l2_store_result: bool | None = None
     """L2 outcome (True=success, False=failure, None=still in flight)."""
@@ -253,6 +270,11 @@ class StoreController(StorageControllerInterface):
         self._listener = StoreListener()
         self._l1_manager.register_listener(self._listener)
         self._event_bus = get_event_bus()
+
+        # Keys queued by ``submit_flush``; drained on the store loop thread
+        # together with the listener's queue.
+        self._flush_lock = threading.Lock()
+        self._pending_flush_keys: list[ObjectKey] = []
 
         # (adapter_index, task_id) -> InFlightStoreTask
         # Composite key is needed because task IDs are only unique
@@ -386,6 +408,30 @@ class StoreController(StorageControllerInterface):
         self._adapter_ctrl_efd.notify()
         return op.done
 
+    def submit_flush(self, keys: list[ObjectKey]) -> None:
+        """Copy ``keys`` from L1 to every active L2 adapter, keeping the L1 copy.
+
+        Asynchronous and best effort: the store policy is not consulted, keys
+        that cannot be read-locked are skipped, and the keys are never deleted
+        from L1 on completion. With no active adapter the batch is dropped
+        with a warning.
+
+        Args:
+            keys: L1 object keys to copy. Empty is a no-op.
+        """
+        if not keys:
+            return
+        with self._flush_lock:
+            self._pending_flush_keys.extend(keys)
+        self._listener.notify()
+
+    def _pop_pending_flush_keys(self) -> list[ObjectKey]:
+        """Atomically drain the flush queue on the store loop thread."""
+        with self._flush_lock:
+            keys = self._pending_flush_keys
+            self._pending_flush_keys = []
+        return keys
+
     def get_adapter_state_observations(
         self,
     ) -> list[tuple[int | float, dict[str, object]]]:
@@ -469,6 +515,9 @@ class StoreController(StorageControllerInterface):
                         keys = self._listener.pop_pending_keys()
                         if keys:
                             self._process_new_keys(keys)
+                        flush_keys = self._pop_pending_flush_keys()
+                        if flush_keys:
+                            self._process_new_keys(flush_keys, StoreMode.FLUSH)
                     else:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
                         if adapter_idx is not None:
@@ -553,24 +602,31 @@ class StoreController(StorageControllerInterface):
             logger.info("StoreController detached adapter %d", adapter_id)
             done.set()
 
-    def _process_new_keys(self, keys: list[ObjectKey]) -> None:
+    def _process_new_keys(
+        self, keys: list[ObjectKey], mode: StoreMode = StoreMode.STORE
+    ) -> None:
         """
-        Process a batch of newly written keys.
+        Process a batch of keys to store.
 
-        1. Ask the policy which adapters each key should go to.
+        1. Ask the policy which adapters each key should go to (``STORE``),
+           or target every active adapter (``FLUSH``).
         2. For each adapter target, reserve read access on L1 to get
            MemoryObj references (skip keys that fail — best-effort).
         3. Submit store tasks to L2 adapters.
         4. Track in-flight tasks for later cleanup.
 
         Args:
-            keys (list[ObjectKey]): Keys that finished writing to L1.
+            keys (list[ObjectKey]): Keys that finished writing to L1, or
+                keys handed to ``submit_flush``.
+            mode: Which path the keys came from.
         """
 
         for group in _group_keys_by_shape(keys).values():
-            self._submit_store_for_single_shape(group)
+            self._submit_store_for_single_shape(group, mode)
 
-    def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
+    def _submit_store_for_single_shape(
+        self, keys: list[ObjectKey], mode: StoreMode
+    ) -> None:
         """Submit ``keys`` (all same shape) to their target adapters."""
         # Only route to adapters that are live (not draining). Descriptors
         # for draining adapters are kept for in-flight completion handling
@@ -580,7 +636,17 @@ class StoreController(StorageControllerInterface):
             for adapter_id, desc in self._adapter_descriptors.items()
             if adapter_id not in self._draining
         ]
-        plan = self._policy.select_store_targets(keys, routing_descriptors)
+        if mode is StoreMode.FLUSH:
+            if not routing_descriptors:
+                logger.warning(
+                    "L2 flush requested for %d key(s) but no active L2 "
+                    "adapter is configured; dropping (keys stay in L1).",
+                    len(keys),
+                )
+                return
+            plan = {desc.index: keys for desc in routing_descriptors}
+        else:
+            plan = self._policy.select_store_targets(keys, routing_descriptors)
 
         l1_mgr = self._l1_manager
 
@@ -623,10 +689,12 @@ class StoreController(StorageControllerInterface):
                 successful_keys.append(key)
                 successful_objs.append(obj)
 
-            # L1 read-failure anomaly reporting: target_keys come from an
-            # L1_WRITE_FINISHED notification, so failing to reserve_read them
-            # immediately after means an unexpected eviction or lock race.
-            if not_found_keys:
+            # L1 read-failure anomaly reporting: on the write-through path
+            # target_keys come from an L1_WRITE_FINISHED notification, so
+            # failing to reserve_read them immediately after means an
+            # unexpected eviction or lock race. A flush key may have been
+            # evicted legitimately in the meantime, so it is not reported.
+            if mode is StoreMode.STORE and not_found_keys:
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.L1_READ_FAILED,
@@ -637,7 +705,7 @@ class StoreController(StorageControllerInterface):
                         },
                     )
                 )
-            if write_locked_keys:
+            if mode is StoreMode.STORE and write_locked_keys:
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.L1_READ_FAILED,
@@ -668,6 +736,7 @@ class StoreController(StorageControllerInterface):
                 adapter_index=adapter_index,
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
+                mode=mode,
             )
             self._status_in_flight_count += 1
 
@@ -768,9 +837,10 @@ class StoreController(StorageControllerInterface):
                 adapter_index,
                 len(task.keys),
             )
-            delete_keys = self._policy.select_l1_deletions(task.keys)
-            if delete_keys:
-                l1_mgr.delete(delete_keys)
+            if task.mode is StoreMode.STORE:
+                delete_keys = self._policy.select_l1_deletions(task.keys)
+                if delete_keys:
+                    l1_mgr.delete(delete_keys)
         else:
             self._event_bus.publish(
                 Event(

@@ -747,6 +747,18 @@ class StorageManager:
         """
         self._l1_manager.touch_keys(keys)
 
+    def flush_l1_keys_to_l2(self, keys: list[ObjectKey]) -> None:
+        """Copy L1 keys to every active L2 adapter, keeping the L1 copy.
+
+        Asynchronous and best effort: the store policy is not consulted,
+        keys that are gone or write-locked are skipped, and a configuration
+        with no L2 adapter drops the batch with a warning.
+
+        Args:
+            keys (list[ObjectKey]): L1 object keys to copy. Empty is a no-op.
+        """
+        self._store_controller.submit_flush(keys)
+
     def delete_l1_keys(
         self, keys: list[ObjectKey], force: bool = False
     ) -> tuple[int, int]:
