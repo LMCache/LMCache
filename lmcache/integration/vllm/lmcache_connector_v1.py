@@ -190,6 +190,15 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         """
         return self._lmcache_engine.build_connector_meta(scheduler_output)
 
+    def reset_cache(self) -> Optional[bool]:
+        """Reset LMCache state in response to vLLM prefix-cache reset.
+
+        Returns:
+            True if LMCache was cleared successfully, False if clearing failed,
+            and None for roles that do not own scheduler-side reset.
+        """
+        return self._lmcache_engine.reset_cache()
+
     def request_finished(
         self,
         request: "Request",

@@ -1844,6 +1844,60 @@ class LMCacheConnectorV1Impl:
         return meta
 
     @_lmcache_nvtx_annotate
+    def reset_cache(self) -> Optional[bool]:
+        """Reset LMCache's external cache for vLLM prefix-cache reset.
+
+        Returns:
+            True if the scheduler role cleared LMCache successfully, False if
+            the cache could not be cleared, and None for non-scheduler roles.
+        """
+        if self._role != KVConnectorRole.SCHEDULER:
+            return None
+
+        request_ids = (
+            set(self.load_specs)
+            | set(self._unfinished_requests)
+            | set(self._request_trackers)
+            | set(self._requests_priority)
+        )
+        lookup_client = self.lookup_client
+        if lookup_client is not None:
+            cancel_lookup = getattr(lookup_client, "cancel_lookup", None)
+            for request_id in request_ids:
+                if callable(cancel_lookup):
+                    cancel_lookup(request_id)
+                lookup_client.clear_lookup_status(request_id)
+
+        self.load_specs.clear()
+        self._unfinished_requests.clear()
+        self._request_trackers.clear()
+        self._requests_priority.clear()
+        self._invalid_block_ids.clear()
+        self.layerwise_retrievers.clear()
+        self._layerwise_save_storers.clear()
+        for request_id in request_ids:
+            tmp_disagg_tracker.pop(request_id, None)
+
+        if self.lmcache_engine is None:
+            logger.warning(
+                "Cannot reset LMCache connector cache because lmcache_engine "
+                "is not initialized on the scheduler role."
+            )
+            return False
+
+        try:
+            num_cleared_tokens = self.lmcache_engine.clear()
+        except Exception:
+            logger.exception("Failed to reset LMCache connector cache.")
+            return False
+
+        logger.info(
+            "Reset LMCache connector cache; cleared %d tokens.",
+            num_cleared_tokens,
+        )
+        return True
+
+    @_lmcache_nvtx_annotate
     def request_finished(
         self,
         request: "Request",
