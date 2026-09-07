@@ -216,7 +216,7 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
     else:
         raise RuntimeError(f"Invalid value `{value}` for `{key}` in extra_config")
 
-    logger.info(f"Getting {key} = {bool_value} from extra_config")
+    logger.info("Getting %s = %s from extra_config", key, bool_value)
     return bool_value
 
 
@@ -300,8 +300,10 @@ class GdsBackend(AllocatorBackendInterface):
         # Log the fstype - this is useful in reports and varying optimizations
         # based on the kind of fstype used.
         logger.info(
-            f"GDS backend using fstype '{self.fstype}' on path '{self.gds_path}'"
-            f" ({len(self.gds_paths)} path(s) configured)"
+            "GDS backend using fstype '%s' on path '%s' (%s path(s) configured)",
+            self.fstype,
+            self.gds_path,
+            len(self.gds_paths),
         )
 
         self.use_gds = config.use_gds
@@ -404,7 +406,7 @@ class GdsBackend(AllocatorBackendInterface):
         self.put_tasks: set[CacheEngineKey] = set()
 
         if hasattr(self.memory_allocator, "base_pointer"):
-            logger.debug(f"Using base pointer {self.memory_allocator.base_pointer}")
+            logger.debug("Using base pointer %s", self.memory_allocator.base_pointer)
             self.gds_base_pointer = self.memory_allocator.base_pointer
         else:
             logger.info("No base pointer found, GDS will use bounce buffers")
@@ -444,8 +446,9 @@ class GdsBackend(AllocatorBackendInterface):
         await asyncio.gather(*tasks)
         end = time.perf_counter()
         logger.info(
-            f"Read {len(self.hot_cache)} cache entries from persistent "
-            f"storage in {end - start:.2f} seconds"
+            "Read %s cache entries from persistent storage in %.2f seconds",
+            len(self.hot_cache),
+            end - start,
         )
 
     def _scan_metadata_subdir(self, path, l1_dir):
@@ -469,8 +472,10 @@ class GdsBackend(AllocatorBackendInterface):
                             key = parse_cache_key(key_str)
                         except ValueError as e:
                             logger.error(
-                                f"Filename {filename} can't be converted "
-                                f"back into cache key: {e}"
+                                "Filename %s can't be converted "
+                                "back into cache key: %s",
+                                filename,
+                                e,
                             )
                             continue
                         try:
@@ -533,9 +538,15 @@ class GdsBackend(AllocatorBackendInterface):
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
             raise UnsupportedMetadataVersion("unhandled lmcache metadata")
         logger.debug(
-            f"Read metadata for {key} from {filename}: "
-            f"shape={shape}, dtype={dtype}, size={size}, fmt={fmt}, "
-            f"extra_metadata={extra_metadata}"
+            "Read metadata for %s from %s: shape=%s, dtype=%s, "
+            "size=%s, fmt=%s, extra_metadata=%s",
+            key,
+            filename,
+            shape,
+            dtype,
+            size,
+            fmt,
+            extra_metadata,
         )
         # TODO(extra_metadata)
         # TODO(Jiayi): need to support `cached_positions`.
@@ -577,27 +588,36 @@ class GdsBackend(AllocatorBackendInterface):
                     return self._read_metadata(key, path, subdir_key)
                 except FileNotFoundError:
                     logger.warning(
-                        f"[GDS] File not found for key {key.to_string()} "
-                        f"at expected path {path}, returning None"
+                        "[GDS] File not found for key %s at "
+                        "expected path %s, returning None",
+                        key.to_string(),
+                        path,
                     )
                 except PermissionError:
                     logger.warning(
-                        f"[GDS]: Permission Denied for PID {os.getpid()} on {path},"
-                        f" returning None"
+                        "[GDS]: Permission Denied for PID %s on %s, returning None",
+                        os.getpid(),
+                        path,
                     )
                 except UnsupportedMetadataVersion:
-                    logger.error(f"Unsupported metadata version for {path}, ignoring")
+                    logger.error("Unsupported metadata version for %s, ignoring", path)
                 except (OSError, IOError) as e:
                     logger.error(
-                        f"Failed to read metadata file {path}: {type(e).__name__}: "
-                        f"{e}. File may be corrupted or inaccessible. "
-                        f"Ignoring cache entry for key {key.to_string()}."
+                        "Failed to read metadata file %s: %s: %s. File may be "
+                        "corrupted or inaccessible. Ignoring cache entry for key %s.",
+                        path,
+                        type(e).__name__,
+                        e,
+                        key.to_string(),
                     )
                 except Exception as e:
                     logger.error(
-                        f"Unexpected error reading metadata file {path}: "
-                        f"{type(e).__name__}: {e}. Ignoring cache entry for key "
-                        f"{key.to_string()}."
+                        "Unexpected error reading metadata file %s: %s: %s. "
+                        "Ignoring cache entry for key %s.",
+                        path,
+                        type(e).__name__,
+                        e,
+                        key.to_string(),
                     )
 
         return None
@@ -712,18 +732,25 @@ class GdsBackend(AllocatorBackendInterface):
                 )
             except Exception as e:
                 logger.error(
-                    f"GDS write operation failed for key {key.to_string()} at "
-                    f"path {path}: tensor_shape={kv_chunk.shape}, "
-                    f"tensor_dtype={kv_chunk.dtype}, "
-                    f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
+                    "GDS write operation failed for key %s at path %s: "
+                    "tensor_shape=%s, tensor_dtype=%s, tensor_size_bytes=%s, error=%s",
+                    key.to_string(),
+                    path,
+                    kv_chunk.shape,
+                    kv_chunk.dtype,
+                    kv_chunk.nbytes,
+                    e,
                     exc_info=True,
                 )
                 return
 
             # Register key in cache
             logger.debug(
-                f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
-                f"to {path} with metadata {metadata}"
+                "Saved %s elements of %s to %s with metadata %s",
+                kv_chunk.numel(),
+                kv_chunk.dtype,
+                path,
+                metadata,
             )
             self.insert_key(key, memory_obj)
             try:
@@ -738,10 +765,13 @@ class GdsBackend(AllocatorBackendInterface):
                 )
             except Exception as e:
                 logger.error(
-                    f"POSIX metadata write operation failed for key {key.to_string()} "
-                    f"at path {path + _METADATA_FILE_SUFFIX}: "
-                    f"metadata_size_bytes={len(metadata)}, "
-                    f"tmp_suffix={tmp}, error={e}",
+                    "POSIX metadata write operation failed for key %s at path %s: "
+                    "metadata_size_bytes=%s, tmp_suffix=%s, error=%s",
+                    key.to_string(),
+                    path + _METADATA_FILE_SUFFIX,
+                    len(metadata),
+                    tmp,
+                    e,
                     exc_info=True,
                 )
                 with self.hot_lock:
@@ -758,7 +788,9 @@ class GdsBackend(AllocatorBackendInterface):
                 on_complete_callback(key)
             except Exception as e:
                 logger.error(
-                    f"on_complete_callback failed for key {key.to_string()}: {e}",
+                    "on_complete_callback failed for key %s: %s",
+                    key.to_string(),
+                    e,
                     exc_info=True,
                 )
 
@@ -771,8 +803,10 @@ class GdsBackend(AllocatorBackendInterface):
             exception = task.exception()
             if exception is not None:
                 logger.error(
-                    f"Metadata write task failed for key {key.to_string()} "
-                    f"at path {path + _METADATA_FILE_SUFFIX}: {exception}",
+                    "Metadata write task failed for key %s at path %s: %s",
+                    key.to_string(),
+                    path + _METADATA_FILE_SUFFIX,
+                    exception,
                     exc_info=exception,
                 )
                 with self.hot_lock:
@@ -780,8 +814,9 @@ class GdsBackend(AllocatorBackendInterface):
         except Exception as e:
             # Exception calling task.exception() (e.g., task was cancelled)
             logger.error(
-                f"Error checking metadata write task status for key "
-                f"{key.to_string()}: {e}",
+                "Error checking metadata write task status for key %s: %s",
+                key.to_string(),
+                e,
                 exc_info=True,
             )
 
@@ -955,7 +990,9 @@ class GdsBackend(AllocatorBackendInterface):
         if ret != memory_obj.get_size():
             if ret < 0:
                 logger.error(
-                    f"Error loading {path}: ret: {ret} removing entry from cache"
+                    "Error loading %s: ret: %s removing entry from cache",
+                    path,
+                    ret,
                 )
                 with self.hot_lock:
                     self.hot_cache.pop(key)
@@ -963,8 +1000,10 @@ class GdsBackend(AllocatorBackendInterface):
                 # TODO: we should probably count errors and
                 # remove the entry if it's a persistent problem.
                 logger.error(
-                    f"Error loading {path}: got only {ret} bytes "
-                    f"out of {memory_obj.get_size()}, ignoring"
+                    "Error loading %s: got only %s bytes out of %s, ignoring",
+                    path,
+                    ret,
+                    memory_obj.get_size(),
                 )
             memory_obj.ref_count_down()
             return None
@@ -1004,7 +1043,7 @@ class GdsBackend(AllocatorBackendInterface):
             for key in keys:
                 entry = self.hot_cache.get(key)
                 if entry is None:
-                    logger.error(f"Lookup failed during get_blocking for {key}")
+                    logger.error("Lookup failed during get_blocking for %s", key)
                     paths.append(None)
                     dtypes.append(None)
                     shapes.append(None)
@@ -1032,7 +1071,10 @@ class GdsBackend(AllocatorBackendInterface):
             else:
                 memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
             if memory_obj is None:
-                logger.error(f"Memory allocation failed during get_blocking for {path}")
+                logger.error(
+                    "Memory allocation failed during get_blocking for %s",
+                    path,
+                )
             else:
                 gds_reads += 1
                 gds_read_bytes += memory_obj.get_size()
@@ -1047,8 +1089,10 @@ class GdsBackend(AllocatorBackendInterface):
         )
         total_time = time.perf_counter() - start_time
         logger.info(
-            f"Time taken for batched_get_blocking: {total_time:.3f}s |"
-            f" {gds_read_bytes / 1024 / 1024}MiB | {gds_reads} ops."
+            "Time taken for batched_get_blocking: %.3fs | %sMiB | %s ops.",
+            total_time,
+            gds_read_bytes / 1024 / 1024,
+            gds_reads,
         )
         return results
 
@@ -1134,7 +1178,7 @@ class GdsBackend(AllocatorBackendInterface):
                 mm.close()
 
         except Exception as e:
-            logger.error(f"Error saving {tmp_path}: {e}", exc_info=True)
+            logger.error("Error saving %s: %s", tmp_path, e, exc_info=True)
             raise e
         os.rename(tmp_path, path)
         return metadata
@@ -1167,9 +1211,13 @@ class GdsBackend(AllocatorBackendInterface):
                 if file_size < file_offset + size_in_bytes:
                     os.close(fd)
                     logger.error(
-                        f"File {gds_path} is too small: size={file_size}, "
-                        f"but need at least {file_offset + size_in_bytes} bytes "
-                        f"(offset={file_offset}, requested={size_in_bytes})"
+                        "File %s is too small: size=%s, but need at least %s "
+                        "bytes (offset=%s, requested=%s)",
+                        gds_path,
+                        file_size,
+                        file_offset + size_in_bytes,
+                        file_offset,
+                        size_in_bytes,
                     )
                     return -1
 
@@ -1205,7 +1253,7 @@ class GdsBackend(AllocatorBackendInterface):
             # return -1 on any exception, and log the error.
             # The caller will handle the error by removing the cache entry and
             # returning None.
-            logger.error(f"GDS read failed for {gds_path}: {e}", exc_info=True)
+            logger.error("GDS read failed for %s: %s", gds_path, e, exc_info=True)
             return -1
 
     def pin(self, key: CacheEngineKey) -> bool:
@@ -1246,7 +1294,7 @@ class GdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        logger.debug(f"Allocating memory with busy loop: {busy_loop}")
+        logger.debug("Allocating memory with busy loop: %s", busy_loop)
 
         max_attempts = self.max_alloc_attempts if busy_loop else 1
         num_attempts = 0
@@ -1260,9 +1308,10 @@ class GdsBackend(AllocatorBackendInterface):
             num_attempts += 1
             if num_attempts < max_attempts:  # keep trying until max attempts is reached
                 logger.debug(
-                    f"Unable to allocate memory object after {num_attempts} "
-                    f"attempt(s) of GDS backend allocate(). "
-                    f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
+                    "Unable to allocate memory object after %s attempt(s) of GDS "
+                    "backend allocate(). Waiting %s seconds before retrying.",
+                    num_attempts,
+                    self.alloc_attempt_delay_secs,
                 )
                 if self.alloc_attempt_delay_secs > 0:
                     time.sleep(self.alloc_attempt_delay_secs)
@@ -1270,7 +1319,8 @@ class GdsBackend(AllocatorBackendInterface):
                 break
 
         logger.warning(
-            f"GDS allocation failed after {num_attempts} attempt(s). Returning None."
+            "GDS allocation failed after %s attempt(s). Returning None.",
+            num_attempts,
         )
         if not self.memory_allocator.memcheck():
             logger.error(
@@ -1295,7 +1345,8 @@ class GdsBackend(AllocatorBackendInterface):
             logger.warning("GDS Backend does not support eviction")
 
         logger.debug(
-            f"Batched allocating memory in GDS backend with busy loop: {busy_loop}"
+            "Batched allocating memory in GDS backend with busy loop: %s",
+            busy_loop,
         )
 
         max_attempts = self.max_alloc_attempts if busy_loop else 1
@@ -1312,9 +1363,10 @@ class GdsBackend(AllocatorBackendInterface):
             num_attempts += 1
             if num_attempts < max_attempts:  # keep trying until max attempts is reached
                 logger.debug(
-                    f"Unable to allocate memory object after {num_attempts} "
-                    f"attempt(s) of GDS backend batched_allocate(). "
-                    f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
+                    "Unable to allocate memory object after %s attempt(s) of GDS "
+                    "backend batched_allocate(). Waiting %s seconds before retrying.",
+                    num_attempts,
+                    self.alloc_attempt_delay_secs,
                 )
                 if self.alloc_attempt_delay_secs > 0:
                     time.sleep(self.alloc_attempt_delay_secs)
@@ -1322,8 +1374,8 @@ class GdsBackend(AllocatorBackendInterface):
                 break
 
         logger.warning(
-            f"GDS batched allocation failed after {num_attempts} "
-            f"attempt(s). Returning None."
+            "GDS batched allocation failed after %s attempt(s). Returning None.",
+            num_attempts,
         )
         if not self.memory_allocator.memcheck():
             logger.error(
@@ -1344,7 +1396,8 @@ class GdsBackend(AllocatorBackendInterface):
             self._scan_metadata_future.result(timeout=30)
         except Exception as e:
             logger.warning(
-                f"Exception while waiting for metadata scan: {e}",
+                "Exception while waiting for metadata scan: %s",
+                e,
                 exc_info=True,
             )
         # Wait for pending metadata write tasks to finish before tearing down
@@ -1363,7 +1416,8 @@ class GdsBackend(AllocatorBackendInterface):
                 drain.result(timeout=30)
             except Exception as e:
                 logger.warning(
-                    f"Exception while draining metadata write tasks: {e}",
+                    "Exception while draining metadata write tasks: %s",
+                    e,
                     exc_info=True,
                 )
         self.memory_allocator.close()
