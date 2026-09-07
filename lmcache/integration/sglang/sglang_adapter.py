@@ -33,19 +33,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _model_uses_mla(model_config: ModelConfig) -> bool:
-    """Return whether SGLang classified the model as MLA.
-
-    Args:
-        model_config: SGLang model metadata containing ``attention_arch``.
-
-    Returns:
-        ``True`` when ``attention_arch`` names the MLA architecture.
-    """
-    attention_arch = getattr(model_config, "attention_arch", None)
-    return getattr(attention_arch, "name", attention_arch) == "MLA"
-
-
 @dataclass
 class StoreMetadata:
     last_node: object
@@ -71,7 +58,9 @@ def init_lmcache_engine(
     global_rank: int,
     kv_dtype: torch.dtype,
     config_file: str,
-    kv_head_dim: int | None = None,
+    use_mla: bool = False,
+    kv_cache_dim: Optional[int] = None,
+    page_size: int = 1,
 ) -> LMCacheEngine:
     """
     Initialize LMCache engine for SGLang integration.
@@ -83,15 +72,23 @@ def init_lmcache_engine(
         global_rank: Global tensor parallel rank (for metadata)
         kv_dtype: Data type for KV cache tensors
         config_file: Path to the LMCache YAML configuration file
-        kv_head_dim: Actual width of one MLA cache row. Required for MLA
-            callers because it can differ from the attention head dimension.
+        use_mla: Whether the model uses MLA (fused KV, single buffer).
+            When True, ``kv_cache_dim`` must be provided.
+        kv_cache_dim: The fused KV cache dimension for MLA/DSA models
+            (``kv_lora_rank + qk_rope_head_dim``). Required when
+            ``use_mla`` is True; ignored otherwise.
+        page_size: SGLang page size (tokens per block). Passed as
+            ``tokens_per_block`` in ``layout_hints`` to the GPU connector
+            so that ``KVLayerGroupsManager`` can resolve ``block_size``
+            for fused formats (``NL_X_NBBS_ONE_HS``) whose
+            ``block_size()`` is undefined.
 
     Returns:
         The initialized or existing SGLang LMCache engine.
 
     Raises:
-        ValueError: If an MLA model does not provide a positive cache-row
-            width.
+        ValueError: If ``use_mla=True`` but ``kv_cache_dim`` is not
+            provided.
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
@@ -104,11 +101,14 @@ def init_lmcache_engine(
     # construct kv shape (for mem pool)
     num_layer = model_config.num_hidden_layers
     chunk_size = config.chunk_size
-    use_mla = _model_uses_mla(model_config)
+
     if use_mla:
-        if kv_head_dim is None or kv_head_dim <= 0:
-            raise ValueError("SGLang MLA requires a positive KV-cache row width")
-        kv_shape = (num_layer, 1, chunk_size, 1, kv_head_dim)
+        if kv_cache_dim is None:
+            raise ValueError(
+                "kv_cache_dim must be provided when use_mla=True"
+            )
+        # MLA/DSA: fused KV, single head, kv_size=1
+        kv_shape = (num_layer, 1, chunk_size, 1, kv_cache_dim)
     else:
         num_kv_head = model_config.get_num_kv_heads(tp_size)
         head_dim = model_config.head_dim
@@ -127,7 +127,10 @@ def init_lmcache_engine(
         use_mla=use_mla,
     )
 
-    gpu_connector = CreateGPUConnector(config, metadata, EngineType.SGLANG)
+    gpu_connector = CreateGPUConnector(
+        config, metadata, EngineType.SGLANG,
+        layout_hints={"tokens_per_block": page_size},
+    )
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         config,
@@ -146,19 +149,52 @@ class LMCacheConnector:
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        k_pool: List[torch.Tensor],
-        v_pool: List[torch.Tensor],
         config_file: str,
+        k_pool: Optional[List[torch.Tensor]] = None,
+        v_pool: Optional[List[torch.Tensor]] = None,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        use_mla: bool = False,
+        kv_cache_dim: Optional[int] = None,
+        page_size: int = 1,
     ):
-        if not k_pool:
-            raise ValueError("k_pool cannot be empty during initialization.")
-        use_mla = _model_uses_mla(sgl_config)
-        kv_dtype = k_pool[0].dtype
+        """Initialize the LMCache connector for SGLang.
+
+        Args:
+            sgl_config: SGLang model configuration.
+            tp_size: Tensor parallel size.
+            rank: Global tensor parallel rank.
+            config_file: Path to the LMCache YAML configuration file.
+            k_pool: List of key cache tensors (MHA models). Mutually
+                exclusive with ``kv_caches``.
+            v_pool: List of value cache tensors (MHA models). Mutually
+                exclusive with ``kv_caches``.
+            kv_caches: Flat list of KV cache tensors for MLA/DSA models
+                (fused buffer). When provided, ``k_pool``/``v_pool`` are
+                ignored. For DSA this list includes both the MLA latent
+                layers and the indexer layers appended in order.
+            use_mla: Whether the model uses MLA (fused KV).
+            kv_cache_dim: Fused KV cache dimension for MLA/DSA models.
+            page_size: SGLang page size (tokens per block). Forwarded
+                to ``init_lmcache_engine`` as ``layout_hints`` so the
+                GPU connector can resolve ``block_size`` for fused
+                formats.
+        """
+        if kv_caches is not None:
+            self.kvcaches = kv_caches
+        else:
+            if not k_pool:
+                raise ValueError(
+                    "Either kv_caches or k_pool must be provided."
+                )
+            self.kvcaches = k_pool + v_pool
+        self.use_mla = use_mla
+
+        kv_dtype = self.kvcaches[0].dtype
         if (
-            k_pool[0].device.type == torch_device_type
-            and k_pool[0].device.index is not None
+            self.kvcaches[0].device.type == torch_device_type
+            and self.kvcaches[0].device.index is not None
         ):
-            local_rank = k_pool[0].device.index
+            local_rank = self.kvcaches[0].device.index
         else:
             # Fallback for CPU / odd cases
             local_rank = rank
@@ -172,12 +208,13 @@ class LMCacheConnector:
             rank,  # global_rank (tp_rank) for metadata
             kv_dtype,
             config_file,
-            kv_head_dim=k_pool[0].shape[-1] if use_mla else None,
+            use_mla=use_mla,
+            kv_cache_dim=kv_cache_dim,
+            page_size=page_size,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = local_rank  # Use local_rank for torch.device() calls
-        self.kvcaches = k_pool if use_mla else k_pool + v_pool
         self.num_layer = sgl_config.num_hidden_layers
 
         self.lmcache_engine.post_init(kvcaches=self.kvcaches)
@@ -249,16 +286,34 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        k_pool: List[torch.Tensor],
-        v_pool: List[torch.Tensor],
         config_file: str,
+        k_pool: Optional[List[torch.Tensor]] = None,
+        v_pool: Optional[List[torch.Tensor]] = None,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        use_mla: bool = False,
+        kv_cache_dim: Optional[int] = None,
+        page_size: int = 1,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
-        super().__init__(sgl_config, tp_size, rank, k_pool, v_pool, config_file)
+        super().__init__(
+            sgl_config,
+            tp_size,
+            rank,
+            config_file,
+            k_pool=k_pool,
+            v_pool=v_pool,
+            kv_caches=kv_caches,
+            use_mla=use_mla,
+            kv_cache_dim=kv_cache_dim,
+            page_size=page_size,
+        )
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers: List[Any] = []
         self.layer_load_layer: List[int] = []
-        self.kvcaches = [k_pool, v_pool]
+        if kv_caches is not None:
+            self.kvcaches = [kv_caches]
+        else:
+            self.kvcaches = [k_pool, v_pool]
         self.tp_group = tp_group
         self.lookup_id_list: List[str] = []
 

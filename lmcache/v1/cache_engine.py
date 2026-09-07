@@ -330,7 +330,29 @@ class LMCacheEngine:
                 )
                 if self.hidden_state_store is not None:
                     self.hidden_state_store.bind_storage_manager(self.storage_manager)
-            self.post_inited = True
+
+        # Eagerly initialize the GPU connector's kvcaches pointers and
+        # KVLayerGroupsManager so that metadata.get_shapes() returns
+        # per-group shapes before the first store()/retrieve() call.
+        # Without this, the lazy _initialize_pointers() in
+        # SGLangGPUConnector runs only inside from_gpu/to_gpu — which is
+        # *after* get_shapes() is called in store() — causing a
+        # single-group fallback that crashes with IndexError when
+        # from_gpu tries to access the second group (DSA indexer).
+        if self.gpu_connector is not None and "kvcaches" in kwargs:
+            self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
+            # SGLangGPUConnector needs _initialize_pointers called to build
+            # the KVLayerGroupsManager on metadata; other connectors are
+            # unaffected (no _initialize_pointers method or already built).
+            init_ptrs = getattr(
+                self.gpu_connector, "_initialize_pointers", None
+            )
+            if init_ptrs is not None:
+                kvcaches = getattr(self.gpu_connector, "kvcaches", None)
+                if kvcaches is not None:
+                    init_ptrs(kvcaches)
+
+        self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
         """
