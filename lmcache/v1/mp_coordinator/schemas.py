@@ -392,18 +392,21 @@ class DirectoryLookupRequest(BaseModel):
 
 
 class DirectoryKeyPlacements(BaseModel):
-    """Placements and token ids for one resolved key.
+    """Placements, token ids, and access count for one resolved key.
 
     Attributes:
         key: The resolved key, echoed back.
         placements: Known placements; empty when the directory knows
             nothing about the key.
         token_ids: The chunk's token ids; empty when unknown.
+        access_count: ``ACCESS`` entries applied to the key since its
+            creation.
     """
 
     key: EncodedObjectKey
     placements: list[Placement] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
+    access_count: int = 0
 
 
 class DirectoryLookupResponse(BaseModel):
@@ -428,11 +431,14 @@ class DirectoryKeyInfo(BaseModel):
         key: The listed key.
         placements: The key's placements that matched the listing filters.
         num_tokens: Token ids known for the key's chunk (``0`` = unknown).
+        access_count: ``ACCESS`` entries applied to the key since its
+            creation.
     """
 
     key: EncodedObjectKey
     placements: list[Placement] = Field(default_factory=list)
     num_tokens: int = 0
+    access_count: int = 0
 
 
 class DirectoryListResponse(BaseModel):

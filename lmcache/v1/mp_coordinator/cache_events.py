@@ -324,8 +324,8 @@ class CacheEventSubscriber(EventSubscriber):
 
     def _on_l1_access(self, event: Event) -> None:
         keys: list[ObjectKey] = event.metadata["keys"]
-        # ACCESS refreshes key-level recency only; it carries no
-        # placement identity, so the backend is empty by contract.
+        # ACCESS updates key-level recency and access count only; it
+        # carries no placement identity, so the backend is empty by contract.
         self._record(
             CacheEventType.ACCESS,
             Tier.L1,

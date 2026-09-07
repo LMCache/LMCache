@@ -1,0 +1,16 @@
+# Vendor-specific runtime deps baked into install_requires by setup.py
+# when building for MetaX MACA (BUILD_WITH_MACA=1).
+#
+# torch/torchvision are NOT listed here: MACA-enabled torch is not on PyPI;
+# users install a MACA-enabled torch build themselves before compiling
+# lmcache from source, per the "LMCache on MACA" installation docs.
+#
+# MP mode's MACA counterpart to cupy is mcpy (the analogue of
+# cupy-rocm-7-0 in requirements/rocm_core.txt). It's published as a real
+# wheel on MetaX's own pip index (repos.metax-tech.com/r/maca-pypi), not
+# PyPI, so a plain `pip install` (without --no-deps and without pointing
+# at that index) won't resolve it. See the "LMCache on MACA" installation
+# docs for the index URL. --no-deps (the documented default self-compile
+# flow) skips this file's contents entirely either way.
+
+mcpy

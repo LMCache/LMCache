@@ -328,8 +328,15 @@ class LocalDiskBackend(StorageBackendInterface):
         :param on_complete_callback: Optional callback invoked once per key
             after the disk write completes. Callback exceptions are caught
             and logged.
+        :returns: Always ``None``. The task is skipped when a write for this
+            key is already in flight or when the key is already on disk.
         """
         assert memory_obj.tensor is not None
+
+        with self.disk_lock:
+            if key in self.dict:
+                self.cache_policy.update_on_hit(key, self.dict)
+                return None
 
         # skip repeated save
         if self.exists_in_put_tasks(key):
