@@ -2,9 +2,8 @@
 """
 Commit policy: does a finished request's sliding window earn an L2 copy?
 
-A store policy that keeps sliding-window chunks out of L2 on the store path --
-``window_tiered`` is the one in tree -- leaves L1 holding their only copy until
-an eviction writes them back. That write happens under memory pressure, which
+A store policy that keeps sliding-window chunks out of L2 on the store path
+leaves L1 holding their only copy until an eviction writes them back. That write happens under memory pressure, which
 is the wrong moment: the next turn of the same conversation can arrive while
 the write-back is still in flight and miss.
 
@@ -155,8 +154,7 @@ class CommitPolicyConfig:
         policy: Registered commit policy name.
         anchor: Where the committed window ends.
         boundary_token_ids: Token ids that mark a chat turn boundary for this
-            deployment (PLaMo 3: ``[16]`` for ``<|plamo:tag|>``; Qwen:
-            ``<|im_end|>``). Empty accepts any token a request stopped on.
+            deployment (Qwen: ``[151645]`` for ``<|im_end|>``). Empty accepts any token a request stopped on.
     """
 
     policy: str = "never"
@@ -170,7 +168,7 @@ class CommitPolicyConfig:
 
 
 DEFAULT_COMMIT_CONFIG = CommitPolicyConfig()
-"""The commit path switched off: policy "never", no request hints."""
+"""The commit path switched off: policy "never"."""
 
 
 def register_commit_policy(name: str, policy_cls: type[CommitPolicy]) -> None:
@@ -310,7 +308,7 @@ class StopTokenCommitPolicy(CommitPolicy):
     """Commit when the model stopped on a turn-boundary token.
 
     A chat model ends its turn by emitting the token that opens the next turn
-    (PLaMo 3 stops on ``<|plamo:tag|>``, id 16, because its
+    (Qwen stops on ``<|im_end|>``, id 151645, because its
     ``generation_config.json`` lists it in ``eos_token_id``). A request that
     reached that token ended where the next prompt will resume, so its final
     window is exactly what the follow-up needs.

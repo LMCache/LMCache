@@ -71,8 +71,8 @@ class MPServerConfig:
 
     commit_boundary_token_ids: list[int] = field(default_factory=list)
     """Token ids that mark a chat turn boundary, for the "stop_token" commit
-    policy. Empty (default) accepts any token a request stopped on. PLaMo 3
-    ends an assistant turn on ``<|plamo:tag|>`` = 16."""
+    policy. Empty (default) accepts any token a request stopped on. Qwen ends
+    an assistant turn on ``<|im_end|>`` = 151645."""
 
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
@@ -359,8 +359,8 @@ def add_mp_server_args(
         nargs="*",
         default=None,
         help="Token ids that mark a chat turn boundary, for --commit-policy "
-        "stop_token. Omit to accept any stop token. PLaMo 3 ends an assistant "
-        "turn on <|plamo:tag|> = 16.",
+        "stop_token. Omit to accept any stop token. Qwen ends an assistant "
+        "turn on <|im_end|> = 151645.",
     )
     mp_group.add_argument(
         "--hash-algorithm",

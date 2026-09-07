@@ -322,8 +322,7 @@ class SessionEndInfo:
     The commit policy decides from these facts whether the request's final
     sliding-window is worth committing to L2 (see
     ``lmcache/v1/multiprocess/commit_policy.py``). They are raw observations,
-    not a decision: the engine reports how the request ended and, when the
-    caller passed a per-request hint, what the caller asked for; the policy
+    not a decision: the engine reports how the request ended and the policy
     owns the rule.
 
     Every field has a default so an engine adapter that knows nothing sends
@@ -338,7 +337,7 @@ class SessionEndInfo:
     stop_token_id: int = -1
     """Token id the generation stopped on, ``-1`` when unknown. For a chat
     model this is the turn-boundary marker the model emits to end its turn
-    (PLaMo 3: ``<|plamo:tag|>`` = 16). The engine reports the last generated
+    (Qwen: ``<|im_end|>`` = 151645). The engine reports the last generated
     token when it has no more specific stop reason, which is the ordinary case
     for a model that ends its turn on its own EOS."""
 

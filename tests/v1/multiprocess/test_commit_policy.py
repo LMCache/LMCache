@@ -47,8 +47,8 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 CHUNK_SIZE = 4
 MODEL_NAME = "model"
 REQUEST_ID = "req-1"
-BOUNDARY_TOKEN = 16
-"""Stands in for PLaMo 3's ``<|plamo:tag|>``, the token a chat turn ends on."""
+BOUNDARY_TOKEN = 151645
+"""Qwen's ``<|im_end|>``, the token a chat turn ends on."""
 
 # One sliding-window group of two chunks and one full-attention group, the
 # shape of a hybrid model served with --separate-object-groups.
@@ -167,7 +167,7 @@ class TestRegistry:
 
 
 # =============================================================================
-# Hint resolution and anchors
+# Commit resolution and anchors
 # =============================================================================
 
 
