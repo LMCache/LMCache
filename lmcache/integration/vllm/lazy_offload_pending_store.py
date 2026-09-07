@@ -78,6 +78,15 @@ class LazyOffloadPendingStore:
         """
         return self._policy.pop_items_for_offload(self._select_count)
 
+    def has_pending_work(self) -> bool:
+        """Return whether lazy offload still has store work to drain.
+
+        Returns:
+            True if store metadata is queued by the policy or if submitted
+            stores are still waiting for worker completion.
+        """
+        return self._policy.has_pending_work() or bool(self._request_block_ids)
+
     def mark_req_finished(self, req_id: str):
         self._policy.mark_req_finished(req_id)
 

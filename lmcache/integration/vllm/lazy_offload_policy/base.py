@@ -66,3 +66,12 @@ class OffloadPolicy(ABC):
         Returns:
             Pending items to offload, or an empty list when offload is not due.
         """
+
+    @abstractmethod
+    def has_pending_work(self) -> bool:
+        """Return whether the policy still has queued store work.
+
+        Returns:
+            True if there are pending store items that have not been popped for
+            offload yet, otherwise False.
+        """
