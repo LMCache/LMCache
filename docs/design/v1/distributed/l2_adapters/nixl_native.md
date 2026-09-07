@@ -59,6 +59,17 @@ Buffered transfers may use unaligned in-arena buffers; direct-I/O transfers
 remain subject to the backend and filesystem alignment requirements. Arbitrary
 process memory is never registered on demand.
 
+When direct I/O is in effect (FILE storage with `use_direct_io: "true"`, as
+reported by the connector's `supports_direct_io` capability), the Python
+adapter automatically submits each object's full physical L1 slot — logical
+bytes plus the allocator's alignment padding up to `--l1-align-bytes` —
+instead of just the logical bytes. The padding is part of the object's own
+allocation, so the range still lies inside the registered arena; the connector
+needs no change because it transfers exactly the pointer/length pair it is
+given. This keeps direct-I/O length alignment valid for KV chunks whose byte
+size is not an alignment multiple. Buffered transfers (direct I/O off) and
+OBJECT storage are never padded.
+
 ## Batch transfer lifecycle
 
 One `ConnectorBase` tile becomes one local descriptor list, one storage

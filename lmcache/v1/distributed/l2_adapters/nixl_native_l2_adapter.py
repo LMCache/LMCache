@@ -172,6 +172,11 @@ def _create_nixl_native_l2_adapter(
             raise ValueError(
                 f"{native_client.storage_type} storage does not support eviction"
             )
+        # Pad transfers to the L1 alignment exactly when direct I/O is in
+        # effect (FILE storage with use_direct_io="true"): unaligned chunk
+        # sizes would otherwise fail validate_direct_io() at transfer time.
+        # OBJ storage never pads — use_direct_io is meaningless there.
+        pad_buffers_to_alignment = bool(native_client.supports_direct_io)
         status: dict[str, Any] = {
             "backend": config.backend,
             "storage_type": native_client.storage_type,
@@ -180,6 +185,7 @@ def _create_nixl_native_l2_adapter(
             "supports_delete": native_client.supports_delete,
             "supports_direct_io": native_client.supports_direct_io,
             "atomic_publication": native_client.atomic_publication,
+            "pad_buffers_to_alignment": pad_buffers_to_alignment,
         }
         if native_client.storage_type == "FILE":
             status["file_path"] = config.backend_params["file_path"]
@@ -188,16 +194,19 @@ def _create_nixl_native_l2_adapter(
         native_client.close()
         raise
     logger.info(
-        "Created native NIXL adapter (backend=%s, storage_type=%s, workers=%d)",
+        "Created native NIXL adapter (backend=%s, storage_type=%s, workers=%d, "
+        "pad_buffers_to_alignment=%s)",
         config.backend,
         native_client.storage_type,
         config.num_workers,
+        pad_buffers_to_alignment,
     )
     return NativeConnectorL2Adapter(
         native_client,
         max_capacity_gb=config.max_capacity_gb,
         type_name="nixl_native",
         extra_status=status,
+        pad_buffers_to_alignment=pad_buffers_to_alignment,
     )
 
 

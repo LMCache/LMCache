@@ -288,9 +288,6 @@ void NixlConnector::validate_buffer(const void* buffer, size_t length) const {
   if (length == 0) {
     throw std::runtime_error("buffer length must be positive");
   }
-  if (address % l1_alignment_ != 0 || length % l1_alignment_ != 0) {
-    throw std::runtime_error("buffer address and length must be L1-aligned");
-  }
 }
 
 }  // namespace connector

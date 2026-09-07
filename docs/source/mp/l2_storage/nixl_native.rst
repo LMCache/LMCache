@@ -142,9 +142,14 @@ producing ``rw,create,sync,direct:<path>`` for stores and
 ``ro,direct:<path>`` for loads. Buffer addresses and byte lengths must
 satisfy the NIXL backend and filesystem direct-I/O alignment requirements;
 misaligned direct operations fail instead of silently using buffered I/O.
-Buffered transfers may use unaligned buffers within the registered L1 arena.
-``shard_dirs: "true"`` stores files under two hash-prefix directories; choose
-that layout before populating a cache.
+To make the length requirement hold, direct-I/O transfers automatically
+cover each object's full alignment-padded L1 slot (logical bytes plus
+padding up to ``--l1-align-bytes``) instead of just the logical KV bytes,
+so on-disk files are alignment-sized multiples and loading them requires
+the same ``--l1-align-bytes`` and direct-I/O setting as the store.
+Buffered transfers may use unaligned buffers within the registered L1 arena
+and are never padded. ``shard_dirs: "true"`` stores files under two
+hash-prefix directories; choose that layout before populating a cache.
 
 OBJ OBJECT example
 ------------------
