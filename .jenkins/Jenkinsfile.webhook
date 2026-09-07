@@ -7,11 +7,11 @@ pipeline {
     triggers {
         GenericTrigger(
             genericVariables: [
-                [key: 'COMMIT_SHA', value: '$.pull_request.head.sha'],
-                [key: 'PR_NUMBER',  value: '$.pull_request.number'],
-                [key: 'PR_TITLE',   value: '$.pull_request.title'],
-                [key: 'ACTION',     value: '$.action'],
-                [key: 'LABEL_NAME', value: '$.label.name'],
+                [key: 'COMMIT_SHA', value: '$.pull_request.head.sha', defaultValue: ''],
+                [key: 'PR_NUMBER',  value: '$.pull_request.number',   defaultValue: ''],
+                [key: 'PR_TITLE',   value: '$.pull_request.title',    defaultValue: ''],
+                [key: 'ACTION',     value: '$.action',                defaultValue: ''],
+                [key: 'LABEL_NAME', value: '$.label.name',            defaultValue: ''],
             ],
             causeString: 'PR #$PR_NUMBER - $ACTION $LABEL_NAME',
             tokenCredentialId: 'metax-webhook-token',
@@ -34,12 +34,16 @@ pipeline {
         stage('Trigger MetaX test') {
             steps {
                 script {
+                    if (!env.COMMIT_SHA || !env.PR_NUMBER) {
+                        error("This job must be triggered by the GitHub webhook (PR labeled 'metax'). " +
+                              "No webhook payload found: COMMIT_SHA/PR_NUMBER are empty.")
+                    }
                     echo "Webhook received: PR #${env.PR_NUMBER} '${env.PR_TITLE}' @ ${env.COMMIT_SHA.take(7)}"
                     build job: 'lmcache-metax-test',
                           parameters: [
                               string(name: 'COMMIT_SHA', value: env.COMMIT_SHA),
                               string(name: 'PR_NUMBER',  value: env.PR_NUMBER),
-                              string(name: 'PR_TITLE',   value: env.PR_TITLE)
+                              string(name: 'PR_TITLE',   value: env.PR_TITLE ?: '')
                           ],
                           wait: false
                     echo "Triggered lmcache-metax-test for PR #${env.PR_NUMBER}."
