@@ -3,9 +3,10 @@
 Commit policy: does a finished request's sliding window earn an L2 copy?
 
 A store policy that keeps sliding-window chunks out of L2 on the store path
-leaves L1 holding their only copy until an eviction writes them back. That write happens under memory pressure, which
-is the wrong moment: the next turn of the same conversation can arrive while
-the write-back is still in flight and miss.
+leaves L1 holding their only copy until an eviction writes them back. That
+write happens under memory pressure, which is the wrong moment: the next turn
+of the same conversation can arrive while the write-back is still in flight
+and miss.
 
 A commit turns that around. When a request finishes at a point a follow-up
 will match -- a chat turn boundary -- its final window is copied to L2 right
@@ -153,22 +154,22 @@ class CommitPolicyConfig:
     Args:
         policy: Registered commit policy name.
         anchor: Where the committed window ends.
-        boundary_token_ids: Token ids that mark a chat turn boundary for this
-            deployment (Qwen: ``[151645]`` for ``<|im_end|>``). Empty accepts any token a request stopped on.
+        boundary_token_ids: Token ids that count as a chat turn boundary for
+            this deployment. Empty accepts any token a request stopped on.
+            The set also chooses *which* boundaries commit on a model that
+            ends a tool call and a final answer on different tokens: gpt-oss
+            lists both ``<|return|>`` (200002) and ``<|call|>`` (200012) in
+            ``eos_token_id``, so ``{200002}`` commits only finished answers,
+            ``{200012}`` only tool calls, and empty commits both.
     """
 
-    policy: str = "never"
+    policy: str = "stop_token"
     anchor: CommitAnchor = CommitAnchor.GENERATION_END
     boundary_token_ids: frozenset[int] = frozenset()
 
-    @property
-    def enabled(self) -> bool:
-        """Whether any commit can happen under this configuration."""
-        return self.policy != "never"
-
 
 DEFAULT_COMMIT_CONFIG = CommitPolicyConfig()
-"""The commit path switched off: policy "never"."""
+"""The built-in default: ``stop_token`` with any stop token accepted."""
 
 
 def register_commit_policy(name: str, policy_cls: type[CommitPolicy]) -> None:
@@ -285,25 +286,6 @@ def resolve_anchor(
 # -----------------------------------------------------------------------------
 
 
-class NeverCommitPolicy(CommitPolicy):
-    """Refuse every commit, leaving the window to the eviction write-back.
-
-    The default, and what the server did before this option existed:
-    selecting it is how a deployment opts out of the commit path entirely.
-    """
-
-    def should_commit(self, ctx: CommitContext) -> bool:
-        """Refuse, whatever the request did.
-
-        Args:
-            ctx: Not consulted.
-
-        Returns:
-            False.
-        """
-        return False
-
-
 class StopTokenCommitPolicy(CommitPolicy):
     """Commit when the model stopped on a turn-boundary token.
 
@@ -317,6 +299,13 @@ class StopTokenCommitPolicy(CommitPolicy):
     repetition stop all leave the sequence mid-turn, and a mid-turn tail is
     re-rendered -- or never sent again -- by the next request, so its window
     would be written and never read.
+
+    A model that ends tool calls and final answers on different tokens (gpt-oss:
+    ``<|call|>`` and ``<|return|>``) lets the boundary set pick which of the
+    two commits. A model that ends both on the same token (Qwen: ``<|im_end|>``)
+    gives the server no way to tell them apart, and both commit. That is the
+    safe default either way: a tool result can take an hour to come back, so a
+    tool-call window cannot wait in L1 any more than an answer's can.
 
     Args:
         boundary_token_ids: Ids that count as a turn boundary. Empty accepts
@@ -347,7 +336,6 @@ class StopTokenCommitPolicy(CommitPolicy):
         return ctx.end_info.stop_token_id in self._boundary_token_ids
 
 
-register_commit_policy("never", NeverCommitPolicy)
 register_commit_policy_factory(
     "stop_token",
     lambda cfg: StopTokenCommitPolicy(cfg.boundary_token_ids),
