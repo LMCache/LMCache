@@ -19,6 +19,13 @@ export BUILD_WITH_HIP=1
 export TORCH_DONT_CHECK_COMPILER_ABI=1
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 
+# This path calls run-single-test.sh directly, bypassing the common run.sh
+# entrypoint that normally configures the shared multiprocess launcher. ROCm
+# still uses the "cuda" torch/vLLM device type, while HIP_VISIBLE_DEVICES owns
+# physical device affinity.
+export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
+export DEVICE_AFFINITY_VAR="${DEVICE_AFFINITY_VAR:-HIP_VISIBLE_DEVICES}"
+
 case "${AMD_KERNEL_MODE:?AMD_KERNEL_MODE must be set}" in
     serialized)
         [[ "${AMD_SERIALIZE_KERNEL:-}" == "1" ]]
