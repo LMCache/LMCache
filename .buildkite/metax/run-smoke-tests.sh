@@ -49,7 +49,11 @@ pytest --maxfail=1 \
 # a fresh checkout instead of accumulating anything (build artifacts, stray
 # temp files, .git growth) beyond what common-setup.sh's targeted cleanup
 # already knows to remove. Requires passwordless sudo for this agent user.
-export TARGET="$PWD"
-echo "Deleting current workspace $TARGET"
+TARGET="${BUILDKITE_BUILD_CHECKOUT_PATH:-$PWD}"
+echo "Deleting current workspace ${TARGET}"
+if [[ -z "${TARGET}" || "${TARGET}" == "/" ]]; then
+    echo "Refusing to delete unsafe workspace path: '${TARGET}'" >&2
+    exit 1
+fi
 cd /
-sudo rm -rf "$TARGET"
+sudo rm -rf -- "${TARGET}"
