@@ -8,22 +8,37 @@ finish-reason reporting in `lmcache/integration/vllm/lmcache_mp_connector.py`.
 
 ## 1. Motivation
 
-A store policy that keeps sliding-window chunks out of L2 leaves L1 holding
-their only copy. Such a chunk reaches L2 only when eviction writes it back,
-which happens under memory pressure, the moment the next turn of the same
-conversation may already be looking the window up. When the follow-up's
-lookup lands while the write-back is still in flight, it misses and pays a
-full prefill.
+In a hybrid-attention model, the KV of a sliding-window layer is reusable
+only within the window. Resuming a sequence at token offset `p` needs the
+full-attention KV of every chunk in `[0, p)` but the sliding-window KV of
+the last `w` chunks only, `[p - w, p)`; every older sliding-window chunk is
+dead weight for prefix reuse. Those chunks are also the large ones: per chunk,
+a sliding-window object group holds an order of magnitude more bytes than a
+full-attention group.
 
-The bytes are the same either way; the timing is not. A chat turn is followed
-by idle time while a person reads and types. A window written then is in L2
-long before the follow-up, and it only matters at all while L1 cannot hold
-every live window.
+Writing every sliding-window chunk through to L2, as the `default` store
+policy does, therefore spends most of the L2 bandwidth and space on KV that
+is never read back. A store policy that writes full-attention groups through
+and skips sliding-window groups removes that cost, and leaves one question:
+which sliding-window window must still reach L2, and when.
 
-The design copies a finished request's final sliding window from L1 to L2 at
-`END_SESSION` when the request ended on a chat turn boundary. It is a copy:
-the L1 window stays, so the follow-up is still an L1 hit and only the
-window's durability changes.
+Which window is decided by the resume point. The window worth keeping is the
+one ending at the offset `p` where a later request's prefix match will end,
+and `p` is not known while the request is running: the sequence is still
+growing and nobody knows where it stops or where the next request resumes.
+It is known the moment the request finishes. A chat model ends its turn by
+emitting its turn-end token, and a request that stopped on it ended exactly
+where the next prompt resumes; a request that was aborted, hit its length
+cap, errored, or tripped repetition detection ended mid-turn, and no
+follow-up resumes there.
+
+So the design commits at `END_SESSION`: when a request ended on a turn
+boundary, its final sliding window, `[p - w, p)` for every sliding-window
+group, is copied from L1 to L2 right then. It is a copy, not a move; the L1
+window stays and the follow-up is still an L1 hit. The write lands during the
+idle time between turns, before the follow-up arrives and before L1 pressure
+can evict the window. Sliding-window chunks outside a committed window never
+leave L1, and eviction can simply discard them.
 
 ## 2. Design
 
@@ -117,16 +132,19 @@ Full-attention groups are skipped; the store path already wrote them through.
 
 ### 2.5 Execution: `StoreMode.FLUSH`
 
-`StoreController.submit_flush(keys)` enqueues on the eviction write-back's
-queue and eventfd; the store loop drains both kinds together through the same
-`reserve_read` / `submit_store_task` / completion code. The one difference is
-at completion: a `WRITEBACK` task deletes the key from L1 once every adapter
-succeeded, a `FLUSH` task does not.
+`StorageManager.flush_l1_keys_to_l2(keys)` hands the keys to
+`StoreController.submit_flush`, which enqueues them and wakes the store
+loop; nothing runs on the `END_SESSION` handler's thread. The store loop
+takes an L1 read lock on each key (`reserve_read`), submits one store task
+per active L2 adapter, and releases the lock when the last adapter completes.
+The task's mode is `StoreMode.FLUSH`, which differs from a plain store in two
+ways: it bypasses `StorePolicy`, since the policy is what kept these keys out
+of L2 in the first place, and it never deletes the key from L1 on success.
 
-Like the write-back, a flush bypasses `StorePolicy`: it writes whatever keys
-it is given. Keys already in flight on either path are dropped from the
-batch, so a flush racing an eviction write-back of the same key is a no-op
-rather than a double write.
+Keys already in flight for any store task are dropped from the batch, so a
+flush that races another write of the same key is a no-op rather than a
+double write. A configuration with no active L2 adapter drops the batch with
+a warning.
 
 ## 3. Configuration
 
@@ -161,23 +179,23 @@ turns of one conversation overlap in that window and chunk hashes are
 content-derived, so an L2 adapter that skips keys it already holds (the
 filesystem adapter checks the path before writing) writes only the chunks a
 turn's window gained. Against `default` write-through this is a fraction of
-the sliding-window traffic; against eviction-only write-back it is strictly
-more. Per-turn latency is unchanged because the L1 copy stays.
+the sliding-window traffic. Per-turn latency is unchanged because the L1
+copy stays.
 
 ## 5. Failure Modes
 
 * **No L2 adapter, key already evicted, key write-locked, key in flight.**
-  The flush is dropped (a warning for the adapter case). The window still
-  reaches L2 through the eviction write-back, as before; what is lost is
-  timeliness, not the window.
+  The flush is dropped (a warning for the adapter case) and the window has
+  no L2 copy. The next turn is still an L1 hit while the window is resident;
+  it pays a prefill only if L1 evicts the window before then, which is the
+  situation without this design.
 * **Policy raises.** Logged, treated as "do not commit".
 * **Engine sends no `SessionEndInfo`.** `NO_SESSION_END_INFO` is the default
   second payload, and the built-in policy refuses it.
 * **`Request.resumable` (vLLM streaming sessions).** The request stays alive
   across turns, `END_SESSION` never fires, and no commit happens. Such a
   deployment needs a different trigger.
-* **Second write on eviction.** Eviction still routes a committed window
-  through the write-back path. An adapter that skips keys it already holds
-  absorbs the write, but the L1 read before it still happens. Teaching the
-  eviction policy that a committed key already has an L2 copy is the next
-  step.
+* **Eviction policies that write sliding-window chunks back to L2.** A
+  committed window has an L2 copy already; an eviction policy that writes
+  sliding-window chunks to L2 on eviction writes it a second time. The
+  intended pairing is an eviction that discards sliding-window chunks.
