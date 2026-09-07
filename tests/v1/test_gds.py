@@ -30,12 +30,14 @@ def test_gds_backend_metadata():
     # more tensor types to be sure.
     for [tensor, expected_nbytes] in [(torch.randn(3, 10), 120)]:
         r = pack_metadata(tensor, fmt=MemoryFormat.KV_2LTD, version="test")
-        size, dtype, nbytes, fmt, meta = unpack_metadata(r)
+        size, dtype, nbytes, fmt, meta, shapes, dtypes = unpack_metadata(r)
         assert size == tensor.size()
         assert dtype == tensor.dtype
         assert expected_nbytes == nbytes
         assert fmt == MemoryFormat.KV_2LTD
         assert meta["version"] == "test"
+        assert shapes is None
+        assert dtypes is None
 
         # Make sure that safetensors can load this
         with tempfile.TemporaryDirectory() as temp_dir:

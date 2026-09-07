@@ -137,6 +137,12 @@ def recover_engine_states(engine):
 
 def recover_gpu_connector_states(gpu_connector):
     gpu_connector.kv_cache_pointers_on_gpu = {}
+    # SGLangGPUConnector keeps per-group state that must also be reset
+    # so a fresh _initialize_pointers runs on the next store/retrieve.
+    if hasattr(gpu_connector, "_layer_groups_initialized"):
+        gpu_connector._layer_groups_initialized = False
+    if hasattr(gpu_connector, "group_kv_cache_pointers_on_gpu"):
+        gpu_connector.group_kv_cache_pointers_on_gpu = []
 
 
 def dumb_metadata(kv_shape=(32, 2, 256, 8, 128)):
