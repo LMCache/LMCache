@@ -65,7 +65,7 @@ pipeline {
 
                         // 'lmcache-rbln-test' is a Jenkins Pipeline job configured with
                         // Script Path: .jenkins/Jenkinsfile.test
-                        build job: 'lmcache-rbln-test',
+                        build job: 'lmcache-metax-test_poller',
                               parameters: [
                                   string(name: 'COMMIT_SHA', value: sha),
                                   string(name: 'PR_NUMBER',  value: prNum),
