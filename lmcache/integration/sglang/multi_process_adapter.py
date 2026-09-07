@@ -182,18 +182,17 @@ class LMCacheMPConnector:
         host: str,
         port: int,
         kv_caches: list[torch.Tensor],
-        
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
-        device = _validate_sglang_kv_pools(k_pool, v_pool)
+        device = _validate_sglang_kv_caches(kv_caches)
         self.tp_size = tp_size
         self.worker_id = rank
         self.page_size = page_size
         self.device = device
         self.model_name = sgl_config.model_path
-        self.num_layers = len(k_pool)
+        self.num_layers = len(kv_caches)
         self.tp_group = tp_group
         self.instance_id = os.getpid()
         self._mq_timeout = mq_timeout
