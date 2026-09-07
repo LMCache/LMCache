@@ -205,6 +205,21 @@ class HTTPFrontendConfig:
     http_port: int = 8080
     """HTTP server port."""
 
+    enable_l1_cache_download: bool = False
+    """Opt in to exposing raw KV contents on the HTTP interface."""
+
+    l1_cache_download_max_size_bytes: int = 64 << 20
+    """Maximum logical object size per download (default 64 MiB)."""
+
+    l1_cache_download_max_concurrency: int = 2
+    """Maximum concurrent downloads per HTTP server process."""
+
+    def __post_init__(self) -> None:
+        if self.l1_cache_download_max_size_bytes <= 0:
+            raise ValueError("l1_cache_download_max_size_bytes must be positive")
+        if self.l1_cache_download_max_concurrency <= 0:
+            raise ValueError("l1_cache_download_max_concurrency must be positive")
+
 
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
 
@@ -578,6 +593,24 @@ def add_http_frontend_args(
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
     )
+    http_group.add_argument(
+        "--enable-l1-cache-download",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_HTTP_FRONTEND_CONFIG.enable_l1_cache_download,
+        help="Expose raw KV cache contents; use only on a trusted network.",
+    )
+    http_group.add_argument(
+        "--l1-cache-download-max-size-bytes",
+        type=int,
+        default=DEFAULT_HTTP_FRONTEND_CONFIG.l1_cache_download_max_size_bytes,
+        help="Maximum logical bytes per L1 download (default 64 MiB).",
+    )
+    http_group.add_argument(
+        "--l1-cache-download-max-concurrency",
+        type=int,
+        default=DEFAULT_HTTP_FRONTEND_CONFIG.l1_cache_download_max_concurrency,
+        help="Concurrent L1 downloads per HTTP process (default 2).",
+    )
     return parser
 
 
@@ -596,6 +629,9 @@ def parse_args_to_http_frontend_config(
     return HTTPFrontendConfig(
         http_host=args.http_host,
         http_port=args.http_port,
+        enable_l1_cache_download=args.enable_l1_cache_download,
+        l1_cache_download_max_size_bytes=args.l1_cache_download_max_size_bytes,
+        l1_cache_download_max_concurrency=args.l1_cache_download_max_concurrency,
     )
 
 

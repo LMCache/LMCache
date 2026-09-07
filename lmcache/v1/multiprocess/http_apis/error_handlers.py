@@ -11,6 +11,7 @@ here into a ``{"detail": ...}`` body with the mapped status.
 
 # Standard
 from http import HTTPStatus
+from typing import cast
 
 # Third Party
 from fastapi import FastAPI, Request
@@ -20,8 +21,10 @@ from fastapi.responses import JSONResponse
 from lmcache.v1.multiprocess.cache_control.errors import (
     CacheControlError,
     Conflict,
+    Disabled,
     InvalidRequest,
     NotFound,
+    TooLarge,
     Unavailable,
     Unsupported,
 )
@@ -33,6 +36,8 @@ _STATUS_BY_ERROR: dict[type[CacheControlError], HTTPStatus] = {
     Unavailable: HTTPStatus.SERVICE_UNAVAILABLE,
     Conflict: HTTPStatus.CONFLICT,
     Unsupported: HTTPStatus.NOT_IMPLEMENTED,
+    Disabled: HTTPStatus.FORBIDDEN,
+    TooLarge: HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
 }
 
 
@@ -47,13 +52,8 @@ def register_error_handlers(app: FastAPI) -> None:
     """
 
     async def _handle(request: Request, exc: Exception) -> JSONResponse:
-        # Registered for CacheControlError, so the isinstance branch always
-        # holds; the signature is widened to ``Exception`` to match Starlette's
-        # handler type (and narrowed back here for the typed lookup).
-        if isinstance(exc, CacheControlError):
-            status = _STATUS_BY_ERROR.get(type(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
-        else:
-            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        error = cast(CacheControlError, exc)
+        status = _STATUS_BY_ERROR.get(type(error), HTTPStatus.INTERNAL_SERVER_ERROR)
         return JSONResponse(status_code=status, content={"detail": str(exc)})
 
     app.add_exception_handler(CacheControlError, _handle)

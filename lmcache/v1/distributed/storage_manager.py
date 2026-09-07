@@ -32,7 +32,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     get_configured_capacity_bytes,
 )
-from lmcache.v1.distributed.error import L1Error, strerror
+from lmcache.v1.distributed.error import InspectionReadError, L1Error, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
@@ -181,7 +181,7 @@ class StorageManager:
 
     # External APIs for serving engine integration code to call
     def snapshot_l1_object(
-        self, key: ObjectKey
+        self, key: ObjectKey, max_size_bytes: int | None = None
     ) -> tuple[L1Error, L1ObjectSnapshot | None]:
         """Copy one node-local L1 object into an independent CPU snapshot.
 
@@ -192,41 +192,54 @@ class StorageManager:
 
         Args:
             key: Exact object key to locate in this node's L1 cache.
+            max_size_bytes: Maximum logical byte count, checked before copying.
+                None disables the limit for internal callers.
 
         Returns:
             ``(SUCCESS, snapshot)`` on success. Missing, temporarily unreadable,
-            and unsupported-backend results return their corresponding
-            :class:`L1Error` with ``None``.
+            oversized, and unsupported-backend results return their corresponding
+            :class:`L1Error` with ``None``. Lost residency or unsuccessful release
+            (including read TTL expiry) returns ``KEY_NOT_READABLE`` with ``None``.
+
+        Raises:
+            Exception: Metadata access or byte copying failed. Read release is
+                still attempted; no snapshot is returned.
 
         Note:
             DRAM and Device-DAX objects are CPU-addressable. GDS objects are
             rejected because their bytes require a GPU staging/DMA path.
         """
-        with self._l1_manager.protected_read_for_inspection(key) as (error, obj):
-            if error != L1Error.SUCCESS or obj is None:
-                return error, None
+        try:
+            with self._l1_manager.reserve_read_for_inspection(key) as (error, obj):
+                if error != L1Error.SUCCESS or obj is None:
+                    return error, None
 
-            backend = self._l1_manager.get_backend_type(obj)
-            if backend == L1BackendType.GDS:
-                return L1Error.UNSUPPORTED_BACKEND, None
+                backend = self._l1_manager.get_backend_type(obj)
+                if backend == L1BackendType.GDS:
+                    return L1Error.UNSUPPORTED_BACKEND, None
+                if max_size_bytes is not None and obj.get_size() > max_size_bytes:
+                    return L1Error.OBJECT_TOO_LARGE, None
 
-            shapes = tuple(
-                tuple(int(dim) for dim in shape) for shape in obj.get_shapes()
-            )
-            dtypes = tuple(str(dtype) for dtype in obj.get_dtypes())
-            memory_format = obj.get_memory_format().name.lower()
-            data = memoryview(obj.byte_array).cast("B").tobytes()
-            return (
-                L1Error.SUCCESS,
-                L1ObjectSnapshot(
+                shapes = tuple(
+                    tuple(int(dim) for dim in shape) for shape in obj.get_shapes()
+                )
+                dtypes = tuple(str(dtype) for dtype in obj.get_dtypes())
+                memory_format = obj.get_memory_format().name.lower()
+                view = memoryview(obj.byte_array).cast("B")
+                data = view.tobytes()
+                snapshot = L1ObjectSnapshot(
                     data=data,
                     size_bytes=len(data),
                     backend=backend,
                     memory_format=memory_format,
                     shapes=shapes,
                     dtypes=dtypes,
-                ),
-            )
+                )
+            # Context exit validates residency before releasing the read, and
+            # rejects expired protection. Only then can bytes be returned.
+            return L1Error.SUCCESS, snapshot
+        except InspectionReadError:
+            return L1Error.KEY_NOT_READABLE, None
 
     @enable_tracing()
     def reserve_write(
