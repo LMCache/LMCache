@@ -2,7 +2,6 @@
 
 #include "storage.h"
 
-#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -24,7 +23,41 @@ namespace lmcache {
 namespace connector {
 namespace {
 
+std::atomic<uint64_t> next_file_device_id{1};
 std::atomic<uint64_t> next_temporary_id{1};
+
+uint64_t allocate_file_device_id() {
+  uint64_t current = next_file_device_id.load(std::memory_order_relaxed);
+  while (current != std::numeric_limits<uint64_t>::max()) {
+    if (next_file_device_id.compare_exchange_weak(current, current + 1,
+                                                  std::memory_order_relaxed)) {
+      return current;
+    }
+  }
+  throw std::runtime_error("NIXL file device ID space exhausted");
+}
+
+std::string make_store_file_meta_info(const std::filesystem::path& path,
+                                      bool use_direct_io) {
+  std::string mode = "rw,create,sync";
+  if (use_direct_io) mode += ",direct";
+  return mode + ":" + path.string();
+}
+
+std::string make_load_file_meta_info(const std::filesystem::path& path,
+                                     bool use_direct_io) {
+  std::string mode = "ro";
+  if (use_direct_io) mode += ",direct";
+  return mode + ":" + path.string();
+}
+
+std::filesystem::path make_temporary_path(
+    const std::filesystem::path& final_path) {
+  std::filesystem::path candidate = final_path;
+  candidate += ".tmp." + std::to_string(next_temporary_id.fetch_add(
+                             1, std::memory_order_relaxed));
+  return candidate;
+}
 
 void check_nixl(nixl_status_t status, const std::string& operation) {
   if (status != NIXL_SUCCESS) {
@@ -33,56 +66,35 @@ void check_nixl(nixl_status_t status, const std::string& operation) {
   }
 }
 
-class UniqueFd {
+class TemporaryPath {
  public:
-  explicit UniqueFd(int fd = -1) : fd_(fd) {}
-  ~UniqueFd() { reset(); }
-
-  UniqueFd(const UniqueFd&) = delete;
-  UniqueFd& operator=(const UniqueFd&) = delete;
-  UniqueFd(UniqueFd&& other) noexcept : fd_(other.release()) {}
-  UniqueFd& operator=(UniqueFd&& other) noexcept {
-    if (this != &other) reset(other.release());
-    return *this;
-  }
-
-  int get() const { return fd_; }
-  int release() {
-    int result = fd_;
-    fd_ = -1;
-    return result;
-  }
-  void reset(int fd = -1) {
-    if (fd_ >= 0) ::close(fd_);
-    fd_ = fd;
-  }
-
- private:
-  int fd_;
-};
-
-class TemporaryFile {
- public:
-  TemporaryFile(std::filesystem::path path, int fd)
-      : path_(std::move(path)), fd_(fd) {}
-  ~TemporaryFile() {
-    fd_.reset();
+  explicit TemporaryPath(std::filesystem::path path) : path_(std::move(path)) {}
+  ~TemporaryPath() {
+    if (path_.empty()) return;
     std::error_code error;
     std::filesystem::remove(path_, error);
   }
 
-  TemporaryFile(const TemporaryFile&) = delete;
-  TemporaryFile& operator=(const TemporaryFile&) = delete;
-  TemporaryFile(TemporaryFile&&) noexcept = default;
-  TemporaryFile& operator=(TemporaryFile&&) noexcept = default;
+  TemporaryPath(const TemporaryPath&) = delete;
+  TemporaryPath& operator=(const TemporaryPath&) = delete;
+  TemporaryPath(TemporaryPath&& other) noexcept
+      : path_(std::move(other.path_)) {
+    other.path_.clear();
+  }
+  TemporaryPath& operator=(TemporaryPath&& other) noexcept {
+    if (this != &other) {
+      std::error_code error;
+      std::filesystem::remove(path_, error);
+      path_ = std::move(other.path_);
+      other.path_.clear();
+    }
+    return *this;
+  }
 
-  int fd() const { return fd_.get(); }
   const std::filesystem::path& path() const { return path_; }
-  void close() { fd_.reset(); }
 
  private:
   std::filesystem::path path_;
-  UniqueFd fd_;
 };
 
 class RegisteredMemory {
@@ -292,9 +304,9 @@ class NixlFileStorage final : public NixlStorageStrategy {
     nixl_reg_dlist_t registration(FILE_SEG);
     nixl_xfer_dlist_t local(DRAM_SEG);
     nixl_xfer_dlist_t storage(FILE_SEG);
-    std::vector<TemporaryFile> temporary_files;
+    std::vector<TemporaryPath> temporary_paths;
     std::vector<std::filesystem::path> final_paths;
-    temporary_files.reserve(buffers.size());
+    temporary_paths.reserve(buffers.size());
     final_paths.reserve(buffers.size());
 
     for (size_t index = 0; index < buffers.size(); ++index) {
@@ -302,44 +314,26 @@ class NixlFileStorage final : public NixlStorageStrategy {
       validate_direct_io(buffer);
       std::filesystem::path final_path = path_for_key(buffer.key);
       std::filesystem::create_directories(final_path.parent_path());
-      std::filesystem::path temporary_path = final_path;
-      temporary_path += ".tmp." +
-                        std::to_string(static_cast<long long>(getpid())) + "." +
-                        std::to_string(next_temporary_id.fetch_add(1));
-      int flags = O_CREAT | O_EXCL | O_RDWR;
-#ifdef O_DIRECT
-      if (use_direct_io_) flags |= O_DIRECT;
-#endif
-      int fd = ::open(temporary_path.c_str(), flags, 0644);
-      if (fd < 0) {
-        throw std::runtime_error("failed to create NIXL temporary file: " +
-                                 std::string(std::strerror(errno)));
-      }
-      temporary_files.emplace_back(temporary_path, fd);
+      std::filesystem::path temporary_path = make_temporary_path(final_path);
+      temporary_paths.emplace_back(temporary_path);
       final_paths.push_back(final_path);
       local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
                                   buffer.length, 0));
-      nixlBlobDesc file_descriptor(0, buffer.length, static_cast<uint64_t>(fd),
-                                   std::string());
+      nixlBlobDesc file_descriptor(
+          0, buffer.length, allocate_file_device_id(),
+          make_store_file_meta_info(temporary_path, use_direct_io_));
       registration.addDesc(file_descriptor);
       storage.addDesc(file_descriptor);
     }
 
     execute_transfer(agent, backend, agent_name, NIXL_WRITE, local,
                      registration, storage, stop);
-    for (TemporaryFile& file : temporary_files) {
-      if (::fsync(file.fd()) != 0) {
-        throw std::runtime_error("fsync failed for NIXL temporary file: " +
-                                 std::string(std::strerror(errno)));
-      }
-      file.close();
-    }
 
     std::vector<std::filesystem::path> published;
     try {
-      for (size_t index = 0; index < temporary_files.size(); ++index) {
+      for (size_t index = 0; index < temporary_paths.size(); ++index) {
         const std::filesystem::path& temporary_path =
-            temporary_files[index].path();
+            temporary_paths[index].path();
         const std::filesystem::path& final_path = final_paths[index];
         if (::link(temporary_path.c_str(), final_path.c_str()) == 0) {
           published.push_back(final_path);
@@ -375,31 +369,14 @@ class NixlFileStorage final : public NixlStorageStrategy {
     nixl_reg_dlist_t registration(FILE_SEG);
     nixl_xfer_dlist_t local(DRAM_SEG);
     nixl_xfer_dlist_t storage(FILE_SEG);
-    std::vector<UniqueFd> files;
-    std::vector<size_t> selected_indices;
-
-    for (size_t index = 0; index < buffers.size(); ++index) {
-      const NixlTransferBuffer& buffer = buffers[index];
+    for (const NixlTransferBuffer& buffer : buffers) {
       validate_direct_io(buffer);
       std::filesystem::path path = path_for_key(buffer.key);
-      int flags = O_RDONLY;
-#ifdef O_DIRECT
-      if (use_direct_io_) flags |= O_DIRECT;
-#endif
-      int fd = ::open(path.c_str(), flags);
-      if (fd < 0) continue;
-      struct stat file_info{};
-      if (::fstat(fd, &file_info) != 0 || file_info.st_size < 0 ||
-          static_cast<size_t>(file_info.st_size) != buffer.length) {
-        ::close(fd);
-        continue;
-      }
-      files.emplace_back(fd);
-      selected_indices.push_back(index);
       local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
                                   buffer.length, 0));
-      nixlBlobDesc file_descriptor(0, buffer.length, static_cast<uint64_t>(fd),
-                                   std::string());
+      nixlBlobDesc file_descriptor(
+          0, buffer.length, allocate_file_device_id(),
+          make_load_file_meta_info(path, use_direct_io_));
       registration.addDesc(file_descriptor);
       storage.addDesc(file_descriptor);
     }
@@ -407,7 +384,7 @@ class NixlFileStorage final : public NixlStorageStrategy {
     try {
       execute_transfer(agent, backend, agent_name, NIXL_READ, local,
                        registration, storage, stop);
-      for (size_t index : selected_indices) results[index] = 1;
+      std::fill(results.begin(), results.end(), 1);
     } catch (const std::exception& error) {
       std::fprintf(stderr, "[LMCache NIXL GET] %s\n", error.what());
     }

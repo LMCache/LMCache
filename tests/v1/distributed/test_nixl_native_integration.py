@@ -3,11 +3,12 @@
 
 # Standard
 from pathlib import Path
-from typing import Any
+import errno
 import importlib.util
-import multiprocessing
 import os
 import select
+import threading
+import time
 import uuid
 
 # Third Party
@@ -84,6 +85,9 @@ def _wait_for_fd(event_fd: int, timeout: float = 10.0) -> None:
 def _make_posix_adapter(
     base_path: Path,
     arena: torch.Tensor,
+    *,
+    use_direct_io: bool = False,
+    num_workers: int = 1,
 ) -> L2AdapterInterface:
     """Create a POSIX native NIXL adapter for an existing L1 arena."""
     config = NixlNativeL2AdapterConfig.from_dict(
@@ -91,9 +95,9 @@ def _make_posix_adapter(
             "backend": "POSIX",
             "backend_params": {
                 "file_path": str(base_path),
-                "use_direct_io": "false",
+                "use_direct_io": str(use_direct_io).lower(),
             },
-            "num_workers": 1,
+            "num_workers": num_workers,
         }
     )
     descriptor = L1MemoryDesc(
@@ -104,38 +108,52 @@ def _make_posix_adapter(
     return create_l2_adapter(config, descriptor)
 
 
-def _store_shared_posix_key(
-    base_path: str,
-    fill_value: int,
-    ready_queue: Any,
-    start_event: Any,
-    result_queue: Any,
-) -> None:
-    """Store one shared key from a spawned connector process."""
-    adapter: L2AdapterInterface | None = None
+def _supports_direct_io(base_path: Path) -> tuple[bool, str]:
+    """Report whether the test filesystem accepts an O_DIRECT file."""
+    direct_flag = getattr(os, "O_DIRECT", None)
+    if direct_flag is None:
+        return False, "Python does not expose O_DIRECT on this platform"
+
+    probe_path = base_path / ".nixl-direct-io-probe"
     try:
-        _, arena = _aligned_arena(_CHUNK_SIZE)
-        source = _memory_obj(arena, 0, fill_value)
-        key = ObjectKey(ObjectKey.IntHash2Bytes(77), "shared/model", 3, 5)
-        adapter = _make_posix_adapter(Path(base_path), arena)
-        ready_queue.put(True)
-        if not start_event.wait(10.0):
-            raise RuntimeError("timed out waiting for concurrent store start")
-        task_id = adapter.submit_store_task([key], [source])
-        _wait_for_fd(adapter.get_store_event_fd())
-        result_queue.put(
-            (fill_value, adapter.pop_completed_store_tasks()[task_id].is_successful())
+        descriptor = os.open(
+            probe_path,
+            os.O_CREAT | os.O_EXCL | os.O_RDWR | direct_flag,
+            0o600,
         )
-    except BaseException as error:
-        result_queue.put((fill_value, repr(error)))
+    except OSError as error:
+        unsupported_errors = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+        if error.errno in unsupported_errors:
+            return False, f"test filesystem does not support O_DIRECT: {error}"
+        raise
+    else:
+        os.close(descriptor)
+        return True, ""
     finally:
-        if adapter is not None:
-            adapter.close()
+        probe_path.unlink(missing_ok=True)
+
+
+def _wait_for_store_tasks(
+    adapter: L2AdapterInterface,
+    task_ids: set[int],
+) -> None:
+    """Wait until all requested public store tasks complete successfully."""
+    pending = set(task_ids)
+    deadline = time.monotonic() + 10.0
+    while pending:
+        _wait_for_fd(
+            adapter.get_store_event_fd(),
+            timeout=max(0.0, deadline - time.monotonic()),
+        )
+        completed = adapter.pop_completed_store_tasks()
+        for task_id in pending & completed.keys():
+            assert completed[task_id].is_successful()
+        pending.difference_update(completed)
 
 
 @requires_nixl_integration
 @requires_nixl_extension
-def test_posix_public_round_trip_persistence_and_mixed_load(
+def test_posix_public_batch_round_trip_persistence_and_delete(
     tmp_path: Path,
 ) -> None:
     """Exercise FILE storage through only the public L2 adapter interface."""
@@ -187,8 +205,6 @@ def test_posix_public_round_trip_persistence_and_mixed_load(
     }
     assert {path.name for path in tmp_path.iterdir()} == expected_names
 
-    truncated_path = tmp_path / "org-SEP-model@0x0000002a@9@8899aabb.data"
-    truncated_path.write_bytes(b"truncated")
     destinations: list[MemoryObj] = [
         _memory_obj(arena, 3 * _CHUNK_SIZE, 0),
         _memory_obj(arena, 4 * _CHUNK_SIZE, 0),
@@ -207,10 +223,8 @@ def test_posix_public_round_trip_persistence_and_mixed_load(
         _wait_for_fd(adapter.get_load_event_fd())
         loaded = adapter.query_load_result(load_id)
         assert loaded is not None
-        assert [loaded.test(index) for index in range(3)] == [True, True, False]
-        assert bytes(destinations[0].byte_array) == expected[0]
-        assert bytes(destinations[1].byte_array) == expected[1]
-        assert bytes(destinations[2].byte_array) == bytes(_CHUNK_SIZE)
+        assert [loaded.test(index) for index in range(3)] == [True, True, True]
+        assert [bytes(obj.byte_array) for obj in destinations] == expected
 
         adapter.submit_unlock(keys)
         adapter.delete(keys)
@@ -221,10 +235,10 @@ def test_posix_public_round_trip_persistence_and_mixed_load(
 
 @requires_nixl_integration
 @requires_nixl_extension
-def test_posix_rejects_out_of_arena_and_misaligned_buffers(
+def test_posix_rejects_out_of_arena_and_accepts_unaligned_buffered_io(
     tmp_path: Path,
 ) -> None:
-    """Reject invalid buffers through normal asynchronous store results."""
+    """Reject foreign buffers while allowing unaligned buffered transfers."""
     _, arena = _aligned_arena(2 * _CHUNK_SIZE)
     _, foreign_arena = _aligned_arena(_CHUNK_SIZE)
     valid = _memory_obj(arena, _CHUNK_SIZE, 11)
@@ -254,10 +268,12 @@ def test_posix_rejects_out_of_arena_and_misaligned_buffers(
         _wait_for_fd(adapter.get_store_event_fd())
         assert adapter.pop_completed_store_tasks()[valid_id].is_successful()
 
-        for key, invalid in zip(keys[1:], [foreign, misaligned], strict=True):
-            task_id = adapter.submit_store_task([key], [invalid])
-            _wait_for_fd(adapter.get_store_event_fd())
-            assert not adapter.pop_completed_store_tasks()[task_id].is_successful()
+        foreign_id = adapter.submit_store_task([keys[1]], [foreign])
+        _wait_for_fd(adapter.get_store_event_fd())
+        assert not adapter.pop_completed_store_tasks()[foreign_id].is_successful()
+        misaligned_id = adapter.submit_store_task([keys[2]], [misaligned])
+        _wait_for_fd(adapter.get_store_event_fd())
+        assert adapter.pop_completed_store_tasks()[misaligned_id].is_successful()
 
         recovery_id = adapter.submit_store_task([keys[1]], [valid])
         _wait_for_fd(adapter.get_store_event_fd())
@@ -265,45 +281,113 @@ def test_posix_rejects_out_of_arena_and_misaligned_buffers(
         assert {path.name for path in tmp_path.iterdir()} == {
             "model@0x00000000@0@00000001.data",
             "model@0x00000000@0@00000002.data",
+            "model@0x00000000@0@00000003.data",
         }
     finally:
-        adapter.close()
         adapter.close()
 
 
 @requires_nixl_integration
 @requires_nixl_extension
-def test_posix_cross_process_atomic_publication(tmp_path: Path) -> None:
-    """Publish one key concurrently from two independent connector processes."""
-    context = multiprocessing.get_context("spawn")
-    ready_queue = context.Queue()
-    result_queue = context.Queue()
-    start_event = context.Event()
-    fill_values = (71, 83)
-    processes = [
-        context.Process(
-            target=_store_shared_posix_key,
-            args=(
-                str(tmp_path),
-                fill_value,
-                ready_queue,
-                start_event,
-                result_queue,
-            ),
-        )
-        for fill_value in fill_values
+def test_posix_repeated_round_trips_release_file_descriptors(
+    tmp_path: Path,
+) -> None:
+    """Return to post-initialization fd baseline and release it on close."""
+    _, arena = _aligned_arena(4 * _CHUNK_SIZE)
+    keys = [
+        ObjectKey(ObjectKey.IntHash2Bytes(index), "fd/model", 1, index)
+        for index in range(1, 3)
     ]
+    sources: list[MemoryObj] = [
+        _memory_obj(arena, 0, 61),
+        _memory_obj(arena, _CHUNK_SIZE, 67),
+    ]
+    destinations: list[MemoryObj] = [
+        _memory_obj(arena, 2 * _CHUNK_SIZE, 0),
+        _memory_obj(arena, 3 * _CHUNK_SIZE, 0),
+    ]
+    bootstrap = _make_posix_adapter(tmp_path, arena)
+    bootstrap.close()
+    post_initialization_baseline = len(os.listdir("/proc/self/fd"))
 
-    for process in processes:
-        process.start()
-    for _ in processes:
-        assert ready_queue.get(timeout=20.0) is True
-    start_event.set()
-    results = [result_queue.get(timeout=20.0) for _ in processes]
-    for process in processes:
-        process.join(timeout=20.0)
-        assert process.exitcode == 0
-    assert sorted(results) == [(71, True), (83, True)]
+    adapter = _make_posix_adapter(tmp_path, arena)
+    try:
+        # Warm up plugin and worker paths before establishing the fd baseline.
+        store_id = adapter.submit_store_task(keys, sources)
+        _wait_for_store_tasks(adapter, {store_id})
+        load_id = adapter.submit_load_task(keys, destinations)
+        _wait_for_fd(adapter.get_load_event_fd())
+        loaded = adapter.query_load_result(load_id)
+        assert loaded is not None
+        assert all(loaded.test(index) for index in range(len(keys)))
+        initialized_baseline = len(os.listdir("/proc/self/fd"))
+
+        for _ in range(5):
+            store_id = adapter.submit_store_task(keys, sources)
+            _wait_for_store_tasks(adapter, {store_id})
+            load_id = adapter.submit_load_task(keys, destinations)
+            _wait_for_fd(adapter.get_load_event_fd())
+            loaded = adapter.query_load_result(load_id)
+            assert loaded is not None
+            assert all(loaded.test(index) for index in range(len(keys)))
+            assert len(os.listdir("/proc/self/fd")) == initialized_baseline
+    finally:
+        adapter.close()
+
+    assert len(os.listdir("/proc/self/fd")) == post_initialization_baseline
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+
+@requires_nixl_integration
+@requires_nixl_extension
+def test_posix_concurrent_thread_atomic_publication(tmp_path: Path) -> None:
+    """Publish one complete file from concurrent threads sharing an adapter."""
+    _, arena = _aligned_arena(2 * _CHUNK_SIZE)
+    key = ObjectKey(ObjectKey.IntHash2Bytes(77), "shared/model", 3, 5)
+    fill_values = (71, 83)
+    sources: list[MemoryObj] = [
+        _memory_obj(arena, index * _CHUNK_SIZE, fill_value)
+        for index, fill_value in enumerate(fill_values)
+    ]
+    adapter = _make_posix_adapter(tmp_path, arena, num_workers=2)
+    final_path = tmp_path / "shared-SEP-model@0x00000003@5@0000004d.data"
+    stop_observer = threading.Event()
+    observed_contents: list[bytes] = []
+    start = threading.Barrier(len(sources))
+    task_ids: list[int] = []
+    task_ids_lock = threading.Lock()
+
+    def submit(source: MemoryObj) -> None:
+        """Submit one store when both test threads reach the barrier."""
+        start.wait(timeout=10.0)
+        task_id = adapter.submit_store_task([key], [source])
+        with task_ids_lock:
+            task_ids.append(task_id)
+
+    def observe_publication() -> None:
+        """Record every visible final-file state during publication."""
+        while not stop_observer.wait(0.0005):
+            try:
+                observed_contents.append(final_path.read_bytes())
+            except FileNotFoundError:
+                pass
+
+    threads = [threading.Thread(target=submit, args=(source,)) for source in sources]
+    observer = threading.Thread(target=observe_publication)
+    try:
+        observer.start()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10.0)
+            assert not thread.is_alive()
+        assert len(task_ids) == len(sources)
+        _wait_for_store_tasks(adapter, set(task_ids))
+    finally:
+        stop_observer.set()
+        observer.join(timeout=10.0)
+        assert not observer.is_alive()
+        adapter.close()
 
     paths = list(tmp_path.iterdir())
     assert [path.name for path in paths] == [
@@ -311,7 +395,48 @@ def test_posix_cross_process_atomic_publication(tmp_path: Path) -> None:
     ]
     contents = paths[0].read_bytes()
     assert len(contents) == _CHUNK_SIZE
-    assert contents in {bytes([value]) * _CHUNK_SIZE for value in fill_values}
+    complete_contents = {bytes([value]) * _CHUNK_SIZE for value in fill_values}
+    assert contents in complete_contents
+    assert all(observed in complete_contents for observed in observed_contents)
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+
+@requires_nixl_integration
+@requires_nixl_extension
+def test_posix_direct_io_batch_round_trip(tmp_path: Path) -> None:
+    """Round-trip a path-mode batch with direct I/O when supported."""
+    supported, reason = _supports_direct_io(tmp_path)
+    if not supported:
+        pytest.skip(reason)
+
+    _, arena = _aligned_arena(4 * _CHUNK_SIZE)
+    keys = [
+        ObjectKey(ObjectKey.IntHash2Bytes(index), "direct/model", 2, index)
+        for index in range(1, 3)
+    ]
+    sources: list[MemoryObj] = [
+        _memory_obj(arena, 0, 101),
+        _memory_obj(arena, _CHUNK_SIZE, 103),
+    ]
+    destinations: list[MemoryObj] = [
+        _memory_obj(arena, 2 * _CHUNK_SIZE, 0),
+        _memory_obj(arena, 3 * _CHUNK_SIZE, 0),
+    ]
+    expected = [bytes(source.byte_array) for source in sources]
+    adapter = _make_posix_adapter(tmp_path, arena, use_direct_io=True)
+    try:
+        store_id = adapter.submit_store_task(keys, sources)
+        _wait_for_store_tasks(adapter, {store_id})
+        load_id = adapter.submit_load_task(keys, destinations)
+        _wait_for_fd(adapter.get_load_event_fd())
+        loaded = adapter.query_load_result(load_id)
+        assert loaded is not None
+        assert all(loaded.test(index) for index in range(len(keys)))
+        assert [bytes(obj.byte_array) for obj in destinations] == expected
+    finally:
+        adapter.close()
+
+    assert not list(tmp_path.glob("*.tmp.*"))
 
 
 @requires_nixl_integration

@@ -100,27 +100,51 @@ Create a writable directory and start the MP server:
          "max_capacity_gb": 100
        }'
 
-Stores write unique temporary files, complete the NIXL transfer, call
-``fsync``, and publish with an atomic no-replace operation in the same
-filesystem. The store path does not perform an existence query; the caller is
-expected to query first. If another writer wins the publication race, an
-existing file of the expected size is accepted, while a different size is an
-error. A failed batch removes its unpublished temporary files and rolls back
-files published by that batch.
+POSIX transfers use path-mode registration. For example, a buffered store and
+load can register these metadata strings (the path after the first colon is an
+absolute cache path):
+
+.. code-block:: text
+
+   rw,create,sync:/data/lmcache/l2/model@0x00000000@0@00000001.data.tmp.42
+   ro:/data/lmcache/l2/model@0x00000000@0@00000001.data
+
+Each file in a batch receives a distinct synthetic device ID. NIXL opens a
+registered path, owns its file descriptor through the transfer, and closes it
+during deregistration. For stores, ``sync`` asks NIXL to preserve the durable
+completion boundary. After deregistration closes the files, LMCache publishes
+the completed temporary paths with an atomic no-replace operation in the same
+filesystem; LMCache does not reopen transfer files or call ``fsync`` on
+NIXL-owned descriptors.
+
+The store path does not perform an existence query; the caller is expected to
+query first. If another worker thread wins the publication race, an existing
+file of the expected size is accepted, while a different size is an error. A
+failed batch removes its unpublished temporary files and rolls back files
+published by that batch. Concurrent workers are supported within one LMCache
+process, but a ``file_path`` namespace must not be written by multiple LMCache
+processes.
 
 The submission path also performs no duplicate-key scan. Duplicate serialized
 keys in one batch violate the caller contract and must be removed upstream.
 
-Files persist when the connector closes. Lookup queries NIXL using the complete
-deterministic path. Load opens each hit and requires its size to equal the
-destination size, allowing a mixed batch to load valid files while reporting a
-truncated file as a miss. Delete removes the deterministic file.
+Files persist when the connector closes. Lookup calls NIXL ``queryMem`` with
+the complete deterministic path, not a mode-prefixed string. Load performs no
+filesystem open, existence check, or size preflight in LMCache. The caller must
+query first and provide the correct destination length; NIXL registers every
+``ro:<absolute-path>`` descriptor and executes the tile as one batch. A
+registration or transfer error fails that load batch. Delete removes the
+deterministic file.
 
 Set ``use_direct_io`` to ``"true"`` only when the filesystem and L1 layout
-support direct I/O. Both buffer address and byte length must be aligned to the
-larger of the L1 alignment and filesystem block size. Misaligned operations fail
-instead of silently using buffered I/O. ``shard_dirs: "true"`` stores files
-under two hash-prefix directories; choose that layout before populating a cache.
+support direct I/O. This setting adds NIXL's ``direct`` path-mode flag,
+producing ``rw,create,sync,direct:<path>`` for stores and
+``ro,direct:<path>`` for loads. Buffer addresses and byte lengths must
+satisfy the NIXL backend and filesystem direct-I/O alignment requirements;
+misaligned direct operations fail instead of silently using buffered I/O.
+Buffered transfers may use unaligned buffers within the registered L1 arena.
+``shard_dirs: "true"`` stores files under two hash-prefix directories; choose
+that layout before populating a cache.
 
 OBJ OBJECT example
 ------------------
@@ -178,17 +202,17 @@ Names follow ``nixl_store_dynamic``. A model slash becomes ``--`` and all
 
 .. code-block:: text
 
-   <safe-model>_<kv-rank-8hex>_<object-group-hex>_<chunk-hash-hex>[@salt].bin
+   <safe-model>@0x<kv-rank-8hex>@<object-group-hex>@<chunk-hash-hex>[@salt].data
 
 For example, model ``org/model``, rank 42, object group 7, hash ``00112233``,
 and salt ``tenant`` becomes:
 
 .. code-block:: text
 
-   org--model_0000002a_7_00112233@tenant.bin
+   org-SEP-model@0x0000002a@7@00112233@tenant.data
 
-This format is intentionally incompatible with ``fs_native``'s existing
-``.data`` files. With ``shard_dirs: "true"``, the example lives below
+This is the same persistent filename format used by ``fs_native``. With
+``shard_dirs: "true"``, the example lives below
 ``00/11/``. For object storage those separators form an object-key prefix; for
 file storage they are directories beneath ``file_path``.
 
