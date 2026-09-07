@@ -8,6 +8,12 @@ import sys
 
 # Third Party
 from vllm.config import VllmConfig
+from vllm.distributed.kv_events import (
+    BlockStored,
+    KVCacheEvent,
+    KVConnectorKVEvents,
+    KVEventAggregator,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -27,6 +33,7 @@ except ImportError:
 
 # Third Party
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -93,7 +100,6 @@ except ImportError:
 
 if TYPE_CHECKING:
     # Third Party
-    from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -110,6 +116,49 @@ logger = lmcache_init_logger(__name__)
 
 _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 _MAX_LCM_EXPANSION_FACTOR = 4
+
+
+def _convert_kv_event_hash(block_hash: bytes | int | None) -> bytes | int | None:
+    """Convert LMCache event hashes to vLLM's configured external format."""
+    if isinstance(block_hash, bytes):
+        return maybe_convert_block_hash(BlockHash(block_hash))
+    return block_hash
+
+
+class LMCacheMPKVEvents(KVConnectorKVEvents):
+    """KV event container used by LMCache multiprocess workers."""
+
+    def __init__(self, num_workers: int) -> None:
+        self._aggregator = KVEventAggregator(num_workers)
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        """Add events from one worker."""
+        self._aggregator.add_events(events)
+
+    def aggregate(self) -> "LMCacheMPKVEvents":
+        """Retain only events seen from every contributing worker."""
+        common_events = self._aggregator.get_common_events()
+        self._aggregator.clear_events()
+        self._aggregator.add_events(common_events)
+        self._aggregator.reset_workers()
+        return self
+
+    def increment_workers(self, count: int = 1) -> None:
+        """Track an additional worker contribution."""
+        self._aggregator.increment_workers(count)
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        """Return all buffered events."""
+        return self._aggregator.get_all_events()
+
+    def get_number_of_workers(self) -> int:
+        """Return the number of contributing workers."""
+        return self._aggregator.get_number_of_workers()
+
+    def clear_events(self) -> None:
+        """Clear buffered events and reset the worker count."""
+        self._aggregator.clear_events()
+        self._aggregator.reset_workers()
 
 
 # Helper functions
@@ -491,6 +540,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
 
+        self._enable_kv_events = bool(
+            getattr(vllm_config, "kv_events_config", None) is not None
+            and vllm_config.kv_events_config.enable_kv_cache_events
+        )
+
         self._eager_prefetch: bool = bool(
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.eager_prefetch", False
@@ -594,6 +648,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            self._kv_cache_events: LMCacheMPKVEvents | None = None
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -619,6 +674,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+                enable_kv_events=self._enable_kv_events,
             )
             if self.transfer_intermediate_tensors:
                 # First Party
@@ -943,6 +999,38 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         return self.worker_adapter.get_block_ids_with_load_errors()
 
+    def get_kv_connector_kv_cache_events(self) -> LMCacheMPKVEvents | None:
+        """Return worker-side KV cache events collected since the last step.
+
+        Returns:
+            A vLLM KV event container with completed LMCache store events, or
+            None when disabled or when no store completed.
+        """
+        if not self._enable_kv_events:
+            return None
+        events = self.worker_adapter.get_kv_events()
+        if not events:
+            return None
+
+        blocks = [
+            BlockStored(
+                block_hashes=[
+                    _convert_kv_event_hash(block_hash)
+                    for block_hash in event.block_hashes
+                ],
+                parent_block_hash=_convert_kv_event_hash(event.parent_block_hash),
+                token_ids=event.token_ids,
+                lora_id=event.lora_id,
+                block_size=event.block_size,
+                medium=event.medium,
+                lora_name=event.lora_name,
+            )
+            for event in events
+        ]
+        kv_events = LMCacheMPKVEvents(num_workers=1)
+        kv_events.add_events(blocks)
+        return kv_events
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process
@@ -1231,6 +1319,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
+        kv_cache_events = connector_output.kv_cache_events
+        if kv_cache_events and isinstance(kv_cache_events, LMCacheMPKVEvents):
+            if self._kv_cache_events is None:
+                self._kv_cache_events = kv_cache_events
+            else:
+                self._kv_cache_events.add_events(kv_cache_events.get_all_events())
+                self._kv_cache_events.increment_workers(
+                    kv_cache_events.get_number_of_workers()
+                )
+
         if not self.lazy_offload:
             return
         if not self._gpu_block_pool:
@@ -1314,7 +1412,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Yields:
             New KV cache events since the last call.
         """
-        return ()
+        if self._kv_cache_events is not None:
+            self._kv_cache_events.aggregate()
+            yield from self._kv_cache_events.get_all_events()
+            self._kv_cache_events.clear_events()
+            self._kv_cache_events = None
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

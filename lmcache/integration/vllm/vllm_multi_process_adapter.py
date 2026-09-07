@@ -20,7 +20,12 @@ from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
-from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
+from lmcache.utils import (
+    CacheStoreEvent,
+    EngineType,
+    _lmcache_nvtx_annotate,
+    init_logger,
+)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -31,6 +36,7 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessagingFuture
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
@@ -75,6 +81,9 @@ class ExtraConfigDefault(enum.Enum):
     # lmcache/v1/platform/isolated_ipc.py. Must match the LMCache server's
     # ``--isolated-ipc`` setting.
     isolated_ipc = False
+    # Must match the MP server's --hash-algorithm setting because KV events
+    # expose the same chunk hashes used by server-side object keys.
+    hash_algorithm = "blake3"
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -1149,6 +1158,7 @@ class LMCacheMPWorkerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
+        enable_kv_events: bool = False,
     ):
         """Initialize the worker adapter for current or legacy vLLM callers.
 
@@ -1169,6 +1179,8 @@ class LMCacheMPWorkerAdapter:
             extra_config: Optional dict with keys starting with
                 ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
+            enable_kv_events: Whether to collect completed store operations
+                for vLLM's KV event publisher.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1179,10 +1191,12 @@ class LMCacheMPWorkerAdapter:
             legacy_block_size,
             mq_timeout,
         )
+        hash_algorithm = ExtraConfigDefault.hash_algorithm.value
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            hash_algorithm = cfg[ExtraConfigDefault.hash_algorithm.name]
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1256,6 +1270,17 @@ class LMCacheMPWorkerAdapter:
             self.req_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._kv_events_enabled = enable_kv_events
+        self._kv_event_hasher = (
+            TokenHasher(
+                chunk_size=lmcache_tokens_per_chunk,
+                hash_algorithm=hash_algorithm,
+            )
+            if enable_kv_events
+            else None
+        )
+        self._pending_store_kv_events: dict[str, list[CacheStoreEvent]] = {}
+        self._kv_events: list[CacheStoreEvent] = []
         if lmcache_tokens_per_chunk % vllm_block_size != 0:
             raise ValueError(
                 f"LMCache chunk size {lmcache_tokens_per_chunk} must be a "
@@ -1588,6 +1613,10 @@ class LMCacheMPWorkerAdapter:
         self.store_futures[request_id] = future
         if event is not None:
             self.store_events[request_id] = event
+        if self._kv_events_enabled:
+            self._pending_store_kv_events.setdefault(request_id, []).extend(
+                self._build_store_kv_events(key)
+            )
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -1809,6 +1838,7 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_futures.clear()
             self.store_events.clear()
             self.retrieve_events.clear()
+            self._pending_store_kv_events.clear()
 
             # Retrieves dropped at submit time still must be reported,
             # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
@@ -1840,10 +1870,15 @@ class LMCacheMPWorkerAdapter:
             finished_stores.add(request_id)
 
             if not s_result:
+                self._pending_store_kv_events.pop(request_id, None)
                 logger.error(
                     "Something went wrong when processing the "
                     "store request for request_id=%s",
                     request_id,
+                )
+            else:
+                self._kv_events.extend(
+                    self._pending_store_kv_events.pop(request_id, [])
                 )
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
@@ -1937,6 +1972,7 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_futures.clear()
             self.store_events.clear()
             self.retrieve_events.clear()
+            self._pending_store_kv_events.clear()
 
             # Retrieves dropped at submit time still must be reported,
             # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
@@ -1961,10 +1997,15 @@ class LMCacheMPWorkerAdapter:
             finished_stores.add(request_id)
 
             if not s_result:
+                self._pending_store_kv_events.pop(request_id, None)
                 logger.error(
                     "Something went wrong when processing the "
                     "store request for request_id=%s",
                     request_id,
+                )
+            else:
+                self._kv_events.extend(
+                    self._pending_store_kv_events.pop(request_id, [])
                 )
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
@@ -2024,6 +2065,20 @@ class LMCacheMPWorkerAdapter:
         self._completed_store_requests = {}
         return completed_store_requests
 
+    def get_kv_events(self) -> list[CacheStoreEvent]:
+        """Return completed store events since the last call.
+
+        Returns:
+            A list of LMCache cache-store events for stores that completed
+            successfully. Returns an empty list when KV events are disabled or
+            no new store completed.
+        """
+        if not self._kv_events_enabled or not self._kv_events:
+            return []
+        events = self._kv_events
+        self._kv_events = []
+        return events
+
     def num_blocks_per_chunk(self) -> int:
         """
         Returns:
@@ -2058,6 +2113,47 @@ class LMCacheMPWorkerAdapter:
         self.transfer_ctx.flush_inflight_stores()
         # Force device sync here, compare to preemption, perf panelty is trivial
         torch_dev.synchronize()
+
+    def _build_store_kv_events(
+        self,
+        key: IPCCacheServerKey,
+    ) -> list[CacheStoreEvent]:
+        """Build LMCache cache-store events for a submitted store key."""
+        if self._kv_event_hasher is None:
+            return []
+
+        token_ids = list(key.token_ids)
+        chunk_size = self.lmcache_tokens_per_chunk
+        hashes = self._kv_event_hasher.compute_chunk_hashes(
+            token_ids,
+            end=key.end,
+        )
+        start_chunk = key.start // chunk_size
+        end_chunk = key.end // chunk_size
+        if start_chunk >= end_chunk:
+            return []
+
+        events = []
+        parent_hash = hashes[start_chunk - 1] if start_chunk > 0 else None
+        for chunk_idx, block_hash in enumerate(
+            hashes[start_chunk:end_chunk],
+            start=start_chunk,
+        ):
+            start = chunk_idx * chunk_size
+            end = start + chunk_size
+            events.append(
+                CacheStoreEvent(
+                    block_hashes=[block_hash],
+                    parent_block_hash=parent_hash,
+                    token_ids=token_ids[start:end],
+                    block_size=chunk_size,
+                    lora_id=None,
+                    medium="cpu",
+                    lora_name=None,
+                )
+            )
+            parent_hash = block_hash
+        return events
 
     def shutdown(self) -> None:
         """

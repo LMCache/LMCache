@@ -658,8 +658,8 @@ class LayerCacheEngineKey(CacheEngineKey):
 
 @dataclass
 class CacheStoreEvent:
-    block_hashes: list[int]
-    parent_block_hash: int | None
+    block_hashes: list[int | bytes]
+    parent_block_hash: int | bytes | None
     token_ids: list[int]
     block_size: int
 
