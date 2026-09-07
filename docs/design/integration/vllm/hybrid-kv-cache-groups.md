@@ -174,6 +174,16 @@ logical-block granularity. See
 limits (notably: edited groups are byte-opaque — no content-aware processing,
 no cross-backend cache sharing).
 
+In `mamba_cache_mode="align"` a Mamba group's block list is sparse: a step
+writes one state, into the slot of its last token, and vLLM nulls the slots a
+multi-block step skips (EAGLE-family speculative decoding merges the prompt's
+last full block with its tail, so this is common). vLLM reports only appended
+blocks, and a speculative scratch block relocated from a skipped slot to the
+tail is reported again. `LMCacheMPRequestTracker.append_block_ids` nulls the
+old slot of a re-reported block; `all_null_chunk_masks` then drops that
+chunk's recurrent object and the next hit fails closed one chunk earlier.
+Requires `--separate-object-groups`.
+
 ## Code map
 
 | Area | File |
