@@ -2,11 +2,9 @@
 """
 Commit policy: does a finished request's sliding window earn an L2 copy?
 
-A store policy that keeps sliding-window chunks out of L2 on the store path
-leaves L1 holding their only copy until an eviction writes them back. That
-write happens under memory pressure, which is the wrong moment: the next turn
-of the same conversation can arrive while the write-back is still in flight
-and miss.
+Whether a sliding-window chunk reaches L2 on the store path is the store
+policy's decision. A window that only L1 holds is lost the moment L1 evicts
+it, and the next turn of the same conversation then pays a full prefill.
 
 A commit turns that around. When a request finishes at a point a follow-up
 will match -- a chat turn boundary -- its final window is copied to L2 right
@@ -118,7 +116,7 @@ class CommitPolicy(ABC):
     Implementations must be thread-safe and side-effect free: several
     ``END_SESSION`` handlers run concurrently on the CPU pool, and a policy
     that raises is treated as "do not commit" by the caller, which leaves the
-    window to the eviction write-back.
+    window where it is.
     """
 
     @abstractmethod
@@ -129,7 +127,7 @@ class CommitPolicy(ABC):
             ctx: What the server knows about the finished request.
 
         Returns:
-            True to commit the window now, False to leave it to eviction.
+            True to commit the window now, False to leave it as it is.
         """
 
 
@@ -230,8 +228,8 @@ def resolve_commit(ctx: CommitContext, policy: CommitPolicy) -> bool:
     """Ask the policy, and treat a failure as "do not commit".
 
     A policy that raises is reported and refused rather than trusted: the
-    window then leaves L1 the ordinary way, through the eviction write-back,
-    which loses timeliness but nothing else.
+    window is then simply not committed, which costs the L2 copy but nothing
+    else.
 
     Args:
         ctx: What the server knows about the finished request.

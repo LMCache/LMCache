@@ -16,11 +16,11 @@ dead weight for prefix reuse. Those chunks are also the large ones: per chunk,
 a sliding-window object group holds an order of magnitude more bytes than a
 full-attention group.
 
-Writing every sliding-window chunk through to L2, as the `default` store
-policy does, therefore spends most of the L2 bandwidth and space on KV that
-is never read back. A store policy that writes full-attention groups through
-and skips sliding-window groups removes that cost, and leaves one question:
-which sliding-window window must still reach L2, and when.
+Whether a sliding-window chunk is written through to L2 is the store
+policy's decision, and a policy that spends L2 bandwidth and space only on KV
+that will be read back has to skip most sliding-window chunks. That leaves one
+question the store path cannot answer on its own: which sliding-window window
+must still reach L2, and when.
 
 Which window is decided by the resume point. The window worth keeping is the
 one ending at the offset `p` where a later request's prefix match will end,
@@ -37,8 +37,7 @@ boundary, its final sliding window, `[p - w, p)` for every sliding-window
 group, is copied from L1 to L2 right then. It is a copy, not a move; the L1
 window stays and the follow-up is still an L1 hit. The write lands during the
 idle time between turns, before the follow-up arrives and before L1 pressure
-can evict the window. Sliding-window chunks outside a committed window never
-leave L1, and eviction can simply discard them.
+can evict the window.
 
 ## 2. Design
 
@@ -136,15 +135,12 @@ Full-attention groups are skipped; the store path already wrote them through.
 `StoreController.submit_flush`, which enqueues them and wakes the store
 loop; nothing runs on the `END_SESSION` handler's thread. The store loop
 takes an L1 read lock on each key (`reserve_read`), submits one store task
-per active L2 adapter, and releases the lock when the last adapter completes.
-The task's mode is `StoreMode.FLUSH`, which differs from a plain store in two
-ways: it bypasses `StorePolicy`, since the policy is what kept these keys out
-of L2 in the first place, and it never deletes the key from L1 on success.
-
-Keys already in flight for any store task are dropped from the batch, so a
-flush that races another write of the same key is a no-op rather than a
-double write. A configuration with no active L2 adapter drops the batch with
-a warning.
+per active L2 adapter, and releases the lock when that task completes,
+exactly as a write-through store does. The task's mode is `StoreMode.FLUSH`,
+which differs from a plain store in two ways: it targets every active adapter
+without consulting `StorePolicy`, and the policy's L1 deletions are not
+applied on completion. A configuration with no active L2 adapter drops the
+batch with a warning.
 
 ## 3. Configuration
 
@@ -178,13 +174,12 @@ One window per committed turn: `w` chunks per sliding-window group. Consecutive
 turns of one conversation overlap in that window and chunk hashes are
 content-derived, so an L2 adapter that skips keys it already holds (the
 filesystem adapter checks the path before writing) writes only the chunks a
-turn's window gained. Against `default` write-through this is a fraction of
-the sliding-window traffic. Per-turn latency is unchanged because the L1
-copy stays.
+turn's window gained. Per-turn latency is unchanged because the L1 copy
+stays.
 
 ## 5. Failure Modes
 
-* **No L2 adapter, key already evicted, key write-locked, key in flight.**
+* **No L2 adapter, key already evicted, key write-locked.**
   The flush is dropped (a warning for the adapter case) and the window has
   no L2 copy. The next turn is still an L1 hit while the window is resident;
   it pays a prefill only if L1 evicts the window before then, which is the
@@ -195,7 +190,3 @@ copy stays.
 * **`Request.resumable` (vLLM streaming sessions).** The request stays alive
   across turns, `END_SESSION` never fires, and no commit happens. Such a
   deployment needs a different trigger.
-* **Eviction policies that write sliding-window chunks back to L2.** A
-  committed window has an L2 copy already; an eviction policy that writes
-  sliding-window chunks to L2 on eviction writes it a second time. The
-  intended pairing is an eviction that discards sliding-window chunks.

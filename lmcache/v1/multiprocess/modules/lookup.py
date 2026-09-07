@@ -626,13 +626,13 @@ class LookupModule:
     ) -> None:
         """Copy the finished request's sliding window to L2 if it earned it.
 
-        When a store policy keeps sliding-window chunks out of L2, L1 holds
-        their only copy until an eviction writes them back. That write lands
-        under memory pressure, which is exactly when the next turn of the same
-        conversation may already be looking the window up. A commit moves the
-        write earlier: when a request ends where a follow-up will resume -- a
-        chat turn boundary -- its final window is copied to L2 during the idle
-        time before that follow-up arrives.
+        Whether the store path writes sliding-window chunks to L2 is the
+        store policy's decision; a window that only L1 holds is lost when L1
+        evicts it, and the next turn of the same conversation pays a full
+        prefill. A commit does not depend on that decision: when a request
+        ends where a follow-up will resume -- a chat turn boundary -- its
+        final window is copied to L2 during the idle time before that
+        follow-up arrives.
 
         It is a copy, not a move: the L1 window stays, so the follow-up is
         still an L1 hit and only the window's durability changed. Nothing else
