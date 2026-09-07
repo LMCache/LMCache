@@ -2,6 +2,8 @@
 """Focused tests for node-local L1 inspection and byte snapshots."""
 
 # Standard
+from collections.abc import Callable
+from typing import Any
 from unittest.mock import MagicMock
 
 # Third Party
@@ -21,12 +23,14 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.error import InspectionReadError, L1Error
 from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.storage_controllers import L1EvictionController
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+import lmcache.v1.distributed.storage_manager as storage_module
 
 
 def _key(value: int) -> ObjectKey:
@@ -35,6 +39,26 @@ def _key(value: int) -> ObjectKey:
         model_name="test-model",
         kv_rank=0,
     )
+
+
+def _after_copy(monkeypatch: pytest.MonkeyPatch, action: Callable[[], None]) -> None:
+    """Run a deterministic interleaving after bytes are copied, before validation."""
+
+    def view_with_hook(buffer: Any) -> MagicMock:
+        view = memoryview(buffer).cast("B")
+        wrapped = MagicMock()
+        wrapped.cast.return_value = wrapped
+        wrapped.nbytes = view.nbytes
+
+        def copy() -> bytes:
+            data = view.tobytes()
+            action()
+            return data
+
+        wrapped.tobytes.side_effect = copy
+        return wrapped
+
+    monkeypatch.setattr(storage_module, "memoryview", view_with_hook, raising=False)
 
 
 def _memory_config() -> L1MemoryManagerConfig:
@@ -77,15 +101,31 @@ def _store_ready(
     return result[key][1]
 
 
-class TestProtectedReadForInspection:
+class TestReserveReadForInspection:
+    def test_replacement_reader_is_not_released(self) -> None:
+        manager = L1Manager(_l1_config())
+        key = _key(1)
+        _store_ready(manager, key, _layout())
+        try:
+            with pytest.raises(InspectionReadError):
+                with manager.reserve_read_for_inspection(key):
+                    assert manager.delete([key], force=True)[key] == L1Error.SUCCESS
+                    _store_ready(manager, key, _layout())
+                    assert manager.reserve_read([key])[key][0] == L1Error.SUCCESS
+            assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+            assert manager.finish_read([key])[key] == L1Error.SUCCESS
+            assert manager.delete([key])[key] == L1Error.SUCCESS
+        finally:
+            manager.close()
+
     def test_missing_and_write_locked_results(self):
         manager = L1Manager(_l1_config())
         write_locked = _key(2)
         manager.reserve_write([write_locked], [False], _layout())
 
-        with manager.protected_read_for_inspection(_key(1)) as (error, obj):
+        with manager.reserve_read_for_inspection(_key(1)) as (error, obj):
             assert (error, obj) == (L1Error.KEY_NOT_EXIST, None)
-        with manager.protected_read_for_inspection(write_locked) as (error, obj):
+        with manager.reserve_read_for_inspection(write_locked) as (error, obj):
             assert (error, obj) == (L1Error.KEY_NOT_READABLE, None)
         manager.close()
 
@@ -94,7 +134,7 @@ class TestProtectedReadForInspection:
         key = _key(1)
         _store_ready(manager, key, _layout())
 
-        with manager.protected_read_for_inspection(key) as (error, obj):
+        with manager.reserve_read_for_inspection(key) as (error, obj):
             assert error == L1Error.SUCCESS
             assert obj is not None
             assert manager.delete([key]) == {key: L1Error.KEY_IS_LOCKED}
@@ -102,7 +142,7 @@ class TestProtectedReadForInspection:
 
         _store_ready(manager, key, _layout())
         with pytest.raises(RuntimeError, match="copy failed"):
-            with manager.protected_read_for_inspection(key):
+            with manager.reserve_read_for_inspection(key):
                 raise RuntimeError("copy failed")
         assert manager.delete([key]) == {key: L1Error.SUCCESS}
         manager.close()
@@ -112,7 +152,7 @@ class TestProtectedReadForInspection:
         key = _key(1)
         _store_ready(manager, key, _layout(), temporary=True)
 
-        with manager.protected_read_for_inspection(key) as (error, obj):
+        with manager.reserve_read_for_inspection(key) as (error, obj):
             assert error == L1Error.SUCCESS
             assert obj is not None
             assert manager.get_object_state(key) is not None
@@ -125,7 +165,7 @@ class TestProtectedReadForInspection:
         _store_ready(manager, key, _layout())
         assert manager.reserve_read([key])[key][0] == L1Error.SUCCESS
 
-        with manager.protected_read_for_inspection(key) as (error, obj):
+        with manager.reserve_read_for_inspection(key) as (error, obj):
             assert error == L1Error.SUCCESS
             assert obj is not None
             assert manager.finish_read([key])[key] == L1Error.SUCCESS
@@ -149,7 +189,7 @@ class TestProtectedReadForInspection:
         before = policy.get_eviction_candidates(len(keys))
         publish.reset_mock()
 
-        with manager.protected_read_for_inspection(keys[1]) as (error, obj):
+        with manager.reserve_read_for_inspection(keys[1]) as (error, obj):
             assert error == L1Error.SUCCESS
             assert obj is not None
 
@@ -161,6 +201,117 @@ class TestProtectedReadForInspection:
 
 
 class TestStorageManagerL1Snapshot:
+    def test_temporary_snapshot_validated_before_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = L1Manager(_l1_config())
+        monkeypatch.setattr(storage_module, "L1Manager", lambda config: manager)
+        storage = StorageManager(_storage_config())
+        key = _key(1)
+        try:
+            source = _store_ready(manager, key, _layout(), temporary=True)
+            memoryview(source.byte_array).cast("B")[:] = b"temporary"[:8]
+            error, snapshot = storage.snapshot_l1_object(key)
+            assert error == L1Error.SUCCESS
+            assert snapshot is not None and snapshot.data == b"temporar"
+            assert manager.get_object_state(key) is None
+        finally:
+            storage.close()
+
+    def test_expired_read_rejects_snapshot(self) -> None:
+        config = _storage_config()
+        config.l1_manager_config.read_ttl_seconds = 0
+        storage = StorageManager(config)
+        key = _key(1)
+        try:
+            storage.reserve_write([key], _layout(), mode="new")
+            storage.finish_write([key])
+            assert storage.snapshot_l1_object(key) == (L1Error.KEY_NOT_READABLE, None)
+        finally:
+            storage.close()
+
+    @pytest.mark.parametrize("replace", [False, True])
+    def test_force_delete_or_replace_after_copy(
+        self, monkeypatch: pytest.MonkeyPatch, replace: bool
+    ) -> None:
+        storage = StorageManager(_storage_config())
+        key = _key(1)
+        try:
+            source = storage.reserve_write([key], _layout(), mode="new")[key]
+            storage.finish_write([key])
+
+            def delete_or_replace() -> None:
+                assert storage.delete_l1_keys([key], force=True) == (1, 0)
+                if replace:
+                    replacement = storage.reserve_write([key], _layout(), mode="new")[
+                        key
+                    ]
+                    assert replacement is not source
+                    storage.finish_write([key])
+
+            _after_copy(monkeypatch, delete_or_replace)
+            assert storage.snapshot_l1_object(key) == (L1Error.KEY_NOT_READABLE, None)
+        finally:
+            storage.close()
+
+    def test_size_limit_precedes_byte_access(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage = StorageManager(_storage_config())
+        key = _key(1)
+        try:
+            source = storage.reserve_write([key], _layout(), mode="new")[key]
+            storage.finish_write([key])
+
+            def unexpected_byte_access(obj: Any) -> Any:
+                pytest.fail("oversized object must be rejected before byte access")
+
+            monkeypatch.setattr(
+                type(source), "byte_array", property(unexpected_byte_access)
+            )
+            assert storage.snapshot_l1_object(key, max_size_bytes=7) == (
+                L1Error.OBJECT_TOO_LARGE,
+                None,
+            )
+            assert storage.delete_l1_keys([key]) == (1, 0)
+        finally:
+            storage.close()
+
+    def test_lru_eviction_during_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = L1Manager(_l1_config())
+        policy = LRUEvictionPolicy()
+        manager.register_listener(L1EvictionPolicy(policy))
+        controller = L1EvictionController(
+            manager, EvictionConfig(eviction_policy="LRU")
+        )
+        monkeypatch.setattr(storage_module, "L1Manager", lambda config: manager)
+        storage = StorageManager(_storage_config())
+        key, victim = _key(1), _key(2)
+        try:
+            for item in (key, victim):
+                storage.reserve_write([item], _layout(), mode="new")
+                storage.finish_write([item])
+
+            def evict() -> None:
+                actions = policy.get_eviction_actions(
+                    1.0, key_eligible_filter=manager.is_key_evictable
+                )
+                assert [item for action in actions for item in action.keys] == [victim]
+                for action in actions:
+                    controller.execute_eviction_action(action)
+                assert manager.get_object_state(victim) is None
+                assert manager.get_object_state(key) is not None
+
+            _after_copy(monkeypatch, evict)
+            error, snapshot = storage.snapshot_l1_object(key, max_size_bytes=8)
+            assert error == L1Error.SUCCESS
+            assert snapshot is not None and snapshot.size_bytes == 8
+            assert manager.is_key_evictable(key)
+        finally:
+            storage.close()
+
     def test_exact_independent_bytes_and_heterogeneous_metadata(self):
         storage_manager = StorageManager(_storage_config())
         key = _key(1)

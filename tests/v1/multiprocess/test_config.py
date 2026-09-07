@@ -19,12 +19,18 @@ from lmcache.v1.multiprocess.config import (
     DEFAULT_KAFKA_CACHE_EVENT_TOPIC,
     DEFAULT_KAFKA_DELIVERY_TIMEOUT,
     CoordinatorConfig,
+<<<<<<< HEAD
     HttpCacheEventSinkConfig,
     KafkaCacheEventSinkConfig,
+=======
+    HTTPFrontendConfig,
+>>>>>>> 2570aca5 (fix(mp): harden L1 KV cache object downloads)
     MPServerConfig,
     add_coordinator_args,
+    add_http_frontend_args,
     add_mp_server_args,
     parse_args_to_coordinator_config,
+    parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
 )
 
@@ -35,6 +41,43 @@ _COORD_ENV = (
     "LMCACHE_COORDINATOR_EVENT_REPORTING",
     "LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL",
 )
+
+
+def test_http_download_defaults_and_cli() -> None:
+    parser = add_http_frontend_args(argparse.ArgumentParser())
+    defaults = parse_args_to_http_frontend_config(parser.parse_args([]))
+    assert defaults == HTTPFrontendConfig()
+    assert not defaults.enable_l1_cache_download
+    assert defaults.l1_cache_download_max_size_bytes == 64 << 20
+    assert defaults.l1_cache_download_max_concurrency == 2
+    config = parse_args_to_http_frontend_config(
+        parser.parse_args(
+            [
+                "--enable-l1-cache-download",
+                "--l1-cache-download-max-size-bytes",
+                "1024",
+                "--l1-cache-download-max-concurrency",
+                "1",
+            ]
+        )
+    )
+    assert config.enable_l1_cache_download
+    assert config.l1_cache_download_max_size_bytes == 1024
+    assert config.l1_cache_download_max_concurrency == 1
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--l1-cache-download-max-size-bytes",
+        "--l1-cache-download-max-concurrency",
+    ],
+)
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_http_download_rejects_nonpositive_limits(flag: str, value: str) -> None:
+    parser = add_http_frontend_args(argparse.ArgumentParser())
+    with pytest.raises(ValueError, match="must be positive"):
+        parse_args_to_http_frontend_config(parser.parse_args([flag, value]))
 
 
 def _parse(argv: list[str]) -> CoordinatorConfig:

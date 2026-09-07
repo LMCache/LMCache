@@ -17,7 +17,7 @@ from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     get_configured_capacity_bytes,
 )
-from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.error import InspectionReadError, L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
@@ -248,7 +248,7 @@ class L1Manager:
             self._registered_listeners.append(listener)
 
     @contextmanager
-    def protected_read_for_inspection(
+    def reserve_read_for_inspection(
         self, key: ObjectKey
     ) -> Iterator[L1OperationResult]:
         """Protect one object for a read-only management inspection.
@@ -266,19 +266,35 @@ class L1Manager:
             ``(L1Error, MemoryObj | None)``. ``SUCCESS`` includes the protected
             object; missing and temporarily unreadable objects include ``None``.
 
+        Raises:
+            InspectionReadError: The object was removed or replaced during the
+                inspection, or finishing the read failed (including TTL expiry).
+
         Note:
             The protection uses the configured read-lock TTL. Force deletion or
             force clearing retains its existing ability to ignore active locks.
         """
         with self._lock:
-            result = self._reserve_read_locked([key], total=1, emit_events=False)[key]
+            result = self._reserve_read_locked([key], total=1, notify=False)[key]
 
         try:
             yield result
         finally:
             if result[0] == L1Error.SUCCESS:
                 with self._lock:
-                    self._finish_read_locked([key], total=1, emit_events=False)
+                    # Validate before release: release can legitimately remove
+                    # a temporary object. Never release a replacement's lock.
+                    still_resident = self._still_resident_locked(key, result[1])
+                    release = (
+                        self._finish_read_locked([key], total=1, notify=False)[key]
+                        if still_resident
+                        else L1Error.KEY_IN_WRONG_STATE
+                    )
+                    if release != L1Error.SUCCESS:
+                        raise InspectionReadError(
+                            f"inspection read invalid: resident={still_resident}, "
+                            f"release={release.name}"
+                        )
 
     @l1_mgr_synchronized
     def reserve_read(
@@ -1081,7 +1097,7 @@ class L1Manager:
         )
         return mem_check_result
 
-<<<<<<< HEAD
+
     # Private helpers
 
     def _get_staging(self, key: ObjectKey, tag: str) -> L1ObjectState | None:
@@ -1218,12 +1234,17 @@ class L1Manager:
                 metadata={"keys": keys, "meta": freed_meta},
             )
         )
-=======
+
+    def _still_resident_locked(self, key: ObjectKey, obj: MemoryObj | None) -> bool:
+        """Check identity while the caller holds the manager lock."""
+        entry = self._objects.get(key)
+        return entry is not None and entry.memory_obj is obj
+
     def _reserve_read_locked(
         self,
         keys: list[ObjectKey],
         total: int,
-        emit_events: bool,
+        notify: bool,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Acquire read locks while the caller holds the manager lock."""
         ret: dict[ObjectKey, L1OperationResult] = {}
@@ -1245,7 +1266,7 @@ class L1Manager:
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
-        if emit_events:
+        if notify:
             for listener in self._registered_listeners:
                 listener.on_l1_keys_reserved_read(successful_keys)
             self._event_bus.publish(
@@ -1260,7 +1281,7 @@ class L1Manager:
         self,
         keys: list[ObjectKey],
         total: int,
-        emit_events: bool,
+        notify: bool,
     ) -> dict[ObjectKey, L1Error]:
         """Release read locks while the caller holds the manager lock."""
         need_to_free: list[MemoryObj] = []
@@ -1313,19 +1334,20 @@ class L1Manager:
         freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
+        notify_deletion = notify or bool(need_to_free_keys)
         for listener in self._registered_listeners:
-            if emit_events:
+            if notify:
                 listener.on_l1_keys_read_finished(successful_keys)
-            if emit_events or need_to_free_keys:
+            if notify_deletion:
                 listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
-        if emit_events:
+        if notify:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_READ_FINISHED,
                     metadata={"keys": successful_keys},
                 )
             )
-        if emit_events or need_to_free_keys:
+        if notify_deletion:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
@@ -1333,7 +1355,6 @@ class L1Manager:
                 )
             )
         return ret
->>>>>>> 9b5e235f (feat(mp): add L1 KV cache object download API)
 
     def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
         """Build the listener-facing metadata for one resident object."""

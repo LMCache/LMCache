@@ -26,3 +26,9 @@ class Conflict(CacheControlError): ...  # object exists but is temporarily locke
 
 
 class Unsupported(CacheControlError): ...  # backend lacks the requested capability
+
+
+class Disabled(CacheControlError): ...  # capability requires explicit opt-in
+
+
+class TooLarge(CacheControlError): ...  # object exceeds the configured byte limit

@@ -93,11 +93,12 @@ async def delete_cache_objects(
     L1 keys even if locked.
 
     Responses:
-        200: ``{"deleted", "skipped", "ok"[, "error"]}``.
+        200: ``{"deleted", "skipped", "ok"}``.
         400: batch too large or an ``ObjectKey`` invariant violation.
             404: adapter matches none. 422: body validation.
         503: server not initialized, or no L2 adapters configured (tier
             includes L2).
+        500: unexpected L2 adapter failure.
     """
     return await get_context(request).object_service.delete_objects(
         body.tier, body.adapter, body.keys, body.force
@@ -114,11 +115,15 @@ async def download_cache_object(
     are supported; GDS requires a separate DMA path and is rejected. Inspection
     does not count as a normal cache read and does not update LRU state.
 
+    Returns:
+        Raw bytes and layout metadata in a non-streaming HTTP response.
+
     Responses:
         200: Raw logical bytes (``application/octet-stream``) with compact JSON
             layout metadata in ``X-LMCache-Object-Metadata``.
         400: Invalid ``ObjectKey`` semantic value. 404: object absent from L1.
         409: object temporarily unreadable. 501: unsupported L1 backend.
+        403: download disabled. 413: object exceeds the configured size limit.
         503: server not initialized. 422: body validation.
     """
     snapshot = await get_context(request).object_service.download_object(body.key)

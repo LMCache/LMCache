@@ -19,6 +19,7 @@ from fastapi import HTTPException, Request
 # First Party
 from lmcache.v1.multiprocess.cache_control.object_service import ObjectService
 from lmcache.v1.multiprocess.cache_control.prefetch_service import PrefetchService
+from lmcache.v1.multiprocess.config import HTTPFrontendConfig
 
 
 @dataclass
@@ -38,7 +39,7 @@ class MPHTTPContext:
     prefetch_service: PrefetchService
 
 
-def build_context(engine: Any) -> MPHTTPContext:
+def build_context(engine: Any, http_config: HTTPFrontendConfig) -> MPHTTPContext:
     """Construct the per-app context once the engine is ready.
 
     Called from the server lifespan; the result is stashed on
@@ -46,13 +47,14 @@ def build_context(engine: Any) -> MPHTTPContext:
 
     Args:
         engine: The initialized node cache engine.
+        http_config: HTTP download permissions and limits.
 
     Returns:
         A fresh :class:`MPHTTPContext` wrapping the engine and its services.
     """
     return MPHTTPContext(
         engine=engine,
-        object_service=ObjectService(engine),
+        object_service=ObjectService(engine, http_config),
         prefetch_service=PrefetchService(engine),
     )
 
