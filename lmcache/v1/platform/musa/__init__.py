@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any
 
 # First Party
 from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
-from lmcache.v1.platform.musa.pin_memory import MusaPinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -43,15 +41,6 @@ class MusaDeviceSpec(DeviceSpec):
         from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
         return MusaDeviceOps
-
-    @property
-    def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
-        """Return the TorchMUSA-backed host-memory pinning adapter.
-
-        Returns:
-            The MUSA pin-memory backend class.
-        """
-        return MusaPinMemoryBackend
 
     @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:

@@ -35,6 +35,10 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.group_view import (
+    EngineGroupInfo,
+    expand_engine_block_ids,
+)
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
 
@@ -49,53 +53,55 @@ logger = init_logger(__name__)
 _WAIT_LOOKUP_RESPONSE_BUFFER_S = 5.0
 
 
-def _validate_sglang_kv_pools(
-    k_pool: list[torch.Tensor],
-    v_pool: list[torch.Tensor],
+def _validate_sglang_kv_caches(
+    kv_caches: list[torch.Tensor],
 ) -> torch.device:
-    """Validate SGLang's split MHA pools and return their shared device.
+    """Validate a flat SGLang KV cache list and return the shared device.
 
     Args:
-        k_pool: Per-layer key-cache tensors.
-        v_pool: Per-layer value-cache tensors.
+        kv_caches: Flat per-layer KV cache tensors. Layout depends on
+            attention type: MHA ``[K..., V...]``, MLA ``[KV...]``,
+            DSA ``[KV..., indexer...]``.
 
     Returns:
-        The device shared by every key and value tensor.
+        The device shared by every tensor.
 
     Raises:
-        ValueError: If either pool is empty, layer counts differ, or tensors
-            span multiple devices.
+        ValueError: If the list is empty or tensors span multiple devices.
     """
-    if not k_pool or not v_pool:
-        raise ValueError("SGLang MP registration requires non-empty K and V pools")
-    if len(k_pool) != len(v_pool):
-        raise ValueError("SGLang MP registration requires matching K and V layers")
-    tensors = [*k_pool, *v_pool]
-    device = tensors[0].device
-    if any(tensor.device != device for tensor in tensors):
-        raise ValueError("SGLang MP K and V pools must use one device")
+    if not kv_caches:
+        raise ValueError("SGLang MP registration requires non-empty KV caches")
+    device = kv_caches[0].device
+    if any(tensor.device != device for tensor in kv_caches):
+        raise ValueError("SGLang MP KV caches must use one device")
     return device
 
 
 def _wrap_sglang_kv_caches(
-    k_pool: list[torch.Tensor],
-    v_pool: list[torch.Tensor],
+    kv_caches: list[torch.Tensor],
 ) -> KVCache:
-    """Flatten SGLang's depth-2 ``[K_layers, V_layers]`` KV layout into a
-    single flat ``KVCache`` so it fits upstream's wire
-    ``KVCache`` payload type. The daemon's
-    :func:`normalize_kv_and_discover_format` recognizes this shape from
-    ``EngineType.SGLANG`` plus ``tokens_per_block`` and ``kv_list_layout``
-    ``LayoutHints`` fields, then splits it back at its midpoint before format
-    detection.
+    """Wrap a flat list of SGLang KV cache tensors for IPC transport.
+
+    The caller (``LMCacheMPConnector.__init__``) supplies a flat
+    ``list[torch.Tensor]`` whose layout depends on the attention type:
+
+    - **MHA**: ``[K_layers..., V_layers...]`` (depth-2 flattened).
+    - **MLA**: ``[KV_layers...]`` -- one fused buffer per layer.
+    - **DSA**: ``[KV_layers..., indexer_layers...]`` -- MLA latent
+      layers followed by DSA indexer layers.
+
+    The daemon's
+    :func:`normalize_and_discover_per_layer_formats` splits this flat
+    list by per-layer tensor shape and assigns each contiguous run of
+    same-shape layers to its own kernel group. The
+    ``engine_group_infos`` sent alongside ``REGISTER_KV_CACHE`` tells
+    the daemon how many groups to expect and which layers each covers.
 
     Raises:
-        ValueError: If the pools are empty, use different devices, or the
-            selected platform cannot provide the complete handle-transfer
-            path.
+        ValueError: If the list is empty or the selected platform
+            cannot provide the complete handle-transfer path.
     """
-    device = _validate_sglang_kv_pools(k_pool, v_pool)
-    tensors = [*k_pool, *v_pool]
+    device = _validate_sglang_kv_caches(kv_caches)
     device_spec = get_device_spec(device.type)
     if device_spec is None or not device_spec.is_handle_transfer_available():
         raise ValueError(
@@ -103,7 +109,7 @@ def _wrap_sglang_kv_caches(
             f"{device.type!r}: required memory IPC, event IPC, cache context, "
             "or block-transfer capabilities are missing"
         )
-    return [wrap_one_kv_cache(tensor) for tensor in tensors]
+    return [wrap_one_kv_cache(tensor) for tensor in kv_caches]
 
 
 def _completed_future(result: bool) -> MessagingFuture[bool]:
@@ -175,8 +181,8 @@ class LMCacheMPConnector:
         page_size: int,
         host: str,
         port: int,
-        k_pool: list[torch.Tensor],
-        v_pool: list[torch.Tensor],
+        kv_caches: list[torch.Tensor],
+        
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
@@ -226,7 +232,7 @@ class LMCacheMPConnector:
         # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
         self.req_client.register_kv_cache(
             self.instance_id,
-            _wrap_sglang_kv_caches(k_pool, v_pool),
+            _wrap_sglang_kv_caches(kv_caches),
             self.model_name,
             self.tp_size,
             EngineType.SGLANG,

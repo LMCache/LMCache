@@ -94,14 +94,13 @@ class HF3fsConnector(FSConnector):
         try:
             hf3fs_mount_point = extract_mount_point(mount_point)
         except Exception as e:
-            logger.error("Failed to extract 3FS mount point: %s", e)
+            logger.error(f"Failed to extract 3FS mount point: {e}")
             raise Exception(f"Failed to extract 3FS mount point: {e}") from e
 
         if hf3fs_mount_point != mount_point:
             logger.error(
-                "Invalid 3FS mount point, config:%s, extract:%s",
-                mount_point,
-                hf3fs_mount_point,
+                f"Invalid 3FS mount point, config:{mount_point},"
+                f" extract:{hf3fs_mount_point}"
             )
             raise Exception(
                 f"Invalid 3FS mount point, config:{mount_point},"
@@ -122,13 +121,13 @@ class HF3fsConnector(FSConnector):
             try:
                 self.client.close()
             except Exception as e:
-                logger.error("Failed to close HF3fsConnector,%s", e)
+                logger.error(f"Failed to close HF3fsConnector,{e}")
 
         if hasattr(self, "io_executor") and self.io_executor is not None:
             try:
                 self.io_executor.shutdown(wait=True)
             except Exception as e:
-                logger.error("Failed to close HF3fsConnector,%s", e)
+                logger.error(f"Failed to close HF3fsConnector,{e}")
 
     async def close(self):
         await asyncio.to_thread(self._close)
@@ -204,7 +203,7 @@ class HF3fsConnector(FSConnector):
 
         except Exception as e:
             if not isinstance(e, FileNotFoundError):
-                logger.error("Failed to read from file %s: %s", file_path, e)
+                logger.error(f"Failed to read from file {file_path}: {str(e)}")
             if memory_obj is not None:
                 memory_obj.ref_count_down()
             return None
@@ -259,7 +258,7 @@ class HF3fsConnector(FSConnector):
                 # Atomically rename temp file to final destination
                 Hf3fsFile.rename(temp_path, final_path)
         except Exception as e:
-            logger.error("Failed to write file %s: %s", final_path, e)
+            logger.error(f"Failed to write file {final_path}: {str(e)}")
             Hf3fsFile.remove(temp_path)  # Remove corrupted file
             raise
 
@@ -313,11 +312,11 @@ class Hf3fsClient:
             # init the instance
             cls._thread_local._instance = cls(config)
             logger.info(
-                "Create %s instance success", cls._thread_local._instance.client_name
+                f"Create {cls._thread_local._instance.client_name} instance success"
             )
         else:
             logger.debug(
-                "Hf3fsClient instance already exist in %s", threading.get_ident()
+                f"Hf3fsClient instance already exist in {threading.get_ident()}"
             )
         return cls._thread_local._instance
 
@@ -334,10 +333,10 @@ class Hf3fsClient:
                 name=f"{self.client_name}_wt", size=self.config.iov_size, create=True
             )
         except Exception as e:
-            logger.error("%s failed to create share memory %s", self.client_name, e)
+            logger.error(f"{self.client_name} failed to create share memory {e}")
             self.close()
             raise
-        logger.debug("%s create share memory successfully", self.client_name)
+        logger.debug(f"{self.client_name} create share memory successfully")
 
         try:
             self.iov_read = make_iovec(
@@ -351,10 +350,10 @@ class Hf3fsClient:
                 numa=self.config.numa_id,
             )
         except Exception as e:
-            logger.error("%s failed to create iov: %s", self.client_name, e)
+            logger.error(f"{self.client_name} failed to create iov: {e}")
             self.close()
             raise
-        logger.debug("%s create iov successfully", self.client_name)
+        logger.debug(f"{self.client_name} create iov successfully")
 
         # read I/O ring
         try:
@@ -366,10 +365,10 @@ class Hf3fsClient:
                 numa=self.config.numa_id,
             )
         except Exception as e:
-            logger.error("%s failed to create ior_read: %s", self.client_name, e)
+            logger.error(f"{self.client_name} failed to create ior_read: {e}")
             self.close()
             raise
-        logger.debug("%s create ior_read successfully", self.client_name)
+        logger.debug(f"{self.client_name} create ior_read successfully")
 
         # write I/O ring
         try:
@@ -381,21 +380,21 @@ class Hf3fsClient:
                 numa=self.config.numa_id,
             )
         except Exception as e:
-            logger.error("%s failed to create ior_write: %s", self.client_name, e)
+            logger.error(f"{self.client_name} failed to create ior_write: {e}")
             self.close()
             raise
 
-        logger.debug("%s create ior_write successfully", self.client_name)
+        logger.debug(f"{self.client_name} create ior_write successfully")
         # lock for read and write
         self.lock_read = threading.RLock()
         self.lock_write = threading.RLock()
-        logger.debug("%s initialized end ", self.client_name)
+        logger.debug(f"{self.client_name} initialized end ")
 
     def close(self):
         if self._closed:
-            logger.debug("%s already closed, skip", self.client_name)
+            logger.debug(f"{self.client_name} already closed, skip")
             return
-        logger.debug("%s close begin", self.client_name)
+        logger.debug(f"{self.client_name} close begin")
         try:
             #  clear I/O resource first, then share memory
             if hasattr(self, "ior_read") and self.ior_read is not None:
@@ -418,9 +417,9 @@ class Hf3fsClient:
                     self.shm_read.unlink()
                 except FileNotFoundError:
                     # already release, ignore it
-                    logger.debug("%s shm_read already unlinked", self.client_name)
+                    logger.debug(f"{self.client_name} shm_read already unlinked")
                 except Exception as e:
-                    logger.error("%s error closing shm_read: %s", self.client_name, e)
+                    logger.error(f"{self.client_name} error closing shm_read: {e}")
                 finally:
                     self.shm_read = None
             if hasattr(self, "shm_write") and self.shm_write is not None:
@@ -429,25 +428,25 @@ class Hf3fsClient:
                     self.shm_write.unlink()
                 except FileNotFoundError:
                     # already release, ignore it
-                    logger.debug("%s shm_write already unlinked", self.client_name)
+                    logger.debug(f"{self.client_name} shm_write already unlinked")
                 except Exception as e:
-                    logger.error("%s error closing shm_write: %s", self.client_name, e)
+                    logger.error(f"{self.client_name} error closing shm_write: {e}")
                 finally:
                     self.shm_write = None
 
             self._closed = True
-            logger.info("%s release successfully", self.client_name)
+            logger.info(f"{self.client_name} release successfully")
         except Exception as e:
-            logger.error("%s error during close: %s", self.client_name, e)
+            logger.error(f"{self.client_name} error during close: {e}")
             self._closed = True  # Mark this flag even it exception
 
     def __del__(self):
         try:
-            logger.debug("%s __del__ begin", self.client_name)
+            logger.debug(f"{self.client_name} __del__ begin")
             self.close()
         except Exception as e:
             # do not throw exception in __del__
-            logger.error("%s error in __del__: %s", self.client_name, e)
+            logger.error(f"{self.client_name} error in __del__: {e}")
 
     def __enter__(self):
         return self
@@ -467,7 +466,7 @@ class Hf3fsClient:
         try:
             done = self.ior_read.submit().wait(min_results=1)[0]
         except Exception as e:
-            logger.error("%s read submit failed: %s", self.client_name, e)
+            logger.error(f"{self.client_name} read submit failed: {e}")
             raise RuntimeError(f"{self.client_name} read submit failed") from e
 
         total_bytes_read = done.result
@@ -494,10 +493,8 @@ class Hf3fsClient:
                     break
             if total_bytes_read != length:
                 logger.warning(
-                    "%s read: requested %d, got %d",
-                    self.client_name,
-                    length,
-                    total_bytes_read,
+                    f"{self.client_name} read: requested {length}, "
+                    f"got {total_bytes_read}"
                 )
             return total_bytes_read
 
@@ -515,7 +512,7 @@ class Hf3fsClient:
         try:
             done = self.ior_write.submit().wait(min_results=1)[0]
         except Exception as e:
-            logger.error("%s write submit failed: %s", self.client_name, e)
+            logger.error(f"{self.client_name} write submit failed: {e}")
             raise RuntimeError(f"{self.client_name} write submit failed") from e
 
         total_bytes_written = done.result
@@ -539,10 +536,8 @@ class Hf3fsClient:
                     break
             if total_bytes_written != length:
                 logger.error(
-                    "%s write: requested %d, got %d",
-                    self.client_name,
-                    length,
-                    total_bytes_written,
+                    f"{self.client_name} write: requested {length}, "
+                    f"got {total_bytes_written}"
                 )
                 raise RuntimeError(
                     f"{self.client_name} write: requested {length}, "
@@ -563,13 +558,9 @@ class Hf3fsFile:
         try:
             self.fd = os.open(self.fname, self.flags)
             register_fd(self.fd)
-            logger.debug(
-                "Open file %s with flag %d successfully", self.fname, self.flags
-            )
+            logger.debug(f"Open file {self.fname} with flag {self.flags} successfully")
         except Exception as e:
-            logger.error(
-                "Open file %s with flag %d failed %s", self.fname, self.flags, e
-            )
+            logger.error(f"Open file {self.fname} with flag {self.flags} failed {e}")
             raise
 
     def close(self):
@@ -578,9 +569,9 @@ class Hf3fsFile:
         try:
             deregister_fd(self.fd)
             os.close(self.fd)
-            logger.debug("Close file (%s) successfully", self.fname)
+            logger.debug(f"Close file ({self.fname}) successfully")
         except Exception as e:
-            logger.error("Close file %s failed %s", self.fname, e)
+            logger.error(f"Close file {self.fname} failed {e}")
             raise
         self.fd = -1
         self.fname = ""
@@ -595,7 +586,7 @@ class Hf3fsFile:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         if exc_type:
-            logger.error("Hf3fsFile closed with exception: %s", exc_val)
+            logger.error(f"Hf3fsFile closed with exception: {exc_val}")
         return False  # False, exceptions are not suppressed
 
     @staticmethod
@@ -609,7 +600,7 @@ class Hf3fsFile:
             os.remove(fname)
             return True
         except OSError as e:
-            logger.error("Failed to remove file %s: %s", fname, e)
+            logger.error(f"Failed to remove file {fname}: {e}")
             return False
 
     @staticmethod
@@ -617,7 +608,7 @@ class Hf3fsFile:
         try:
             os.rename(old_fname, new_fname)
         except OSError as e:
-            logger.warning("rename %s to %s failed, %s", old_fname, new_fname, e)
+            logger.warning(f"rename {old_fname} to {new_fname} failed, {e}")
             raise
         return
 

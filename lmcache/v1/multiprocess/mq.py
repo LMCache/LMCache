@@ -253,17 +253,7 @@ class ClientPollingLoop:
                 if event & zmq.POLLIN:
                     owner = self._socket_to_client.get(sock)
                     if owner is not None:
-                        try:
-                            owner.process_inbound()
-                        except Exception:
-                            # This loop is shared by every client in the
-                            # process, so one undecodable or unexpected frame
-                            # must not terminate it: that would strand all
-                            # other clients' pending and future requests.
-                            logger.exception(
-                                "process_inbound failed; dropping this frame "
-                                "and continuing the shared polling loop"
-                            )
+                        owner.process_inbound()
 
         # Drain remaining ops so any waiting threads unblock.
         self._process_ops()
@@ -298,45 +288,43 @@ class MessageQueueClient:
     def process_outbound_task(self):
         try:
             while wrapped_request := self.input_queue.get_nowait():
-                request_uid = wrapped_request.request_uid
-                try:
-                    b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
-                    b_request_type = msgspec_encode(
-                        wrapped_request.request_type, cls=RequestType
-                    )
-                    payload_classes = get_payload_classes(wrapped_request.request_type)
-                    if len(payload_classes) != len(wrapped_request.request_payloads):
-                        expected_classes = [cls.__name__ for cls in payload_classes]
-                        actual_classes = [
-                            type(payload).__name__
-                            for payload in wrapped_request.request_payloads
-                        ]
-                        raise ValueError(
-                            f"Payload count mismatch for request "
-                            f"{wrapped_request.request_type}: "
-                            f"expected {len(payload_classes)} payloads "
-                            f"{expected_classes}, "
-                            f"got {len(wrapped_request.request_payloads)} payloads "
-                            f"{actual_classes}. "
-                            f"This is likely caused by a version mismatch between "
-                            f"the lmcache client and lmcache server."
-                        )
+                # wrapped_request = self.input_queue.get_nowait()
 
-                    b_payloads = [
-                        msgspec_encode(payload, cls=cls)
-                        for payload, cls in zip(
-                            wrapped_request.request_payloads,
-                            payload_classes,
-                            strict=False,
-                        )
+                # Update the pending futures
+                request_uid = wrapped_request.request_uid
+                self.pending_futures[request_uid] = wrapped_request.future
+
+                # Send the request
+                b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
+                b_request_type = msgspec_encode(
+                    wrapped_request.request_type, cls=RequestType
+                )
+                payload_classes = get_payload_classes(wrapped_request.request_type)
+                if len(payload_classes) != len(wrapped_request.request_payloads):
+                    expected_classes = [cls.__name__ for cls in payload_classes]
+                    actual_classes = [
+                        type(p).__name__ for p in wrapped_request.request_payloads
                     ]
-                    self.pending_futures[request_uid] = wrapped_request.future
-                    self.socket.send_multipart(
-                        [b_request_uid, b_request_type] + b_payloads
+                    raise ValueError(
+                        f"Payload count mismatch for request "
+                        f"{wrapped_request.request_type}: "
+                        f"expected {len(payload_classes)} payloads "
+                        f"{expected_classes}, "
+                        f"got {len(wrapped_request.request_payloads)} payloads "
+                        f"{actual_classes}. "
+                        f"This is likely caused by a version mismatch between "
+                        f"the lmcache client and lmcache server."
                     )
-                except Exception as exc:
-                    self.pending_futures.pop(request_uid, None)
-                    wrapped_request.future.set_exception(exc)
+
+                b_payloads = [
+                    msgspec_encode(payload, cls=cls)
+                    for payload, cls in zip(
+                        wrapped_request.request_payloads,
+                        payload_classes,
+                        strict=False,
+                    )
+                ]
+                self.socket.send_multipart([b_request_uid, b_request_type] + b_payloads)
         except queue.Empty:
             pass
 

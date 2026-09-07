@@ -16,6 +16,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Empty, Queue
+import os
 import threading
 
 # First Party
@@ -151,37 +152,32 @@ class BlendCoordinatorClient:
             self._client.close()
 
     @classmethod
-    def maybe_create(
-        cls,
-        url: str | None,
-        *,
-        timeout: float,
-        match_concurrency: int,
-    ) -> "BlendCoordinatorClient | None":
+    def maybe_create(cls, url: str | None) -> "BlendCoordinatorClient | None":
         """Build a started client for ``url``; an empty URL returns ``None``.
+
+        Timing knobs are read from the environment:
+        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (seconds, default 1.0; used as
+        both the per-request HTTP timeout and the per-lookup match budget) and
+        ``LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY`` (default 8).
 
         Args:
             url: Coordinator base URL; empty or ``None`` disables the client.
-            timeout: Seconds used as both the per-request HTTP timeout and the
-                per-lookup match budget.
-            match_concurrency: Max match round-trips in flight at once.
 
         Returns:
             A started client, or ``None`` when ``url`` is empty (the blend
             module then runs purely local).
-
-        Raises:
-            ValueError: If ``match_concurrency`` is not positive.
         """
         url = (url or "").strip()
         if not url:
             return None
+        concurrency = int(os.getenv("LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY", "8"))
+        timeout = float(os.getenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.0"))
         logger.info("Blend coordinator client enabled -> %s", url)
         return cls(
             url,
             request_timeout=timeout,
             match_budget_s=timeout,
-            match_concurrency=match_concurrency,
+            match_concurrency=concurrency,
         )
 
     # -- daemon ------------------------------------------------------------

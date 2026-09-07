@@ -201,7 +201,7 @@ class AzureConnector(RemoteConnector):
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Download the chunk for ``key`` into a freshly allocated MemoryObj.
 
-        The blob bytes are downloaded and copied into the preallocated buffer.
+        The blob is streamed directly into the preallocated buffer (zero-copy).
 
         Args:
             key: The cache engine key to fetch.
@@ -245,17 +245,8 @@ class AzureConnector(RemoteConnector):
         try:
             blob = self.container_client.get_blob_client(self._blob_name(key_str))
             downloader = await blob.download_blob()
-            # Read the whole blob into bytes, then copy into the buffer.
-            data = await downloader.readall()
-            dst = memoryview(memory_obj.byte_array).cast("B")
-            if len(data) != len(dst):
-                logger.error(
-                    f"Downloaded {len(data)} bytes for {key_str} but the buffer is "
-                    f"{len(dst)} bytes; dropping."
-                )
-                memory_obj.ref_count_down()
-                return None
-            dst[:] = data
+            # Zero-copy: stream straight into the preallocated buffer.
+            await downloader.readinto(memory_obj.byte_array)
             return memory_obj
         except Exception as e:
             logger.error("Failed to download %s from Azure: %s", key_str, e)
@@ -298,12 +289,12 @@ class AzureConnector(RemoteConnector):
 
         try:
             blob = self.container_client.get_blob_client(self._blob_name(key_str))
-            # upload_blob cannot consume a raw memoryview; it needs bytes.
-            data = bytes(memoryview(memory_obj.byte_array).cast("B"))
+            # Pass the memoryview directly (zero-copy); bytes() would copy the
+            # whole chunk.
             await blob.upload_blob(
-                data,
+                memory_obj.byte_array,
                 overwrite=True,
-                length=len(data),
+                length=memory_obj.get_physical_size(),
             )
             self.object_size_cache[key_str] = memory_obj.get_physical_size()
             logger.debug("Uploaded %s to Azure successfully", key_str)

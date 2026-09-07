@@ -18,19 +18,18 @@ from typing import TYPE_CHECKING, Any
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.controllers.base import Controller
 
 if TYPE_CHECKING:
     # Third Party
     import httpx
 
     # First Party
-    from lmcache.v1.mp_coordinator.views.instance_registry import MPInstance
+    from lmcache.v1.mp_coordinator.registry import MPInstance
 
 logger = init_logger(__name__)
 
 
-class PrefetchManager(Controller):
+class PrefetchManager:
     """Submit warm-prefetch requests to MP servers and proxy their status."""
 
     async def submit_prefetch(

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard
+import errno
 import os
 import platform
 
@@ -14,12 +15,28 @@ import pytest
 from tests.v1.storage_backend.raw_block_test_utils import (
     RAW_BLOCK_CI_BLOCK_ALIGN,
     RAW_BLOCK_CI_CAPACITY_BYTES,
-    is_skip_safe_io_error,
     make_raw_block_file,
 )
 
 lmcache_rust_raw_block_io = pytest.importorskip("lmcache_rust_raw_block_io")
 RawBlockDevice = lmcache_rust_raw_block_io.RawBlockDevice
+
+
+def _is_skip_safe_io_error(exc: BaseException) -> bool:
+    if getattr(exc, "errno", None) in {errno.EINVAL, errno.ENOSYS, errno.EPERM}:
+        return True
+    msg = str(exc).lower()
+    return any(
+        text in msg
+        for text in (
+            "function not implemented",
+            "invalid argument",
+            "io_uring init failed",
+            "not supported",
+            "operation not permitted",
+            "unsupported",
+        )
+    )
 
 
 def test_raw_block_device_posix_roundtrip_on_tmp_file(tmp_path):
@@ -90,13 +107,13 @@ def test_raw_block_device_iouring_best_effort_roundtrip(tmp_path):
         out = bytearray(len(payload))
 
         batch_id = dev.batched_write([4096], [payload], [len(payload)])
-        assert dev.wait_iouring(batch_id) == ([True], [])
+        dev.wait_iouring(batch_id)
         batch_id = dev.batched_read([4096], [out], [len(out)])
-        assert dev.wait_iouring(batch_id) == ([True], [])
+        dev.wait_iouring(batch_id)
 
         assert out == payload
     except Exception as e:
-        if is_skip_safe_io_error(e):
+        if _is_skip_safe_io_error(e):
             pytest.skip(f"io_uring is unavailable on this runner: {e}")
         raise
     finally:
@@ -127,7 +144,7 @@ def test_raw_block_device_odirect_optional_smoke(tmp_path):
         dev.pread_into(4096, out, len(out), len(out))
         assert out == payload
     except Exception as e:
-        if is_skip_safe_io_error(e):
+        if _is_skip_safe_io_error(e):
             pytest.skip(f"O_DIRECT is unavailable on this runner: {e}")
         raise
     finally:

@@ -276,10 +276,8 @@ class MockConnector(RemoteConnector):
             )
             if memory_obj is None:
                 logger.warning(
-                    "Failed to allocate memory even with busy loop on %s out of %s"
-                    " objects",
-                    i,
-                    len(mock_objs),
+                    "Failed to allocate memory even with",
+                    f" busy loop on {i} out of {len(mock_objs)} objects",
                 )
                 break
             memory_objs.append(memory_obj)

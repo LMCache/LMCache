@@ -24,8 +24,8 @@ from lmcache.v1.mp_coordinator.blend_client import (
     PENDING,
     BlendCoordinatorClient,
 )
+from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.schemas import decode_tokens
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 CHUNK = 3
 
@@ -169,30 +169,22 @@ def test_take_match_clears():
         client.close()
 
 
-def test_maybe_create():
-    kwargs = {"timeout": 1.0, "match_concurrency": 8}
-    assert BlendCoordinatorClient.maybe_create("", **kwargs) is None
-    assert BlendCoordinatorClient.maybe_create("   ", **kwargs) is None
-    assert BlendCoordinatorClient.maybe_create(None, **kwargs) is None
+def test_maybe_create(monkeypatch: pytest.MonkeyPatch):
+    assert BlendCoordinatorClient.maybe_create("") is None
+    assert BlendCoordinatorClient.maybe_create("   ") is None
+    assert BlendCoordinatorClient.maybe_create(None) is None
 
-    client = BlendCoordinatorClient.maybe_create("http://coord:9300", **kwargs)
+    monkeypatch.delenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", raising=False)
+    client = BlendCoordinatorClient.maybe_create("http://coord:9300")
     assert client is not None
-    assert client.match_budget_s == 1.0
+    assert client.match_budget_s == 1.0  # default timeout
     client.close()
 
-    client = BlendCoordinatorClient.maybe_create(
-        "http://coord:9300", timeout=1.5, match_concurrency=2
-    )
+    monkeypatch.setenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.5")
+    client = BlendCoordinatorClient.maybe_create("http://coord:9300")
     assert client is not None
-    assert client.match_budget_s == 1.5
+    assert client.match_budget_s == 1.5  # env override
     client.close()
-
-
-def test_maybe_create_rejects_bad_concurrency():
-    with pytest.raises(ValueError):
-        BlendCoordinatorClient.maybe_create(
-            "http://coord:9300", timeout=1.0, match_concurrency=0
-        )
 
 
 def test_pending_sentinel_distinct():

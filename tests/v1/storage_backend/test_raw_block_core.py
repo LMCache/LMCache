@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 # Standard
-from typing import Any
 import ctypes
 import dataclasses
 import stat
@@ -55,7 +54,6 @@ class _RecordingRawDevice:
         self.read_data = b""
         self.read_cursor = 0
         self.waited_batch_id: int | None = None
-        self._batch_results: dict[int, list[bool]] = {}
 
     def batched_write(
         self,
@@ -68,26 +66,10 @@ class _RecordingRawDevice:
         self.offsets = offsets
         self.buffers = buffers
         self.lengths = lengths
-        self._batch_results[17] = [True] * len(offsets)
         return 17
 
-    def batched_read(
-        self,
-        offsets: list[int],
-        buffers: list[memoryview],
-        lengths: list[int],
-    ) -> int:
-        for target, total_len in zip(buffers, lengths, strict=True):
-            self.read_buffers.append(target)
-            end = self.read_cursor + total_len
-            target[:total_len] = self.read_data[self.read_cursor : end]
-            self.read_cursor = end
-        self._batch_results[17] = [True] * len(offsets)
-        return 17
-
-    def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
+    def wait_iouring(self, batch_id: int) -> None:
         self.waited_batch_id = batch_id
-        return self._batch_results.pop(batch_id), []
 
     def read_uring(
         self,
@@ -369,7 +351,6 @@ class _FakeRawDevice:
             tuple[list[int], list[int], list[int | None] | None]
         ] = []
         self.write_uring_calls: list[tuple[int, int, int, int | None]] = []
-        self._batch_results: dict[int, list[bool]] = {}
 
     def size_bytes(self) -> int:
         return self._size_bytes
@@ -390,12 +371,10 @@ class _FakeRawDevice:
     ) -> int:
         del buffers
         self.batched_write_calls.append((offsets, total_lens, placement_ids))
-        self._batch_results[123] = [True] * len(offsets)
         return 123
 
-    def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
+    def wait_iouring(self, batch_id: int) -> None:
         assert batch_id == 123
-        return self._batch_results.pop(batch_id), []
 
     def write_uring(
         self,
@@ -422,7 +401,6 @@ def _make_fake_io_uring_core(
     fdp_slot_affinity_enabled: bool = False,
 ) -> tuple[RawBlockCore, _FakeRawDevice]:
     raw_devices: list[_FakeRawDevice] = []
-    device_path = tmp_path / "ng0n1"
 
     def create_fake_device(path: str, **kwargs):
         del path, kwargs
@@ -436,19 +414,13 @@ def _make_fake_io_uring_core(
         types.SimpleNamespace(RawBlockDevice=create_fake_device),
     )
     if use_uring_cmd:
-        real_stat = raw_block_core.os.stat
-
-        def fake_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
-            if str(path) == str(device_path):
-                return types.SimpleNamespace(st_mode=stat.S_IFCHR)
-            return real_stat(path, *args, **kwargs)
-
         monkeypatch.setattr(
             raw_block_core.os,
             "stat",
-            fake_stat,
+            lambda path: types.SimpleNamespace(st_mode=stat.S_IFCHR),
         )
 
+    device_path = tmp_path / "ng0n1"
     core = RawBlockCore(
         RawBlockCoreConfig(
             device_path=str(device_path),

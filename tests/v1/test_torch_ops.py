@@ -72,7 +72,6 @@ def _build_backend_params() -> list:
             # First Party
             import lmcache.cuda_ops as cuda_ops
 
-            cuda_ops.PageBufferShapeDesc = lmcache_native.PageBufferShapeDesc
             params.append(pytest.param(("cuda_ops", cuda_ops, "cuda"), id="cuda_ops"))
         except ImportError:
             pass
@@ -2487,58 +2486,6 @@ def scenario_multi_layer_block_kv_transfer(
                 f"SGLang NB kv={kv} layer={i} mismatch"
             )
 
-    # --- vLLM per-layer (K, V) tuple format ---
-    # This format (NL_X_TWO_X_NB_BS_NH_HS) is implemented only in the Python
-    # fallback; the compiled c_ops/xpu_ops backends have no transfer for it,
-    # so exercise it solely on the Python-fallback backend (any device).
-    if ops is _py_ops:
-        torch.manual_seed(707)
-        paged_tuple = [
-            (
-                torch.randn(
-                    num_blocks, block_size, num_heads, head_size, dtype=dtype
-                ).to(device),
-                torch.randn(
-                    num_blocks, block_size, num_heads, head_size, dtype=dtype
-                ).to(device),
-            )
-            for _ in range(num_layers)
-        ]
-        engine_kv_format_tuple = ops.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS
-        d2h_chunks_tuple = _alloc_chunks(
-            (2, num_layers, chunk_tokens, hidden_dim), num_chunks
-        )
-        ops.multi_layer_block_kv_transfer(
-            paged_tuple,
-            d2h_chunks_tuple,
-            torch.tensor(block_ids, dtype=torch.int64, device=device),
-            torch.device(device),
-            ops.TransferDirection.D2H,
-            shape_desc,
-            chunk_tokens,
-            engine_kv_format_tuple,
-            0,
-        )
-        paged_tuple_h2d = [
-            (torch.zeros_like(k), torch.zeros_like(v)) for k, v in paged_tuple
-        ]
-        ops.multi_layer_block_kv_transfer(
-            paged_tuple_h2d,
-            d2h_chunks_tuple,
-            torch.tensor(block_ids, dtype=torch.int64, device=device),
-            torch.device(device),
-            ops.TransferDirection.H2D,
-            shape_desc,
-            chunk_tokens,
-            engine_kv_format_tuple,
-            0,
-        )
-        for i in range(num_layers):
-            for kv in range(2):
-                assert torch.allclose(
-                    paged_tuple[i][kv], paged_tuple_h2d[i][kv], atol=1e-6
-                ), f"Per-layer (K,V) tuple Layer {i} kv={kv} round-trip mismatch"
-
     # --- skip_prefix_n_blocks > 0 ---
     torch.manual_seed(505)
     skip_n = 2
@@ -2892,7 +2839,7 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
 # 3. Registry
 # ==========================================
 
-# cover the torch baseline surface mirrored by the native pybind modules
+# cover pybind list in csrc/cuda/pybind.cpp
 SCENARIO_REGISTRY = {
     "transfer_direction_enum": scenario_transfer_direction_enum,
     "multi_layer_kv_transfer": scenario_multi_layer_kv_transfer,

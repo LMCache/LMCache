@@ -145,8 +145,12 @@ def test_wrap_sglang_kv_caches_uses_platform_wrapper_in_kv_order(
 ) -> None:
     """Registration dispatches each tensor through the platform wrapper."""
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
-    k_pool = [torch.tensor([1]), torch.tensor([2])]
-    v_pool = [torch.tensor([3]), torch.tensor([4])]
+    kv_caches = [
+        torch.tensor([1]),
+        torch.tensor([2]),
+        torch.tensor([3]),
+        torch.tensor([4]),
+    ]
     wrapped_tensors: list[torch.Tensor] = []
 
     def wrap_one(tensor: torch.Tensor) -> object:
@@ -160,11 +164,11 @@ def test_wrap_sglang_kv_caches_uses_platform_wrapper_in_kv_order(
         raising=False,
     )
 
-    wrapped = adapter_mod._wrap_sglang_kv_caches(k_pool, v_pool)
+    wrapped = adapter_mod._wrap_sglang_kv_caches(kv_caches)
     wrapped_namespaces = cast(list[SimpleNamespace], wrapped)
 
-    assert wrapped_tensors == [*k_pool, *v_pool]
-    assert [wrapper.tensor for wrapper in wrapped_namespaces] == [*k_pool, *v_pool]
+    assert wrapped_tensors == kv_caches
+    assert [wrapper.tensor for wrapper in wrapped_namespaces] == kv_caches
 
 
 def test_wrap_sglang_kv_caches_requires_full_handle_capability(
@@ -187,14 +191,11 @@ def test_wrap_sglang_kv_caches_requires_full_handle_capability(
         )
 
 
-def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
-    """Registration rejects a wire payload that cannot split into K/V pairs."""
+def test_wrap_sglang_kv_caches_rejects_empty_list() -> None:
+    """Registration rejects an empty KV cache list."""
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
-    with pytest.raises(ValueError, match="matching K and V layers"):
-        adapter_mod._wrap_sglang_kv_caches(
-            [torch.tensor([1]), torch.tensor([2])],
-            [torch.tensor([3])],
-        )
+    with pytest.raises(ValueError, match="non-empty KV caches"):
+        adapter_mod._wrap_sglang_kv_caches([])
 
 
 def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
@@ -239,8 +240,7 @@ def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
     )
     monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", lambda tensor: tensor)
 
-    k_pool = [torch.empty(4, 1, 8) for _ in range(2)]
-    v_pool = [torch.empty(4, 1, 8) for _ in range(2)]
+    kv_caches = [torch.empty(4, 1, 8) for _ in range(4)]
     LMCacheMPConnector(
         sgl_config=SimpleNamespace(model_path="test-model"),
         tp_size=1,
@@ -248,8 +248,7 @@ def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
         page_size=2,
         host="127.0.0.1",
         port=5556,
-        k_pool=k_pool,
-        v_pool=v_pool,
+        kv_caches=kv_caches,
     )
 
     req_client.register_kv_cache.assert_called_once()
@@ -295,6 +294,7 @@ def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> 
     _, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=False)
     conn.req_client = MagicMock(name="rpc_client")
+    conn.engine_group_infos = []
 
     future = conn.store_kv_async(_store_metadata(num_tokens=4 * _CHUNK_SIZE))
 

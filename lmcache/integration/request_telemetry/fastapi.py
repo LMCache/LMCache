@@ -90,13 +90,13 @@ class FastAPIRequestTelemetry(RequestTelemetry):
             with urlopen(request, timeout=self._timeout) as response:
                 if response.status >= 400:
                     logger.warning(
-                        "FastAPI telemetry request failed with status %s",
-                        response.status,
+                        f"FastAPI telemetry request failed with"
+                        f" status {response.status}"
                     )
         except URLError as e:
-            logger.warning("FastAPI telemetry request failed: %s", e)
+            logger.warning(f"FastAPI telemetry request failed: {e}")
         except Exception as e:
-            logger.warning("FastAPI telemetry request failed unexpectedly: %s", e)
+            logger.warning(f"FastAPI telemetry request failed unexpectedly: {e}")
 
     def close(self) -> None:
         """Shutdown the thread pool executor."""

@@ -15,8 +15,8 @@ import torch
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
-from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -78,6 +78,7 @@ def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
     engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
     per_layer_engine_group_idx: Sequence[int] | None = None,
+    per_layer_tokens_per_block: Sequence[int] | None = None,
 ) -> list[tuple[LayerGroupIdentity, list[int]]]:
     """Partition layer indices by :data:`LayerGroupIdentity`.
 
@@ -94,6 +95,11 @@ def group_layers_by_identity(
             identity even if their tensor shapes match. Layers whose value is
             ``EXCLUDED_ENGINE_GROUP`` are left out of all groups (e.g. cross-layer
             KV-sharing layers whose KV lives in their target owner's blocks).
+        per_layer_tokens_per_block: Optional logical tokens-per-block per layer,
+            as declared by the engine (``EngineGroupInfo.tokens_per_block``).
+            Used as a fallback for ``block_size`` when the format's spec raises
+            ``ValueError`` — i.e. for NBBS-fused formats (SGLang MLA) where the
+            block axis is folded into PBS and ``block_size()`` is undefined.
 
     Returns:
         A list of ``(identity, layer_indices)`` pairs sorted by each group's
@@ -138,7 +144,16 @@ def group_layers_by_identity(
         nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
         hs = get_head_size(kv_caches, layer_format, idx)
         dt = get_dtype(kv_caches, layer_format, idx)
-        bs = get_block_size(kv_caches, layer_format, idx)
+        try:
+            bs = get_block_size(kv_caches, layer_format, idx)
+        except ValueError:
+            # NBBS-fused formats (e.g. SGLang MLA NL_X_NBBS_ONE_HS) fold the
+            # block axis into PBS, so block_size() is undefined. Fall back to
+            # the engine-declared tokens_per_block from EngineGroupInfo.
+            if per_layer_tokens_per_block is not None:
+                bs = per_layer_tokens_per_block[idx]
+            else:
+                raise
 
         identity = LayerGroupIdentity(
             kv_size=kv_size,
@@ -207,16 +222,6 @@ class KernelGroupInfo:
     sw_size_tokens: int = -1
     """Sliding window size in logical tokens for this group's layers.
     ``-1`` means the layers are not sliding-window attention."""
-    extra_object_group_tag: int = 0
-    """Connector-private extra-group tag. ``0`` = a regular group, bucketed
-    by (recurrent, window) under ``separate_object_groups``; ``> 0`` = an
-    extra group (e.g. the CacheBlend fused-aux pool) that buckets by tag —
-    groups sharing a tag share an object group, and extras always sort
-    after the regular groups."""
-    recurrent_state: bool = False
-    """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
-    rather than per-token attention KV. The window reflects restore
-    semantics, so ``full_sw_kv`` forcing must not widen it."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -265,19 +270,6 @@ class KernelGroupInfo:
 KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
 
 
-class _ObjectBucket(NamedTuple):
-    """Object-group bucket key under ``separate_object_groups``.
-
-    Regular groups (``extra_tag == 0``) bucket by ``(recurrent, sw_chunks)``;
-    tagged extras bucket by ``extra_tag`` (their other fields ride along for
-    bookkeeping but extras never mix with regular groups).
-    """
-
-    extra_tag: int
-    recurrent: bool
-    sw_chunks: int
-
-
 @dataclass
 class ObjectGroupInfo:
     """Metadata for an 'object group'.
@@ -298,14 +290,6 @@ class ObjectGroupInfo:
     """Cross-chunk sliding window size in LMCache chunks shared by every
     kernel group in this object group. ``-1`` means the kernel groups are
     not sliding-window attention."""
-
-    standalone: bool = False
-    """Whether this is a connector-private (standalone) object group (see
-    ``KernelGroupInfo.extra_object_group_tag``)."""
-
-    recurrent: bool = False
-    """Whether every kernel group in this object group holds recurrent state
-    pages; such groups keep their window even under ``full_sw_kv``."""
 
 
 class KVLayerGroupsManager:
@@ -363,6 +347,7 @@ class KVLayerGroupsManager:
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,
+            get_page_buffer_size,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
@@ -379,8 +364,20 @@ class KVLayerGroupsManager:
         per_layer_engine_group_idx = get_engine_group_indices(
             engine_group_infos, num_layers
         )
+        # Build a per-layer tokens_per_block mapping from engine_group_infos so
+        # that group_layers_by_identity can fall back to it for NBBS-fused
+        # formats (SGLang MLA) where block_size() is undefined.
+        per_layer_tokens_per_block: list[int] | None = None
+        if engine_group_infos:
+            per_layer_tokens_per_block = [0] * num_layers
+            for info in engine_group_infos:
+                for layer_idx in info.layer_indices:
+                    per_layer_tokens_per_block[layer_idx] = info.tokens_per_block
         groups_by_identity = group_layers_by_identity(
-            kv_caches, engine_kv_formats, per_layer_engine_group_idx
+            kv_caches,
+            engine_kv_formats,
+            per_layer_engine_group_idx,
+            per_layer_tokens_per_block=per_layer_tokens_per_block,
         )
 
         # Engine group infos are produced by the same group_layers_by_identity
@@ -404,7 +401,14 @@ class KVLayerGroupsManager:
             group_format = identity.engine_kv_format
             # Block count is per engine group (each is its own block-id space), so
             # read it from this group's own tensor rather than a context-wide value.
-            group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
+            try:
+                group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
+            except ValueError:
+                # NBBS-fused formats have no separate block axis; derive
+                # num_blocks from page_buffer_size // block_size.
+                group_num_blocks = (
+                    get_page_buffer_size([kv_caches[indices[0]]], group_format) // bs
+                )
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 group_format,
@@ -421,7 +425,9 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
-            info = engine_group_infos[group_idx] if engine_group_infos else None
+            info: "EngineGroupInfo | None" = (
+                engine_group_infos[group_idx] if engine_group_infos else None
+            )
             if info is not None and tuple(indices) != tuple(info.layer_indices):
                 raise ValueError(
                     f"group {group_idx}: engine group info covers layers "
@@ -456,12 +462,6 @@ class KVLayerGroupsManager:
                     tokens_per_block=tokens_per_block,
                     engine_group_idx=engine_group_idx,
                     sw_size_tokens=sw_size_tokens,
-                    extra_object_group_tag=(
-                        info.extra_object_group_tag if info is not None else 0
-                    ),
-                    recurrent_state=(
-                        info.recurrent_state if info is not None else False
-                    ),
                 )
             )
 
@@ -605,39 +605,21 @@ class KVLayerGroupsManager:
         Returns:
             An :class:`AttnWindowDesc` with one entry per object group, in
             object-group order; the entry is ``-1`` for a non-sliding-window
-            group. ``group_kinds`` labels each object group so consumers can
-            tell attention, recurrent-state, and connector-private standalone
-            groups apart.
+            group.
 
         Note:
             With object-group separation disabled (the default), the result
             has a single full-attention entry.
         """
-        kinds: tuple[GroupKind, ...] = tuple(
-            "standalone"
-            if g.standalone
-            else ("recurrent" if g.recurrent else "attention")
-            for g in self._object_groups
-        )
         if self._full_sw_kv:
-            # full_sw_kv: attention groups report full attention;
-            # recurrent-state groups keep their window (position-bound
-            # snapshots the blend never touches).
-            return AttnWindowDesc(
-                num_chunks_in_sw=[
-                    (g.sw_size_chunks if g.sw_size_chunks >= 1 else -1)
-                    if g.recurrent
-                    else -1
-                    for g in self._object_groups
-                ],
-                group_kinds=kinds,
-            )
+            # full_sw_kv: every group reports full attention, no cross-chunk
+            # window skipping (mirrors get_subchunk_sw_size_tokens).
+            return AttnWindowDesc(num_chunks_in_sw=[-1] * len(self._object_groups))
         return AttnWindowDesc(
             num_chunks_in_sw=[
                 w if w >= 1 else -1
                 for w in (g.sw_size_chunks for g in self._object_groups)
-            ],
-            group_kinds=kinds,
+            ]
         )
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
@@ -669,11 +651,8 @@ class KVLayerGroupsManager:
         """Bucket kernel groups into object groups.
 
         Puts all kernel groups into a single object group when object-group
-        separation is disabled (the default). Otherwise groups the kernel
-        groups by (recurrent, sliding-window chunks), except that tagged
-        extra groups (``extra_object_group_tag``, connector-private) bucket
-        by tag — and always sort after the regular groups, so the shared
-        group ids match a registration without any extras.
+        separation is disabled (the default). Otherwise groups the kernel groups
+        by sliding-window size measured in number of chunks.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -689,37 +668,20 @@ class KVLayerGroupsManager:
             ]
 
         chunk_size = self._lmcache_tokens_per_chunk
-        # Recurrent pages and SW attention KV never share an object even when
-        # windows coincide; tagged extras bucket by tag alone.
-        groups_by_bucket: dict[_ObjectBucket, list[int]] = defaultdict(list)
-        bucket_sw_size: dict[_ObjectBucket, int] = {}
+        groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
         for kernel_group_idx, group in enumerate(self._kernel_groups):
             if group.sw_size_tokens == -1:
                 sw_size_chunks = -1
             else:
                 sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
-            bucket = _ObjectBucket(
-                extra_tag=group.extra_object_group_tag,
-                recurrent=group.recurrent_state,
-                sw_chunks=sw_size_chunks,
-            )
-            groups_by_bucket[bucket].append(kernel_group_idx)
-            bucket_sw_size[bucket] = sw_size_chunks
-        # Extras sort AFTER every regular group, so the shared (regular)
-        # group ids are identical to a registration without extras —
-        # regardless of the order the connector registered its pools in.
+            groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
         return [
             ObjectGroupInfo(
                 kernel_group_indices=kernel_group_indices,
-                sw_size_chunks=bucket_sw_size[bucket],
-                standalone=bucket.extra_tag != 0,
-                recurrent=all(
-                    self._kernel_groups[i].recurrent_state for i in kernel_group_indices
-                ),
+                sw_size_chunks=sw_size_chunks,
             )
-            for bucket, kernel_group_indices in sorted(
-                groups_by_bucket.items(),
-                key=lambda kv: (kv[0].extra_tag != 0, kv[1][0]),
+            for sw_size_chunks, kernel_group_indices in sorted(
+                groups_by_sw_size.items(), key=lambda kv: kv[1][0]
             )
         ]
 
@@ -881,7 +843,7 @@ def parse_kvcache_shape_spec(
         shape_desc.nh = nh
         shape_desc.hs = hs
         shape_desc.element_size = dtype.itemsize
-        shape_desc.dtype = dtype
+        set_shape_desc_dtype(shape_desc, dtype)
 
         indices = list(range(layer_offset, layer_offset + layer_count))
         groups.append(

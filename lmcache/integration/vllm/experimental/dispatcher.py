@@ -46,6 +46,7 @@ class QTensorFeature:
             q_model_name=LMCacheSDKCacheKind.QUERY.server_model_name(
                 ctx.worker_adapter.model_name
             ),
+            send_lmcache_request=ctx.send_lmcache_request,
         )
         self._capture = QRingBufferCapture(ctx.worker_adapter, self._q_ring_adapter)
 
@@ -102,6 +103,7 @@ class FeatureContext:
     """
 
     worker_adapter: LMCacheMPWorkerAdapter
+    send_lmcache_request: Callable[..., Any]
 
 
 FeatureFactory = Callable[[FeatureContext], "QTensorFeature"]

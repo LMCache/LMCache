@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-layer MLA: ``NL x [NB, BS, HS]``.
+"""Per-layer MLA: ``NL x [NB, BS, HS]`` (e.g. vLLM MLA).
 
 A ``list[NL]`` of a 3-D tensor; K and V share one latent (``num_heads == 1``).
-Used by vLLM MLA and normalized SGLang MP MLA.
 """
 
 # Each spec indexes ``kv_caches`` (Tensor | nested list) per its format, so the
@@ -21,7 +20,7 @@ import lmcache.lmcache_native as lmcache_native
 
 class NL_X_NB_BS_HS_Spec(KVFormatSpec):
     engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
-    attention_backends = ("vLLM MLA / SGLang MLA (MP)",)
+    attention_backends = ("vLLM MLA",)
     is_layer_list = True
     is_mla = True
 

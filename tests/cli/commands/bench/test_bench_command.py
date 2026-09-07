@@ -24,18 +24,10 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
     RequestResult,
 )
-from lmcache.cli.commands.bench.engine_bench.workloads.base import MetricSection
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_workload(sections: list[MetricSection] = []) -> MagicMock:  # noqa: B006
-    """A stand-in workload contributing *sections* to the report."""
-    workload = MagicMock()
-    workload.extra_metric_sections.return_value = list(sections)
-    return workload
 
 
 def _make_args(**overrides) -> argparse.Namespace:
@@ -219,16 +211,6 @@ class TestBenchCommandRegistration:
         assert args.ldqa_shuffle_policy == "random"
         assert args.ldqa_num_inflight_requests == 3
         assert args.quiet is False
-        assert args.no_warmup is False
-
-    def test_no_warmup_flag_accepted(self) -> None:
-        parser = argparse.ArgumentParser()
-        subparsers = parser.add_subparsers()
-        cmd = BenchCommand()
-        cmd.register(subparsers)
-
-        args = parser.parse_args(["bench", "engine", "--no-warmup"])
-        assert args.no_warmup is True
 
 
 # ---------------------------------------------------------------------------
@@ -419,30 +401,6 @@ class TestExportConfig:
         assert data["ldqa_document_length"] == 5000
         assert data["ldqa_query_per_document"] == 4
 
-    def test_export_config_records_no_warmup(
-        self,
-        tmp_path,  # type: ignore[no-untyped-def]
-    ) -> None:
-        export_path = str(tmp_path / "exported.json")
-        args = _make_args(
-            no_warmup=True,
-            export_config=export_path,
-            quiet=True,
-        )
-
-        cmd = BenchCommand()
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            run_engine_bench(cmd, args)
-        finally:
-            sys.stdout = old_stdout
-
-        with open(export_path) as f:
-            data = json.load(f)
-
-        assert data["no_warmup"] is True
-
 
 # ---------------------------------------------------------------------------
 # Final metrics emission
@@ -459,7 +417,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            _emit_final_metrics(cmd, config, final, args, _make_workload())
+            _emit_final_metrics(cmd, config, final, args)
         finally:
             sys.stdout = old_stdout
 
@@ -479,7 +437,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            _emit_final_metrics(cmd, config, final, args, _make_workload())
+            _emit_final_metrics(cmd, config, final, args)
         finally:
             sys.stdout = old_stdout
 
@@ -489,32 +447,6 @@ class TestBenchCommandEmitMetrics:
         assert "decode" in data["metrics"]
         assert data["metrics"]["config"]["model"] == "test-model"
         assert data["metrics"]["results"]["successful"] == 10
-
-    def test_emit_final_metrics_renders_workload_sections(self) -> None:
-        """A workload's sections reach the report alongside the common ones."""
-        cmd = BenchCommand()
-        args = _make_args(quiet=False, format="json")
-        workload = _make_workload(
-            [
-                MetricSection(
-                    key="quality",
-                    label="Answer Quality",
-                    entries=[("f1_mean", "Mean F1", 0.61)],
-                )
-            ]
-        )
-
-        old_stdout = sys.stdout
-        sys.stdout = buf = io.StringIO()
-        try:
-            _emit_final_metrics(
-                cmd, _make_config(), _make_final_stats(), args, workload
-            )
-        finally:
-            sys.stdout = old_stdout
-
-        data = json.loads(buf.getvalue())
-        assert data["metrics"]["quality"]["f1_mean"] == 0.61
 
 
 # ---------------------------------------------------------------------------

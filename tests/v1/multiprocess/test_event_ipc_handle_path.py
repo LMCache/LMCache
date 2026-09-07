@@ -14,6 +14,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.multiprocess.protocol import RequestType
 
 
 class _FakeEventBackend:
@@ -55,6 +56,13 @@ class _FakeEventBackend:
 
     def synchronize_event(self, event: object, device: object) -> None:
         self.calls.append(("synchronize", event, device))
+
+
+class _WorkerEvent:
+    """Worker event without a direct ``ipc_handle`` method."""
+
+    def wait(self, stream: object | None = None) -> None:
+        return None
 
 
 class _NoopDispatcher:
@@ -115,10 +123,17 @@ def test_worker_exports_events_through_platform_backend(
         lambda kv_caches: list(kv_caches.values()),
     )
 
-    client = MagicMock()
-    client.register_kv_cache.return_value = _resolved_future(True)
-    client.store.return_value = MessagingFuture()
-    client.retrieve.return_value = MessagingFuture()
+    sent: list[tuple[RequestType, list[object]]] = []
+
+    def send_request(
+        _client: object,
+        request_type: RequestType,
+        payload: list[object],
+    ) -> MessagingFuture:
+        sent.append((request_type, payload))
+        if request_type == RequestType.REGISTER_KV_CACHE:
+            return _resolved_future(True)
+        return MessagingFuture()
 
     context = worker_transfer.LMCacheDrivenTransferContext()
     kv_caches = {"layer_0": torch.empty(1)}
@@ -128,12 +143,10 @@ def test_worker_exports_events_through_platform_backend(
         "model",
         1,
         1,
-        client,
+        MagicMock(),
         1.0,
+        send_request,
     )
-    stream = MagicMock(name="current_stream")
-    monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
-    event = context.create_recorded_event()
 
     store_future = context.submit_store(
         "request",
@@ -141,7 +154,7 @@ def test_worker_exports_events_through_platform_backend(
         1,
         kv_caches,
         [[0]],
-        event,
+        _WorkerEvent(),
         1,
     )
     retrieve_future = context.submit_retrieve(
@@ -150,27 +163,27 @@ def test_worker_exports_events_through_platform_backend(
         1,
         kv_caches,
         [[0]],
-        event,
+        _WorkerEvent(),
         1,
         skip_first_n_tokens=2,
     )
 
     assert isinstance(store_future, DeviceMessagingFuture)
     assert isinstance(retrieve_future, DeviceMessagingFuture)
-    client.store.assert_called_once_with("key", 1, [[0]], b"completion-handle")
-    client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2)
+    assert sent[1] == (
+        RequestType.STORE,
+        ["key", 1, [[0]], b"completion-handle"],
+    )
+    assert sent[2] == (
+        RequestType.RETRIEVE,
+        ["key", 1, [[0]], b"completion-handle", 2],
+    )
     assert [call[0] for call in backend.calls] == [
         "check",
-        "create",
-        "record",
         "export",
         "export",
     ]
-    assert backend.calls[2][2] is stream
-    device = torch.device("cpu")
-    assert backend.calls[0][1] == device
-    assert backend.calls[1][1] == device
-    assert all(call[-1] == device for call in backend.calls[3:])
+    assert all(call[-1] == torch.device("cpu") for call in backend.calls)
 
 
 def test_server_store_and_retrieve_delegate_event_ordering(
@@ -244,9 +257,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             num_object_groups=1,
             num_kernel_groups=1,
             object_groups=[SimpleNamespace(kernel_group_indices=[0])],
-            get_attn_desc=lambda: SimpleNamespace(
-                num_chunks_in_sw=[-1], group_kinds=()
-            ),
+            get_attn_desc=lambda: SimpleNamespace(num_chunks_in_sw=[-1]),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
     )

@@ -16,9 +16,10 @@ import torch
 # First Party
 from lmcache import device_ops, torch_dev
 from lmcache import torch_device_type as torch_device_type  # noqa: F401
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
+from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
@@ -845,6 +846,12 @@ class TensorMemoryObj(MemoryObj):
             # transport slots from ``tensor.shape`` and
             # ``shm_byte_length`` then stay self-consistent.
             return self.raw_data[: self._used_size_override].view(torch.uint8)
+        # Multi-group objects (e.g. DSA dual-buffer): the raw_data buffer
+        # contains multiple groups concatenated, but meta.shape/dtype only
+        # describe group 0.  Return group 0's properly shaped tensor via
+        # get_tensor(0), which uses group_prefix_sum to slice correctly.
+        if self.meta.shapes is not None and self.meta.dtypes is not None:
+            return self.get_tensor(0)
         # TODO(Jiayi): consider caching the `get_size()`
         return (
             self.raw_data[: self.get_size()].view(self.meta.dtype).view(self.meta.shape)

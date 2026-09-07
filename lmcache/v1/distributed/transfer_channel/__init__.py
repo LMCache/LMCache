@@ -52,8 +52,7 @@ def initialize_transfer_channel_context(
     """Create the global transfer channel context.
 
     Args:
-        transfer_channel_type: Registered implementation name, such as
-            ``"nixl"`` or ``"mooncake"``.
+        transfer_channel_type: Currently only ``"nixl"`` is supported.
         l1_memory_desc: Describes the L1 memory region to register.
         listen_url: ``host:port`` this peer's singleton server binds to.
         advertise_url: ``host:port`` this peer advertises as its identity (the

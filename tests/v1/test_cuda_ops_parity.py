@@ -218,12 +218,15 @@ _EXCLUDED_FUNCS: set[str] = {
     "execute_cb_retrieve_plan_flat",
 }
 
-# CUDA-only plan descriptors intentionally remain native-only. Descriptor
-# parity here only concerns portable/shared types with a torch-side surface.
+# Plan types (StagingCopy, LaunchVar, BatchStep, KernelGroupSpec)
+# are native-only with no torch fallback — auto-discovered by bind_native.
+# NOTE: these previously had signature-only stubs (raised NotImplementedError
+# unconditionally) — not real fallbacks.
 _EXCLUDED_DESCS: set[str] = {
     "StagingCopy",
     "LaunchVar",
     "BatchStep",
+    "KernelGroupSpec",
     "CBGroupSpec",
 }
 

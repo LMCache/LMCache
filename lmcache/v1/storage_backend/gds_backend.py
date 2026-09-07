@@ -98,12 +98,25 @@ def get_fstype(path):
     return best_fstype
 
 
-def pack_metadata(tensor, fmt: MemoryFormat, **extra_metadata) -> bytes:
+def pack_metadata(
+    tensor,
+    fmt: MemoryFormat,
+    shapes: Optional[list[torch.Size]] = None,
+    dtypes: Optional[list[torch.dtype]] = None,
+    **extra_metadata,
+) -> bytes:
     if tensor.dtype not in torch_dtypes:
         raise RuntimeError(f"unhandled dtype {tensor.dtype}")
 
     # Metadata
-    data_size = tensor.numel() * tensor.element_size()
+    if shapes is not None and dtypes is not None:
+        # Multi-group: data_size covers all groups' raw bytes so that
+        # data_offsets[1] - data_offsets[0] matches the on-disk blob.
+        data_size = sum(
+            s.numel() * d.element_size() for s, d in zip(shapes, dtypes, strict=True)
+        )
+    else:
+        data_size = tensor.numel() * tensor.element_size()
     tensor_meta = {
         "dtype": torch_dtypes[tensor.dtype],
         "shape": list(tensor.size()),
@@ -111,6 +124,12 @@ def pack_metadata(tensor, fmt: MemoryFormat, **extra_metadata) -> bytes:
         "fmt": fmt.value,
         "__metadata__": extra_metadata,
     }
+    # Record per-group shapes/dtypes for multi-group memory objects (e.g.
+    # DSA dual-buffer) so the retrieve path can reconstruct the multi-group
+    # MemoryObj with the correct group_prefix_sum.
+    if shapes is not None and dtypes is not None:
+        tensor_meta["shapes"] = [list(s) for s in shapes]
+        tensor_meta["dtypes"] = [torch_dtypes[d] for d in dtypes]
     meta = {"kvcache": tensor_meta}
     str_meta = json.dumps(meta).encode("utf-8")
     meta_len = len(str_meta)
@@ -140,7 +159,25 @@ def unpack_metadata(buffer: bytes):
     nbytes = data_offsets[1] - data_offsets[0]
     dtype = torch_dtypes_inverse[dtype_str]
 
-    return torch.Size(shape), dtype, nbytes, fmt, tensor_meta["__metadata__"]
+    # Reconstruct per-group shapes/dtypes for multi-group memory objects.
+    multi_shapes = tensor_meta.get("shapes")
+    multi_dtypes_str = tensor_meta.get("dtypes")
+    if multi_shapes is not None and multi_dtypes_str is not None:
+        shapes = [torch.Size(s) for s in multi_shapes]
+        dtypes = [torch_dtypes_inverse[d] for d in multi_dtypes_str]
+    else:
+        shapes = None
+        dtypes = None
+
+    return (
+        torch.Size(shape),
+        dtype,
+        nbytes,
+        fmt,
+        tensor_meta["__metadata__"],
+        shapes,
+        dtypes,
+    )
 
 
 def rand_suffix(n: int):
@@ -179,7 +216,7 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
     else:
         raise RuntimeError(f"Invalid value `{value}` for `{key}` in extra_config")
 
-    logger.info("Getting %s = %s from extra_config", key, bool_value)
+    logger.info(f"Getting {key} = {bool_value} from extra_config")
     return bool_value
 
 
@@ -263,10 +300,8 @@ class GdsBackend(AllocatorBackendInterface):
         # Log the fstype - this is useful in reports and varying optimizations
         # based on the kind of fstype used.
         logger.info(
-            "GDS backend using fstype '%s' on path '%s' (%s path(s) configured)",
-            self.fstype,
-            self.gds_path,
-            len(self.gds_paths),
+            f"GDS backend using fstype '{self.fstype}' on path '{self.gds_path}'"
+            f" ({len(self.gds_paths)} path(s) configured)"
         )
 
         self.use_gds = config.use_gds
@@ -369,7 +404,7 @@ class GdsBackend(AllocatorBackendInterface):
         self.put_tasks: set[CacheEngineKey] = set()
 
         if hasattr(self.memory_allocator, "base_pointer"):
-            logger.debug("Using base pointer %s", self.memory_allocator.base_pointer)
+            logger.debug(f"Using base pointer {self.memory_allocator.base_pointer}")
             self.gds_base_pointer = self.memory_allocator.base_pointer
         else:
             logger.info("No base pointer found, GDS will use bounce buffers")
@@ -409,9 +444,8 @@ class GdsBackend(AllocatorBackendInterface):
         await asyncio.gather(*tasks)
         end = time.perf_counter()
         logger.info(
-            "Read %s cache entries from persistent storage in %.2f seconds",
-            len(self.hot_cache),
-            end - start,
+            f"Read {len(self.hot_cache)} cache entries from persistent "
+            f"storage in {end - start:.2f} seconds"
         )
 
     def _scan_metadata_subdir(self, path, l1_dir):
@@ -435,10 +469,8 @@ class GdsBackend(AllocatorBackendInterface):
                             key = parse_cache_key(key_str)
                         except ValueError as e:
                             logger.error(
-                                "Filename %s can't be converted "
-                                "back into cache key: %s",
-                                filename,
-                                e,
+                                f"Filename {filename} can't be converted "
+                                f"back into cache key: {e}"
                             )
                             continue
                         try:
@@ -495,19 +527,15 @@ class GdsBackend(AllocatorBackendInterface):
         filename: str,
         subdir_key: str,
     ):
-        shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
+        shape, dtype, size, fmt, extra_metadata, shapes, dtypes = (
+            self._read_metadata_info(filename)
+        )
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
             raise UnsupportedMetadataVersion("unhandled lmcache metadata")
         logger.debug(
-            "Read metadata for %s from %s: shape=%s, dtype=%s, "
-            "size=%s, fmt=%s, extra_metadata=%s",
-            key,
-            filename,
-            shape,
-            dtype,
-            size,
-            fmt,
-            extra_metadata,
+            f"Read metadata for {key} from {filename}: "
+            f"shape={shape}, dtype={dtype}, size={size}, fmt={fmt}, "
+            f"extra_metadata={extra_metadata}"
         )
         # TODO(extra_metadata)
         # TODO(Jiayi): need to support `cached_positions`.
@@ -519,6 +547,8 @@ class GdsBackend(AllocatorBackendInterface):
             dtype,
             None,
             fmt,
+            shapes=shapes,
+            dtypes=dtypes,
         )
         with self.hot_lock:
             self.metadata_dirs.add(subdir_key)
@@ -547,36 +577,27 @@ class GdsBackend(AllocatorBackendInterface):
                     return self._read_metadata(key, path, subdir_key)
                 except FileNotFoundError:
                     logger.warning(
-                        "[GDS] File not found for key %s at "
-                        "expected path %s, returning None",
-                        key.to_string(),
-                        path,
+                        f"[GDS] File not found for key {key.to_string()} "
+                        f"at expected path {path}, returning None"
                     )
                 except PermissionError:
                     logger.warning(
-                        "[GDS]: Permission Denied for PID %s on %s, returning None",
-                        os.getpid(),
-                        path,
+                        f"[GDS]: Permission Denied for PID {os.getpid()} on {path},"
+                        f" returning None"
                     )
                 except UnsupportedMetadataVersion:
-                    logger.error("Unsupported metadata version for %s, ignoring", path)
+                    logger.error(f"Unsupported metadata version for {path}, ignoring")
                 except (OSError, IOError) as e:
                     logger.error(
-                        "Failed to read metadata file %s: %s: %s. File may be "
-                        "corrupted or inaccessible. Ignoring cache entry for key %s.",
-                        path,
-                        type(e).__name__,
-                        e,
-                        key.to_string(),
+                        f"Failed to read metadata file {path}: {type(e).__name__}: "
+                        f"{e}. File may be corrupted or inaccessible. "
+                        f"Ignoring cache entry for key {key.to_string()}."
                     )
                 except Exception as e:
                     logger.error(
-                        "Unexpected error reading metadata file %s: %s: %s. "
-                        "Ignoring cache entry for key %s.",
-                        path,
-                        type(e).__name__,
-                        e,
-                        key.to_string(),
+                        f"Unexpected error reading metadata file {path}: "
+                        f"{type(e).__name__}: {e}. Ignoring cache entry for key "
+                        f"{key.to_string()}."
                     )
 
         return None
@@ -686,28 +707,23 @@ class GdsBackend(AllocatorBackendInterface):
                     fmt,
                     self.gds_base_pointer,
                     memory_obj.metadata.address,
+                    memory_obj.metadata.shapes,
+                    memory_obj.metadata.dtypes,
                 )
             except Exception as e:
                 logger.error(
-                    "GDS write operation failed for key %s at path %s: "
-                    "tensor_shape=%s, tensor_dtype=%s, tensor_size_bytes=%s, error=%s",
-                    key.to_string(),
-                    path,
-                    kv_chunk.shape,
-                    kv_chunk.dtype,
-                    kv_chunk.nbytes,
-                    e,
+                    f"GDS write operation failed for key {key.to_string()} at "
+                    f"path {path}: tensor_shape={kv_chunk.shape}, "
+                    f"tensor_dtype={kv_chunk.dtype}, "
+                    f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
                     exc_info=True,
                 )
                 return
 
             # Register key in cache
             logger.debug(
-                "Saved %s elements of %s to %s with metadata %s",
-                kv_chunk.numel(),
-                kv_chunk.dtype,
-                path,
-                metadata,
+                f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
+                f"to {path} with metadata {metadata}"
             )
             self.insert_key(key, memory_obj)
             try:
@@ -722,13 +738,10 @@ class GdsBackend(AllocatorBackendInterface):
                 )
             except Exception as e:
                 logger.error(
-                    "POSIX metadata write operation failed for key %s at path %s: "
-                    "metadata_size_bytes=%s, tmp_suffix=%s, error=%s",
-                    key.to_string(),
-                    path + _METADATA_FILE_SUFFIX,
-                    len(metadata),
-                    tmp,
-                    e,
+                    f"POSIX metadata write operation failed for key {key.to_string()} "
+                    f"at path {path + _METADATA_FILE_SUFFIX}: "
+                    f"metadata_size_bytes={len(metadata)}, "
+                    f"tmp_suffix={tmp}, error={e}",
                     exc_info=True,
                 )
                 with self.hot_lock:
@@ -745,9 +758,7 @@ class GdsBackend(AllocatorBackendInterface):
                 on_complete_callback(key)
             except Exception as e:
                 logger.error(
-                    "on_complete_callback failed for key %s: %s",
-                    key.to_string(),
-                    e,
+                    f"on_complete_callback failed for key {key.to_string()}: {e}",
                     exc_info=True,
                 )
 
@@ -760,10 +771,8 @@ class GdsBackend(AllocatorBackendInterface):
             exception = task.exception()
             if exception is not None:
                 logger.error(
-                    "Metadata write task failed for key %s at path %s: %s",
-                    key.to_string(),
-                    path + _METADATA_FILE_SUFFIX,
-                    exception,
+                    f"Metadata write task failed for key {key.to_string()} "
+                    f"at path {path + _METADATA_FILE_SUFFIX}: {exception}",
                     exc_info=exception,
                 )
                 with self.hot_lock:
@@ -771,9 +780,8 @@ class GdsBackend(AllocatorBackendInterface):
         except Exception as e:
             # Exception calling task.exception() (e.g., task was cancelled)
             logger.error(
-                "Error checking metadata write task status for key %s: %s",
-                key.to_string(),
-                e,
+                f"Error checking metadata write task status for key "
+                f"{key.to_string()}: {e}",
                 exc_info=True,
             )
 
@@ -783,9 +791,20 @@ class GdsBackend(AllocatorBackendInterface):
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
+        shapes = memory_obj.metadata.shapes
+        dtypes = memory_obj.metadata.dtypes
         with self.hot_lock:
             # TODO(Jiayi): need to support `cached_positions`.
-            self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, None, fmt)
+            self.hot_cache[key] = DiskCacheMetadata(
+                path,
+                size,
+                shape,
+                dtype,
+                None,
+                fmt,
+                shapes=shapes,
+                dtypes=dtypes,
+            )
 
     def submit_prefetch_task(
         self,
@@ -837,10 +856,22 @@ class GdsBackend(AllocatorBackendInterface):
         dtype = entry.dtype
         shape = entry.shape
         fmt = entry.fmt
-        logger.warning(entry)
         assert dtype is not None
         assert shape is not None
         assert fmt is not None
+        # Multi-group memory objects (e.g. DSA dual-buffer) need the
+        # per-group shapes/dtypes so the allocated MemoryObj has the
+        # correct group_prefix_sum for get_tensor(i).
+        if entry.shapes is not None and entry.dtypes is not None:
+            return self._load_bytes_from_disk_with_allocation(
+                key,
+                path,
+                dtype=dtype,
+                shape=shape,
+                fmt=fmt,
+                shapes=entry.shapes,
+                dtypes=entry.dtypes,
+            )
         return self._load_bytes_from_disk_with_allocation(
             key, path, dtype=dtype, shape=shape, fmt=fmt
         )
@@ -852,6 +883,8 @@ class GdsBackend(AllocatorBackendInterface):
         dtype: torch.dtype,
         shape: torch.Size,
         fmt: MemoryFormat,
+        shapes: Optional[list[torch.Size]] = None,
+        dtypes: Optional[list[torch.dtype]] = None,
     ) -> Optional[MemoryObj]:
         """
         Load byte array from disk by first allocating memory, then loading.
@@ -861,12 +894,19 @@ class GdsBackend(AllocatorBackendInterface):
             path: File path to load from
             dtype: Data type for memory allocation
             shape: Shape for memory allocation
+            shapes: Per-group shapes for multi-group memory objects.
+                When provided, the allocator receives the full list so
+                the resulting MemoryObj has the correct group_prefix_sum.
+            dtypes: Per-group dtypes, paired with ``shapes``.
 
         Returns:
             A new memory object with loaded data, or None if allocation or
             loading failed
         """
-        memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
+        if shapes is not None and dtypes is not None:
+            memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt=fmt)
+        else:
+            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
         if memory_obj is None:
             logger.error("Memory allocation failed during sync disk load.")
             return None
@@ -915,9 +955,7 @@ class GdsBackend(AllocatorBackendInterface):
         if ret != memory_obj.get_size():
             if ret < 0:
                 logger.error(
-                    "Error loading %s: ret: %s removing entry from cache",
-                    path,
-                    ret,
+                    f"Error loading {path}: ret: {ret} removing entry from cache"
                 )
                 with self.hot_lock:
                     self.hot_cache.pop(key)
@@ -925,10 +963,8 @@ class GdsBackend(AllocatorBackendInterface):
                 # TODO: we should probably count errors and
                 # remove the entry if it's a persistent problem.
                 logger.error(
-                    "Error loading %s: got only %s bytes out of %s, ignoring",
-                    path,
-                    ret,
-                    memory_obj.get_size(),
+                    f"Error loading {path}: got only {ret} bytes "
+                    f"out of {memory_obj.get_size()}, ignoring"
                 )
             memory_obj.ref_count_down()
             return None
@@ -962,33 +998,41 @@ class GdsBackend(AllocatorBackendInterface):
         dtypes: list[torch.dtype | None] = []
         shapes: list[torch.Size | None] = []
         fmts: list[MemoryFormat | None] = []
+        multi_shapes: list[Optional[list[torch.Size]]] = []
+        multi_dtypes: list[Optional[list[torch.dtype]]] = []
         with self.hot_lock:
             for key in keys:
                 entry = self.hot_cache.get(key)
                 if entry is None:
-                    logger.error("Lookup failed during get_blocking for %s", key)
+                    logger.error(f"Lookup failed during get_blocking for {key}")
                     paths.append(None)
                     dtypes.append(None)
                     shapes.append(None)
                     fmts.append(None)
+                    multi_shapes.append(None)
+                    multi_dtypes.append(None)
                     continue
                 paths.append(entry.path)
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
                 fmts.append(entry.fmt)
+                multi_shapes.append(entry.shapes)
+                multi_dtypes.append(entry.dtypes)
 
         memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
-        for dtype, shape, path, fmt in zip(dtypes, shapes, paths, fmts, strict=True):
+        for dtype, shape, path, fmt, m_shapes, m_dtypes in zip(
+            dtypes, shapes, paths, fmts, multi_shapes, multi_dtypes, strict=True
+        ):
             if path is None:
                 memory_objs.append(None)
                 continue
-            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
+            if m_shapes is not None and m_dtypes is not None:
+                memory_obj = self.memory_allocator.allocate(m_shapes, m_dtypes, fmt=fmt)
+            else:
+                memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
             if memory_obj is None:
-                logger.error(
-                    "Memory allocation failed during get_blocking for %s",
-                    path,
-                )
+                logger.error(f"Memory allocation failed during get_blocking for {path}")
             else:
                 gds_reads += 1
                 gds_read_bytes += memory_obj.get_size()
@@ -1003,10 +1047,8 @@ class GdsBackend(AllocatorBackendInterface):
         )
         total_time = time.perf_counter() - start_time
         logger.info(
-            "Time taken for batched_get_blocking: %.3fs | %sMiB | %s ops.",
-            total_time,
-            gds_read_bytes / 1024 / 1024,
-            gds_reads,
+            f"Time taken for batched_get_blocking: {total_time:.3f}s |"
+            f" {gds_read_bytes / 1024 / 1024}MiB | {gds_reads} ops."
         )
         return results
 
@@ -1020,7 +1062,24 @@ class GdsBackend(AllocatorBackendInterface):
         fmt: MemoryFormat,
         base_pointer: int,
         device_offset: int,
+        shapes: Optional[list[torch.Size]] = None,
+        dtypes: Optional[list[torch.dtype]] = None,
     ):
+        # For multi-group memory objects (e.g. DSA dual-buffer), kv_chunk
+        # is only group 0's tensor (via memory_obj.tensor → get_tensor(0)).
+        # The full raw_data buffer contains all groups concatenated, so we
+        # must write get_size() bytes — not kv_chunk.nbytes — to persist
+        # every group.  The write address is the raw_data base pointer
+        # (or the pre-computed base_pointer + device_offset for pinned
+        # allocator paths).
+        if shapes is not None and dtypes is not None:
+            write_nbytes = sum(
+                s.numel() * d.element_size()
+                for s, d in zip(shapes, dtypes, strict=True)
+            )
+        else:
+            write_nbytes = kv_chunk.nbytes
+
         if base_pointer is None:
             addr = ctypes.c_void_p(kv_chunk.data_ptr())
             dev_offset = 0
@@ -1032,7 +1091,11 @@ class GdsBackend(AllocatorBackendInterface):
         # TODO: We can add the chunk's metadata here, e.g. Tensor parallelism shard
         # and pipeline parallelism index.
         metadata = pack_metadata(
-            kv_chunk, fmt=fmt, lmcache_version=str(_METADATA_VERSION)
+            kv_chunk,
+            fmt=fmt,
+            shapes=shapes,
+            dtypes=dtypes,
+            lmcache_version=str(_METADATA_VERSION),
         )
         try:
             with open(tmp_path, "wb") as f:
@@ -1042,12 +1105,12 @@ class GdsBackend(AllocatorBackendInterface):
                     tmp_path, "r+", use_direct_io=self.use_direct_io
                 ) as f:
                     f.write(
-                        addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
+                        addr, write_nbytes, file_offset=offset, dev_offset=dev_offset
                     )
             elif self._gpu_memcpy:
                 # mmap the file
                 fd = os.open(tmp_path, os.O_RDWR)
-                nbytes = kv_chunk.nbytes
+                nbytes = write_nbytes
                 os.ftruncate(fd, nbytes + offset)
                 mm = mmap.mmap(
                     fd, nbytes + offset, prot=mmap.PROT_WRITE, flags=mmap.MAP_SHARED
@@ -1061,7 +1124,7 @@ class GdsBackend(AllocatorBackendInterface):
                 assert addr.value is not None
                 res = self._gpu_memcpy(
                     ctypes.c_void_p(buf_addr + offset),
-                    ctypes.c_void_p(int(addr.value) + device_offset),
+                    ctypes.c_void_p(int(addr.value) + dev_offset),
                     ctypes.c_size_t(nbytes),
                     ctypes.c_int(2),
                 )
@@ -1071,7 +1134,7 @@ class GdsBackend(AllocatorBackendInterface):
                 mm.close()
 
         except Exception as e:
-            logger.error("Error saving %s: %s", tmp_path, e, exc_info=True)
+            logger.error(f"Error saving {tmp_path}: {e}", exc_info=True)
             raise e
         os.rename(tmp_path, path)
         return metadata
@@ -1104,13 +1167,9 @@ class GdsBackend(AllocatorBackendInterface):
                 if file_size < file_offset + size_in_bytes:
                     os.close(fd)
                     logger.error(
-                        "File %s is too small: size=%s, but need at least %s "
-                        "bytes (offset=%s, requested=%s)",
-                        gds_path,
-                        file_size,
-                        file_offset + size_in_bytes,
-                        file_offset,
-                        size_in_bytes,
+                        f"File {gds_path} is too small: size={file_size}, "
+                        f"but need at least {file_offset + size_in_bytes} bytes "
+                        f"(offset={file_offset}, requested={size_in_bytes})"
                     )
                     return -1
 
@@ -1146,7 +1205,7 @@ class GdsBackend(AllocatorBackendInterface):
             # return -1 on any exception, and log the error.
             # The caller will handle the error by removing the cache entry and
             # returning None.
-            logger.error("GDS read failed for %s: %s", gds_path, e, exc_info=True)
+            logger.error(f"GDS read failed for {gds_path}: {e}", exc_info=True)
             return -1
 
     def pin(self, key: CacheEngineKey) -> bool:
@@ -1187,7 +1246,7 @@ class GdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        logger.debug("Allocating memory with busy loop: %s", busy_loop)
+        logger.debug(f"Allocating memory with busy loop: {busy_loop}")
 
         max_attempts = self.max_alloc_attempts if busy_loop else 1
         num_attempts = 0
@@ -1201,10 +1260,9 @@ class GdsBackend(AllocatorBackendInterface):
             num_attempts += 1
             if num_attempts < max_attempts:  # keep trying until max attempts is reached
                 logger.debug(
-                    "Unable to allocate memory object after %s attempt(s) of GDS "
-                    "backend allocate(). Waiting %s seconds before retrying.",
-                    num_attempts,
-                    self.alloc_attempt_delay_secs,
+                    f"Unable to allocate memory object after {num_attempts} "
+                    f"attempt(s) of GDS backend allocate(). "
+                    f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
                 )
                 if self.alloc_attempt_delay_secs > 0:
                     time.sleep(self.alloc_attempt_delay_secs)
@@ -1212,8 +1270,7 @@ class GdsBackend(AllocatorBackendInterface):
                 break
 
         logger.warning(
-            "GDS allocation failed after %s attempt(s). Returning None.",
-            num_attempts,
+            f"GDS allocation failed after {num_attempts} attempt(s). Returning None."
         )
         if not self.memory_allocator.memcheck():
             logger.error(
@@ -1238,8 +1295,7 @@ class GdsBackend(AllocatorBackendInterface):
             logger.warning("GDS Backend does not support eviction")
 
         logger.debug(
-            "Batched allocating memory in GDS backend with busy loop: %s",
-            busy_loop,
+            f"Batched allocating memory in GDS backend with busy loop: {busy_loop}"
         )
 
         max_attempts = self.max_alloc_attempts if busy_loop else 1
@@ -1256,10 +1312,9 @@ class GdsBackend(AllocatorBackendInterface):
             num_attempts += 1
             if num_attempts < max_attempts:  # keep trying until max attempts is reached
                 logger.debug(
-                    "Unable to allocate memory object after %s attempt(s) of GDS "
-                    "backend batched_allocate(). Waiting %s seconds before retrying.",
-                    num_attempts,
-                    self.alloc_attempt_delay_secs,
+                    f"Unable to allocate memory object after {num_attempts} "
+                    f"attempt(s) of GDS backend batched_allocate(). "
+                    f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
                 )
                 if self.alloc_attempt_delay_secs > 0:
                     time.sleep(self.alloc_attempt_delay_secs)
@@ -1267,8 +1322,8 @@ class GdsBackend(AllocatorBackendInterface):
                 break
 
         logger.warning(
-            "GDS batched allocation failed after %s attempt(s). Returning None.",
-            num_attempts,
+            f"GDS batched allocation failed after {num_attempts} "
+            f"attempt(s). Returning None."
         )
         if not self.memory_allocator.memcheck():
             logger.error(
@@ -1289,8 +1344,7 @@ class GdsBackend(AllocatorBackendInterface):
             self._scan_metadata_future.result(timeout=30)
         except Exception as e:
             logger.warning(
-                "Exception while waiting for metadata scan: %s",
-                e,
+                f"Exception while waiting for metadata scan: {e}",
                 exc_info=True,
             )
         # Wait for pending metadata write tasks to finish before tearing down
@@ -1309,8 +1363,7 @@ class GdsBackend(AllocatorBackendInterface):
                 drain.result(timeout=30)
             except Exception as e:
                 logger.warning(
-                    "Exception while draining metadata write tasks: %s",
-                    e,
+                    f"Exception while draining metadata write tasks: {e}",
                     exc_info=True,
                 )
         self.memory_allocator.close()

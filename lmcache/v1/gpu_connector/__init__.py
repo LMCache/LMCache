@@ -77,6 +77,12 @@ def CreateGPUConnector(
     use_gpu = need_gpu_interm_buffer(config)
 
     if engine == EngineType.SGLANG:
+        if torch_device_type == "musa":
+            raise ValueError(
+                "SGLang on MUSA is not supported; only the vLLM MUSA "
+                "connector is available."
+            )
+
         num_layer, _, chunk_size, num_kv_head, head_dim = metadata.kv_shape
         hidden_dim_size = num_kv_head * head_dim
         local_worker_id = metadata.local_worker_id
@@ -84,28 +90,7 @@ def CreateGPUConnector(
         device = torch.device(f"{torch_device_type}:{local_worker_id}")
         kv_dtype = metadata.kv_dtype
 
-        if torch_device_type == "musa":
-            # First Party
-            from lmcache.v1.gpu_connector.musa_connectors import (
-                SGLangLayerwiseMUSAConnector,
-                SGLangMUSAConnector,
-            )
-
-            connector_cls = (
-                SGLangLayerwiseMUSAConnector
-                if config.use_layerwise
-                else SGLangMUSAConnector
-            )
-            return connector_cls(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-                use_mla=metadata.use_mla,
-            )
-        elif torch_device_type == "xpu":
+        if torch_device_type == "xpu":
             # First Party
             from lmcache.v1.gpu_connector.xpu_connectors import (
                 SGLangLayerwiseXPUConnector,
@@ -138,6 +123,18 @@ def CreateGPUConnector(
             )
 
             if config.use_layerwise:
+                if metadata.use_mla:
+                    raise ValueError(
+                        "Layerwise mode (use_layerwise=True) is not yet "
+                        "supported for MLA/DSA models. The layerwise "
+                        "store_layer/retrieve_layer path in cache_engine "
+                        "iterates per-layer with a single uniform shape and "
+                        "has no awareness of layer groups — incompatible "
+                        "with MLA's fused single-buffer layout and DSA's "
+                        "dual-buffer layout. Set use_layerwise=False (the "
+                        "default) to use the fully-supported non-layerwise "
+                        "MP path."
+                    )
                 return SGLangLayerwiseGPUConnector(
                     hidden_dim_size,
                     num_layer,
@@ -154,6 +151,9 @@ def CreateGPUConnector(
                     chunk_size=chunk_size,
                     dtype=kv_dtype,
                     device=device,
+                    use_mla=metadata.use_mla,
+                    metadata=metadata,
+                    layout_hints=layout_hints,
                 )
     elif engine == EngineType.VLLM:
         _validate_vllm_device_features(config)

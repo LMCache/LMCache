@@ -10,7 +10,6 @@ the cache.
 
    /mp/index
    installation
-   compatibility
    quickstart
    /mp/configuration
    benchmarking

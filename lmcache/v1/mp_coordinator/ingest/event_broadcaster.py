@@ -9,13 +9,12 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
 
 # Standard
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 # First Party
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 
 
-@runtime_checkable
 class CacheEventConsumer(Protocol):
     """One downstream consumer of gate-admitted cache-event batches."""
 

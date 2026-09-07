@@ -244,6 +244,7 @@ in their shutdown paths:
 
 - `server.py :: run_cache_server` — in the `KeyboardInterrupt`
   handler.
+- `blend_server_v2.py :: run_cache_server` — same.
 - `http_server.py :: lifespan` — in the FastAPI lifespan teardown
   branch.
 
@@ -332,7 +333,7 @@ arg group:
 
 Both flags flow through `ObservabilityConfig` and are consumed by
 `maybe_initialize_trace_recorder`, called from `run_cache_server` in
-`multiprocess/server.py`.
+both `multiprocess/server.py` and `multiprocess/blend_server_v2.py`.
 When `--trace-level` is unset, the helper returns `None` and no
 recorder is registered — true zero overhead.
 

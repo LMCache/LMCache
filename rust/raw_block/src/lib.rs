@@ -206,8 +206,6 @@ fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<b
 
 ///Per batch tracking for in flight I/O operation
 type BatchTracking = (Arc<AtomicU64>, Arc<Condvar>);
-type IoUringCompletionErrors = Vec<(usize, String)>;
-type IoUringBatchResults = (Vec<bool>, IoUringCompletionErrors);
 
 /// Round up to nearest multiple of alignment (required for O_DIRECT).
 #[allow(clippy::manual_div_ceil)]
@@ -794,28 +792,6 @@ impl IoCompletion {
         }
         guard.take().unwrap()
     }
-}
-
-// Convert a batch's completion objects into a success bitmap and sparse errors.
-fn collect_iouring_completion_results(
-    completions: Option<Vec<Arc<IoCompletion>>>,
-) -> IoUringBatchResults {
-    let Some(completions) = completions else {
-        return (Vec::new(), Vec::new());
-    };
-
-    let mut results = Vec::with_capacity(completions.len());
-    let mut errors = Vec::new();
-    for (operation_index, completion) in completions.iter().enumerate() {
-        match completion.wait() {
-            Ok(()) => results.push(true),
-            Err(error) => {
-                results.push(false);
-                errors.push((operation_index, error.to_string()));
-            }
-        }
-    }
-    (results, errors)
 }
 
 /// Manages io_uring worker thread notification, using one `epoll` instance
@@ -2172,10 +2148,8 @@ impl RawBlockDevice {
     /// All writes are queued to the worker thread, which processes them
     /// in batches to maximize throughput.
     ///
-    /// Returns a batch ID that must be passed to `wait_iouring()` to wait for
-    /// completion and obtain a success bitmap plus sparse completion errors.
-    /// Validation or request-preparation errors are raised instead of returning
-    /// a batch ID.
+    /// Returns a batch_id that must be passed to wait_iouring() to wait
+    /// for completions for that batch.
     #[pyo3(signature = (offsets, buffers, total_lens, placement_ids = None))]
     fn batched_write(
         &self,
@@ -2431,16 +2405,12 @@ impl RawBlockDevice {
     ///     batch_id: The batch ID returned by batched_write() or batched_read().
     ///               Only completions from this batch are checked.
     ///
-    /// Returns a success bitmap aligned with the operations submitted in this
-    /// batch and a sparse list of `(operation_index, error_message)` entries.
-    /// `batched_read()` and `batched_write()` can raise validation or
-    /// request-preparation errors instead of returning a batch ID. After a
-    /// batch ID is returned, I/O completion failures are reported in both
-    /// returned collections.
+    /// Returns an error if any I/O operation in this batch failed. The error message
+    /// includes details about the first failure encountered.
     #[pyo3(signature = (batch_id))]
-    fn wait_iouring(&self, py: Python<'_>, batch_id: u64) -> PyResult<IoUringBatchResults> {
+    fn wait_iouring(&self, py: Python<'_>, batch_id: u64) -> PyResult<()> {
         if !self.use_iouring {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(());
         }
 
         // Get the per-batch tracking for this batch
@@ -2453,12 +2423,24 @@ impl RawBlockDevice {
                     // Check if there are any completions for this batch
                     let mut completions = self.batched_completions.lock().unwrap();
                     let batch_completions = completions.remove(&batch_id);
-                    drop(completions);
-                    let results = collect_iouring_completion_results(batch_completions);
+                    let mut first_error: Option<PyErr> = None;
+                    if let Some(comp_vec) = batch_completions {
+                        for comp in comp_vec.iter() {
+                            if let Err(e) = comp.wait() {
+                                if first_error.is_none() {
+                                    first_error = Some(e);
+                                }
+                            }
+                        }
+                    }
                     // Clear stored buffer objects for this batch
                     let mut stored_objs = self.batched_buffer_objs.lock().unwrap();
                     stored_objs.remove(&batch_id);
-                    return Ok(results);
+                    return if let Some(e) = first_error {
+                        Err(e)
+                    } else {
+                        Ok(())
+                    };
                 }
             }
         };
@@ -2478,8 +2460,16 @@ impl RawBlockDevice {
         // Check all completion results for errors for this specific batch
         let mut completions = self.batched_completions.lock().unwrap();
         let batch_completions = completions.remove(&batch_id);
-        drop(completions);
-        let results = collect_iouring_completion_results(batch_completions);
+        let mut first_error: Option<PyErr> = None;
+        if let Some(comp_vec) = batch_completions {
+            for comp in comp_vec.iter() {
+                if let Err(e) = comp.wait() {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            }
+        }
 
         // Clear stored buffer objects for this batch now that I/O is complete
         let mut stored_objs = self.batched_buffer_objs.lock().unwrap();
@@ -2489,7 +2479,11 @@ impl RawBlockDevice {
         let mut batch_map = self.batch_in_flight.lock().unwrap();
         batch_map.remove(&batch_id);
 
-        Ok(results)
+        if let Some(e) = first_error {
+            Err(e)
+        } else {
+            Ok(())
+        }
     }
 
     /// Synchronous read using io_uring.
@@ -2785,10 +2779,8 @@ impl RawBlockDevice {
     /// All reads are queued to the worker thread, which processes them
     /// in batches to maximize throughput.
     ///
-    /// Returns a batch ID that must be passed to `wait_iouring()` to wait for
-    /// completion and obtain a success bitmap plus sparse completion errors.
-    /// Validation or request-preparation errors are raised instead of returning
-    /// a batch ID.
+    /// Returns a batch_id that must be passed to wait_iouring() to wait
+    /// for completions for that batch
     #[pyo3(signature = (offsets, buffers, total_lens))]
     fn batched_read(
         &self,

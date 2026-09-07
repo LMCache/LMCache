@@ -278,7 +278,7 @@ def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
     # component-type changes (keys/layout/policy/attn/mode all have codecs).
     return {
         "keys": [encode_value(k) for k in s.keys],
-        "num_kv_readers": s.num_kv_readers,
+        "extra_count": s.extra_count,
         "policy": encode_value(s.policy),
         "attn_desc": encode_value(s.attn_desc),
         "group_layout_descs": {
@@ -286,14 +286,6 @@ def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
         },
         "mode": encode_value(s.mode),
     }
-
-
-def _readers_from_trace(d: dict[str, Any]) -> int:
-    """Reader count of a trace record; pre-rename traces carry extra_count
-    (readers - 1)."""
-    if "num_kv_readers" in d:
-        return d["num_kv_readers"]
-    return d.get("extra_count", 0) + 1
 
 
 def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
@@ -307,7 +299,7 @@ def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
     return PrefetchRequestSpec(
         keys=[decode_value(k) for k in d["keys"]],
         group_layout_descs=group_layout_descs,
-        num_kv_readers=_readers_from_trace(d),
+        extra_count=d["extra_count"],
         policy=decode_value(d["policy"]),
         attn_desc=decode_value(d["attn_desc"]),
         mode=decode_value(d["mode"]),

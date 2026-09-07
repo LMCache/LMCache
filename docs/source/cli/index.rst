@@ -58,9 +58,7 @@ Available Commands
    * - :doc:`ping`
      - Liveness check for LMCache or vLLM servers.
    * - :doc:`query`
-     - Single-shot queries: one inference request to a serving engine
-       (``engine``), or a read of the MP coordinator's read-only HTTP APIs
-       (``coordinator``).
+     - Single-shot query interface for the serving engine.
    * - :doc:`bench`
      - Run sustained benchmarks against an inference engine
        (``engine``), an LMCache MP server (``server``), or an L2 cache
