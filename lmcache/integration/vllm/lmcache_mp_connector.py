@@ -292,7 +292,8 @@ def validate_mamba_step_alignment(
     the end of each scheduler step, on the last block the step advanced. A step
     advancing more than one block fills the skipped block-table positions with
     the null block (``MambaManager.allocate_new_blocks``); LMCache handles those
-    safely -- ``store`` never commits an all-null-block chunk and ``retrieve``
+    safely -- the request tracker nulls the slot of a relocated speculative
+    block, ``store`` never commits an all-null-block chunk and ``retrieve``
     loads only each object group's sliding-window suffix -- so
     ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with
     ``--separate-object-groups``). Only the lower bound remains: a step must
