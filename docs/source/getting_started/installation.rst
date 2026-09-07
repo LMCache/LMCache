@@ -133,6 +133,51 @@ runtime, see :doc:`compatibility` before installing.
                             build can be requested explicitly. A bare ``lmcache==${VERSION}``
                             also resolves it, since ``==`` ignores the local segment.
 
+                    .. tab-item:: Moore Threads MUSA
+
+                        The MUSA wheel is built in the validated TorchMUSA/MUSA SDK
+                        image used by the release workflow and is published to a
+                        dedicated `GitHub Release <https://github.com/LMCache/LMCache/releases>`__.
+                        It is not uploaded to PyPI because TorchMUSA is distributed
+                        by Moore Threads rather than the public PyPI index.
+
+                        Start a matching MUSA runtime image. The image must provide
+                        ``torch_musa``, the MUSA SDK libraries, and (for the native
+                        transfer fast path) ``musa_aiter``:
+
+                        .. code-block:: bash
+
+                            docker run -it --privileged --network=host \
+                                -e MTHREADS_VISIBLE_DEVICES=all \
+                                --entrypoint bash \
+                                sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm-ci@sha256:75c8c1012cf49caf6dd99dbbfd33931ef100d035647083b999eaf0092d94edba
+
+                            VERSION=0.5.5  # replace with target release
+                            pip install lmcache==${VERSION}+musa --no-deps \
+                                --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-musa
+
+                        .. note::
+
+                            ``--no-deps`` is required: it preserves the image's
+                            vendor-pinned TorchMUSA stack instead of resolving the
+                            generic ``torch`` dependency from PyPI. ``--no-index``
+                            prevents pip from selecting a same-version CUDA wheel.
+
+                            The current MUSA profile ships LMCache's Python MUSA
+                            integration and common native modules. MUSA-specific
+                            fused kernels remain supplied by the optional
+                            ``musa_aiter`` package; build from source if your
+                            vendor image uses a different native extension.
+
+                        .. note::
+
+                            The wheel carries a ``+musa`` PEP 440 local version,
+                            so ``pip show lmcache`` identifies the accelerator
+                            variant. A bare ``lmcache==${VERSION}`` also matches
+                            this wheel, but the explicit local version avoids
+                            accidentally selecting the CUDA artifact.
+
                     .. tab-item:: ROCm 7.2.4 / torch 2.10
 
                         This wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and

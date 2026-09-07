@@ -222,6 +222,31 @@ else:
     return "$failed"
 }
 
+verify_single_instance_result() {
+    local lmcache_result="$VLLM_BENCH_DIR/lmcache.json"
+
+    echo "=== LMCache Benchmark Result ==="
+    if [ ! -f "$lmcache_result" ]; then
+        echo "LMCache result file not found: $lmcache_result"
+        return 1
+    fi
+
+    local lmcache_total_input_tokens lmcache_completed lmcache_throughput
+    lmcache_total_input_tokens=$(extract_json_field "$lmcache_result" "total_input_tokens")
+    lmcache_completed=$(extract_json_field "$lmcache_result" "completed")
+    lmcache_throughput=$(extract_json_field "$lmcache_result" "total_token_throughput")
+
+    echo "  total_input_tokens: $lmcache_total_input_tokens"
+    echo "  completed: $lmcache_completed"
+    echo "  total_token_throughput: $lmcache_throughput"
+
+    if [ "$lmcache_completed" -ne "$EXPECTED_COMPLETED" ] 2>/dev/null; then
+        echo "LMCache completed: $lmcache_completed (expected: $EXPECTED_COMPLETED) FAIL"
+        return 1
+    fi
+    echo "LMCache completed: $lmcache_completed (expected: $EXPECTED_COMPLETED) PASS"
+}
+
 warmup_server() {
     local port="$1"
     local description="$2"
@@ -410,20 +435,24 @@ verify_cache_hit_replay() {
 echo "Using random seed: $RANDOM_SEED"
 echo ""
 
-# Warm up both servers so tokenizer/template compilation does not
-# skew the benchmark. See THROUGHPUT_FIX_PROPOSAL.md for details.
+# Warm up the active benchmark server(s). In single-instance mode the baseline
+# server is intentionally disabled, so skip the warmup/benchmark phases that
+# require it.
 echo "============================================"
-echo "=== Warming up both servers ==="
+echo "=== Warming up servers ==="
 echo "============================================"
 warmup_server "$VLLM_PORT" "vLLM with LMCache"
-warmup_server "$VLLM_BASELINE_PORT" "vLLM baseline"
+if [ "${LAUNCH_BASELINE:-true}" = "true" ]; then
+    warmup_server "$VLLM_BASELINE_PORT" "vLLM baseline"
+fi
 echo ""
 
-# Baseline first
-echo "============================================"
-echo "=== Benchmark: Baseline vLLM (without LMCache) ==="
-echo "============================================"
-run_vllm_bench "$VLLM_BASELINE_PORT" "baseline.json" "Baseline vLLM" "$RANDOM_SEED"
+if [ "${LAUNCH_BASELINE:-true}" = "true" ]; then
+    echo "============================================"
+    echo "=== Benchmark: Baseline vLLM (without LMCache) ==="
+    echo "============================================"
+    run_vllm_bench "$VLLM_BASELINE_PORT" "baseline.json" "Baseline vLLM" "$RANDOM_SEED"
+fi
 
 # LMCache
 echo "============================================"
@@ -435,14 +464,26 @@ run_vllm_bench "$VLLM_PORT" "lmcache.json" "vLLM with LMCache" "$RANDOM_SEED"
 echo "============================================"
 echo "=== Verifying benchmark results ==="
 echo "============================================"
-if ! verify_results; then
-    echo "Verification failed"
-    exit 1
+if [ "${LAUNCH_BASELINE:-true}" = "true" ]; then
+    if ! verify_results; then
+        echo "Verification failed"
+        exit 1
+    fi
+else
+    echo "Single-instance benchmark mode: skipping baseline-vs-LMCache comparison"
+    if ! verify_single_instance_result; then
+        echo "Single-instance benchmark result verification failed"
+        exit 1
+    fi
 fi
 
-if ! verify_cache_hit_replay; then
-    echo "Cache-hit replay validation failed"
-    exit 1
+if [ "${LMCACHE_MP_LAZY_OFFLOAD:-false}" = "true" ]; then
+    echo "Lazy-offload benchmark mode: skipping two-request cache-hit replay validation"
+else
+    if ! verify_cache_hit_replay; then
+        echo "Cache-hit replay validation failed"
+        exit 1
+    fi
 fi
 
 echo "============================================"

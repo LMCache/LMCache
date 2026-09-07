@@ -343,7 +343,8 @@ class MessageQueueClient:
                 if len(payload_classes) != len(wrapped_request.request_payloads):
                     expected_classes = [cls.__name__ for cls in payload_classes]
                     actual_classes = [
-                        type(p).__name__ for p in wrapped_request.request_payloads
+                        type(payload).__name__
+                        for payload in wrapped_request.request_payloads
                     ]
                     raise ValueError(
                         f"Payload count mismatch for request "
@@ -364,22 +365,11 @@ class MessageQueueClient:
                         strict=False,
                     )
                 ]
-
                 self.pending_futures[request_uid] = wrapped_request.future
-                try:
-                    self.socket.send_multipart(
-                        [b_request_uid, b_request_type] + b_payloads
-                    )
-                except Exception:
-                    self.pending_futures.pop(request_uid, None)
-                    raise
+                self.socket.send_multipart([b_request_uid, b_request_type] + b_payloads)
             except Exception as exc:
                 self.pending_futures.pop(request_uid, None)
                 wrapped_request.future.set_exception(exc)
-                logger.exception(
-                    "Failed to prepare or send outbound request %s; continuing",
-                    request_uid,
-                )
 
         return not self.input_queue.empty()
 
