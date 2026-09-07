@@ -323,12 +323,11 @@ class StopTokenCommitPolicy(CommitPolicy):
             ctx: The finished request's context.
 
         Returns:
-            True when the finish reason is ``stop``, the session stored a full
-            chunk, and the stop token is a configured boundary token (or no
-            boundary tokens are configured).
+            True when the finish reason is ``stop`` and the stop token is a
+            configured boundary token (or no boundary tokens are configured).
+            Whether the session has anything to commit is the caller's
+            question, answered by :func:`resolve_anchor`.
         """
-        if ctx.stored_end <= 0:
-            return False
         if ctx.end_info.finish_reason != "stop":
             return False
         if not self._boundary_token_ids:
