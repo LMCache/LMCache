@@ -10,7 +10,7 @@ pipeline {
     environment {
         GITHUB_TOKEN = credentials('GITHUB_PAT')
         GITHUB_REPO  = 'opendataio/LMCache'
-        TARGET_LABEL = 'rbln'
+        TARGET_LABEL = 'metax'
         SEEN_FILE    = '/var/jenkins_home/rbln-seen-shas.txt'
     }
 
