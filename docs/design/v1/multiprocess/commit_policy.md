@@ -1,193 +1,132 @@
 # Sliding-window commits: `--commit-policy`
 
-A store policy for hybrid-attention models keeps sliding-window chunks out of
-L2 on the store path and leaves it to eviction to write back the windows worth
-keeping. This design decides that some of those windows should not wait for
-eviction.
+When a request finishes at a chat turn boundary, the server copies its final
+sliding window from L1 to L2 right away instead of waiting for eviction to
+write it back. The L1 copy stays. The next turn of the same conversation is
+still an L1 hit, and if L1 gives the window up in the meantime the follow-up
+finds it in L2 instead of recomputing it.
 
 ## Problem
 
-A sliding-window chunk the store path skipped has exactly one copy, in L1. It
-reaches L2 only when eviction writes it back, that is, under memory pressure,
-which is the worst moment. Nothing below depends on which store policy left
-the chunk L1-only: any configuration that does has this problem, and one that
-does not has no window to commit and is unaffected.
+Under a store policy that keeps sliding-window chunks out of L2, such a chunk
+has exactly one copy, in L1, until eviction writes it back. That write happens
+under memory pressure, which is exactly when the next turn of the same
+conversation may already be looking the window up.
 
-An E2E run measured the consequence: one GPU serving eight concurrent
-conversations with book-length prompts, L1 = 20 GB. Between one session's
-turn 0 and its turn 1 the other seven sessions store their own sliding-window
-KV, so the first session's window is evicted and written back, and its
-follow-up lookup arrives while that write-back is still in flight. p50 was
-unaffected; p95 went from 0.5 s to 12.6 s, a full prefill.
+Measured on one GPU serving eight concurrent conversations with book-length
+prompts at L1 = 20 GB: between a session's turn 0 and turn 1 the other seven
+sessions push its window out, the write-back is still in flight when the
+follow-up arrives, and p95 turn latency goes from 0.5 s to 12.6 s, a full
+prefill. p50 is unaffected. At L1 = 96 GB nothing is evicted and there is no
+tail.
 
-The write itself is not the problem; its timing is. A chat turn is followed by
-seconds to minutes of nothing while a person reads and types. Writing the
-window then costs the same bytes and is finished long before the follow-up.
+The bytes are the same either way; the timing is not. A chat turn is followed
+by seconds to minutes of idle time while a person reads and types, and a
+window written then is in L2 long before the follow-up.
 
-This matters only while L1 cannot hold every live window. The same run at
-L1 = 96 GB writes no sliding-window chunk at all and shows no p95 tail: the
-windows stay resident, nothing is evicted, and there is nothing to race. A
-commit buys tail latency where L1 is too small for the concurrent
-conversations (448 MiB per live window on the 31B hybrid model measured
-below) and buys nothing where it is not.
+## Design
 
-## What earns a commit
+### Trigger: the request ended on a turn boundary
 
-A window is worth writing only if some later request will match the prefix it
-ends at. For a chat model, how the turn ended decides that.
-
-A chat model ends its turn by emitting its turn-end marker. Qwen emits
-`<|im_end|>` (id 151645), which its `generation_config.json` lists in
-`eos_token_id` next to `<|endoftext|>`. A request that reached that token
+A window is worth writing only if a later request will match the prefix it
+ends at. For a chat model that is decided by how the turn ended: a request
+that stopped on the model's turn-end token (Qwen: `<|im_end|>`, id 151645)
 ended exactly where the next prompt resumes. A request that was aborted, hit
-its length cap, errored, or tripped repetition detection did not: its tail is
+its length cap, errored, or tripped repetition detection did not; its tail is
 re-rendered or never sent again, and its window would be written and never
 read.
 
-The server does not have those facts; vLLM's scheduler does. `Request.status`
-gives the finish reason and `Request.stop_reason` the stop token, both still
-in hand when the connector's `request_finished` runs. vLLM fills
-`stop_reason` only for `stop_token_ids`; a request that stopped on the model's
-own EOS leaves it `None` (`check_stop` in `vllm/v1/core/sched/utils.py`), and
-that is exactly the chat case, so the connector falls back to the last
-generated token.
+The vLLM connector observes the finish reason and the stop token in
+`request_finished`, while the `Request` is still in hand, and sends them to
+the server as `SessionEndInfo`, the second `END_SESSION` payload. vLLM sets
+`stop_reason` only for `stop_token_ids`; a stop on the model's own EOS leaves
+it `None`, so the connector falls back to the last generated token.
 
-Those facts travel to the server as `SessionEndInfo`, the second `END_SESSION`
-payload. They are observations, not a decision: the rule stays server-side,
-where it can be configured and replaced.
+The server-side rule is a `CommitPolicy`, selected by `--commit-policy`. The
+built-in `stop_token` policy commits when the finish reason is `stop` and the
+stop token is in `--commit-boundary-tokens` (any token if the set is empty).
+A policy is a `should_commit(ctx) -> bool`; plugins register more with
+`register_commit_policy_factory`.
 
-### Why the policy returns a bool
+### Extent: one window, ending at the anchor
 
-The decision splits in two, and only one half varies per request.
+A policy answers only *whether*. *Where* the window ends is the
+`--commit-anchor` option, a deployment constant:
 
-*Whether* to commit is a property of how this turn ended. *Where* the committed
-window ends is a property of whether the serving frontend re-sends the
-generated answer verbatim in the next prompt, which follows from the chat
-template and the client, not from any one message. A reasoning model's
-template drops the reasoning from earlier assistant turns: Qwen3 re-renders a
-past turn as `<|im_start|>assistant\n` followed by the answer alone, while
-generation produced `<think>...</think>` before that answer. The re-rendered
-prompt diverges from the generated tokens right after the assistant header,
-so the matching prefix ends before the answer. A client that echoes
-`reasoning_content` back keeps matching through the answer.
+* `generation_end` (default): the last chunk the request stored. Right when
+  the next prompt re-sends the generated answer verbatim.
+* `prompt_end`: the end of the looked-up prompt. Right when the next prompt
+  re-renders the assistant turn differently from what was generated. Qwen3's
+  chat template drops `<think>...</think>` from earlier assistant turns, so a
+  client that does not echo `reasoning_content` back diverges from the
+  generated tokens right after the assistant header, and only the prompt
+  prefix can match.
 
-That is a deployment constant, so it is the `--commit-anchor` option rather
-than a return value. The policy answers the per-request half and returns a
-bool. Everything that made a richer return type tempting (clamping a caller's
-offset, rounding it to a chunk, capping how much one request may write,
-deciding whether to trust a caller with any of it) disappears with it: a bool
-can move exactly one window, so none of those guards has anything to guard.
+The anchor is rounded down to a chunk boundary and clipped to
+`Session.resolved_end`, the furthest offset the session resolved keys for.
+From it, every sliding-window object group takes its own `w` trailing chunks
+(`AttnWindowDesc.num_chunks_in_sw`). Full-attention groups are skipped; the
+store path already wrote them through.
 
-### Why not a range, and why not a timer
-
-An anchor is an *end* offset; each sliding-window object group derives its own
-start by subtracting its own `w` (`AttnWindowDesc.num_chunks_in_sw` is a list,
-and one model may have several). A caller-supplied `[start, end)` could
-under-cover a group's window, and a window missing its oldest chunk is written
-and never read. An API that cannot express that mistake is better than one
-that validates it away.
-
-An idle timer was the other candidate: commit a window that has sat in L1 for
-T seconds, on the theory that a tool loop resumes in milliseconds and a human
-does not. It does not survive contact with agents: a tool call can take an
-hour. A window nobody will touch for an hour cannot stay in L1 either way, so
-by default it is committed like any other; the boundary-token set is where a
-deployment that knows better says so (see Configuration).
-
-## Placement
-
-`END_SESSION` already does its own end-of-request bookkeeping. The commit is a
-separate step in front of it, not a step inside it:
+### Placement: in front of `end_session`
 
 ```
 handle_end_session(request_id, end_info):   # the END_SESSION handler
     maybe commit the window                 # this design
-    end_session(request_id)                 # unchanged, and unaware of the above
+    end_session(request_id)                 # unchanged
 ```
 
-Commit first because `end_session` removes the session the commit reads. The
-two share nothing else: the commit derives its keys from the session's own
-hash chain and the model's attention layout, and touches neither the
-bookkeeping nor its tests.
+The commit runs first because `end_session` removes the session it reads.
+The two share nothing else.
 
-The commit asks the policy, turns `--commit-anchor` into a chunk-aligned
-offset, and names the `w` trailing chunks of every sliding-window object group
-ending there. Full-attention groups are skipped: the store path already wrote
-them through.
+### Execution: the write-back path, minus the delete
 
-The anchor is clipped to `Session.resolved_end`, the furthest offset the
-session resolved object keys for. Nothing past it is in L1 to copy.
-
-## Execution
-
-`StoreController.submit_flush` shares the eviction write-back's queue, lock,
-eventfd and processing code. The one difference is at completion:
+`StoreController.submit_flush` reuses the eviction write-back's queue, lock,
+eventfd and processing. The one difference is at completion:
 `StoreMode.WRITEBACK` deletes the key from L1 once every adapter succeeded,
-`StoreMode.FLUSH` does not. A commit is a copy. The follow-up turn should
-still be an L1 hit; only the window's durability changed.
+`StoreMode.FLUSH` leaves it. Like the write-back, a flush bypasses the store
+policy and writes whatever keys it is given.
 
-Both paths bypass the store policy. That is a property of the write-back
-machinery rather than a choice the commit makes: nothing on this path consults
-the store policy, so a commit writes whatever the anchor names. Under a
-write-through policy that is a key L2 already holds; an adapter that skips
-keys it already has (the filesystem adapter checks the path before writing)
-absorbs the repeat, and one that does not simply overwrites it.
-
-Failure is not costly. A commit that is dropped (no L2 adapter, the key
-already evicted, a policy that raised) changes nothing: the window still
-reaches L2 through the eviction write-back, as it did before. What is lost is
-timeliness, not the window.
+A dropped commit (no L2 adapter, key already evicted, policy raised, key
+already in flight) changes nothing: the window still reaches L2 through the
+eviction write-back, as before. What is lost is timeliness, not the window.
 
 ## Configuration
 
 ```
 --commit-policy stop_token                # default; plugins may add more
---commit-anchor generation_end|prompt_end
---commit-boundary-tokens 151645           # Qwen: <|im_end|>
+--commit-anchor generation_end|prompt_end # default generation_end
+--commit-boundary-tokens 151645           # Qwen: <|im_end|>; empty = any
 ```
 
-The commit path is always live: a model with sliding-window object groups
-commits under `stop_token` unless configured otherwise, and a full-attention
-model has nothing to commit whatever the setting. There is no "off" policy.
-The one reason to want one, an L1 large enough that no window is ever
-evicted, is a sizing fact a deployment can express as its own policy if the
-extra L2 bytes matter to it.
+The commit path is always live. A full-attention model has no sliding-window
+group and commits nothing whatever the setting. There is no "off" policy: the
+one reason to want one, an L1 that never evicts, is a sizing fact a
+deployment can express as its own policy if the extra L2 bytes matter.
 
-### Tool calls and answers
+`--commit-boundary-tokens` also selects *which* turn boundaries commit on a
+model that ends tool calls and final answers on different tokens. gpt-oss
+lists both `<|return|>` (200002) and `<|call|>` (200012) in `eos_token_id`:
+`200002` alone commits finished answers, `200012` alone commits tool calls,
+empty commits both. Both is the default because a tool result can take an
+hour to come back, so a tool-call window cannot wait in L1 any more than an
+answer's can. Qwen ends both kinds of turn on `<|im_end|>`; telling them
+apart there would need the serving frontend's finish reason, which the
+connector does not carry.
 
-`--commit-boundary-tokens` also decides *which* turn boundaries commit. An
-agent's turn ends either in a tool call or in a final answer, and some models
-end the two on different tokens: gpt-oss lists both `<|return|>` (200002) and
-`<|call|>` (200012) in `eos_token_id`. Listing only `200002` commits finished
-answers, only `200012` commits tool calls, and leaving the option empty
-commits both. Qwen ends both on `<|im_end|>`, so on Qwen the server cannot
-tell them apart and both commit; distinguishing them there would need the
-serving frontend's own finish reason, which the connector does not carry
-today.
-
-Both is the right default. A tool result can take an hour to come back, so a
-tool-call window cannot wait in L1 any more than an answer's can. Dropping
-tool-call boundaries only pays off in a deployment that knows its tools
-return within seconds, and that deployment can say so by listing one token.
-
-A plugin loaded through `--runtime-plugin-locations` registers its own policy
-with `register_commit_policy_factory` at import time and is then selectable by
-name, the same way store and eviction policies extend. A deployment whose
-serving frontend knows more than the finish reason does (that this
-conversation is over, or that a follow-up is certain) expresses that as a
-policy. There is deliberately no per-request override: L2 write volume stays
-a property of the server, not of its callers.
+There is no per-request override. L2 write volume stays a property of the
+server, not of its callers.
 
 ## Cost
 
-One window per committed turn: `w` chunks, 8 x 56 MiB = 448 MiB on the
-model below. Consecutive turns of one conversation overlap in that window and the
-chunk hash is content-derived, so an adapter that skips keys it already holds
-collapses the repeat: a turn writes only the chunks its window gained.
+One window per committed turn: `w` chunks, 8 x 56 MiB = 448 MiB on the model
+below. Consecutive turns overlap in that window and chunk hashes are
+content-derived, so an L2 adapter that skips keys it already holds (the
+filesystem adapter does) writes only the chunks a turn's window gained.
 
 Measured on a 31B hybrid sliding-window/full-attention model (PLaMo 3, GPTQ
-4-bit, `--separate-object-groups`, filesystem
-L2, L1 = 16 GB so nothing was ever evicted), three turns of one conversation:
+4-bit, `--separate-object-groups`, filesystem L2, L1 = 16 GB so nothing was
+evicted), three turns of one conversation:
 
 | turn | sliding-window files in L2 | full-attention files in L2 |
 |---|---|---|
@@ -196,27 +135,39 @@ L2, L1 = 16 GB so nothing was ever evicted), three turns of one conversation:
 | 2 | 11 | 35 |
 | 3 | 12 | 36 |
 
-Turn 1 commits exactly one window. Turns 2 and 3 add 3 and 1 files, the chunks
-their windows gained, against 3 and 1 new full-attention chunks, so every
-newly created in-window chunk is committed and nothing else. At the end L2
-holds 12 of the 36 sliding-window chunks. With the commit path disabled the
-same conversation writes no sliding-window file at all, and the per-turn
-latencies are identical (10.0 / 2.5 / 3.3 s), which is the point of copying
+Turn 1 commits one window. Turns 2 and 3 add 3 and 1 sliding-window files
+against 3 and 1 new full-attention chunks, so every newly created in-window
+chunk is committed and nothing else. Per-turn latencies (10.0 / 2.5 / 3.3 s)
+are identical with the commit path disabled, which is the point of copying
 rather than moving.
 
 Against `default` write-through, which writes every sliding-window chunk of
-every sequence, that is a third of the traffic here and less on longer
-conversations. Against eviction-only write-back, which writes nothing while
-L1 has room, it is strictly more. The trade is bytes for a bounded tail
-latency.
+every sequence, this is a third of the traffic here and less on longer
+conversations. Against eviction-only write-back it is strictly more. The
+trade is bytes for a bounded tail latency.
+
+## Alternatives considered
+
+* **A policy that returns a range.** Each sliding-window group derives its
+  own start from the anchor by subtracting its own `w`, and one model may
+  have several. A caller-supplied `[start, end)` could under-cover a group,
+  and a window missing its oldest chunk is written and never read. A bool
+  cannot express that mistake, and needs none of the clamping, rounding and
+  quota guards a range would.
+* **An idle timer** (commit a window that has sat in L1 for T seconds, on the
+  theory that tool loops resume in milliseconds and humans do not). A tool
+  call can take an hour, so the timer would either fire on tool boundaries
+  anyway or hold a window L1 cannot afford to keep.
+* **A per-request hint from the caller.** Rejected so that the server, not
+  its clients, decides how much it writes to L2.
 
 ## Known limits
 
 * `Request.resumable` (vLLM streaming sessions) keeps a request alive across
-  turns, so `END_SESSION` never fires and no commit happens. Such a deployment
-  needs a different trigger.
-* Eviction still routes a committed window to the write-back path rather
-  than discarding it, so the write is attempted a second time. An adapter
-  that skips keys it already holds absorbs the write itself, but the L1 read
-  that precedes it still happens. Teaching the eviction policy that a
-  committed key already has an L2 copy is the obvious next step.
+  turns, so `END_SESSION` never fires and no commit happens. Such a
+  deployment needs a different trigger.
+* Eviction still routes a committed window through the write-back path, so
+  the write is attempted a second time. An adapter that skips keys it already
+  holds absorbs the write, but the L1 read before it still happens. Teaching
+  the eviction policy that a committed key already has an L2 copy is the next
+  step.
