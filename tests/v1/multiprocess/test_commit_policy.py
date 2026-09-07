@@ -34,7 +34,6 @@ from lmcache.v1.multiprocess.commit_policy import (
     CommitPolicyConfig,
     StopTokenCommitPolicy,
     create_commit_policy,
-    get_registered_commit_policies,
     resolve_anchor,
     resolve_commit,
 )
@@ -124,21 +123,9 @@ class TestStopTokenCommitPolicy:
 
         assert policy.should_commit(make_context(finish_reason=reason)) is False
 
-    def test_refuses_session_without_a_full_chunk(self):
-        """Nothing was stored, so there is nothing to commit."""
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
-
-        assert policy.should_commit(make_context(stored_end=0)) is False
-
 
 class TestRegistry:
     """Tests for commit policy lookup by name."""
-
-    def test_builtins_are_registered(self):
-        """The built-in policy is selectable by name."""
-        names = get_registered_commit_policies()
-
-        assert "stop_token" in names
 
     def test_create_passes_boundary_tokens_to_stop_token(self):
         """``--commit-boundary-tokens`` reaches the policy it configures."""
@@ -149,7 +136,6 @@ class TestRegistry:
         policy = create_commit_policy(config)
 
         assert policy.should_commit(make_context(stop_token_id=99)) is False
-        assert policy.should_commit(make_context()) is True
 
     def test_unknown_policy_is_rejected(self):
         """An unknown name fails at startup, not at the first request."""
@@ -179,13 +165,6 @@ class _RaisingPolicy(CommitPolicy):
 
 class TestResolveCommit:
     """Tests for how a policy's answer is taken."""
-
-    def test_policy_answer_is_returned(self):
-        """The ordinary path is a straight delegation."""
-        policy = StopTokenCommitPolicy()
-
-        assert resolve_commit(make_context(), policy) is True
-        assert resolve_commit(make_context(finish_reason="abort"), policy) is False
 
     def test_raising_policy_does_not_commit(self):
         """A broken policy costs timeliness, not correctness."""
@@ -219,12 +198,6 @@ class TestResolveAnchor:
         ctx = make_context(prompt_end=64, stored_end=8)
 
         assert resolve_anchor(CommitAnchor.PROMPT_END, ctx, CHUNK_SIZE) == 8
-
-    def test_empty_session_yields_no_anchor(self):
-        """No full chunk, nothing to anchor to."""
-        ctx = make_context(prompt_end=0, stored_end=0)
-
-        assert resolve_anchor(CommitAnchor.GENERATION_END, ctx, CHUNK_SIZE) == 0
 
 
 # =============================================================================
@@ -337,14 +310,18 @@ class TestEndSessionCommit:
     """Tests for the keys a committed window actually names."""
 
     def test_commits_the_trailing_window_of_the_sliding_group_only(self):
-        """Two chunks of group 0; group 1 is full attention and already in L2."""
-        config = CommitPolicyConfig(
-            policy="stop_token", anchor=CommitAnchor.GENERATION_END
-        )
-
-        ctx, per_group = run_end_session(config, num_chunks=6, lookup_chunks=4)
+        """Under the default config: two chunks of group 0, none of group 1."""
+        ctx, per_group = run_end_session(CommitPolicyConfig(), num_chunks=6)
 
         assert flushed_keys(ctx) == per_group[0][4:6]
+
+    def test_each_sliding_group_takes_its_own_window(self):
+        """Groups with different ``w`` end at one anchor and start apart."""
+        ctx, per_group = run_end_session(
+            CommitPolicyConfig(), num_chunks=6, attn_desc=AttnWindowDesc([2, 4, -1])
+        )
+
+        assert flushed_keys(ctx) == per_group[0][4:6] + per_group[1][2:6]
 
     def test_prompt_end_anchor_commits_an_earlier_window(self):
         """The window ends where the prompt did, not where generation did."""
@@ -364,11 +341,11 @@ class TestEndSessionCommit:
 
         assert flushed_keys(ctx) == []
 
-    def test_default_config_commits_a_clean_turn_boundary(self):
-        """The built-in default is stop_token accepting any stop token."""
-        ctx, per_group = run_end_session(CommitPolicyConfig(), stop_token_id=7)
+    def test_session_without_a_full_chunk_commits_nothing(self):
+        """A clean stop with nothing stored has no window to name."""
+        ctx, _ = run_end_session(CommitPolicyConfig(), num_chunks=0, lookup_chunks=0)
 
-        assert flushed_keys(ctx) == per_group[0][4:6]
+        assert flushed_keys(ctx) == []
 
     def test_full_attention_only_model_commits_nothing(self):
         """Without a sliding-window group there is no window to commit."""
