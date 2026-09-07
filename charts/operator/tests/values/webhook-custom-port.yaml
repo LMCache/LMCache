@@ -1,0 +1,7 @@
+# Custom webhook port and failure policy.
+# Tests that webhook port and failurePolicy values propagate to both
+# the Deployment container port and the MutatingWebhookConfiguration.
+webhook:
+  enabled: true
+  port: 8443
+  failurePolicy: Fail
