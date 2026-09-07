@@ -40,11 +40,12 @@ from lmcache.integration.vllm.utils import (
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
+from lmcache.utils import CacheStoreEvent, EngineType, _lmcache_nvtx_annotate, cdiv
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
+from lmcache.v1.gpu_connector.kv_format import drop_indexer_caches
 from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
@@ -739,6 +740,7 @@ class LMCacheConnectorV1Impl:
                 self.kv_caches[layer_name] = attn_layer.kv_cache[
                     forward_context.virtual_engine
                 ]
+        self.kv_caches = drop_indexer_caches(self.kv_caches, EngineType.VLLM)
 
     ####################
     # Worker side APIs
@@ -746,6 +748,10 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         logger.info("Registering KV caches")
+        # DSA models also register an indexer cache per sparse layer; vLLM
+        # manages those itself and the connectors here are sized to the
+        # attention layer count, so keep only the attention KV caches.
+        kv_caches = drop_indexer_caches(kv_caches, EngineType.VLLM)
         # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0

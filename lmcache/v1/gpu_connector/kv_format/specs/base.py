@@ -101,10 +101,10 @@ class KVFormatSpec(ABC):
     representative) and the format's **static layout facts** -- the structural
     shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``, exactly one
     true) plus the ``is_mla`` / ``is_hnd`` / ``is_fused_packed`` /
-    ``is_two_major`` / ``is_pbs_fused`` modifiers. They default to ``False``, so
-    a spec only declares what applies to it, and every consumer reads them
-    through ``get_spec_class(fmt)`` -- no format lists at call sites. The device
-    kernels keep their own copy in ``csrc/engine_kv_format.h``.
+    ``is_two_major`` / ``is_pbs_fused`` / ``is_indexer`` modifiers. They default
+    to ``False``, so a spec only declares what applies to it, and every consumer
+    reads them through ``get_spec_class(fmt)`` -- no format lists at call sites.
+    The device kernels keep their own copy in ``csrc/engine_kv_format.h``.
 
     Method usage by mode -- every spec is consumed through the ``get_*``
     facade in ``gpu_connector.utils``:
@@ -153,6 +153,11 @@ class KVFormatSpec(ABC):
     # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
     # than a single stacked per-layer tensor.
     is_kv_second_tuple: ClassVar[bool] = False
+    # A sparse-attention indexer cache (DSA: DeepSeek-V3.2, GLM-5.3), not
+    # attention K/V. The engine registers it beside the attention caches and
+    # manages it itself; ``drop_indexer_caches`` keeps it away from connectors
+    # sized to the attention layer count.
+    is_indexer: ClassVar[bool] = False
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The
