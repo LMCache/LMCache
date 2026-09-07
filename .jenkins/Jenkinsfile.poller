@@ -1,5 +1,4 @@
 // Internal Jenkins: polls GitHub every 5 min for PRs labelled 'rbln',
-// triggers lmcache-rbln-test for each new commit SHA.
 
 pipeline {
     agent any
@@ -63,7 +62,6 @@ pipeline {
 
                         echo "New: PR #${prNum} '${title}' @ ${sha[0..6]} — triggering test job."
 
-                        // 'lmcache-rbln-test' is a Jenkins Pipeline job configured with
                         // Script Path: .jenkins/Jenkinsfile.test
                         build job: 'lmcache-metax-test_poller',
                               parameters: [
