@@ -19,13 +19,6 @@ from lmcache.v1.distributed.config import StorageManagerConfig
 
 logger = init_logger(__name__)
 
-FULL_ATTENTION_ONLY_STORE_POLICY = "full_attention_only"
-"""Name of the store policy that keeps sliding-window object groups out of L2.
-
-It only makes sense when sliding-window layers have object groups of their own,
-which is what ``--separate-object-groups`` produces.
-"""
-
 
 @dataclass
 class MPServerConfig:
@@ -515,12 +508,12 @@ def validate_server_config(
         ValueError: If ``--l2-store-policy full_attention_only`` is selected without
             ``--separate-object-groups``.
     """
-    if storage_manager_config.store_policy != FULL_ATTENTION_ONLY_STORE_POLICY:
+    if storage_manager_config.store_policy != "full_attention_only":
         return
 
     if not mp_config.separate_object_groups:
         raise ValueError(
-            f"--l2-store-policy {FULL_ATTENTION_ONLY_STORE_POLICY} requires "
+            "--l2-store-policy full_attention_only requires "
             "--separate-object-groups: without it every layer shares one "
             "full-attention object group, so no chunk is ever classified as "
             "sliding-window and the policy degenerates to 'default'. Add "
