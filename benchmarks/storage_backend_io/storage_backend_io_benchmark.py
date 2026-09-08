@@ -17,7 +17,7 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 import argparse
 import asyncio
 import json
@@ -426,6 +426,7 @@ class StorageBackendBenchmark(ABC):
         )
 
         # Run benchmark
+        self._before_benchmark()
         logger.info(f"Start benchmark with {self.backend_name} ...")
         self._start_time = time.perf_counter()
         result = self._execute_benchmark()
@@ -478,14 +479,19 @@ class StorageBackendBenchmark(ABC):
         # Single-phase benchmark (write-only)
         elapsed = self._execute_write_phase()
 
-        return {
+        result = {
             "backend": self.backend_name,
             "num_ops": self.num_ops,
             "concurrency": self.concurrency,
             "write_elapsed_sec": elapsed,
             "write_ops_per_sec": self.num_ops / elapsed if elapsed > 0 else 0.0,
+            "write_gib_per_sec": self._total_payload_bytes() / (1024**3) / elapsed
+            if elapsed > 0
+            else 0.0,
             "use_odirect": self.use_odirect,
         }
+        result.update(self._get_extra_result_fields())
+        return result
 
     def _uses_futures_pattern(self) -> bool:
         """Check if this backend uses futures pattern.
@@ -498,6 +504,14 @@ class StorageBackendBenchmark(ABC):
         """Wait for all futures to complete."""
         for fut in futures:
             fut.result(timeout=120)
+
+    def _before_benchmark(self) -> None:
+        """Prepare backend-specific state immediately before timing."""
+        return None
+
+    def _total_payload_bytes(self) -> int:
+        """Return the total payload bytes represented by benchmark objects."""
+        return sum(obj.get_size() for obj in self._objs)
 
     def _get_extra_result_fields(self) -> dict:
         """Get extra fields to add to the benchmark result.
@@ -555,8 +569,14 @@ class StorageBackendBenchmark(ABC):
             "write_ops_per_sec": self.num_ops / write_elapsed
             if write_elapsed > 0
             else 0.0,
+            "write_gib_per_sec": self._total_payload_bytes() / (1024**3) / write_elapsed
+            if write_elapsed > 0
+            else 0.0,
             "read_elapsed_sec": read_elapsed,
             "read_ops_per_sec": self.num_ops / read_elapsed
+            if read_elapsed > 0
+            else 0.0,
+            "read_gib_per_sec": self._total_payload_bytes() / (1024**3) / read_elapsed
             if read_elapsed > 0
             else 0.0,
             "total_elapsed_sec": write_elapsed + read_elapsed,
@@ -830,11 +850,29 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
         if self._backend:
             self._backend.close()
 
+    def _before_benchmark(self) -> None:
+        """Reset path counters so setup I/O is excluded from results."""
+        backend = cast(RustRawBlockBackend, self._backend)
+        backend.reset_io_path_stats()
+
     def _get_extra_result_fields(self) -> dict:
         """Get extra fields for RustRawBlockBackend benchmark results."""
+        backend = cast(RustRawBlockBackend, self._backend)
+        stats = backend.io_path_stats()
+        request_key = "write_requests" if self.write_bench else "read_requests"
+        fixed_key = (
+            "fixed_write_requests" if self.write_bench else "fixed_read_requests"
+        )
+        bounce_key = (
+            "bounce_write_requests" if self.write_bench else "bounce_read_requests"
+        )
+        requests = stats[request_key]
         return {
             "use_uring": self.use_uring,
             "use_uring_cmd": self.use_uring_cmd,
+            "io_path_stats": stats,
+            "fixed_buffer_hit_ratio": stats[fixed_key] / requests if requests else 0.0,
+            "bounce_request_ratio": stats[bounce_key] / requests if requests else 0.0,
         }
 
     def _cleanup_device(self) -> None:
@@ -1228,12 +1266,14 @@ def main() -> None:
             f"{result['backend']}: ops={result['num_ops']} "
             f"concurrency={result['concurrency']} "
             f"write_elapsed={result['write_elapsed_sec']:.3f}s "
-            f"write_ops/sec={result['write_ops_per_sec']:.2f}"
+            f"write_ops/sec={result['write_ops_per_sec']:.2f} "
+            f"write_GiB/sec={result['write_gib_per_sec']:.2f}"
         )
         if not write_bench:
             print(
                 f"read_elapsed={result['read_elapsed_sec']:.3f}s "
                 f"read_ops/sec={result['read_ops_per_sec']:.2f} "
+                f"read_GiB/sec={result['read_gib_per_sec']:.2f} "
                 f"total_elapsed={result['total_elapsed_sec']:.3f}s"
             )
             if args.verify_integrity:

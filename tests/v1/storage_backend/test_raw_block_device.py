@@ -95,6 +95,13 @@ def test_raw_block_device_iouring_best_effort_roundtrip(tmp_path):
         assert dev.wait_iouring(batch_id) == ([True], [])
 
         assert out == payload
+        stats = dev.io_path_stats()
+        assert stats["write_requests"] == 1
+        assert stats["read_requests"] == 1
+        assert stats["iouring_write_requests"] == 1
+        assert stats["iouring_read_requests"] == 1
+        assert stats["posix_write_requests"] == 0
+        assert stats["posix_read_requests"] == 0
     except Exception as e:
         if is_skip_safe_io_error(e):
             pytest.skip(f"io_uring is unavailable on this runner: {e}")
@@ -133,3 +140,47 @@ def test_raw_block_device_odirect_optional_smoke(tmp_path):
     finally:
         if dev is not None:
             dev.close()
+
+
+def test_raw_block_device_io_path_stats_posix(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    dev = RawBlockDevice(
+        str(path),
+        writable=True,
+        use_odirect=False,
+        alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+        io_engine="posix",
+        iouring_queue_depth=8,
+    )
+
+    try:
+        assert all(value == 0 for value in dev.io_path_stats().values())
+        payload = bytearray(b"raw-block-path-stats")
+        out = bytearray(len(payload))
+        dev.pwrite_from_buffer(4096, payload, len(payload), len(payload))
+        dev.pread_into(4096, out, len(out), len(out))
+
+        stats = dev.io_path_stats()
+        assert stats["write_requests"] == 1
+        assert stats["read_requests"] == 1
+        assert stats["posix_write_requests"] == 1
+        assert stats["posix_read_requests"] == 1
+        assert stats["iouring_write_requests"] == 0
+        assert stats["iouring_read_requests"] == 0
+        assert stats["bounce_write_requests"] == 0
+        assert stats["bounce_read_requests"] == 0
+
+        padded_payload = bytearray(b"abc")
+        padded_out = bytearray(len(padded_payload))
+        dev.pwrite_from_buffer(8192, padded_payload, len(padded_payload), 4)
+        dev.pread_into(8192, padded_out, len(padded_out), 4)
+        stats = dev.io_path_stats()
+        assert stats["bounce_write_requests"] == 1
+        assert stats["bounce_read_requests"] == 1
+        assert stats["bounce_write_bytes"] == len(padded_payload)
+        assert stats["bounce_read_bytes"] == len(padded_out)
+
+        dev.reset_io_path_stats()
+        assert all(value == 0 for value in dev.io_path_stats().values())
+    finally:
+        dev.close()

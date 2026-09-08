@@ -1020,6 +1020,66 @@ struct IoSubmission {
     nvme_cmd_data: Option<NvmeCmdData>, // NVMe command data for io_uring_cmd
 }
 
+#[derive(Default)]
+struct IoPathStats {
+    read_requests: AtomicU64,
+    write_requests: AtomicU64,
+    posix_read_requests: AtomicU64,
+    posix_write_requests: AtomicU64,
+    iouring_read_requests: AtomicU64,
+    iouring_write_requests: AtomicU64,
+    uring_cmd_read_requests: AtomicU64,
+    uring_cmd_write_requests: AtomicU64,
+    fixed_read_requests: AtomicU64,
+    fixed_write_requests: AtomicU64,
+    bounce_read_requests: AtomicU64,
+    bounce_write_requests: AtomicU64,
+    bounce_read_bytes: AtomicU64,
+    bounce_write_bytes: AtomicU64,
+}
+
+impl IoPathStats {
+    fn snapshot(&self) -> HashMap<String, u64> {
+        let counters = [
+            ("read_requests", &self.read_requests),
+            ("write_requests", &self.write_requests),
+            ("posix_read_requests", &self.posix_read_requests),
+            ("posix_write_requests", &self.posix_write_requests),
+            ("iouring_read_requests", &self.iouring_read_requests),
+            ("iouring_write_requests", &self.iouring_write_requests),
+            ("uring_cmd_read_requests", &self.uring_cmd_read_requests),
+            ("uring_cmd_write_requests", &self.uring_cmd_write_requests),
+            ("fixed_read_requests", &self.fixed_read_requests),
+            ("fixed_write_requests", &self.fixed_write_requests),
+            ("bounce_read_requests", &self.bounce_read_requests),
+            ("bounce_write_requests", &self.bounce_write_requests),
+            ("bounce_read_bytes", &self.bounce_read_bytes),
+            ("bounce_write_bytes", &self.bounce_write_bytes),
+        ];
+        counters
+            .into_iter()
+            .map(|(name, counter)| (name.to_string(), counter.load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    fn reset(&self) {
+        self.read_requests.store(0, Ordering::Relaxed);
+        self.write_requests.store(0, Ordering::Relaxed);
+        self.posix_read_requests.store(0, Ordering::Relaxed);
+        self.posix_write_requests.store(0, Ordering::Relaxed);
+        self.iouring_read_requests.store(0, Ordering::Relaxed);
+        self.iouring_write_requests.store(0, Ordering::Relaxed);
+        self.uring_cmd_read_requests.store(0, Ordering::Relaxed);
+        self.uring_cmd_write_requests.store(0, Ordering::Relaxed);
+        self.fixed_read_requests.store(0, Ordering::Relaxed);
+        self.fixed_write_requests.store(0, Ordering::Relaxed);
+        self.bounce_read_requests.store(0, Ordering::Relaxed);
+        self.bounce_write_requests.store(0, Ordering::Relaxed);
+        self.bounce_read_bytes.store(0, Ordering::Relaxed);
+        self.bounce_write_bytes.store(0, Ordering::Relaxed);
+    }
+}
+
 impl Default for IoSubmission {
     fn default() -> Self {
         IoSubmission {
@@ -1092,6 +1152,7 @@ struct RawBlockDevice {
     batched_completions: Arc<Mutex<HashMap<u64, Vec<Arc<IoCompletion>>>>>,
     // Counter for generating unique batch IDs
     next_batch_id: Arc<AtomicU64>,
+    io_path_stats: Arc<IoPathStats>,
 }
 
 /// RAII guard for a raw file descriptor
@@ -1994,6 +2055,7 @@ impl RawBlockDevice {
             next_batch_id: next_batch_id_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(1))),
             batch_in_flight: batch_in_flight_opt
                 .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new()))),
+            io_path_stats: Arc::new(IoPathStats::default()),
         })
     }
 
@@ -2057,6 +2119,16 @@ impl RawBlockDevice {
     // Expose cached size to Python.
     fn size_bytes(&self) -> PyResult<u64> {
         Ok(self.size)
+    }
+
+    /// Return a snapshot of I/O path counters since construction or last reset.
+    fn io_path_stats(&self) -> HashMap<String, u64> {
+        self.io_path_stats.snapshot()
+    }
+
+    /// Reset all I/O path counters to zero.
+    fn reset_io_path_stats(&self) {
+        self.io_path_stats.reset();
     }
 
     /// Get NVMe namespace ID (only available when use_uring_cmd=true)
@@ -2286,6 +2358,7 @@ impl RawBlockDevice {
         let batch_ready = Arc::clone(self.batch_ready.as_ref().unwrap());
         let batched_completions = Arc::clone(&self.batched_completions);
         let batch_in_flight = Arc::clone(&self.batch_in_flight);
+        let io_path_stats = Arc::clone(&self.io_path_stats);
         // Additional clones for cleanup on error path
         let batch_in_flight_cleanup = Arc::clone(&batch_in_flight);
         let batched_completions_cleanup = Arc::clone(&batched_completions);
@@ -2374,6 +2447,39 @@ impl RawBlockDevice {
 
                 submissions.push((sub, comp));
             }
+
+            io_path_stats
+                .write_requests
+                .fetch_add(n as u64, Ordering::Relaxed);
+            io_path_stats
+                .iouring_write_requests
+                .fetch_add(n as u64, Ordering::Relaxed);
+            if use_uring_cmd {
+                io_path_stats
+                    .uring_cmd_write_requests
+                    .fetch_add(n as u64, Ordering::Relaxed);
+            }
+            let fixed_count = submissions
+                .iter()
+                .filter(|(sub, _)| sub.fixed_buffer_idx.is_some())
+                .count() as u64;
+            let bounce_count = submissions
+                .iter()
+                .filter(|(sub, _)| sub.bounce.is_some())
+                .count() as u64;
+            let bounce_bytes = submissions
+                .iter()
+                .filter_map(|(sub, _)| sub.bounce.as_ref().map(|_| sub.len as u64))
+                .sum::<u64>();
+            io_path_stats
+                .fixed_write_requests
+                .fetch_add(fixed_count, Ordering::Relaxed);
+            io_path_stats
+                .bounce_write_requests
+                .fetch_add(bounce_count, Ordering::Relaxed);
+            io_path_stats
+                .bounce_write_bytes
+                .fetch_add(bounce_bytes, Ordering::Relaxed);
 
             // Queue all submissions atomically. At this point no further errors can
             // occur during queuing.
@@ -2571,6 +2677,31 @@ impl RawBlockDevice {
         // Buffer capacity is less than total_len
         let use_bounce = !ptr_aligned || cap < total_len;
 
+        self.io_path_stats
+            .read_requests
+            .fetch_add(1, Ordering::Relaxed);
+        self.io_path_stats
+            .iouring_read_requests
+            .fetch_add(1, Ordering::Relaxed);
+        if self.use_uring_cmd {
+            self.io_path_stats
+                .uring_cmd_read_requests
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if fixed_idx.is_some() && !use_bounce {
+            self.io_path_stats
+                .fixed_read_requests
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if use_bounce {
+            self.io_path_stats
+                .bounce_read_requests
+                .fetch_add(1, Ordering::Relaxed);
+            self.io_path_stats
+                .bounce_read_bytes
+                .fetch_add(payload_len as u64, Ordering::Relaxed);
+        }
+
         let res = if !use_bounce {
             self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
@@ -2708,6 +2839,31 @@ impl RawBlockDevice {
         // Buffer is not aligned (O_DIRECT requirement)
         // Buffer capacity is less than total_len
         let use_bounce = !ptr_aligned || cap < total_len;
+
+        self.io_path_stats
+            .write_requests
+            .fetch_add(1, Ordering::Relaxed);
+        self.io_path_stats
+            .iouring_write_requests
+            .fetch_add(1, Ordering::Relaxed);
+        if self.use_uring_cmd {
+            self.io_path_stats
+                .uring_cmd_write_requests
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if fixed_idx.is_some() && !use_bounce {
+            self.io_path_stats
+                .fixed_write_requests
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if use_bounce {
+            self.io_path_stats
+                .bounce_write_requests
+                .fetch_add(1, Ordering::Relaxed);
+            self.io_path_stats
+                .bounce_write_bytes
+                .fetch_add(payload_len as u64, Ordering::Relaxed);
+        }
 
         let res = if !use_bounce {
             self.in_flight_count.fetch_add(1, Ordering::Relaxed);
@@ -2886,6 +3042,7 @@ impl RawBlockDevice {
         let batch_ready = Arc::clone(self.batch_ready.as_ref().unwrap());
         let batched_completions = Arc::clone(&self.batched_completions);
         let batch_in_flight = Arc::clone(&self.batch_in_flight);
+        let io_path_stats = Arc::clone(&self.io_path_stats);
 
         // Additional clones for cleanup on error path
         let batch_in_flight_cleanup = Arc::clone(&batch_in_flight);
@@ -2969,6 +3126,39 @@ impl RawBlockDevice {
 
                 submissions.push((sub, comp));
             }
+
+            io_path_stats
+                .read_requests
+                .fetch_add(n as u64, Ordering::Relaxed);
+            io_path_stats
+                .iouring_read_requests
+                .fetch_add(n as u64, Ordering::Relaxed);
+            if use_uring_cmd {
+                io_path_stats
+                    .uring_cmd_read_requests
+                    .fetch_add(n as u64, Ordering::Relaxed);
+            }
+            let fixed_count = submissions
+                .iter()
+                .filter(|(sub, _)| sub.fixed_buffer_idx.is_some())
+                .count() as u64;
+            let bounce_count = submissions
+                .iter()
+                .filter(|(sub, _)| sub.bounce.is_some())
+                .count() as u64;
+            let bounce_bytes = submissions
+                .iter()
+                .filter_map(|(sub, _)| sub.payload_len.map(|len| len as u64))
+                .sum::<u64>();
+            io_path_stats
+                .fixed_read_requests
+                .fetch_add(fixed_count, Ordering::Relaxed);
+            io_path_stats
+                .bounce_read_requests
+                .fetch_add(bounce_count, Ordering::Relaxed);
+            io_path_stats
+                .bounce_read_bytes
+                .fetch_add(bounce_bytes, Ordering::Relaxed);
 
             // Queue all submissions atomically. At this point no further errors can
             // occur during queuing.
@@ -3076,6 +3266,28 @@ impl RawBlockDevice {
         // to `allow_threads` must own plain data and cannot borrow `view`.
         // We still keep `view` alive until I/O finishes, then release it below.
         let ptr_usize = ptr as usize;
+        let src_aligned = ptr_usize.is_multiple_of(align);
+        let bounce_copy_bytes = if total_len == payload_len && !self.use_odirect {
+            0
+        } else if self.use_odirect && src_aligned {
+            payload_len % align
+        } else {
+            payload_len
+        };
+        self.io_path_stats
+            .write_requests
+            .fetch_add(1, Ordering::Relaxed);
+        self.io_path_stats
+            .posix_write_requests
+            .fetch_add(1, Ordering::Relaxed);
+        if bounce_copy_bytes > 0 {
+            self.io_path_stats
+                .bounce_write_requests
+                .fetch_add(1, Ordering::Relaxed);
+            self.io_path_stats
+                .bounce_write_bytes
+                .fetch_add(bounce_copy_bytes as u64, Ordering::Relaxed);
+        }
         let res = py.allow_threads(move || {
             let src = ptr_usize as *const u8;
             let src_aligned = (src as usize).is_multiple_of(align);
@@ -3216,6 +3428,28 @@ impl RawBlockDevice {
         // Same pattern as write path: move raw address into closure-safe value
         // while retaining `view` lifetime until closure completion.
         let dst_usize = ptr as usize;
+        let dst_aligned = dst_usize.is_multiple_of(align);
+        let bounce_copy_bytes = if total_len == payload_len && !self.use_odirect {
+            0
+        } else if self.use_odirect && dst_aligned {
+            payload_len % align
+        } else {
+            payload_len
+        };
+        self.io_path_stats
+            .read_requests
+            .fetch_add(1, Ordering::Relaxed);
+        self.io_path_stats
+            .posix_read_requests
+            .fetch_add(1, Ordering::Relaxed);
+        if bounce_copy_bytes > 0 {
+            self.io_path_stats
+                .bounce_read_requests
+                .fetch_add(1, Ordering::Relaxed);
+            self.io_path_stats
+                .bounce_read_bytes
+                .fetch_add(bounce_copy_bytes as u64, Ordering::Relaxed);
+        }
         let res = py.allow_threads(move || {
             let dst = dst_usize as *mut u8;
             let dst_aligned = (dst as usize).is_multiple_of(align);

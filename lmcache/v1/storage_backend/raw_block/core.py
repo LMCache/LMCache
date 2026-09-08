@@ -581,6 +581,14 @@ class RawBlockCore:
             len(buffers),
         )
 
+    def io_path_stats(self) -> dict[str, int]:
+        """Return a snapshot of low-level I/O path counters."""
+        return dict(self._rawdev().io_path_stats())
+
+    def reset_io_path_stats(self) -> None:
+        """Reset all low-level I/O path counters."""
+        self._rawdev().reset_io_path_stats()
+
     def contains_key(self, encoded_key: str, *, lock: bool = False) -> bool:
         """Return whether one encoded key is present in the raw-block index.
 
