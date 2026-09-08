@@ -754,8 +754,9 @@ class LMCacheConnectorV1Impl:
             # indexer top-k then decodes garbage (LMCache/LMCache#5002).
             raise NotImplementedError(
                 f"{len(indexer_caches)} DSA indexer KV caches registered (e.g. "
-                f"{indexer_caches[0]}); this connector cannot offload them yet. "
-                "See https://github.com/LMCache/LMCache/issues/5002."
+                f"{indexer_caches[0]}); this connector cannot offload them. Use "
+                "LMCacheMPConnector, which stores and restores them (see the GLM "
+                "recipe and https://github.com/LMCache/LMCache/issues/5002)."
             )
         # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
         #  not called, we should consider removing it.

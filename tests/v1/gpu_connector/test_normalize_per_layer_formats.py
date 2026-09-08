@@ -84,3 +84,14 @@ def test_vllm_mixed_rank4_fused_groups():
     assert tuple(normalized[0].shape) == (NB, BS, NH, 2 * HS)
     assert tuple(normalized[3].shape) == (NB, BS, NH, 4 * HS)
     assert formats == [F.NL_X_NB_NH_BS_CS] * 5
+
+
+def test_vllm_dsa_mla_plus_indexer_groups():
+    # DSA (GLM-5.3, DeepSeek-V3.2): fp8 MLA caches beside uint8 [NB, BS, 132]
+    # indexer k-caches, one vLLM group. Each layer must get its own format.
+    mla = [torch.zeros(NB, BS, 576, dtype=torch.float8_e4m3fn) for _ in range(3)]
+    indexer = [torch.zeros(NB, BS, 132, dtype=torch.uint8) for _ in range(2)]
+    _, formats = normalize_and_discover_per_layer_formats(
+        mla + indexer, [range(5)], EngineType.VLLM, {}
+    )
+    assert formats == [F.NL_X_NB_BS_HS] * 3 + [F.NL_X_NB_BSV_BSS] * 2
