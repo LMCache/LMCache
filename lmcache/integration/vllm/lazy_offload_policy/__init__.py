@@ -11,8 +11,8 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
     OffloadPolicy,
 )
 from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (
-    EvictionAwareStoreQueue,
     EvictionAwarePolicyConfig,
+    EvictionAwareStoreQueue,
 )
 from lmcache.integration.vllm.lazy_offload_policy.fifo import FIFOOffloadPolicy
 from lmcache.utils import init_logger
