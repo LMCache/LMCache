@@ -176,7 +176,9 @@ class TestLazyOffloadPendingStore:
     def test_add_with_gpu_pool(self):
         store = self._setup_store_with_gpu_pool()
         meta = _make_meta("req-0", num_blocks=2)
+        assert not store.has_pending_request("req-0")
         store.add(meta)
+        assert store.has_pending_request("req-0")
         # Verify block hashes were computed from gpu pool
         pending = store._policy._pending_items["req-0"]
         assert len(pending.metadatas) == 1
@@ -193,6 +195,8 @@ class TestLazyOffloadPendingStore:
         store.add(_make_meta("req-1"))
         store.mark_req_finished("req-1")
         assert len(store.pop_items_for_offload()) == 2
+        assert not store.has_pending_request("req-0")
+        assert not store.has_pending_request("req-1")
 
     def test_pop_items_for_offload_returns_correct_count(self):
         configs = {

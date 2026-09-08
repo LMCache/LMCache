@@ -52,6 +52,12 @@ class LazyOffloadPendingStore:
         # save all request block ids for free
         self._request_block_ids: dict[str, list[int]] = defaultdict(list)
 
+        # Track membership at the queue boundary rather than extending the
+        # policy interface. This keeps third-party OffloadPolicy subclasses
+        # compatible while allowing callers to distinguish a legitimate
+        # no-store request from a missing queued item.
+        self._pending_request_ids: set[str] = set()
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the GPU block pool to the pending store."""
         self._gpu_block_pool = gpu_block_pool
@@ -64,6 +70,7 @@ class LazyOffloadPendingStore:
                 for bid in meta.op.flat_block_ids
             }
             self._policy.add(meta, block_hashes)
+            self._pending_request_ids.add(meta.request_id)
         else:
             raise ValueError("gpu block pool not bound")
 
@@ -76,10 +83,23 @@ class LazyOffloadPendingStore:
             Pending store items to submit, or an empty list when no offload is
             due.
         """
-        return self._policy.pop_items_for_offload(self._select_count)
+        items = self._policy.pop_items_for_offload(self._select_count)
+        self._pending_request_ids.difference_update(item.request_id for item in items)
+        return items
 
-    def mark_req_finished(self, req_id: str):
+    def mark_req_finished(self, req_id: str) -> None:
         self._policy.mark_req_finished(req_id)
+
+    def has_pending_request(self, req_id: str) -> bool:
+        """Return whether a request has cache blocks pending offload.
+
+        Args:
+            req_id: Identifier of the request to inspect.
+
+        Returns:
+            True when the request has at least one queued store operation.
+        """
+        return req_id in self._pending_request_ids
 
     def update_request_gpu_block_ids(self, req_id: str, block_ids: list[int]):
         self._request_block_ids[req_id].extend(block_ids)

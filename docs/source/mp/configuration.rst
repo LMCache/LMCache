@@ -700,6 +700,59 @@ rejected at connector startup.
 ``decode_context_parallel_size > tensor_parallel_size`` is rejected by vLLM
 itself, so this connector does not re-check it.
 
+.. _rswa-prompt-caching:
+
+Reference Sliding Window Attention (R-SWA)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The LMCache-provided MP connector supports vLLM's Reference Sliding Window
+Attention (R-SWA) with a **prompt-only** cache policy. R-SWA retains the
+initial prompt but can free and reuse older decode blocks once they leave the
+active sliding window. Treating those reused slots as an append-only token
+prefix could store KV under the wrong token keys, so LMCache never looks up,
+stores, or retrieves decode tokens for an R-SWA request.
+
+The cacheable boundary is fixed to the request's initial
+``num_prompt_tokens``. Only complete LMCache chunks within that boundary are
+transferred; a partial final prompt chunk is recomputed locally. For example,
+a 277-token prompt with ``--chunk-size 256`` stores and can retrieve 256
+tokens. Requests that vLLM marks as resumable bypass LMCache entirely because
+their prompt boundary can change between turns.
+
+The connector automatically appends the
+``##lmcache-rswa-prompt-v1`` policy marker to its cache model namespace, after
+any DCP layout decoration. This keeps prompt-only entries separate from normal
+full-sequence entries and from entries written by older connectors that did
+not enforce the policy. The first request after upgrading is therefore cold;
+no namespace configuration is required.
+
+R-SWA requires the ``LMCacheMPConnector`` implementation shipped by LMCache.
+Select its external module explicitly and keep vLLM's engine-local prefix
+cache disabled:
+
+.. code-block:: bash
+
+    vllm serve <r-swa-model> \
+        --no-enable-prefix-caching \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_role":"kv_both"}'
+
+The LMCache-provided in-process ``LMCacheConnectorV1`` implementation and
+``LMCacheConnectorV1Dynamic`` do not support R-SWA and reject the model at
+startup. This includes the default ``use_native=false`` path in vLLM's
+``LMCacheConnectorV1`` shim. Its ``use_native=true`` implementation is
+vendored in vLLM and is outside this compatibility guarantee; do not use it
+for R-SWA. Omitting ``kv_connector_module_path`` can likewise select vLLM's
+bundled MP connector, which may not include the prompt-only policy. See
+:doc:`/getting_started/compatibility` for connector-loading version details
+and :doc:`/recipes/unlimited_ocr` for a validated multimodal R-SWA setup.
+
+For multimodal R-SWA models, ``--mm-processor-cache-gb`` must be greater than
+zero. Combined with the required ``--no-enable-prefix-caching`` setting, a
+zero processor-cache budget lets vLLM generate renderer-local media IDs that
+can repeat after a restart or across replicas. The connector rejects that
+unsafe combination at startup.
+
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
 
