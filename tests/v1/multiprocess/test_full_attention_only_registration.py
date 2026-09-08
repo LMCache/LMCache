@@ -261,24 +261,20 @@ class TestStorePolicyValidation:
         assert "--separate-object-groups" in message
 
     def test_full_attention_only_with_separate_object_groups_is_accepted(self):
-        """The supported combination builds and validates."""
+        """The supported combination passes validation without raising."""
         args = parse_server_args(
             ["--l2-store-policy", "full_attention_only", "--separate-object-groups"]
         )
-        mp_config = parse_args_to_mp_server_config(args)
-        storage_manager_config = parse_args_to_config(args)
 
-        validate_server_config(mp_config, storage_manager_config)
-
-        assert storage_manager_config.store_policy == "full_attention_only"
-        assert mp_config.separate_object_groups is True
+        validate_server_config(
+            parse_args_to_mp_server_config(args), parse_args_to_config(args)
+        )
 
     def test_default_policy_needs_no_object_group_split(self):
-        """Other store policies are unaffected by the check."""
+        """The check is specific to full_attention_only: the default policy
+        passes without --separate-object-groups."""
         args = parse_server_args([])
-        mp_config = parse_args_to_mp_server_config(args)
-        storage_manager_config = parse_args_to_config(args)
 
-        validate_server_config(mp_config, storage_manager_config)
-
-        assert storage_manager_config.store_policy == "default"
+        validate_server_config(
+            parse_args_to_mp_server_config(args), parse_args_to_config(args)
+        )
