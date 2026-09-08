@@ -58,12 +58,10 @@ lmcache/v1/mp_coordinator/
   app.py                # create_app + lifespan + router discovery + health/eviction loops
   __main__.py           # uvicorn entrypoint (`python -m lmcache.v1.mp_coordinator`)
   config.py             # MPCoordinatorConfig (CLI flags only, no env vars)
-  registry.py           # InstanceRegistry + MPInstance (pure membership)
   schemas.py            # Pydantic request/response models (shared wire contract)
   registrar.py          # mp-server-side register/heartbeat/deregister helpers
   blend_index.py      # BlendIndex: fragment (blend) lookup over those bindings
   blend_client.py       # mp-server-side fragment-lookup query client
-  server_config.py      # ServerConfigRegistry: per-server module capacities (from registration)
   ingest/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
@@ -72,13 +70,16 @@ lmcache/v1/mp_coordinator/
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
     base.py             # View: the marker; may depend on other views only
+    instance_registry.py  # InstanceRegistry + MPInstance: fleet membership
     key_directory.py    # KeyDirectory: placements + token bindings (a consumer)
+    server_config.py    # ServerConfigRegistry: per-server capacities (from registration)
     usage_manager.py    # per-tier usage view, by salt and by instance (a consumer)
   controllers/          # policy: loops and request handling, reading the views
-    __init__.py         # build_controllers: scans this package
-    base.py             # Controller: the marker; may depend on views and peers
+    __init__.py         # build_controllers: scans this package + named ones
+    base.py             # Controller: construction + run(); views only
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
     prefetch_manager.py # dispatches warm prefetch to a named MP server
+  http_routes.py        # HttpRoutes: a controller registering its own endpoints
   http_apis/
     __init__.py
     dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
@@ -278,10 +279,10 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   on shutdown. `HEALTH_CHECK_INTERVAL = 0` disables the stale-instance loop
   (it does not affect the L2 eviction loop, which is gated separately by
   `EVICTION_CHECK_INTERVAL`).
-- The L2 eviction loop is a second asyncio task started in the lifespan,
-  running `FleetEvictionController.run` (the controller owns its own
-  cadence); it is cancelled on shutdown. `EVICTION_CHECK_INTERVAL = 0`
-  disables it.
+- The L2 eviction loop is the controller's own, not the app's: the lifespan
+  enters every controller's `run` and names none of them.
+  `EVICTION_CHECK_INTERVAL = 0` makes `FleetEvictionController.start`
+  create no task.
 - Registration is idempotent: re-registering replaces the entry. The registry
   is ephemeral — rebuilt from heartbeats after a coordinator restart. Durable
   state (registered quotas) belongs in an external store, not here. The
