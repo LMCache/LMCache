@@ -3,8 +3,8 @@
 """Contract tests for generation-scoped logical prefetch leases."""
 
 # Standard
-import threading
 from unittest.mock import Mock
+import threading
 
 # Third Party
 import pytest
