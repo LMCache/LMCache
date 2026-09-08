@@ -244,6 +244,7 @@ def _detect_device() -> "tuple[Any, str, str | None]":
     env_backend_name = _get_env_choice(DEVICE_BACKEND_ENV_VAR)
     if env_backend_name is not None:
         torch_module, spec = _resolve_explicit_backend(torch, env_backend_name)
+        torch_module = spec.adapt_torch_module(torch_module)
         return torch_module, spec.device_type, spec.backend_name
 
     env_device_type = _get_env_choice("DEVICE_TYPE")
@@ -251,6 +252,7 @@ def _detect_device() -> "tuple[Any, str, str | None]":
         resolved = _resolve_device_type_candidates(torch, env_device_type)
         if resolved is not None:
             torch_module, spec = resolved
+            torch_module = spec.adapt_torch_module(torch_module)
             return torch_module, spec.device_type, spec.backend_name
         logger.warning(
             "DEVICE_TYPE=%r is not available or not registered, "
@@ -262,6 +264,7 @@ def _detect_device() -> "tuple[Any, str, str | None]":
         resolved = _resolve_device_type_candidates(torch, device_type)
         if resolved is not None:
             torch_module, spec = resolved
+            torch_module = spec.adapt_torch_module(torch_module)
             return torch_module, spec.device_type, spec.backend_name
 
     # No accelerator found -- fall back to CPU stub

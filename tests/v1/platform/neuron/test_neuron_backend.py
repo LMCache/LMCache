@@ -125,3 +125,87 @@ def test_neuron_device_type_matches_torch_neuronx() -> None:
         f"NeuronDeviceSpec assumes device_type='neuron' but "
         f"torch_neuronx reports '{actual}'. Update NeuronDeviceSpec."
     )
+
+
+# -- Visible-device parsing ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("", 1),
+        ("   ", 1),
+        ("5", 1),
+        ("0,1,2", 3),
+        ("0-7", 8),
+        ("0-3,8-11", 8),
+        ("0-3,8", 5),
+        ("0-0", 1),
+        ("3-1", 1),
+        ("garbage", 1),
+    ],
+)
+def test_parse_visible_devices(value: str, expected: int) -> None:
+    """NEURON_VISIBLE_DEVICES ranges are counted, not just comma-separated ids.
+
+    vllm-neuron sets this in range form (e.g. "0-7" for two replicas of four
+    cores), so counting commas alone under-reports a whole-node allocation.
+    """
+    # First Party
+    from lmcache.v1.platform.neuron import parse_visible_devices
+
+    assert parse_visible_devices(value) == expected
+
+
+# -- torch module adapter --------------------------------------------------
+
+
+def test_adapt_torch_module_supplies_missing_methods(
+    neuron_spec: NeuronDeviceSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The adapter answers the calls torch.neuron does not define."""
+    monkeypatch.setenv("NEURON_VISIBLE_DEVICES", "0-7")
+
+    class BareModule:
+        """Stands in for a torch.neuron without the CUDA-shaped surface."""
+
+        def is_available(self) -> bool:
+            return True
+
+    adapted = neuron_spec.adapt_torch_module(BareModule())
+
+    assert adapted.device_count() == 8
+    assert adapted.set_device(0) is None
+    assert adapted.current_stream().synchronize() is None
+    assert adapted.Stream is not None
+
+
+def test_adapt_torch_module_does_not_mutate_the_module(
+    neuron_spec: NeuronDeviceSpec,
+) -> None:
+    """Adapting leaves the vendor's module untouched."""
+
+    class BareModule:
+        """Stands in for a torch.neuron without the CUDA-shaped surface."""
+
+    module = BareModule()
+    neuron_spec.adapt_torch_module(module)
+
+    assert not hasattr(module, "set_device")
+    assert not hasattr(module, "device_count")
+    assert not hasattr(module, "Stream")
+
+
+def test_adapt_torch_module_forwards_real_attributes(
+    neuron_spec: NeuronDeviceSpec,
+) -> None:
+    """Attributes the real module defines are passed straight through."""
+
+    class BareModule:
+        """Stands in for a torch.neuron exposing its own attribute."""
+
+        sentinel = "from-the-real-module"
+
+    adapted = neuron_spec.adapt_torch_module(BareModule())
+
+    assert adapted.sentinel == "from-the-real-module"

@@ -46,6 +46,12 @@ from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
 from lmcache.v1.manager import LMCacheManager
+from lmcache.v1.platform import torch_device_type
+
+# Platforms whose runner builds attention state itself and calls
+# set_forward_context with attn_metadata=None on a real forward pass. On these,
+# a None attn_metadata carries no information about whether a load should run.
+_NO_ATTN_METADATA_DEVICES = frozenset({"neuron"})
 
 if TYPE_CHECKING:
     # Third Party
@@ -776,8 +782,19 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
 
+        # Platforms that build their own attention state run a real forward pass
+        # with attn_metadata set to None -- vllm-neuron does -- so on those this
+        # check silently disabled every load while stores kept running. It was
+        # never a real precondition anywhere: this path reads only token ids and
+        # slot mappings, both from the connector metadata, and wait_for_save (the
+        # store path) has always driven off that metadata alone. Requests that
+        # must not be loaded are filtered per request below, via load_spec.
+        #
+        # The check is nonetheless kept for every other platform, so CUDA
+        # behaviour is unchanged. Only the platforms that cannot supply
+        # attn_metadata opt out.
         attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
+        if attn_metadata is None and torch_device_type not in _NO_ATTN_METADATA_DEVICES:
             logger.debug("In connector.start_load_kv, but the attn_metadata is None")
             return
 
