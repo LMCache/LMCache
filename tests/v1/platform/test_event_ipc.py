@@ -13,9 +13,9 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.cpu import CpuDeviceSpec
-from lmcache.v1.platform.cuda import CudaDeviceSpec
-from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
+from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
+from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
     TimelineSemaphoreEventIPCBackend,
 )
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
