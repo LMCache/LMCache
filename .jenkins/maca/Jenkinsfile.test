@@ -1,0 +1,128 @@
+// Test job: triggered by lmcache-maca-webhook.
+// Checks out the PR commit, runs tests, and posts results to GitHub.
+// MetaX MACA variant — kept in its own maca/ subdirectory so it doesn't
+// collide with other vendors' copies of the shared webhook/test pattern.
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'COMMIT_SHA', defaultValue: '', description: 'Exact git SHA to test')
+        string(name: 'PR_NUMBER',  defaultValue: '', description: 'GitHub PR number')
+        string(name: 'PR_TITLE',   defaultValue: '', description: 'PR title (for display)')
+    }
+
+    environment {
+        GITHUB_TOKEN   = credentials('GITHUB_PAT')
+        GITHUB_REPO    = 'opendataio/LMCache'
+        STATUS_CONTEXT = 'jenkins/maca'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                cleanWs()
+                writeGithubStatus('pending', 'Checking out code...')
+                sh """
+                    git clone https://github.com/\${GITHUB_REPO}.git repo
+                    cd repo
+                    git checkout \${COMMIT_SHA}
+                    echo "Checked out: \$(git log -1 --oneline)"
+                """
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                writeGithubStatus('pending', 'Tests running...')
+                sh """
+                    set -o pipefail
+                    cd repo
+                    bash .jenkins/maca/run_tests.sh 2>&1 | tee \${WORKSPACE}/test_output.txt
+                """
+            }
+        }
+
+        stage('Parse Result') {
+            steps {
+                script {
+                    if (!fileExists('repo/result.json')) {
+                        error("result.json not found — run_tests.sh did not produce output")
+                    }
+                    def result = readJSON file: 'repo/result.json'
+                    echo "Result: ${result}"
+                    env.TEST_STATUS       = result.status
+                    env.TEST_DURATION     = result.duration_seconds.toString()
+                    env.TEST_CAPABILITY   = result.capability
+                    env.TEST_FAILED_TESTS = result.failed_tests ? result.failed_tests.join('\n') : ''
+                    env.TEST_ERROR_SUMMARY = result.error_summary ?: ''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            writeGithubStatus(
+                'success',
+                "Tests passed on ${env.TEST_CAPABILITY} in ${env.TEST_DURATION}s"
+            )
+            postPrComment(""":white_check_mark: **MACA tests passed**
+- Capability: `${env.TEST_CAPABILITY}`
+- Duration: ${env.TEST_DURATION}s""")
+        }
+        failure {
+            writeGithubStatus('failure', 'Tests failed — see logs for details')
+            script {
+                def failedList = env.TEST_FAILED_TESTS ? "\n**Failed tests:**\n```\n${env.TEST_FAILED_TESTS}\n```" : ''
+                def errSummary = env.TEST_ERROR_SUMMARY ? "\n**Error summary:**\n```\n${env.TEST_ERROR_SUMMARY}\n```" : ''
+                postPrComment(""":x: **MACA tests failed**${failedList}${errSummary}""")
+            }
+        }
+        aborted {
+            writeGithubStatus('failure', 'Build aborted')
+            postPrComment(""":warning: **MACA tests aborted**""")
+        }
+        always {
+            archiveArtifacts artifacts: 'test_output.txt, repo/result.json',
+                             allowEmptyArchive: true
+        }
+    }
+}
+
+// Uses groovy.json.JsonOutput to build valid JSON (written to a temp file and
+// sent via `curl -d @file`) instead of manually escaping a string into a JSON
+// literal — hand-rolled escaping only covered backslash/quote/newline and
+// could produce invalid JSON (silently dropping the PR comment) on other
+// control characters in test output.
+def postPrComment(String body) {
+    def prNumber = env.PR_NUMBER ?: ''
+    if (!prNumber) { return }
+    writeFile file: 'comment_payload.json', text: groovy.json.JsonOutput.toJson([body: body])
+    sh """
+        curl -sf -X POST \
+          -H "Authorization: Bearer \${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          -H "Content-Type: application/json" \
+          "https://api.github.com/repos/\${GITHUB_REPO}/issues/${prNumber}/comments" \
+          -d @comment_payload.json
+    """
+}
+
+def writeGithubStatus(String state, String description) {
+    def statusContext = env.STATUS_CONTEXT ?: ''
+    writeFile file: 'status_payload.json', text: groovy.json.JsonOutput.toJson([
+        state: state, context: statusContext, description: description
+    ])
+    sh """
+        curl -sf -X POST \
+          -H "Authorization: Bearer \${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/\${GITHUB_REPO}/statuses/\${COMMIT_SHA}" \
+          -d @status_payload.json
+    """
+}

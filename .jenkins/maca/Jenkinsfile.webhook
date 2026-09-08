@@ -1,0 +1,56 @@
+// Receives GitHub webhook events and triggers lmcache-maca-test.
+// Setup: see docs/webhook-setup.md (MetaX MACA variant of the shared
+// webhook/test pattern under .jenkins/ — kept in its own maca/ subdirectory
+// so it doesn't collide with other vendors' copies of the same files).
+
+pipeline {
+    agent any
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'COMMIT_SHA', value: '$.pull_request.head.sha', defaultValue: ''],
+                [key: 'PR_NUMBER',  value: '$.pull_request.number',   defaultValue: ''],
+                [key: 'PR_TITLE',   value: '$.pull_request.title',    defaultValue: ''],
+                [key: 'ACTION',     value: '$.action',                defaultValue: ''],
+                [key: 'LABEL_NAME', value: '$.label.name',            defaultValue: ''],
+            ],
+            causeString: 'PR #$PR_NUMBER - $ACTION $LABEL_NAME',
+            tokenCredentialId: 'maca-webhook-token',
+            regexpFilterText:  '$ACTION__$LABEL_NAME',
+            regexpFilterExpression: 'labeled__maca'
+        )
+    }
+
+    environment {
+        GITHUB_TOKEN = credentials('GITHUB_PAT')
+        GITHUB_REPO  = 'opendataio/LMCache'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Trigger MACA test') {
+            steps {
+                script {
+                    if (!env.COMMIT_SHA || !env.PR_NUMBER) {
+                        error("This job must be triggered by the GitHub webhook (PR labeled 'maca'). " +
+                              "No webhook payload found: COMMIT_SHA/PR_NUMBER are empty.")
+                    }
+                    echo "Webhook received: PR #${env.PR_NUMBER} '${env.PR_TITLE}' @ ${env.COMMIT_SHA.take(7)}"
+                    build job: 'lmcache-maca-test',
+                          parameters: [
+                              string(name: 'COMMIT_SHA', value: env.COMMIT_SHA),
+                              string(name: 'PR_NUMBER',  value: env.PR_NUMBER),
+                              string(name: 'PR_TITLE',   value: env.PR_TITLE ?: '')
+                          ],
+                          wait: false
+                    echo "Triggered lmcache-maca-test for PR #${env.PR_NUMBER}."
+                }
+            }
+        }
+    }
+}
