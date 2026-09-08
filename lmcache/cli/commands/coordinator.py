@@ -166,7 +166,9 @@ class CoordinatorCommand(BaseCommand):
             default=None,
             help=(
                 "JSON object of settings the core flags do not name, read by "
-                "whichever view or controller looks for them."
+                "whichever view or controller looks for them. The coordinator "
+                'reads "controller_packages": a list of importable paths to '
+                "load out-of-tree controllers from."
             ),
         )
         parser.add_argument(

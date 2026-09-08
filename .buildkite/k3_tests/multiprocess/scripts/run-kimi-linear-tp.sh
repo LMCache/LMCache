@@ -184,10 +184,14 @@ stop_vllm() {
     fi
     # Free the serving port in case a child socket lingers.
     fuser -k "${VLLM_PORT}/tcp" 2>/dev/null || true
-    # GPU 1 is used exclusively by vLLM (the LMCache server pins its CUDA
-    # context on GPU 0), so its memory dropping to near-idle is a clean signal
-    # that the old vLLM (and its TP workers) are fully gone.
+    # TP=2 puts a vLLM rank on GPU 0 and GPU 1, so both have to come back
+    # before the relaunch sizes its KV cache -- waiting on GPU 1 alone let a
+    # rank-0 allocation that outlived the process shrink the relaunch's budget
+    # ("Free memory on device cuda:0 ... less than desired GPU memory
+    # utilization"). GPU 1 is vLLM's alone; GPU 0 also carries the LMCache
+    # server, so it is measured against the pre-vLLM baseline.
     wait_for_gpu_release 1 2000
+    wait_for_gpu_release 0 $(( GPU0_BASELINE_MIB + 2000 ))
 }
 
 # Send one greedy completion request and write the generated text to a file.
@@ -250,6 +254,13 @@ LMCACHE_PID=$!
 echo "$LMCACHE_PID" >> "$PID_FILE"
 echo "LMCache MP server started (PID=$LMCACHE_PID)"
 sleep 10
+
+# Everything on GPU 0 that is not vLLM (the LMCache server's CUDA context and
+# its buffers). stop_vllm waits for GPU 0 to come back to this, so the wait
+# does not depend on guessing the server's footprint.
+GPU0_BASELINE_MIB=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
+    -i 0 2>/dev/null | tr -d ' ' || echo 0)
+echo "GPU 0 baseline before vLLM: ${GPU0_BASELINE_MIB} MiB"
 
 # ── 2. Build a long, deterministic prompt, then ask for a summary ──
 # A ~7-8k word document (well over the several-thousand-token span needed for

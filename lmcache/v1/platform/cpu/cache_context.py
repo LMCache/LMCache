@@ -17,7 +17,6 @@ The platform-agnostic dispatcher ``create_cache_context`` lives in
 from __future__ import annotations
 
 # Standard
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 import os
 
@@ -33,13 +32,16 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cpu.stub_cpu_device import StubStream
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Sequence
+
     # First Party
+    from lmcache.v1.multiprocess.custom_types import KVCache
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
