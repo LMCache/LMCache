@@ -2,39 +2,51 @@
 
 ## 1. Motivation
 
-In a hybrid-attention model, the KV of a sliding-window layer is reusable
-only within the window. Resuming a sequence at token offset `p` needs the
-full-attention KV of every chunk in `[0, p)` but the sliding-window KV of
-the last `w` chunks only, `[p - w, p)`; every older sliding-window chunk is
-dead weight for prefix reuse. Those chunks are also the large ones: per chunk,
-a sliding-window object group holds an order of magnitude more bytes than a
-full-attention group.
+A hybrid-attention model's sliding-window KV is large but short-lived:
+only the last `w` chunks matter for prefix reuse, and the rest is dead
+weight. This design commits exactly that live window to L2 when a chat
+turn ends, instead of writing every sliding-window chunk through.
 
-Writing every sliding-window chunk through to L2, as the `default` store
-policy does, therefore spends most of the L2 bandwidth and space on KV that
-is never read back. The `full_attention_only` store policy
-([../distributed/storage_controllers/full_attention_only_store_policy.md](../distributed/storage_controllers/full_attention_only_store_policy.md))
-writes full-attention groups through and keeps sliding-window groups in L1
-only, which removes that cost and leaves one question the store path cannot
-answer on its own: which sliding-window window must still reach L2, and when.
+### Why most sliding-window KV is wasted in L2
 
-Which window is decided by the resume point. The window worth keeping is the
-one ending at the offset `p` where a later request's prefix match will end,
-and `p` is not known while the request is running: the sequence is still
-growing and nobody knows where it stops or where the next request resumes.
-It is known the moment the request finishes. A chat model ends its turn by
-emitting its turn-end token, and a request that stopped on it ended exactly
-where the next prompt resumes; a request that was aborted, hit its length
-cap, errored, or tripped repetition detection ended mid-turn, and no
-follow-up resumes there.
+Resuming a sequence at token offset `p` requires:
 
-So the design commits at `END_SESSION`: when a request ended on a turn
-boundary, its final sliding window, `[p - w, p)` for every sliding-window
-group, is copied from L1 to L2 right then. It is a copy, not a move; the L1
-window stays and the follow-up is still an L1 hit. The write lands during the
-idle time between turns, before the follow-up arrives and before L1 pressure
-can evict the window. Sliding-window chunks outside a committed window never
-leave L1, and eviction simply discards them.
+- **Full-attention KV**: every chunk in `[0, p)`.
+- **Sliding-window KV**: only the last `w` chunks, `[p - w, p)`.
+
+Every older sliding-window chunk is dead weight for prefix reuse. These
+chunks are also the large ones — per chunk, a sliding-window object group
+holds an order of magnitude more bytes than a full-attention group.
+
+The `default` store policy writes every chunk through to L2, so most L2
+bandwidth and space goes to KV that no future request reads back. The
+[`full_attention_only` store policy](../distributed/storage_controllers/full_attention_only_store_policy.md)
+fixes this by keeping sliding-window groups in L1 only, but it leaves one
+question unanswered: which sliding-window window still needs to reach L2,
+and when?
+
+### The right window depends on where the turn ends
+
+The window worth committing ends at offset `p` — wherever the next
+request's prefix match will stop. While a request is running, `p` is
+unknown: the sequence is still growing. Once the request finishes, `p` is
+known.
+
+A chat model ends its turn by emitting a turn-end token. If the request
+stopped on that token, it ended exactly where the next prompt resumes. If
+the request was aborted, hit its length cap, errored, or tripped repetition
+detection, it ended mid-turn — and no follow-up resumes there.
+
+### The commit: copy the live window at `END_SESSION`
+
+When a request ends on a turn boundary, this design copies its final
+sliding window — `[p - w, p)` for every sliding-window group — from L1 to
+L2. It is a copy, not a move: the L1 window stays, so the follow-up is
+still an L1 hit. The write lands during idle time between turns, before the
+follow-up arrives and before L1 pressure can evict the window.
+
+Sliding-window chunks outside a committed window never leave L1. Eviction
+simply discards them.
 
 ## 2. Design
 
@@ -53,32 +65,30 @@ vLLM scheduler
                                               └─ end_session(request_id)   (unchanged)
 ```
 
-Two decisions are involved:
+The design splits the commit into two decisions:
 
-* **Where** the committed window ends is per deployment (`--commit-anchor`),
-  because it follows from the chat template and the client, not from one
-  message.
-* **Whether** to commit is per request and is the policy's answer, decided
-  from how the engine says the request ended. What counts as evidence
-  depends on the anchor: a window at `generation_end` is worth committing
-  only if the generation ended where a follow-up resumes, while a window at
-  `prompt_end` covers a prompt the follow-up re-sends whatever the
-  generation did. The policy therefore sees the anchor in its
-  `CommitContext`.
+* **Where** the window ends (`--commit-anchor`): a per-deployment setting,
+  because it follows from the chat template and client, not from one request.
+* **Whether** to commit (`CommitPolicy`): a per-request decision based on
+  how the engine says the request ended. What counts as evidence depends on
+  the anchor — a window at `generation_end` is worth committing only if the
+  generation ended where a follow-up resumes, while a window at `prompt_end`
+  covers a prompt the follow-up re-sends regardless. The policy therefore
+  sees the anchor in its `CommitContext`.
 
-The policy returns a `bool`. A richer return (a token range) would let a
-caller under-cover a group's window: each sliding-window object group derives
-its own start from the anchor by subtracting its own `w`, and a window
-missing its oldest chunk is written and never read. A `bool` cannot express
-that mistake and needs none of the clamping, rounding and quota guards a range
+The policy returns a `bool`, not a token range. A range would let callers
+under-cover a group's window: each sliding-window object group derives its
+own start by subtracting its own `w` from the anchor, and a window missing
+its oldest chunk gets written but never read. A `bool` cannot express that
+mistake and needs none of the clamping, rounding, or quota guards a range
 would.
 
 ### 2.2 Connector Side: `SessionEndInfo`
 
-`request_finished` runs while the vLLM `Request` is still in hand, so the
-connector reads the finish reason and stop token there and sends them as the
-second `END_SESSION` payload. In lazy-offload mode `END_SESSION` is sent later
-from `update_connector_output`, so the value is parked in
+`request_finished` runs while the vLLM `Request` is still alive, so the
+connector reads the finish reason and stop token there and packs them into
+the `END_SESSION` payload. In lazy-offload mode, `END_SESSION` goes out
+later from `update_connector_output`; the value waits in
 `_pending_end_info` in between.
 
 | Field | Source | Meaning |
@@ -86,18 +96,17 @@ from `update_connector_output`, so the value is parked in
 | `finish_reason` | `RequestStatus.get_finished_reason(request.status)` | `"stop"`, `"length"`, `"abort"`, `"error"`, `"repetition"`; `""` when unknown |
 | `stop_token_id` | `request.stop_reason` if it is an `int`, else the last of `request.output_token_ids` | Token the generation stopped on; `-1` when unknown |
 
-vLLM sets `stop_reason` only for `stop_token_ids`. A stop on the model's own
-EOS leaves it `None` (`check_stop` in `vllm/v1/core/sched/utils.py`), which
-is the ordinary chat case, hence the fallback to the last generated token.
-`NO_SESSION_END_INFO` (all defaults) is what an engine that observes nothing
-sends; every built-in policy reads it as "do not commit".
+vLLM sets `stop_reason` only for `stop_token_ids`. A stop on the model's
+own EOS leaves it `None` (`check_stop` in `vllm/v1/core/sched/utils.py`) —
+the ordinary chat case — so the connector falls back to the last generated
+token. `NO_SESSION_END_INFO` (all defaults) is what an engine that observes
+nothing sends; every built-in policy treats it as "do not commit".
 
 ### 2.3 Server Side: `CommitPolicy`
 
 `handle_end_session` builds a `CommitContext` from the session and the
-`SessionEndInfo`, asks the configured policy, and only then calls
-`end_session`. The order matters because `end_session` removes the session
-the commit reads; the two share nothing else.
+`SessionEndInfo`, asks the policy, and only then calls `end_session`. The
+order matters: `end_session` removes the session that the commit reads.
 
 | `CommitContext` field | Value |
 |---|---|
@@ -111,28 +120,33 @@ the commit reads; the two share nothing else.
 | `anchor` | the configured `--commit-anchor` |
 
 `CommitPolicy.should_commit(ctx) -> bool` runs on the CPU pool thread and
-must be side-effect free. A policy that raises is logged and treated as
-`False` (`resolve_commit`). Policies are registered by name with
-`register_commit_policy_factory`, so a runtime plugin can add its own.
+must be side-effect-free. If a policy raises, the framework logs the
+exception and treats the answer as `False` (`resolve_commit`). Policies
+register by name with `register_commit_policy_factory`; a runtime plugin
+can add its own.
 
-The built-in `stop_token` policy answers by anchor. At `generation_end` it
-returns `True` iff `finish_reason == "stop"` and `stop_token_id` is in the
-configured boundary set (any token if the set is empty): a request that was
-aborted, hit its length cap, errored, or tripped repetition detection ended
-mid-turn, and a mid-turn tail may be re-rendered or never sent again, so its
-window could be written and never read. At `prompt_end` the generation's
-ending is irrelevant, since the prompt is re-sent either way; it returns
-`True` for every finish reason except `abort`, `error` and an empty report,
-the cases where the conversation itself may not continue.
+The built-in `stop_token` policy decides by anchor:
+
+- **`generation_end`**: returns `True` iff `finish_reason == "stop"` and
+  `stop_token_id` is in the configured boundary set (empty = any stop
+  token). A request that was aborted, hit its length cap, errored, or
+  tripped repetition detection ended mid-turn. A mid-turn tail may be
+  re-rendered or never sent again, so committing its window risks a write
+  that is never read.
+- **`prompt_end`**: the generation's ending is irrelevant — the prompt is
+  re-sent either way. Returns `True` for every finish reason except
+  `abort`, `error`, and an empty report, the cases where the conversation
+  itself may not continue.
 
 ### 2.4 Anchor and Key Selection
 
 `resolve_anchor` maps the anchor to a token offset, clips it to
-`stored_end` (nothing past it is in L1) and rounds down to a chunk boundary.
-From that anchor, for every sliding-window object group `g`,
-`_maybe_commit_window` takes the `num_chunks_in_sw[g]` chunks ending there and
-resolves their `ObjectKey`s through the session's own hash chain.
-Full-attention groups are skipped; the store path already wrote them through.
+`stored_end` (nothing past that is in L1), and rounds down to a chunk
+boundary. For each sliding-window object group `g`,
+`_maybe_commit_window` takes the `num_chunks_in_sw[g]` chunks ending at
+that boundary and resolves their `ObjectKey`s through the session's hash
+chain. Full-attention groups are skipped — the store path already wrote
+them through.
 
 | Anchor | Offset | Right when |
 |---|---|---|
@@ -143,15 +157,19 @@ Full-attention groups are skipped; the store path already wrote them through.
 
 `StorageManager.flush_l1_keys_to_l2(keys)` hands the keys to
 `StoreController.submit_flush`, which enqueues them and wakes the store
-loop; nothing runs on the `END_SESSION` handler's thread. The store loop
-takes an L1 read lock on each key (`reserve_read`), submits one store task
-per active L2 adapter, and releases the lock when that task completes,
-exactly as a write-through store does. The task's mode is `StoreMode.FLUSH`,
-which differs from a plain store in two ways: it targets every active adapter
-without consulting `StorePolicy`, since `full_attention_only` is what kept
-these keys out of L2 in the first place, and the policy's L1 deletions are not
-applied on completion. A configuration with no active L2 adapter drops the
-batch with a warning.
+loop. Nothing runs on the `END_SESSION` handler's thread.
+
+The store loop takes an L1 read lock on each key (`reserve_read`), submits
+one store task per active L2 adapter, and releases the lock when the task
+completes — the same flow as a write-through store. The task's mode is
+`StoreMode.FLUSH`, which differs from a plain store in two ways:
+
+1. It targets every active adapter without consulting `StorePolicy`, since
+   `full_attention_only` is what kept these keys out of L2 in the first
+   place.
+2. The policy's L1 deletions are not applied on completion.
+
+A configuration with no active L2 adapter drops the batch with a warning.
 
 ## 3. Configuration
 
@@ -162,44 +180,55 @@ batch with a warning.
 | `--commit-boundary-tokens` | empty | Token ids the `stop_token` policy accepts as a turn boundary at `generation_end`; empty accepts any stop token. Ignored at `prompt_end`. |
 
 The commit path is always live. A full-attention model has no sliding-window
-group and commits nothing whatever the setting; under the `default` store
-policy every sliding-window chunk is already in L2 and a commit only re-writes
-the window, so the path is meant to be paired with `full_attention_only`. There is no "off" policy: the
-one reason to want one, an L1 that never evicts, is a sizing fact a
-deployment can express as its own policy if the extra L2 bytes matter. There
-is no per-request override either; L2 write volume stays a property of the
-server, not of its callers.
+group and commits nothing regardless of the setting. Under the `default`
+store policy, every sliding-window chunk is already in L2 and a commit only
+re-writes the window, so the path is meant to pair with
+`full_attention_only`.
 
-`--commit-boundary-tokens` is needed when `eos_token_id` holds more than the
-turn marker (Qwen: `<|im_end|>` = 151645 next to `<|endoftext|>` = 151643),
-and it selects *which* turn boundaries commit on a model that ends tool calls
-and final answers on different tokens. gpt-oss lists both `<|return|>`
-(200002) and `<|call|>` (200012): `200002` alone commits finished answers,
-`200012` alone commits tool calls, empty commits both. Both is the default
-because a tool result can take an hour to come back, so a tool-call window
-cannot wait in L1 any more than an answer's can. Qwen ends both kinds of turn
-on `<|im_end|>`; telling them apart there would need the serving frontend's
-finish reason, which the connector does not carry.
+There is no "off" policy. The one reason to want one — an L1 that never
+evicts — is a sizing fact a deployment can express as its own policy if the
+extra L2 bytes matter. There is no per-request override either: L2 write
+volume is a property of the server, not of its callers.
+
+`--commit-boundary-tokens` is needed when `eos_token_id` holds more than
+the turn marker (Qwen: `<|im_end|>` = 151645 next to `<|endoftext|>` =
+151643). It also selects *which* turn boundaries trigger a commit on a
+model that ends tool calls and final answers on different tokens.
+
+Example with gpt-oss, which lists `<|return|>` (200002) and `<|call|>`
+(200012):
+
+| Setting | Effect |
+|---|---|
+| `200002` | commits finished answers only |
+| `200012` | commits tool calls only |
+| empty (default) | commits both |
+
+Both is the default because a tool result can take an hour to come back —
+a tool-call window cannot wait in L1 any more than an answer's can. Qwen
+ends both kinds of turn on `<|im_end|>`; distinguishing them would require
+the serving frontend's finish reason, which the connector does not carry.
 
 ## 4. Cost
 
-One window per committed turn: `w` chunks per sliding-window group. Consecutive
-turns of one conversation overlap in that window and chunk hashes are
-content-derived, so an L2 adapter that skips keys it already holds (the
-filesystem adapter checks the path before writing) writes only the chunks a
-turn's window gained. Per-turn latency is unchanged because the L1 copy
-stays.
+Each committed turn writes one window: `w` chunks per sliding-window group.
+Consecutive turns of the same conversation overlap in that window, and chunk
+hashes are content-derived. An L2 adapter that skips existing keys (the
+filesystem adapter checks the path before writing) writes only the chunks
+the turn's window gained over the previous one.
+
+Per-turn latency is unchanged because the L1 copy stays.
 
 ## 5. Failure Modes
 
-* **No L2 adapter, key already evicted, key write-locked.**
-  The flush is dropped (a warning for the adapter case) and the window has
-  no L2 copy. The next turn is still an L1 hit while the window is resident;
-  it pays a prefill only if L1 evicts the window before then, which is the
-  situation without this design.
-* **Policy raises.** Logged, treated as "do not commit".
-* **Engine sends no `SessionEndInfo`.** `NO_SESSION_END_INFO` is the default
-  second payload, and the built-in policy refuses it.
-* **`Request.resumable` (vLLM streaming sessions).** The request stays alive
-  across turns, `END_SESSION` never fires, and no commit happens. Such a
-  deployment needs a different trigger.
+* **No L2 adapter / key already evicted / key write-locked.**
+  The flush is dropped (with a warning for the no-adapter case). The window
+  has no L2 copy. The next turn is still an L1 hit while the window is
+  resident; it pays a prefill only if L1 evicts the window before then —
+  the same situation as without this design.
+* **Policy raises.** Logged and treated as "do not commit".
+* **Engine sends no `SessionEndInfo`.** `NO_SESSION_END_INFO` (all defaults)
+  is the default payload, and the built-in policy refuses it.
+* **`Request.resumable` (vLLM streaming sessions).** The request stays
+  alive across turns, so `END_SESSION` never fires and no commit happens.
+  Such a deployment needs a different trigger.
