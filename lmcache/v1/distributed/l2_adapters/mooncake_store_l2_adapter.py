@@ -41,6 +41,8 @@ _LMCACHE_ONLY_KEYS = {
     "per_op_workers",
 }
 
+_REPLICATE_CONFIG_KEYS = {"replica_num", "nof_replica_num"}
+
 
 class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
     """Config for an L2 adapter backed by the native
@@ -49,13 +51,14 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
     ``setup_config`` is a string-to-string dict forwarded
     **as-is** to mooncake's
     ``RealClient::setup_internal(ConfigDict)``.
-    LMCache does NOT interpret, validate, or fill in
-    defaults for any mooncake keys — that is mooncake's
-    responsibility.
+    ``replicate_config`` supplies the replica counts for writes
+    via Mooncake's ``ReplicateConfig``.
 
     Fields:
         setup_config: Mooncake SDK configuration forwarded
             as-is to ``RealClient::setup_internal()``.
+        replicate_config: ``replica_num`` and ``nof_replica_num`` for
+            single-object and batch writes, as non-negative decimal strings.
         num_workers: Shared worker thread count (default 4,
             must be > 0).  Used for any op whose lane key
             is not present in ``per_op_workers``.
@@ -70,21 +73,24 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         setup_config: dict[str, str],
         num_workers: int = 4,
         per_op_workers: dict[str, int] | None = None,
-    ):
+        replicate_config: dict[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self.num_workers = L2AdapterConfigBase._validate_num_workers(num_workers)
         self.per_op_workers = L2AdapterConfigBase._validate_per_op_workers(
             per_op_workers
         )
         self.setup_config: dict[str, str] = dict(setup_config)
+        self.replicate_config: dict[str, str] = dict(replicate_config or {})
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> "MooncakeStoreL2AdapterConfig":
         """Construct a config from a raw configuration dict.
 
         LMCache-only keys (``type``, ``num_workers``, ``eviction``,
-        ``per_op_workers``) are consumed locally.  All other keys are
-        forwarded to mooncake as string values.
+        ``per_op_workers``) are consumed locally.  ``replica_num`` and
+        ``nof_replica_num`` populate ``replicate_config``; other Mooncake
+        keys populate ``setup_config``.  Values are converted to strings.
 
         Args:
             d: Raw configuration dict (typically from JSON/CLI).
@@ -99,27 +105,30 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         num_workers = cast(int, d.get("num_workers", 4))  # validated in __init__
 
         per_op_workers = L2AdapterConfigBase._parse_per_op_workers_from_dict(d)
-        # Everything except LMCache-only keys is
-        # forwarded to mooncake as str values.
         setup: dict[str, str] = {}
+        replicate: dict[str, str] = {}
         for k, v in d.items():
-            if k in _LMCACHE_ONLY_KEYS:
+            if k in _LMCACHE_ONLY_KEYS or v is None:
                 continue
-            if v is not None:
+            if k in _REPLICATE_CONFIG_KEYS:
+                replicate[k] = str(v)
+            else:
                 setup[k] = str(v)
 
         return cls(
             setup_config=setup,
             num_workers=num_workers,
             per_op_workers=per_op_workers,
+            replicate_config=replicate,
         )
 
     @classmethod
     def help(cls) -> str:
         return (
             "Mooncake Store L2 adapter config.\n"
-            "All keys except LMCache-only keys are "
-            "forwarded as-is to mooncake's "
+            "replica_num and nof_replica_num set the memory and NoF "
+            "replica counts for writes.\n"
+            "Other Mooncake keys are forwarded as-is to "
             "setup_internal(ConfigDict).\n"
             "When protocol=rdma, LMCache must provide "
             "a valid L1 memory descriptor for "
@@ -199,6 +208,7 @@ def _create_mooncake_store_l2_adapter(
         num_workers=config.num_workers,
         l1_registration=l1_registration,
         per_op_workers=config.per_op_workers,
+        replicate_config=config.replicate_config,
     )
     logger.info(
         "Created Mooncake Store L2 adapter "
