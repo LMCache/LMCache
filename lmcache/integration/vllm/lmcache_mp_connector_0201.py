@@ -12,6 +12,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
     extract_request_configs_from_request,
     mla_only,
+    validate_vllm_multimodal_cache_config,
 )
 from lmcache.utils import (
     check_interprocess_event_support,
@@ -500,6 +501,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig | None" = None,
     ):
+        validate_vllm_multimodal_cache_config(vllm_config)
+
         super().__init__(vllm_config, role, kv_cache_config)
 
         # fast-fail if interprocess is not supported
