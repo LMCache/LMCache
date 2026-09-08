@@ -333,6 +333,8 @@ class ServerBenchClient:
         status = "stored"
         started_at = time.monotonic()
         block_offset = request.block_offset + (start_token // self._block_size)
+        num_blocks = token_count // self._block_size
+        block_ids = list(range(block_offset, block_offset + num_blocks))
         for worker in self._workers:
             if not worker.spec.store_enabled:
                 continue
@@ -345,8 +347,6 @@ class ServerBenchClient:
                 worker_id=worker.spec.kv_worker_id,
                 world_size=self._kv_world_size,
             )
-            num_blocks = token_count // self._block_size
-            block_ids = list(range(block_offset, block_offset + num_blocks))
             block_ids_per_group = [
                 block_ids.copy() for _ in range(self._num_engine_group_infos)
             ]
@@ -435,7 +435,8 @@ class ServerBenchClient:
         status = "retrieved"
         started_at = time.monotonic()
         block_offset = request.block_offset + (start_token // self._block_size)
-        hit_chunks = token_count // self._chunk_size
+        num_blocks = token_count // self._block_size
+        block_ids = list(range(block_offset, block_offset + num_blocks))
         for worker in self._workers:
             if not worker.spec.retrieve_enabled:
                 continue
@@ -448,8 +449,6 @@ class ServerBenchClient:
                 worker_id=worker.spec.kv_worker_id,
                 world_size=self._kv_world_size,
             )
-            num_blocks = (hit_chunks * self._chunk_size) // self._block_size
-            block_ids = list(range(block_offset, block_offset + num_blocks))
             block_ids_per_group = [
                 block_ids.copy() for _ in range(self._num_engine_group_infos)
             ]
