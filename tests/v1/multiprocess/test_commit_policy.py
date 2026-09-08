@@ -37,7 +37,11 @@ from lmcache.v1.multiprocess.commit_policy import (
     resolve_anchor,
     resolve_commit,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, SessionEndInfo
+from lmcache.v1.multiprocess.custom_types import (
+    NO_SESSION_END_INFO,
+    IPCCacheServerKey,
+    SessionEndInfo,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -47,6 +51,10 @@ MODEL_NAME = "model"
 REQUEST_ID = "req-1"
 BOUNDARY_TOKEN = 151645
 """Qwen's ``<|im_end|>``, the token a chat turn ends on."""
+OTHER_TOKEN = 99
+"""Some token that is not a turn boundary: what the connector reports as the
+stop token for a stop on another id, and as the last generated token for a
+length cap, a repetition stop, an abort or an error."""
 
 # One sliding-window group of two chunks and one full-attention group, the
 # shape of a hybrid model served with --separate-object-groups.
@@ -54,8 +62,7 @@ HYBRID_DESC = AttnWindowDesc(num_chunks_in_sw=[2, -1])
 
 
 def make_context(
-    finish_reason: str = "stop",
-    stop_token_id: int = BOUNDARY_TOKEN,
+    end_info: SessionEndInfo = NO_SESSION_END_INFO,
     prompt_end: int = 8,
     stored_end: int = 16,
     hit_chunks: int = -1,
@@ -64,8 +71,9 @@ def make_context(
     """Build a commit context with the fields a policy reads.
 
     Args:
-        finish_reason: How the engine says the request finished.
-        stop_token_id: Token the generation stopped on.
+        end_info: How the engine says the request finished. Defaults to the
+            "engine reported nothing" value, so a test that cares about the
+            finish has to say what it was.
         prompt_end: Raw token offset of the end of the looked-up prompt.
         stored_end: Raw token offset of the end of what the session stored.
         hit_chunks: Chunks this request's own lookup hit.
@@ -76,10 +84,7 @@ def make_context(
     """
     return CommitContext(
         request_id=REQUEST_ID,
-        end_info=SessionEndInfo(
-            finish_reason=finish_reason,
-            stop_token_id=stop_token_id,
-        ),
+        end_info=end_info,
         model_name=MODEL_NAME,
         prompt_end=prompt_end,
         stored_end=stored_end,
@@ -100,55 +105,94 @@ class TestStopTokenCommitPolicy:
     def test_commits_on_configured_boundary_token(self):
         """A turn that stopped on the boundary token earns a commit."""
         policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
-
-        assert policy.should_commit(make_context()) is True
-
-    def test_refuses_other_stop_token(self):
-        """Stopping on some other token is not a turn boundary."""
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
-
-        assert policy.should_commit(make_context(stop_token_id=99)) is False
-
-    def test_accepts_any_stop_token_when_unconfigured(self):
-        """With no boundary tokens configured, any clean stop counts."""
-        policy = StopTokenCommitPolicy()
-
-        assert policy.should_commit(make_context(stop_token_id=99)) is True
-
-    @pytest.mark.parametrize("reason", ["abort", "length", "error", "repetition", ""])
-    def test_refuses_every_non_stop_finish(self, reason: str):
-        """A tail no follow-up re-sends is never committed.
-
-        Args:
-            reason: The finish reason the engine reported.
-        """
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
-
-        assert policy.should_commit(make_context(finish_reason=reason)) is False
-
-    @pytest.mark.parametrize("reason", ["stop", "length", "repetition"])
-    def test_prompt_end_commits_whatever_ended_the_generation(self, reason: str):
-        """A prompt is re-sent by the follow-up however the answer ended.
-
-        Args:
-            reason: The finish reason the engine reported.
-        """
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
         ctx = make_context(
-            finish_reason=reason, stop_token_id=99, anchor=CommitAnchor.PROMPT_END
+            SessionEndInfo(finish_reason="stop", stop_token_id=BOUNDARY_TOKEN)
         )
 
         assert policy.should_commit(ctx) is True
 
-    @pytest.mark.parametrize("reason", ["abort", "error", ""])
-    def test_prompt_end_refuses_a_conversation_that_may_not_continue(self, reason: str):
+    def test_refuses_other_stop_token(self):
+        """Stopping on some other token is not a turn boundary."""
+        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
+        ctx = make_context(
+            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN)
+        )
+
+        assert policy.should_commit(ctx) is False
+
+    def test_accepts_any_stop_token_when_unconfigured(self):
+        """With no boundary tokens configured, any clean stop counts."""
+        policy = StopTokenCommitPolicy()
+        ctx = make_context(
+            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN)
+        )
+
+        assert policy.should_commit(ctx) is True
+
+    @pytest.mark.parametrize(
+        "end_info",
+        [
+            SessionEndInfo(finish_reason="length", stop_token_id=OTHER_TOKEN),
+            SessionEndInfo(finish_reason="repetition", stop_token_id=OTHER_TOKEN),
+            SessionEndInfo(finish_reason="abort", stop_token_id=OTHER_TOKEN),
+            SessionEndInfo(finish_reason="error", stop_token_id=OTHER_TOKEN),
+            NO_SESSION_END_INFO,
+        ],
+        ids=["length", "repetition", "abort", "error", "no-report"],
+    )
+    def test_refuses_every_non_stop_finish(self, end_info: SessionEndInfo):
+        """At generation_end, a tail that did not stop on a turn boundary is
+        never committed, even one whose last token happens to be in the set.
+
+        Args:
+            end_info: How the engine reported the finish.
+        """
+        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN, OTHER_TOKEN}))
+
+        assert policy.should_commit(make_context(end_info)) is False
+
+    @pytest.mark.parametrize(
+        "end_info",
+        [
+            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN),
+            SessionEndInfo(finish_reason="length", stop_token_id=OTHER_TOKEN),
+            SessionEndInfo(finish_reason="repetition", stop_token_id=OTHER_TOKEN),
+        ],
+        ids=["stop-on-other-token", "length", "repetition"],
+    )
+    def test_prompt_end_commits_whatever_ended_the_generation(
+        self, end_info: SessionEndInfo
+    ):
+        """At prompt_end the prompt is re-sent however the answer ended, so
+        neither the finish reason nor the boundary set is consulted.
+
+        Args:
+            end_info: How the engine reported the finish.
+        """
+        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
+        ctx = make_context(end_info, anchor=CommitAnchor.PROMPT_END)
+
+        assert policy.should_commit(ctx) is True
+
+    @pytest.mark.parametrize(
+        "end_info",
+        [
+            SessionEndInfo(finish_reason="abort", stop_token_id=OTHER_TOKEN),
+            SessionEndInfo(finish_reason="error", stop_token_id=OTHER_TOKEN),
+            NO_SESSION_END_INFO,
+        ],
+        ids=["abort", "error", "no-report"],
+    )
+    def test_prompt_end_refuses_a_conversation_that_may_not_continue(
+        self, end_info: SessionEndInfo
+    ):
         """An abort, an error, or no report at all earns no commit anywhere.
 
         Args:
-            reason: The finish reason the engine reported.
+            end_info: How the engine reported the finish.
         """
         policy = StopTokenCommitPolicy()
-        ctx = make_context(finish_reason=reason, anchor=CommitAnchor.PROMPT_END)
+        ctx = make_context(end_info, anchor=CommitAnchor.PROMPT_END)
 
         assert policy.should_commit(ctx) is False
 
@@ -164,7 +208,11 @@ class TestRegistry:
 
         policy = create_commit_policy(config)
 
-        assert policy.should_commit(make_context(stop_token_id=99)) is False
+        ctx = make_context(
+            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN)
+        )
+
+        assert policy.should_commit(ctx) is False
 
     def test_unknown_policy_is_rejected(self):
         """An unknown name fails at startup, not at the first request."""
