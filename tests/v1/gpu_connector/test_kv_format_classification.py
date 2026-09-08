@@ -200,13 +200,26 @@ def test_structural_flags_partition_every_format():
 def test_removed_predicates_are_not_rebound():
     # The facts are spec-owned on the Python side; these bindings were dropped
     # from csrc/lmcache_native/pybind.cpp and must not come back.
-    for name in (
+    removed = (
         "is_cross_layer",
         "is_kv_list",
         "is_layer_list",
         "is_mla",
         "is_kv_second_tuple",
-    ):
+    )
+    for name in removed:
         assert not hasattr(lmcache_native, name), (
             f"lmcache_native.{name} is back; read the fact from the spec instead"
         )
+
+    # The .pyi stub is read by type checkers, not by Python at import time, so
+    # the module-level check above can't catch a declaration left behind
+    # there: mypy would keep accepting a call that raises AttributeError at
+    # runtime.
+    pyi_path = Path(lmcache_native.__file__).with_name("lmcache_native.pyi")
+    if pyi_path.is_file():
+        pyi_source = pyi_path.read_text()
+        for name in removed:
+            assert not re.search(rf"^def {name}\(", pyi_source, re.MULTILINE), (
+                f"lmcache_native.pyi still declares {name}; remove its stub too"
+            )
