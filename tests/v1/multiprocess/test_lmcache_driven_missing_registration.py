@@ -3,7 +3,6 @@
 
 # Standard
 from collections import Counter
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 # Third Party
@@ -15,10 +14,16 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.session import SessionManager
+
+
+@pytest.fixture(autouse=True)
+def _mock_dispatcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gpu_mod, "DeviceHostFuncDispatcher", MagicMock())
 
 
 class _TestTokenHasher:
@@ -88,12 +93,9 @@ def test_missing_registration_returns_terminal_false(method_name: str) -> None:
     a terminal state during the restart-before-registration window. The empty
     handle indicates that the server submitted no device work.
     """
-    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
-    module.get_and_touch_context_entry = MagicMock(  # type: ignore[method-assign]
-        return_value=None
-    )
-    module._ctx = MagicMock()
-    module._ctx.session_manager.get.return_value = None
+    ctx = MagicMock()
+    ctx.session_manager.get.return_value = None
+    module = LMCacheDrivenTransferModule(ctx)
     producer_event = b"worker-producer-event"
     key = _cache_key(world_size=1, worker_id=0, request_id="request")
 
@@ -105,7 +107,7 @@ def test_missing_registration_returns_terminal_false(method_name: str) -> None:
     )
 
     assert result == (b"", False)
-    module.get_and_touch_context_entry.assert_called_once_with(42)
+    assert module.context_entries_snapshot() == {}
 
 
 @pytest.mark.parametrize("mla", [False, True], ids=["sharded-kv", "mla-shared-kv"])
@@ -138,12 +140,14 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
     layout_registry.find_attn_desc.side_effect = AssertionError(
         "failed-retrieve cleanup must use the lookup session's layout"
     )
-    ctx = SimpleNamespace(
+    ctx = MagicMock(
         chunk_size=hasher.chunk_size,
         token_hasher=hasher,
         session_manager=sessions,
         layout_desc_registry=layout_registry,
-        storage_manager=storage,
+        storage_manager=MagicMock(
+            finish_read_prefetched=storage.finish_read_prefetched
+        ),
     )
 
     hashes = hasher.compute_chunk_hashes(list(lookup_key.token_ids), end=lookup_key.end)
@@ -159,11 +163,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
     request_prefix_keys = ipc_key_to_object_keys(lookup_key, hashes[:1], [0])[0]
     storage.finish_read_prefetched(request_prefix_keys, read_locks=lookup_read_locks)
 
-    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
-    module._ctx = ctx  # type: ignore[assignment]
-    module.get_and_touch_context_entry = MagicMock(  # type: ignore[method-assign]
-        return_value=None
-    )
+    module = LMCacheDrivenTransferModule(ctx)
     failed_key = _cache_key(
         world_size=world_size,
         worker_id=failed_worker,
@@ -207,17 +207,12 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
 
 def test_cleanup_exception_does_not_suppress_terminal_false() -> None:
     """A resolution failure must not consume the claim or strand the caller."""
-    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
-    module.get_and_touch_context_entry = MagicMock(  # type: ignore[method-assign]
-        return_value=None
-    )
-    module._ctx = MagicMock()
+    ctx = MagicMock()
+    module = LMCacheDrivenTransferModule(ctx)
     session = MagicMock()
     session.prepare_failed_retrieve_release.return_value = (2, (0,), (-1,), 7)
-    module._ctx.session_manager.get.return_value = session
-    module._ctx.token_hasher.compute_chunk_hashes.side_effect = RuntimeError(
-        "cleanup failed"
-    )
+    ctx.session_manager.get.return_value = session
+    ctx.token_hasher.compute_chunk_hashes.side_effect = RuntimeError("cleanup failed")
 
     result = module.retrieve(
         _cache_key(world_size=1, worker_id=0, request_id="request"),

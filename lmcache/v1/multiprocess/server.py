@@ -135,12 +135,16 @@ class MPCacheServer:
 
     @property
     def cache_contexts(self) -> dict[int, BaseCacheContext] | None:
-        """Used by ``/cache/checksums``; unwraps :class:`ContextEntry`."""
+        """Return non-draining contexts for ``/cache/checksums``.
+
+        The snapshot does not reserve their lifetime.
+        """
         for module in self._modules:
             if isinstance(module, LMCacheDrivenTransferModule):
                 return {
                     i: e.cache_context
                     for i, e in module.context_entries_snapshot().items()
+                    if not e.draining
                 }
         return None
 
