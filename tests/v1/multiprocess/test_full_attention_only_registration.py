@@ -45,11 +45,11 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_mp_server_config,
     validate_server_config,
 )
-from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
 )
+from lmcache.v1.multiprocess.server import run_cache_server
 
 requires_torch_runtime = pytest.mark.skipif(
     not torch_dev.is_available(),

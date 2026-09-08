@@ -152,7 +152,8 @@ class TestStopTokenCommitPolicy:
         """
         policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN, OTHER_TOKEN}))
 
-        assert policy.should_commit(make_context(end_info, anchor=CommitAnchor.GENERATION_END)) is False
+        ctx = make_context(end_info, anchor=CommitAnchor.GENERATION_END)
+        assert policy.should_commit(ctx) is False
 
     @pytest.mark.parametrize(
         "end_info",
@@ -267,7 +268,9 @@ class TestResolveAnchor:
 
     def test_generation_end_uses_the_stored_end(self):
         """The last chunk the request stored."""
-        ctx = make_context(prompt_end=8, stored_end=16, anchor=CommitAnchor.GENERATION_END)
+        ctx = make_context(
+            prompt_end=8, stored_end=16, anchor=CommitAnchor.GENERATION_END
+        )
 
         assert resolve_anchor(ctx, CHUNK_SIZE) == 16
 
@@ -279,9 +282,10 @@ class TestResolveAnchor:
 
     def test_offsets_are_floored_to_chunk_boundaries(self):
         """A partial trailing chunk was never stored as one."""
-        assert (
-            resolve_anchor(make_context(prompt_end=7, stored_end=17, anchor=CommitAnchor.GENERATION_END), CHUNK_SIZE) == 16
+        gen_ctx = make_context(
+            prompt_end=7, stored_end=17, anchor=CommitAnchor.GENERATION_END
         )
+        assert resolve_anchor(gen_ctx, CHUNK_SIZE) == 16
         assert (
             resolve_anchor(
                 make_context(
