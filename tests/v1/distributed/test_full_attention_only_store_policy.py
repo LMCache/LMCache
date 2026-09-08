@@ -25,13 +25,13 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2AdapterConfig,
 )
 from lmcache.v1.distributed.object_group_classifier import ObjectGroupClassifier
+from lmcache.v1.distributed.storage_controllers.full_attention_only_store_policy import (  # noqa: E501
+    FullAttentionOnlyStorePolicy,
+)
 from lmcache.v1.distributed.storage_controllers.store_controller import StoreController
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     create_store_policy,
-)
-from lmcache.v1.distributed.storage_controllers.full_attention_only_store_policy import (  # noqa: E501
-    FullAttentionOnlyStorePolicy,
 )
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
