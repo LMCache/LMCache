@@ -825,16 +825,18 @@ class StorageManager:
 
         found = None
         if handle.prefetch_request_id != -1:
-            cancelled = self._prefetch_controller.cancel_prefetch_request(
+            self._prefetch_controller.cancel_prefetch_request(
                 handle.prefetch_request_id,
                 generation=handle.generation,
             )
             # If the request had already completed, this also consumes the
             # completion bitmap so the loaded read locks can be released.
             found = self.query_prefetch_status(handle)
-            if found is None and cancelled:
-                # Cancellation may finish asynchronously after the query.  Do
-                # not leave an unconsumed empty completion in the controller.
+            if found is None:
+                # Cancellation may finish asynchronously after the query, or
+                # the request may already be outside the manager's active set.
+                # The generation guard makes this cleanup safe for a reused
+                # request ID, and the controller operation is idempotent.
                 self._prefetch_controller.forget_prefetch_result(
                     handle.prefetch_request_id,
                     generation=handle.generation,
@@ -869,7 +871,7 @@ class StorageManager:
                 generation=handle.generation,
             )
             found = self.query_prefetch_status(handle)
-            if found is None and cancelled:
+            if found is None:
                 self._prefetch_controller.forget_prefetch_result(
                     handle.prefetch_request_id,
                     generation=handle.generation,
