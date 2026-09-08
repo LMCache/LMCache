@@ -59,6 +59,7 @@ def make_context(
     prompt_end: int = 8,
     stored_end: int = 16,
     hit_chunks: int = -1,
+    anchor: CommitAnchor = CommitAnchor.GENERATION_END,
 ) -> CommitContext:
     """Build a commit context with the fields a policy reads.
 
@@ -68,6 +69,7 @@ def make_context(
         prompt_end: Raw token offset of the end of the looked-up prompt.
         stored_end: Raw token offset of the end of what the session stored.
         hit_chunks: Chunks this request's own lookup hit.
+        anchor: Where the deployment puts the committed window.
 
     Returns:
         The context.
@@ -83,6 +85,7 @@ def make_context(
         stored_end=stored_end,
         hit_chunks=hit_chunks,
         attn_desc=HYBRID_DESC,
+        anchor=anchor,
     )
 
 
@@ -122,6 +125,32 @@ class TestStopTokenCommitPolicy:
         policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
 
         assert policy.should_commit(make_context(finish_reason=reason)) is False
+
+    @pytest.mark.parametrize("reason", ["stop", "length", "repetition"])
+    def test_prompt_end_commits_whatever_ended_the_generation(self, reason: str):
+        """A prompt is re-sent by the follow-up however the answer ended.
+
+        Args:
+            reason: The finish reason the engine reported.
+        """
+        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
+        ctx = make_context(
+            finish_reason=reason, stop_token_id=99, anchor=CommitAnchor.PROMPT_END
+        )
+
+        assert policy.should_commit(ctx) is True
+
+    @pytest.mark.parametrize("reason", ["abort", "error", ""])
+    def test_prompt_end_refuses_a_conversation_that_may_not_continue(self, reason: str):
+        """An abort, an error, or no report at all earns no commit anywhere.
+
+        Args:
+            reason: The finish reason the engine reported.
+        """
+        policy = StopTokenCommitPolicy()
+        ctx = make_context(finish_reason=reason, anchor=CommitAnchor.PROMPT_END)
+
+        assert policy.should_commit(ctx) is False
 
 
 class TestRegistry:
@@ -178,26 +207,34 @@ class TestResolveAnchor:
         """The last chunk the request stored."""
         ctx = make_context(prompt_end=8, stored_end=16)
 
-        assert resolve_anchor(CommitAnchor.GENERATION_END, ctx, CHUNK_SIZE) == 16
+        assert resolve_anchor(ctx, CHUNK_SIZE) == 16
 
     def test_prompt_end_uses_the_looked_up_prefix(self):
         """The end of the prompt, for a client that drops the answer."""
-        ctx = make_context(prompt_end=8, stored_end=16)
+        ctx = make_context(prompt_end=8, stored_end=16, anchor=CommitAnchor.PROMPT_END)
 
-        assert resolve_anchor(CommitAnchor.PROMPT_END, ctx, CHUNK_SIZE) == 8
+        assert resolve_anchor(ctx, CHUNK_SIZE) == 8
 
     def test_offsets_are_floored_to_chunk_boundaries(self):
         """A partial trailing chunk was never stored as one."""
-        ctx = make_context(prompt_end=7, stored_end=17)
-
-        assert resolve_anchor(CommitAnchor.GENERATION_END, ctx, CHUNK_SIZE) == 16
-        assert resolve_anchor(CommitAnchor.PROMPT_END, ctx, CHUNK_SIZE) == 4
+        assert (
+            resolve_anchor(make_context(prompt_end=7, stored_end=17), CHUNK_SIZE) == 16
+        )
+        assert (
+            resolve_anchor(
+                make_context(
+                    prompt_end=7, stored_end=17, anchor=CommitAnchor.PROMPT_END
+                ),
+                CHUNK_SIZE,
+            )
+            == 4
+        )
 
     def test_prompt_end_is_clamped_to_the_stored_end(self):
         """Nothing past what reached L1 can be committed."""
-        ctx = make_context(prompt_end=64, stored_end=8)
+        ctx = make_context(prompt_end=64, stored_end=8, anchor=CommitAnchor.PROMPT_END)
 
-        assert resolve_anchor(CommitAnchor.PROMPT_END, ctx, CHUNK_SIZE) == 8
+        assert resolve_anchor(ctx, CHUNK_SIZE) == 8
 
 
 # =============================================================================
@@ -330,6 +367,25 @@ class TestEndSessionCommit:
         ctx, per_group = run_end_session(config, num_chunks=6, lookup_chunks=4)
 
         assert flushed_keys(ctx) == per_group[0][2:4]
+
+    def test_length_cap_commits_at_prompt_end_but_not_at_generation_end(self):
+        """A length-capped answer is mid-turn, but its prompt is still re-sent."""
+        at_prompt = CommitPolicyConfig(
+            policy="stop_token", anchor=CommitAnchor.PROMPT_END
+        )
+        at_generation = CommitPolicyConfig(
+            policy="stop_token", anchor=CommitAnchor.GENERATION_END
+        )
+
+        ctx, per_group = run_end_session(
+            at_prompt, num_chunks=6, lookup_chunks=4, finish_reason="length"
+        )
+        assert flushed_keys(ctx) == per_group[0][2:4]
+
+        ctx, _ = run_end_session(
+            at_generation, num_chunks=6, lookup_chunks=4, finish_reason="length"
+        )
+        assert flushed_keys(ctx) == []
 
     def test_abort_does_not_commit(self):
         """An aborted tail is re-rendered or never sent again."""

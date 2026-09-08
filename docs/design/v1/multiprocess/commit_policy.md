@@ -57,13 +57,18 @@ vLLM scheduler                         MP server
                                            └─ end_session(request_id)   (unchanged)
 ```
 
-Two decisions are kept apart:
+Two decisions are involved:
 
-* **Whether** to commit is per request and is the policy's answer, decided
-  from how the engine says the request ended.
 * **Where** the committed window ends is per deployment (`--commit-anchor`),
   because it follows from the chat template and the client, not from one
   message.
+* **Whether** to commit is per request and is the policy's answer, decided
+  from how the engine says the request ended. What counts as evidence
+  depends on the anchor: a window at `generation_end` is worth committing
+  only if the generation ended where a follow-up resumes, while a window at
+  `prompt_end` covers a prompt the follow-up re-sends whatever the
+  generation did. The policy therefore sees the anchor in its
+  `CommitContext`.
 
 The policy returns a `bool`. A richer return (a token range) would let a
 caller under-cover a group's window: each sliding-window object group derives
@@ -105,22 +110,26 @@ the commit reads; the two share nothing else.
 | `stored_end` | furthest offset the session resolved keys for (`Session.resolved_end`) |
 | `hit_chunks` | chunks the request's own lookup hit; `-1` if never consumed |
 | `attn_desc` | the model's `AttnWindowDesc` |
+| `anchor` | the configured `--commit-anchor` |
 
 `CommitPolicy.should_commit(ctx) -> bool` runs on the CPU pool thread and
 must be side-effect free. A policy that raises is logged and treated as
 `False` (`resolve_commit`). Policies are registered by name with
 `register_commit_policy_factory`, so a runtime plugin can add its own.
 
-The built-in `stop_token` policy returns `True` iff `stored_end > 0`,
-`finish_reason == "stop"`, and `stop_token_id` is in the configured boundary
-set (any token if the set is empty). A request that was aborted, hit its
-length cap, errored, or tripped repetition detection ended mid-turn; its tail
-is re-rendered or never sent again, and its window would be written and never
-read.
+The built-in `stop_token` policy answers by anchor. At `generation_end` it
+returns `True` iff `finish_reason == "stop"` and `stop_token_id` is in the
+configured boundary set (any token if the set is empty): a request that was
+aborted, hit its length cap, errored, or tripped repetition detection ended
+mid-turn, and a mid-turn tail may be re-rendered or never sent again, so its
+window could be written and never read. At `prompt_end` the generation's
+ending is irrelevant, since the prompt is re-sent either way; it returns
+`True` for every finish reason except `abort`, `error` and an empty report,
+the cases where the conversation itself may not continue.
 
 ### 2.4 Anchor and Key Selection
 
-`resolve_anchor` maps `--commit-anchor` to a token offset, clips it to
+`resolve_anchor` maps the anchor to a token offset, clips it to
 `stored_end` (nothing past it is in L1) and rounds down to a chunk boundary.
 From that anchor, for every sliding-window object group `g`,
 `_maybe_commit_window` takes the `num_chunks_in_sw[g]` chunks ending there and
@@ -130,7 +139,7 @@ Full-attention groups are skipped; the store path already wrote them through.
 | Anchor | Offset | Right when |
 |---|---|---|
 | `generation_end` (default) | `stored_end` | the next prompt re-sends the generated answer verbatim |
-| `prompt_end` | `prompt_end` | the next prompt re-renders the assistant turn differently from what was generated. Qwen3's template drops `<think>...</think>` from earlier assistant turns, so a client that does not echo `reasoning_content` diverges from the generated tokens right after the assistant header |
+| `prompt_end` | `prompt_end` | the next prompt re-renders the assistant turn differently from what was generated. Qwen3's template drops `<think>...</think>` from earlier assistant turns, so a client that does not echo `reasoning_content` diverges from the generated tokens right after the assistant header. Also the anchor for a client that caps answers by length and resumes from the capped text: the answer's own chunks are not covered, but the prompt's are, and the commit no longer depends on a stop token |
 
 ### 2.5 Execution: `StoreMode.FLUSH`
 
@@ -152,7 +161,7 @@ batch with a warning.
 |---|---|---|
 | `--commit-policy` | `stop_token` | Registered policy name. Unknown names fail at startup. |
 | `--commit-anchor` | `generation_end` | `generation_end` or `prompt_end`, see 2.4. |
-| `--commit-boundary-tokens` | empty | Token ids the `stop_token` policy accepts as a turn boundary; empty accepts any stop token. |
+| `--commit-boundary-tokens` | empty | Token ids the `stop_token` policy accepts as a turn boundary at `generation_end`; empty accepts any stop token. Ignored at `prompt_end`. |
 
 The commit path is always live. A full-attention model has no sliding-window
 group and commits nothing whatever the setting; under the `default` store
