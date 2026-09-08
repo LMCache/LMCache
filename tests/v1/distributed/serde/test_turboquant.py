@@ -422,7 +422,9 @@ class _FakeMemoryObj:
         ("turboquant_3bit_nc", 4.85, 0.80),
     ],
 )
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_turboquant_direct_roundtrip_cuda(
+    dtype: torch.dtype,
     preset: str,
     expected_ratio_lower_bound: float,
     corr_lower_bound: float,
@@ -432,8 +434,6 @@ def test_turboquant_direct_roundtrip_cuda(
     from lmcache.v1.distributed.serde.turboquant import TurboQuantDeserializer
 
     device = torch.device(f"{torch_device_type}:0")
-    dtype = torch.float16
-
     # LMCache KV layout: [2, num_layers, num_tokens, hidden_dim]
     num_layers = 4
     num_tokens = 128
