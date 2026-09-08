@@ -109,6 +109,14 @@ class CommitContext:
     """The model's per-object-group attention windows. A policy that wants to
     price a commit can read the sliding-window widths from here."""
 
+    anchor: CommitAnchor
+    """Where the deployment puts a committed window (``--commit-anchor``).
+
+    Decides what a policy has to look at: a window at ``generation_end`` is
+    worth committing only if the generation ended where a follow-up resumes,
+    while a window at ``prompt_end`` covers a prompt the follow-up re-sends
+    whatever the generation did."""
+
 
 class CommitPolicy(ABC):
     """Decides whether a finished request's window is committed to L2.
@@ -249,11 +257,7 @@ def resolve_commit(ctx: CommitContext, policy: CommitPolicy) -> bool:
         return False
 
 
-def resolve_anchor(
-    anchor: CommitAnchor,
-    ctx: CommitContext,
-    chunk_size: int,
-) -> int:
+def resolve_anchor(ctx: CommitContext, chunk_size: int) -> int:
     """Turn the configured anchor into a chunk-aligned token offset.
 
     The offset is clipped to ``ctx.stored_end`` -- nothing beyond it is in L1
@@ -261,8 +265,7 @@ def resolve_anchor(
     chunk was never stored as one.
 
     Args:
-        anchor: The configured anchor.
-        ctx: The finished request's context.
+        ctx: The finished request's context, including the configured anchor.
         chunk_size: Tokens per LMCache chunk.
 
     Returns:
@@ -275,7 +278,9 @@ def resolve_anchor(
     if chunk_size <= 0:
         raise ValueError(f"resolve_anchor: chunk_size must be > 0, got {chunk_size}")
 
-    raw = ctx.stored_end if anchor is CommitAnchor.GENERATION_END else ctx.prompt_end
+    raw = (
+        ctx.stored_end if ctx.anchor is CommitAnchor.GENERATION_END else ctx.prompt_end
+    )
     return (min(raw, ctx.stored_end) // chunk_size) * chunk_size
 
 
@@ -285,18 +290,25 @@ def resolve_anchor(
 
 
 class StopTokenCommitPolicy(CommitPolicy):
-    """Commit when the model stopped on a turn-boundary token.
+    """Commit when the window's position is one a follow-up will resume at.
 
-    A chat model ends its turn by emitting the token that opens the next turn
-    (Qwen stops on ``<|im_end|>``, id 151645, because its
-    ``generation_config.json`` lists it in ``eos_token_id``). A request that
-    reached that token ended where the next prompt will resume, so its final
-    window is exactly what the follow-up needs.
+    What that takes depends on where the deployment anchors the window.
 
-    Everything else is refused: an abort, a length cap, an error or a
-    repetition stop all leave the sequence mid-turn, and a mid-turn tail is
-    re-rendered -- or never sent again -- by the next request, so its window
-    would be written and never read.
+    At ``generation_end`` the window ends where the generation ended, so the
+    generation must have ended at a turn boundary. A chat model ends its turn
+    by emitting the token that opens the next turn (Qwen stops on
+    ``<|im_end|>``, id 151645, because its ``generation_config.json`` lists it
+    in ``eos_token_id``), and a request that reached that token ended where
+    the next prompt will resume. Everything else is refused: an abort, a
+    length cap, an error or a repetition stop all leave the sequence mid-turn,
+    and a mid-turn tail may be re-rendered -- or never sent again -- by the
+    next request, so its window could be written and never read.
+
+    At ``prompt_end`` the window ends where the prompt ended, which the
+    follow-up re-sends whatever the generation did, so how the generation
+    ended is irrelevant. Only an abort or an error is refused, since those
+    are the cases where the conversation itself may not continue; a length
+    cap or a repetition stop still gets a follow-up.
 
     A model that ends tool calls and final answers on different tokens (gpt-oss:
     ``<|call|>`` and ``<|return|>``) lets the boundary set pick which of the
@@ -321,12 +333,17 @@ class StopTokenCommitPolicy(CommitPolicy):
             ctx: The finished request's context.
 
         Returns:
-            True when the finish reason is ``stop`` and the stop token is a
-            configured boundary token (or no boundary tokens are configured).
-            Whether the session has anything to commit is the caller's
-            question, answered by :func:`resolve_anchor`.
+            At ``generation_end``: True when the finish reason is ``stop`` and
+            the stop token is a configured boundary token (or no boundary
+            tokens are configured). At ``prompt_end``: True unless the request
+            was aborted, errored, or reported no finish reason at all. Whether
+            the session has anything to commit is the caller's question,
+            answered by :func:`resolve_anchor`.
         """
-        if ctx.end_info.finish_reason != "stop":
+        reason = ctx.end_info.finish_reason
+        if ctx.anchor is CommitAnchor.PROMPT_END:
+            return reason not in ("", "abort", "error")
+        if reason != "stop":
             return False
         if not self._boundary_token_ids:
             return True

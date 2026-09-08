@@ -639,11 +639,12 @@ class LookupModule:
             stored_end=session.resolved_end,
             hit_chunks=session.prefetch_hit_chunks,
             attn_desc=attn_desc,
+            anchor=commit_config.anchor,
         )
         if not resolve_commit(ctx, self._ctx.commit_policy):
             return
 
-        anchor = resolve_anchor(commit_config.anchor, ctx, chunk_size)
+        anchor = resolve_anchor(ctx, chunk_size)
         if anchor <= 0:
             return
 
