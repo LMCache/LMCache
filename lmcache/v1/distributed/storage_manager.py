@@ -5,10 +5,11 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Iterator, Literal, Optional
 import threading
 import time
+import weakref
 
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
@@ -70,6 +71,16 @@ from lmcache.v1.mp_observability.trace.decorator import (
 from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _PrefetchLeaseState:
+    """Manager-owned read-lock state for one opaque prefetch handle."""
+
+    handle: PrefetchHandle
+    keys: tuple[ObjectKey, ...]
+    l1_found_indices: tuple[int, ...]
+    num_kv_readers: int
 
 
 class StorageManager:
@@ -164,6 +175,18 @@ class StorageManager:
             max_in_flight=config.prefetch_max_in_flight,
         )
         self._prefetch_controller.start()
+        self._prefetch_release_lock = threading.Lock()
+        # Handle identity is intentional here.  L1-only handles use the
+        # sentinel request id -1 and may all have generation 0; using the
+        # request id as a key would make unrelated leases cancel each other.
+        # Keep a weak reference to released handles alongside their object IDs
+        # so an ID cannot be mistaken for a still-live lease.  Value-based
+        # dataclass equality is not sufficient: two independent handles may
+        # carry identical fields.
+        self._released_prefetch_handles: dict[
+            int, weakref.ReferenceType[PrefetchHandle]
+        ] = {}
+        self._prefetch_handle_metadata: dict[int, _PrefetchLeaseState] = {}
 
         # L2 usage gauge — one observation per adapter, tagged by
         # ``l2_name``.  Parallel to L1Manager's ``l1_memory_usage_bytes``.
@@ -434,7 +457,7 @@ class StorageManager:
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                     spec
                 )
-            return PrefetchHandle(
+            handle = PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
                 external_request_id=external_request_id,
                 l1_found_indices=(),
@@ -444,7 +467,12 @@ class StorageManager:
                 l2_orig_indices=(
                     tuple(range(len(keys))) if prefetch_request_id != -1 else ()
                 ),
+                generation=spec.generation,
             )
+            # WARM does not acquire L1 read locks.  Keep it on the legacy
+            # bookkeeping path even when it has an asynchronous L2 request.
+            self._remember_prefetch_handle(handle, keys, 0, track_lease=False)
+            return handle
 
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
@@ -486,7 +514,7 @@ class StorageManager:
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                     replace(spec, keys=remaining_keys)
                 )
-            return PrefetchHandle(
+            handle = PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
                 external_request_id=external_request_id,
                 l1_found_indices=tuple(l1_found_indices),
@@ -496,7 +524,15 @@ class StorageManager:
                 l2_orig_indices=(
                     tuple(sparse_l2_indices) if prefetch_request_id != -1 else ()
                 ),
+                generation=spec.generation,
             )
+            self._remember_prefetch_handle(
+                handle,
+                keys,
+                spec.num_kv_readers,
+                track_lease=True,
+            )
+            return handle
 
         # PREFIX: fold the per-(group, chunk, rank) L1 presence into the
         # model-wide hit and the per-object-group retain set (sliding-window
@@ -600,7 +636,7 @@ class StorageManager:
             prefetch_request_id,
         )
 
-        return PrefetchHandle(
+        handle = PrefetchHandle(
             prefetch_request_id=prefetch_request_id,
             external_request_id=external_request_id,
             l1_found_indices=tuple(retained_indices),
@@ -608,7 +644,81 @@ class StorageManager:
             total_requested_keys=len(keys),
             submit_time=submit_time,
             l2_orig_indices=l2_orig_indices,
+            generation=spec.generation,
         )
+        # Existing PREFIX callers own the read-lock lifecycle through
+        # finish_read_prefetched.  The explicit lease contract is reserved for
+        # SPARSE requests, whose scattered result cannot be represented by the
+        # legacy prefix cleanup path.
+        self._remember_prefetch_handle(
+            handle,
+            keys,
+            spec.num_kv_readers,
+            track_lease=False,
+        )
+        return handle
+
+    def _remember_prefetch_handle(
+        self,
+        handle: PrefetchHandle,
+        keys: list[ObjectKey],
+        num_kv_readers: int,
+        *,
+        track_lease: bool = True,
+    ) -> None:
+        """Keep the small amount of state needed for explicit cancellation."""
+        if not track_lease:
+            return
+        with self._prefetch_release_lock:
+            handle_id = id(handle)
+            self._prefetch_handle_metadata[handle_id] = _PrefetchLeaseState(
+                handle=handle,
+                keys=tuple(keys),
+                l1_found_indices=handle.l1_found_indices,
+                num_kv_readers=num_kv_readers,
+            )
+
+    def _release_prefetch_lease(
+        self,
+        handle: PrefetchHandle,
+        found: Optional["Bitmap"] = None,
+        extra_keys: Optional[list[ObjectKey]] = None,
+    ) -> None:
+        """Release one handle's manager-owned locks at most once."""
+        handle_id = id(handle)
+        with self._prefetch_release_lock:
+            released = self._released_prefetch_handles.get(handle_id)
+            if released is not None:
+                if released() is handle:
+                    return
+                if released() is None:
+                    self._released_prefetch_handles.pop(handle_id, None)
+            if handle_id in self._released_prefetch_handles:
+                return
+            self._released_prefetch_handles[handle_id] = weakref.ref(handle)
+            state = self._prefetch_handle_metadata.pop(handle_id, None)
+
+        if state is None:
+            return
+
+        release_keys = [
+            state.keys[index]
+            for index in state.l1_found_indices
+            if 0 <= index < len(state.keys)
+        ]
+        if found is not None:
+            release_keys.extend(found.gather(state.keys))
+        if extra_keys:
+            release_keys.extend(extra_keys)
+
+        # A bitmap can contain the L1 keys as well as newly loaded L2 keys.
+        # Deduplicate so the initial L1 reservation is not released twice.
+        release_keys = list(dict.fromkeys(release_keys))
+        if release_keys and state.num_kv_readers > 0:
+            self.finish_read_prefetched(
+                release_keys,
+                read_locks=state.num_kv_readers,
+            )
 
     def _combine_found(
         self, handle: PrefetchHandle, l2_local: "Bitmap | None"
@@ -687,8 +797,119 @@ class StorageManager:
         if handle.prefetch_request_id == -1:
             return True
         return self._prefetch_controller.wait_prefetch_result(
-            handle.prefetch_request_id, timeout
+            handle.prefetch_request_id,
+            timeout,
+            generation=handle.generation,
         )
+
+    @enable_tracing()
+    def cancel_prefetch_task(self, handle: PrefetchHandle) -> None:
+        """Cancel a prefetch and release any locks owned by this manager.
+
+        The controller performs cancellation on its worker thread.  This
+        method also releases the L1 read locks retained by the initial
+        ``StorageManager`` lookup, once and only once.  If an adapter has
+        already accepted an asynchronous task, the controller waits for that
+        task's result before releasing its L2 lock or L1 write reservation.
+
+        Calling this method repeatedly is safe.  The generation carried by
+        ``handle`` prevents a reused request slot from cancelling a newer
+        request when the adapter forwards the handle across an integration
+        boundary.
+        """
+        handle_id = id(handle)
+        with self._prefetch_release_lock:
+            released = self._released_prefetch_handles.get(handle_id)
+            if released is not None and released() is handle:
+                return
+
+        found = None
+        if handle.prefetch_request_id != -1:
+            cancelled = self._prefetch_controller.cancel_prefetch_request(
+                handle.prefetch_request_id,
+                generation=handle.generation,
+            )
+            # If the request had already completed, this also consumes the
+            # completion bitmap so the loaded read locks can be released.
+            found = self.query_prefetch_status(handle)
+            if found is None and cancelled:
+                # Cancellation may finish asynchronously after the query.  Do
+                # not leave an unconsumed empty completion in the controller.
+                self._prefetch_controller.forget_prefetch_result(
+                    handle.prefetch_request_id,
+                    generation=handle.generation,
+                )
+        else:
+            found = self._combine_found(handle, None)
+        self._release_prefetch_lease(handle, found=found)
+
+    @enable_tracing()
+    def release_prefetch_task(
+        self,
+        handle: PrefetchHandle,
+        keys: Optional[list[ObjectKey]] = None,
+    ) -> None:
+        """Release a prefetch lease, optionally releasing consumed keys.
+
+        ``keys`` should be supplied when the caller has consumed the retained
+        objects and wants to drop their read locks.  When omitted, the method
+        cancels the request and performs all cleanup that can be identified by
+        the opaque handle.  This is intentionally idempotent.
+        """
+        handle_id = id(handle)
+        with self._prefetch_release_lock:
+            released = self._released_prefetch_handles.get(handle_id)
+            if released is not None and released() is handle:
+                return
+
+        found = None
+        if handle.prefetch_request_id != -1:
+            cancelled = self._prefetch_controller.cancel_prefetch_request(
+                handle.prefetch_request_id,
+                generation=handle.generation,
+            )
+            found = self.query_prefetch_status(handle)
+            if found is None and cancelled:
+                self._prefetch_controller.forget_prefetch_result(
+                    handle.prefetch_request_id,
+                    generation=handle.generation,
+                )
+        else:
+            found = self._combine_found(handle, None)
+        # ``keys`` is a compatibility escape hatch for callers that already
+        # consumed the controller bitmap through the legacy query API.  When
+        # cancellation is still active, the controller owns cleanup of any
+        # in-flight L2 reservation; releasing caller-supplied keys here could
+        # race that asynchronous operation.
+        extra_keys = None
+        if handle.prefetch_request_id == -1:
+            extra_keys = keys
+        elif found is None and not cancelled:
+            extra_keys = keys
+        self._release_prefetch_lease(
+            handle,
+            found=found,
+            extra_keys=extra_keys,
+        )
+
+    def consume_prefetch_task(self, handle: PrefetchHandle) -> Bitmap | None:
+        """Consume a completed prefetch and release its read-lock lease.
+
+        The returned bitmap is indexed over the original logical key list.
+        This is the lease-oriented counterpart to
+        :meth:`query_prefetch_status`: once a bitmap is returned, all retained
+        keys owned by this handle are released.  Existing callers can keep
+        using ``query_prefetch_status`` plus ``finish_read_prefetched``.
+        """
+        handle_id = id(handle)
+        with self._prefetch_release_lock:
+            released = self._released_prefetch_handles.get(handle_id)
+            if released is not None and released() is handle:
+                return None
+        found = self.query_prefetch_status(handle)
+        if found is not None:
+            self._release_prefetch_lease(handle, found=found)
+        return found
 
     def query_prefetch_status(
         self,
@@ -708,7 +929,8 @@ class StorageManager:
         l2_r: Bitmap | None = None
         if handle.prefetch_request_id != -1:
             l2_r = self._prefetch_controller.query_prefetch_result(
-                handle.prefetch_request_id
+                handle.prefetch_request_id,
+                generation=handle.generation,
             )
             if l2_r is None:
                 return None
@@ -1113,6 +1335,12 @@ class StorageManager:
         """
         Close the storage manager and release all resources.
         """
+        with self._prefetch_release_lock:
+            outstanding_handles = tuple(
+                state.handle for state in self._prefetch_handle_metadata.values()
+            )
+        for handle in outstanding_handles:
+            self.cancel_prefetch_task(handle)
         self._prefetch_controller.stop()
         self._store_controller.stop()
         self._eviction_controller.stop()
@@ -1124,6 +1352,9 @@ class StorageManager:
             adapter.close()
 
         self._l1_manager.close()
+        with self._prefetch_release_lock:
+            self._prefetch_handle_metadata.clear()
+            self._released_prefetch_handles.clear()
 
     def report_status(self) -> dict:
         """Return a status dict aggregating all sub-component statuses."""

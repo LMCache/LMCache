@@ -179,6 +179,7 @@ def trim_load_plan_with_mask(
 PREFETCH_LOOP_POLL_TIMEOUT_MS = 500
 
 PrefetchRequestId = int
+_MISSING = object()
 
 
 class PrefetchPhase(enum.Enum):
@@ -193,6 +194,7 @@ class InFlightPrefetchRequest:
     request_id: PrefetchRequestId
     keys: list[ObjectKey]
     phase: PrefetchPhase
+    generation: int = 0
     num_kv_readers: int = 1
     """Total read locks per key to acquire when transitioning from
     write-locked to read-locked.  Must match the ``num_kv_readers`` of the
@@ -233,6 +235,10 @@ class InFlightPrefetchRequest:
     write_reserved_objs: dict[ObjectKey, "MemoryObj"] = field(default_factory=dict)
     # Key indices found (and read-locked) in L1 when the request starts.
     l1_readlocks: Bitmap = field(default_factory=lambda: Bitmap(0))
+    # Set by the thread-safe cancellation API.  Cancellation is deliberately
+    # completed on the controller thread so adapters that already accepted a
+    # lookup/load task can report their result before locks are returned.
+    cancelled: bool = False
 
     group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
     """Maps object_group_id to that group's layout (one ``MemoryLayoutDesc``
@@ -318,7 +324,14 @@ class PrefetchController(StorageControllerInterface):
         self._submission_lock = threading.Lock()
         self._submission_queue: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
         self._next_request_id: PrefetchRequestId = 0
+        self._request_generations: dict[PrefetchRequestId, int] = {}
         self._submission_efd = create_event_notifier()
+
+        # Cancellation is a control-plane operation.  The caller only marks a
+        # request here; the background thread owns the actual L1/L2 lock
+        # cleanup, which avoids racing adapter result delivery.
+        self._cancel_lock = threading.Lock()
+        self._cancel_requests: dict[PrefetchRequestId, int | None] = {}
 
         # Thread-safe lookup results (background -> external)
         self._lookup_results_lock = threading.Lock()
@@ -330,6 +343,12 @@ class PrefetchController(StorageControllerInterface):
         self._prefetch_results_lock = threading.Lock()
         self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, Bitmap] = {}
+        self._completed_generations: dict[PrefetchRequestId, int] = {}
+        # Request owners may cancel a request and release their lease before
+        # the worker has published the cancellation result.  Remember those
+        # request IDs so the eventual result is cleaned up instead of being
+        # retained forever with no consumer.
+        self._forgotten_results: set[PrefetchRequestId] = set()
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -433,8 +452,53 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append((request_id, spec))
+            self._request_generations[request_id] = spec.generation
         self._submission_efd.notify()
         return request_id
+
+    def cancel_prefetch_request(
+        self,
+        request_id: PrefetchRequestId,
+        generation: int | None = None,
+    ) -> bool:
+        """Cancel a request and release its locks after adapter completion.
+
+        Cancellation is idempotent.  The request remains visible to the
+        background loop until any adapter lookup/load task it already started
+        has returned, so a late result cannot leak an L2 lock or an L1 write
+        reservation.  A zero bitmap is published once cleanup finishes, which
+        also wakes waiters.
+
+        Args:
+            request_id: ID returned by :meth:`submit_prefetch_request`.
+            generation: Optional generation guard.  When supplied, a request
+                with a different generation is left untouched.
+
+        Returns:
+            ``True`` when cancellation was accepted for an active/queued
+            request, ``False`` when the request is unknown or already
+            completed.
+        """
+        with self._prefetch_results_lock:
+            if request_id in self._completed_results:
+                return False
+        with self._submission_lock:
+            request_generation = self._request_generations.get(request_id, _MISSING)
+        if request_generation is _MISSING:
+            return False
+        if generation is not None and generation != request_generation:
+            return False
+        with self._cancel_lock:
+            previous = self._cancel_requests.get(request_id)
+            if (
+                previous is not None
+                and generation is not None
+                and previous != generation
+            ):
+                return False
+            self._cancel_requests[request_id] = generation
+        self._submission_efd.notify()
+        return True
 
     def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
         """
@@ -460,7 +524,11 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             return self._completed_lookups.get(request_id, None)
 
-    def query_prefetch_result(self, request_id: PrefetchRequestId) -> Bitmap | None:
+    def query_prefetch_result(
+        self,
+        request_id: PrefetchRequestId,
+        generation: int | None = None,
+    ) -> Bitmap | None:
         """
         Query the result of a prefetch request.
 
@@ -481,14 +549,25 @@ class PrefetchController(StorageControllerInterface):
             get None forever.
         """
         with self._prefetch_results_lock:
+            completed_generation = self._completed_generations.get(request_id, _MISSING)
+            if (
+                generation is not None
+                and completed_generation is not _MISSING
+                and completed_generation != generation
+            ):
+                return None
             result = self._completed_results.pop(request_id, None)
+            self._completed_generations.pop(request_id, None)
         if result is not None:
             with self._lookup_results_lock:
                 self._completed_lookups.pop(request_id, None)
         return result
 
     def wait_prefetch_result(
-        self, request_id: PrefetchRequestId, timeout: float
+        self,
+        request_id: PrefetchRequestId,
+        timeout: float,
+        generation: int | None = None,
     ) -> bool:
         """
         Block until a prefetch request's result is published, or until timeout.
@@ -506,9 +585,87 @@ class PrefetchController(StorageControllerInterface):
             the wait timed out.
         """
         with self._prefetch_results_cv:
+            if (
+                generation is not None
+                and request_id in self._completed_results
+                and self._completed_generations.get(request_id) != generation
+            ):
+                return False
             return self._prefetch_results_cv.wait_for(
-                lambda: request_id in self._completed_results, timeout
+                lambda: (
+                    request_id in self._completed_results
+                    and (
+                        generation is None
+                        or self._completed_generations.get(request_id) == generation
+                    )
+                ),
+                timeout,
             )
+
+    def forget_prefetch_result(
+        self,
+        request_id: PrefetchRequestId,
+        generation: int | None = None,
+    ) -> bool:
+        """Forget a completion result or suppress one still in flight.
+
+        This is for an owner that has cancelled or otherwise released a
+        prefetch lease and will not consume the completion bitmap.  If the
+        worker has already published a result, it is removed immediately.  If
+        the request is still active, the worker drops the result after it has
+        released all adapter and L1 resources.  The operation is idempotent.
+
+        Returns:
+            ``True`` if a result was removed or a live request was marked for
+            result suppression, ``False`` if the request is unknown.
+        """
+        with self._prefetch_results_lock:
+            completed_generation = self._completed_generations.get(request_id, _MISSING)
+            if (
+                generation is not None
+                and completed_generation is not _MISSING
+                and completed_generation != generation
+            ):
+                return False
+            removed = self._completed_results.pop(request_id, None) is not None
+            self._completed_generations.pop(request_id, None)
+
+        with self._lookup_results_lock:
+            self._completed_lookups.pop(request_id, None)
+
+        if removed:
+            return True
+
+        with self._submission_lock:
+            request_generation = self._request_generations.get(request_id, _MISSING)
+        known = request_generation is not _MISSING and (
+            generation is None or request_generation == generation
+        )
+        if not known:
+            return False
+
+        with self._prefetch_results_lock:
+            # Re-check under the same lock used by completion publication.  A
+            # completion can race with the first removal attempt, so either
+            # remove that result or install the suppression marker atomically.
+            completed_generation = self._completed_generations.get(request_id, _MISSING)
+            if (
+                generation is not None
+                and completed_generation is not _MISSING
+                and completed_generation != generation
+            ):
+                return False
+            if self._completed_results.pop(request_id, None) is not None:
+                self._completed_generations.pop(request_id, None)
+                removed = True
+            elif known:
+                self._forgotten_results.add(request_id)
+            else:
+                return False
+        if removed:
+            with self._lookup_results_lock:
+                self._completed_lookups.pop(request_id, None)
+        return True
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
@@ -719,6 +876,8 @@ class PrefetchController(StorageControllerInterface):
                         fd,
                     )
 
+            self._drain_cancel_requests()
+
             if any(signaled_adapters.values()):
                 for request in list(self._in_flight_requests.values()):
                     try:
@@ -810,6 +969,138 @@ class PrefetchController(StorageControllerInterface):
         self._pending_queue.extend(items)
         self._status_pending_count += len(items)
 
+    def _drain_cancel_requests(self) -> None:
+        """Apply queued cancellations on the prefetch loop thread."""
+        with self._cancel_lock:
+            requested = dict(self._cancel_requests)
+
+        if not requested:
+            return
+
+        # Requests that have not reached the controller thread yet can be
+        # removed without touching a lock.  Publish an empty result so the
+        # public wait API never hangs on cancellation.
+        with self._submission_lock:
+            queued = self._submission_queue
+            self._submission_queue = []
+        retained_submission: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
+        for request_id, spec in queued:
+            generation = requested.get(request_id, _MISSING)
+            if generation is _MISSING or (
+                generation is not None and generation != spec.generation
+            ):
+                retained_submission.append((request_id, spec))
+                continue
+            self._publish_cancelled(request_id, len(spec.keys), spec.generation)
+
+        if retained_submission:
+            with self._submission_lock:
+                self._submission_queue[0:0] = retained_submission
+
+        retained_pending: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
+        for request_id, spec in self._pending_queue:
+            generation = requested.get(request_id, _MISSING)
+            if generation is _MISSING or (
+                generation is not None and generation != spec.generation
+            ):
+                retained_pending.append((request_id, spec))
+                continue
+            self._status_pending_count -= 1
+            self._publish_cancelled(request_id, len(spec.keys), spec.generation)
+        self._pending_queue = retained_pending
+
+        # In-flight requests are marked first and finalized only after the
+        # adapter task currently in progress has produced its bitmap.
+        for request in list(self._in_flight_requests.values()):
+            generation = requested.get(request.request_id, _MISSING)
+            if generation is _MISSING or (
+                generation is not None and generation != request.generation
+            ):
+                continue
+            request.cancelled = True
+            if request.all_lookups_done() and request.phase is PrefetchPhase.LOOKUP:
+                self._finish_cancelled_request(request)
+            elif (
+                request.all_loads_done()
+                and request.phase is PrefetchPhase.PLAN_AND_LOAD
+            ):
+                self._finish_cancelled_request(request)
+
+        # A generation mismatch is a stale cancel request, not a request that
+        # should remain in the control plane forever.  Drop it after the
+        # current queues/in-flight table have been inspected.
+        known_generations = {
+            request_id: spec.generation for request_id, spec in retained_submission
+        }
+        known_generations.update(
+            {request_id: spec.generation for request_id, spec in retained_pending}
+        )
+        known_generations.update(
+            {
+                request.request_id: request.generation
+                for request in self._in_flight_requests.values()
+            }
+        )
+        with self._cancel_lock:
+            for request_id, requested_generation in list(self._cancel_requests.items()):
+                if (
+                    request_id in known_generations
+                    and requested_generation is not None
+                    and requested_generation != known_generations[request_id]
+                ):
+                    self._cancel_requests.pop(request_id, None)
+
+    def _publish_cancelled(
+        self,
+        request_id: PrefetchRequestId,
+        num_keys: int,
+        generation: int,
+    ) -> None:
+        with self._prefetch_results_lock:
+            forgotten = request_id in self._forgotten_results
+            self._forgotten_results.discard(request_id)
+            if not forgotten:
+                self._completed_results[request_id] = Bitmap(num_keys)
+                self._completed_generations[request_id] = generation
+                self._prefetch_results_cv.notify_all()
+        with self._lookup_results_lock:
+            if forgotten:
+                self._completed_lookups.pop(request_id, None)
+            else:
+                self._completed_lookups[request_id] = 0
+        with self._cancel_lock:
+            self._cancel_requests.pop(request_id, None)
+        with self._submission_lock:
+            self._request_generations.pop(request_id, None)
+
+    def _finish_cancelled_request(self, request: InFlightPrefetchRequest) -> None:
+        """Release every resource held by a cancelled request."""
+        l1_mgr = self._l1_manager
+        if request.write_reserved_keys:
+            l1_mgr.finish_write(request.write_reserved_keys)
+            l1_mgr.delete(request.write_reserved_keys)
+            request.write_reserved_keys.clear()
+            request.write_reserved_objs.clear()
+        self._release_l2_locks(request, keep={})
+        if request.l1_readlocks.popcount() > 0:
+            l1_mgr.finish_read(
+                request.l1_readlocks.gather(request.keys),
+                read_locks=request.num_kv_readers,
+            )
+            request.l1_readlocks = Bitmap(len(request.keys))
+        self._complete_request(
+            request.request_id,
+            Bitmap(len(request.keys)),
+            generation=request.generation,
+        )
+        with self._cancel_lock:
+            self._cancel_requests.pop(request.request_id, None)
+        logger.debug(
+            "Prefetch request %d cancelled (generation=%d)",
+            request.request_id,
+            request.generation,
+        )
+
     def _start_pending_requests(self) -> None:
         """Start pending requests up to the max in-flight limit."""
         while (
@@ -888,6 +1179,7 @@ class PrefetchController(StorageControllerInterface):
             request_id=request_id,
             keys=spec.keys,
             phase=PrefetchPhase.LOOKUP,
+            generation=spec.generation,
             num_kv_readers=spec.num_kv_readers,
             policy=spec.policy,
             attn_desc=spec.attn_desc,
@@ -1226,10 +1518,18 @@ class PrefetchController(StorageControllerInterface):
             return
         if request.phase == PrefetchPhase.LOOKUP:
             self._poll_lookup_results(request, phase_adapters)
+            if request.cancelled:
+                if request.all_lookups_done():
+                    self._finish_cancelled_request(request)
+                return
             if request.all_lookups_done():
                 self._transition_to_load_phase(request)
         elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
             self._poll_load_results(request, phase_adapters)
+            if request.cancelled:
+                if request.all_loads_done():
+                    self._finish_cancelled_request(request)
+                return
             if request.all_loads_done():
                 self._finish_request(request)
 
@@ -1417,7 +1717,11 @@ class PrefetchController(StorageControllerInterface):
         if not request.hit_reported:
             self._report_lookup_hit(request, hit_length)
 
-        self._complete_request(request.request_id, retained)
+        self._complete_request(
+            request.request_id,
+            retained,
+            generation=request.generation,
+        )
 
     # =========================================================================
     # Unlock helpers
@@ -1453,13 +1757,30 @@ class PrefetchController(StorageControllerInterface):
     # Completion and cleanup
     # =========================================================================
 
-    def _complete_request(self, request_id: PrefetchRequestId, result: Bitmap) -> None:
+    def _complete_request(
+        self,
+        request_id: PrefetchRequestId,
+        result: Bitmap,
+        generation: int | None = None,
+    ) -> None:
         """Store the retained-key bitmap and remove from in-flight tracking."""
         with self._prefetch_results_lock:
-            self._completed_results[request_id] = result
-            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
-            self._prefetch_results_cv.notify_all()
+            forgotten = request_id in self._forgotten_results
+            self._forgotten_results.discard(request_id)
+            if not forgotten:
+                self._completed_results[request_id] = result
+                if generation is not None:
+                    self._completed_generations[request_id] = generation
+                # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
+                self._prefetch_results_cv.notify_all()
+        if forgotten:
+            with self._lookup_results_lock:
+                self._completed_lookups.pop(request_id, None)
         removed = self._in_flight_requests.pop(request_id, None)
+        with self._cancel_lock:
+            self._cancel_requests.pop(request_id, None)
+        with self._submission_lock:
+            self._request_generations.pop(request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1
             if removed.phase == PrefetchPhase.LOOKUP:
@@ -1492,3 +1813,19 @@ class PrefetchController(StorageControllerInterface):
                 len(request.keys),
             )
         self._in_flight_requests.clear()
+        self._pending_queue.clear()
+        self._status_in_flight_count = 0
+        self._status_pending_count = 0
+        self._status_lookup_phase_count = 0
+        self._status_load_phase_count = 0
+        with self._submission_lock:
+            self._submission_queue.clear()
+            self._request_generations.clear()
+        with self._cancel_lock:
+            self._cancel_requests.clear()
+        with self._lookup_results_lock:
+            self._completed_lookups.clear()
+        with self._prefetch_results_lock:
+            self._completed_results.clear()
+            self._completed_generations.clear()
+            self._forgotten_results.clear()
