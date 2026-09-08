@@ -210,8 +210,13 @@ def test_http_event_source_marks_real_sequence_gap() -> None:
         stream = app.state.ctx.event_gate.stats()["event-source-node"]
         assert stream.last_seq == 3
         assert stream.gap_detected is True
-        [placements] = app.state.ctx.key_directory.lookup([_key(3)])
-        assert len(placements) == 1
+        response = requests.post(
+            f"{base}/directory/lookup",
+            json={"keys": [asdict(_key(3).to_encoded_object_key())]},
+            timeout=2,
+        )
+        response.raise_for_status()
+        assert len(response.json()["results"][0]["placements"]) == 1
     finally:
         server.should_exit = True
         thread.join(timeout=5.0)
