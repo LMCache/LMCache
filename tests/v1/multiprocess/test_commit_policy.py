@@ -106,7 +106,8 @@ class TestStopTokenCommitPolicy:
         """A turn that stopped on the boundary token earns a commit."""
         policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
         ctx = make_context(
-            SessionEndInfo(finish_reason="stop", stop_token_id=BOUNDARY_TOKEN)
+            SessionEndInfo(finish_reason="stop", stop_token_id=BOUNDARY_TOKEN),
+            anchor=CommitAnchor.GENERATION_END,
         )
 
         assert policy.should_commit(ctx) is True
@@ -115,7 +116,8 @@ class TestStopTokenCommitPolicy:
         """Stopping on some other token is not a turn boundary."""
         policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
         ctx = make_context(
-            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN)
+            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN),
+            anchor=CommitAnchor.GENERATION_END,
         )
 
         assert policy.should_commit(ctx) is False
@@ -124,7 +126,8 @@ class TestStopTokenCommitPolicy:
         """With no boundary tokens configured, any clean stop counts."""
         policy = StopTokenCommitPolicy()
         ctx = make_context(
-            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN)
+            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN),
+            anchor=CommitAnchor.GENERATION_END,
         )
 
         assert policy.should_commit(ctx) is True
@@ -149,7 +152,7 @@ class TestStopTokenCommitPolicy:
         """
         policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN, OTHER_TOKEN}))
 
-        assert policy.should_commit(make_context(end_info)) is False
+        assert policy.should_commit(make_context(end_info, anchor=CommitAnchor.GENERATION_END)) is False
 
     @pytest.mark.parametrize(
         "end_info",
@@ -195,6 +198,17 @@ class TestStopTokenCommitPolicy:
         ctx = make_context(end_info, anchor=CommitAnchor.PROMPT_END)
 
         assert policy.should_commit(ctx) is False
+
+    def test_prompt_end_ignores_boundary_token_set(self):
+        """At prompt_end the boundary set is not consulted: a stop on a token
+        outside the set still commits."""
+        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
+        ctx = make_context(
+            SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN),
+            anchor=CommitAnchor.PROMPT_END,
+        )
+
+        assert policy.should_commit(ctx) is True
 
 
 class TestRegistry:
@@ -253,7 +267,7 @@ class TestResolveAnchor:
 
     def test_generation_end_uses_the_stored_end(self):
         """The last chunk the request stored."""
-        ctx = make_context(prompt_end=8, stored_end=16)
+        ctx = make_context(prompt_end=8, stored_end=16, anchor=CommitAnchor.GENERATION_END)
 
         assert resolve_anchor(ctx, CHUNK_SIZE) == 16
 
@@ -266,7 +280,7 @@ class TestResolveAnchor:
     def test_offsets_are_floored_to_chunk_boundaries(self):
         """A partial trailing chunk was never stored as one."""
         assert (
-            resolve_anchor(make_context(prompt_end=7, stored_end=17), CHUNK_SIZE) == 16
+            resolve_anchor(make_context(prompt_end=7, stored_end=17, anchor=CommitAnchor.GENERATION_END), CHUNK_SIZE) == 16
         )
         assert (
             resolve_anchor(
@@ -396,14 +410,18 @@ class TestEndSessionCommit:
 
     def test_commits_the_trailing_window_of_the_sliding_group_only(self):
         """Under the default config: two chunks of group 0, none of group 1."""
-        ctx, per_group = run_end_session(CommitPolicyConfig(), num_chunks=6)
+        ctx, per_group = run_end_session(
+            CommitPolicyConfig(anchor=CommitAnchor.GENERATION_END), num_chunks=6
+        )
 
         assert flushed_keys(ctx) == per_group[0][4:6]
 
     def test_each_sliding_group_takes_its_own_window(self):
         """Groups with different ``w`` end at one anchor and start apart."""
         ctx, per_group = run_end_session(
-            CommitPolicyConfig(), num_chunks=6, attn_desc=AttnWindowDesc([2, 4, -1])
+            CommitPolicyConfig(anchor=CommitAnchor.GENERATION_END),
+            num_chunks=6,
+            attn_desc=AttnWindowDesc([2, 4, -1]),
         )
 
         assert flushed_keys(ctx) == per_group[0][4:6] + per_group[1][2:6]
@@ -447,7 +465,11 @@ class TestEndSessionCommit:
 
     def test_session_without_a_full_chunk_commits_nothing(self):
         """A clean stop with nothing stored has no window to name."""
-        ctx, _ = run_end_session(CommitPolicyConfig(), num_chunks=0, lookup_chunks=0)
+        ctx, _ = run_end_session(
+            CommitPolicyConfig(anchor=CommitAnchor.GENERATION_END),
+            num_chunks=0,
+            lookup_chunks=0,
+        )
 
         assert flushed_keys(ctx) == []
 
