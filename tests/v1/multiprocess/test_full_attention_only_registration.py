@@ -39,11 +39,13 @@ from lmcache.v1.distributed.object_group_classifier import (
     ObjectGroupClass,
     ObjectGroupClassifier,
 )
+from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import (
     add_mp_server_args,
     parse_args_to_mp_server_config,
     validate_server_config,
 )
+from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
@@ -278,3 +280,18 @@ class TestStorePolicyValidation:
         validate_server_config(
             parse_args_to_mp_server_config(args), parse_args_to_config(args)
         )
+
+    def test_server_refuses_to_start_on_the_unsupported_combination(self):
+        """The check is wired into start-up: run_cache_server itself raises
+        before building anything, so a server cannot come up with
+        full_attention_only and no object-group split."""
+        args = parse_server_args(["--l2-store-policy", "full_attention_only"])
+
+        with pytest.raises(ValueError, match="--separate-object-groups"):
+            run_cache_server(
+                mp_config=parse_args_to_mp_server_config(args),
+                storage_manager_config=parse_args_to_config(args),
+                obs_config=DEFAULT_OBSERVABILITY_CONFIG,
+                return_engine=True,
+                start_prometheus_http_server=False,
+            )
