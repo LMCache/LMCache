@@ -76,13 +76,6 @@ The design splits the commit into two decisions:
   covers a prompt the follow-up re-sends regardless. The policy therefore
   sees the anchor in its `CommitContext`.
 
-The policy returns a `bool`, not a token range. A range would let callers
-under-cover a group's window: each sliding-window object group derives its
-own start by subtracting its own `w` from the anchor, and a window missing
-its oldest chunk gets written but never read. A `bool` cannot express that
-mistake and needs none of the clamping, rounding, or quota guards a range
-would.
-
 ### 2.2 Connector Side: `SessionEndInfo`
 
 `request_finished` runs while the vLLM `Request` is still alive, so the
