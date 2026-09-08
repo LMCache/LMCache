@@ -41,14 +41,16 @@ leave L1, and eviction simply discards them.
 ### 2.1 Overview
 
 ```text
-vLLM scheduler                         MP server
-  request_finished(request)              handle_end_session(request_id, end_info)
-    └─ _build_session_end_info             ├─ _maybe_commit_window   (new)
-         └─ SessionEndInfo ──END_SESSION──▶│    ├─ CommitPolicy.should_commit
-                                           │    ├─ resolve_anchor
-                                           │    └─ StorageManager.flush_l1_keys_to_l2
-                                           │         └─ StoreController.submit_flush
-                                           └─ end_session(request_id)   (unchanged)
+vLLM scheduler                        
+  request_finished(request)            
+    └─ _build_session_end_info             
+         └─ SessionEndInfo ──END_SESSION──▶  handle_end_session(request_id, end_info)
+                                              ├─ _maybe_commit_window   (new)
+                                              │    ├─ CommitPolicy.should_commit
+                                              │    ├─ resolve_anchor
+                                              │    └─ StorageManager.flush_l1_keys_to_l2
+                                              │         └─ StoreController.submit_flush
+                                              └─ end_session(request_id)   (unchanged)
 ```
 
 Two decisions are involved:
