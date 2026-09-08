@@ -122,18 +122,6 @@ class TestFIFOOffloadPolicy:
         policy = FIFOOffloadPolicy()
         assert policy.pop_items_for_offload(5) == []
 
-    def test_has_pending_work_tracks_queue(self):
-        policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 1})
-
-        assert policy.has_pending_work() is False
-
-        policy.add(_make_meta("req-0"), _make_block_hashes([0]))
-        assert policy.has_pending_work() is True
-
-        policy.mark_req_finished("req-0")
-        assert len(policy.pop_items_for_offload(1)) == 1
-        assert policy.has_pending_work() is False
-
 
 # ===========================================================================
 # Tests for LazyOffloadPendingStore
@@ -240,24 +228,24 @@ class TestLazyOffloadPendingStore:
         store = LazyOffloadPendingStore()
         assert store.get_request_gpu_block_ids("nonexistent") == []
 
-    def test_has_pending_work_tracks_queued_and_inflight_stores(self):
+    def test_has_inflight_store_work_excludes_queued_stores(self):
         configs = {"lmcache.mp.lazy_offload_threshold": 1}
         store = self._setup_store_with_gpu_pool(configs)
 
-        assert store.has_pending_work() is False
+        assert store.has_inflight_store_work() is False
 
         store.add(_make_meta("req-0"))
-        assert store.has_pending_work() is True
+        assert store.has_inflight_store_work() is False
 
         store.mark_req_finished("req-0")
         assert len(store.pop_items_for_offload()) == 1
-        assert store.has_pending_work() is False
+        assert store.has_inflight_store_work() is False
 
         store.update_request_gpu_block_ids("req-0", [1, 2])
-        assert store.has_pending_work() is True
+        assert store.has_inflight_store_work() is True
 
         store.remove_request_gpu_block_ids("req-0")
-        assert store.has_pending_work() is False
+        assert store.has_inflight_store_work() is False
 
     def test_end_to_end_flow(self):
         """Test full add -> mark_finished -> pop_items_for_offload flow."""
@@ -306,7 +294,7 @@ class TestLazyOffloadPendingStore:
         assert len(batch4) == 0
 
 
-def test_mp_connector_has_pending_push_work_reflects_lazy_offload() -> None:
+def test_mp_connector_has_pending_push_work_reflects_inflight_store() -> None:
     pytest.importorskip("vllm")
 
     # Third Party
@@ -319,15 +307,15 @@ def test_mp_connector_has_pending_push_work_reflects_lazy_offload() -> None:
     connector._role = KVConnectorRole.SCHEDULER
     connector.lazy_offload = True
     connector._pending_store = MagicMock()
-    connector._pending_store.has_pending_work.return_value = True
+    connector._pending_store.has_inflight_store_work.return_value = True
 
     assert connector.has_pending_push_work() is True
 
-    connector._pending_store.has_pending_work.return_value = False
+    connector._pending_store.has_inflight_store_work.return_value = False
     assert connector.has_pending_push_work() is False
 
     connector.lazy_offload = False
-    connector._pending_store.has_pending_work.return_value = True
+    connector._pending_store.has_inflight_store_work.return_value = True
     assert connector.has_pending_push_work() is False
 
     connector._role = KVConnectorRole.WORKER

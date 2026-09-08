@@ -96,12 +96,3 @@ class FIFOOffloadPolicy(OffloadPolicy):
             if len(to_offload) >= count:
                 break
         return to_offload
-
-    def has_pending_work(self) -> bool:
-        """Return whether any store item is still waiting in the FIFO queue.
-
-        Returns:
-            True if at least one request still has queued store metadata,
-            otherwise False.
-        """
-        return bool(self._pending_items)
