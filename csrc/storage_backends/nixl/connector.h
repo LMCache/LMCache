@@ -21,7 +21,7 @@ struct WorkerNixlContext {
   WorkerNixlContext(
       std::string agent_name, const std::string& backend_name,
       const std::unordered_map<std::string, std::string>& backend_params,
-      uintptr_t l1_base, size_t l1_size, size_t l1_alignment);
+      uintptr_t l1_base, size_t l1_size);
   ~WorkerNixlContext();
 
   WorkerNixlContext(const WorkerNixlContext&) = delete;

@@ -48,8 +48,7 @@ class NixlStorageStrategy {
 
 std::unique_ptr<NixlStorageStrategy> make_nixl_storage_strategy(
     NixlStorageKind storage_kind,
-    const std::unordered_map<std::string, std::string>& backend_params,
-    size_t l1_alignment);
+    const std::unordered_map<std::string, std::string>& backend_params);
 
 const char* nixl_storage_kind_name(NixlStorageKind storage_kind);
 

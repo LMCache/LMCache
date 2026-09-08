@@ -39,7 +39,7 @@ std::string make_agent_name() {
 WorkerNixlContext::WorkerNixlContext(
     std::string context_agent_name, const std::string& backend_name,
     const std::unordered_map<std::string, std::string>& backend_params,
-    uintptr_t l1_base, size_t l1_size, size_t l1_alignment)
+    uintptr_t l1_base, size_t l1_size)
     : agent_name(std::move(context_agent_name)), l1_registration(DRAM_SEG) {
   nixlAgentConfig config;
   config.syncMode = nixl_thread_sync_t::NIXL_THREAD_SYNC_NONE;
@@ -83,8 +83,7 @@ WorkerNixlContext::WorkerNixlContext(
   l1_registered = true;
 
   try {
-    storage =
-        make_nixl_storage_strategy(storage_kind, backend_params, l1_alignment);
+    storage = make_nixl_storage_strategy(storage_kind, backend_params);
   } catch (...) {
     agent->deregisterMem(l1_registration, &options);
     l1_registered = false;
@@ -135,8 +134,7 @@ NixlConnector::NixlConnector(
   for (int worker = 0; worker < num_workers; ++worker) {
     std::unique_ptr<WorkerNixlContext> context =
         std::make_unique<WorkerNixlContext>(make_agent_name(), backend,
-                                            backend_params, l1_base_, l1_size_,
-                                            l1_alignment_);
+                                            backend_params, l1_base_, l1_size_);
     if (contexts_.empty()) {
       storage_type_ = nixl_storage_kind_name(context->storage_kind);
       storage_capabilities_ = context->storage->capabilities();

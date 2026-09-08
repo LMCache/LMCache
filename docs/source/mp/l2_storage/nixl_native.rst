@@ -136,20 +136,38 @@ query first and provide the correct destination length; NIXL registers every
 registration or transfer error fails that load batch. Delete removes the
 deterministic file.
 
-Set ``use_direct_io`` to ``"true"`` only when the filesystem and L1 layout
-support direct I/O. This setting adds NIXL's ``direct`` path-mode flag,
-producing ``rw,create,sync,direct:<path>`` for stores and
-``ro,direct:<path>`` for loads. Buffer addresses and byte lengths must
-satisfy the NIXL backend and filesystem direct-I/O alignment requirements;
-misaligned direct operations fail instead of silently using buffered I/O.
-To make the length requirement hold, direct-I/O transfers automatically
-cover each object's full alignment-padded L1 slot (logical bytes plus
-padding up to ``--l1-align-bytes``) instead of just the logical KV bytes,
-so on-disk files are alignment-sized multiples and loading them requires
-the same ``--l1-align-bytes`` and direct-I/O setting as the store.
-Buffered transfers may use unaligned buffers within the registered L1 arena
-and are never padded. ``shard_dirs: "true"`` stores files under two
-hash-prefix directories; choose that layout before populating a cache.
+Set ``use_direct_io`` to ``"true"`` to request direct I/O for eligible FILE
+buffers. The connector reads the target filesystem's direct-I/O alignment
+from ``statvfs(file_path).f_bsize`` and decides eligibility per buffer: a
+buffer uses direct I/O only when both its address and its byte length are
+exact multiples of that alignment. An address- or length-misaligned buffer
+automatically falls back to buffered I/O for that descriptor instead of
+failing, so one batched request can mix both descriptor forms:
+
+.. code-block:: text
+
+   rw,create,sync,direct:<tmp>    (eligible store buffer)
+   rw,create,sync:<tmp>           (misaligned store buffer, buffered fallback)
+   ro,direct:<path>               (eligible load buffer)
+   ro:<path>                      (misaligned load buffer, buffered fallback)
+
+The fallback exists because unaligned buffers previously failed; selecting
+the I/O mode per descriptor keeps the direct-I/O benefit for every eligible
+buffer instead of rejecting the whole batch. This filesystem alignment is
+independent of the L1 allocator alignment (``--l1-align-bytes``): L1 layout
+is enforced by the allocator and adapter and is never validated by the
+connector as a FILE I/O constraint. As an adapter-level optimization (not a
+connector requirement), direct-I/O transfers still cover each object's full
+alignment-padded L1 slot — logical bytes plus padding up to
+``--l1-align-bytes`` — so padded buffers stay eligible for direct I/O.
+On-disk files are therefore alignment-sized multiples, and loading them
+requires the same ``--l1-align-bytes`` and direct-I/O setting as the store.
+Buffered transfers (direct I/O off) and OBJECT storage are never padded.
+The fallback covers only this deterministic alignment preflight: NIXL
+registration, ``open()``, and transfer failures still fail the batch, and
+the separate ``fs`` connector keeps its own behavior. ``shard_dirs: "true"``
+stores files under two hash-prefix directories; choose that layout before
+populating a cache.
 
 OBJ OBJECT example
 ------------------
@@ -265,9 +283,13 @@ Buffer is outside the registered L1 arena
    ``MemoryObj``. The connector deliberately does not register arbitrary
    process memory.
 
-Direct-I/O alignment fails
-   Use ``use_direct_io: "false"`` first. For direct I/O, align the L1 base,
-   object address, and object length to the required filesystem block size.
+Direct I/O is not used for some buffers
+   Eligibility is per buffer: the buffer address and byte length must both be
+   exact multiples of the filesystem's direct-I/O alignment, read from
+   ``statvfs(file_path).f_bsize``. Misaligned buffers fall back to buffered
+   I/O for that descriptor instead of failing, so this is a performance
+   observation, not an error. Keep ``--l1-align-bytes`` at or above the
+   filesystem block size so the adapter's padded L1 slots stay eligible.
 
 OBJ authentication or lookup fails
    Check the credential provider, bucket, endpoint, scheme, region, and path

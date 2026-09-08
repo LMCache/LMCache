@@ -271,11 +271,9 @@ std::vector<uint8_t> query_storage(nixlAgent& agent, nixlBackendH* backend,
 
 class NixlFileStorage final : public NixlStorageStrategy {
  public:
-  NixlFileStorage(
-      const std::unordered_map<std::string, std::string>& backend_params,
-      size_t l1_alignment)
-      : l1_alignment_(l1_alignment),
-        use_direct_io_(
+  explicit NixlFileStorage(
+      const std::unordered_map<std::string, std::string>& backend_params)
+      : use_direct_io_(
             parse_bool_parameter(backend_params, "use_direct_io", false)),
         shard_directories_(
             parse_bool_parameter(backend_params, "shard_dirs", false)) {
@@ -311,7 +309,7 @@ class NixlFileStorage final : public NixlStorageStrategy {
 
     for (size_t index = 0; index < buffers.size(); ++index) {
       const NixlTransferBuffer& buffer = buffers[index];
-      validate_direct_io(buffer);
+      bool direct_io = should_use_direct_io(buffer);
       std::filesystem::path final_path = path_for_key(buffer.key);
       std::filesystem::create_directories(final_path.parent_path());
       std::filesystem::path temporary_path = make_temporary_path(final_path);
@@ -321,7 +319,7 @@ class NixlFileStorage final : public NixlStorageStrategy {
                                   buffer.length, 0));
       nixlBlobDesc file_descriptor(
           0, buffer.length, allocate_file_device_id(),
-          make_store_file_meta_info(temporary_path, use_direct_io_));
+          make_store_file_meta_info(temporary_path, direct_io));
       registration.addDesc(file_descriptor);
       storage.addDesc(file_descriptor);
     }
@@ -370,13 +368,12 @@ class NixlFileStorage final : public NixlStorageStrategy {
     nixl_xfer_dlist_t local(DRAM_SEG);
     nixl_xfer_dlist_t storage(FILE_SEG);
     for (const NixlTransferBuffer& buffer : buffers) {
-      validate_direct_io(buffer);
+      bool direct_io = should_use_direct_io(buffer);
       std::filesystem::path path = path_for_key(buffer.key);
       local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
                                   buffer.length, 0));
-      nixlBlobDesc file_descriptor(
-          0, buffer.length, allocate_file_device_id(),
-          make_load_file_meta_info(path, use_direct_io_));
+      nixlBlobDesc file_descriptor(0, buffer.length, allocate_file_device_id(),
+                                   make_load_file_meta_info(path, direct_io));
       registration.addDesc(file_descriptor);
       storage.addDesc(file_descriptor);
     }
@@ -422,19 +419,14 @@ class NixlFileStorage final : public NixlStorageStrategy {
     return base_path_ / key_to_filename(key, shard_directories_);
   }
 
-  void validate_direct_io(const NixlTransferBuffer& buffer) const {
-    if (!use_direct_io_) return;
+  bool should_use_direct_io(const NixlTransferBuffer& buffer) const {
+    if (!use_direct_io_ || direct_io_alignment_ == 0) return false;
     uintptr_t address = reinterpret_cast<uintptr_t>(buffer.data);
-    size_t alignment = std::max(l1_alignment_, direct_io_alignment_);
-    if (address % alignment != 0 || buffer.length % alignment != 0) {
-      throw std::runtime_error(
-          "direct I/O requires buffer address and length aligned to " +
-          std::to_string(alignment) + " bytes");
-    }
+    return address % direct_io_alignment_ == 0 &&
+           buffer.length % direct_io_alignment_ == 0;
   }
 
   std::filesystem::path base_path_;
-  size_t l1_alignment_;
   size_t direct_io_alignment_ = 0;
   bool use_direct_io_;
   bool shard_directories_;
@@ -536,11 +528,10 @@ class NixlObjectStorage final : public NixlStorageStrategy {
 
 std::unique_ptr<NixlStorageStrategy> make_nixl_storage_strategy(
     NixlStorageKind storage_kind,
-    const std::unordered_map<std::string, std::string>& backend_params,
-    size_t l1_alignment) {
+    const std::unordered_map<std::string, std::string>& backend_params) {
   switch (storage_kind) {
     case NixlStorageKind::File:
-      return std::make_unique<NixlFileStorage>(backend_params, l1_alignment);
+      return std::make_unique<NixlFileStorage>(backend_params);
     case NixlStorageKind::Object:
       return std::make_unique<NixlObjectStorage>(backend_params);
   }

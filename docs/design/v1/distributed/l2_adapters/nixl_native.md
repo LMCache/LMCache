@@ -55,20 +55,21 @@ registrations, agents, and backend handles are destroyed.
 The registered descriptor is exactly
 `[l1_base, l1_base + l1_size)`. Before a request reaches NIXL, the connector
 checks, without overflowing, that every nonempty buffer lies inside that range.
-Buffered transfers may use unaligned in-arena buffers; direct-I/O transfers
-remain subject to the backend and filesystem alignment requirements. Arbitrary
-process memory is never registered on demand.
+Arena containment is the connector's only buffer validation. The filesystem direct-I/O alignment is evaluated per buffer by
+the FILE strategy (see "Direct-I/O eligibility and buffered fallback" below).
+Arbitrary process memory is never registered on demand.
 
 When direct I/O is in effect (FILE storage with `use_direct_io: "true"`, as
 reported by the connector's `supports_direct_io` capability), the Python
 adapter automatically submits each object's full physical L1 slot — logical
 bytes plus the allocator's alignment padding up to `--l1-align-bytes` —
-instead of just the logical bytes. The padding is part of the object's own
-allocation, so the range still lies inside the registered arena; the connector
-needs no change because it transfers exactly the pointer/length pair it is
-given. This keeps direct-I/O length alignment valid for KV chunks whose byte
-size is not an alignment multiple. Buffered transfers (direct I/O off) and
-OBJECT storage are never padded.
+instead of just the logical bytes. This padding is an adapter-level
+optimization, not a connector validation requirement: a padded slot keeps both
+its address and its length as alignment multiples, so it stays eligible for
+direct I/O. The padding is part of the object's own allocation, so the range
+still lies inside the registered arena; the connector needs no change because
+it transfers exactly the pointer/length pair it is given. Buffered transfers
+(direct I/O off) and OBJECT storage are never padded.
 
 ## Batch transfer lifecycle
 
@@ -144,10 +145,41 @@ fails the complete load batch. LMCache performs no `open`, existence check,
 `fstat`, or size filtering before registration. Delete remains a filesystem
 removal and is reported as supported.
 
-Direct I/O is a strategy capability. When enabled, NIXL opens data files with
-its path-mode `direct` flag: store uses `rw,create,sync,direct:<path>` and load
-uses `ro,direct:<path>`. Buffer addresses and lengths must satisfy the NIXL
-backend and filesystem direct-I/O alignment requirements.
+### Direct-I/O eligibility and buffered fallback
+
+Direct I/O is a strategy capability: `supports_direct_io` continues to mean
+that aligned FILE transfers can use direct I/O. `use_direct_io: "true"`
+requests direct I/O for eligible FILE buffers; it neither guarantees nor
+requires it for every buffer.
+
+Eligibility is decided per buffer before registration. The strategy reads the
+target filesystem's direct-I/O alignment from `statvfs(file_path).f_bsize`,
+and a buffer is eligible only when both its address and its byte length are
+exact multiples of that alignment. Eligible buffers are registered with NIXL's
+path-mode `direct` flag; an address- or length-misaligned buffer automatically
+falls back to buffered I/O for that descriptor instead of raising an alignment
+error. One batched request may therefore mix `direct` and buffered FILE
+descriptors:
+
+```text
+rw,create,sync,direct:<tmp>    (eligible store buffer)
+rw,create,sync:<tmp>           (misaligned store buffer, buffered fallback)
+ro,direct:<path>               (eligible load buffer)
+ro:<path>                      (misaligned load buffer, buffered fallback)
+```
+
+The fallback exists because unaligned buffers previously failed the operation;
+selecting the I/O mode per descriptor preserves the direct-I/O benefit for
+every eligible buffer instead of rejecting the whole batch. The alignment
+checked here is a property of the target filesystem and is enforced by the
+FILE strategy; it is distinct from the L1 allocator alignment
+(`--l1-align-bytes`), which the allocator and adapter own and which the
+connector never validates.
+
+Fallback covers this deterministic preflight alignment decision only. NIXL
+registration, `open()`, and transfer failures still fail the operation exactly
+as before — there is no retry or fallback for them. The separate FS connector
+(`csrc/storage_backends/fs/`) keeps its own behavior; no parity is claimed.
 
 ## OBJECT strategy
 

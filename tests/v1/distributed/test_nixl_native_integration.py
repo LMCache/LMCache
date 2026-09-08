@@ -3,6 +3,8 @@
 
 # Standard
 from pathlib import Path
+from typing import Any
+import ctypes
 import errno
 import importlib.util
 import os
@@ -149,6 +151,87 @@ def _wait_for_store_tasks(
         for task_id in pending & completed.keys():
             assert completed[task_id].is_successful()
         pending.difference_update(completed)
+
+
+def _aligned_arena_to(size: int, alignment: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Allocate a CPU byte arena aligned to the given byte alignment."""
+    owner = torch.empty(size + alignment, dtype=torch.uint8)
+    offset = -owner.data_ptr() % alignment
+    return owner, owner[offset : offset + size]
+
+
+def _direct_io_stride(block_size: int) -> int:
+    """Return a chunk stride aligned to both the block size and page size."""
+    return max(block_size, _ALIGNMENT)
+
+
+def _client_key(index: int) -> str:
+    """Build one simple key string in the native-connector wire format."""
+    return f"model@00000000@0@{index:08x}"
+
+
+def _arena_view(arena: torch.Tensor, offset: int, length: int) -> memoryview:
+    """Expose a zero-copy byte memoryview over one arena subrange."""
+    address = arena.data_ptr() + offset
+    array_type = ctypes.c_ubyte * length
+    return memoryview(array_type.from_address(address))
+
+
+def _make_posix_client(
+    base_path: Path,
+    arena: torch.Tensor,
+    *,
+    use_direct_io: bool = True,
+    l1_alignment: int = _ALIGNMENT,
+) -> Any:
+    """Create a public native NIXL client over one registered L1 arena."""
+    # First Party
+    from lmcache.lmcache_nixl import LMCacheNixlClient
+
+    return LMCacheNixlClient(
+        backend="POSIX",
+        backend_params={
+            "file_path": str(base_path),
+            "use_direct_io": str(use_direct_io).lower(),
+        },
+        num_workers=1,
+        l1_base=arena.data_ptr(),
+        l1_size=arena.numel(),
+        l1_alignment=l1_alignment,
+    )
+
+
+def _drain_client_completion(
+    client: Any, future_id: int, timeout: float = 10.0
+) -> tuple[bool, str, list[bool] | None]:
+    """Wait for one public client future and return its completion tuple."""
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "timed out waiting for native NIXL completion"
+        readable, _, _ = select.select([client.event_fd()], [], [], remaining)
+        assert readable, "timed out waiting for native NIXL completion"
+        completions = client.drain_completions()
+        for completed_id, ok, error, results in completions:
+            if completed_id == future_id:
+                return ok, error, results
+
+
+def _client_round_trip(
+    client: Any,
+    keys: list[str],
+    source_views: list[memoryview],
+    destination_views: list[memoryview],
+) -> None:
+    """Store then load the same keys through the public client API."""
+    store_future = client.submit_batch_set(keys, source_views)
+    ok, error, _ = _drain_client_completion(client, store_future)
+    assert ok, f"native NIXL store failed: {error}"
+    load_future = client.submit_batch_get(keys, destination_views)
+    ok, error, results = _drain_client_completion(client, load_future)
+    assert ok, f"native NIXL load failed: {error}"
+    assert results is not None
+    assert list(results) == [True] * len(keys)
 
 
 @requires_nixl_integration
@@ -436,6 +519,214 @@ def test_posix_direct_io_batch_round_trip(tmp_path: Path) -> None:
     finally:
         adapter.close()
 
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+
+@requires_nixl_integration
+@requires_nixl_extension
+def test_posix_client_direct_io_aligned_round_trip(tmp_path: Path) -> None:
+    """Round-trip fully aligned buffers through the public client.
+
+    Both descriptors qualify for direct I/O, so skip when the filesystem
+    does not accept O_DIRECT.
+    """
+    supported, reason = _supports_direct_io(tmp_path)
+    if not supported:
+        pytest.skip(reason)
+
+    stride = _direct_io_stride(os.statvfs(str(tmp_path)).f_bsize)
+    _, arena = _aligned_arena_to(4 * stride, stride)
+    keys = [_client_key(1), _client_key(2)]
+    source_views = [
+        _arena_view(arena, 0, stride),
+        _arena_view(arena, stride, stride),
+    ]
+    arena[0:stride].fill_(101)
+    arena[stride : 2 * stride].fill_(103)
+    destination_views = [
+        _arena_view(arena, 2 * stride, stride),
+        _arena_view(arena, 3 * stride, stride),
+    ]
+    arena[2 * stride : 4 * stride].zero_()
+    expected = [bytes(view) for view in source_views]
+
+    client = _make_posix_client(tmp_path, arena)
+    try:
+        assert client.supports_direct_io
+        _client_round_trip(client, keys, source_views, destination_views)
+    finally:
+        client.close()
+
+    assert [bytes(view) for view in destination_views] == expected
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+
+@requires_nixl_integration
+@requires_nixl_extension
+def test_posix_client_direct_io_misaligned_address_round_trip(
+    tmp_path: Path,
+) -> None:
+    """Round-trip a block-length buffer whose address is not block aligned.
+
+    The descriptor silently falls back to buffered I/O, so this passes
+    regardless of filesystem O_DIRECT support (no probe gating).
+    """
+    block_size = os.statvfs(str(tmp_path)).f_bsize
+    stride = _direct_io_stride(block_size)
+    _, arena = _aligned_arena_to(4 * stride, stride)
+    key = _client_key(1)
+    # Source and destination begin one byte into an aligned chunk.
+    source_view = _arena_view(arena, 1, block_size)
+    arena[1 : 1 + block_size].fill_(55)
+    destination_view = _arena_view(arena, 2 * stride + 1, block_size)
+    arena[2 * stride + 1 : 2 * stride + 1 + block_size].zero_()
+    expected = bytes(source_view)
+
+    client = _make_posix_client(tmp_path, arena)
+    try:
+        _client_round_trip(client, [key], [source_view], [destination_view])
+    finally:
+        client.close()
+
+    assert bytes(destination_view) == expected
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+
+@requires_nixl_integration
+@requires_nixl_extension
+def test_posix_client_direct_io_misaligned_length_round_trip(
+    tmp_path: Path,
+) -> None:
+    """Round-trip an unaligned length and verify the stored file size.
+
+    The exact unaligned length reaches the C++ connector (the client does
+    no padding), so the descriptor uses buffered I/O and this passes
+    regardless of filesystem O_DIRECT support.
+    """
+    block_size = os.statvfs(str(tmp_path)).f_bsize
+    stride = _direct_io_stride(block_size)
+    unaligned_length = block_size + 123
+    _, arena = _aligned_arena_to(4 * stride, stride)
+    key = _client_key(1)
+    source_view = _arena_view(arena, 0, unaligned_length)
+    arena[0:unaligned_length].fill_(77)
+    destination_view = _arena_view(arena, 2 * stride, unaligned_length)
+    arena[2 * stride : 2 * stride + unaligned_length].zero_()
+    expected = bytes(source_view)
+
+    client = _make_posix_client(tmp_path, arena)
+    try:
+        _client_round_trip(client, [key], [source_view], [destination_view])
+    finally:
+        client.close()
+
+    assert bytes(destination_view) == expected
+    stored_files = list(tmp_path.glob("*.data"))
+    assert len(stored_files) == 1
+    assert stored_files[0].stat().st_size == unaligned_length
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+
+@requires_nixl_integration
+@requires_nixl_extension
+def test_posix_client_direct_io_mixed_batch_round_trip(tmp_path: Path) -> None:
+    """Round-trip one batch mixing direct and buffered descriptors.
+
+    The fully aligned buffer uses direct I/O while the misaligned-address
+    and misaligned-length buffers fall back to buffered I/O, all inside
+    the same batched NIXL request, so skip when O_DIRECT is unsupported.
+    """
+    supported, reason = _supports_direct_io(tmp_path)
+    if not supported:
+        pytest.skip(reason)
+
+    block_size = os.statvfs(str(tmp_path)).f_bsize
+    stride = _direct_io_stride(block_size)
+    slot = 2 * stride
+    _, arena = _aligned_arena_to(6 * slot, stride)
+    keys = [_client_key(1), _client_key(2), _client_key(3)]
+    # Fully aligned (direct), misaligned address, and misaligned length.
+    lengths = [stride, block_size, block_size + 123]
+    source_offsets = [0, slot + 1, 2 * slot]
+    destination_offsets = [3 * slot, 4 * slot + 1, 5 * slot]
+    source_views = [
+        _arena_view(arena, offset, length)
+        for offset, length in zip(source_offsets, lengths, strict=True)
+    ]
+    destination_views = [
+        _arena_view(arena, offset, length)
+        for offset, length in zip(destination_offsets, lengths, strict=True)
+    ]
+    for fill, offset, length in zip((11, 22, 33), source_offsets, lengths, strict=True):
+        arena[offset : offset + length].fill_(fill)
+    for offset, length in zip(destination_offsets, lengths, strict=True):
+        arena[offset : offset + length].zero_()
+    expected = [bytes(view) for view in source_views]
+
+    client = _make_posix_client(tmp_path, arena)
+    try:
+        _client_round_trip(client, keys, source_views, destination_views)
+    finally:
+        client.close()
+
+    assert [bytes(view) for view in destination_views] == expected
+    expected_sizes = {
+        "model@0x00000000@0@00000001.data": lengths[0],
+        "model@0x00000000@0@00000002.data": lengths[1],
+        "model@0x00000000@0@00000003.data": lengths[2],
+    }
+    actual_sizes = {path.name: path.stat().st_size for path in tmp_path.glob("*.data")}
+    assert actual_sizes == expected_sizes
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+@requires_nixl_integration
+@requires_nixl_extension
+def test_posix_client_direct_io_fallback_releases_file_descriptors(
+    tmp_path: Path,
+) -> None:
+    """Return to the fd baseline after repeated unaligned round-trips."""
+    block_size = os.statvfs(str(tmp_path)).f_bsize
+    stride = _direct_io_stride(block_size)
+    slot = 2 * stride
+    _, arena = _aligned_arena_to(4 * slot, stride)
+    keys = [_client_key(1), _client_key(2)]
+    # Misaligned address and misaligned length: both use buffered I/O.
+    lengths = [block_size, block_size + 123]
+    source_offsets = [1, slot]
+    destination_offsets = [2 * slot + 1, 3 * slot]
+    source_views = [
+        _arena_view(arena, offset, length)
+        for offset, length in zip(source_offsets, lengths, strict=True)
+    ]
+    destination_views = [
+        _arena_view(arena, offset, length)
+        for offset, length in zip(destination_offsets, lengths, strict=True)
+    ]
+    for fill, offset, length in zip((61, 67), source_offsets, lengths, strict=True):
+        arena[offset : offset + length].fill_(fill)
+    expected = [bytes(view) for view in source_views]
+
+    bootstrap = _make_posix_client(tmp_path, arena)
+    bootstrap.close()
+    post_initialization_baseline = len(os.listdir("/proc/self/fd"))
+
+    client = _make_posix_client(tmp_path, arena)
+    try:
+        # Warm up plugin and worker paths before establishing the fd baseline.
+        _client_round_trip(client, keys, source_views, destination_views)
+        assert [bytes(view) for view in destination_views] == expected
+        initialized_baseline = len(os.listdir("/proc/self/fd"))
+
+        for _ in range(5):
+            for offset, length in zip(destination_offsets, lengths, strict=True):
+                arena[offset : offset + length].zero_()
+            _client_round_trip(client, keys, source_views, destination_views)
+            assert [bytes(view) for view in destination_views] == expected
+            assert len(os.listdir("/proc/self/fd")) == initialized_baseline
+    finally:
+        client.close()
+
+    assert len(os.listdir("/proc/self/fd")) == post_initialization_baseline
     assert not list(tmp_path.glob("*.tmp.*"))
 
 
