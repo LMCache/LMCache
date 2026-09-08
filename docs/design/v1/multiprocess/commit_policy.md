@@ -1,11 +1,5 @@
 # Sliding-Window Commit on Turn Boundaries (Multiprocess Mode)
 
-Covers the `END_SESSION` handler in `lmcache/v1/multiprocess/modules/lookup.py`,
-the policy module `lmcache/v1/multiprocess/commit_policy.py`, the
-`StoreMode.FLUSH` path in
-`lmcache/v1/distributed/storage_controllers/store_controller.py`, and the
-finish-reason reporting in `lmcache/integration/vllm/lmcache_mp_connector.py`.
-
 ## 1. Motivation
 
 In a hybrid-attention model, the KV of a sliding-window layer is reusable
@@ -105,6 +99,8 @@ the commit reads; the two share nothing else.
 
 | `CommitContext` field | Value |
 |---|---|
+| `request_id` | the finished request (`Session.request_id`) |
+| `model_name` | model the session belongs to (`IPCCacheServerKey.model_name`) |
 | `end_info` | the `SessionEndInfo` above |
 | `prompt_end` | end of the last range the engine looked up (`Session.lookup_end`) |
 | `stored_end` | furthest offset the session resolved keys for (`Session.resolved_end`) |
