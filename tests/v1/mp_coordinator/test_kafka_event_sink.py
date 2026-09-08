@@ -3,8 +3,13 @@
 
 # Standard
 from unittest.mock import patch
+from uuid import uuid4
+import os
+import time
 
 # Third Party
+from confluent_kafka import Consumer, Message
+from confluent_kafka.admin import AdminClient, NewTopic
 import pytest
 
 # First Party
@@ -30,6 +35,7 @@ from lmcache.v1.multiprocess.config import (
 from .fake_kafka import FakeKafkaBroker, FakeKafkaConsumer, FakeKafkaProducer
 
 _TOPIC = "cache-events"
+_REAL_KAFKA_BOOTSTRAP_ENV = "LMCACHE_TEST_KAFKA_BOOTSTRAP_SERVERS"
 
 
 def _batch(instance_id: str, seq: int) -> CacheEventBatch:
@@ -120,6 +126,69 @@ def test_kafka_sink_round_trips_ordered_keyed_records() -> None:
         assert value is not None
         envelope = CacheEventsRequest.model_validate_json(value)
         assert envelope.batches == [expected]
+
+
+def test_kafka_sink_round_trips_against_real_broker() -> None:
+    bootstrap_servers = os.environ.get(_REAL_KAFKA_BOOTSTRAP_ENV)
+    if not bootstrap_servers:
+        pytest.skip(f"set {_REAL_KAFKA_BOOTSTRAP_ENV} to test against Kafka")
+        return
+
+    topic = f"lmcache-cache-events-{uuid4().hex}"
+    admin = AdminClient({"bootstrap.servers": bootstrap_servers})
+    topic_result = admin.create_topics(
+        [NewTopic(topic=topic, num_partitions=1, replication_factor=1)]
+    )[topic]
+    topic_result.result(timeout=30.0)
+
+    consumer = Consumer(
+        {
+            "bootstrap.servers": bootstrap_servers,
+            "group.id": f"lmcache-cache-events-{uuid4().hex}",
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
+    sink = KafkaCacheEventSink(
+        bootstrap_servers=bootstrap_servers,
+        topic=topic,
+        delivery_timeout=10.0,
+    )
+    batches = [_batch("node-a", 1), _batch("node-a", 2)]
+
+    try:
+        consumer.subscribe([topic])
+        sink.publish(batches)
+
+        messages: list[Message] = []
+        deadline = time.monotonic() + 30.0
+        while len(messages) < len(batches):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                pytest.fail(f"received {len(messages)} of {len(batches)} Kafka records")
+            message = consumer.poll(timeout=min(1.0, remaining))
+            if message is None:
+                continue
+            if message.error() is not None:
+                pytest.fail(f"Kafka consumer error: {message.error()}")
+            messages.append(message)
+
+        for offset, (message, expected) in enumerate(
+            zip(messages, batches, strict=True)
+        ):
+            assert message.key() == expected.instance_id.encode()
+            assert message.partition() == 0
+            assert message.offset() == offset
+            value = message.value()
+            if value is None:
+                pytest.fail("Kafka record value is missing")
+            envelope = CacheEventsRequest.model_validate_json(value)
+            assert envelope.batches == [expected]
+    finally:
+        sink.close()
+        consumer.close()
+        delete_result = admin.delete_topics([topic], operation_timeout=10.0)[topic]
+        delete_result.result(timeout=30.0)
 
 
 def test_kafka_sink_configures_durable_ordered_producer() -> None:
