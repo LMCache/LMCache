@@ -153,10 +153,8 @@ class KVFormatSpec(ABC):
     # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
     # than a single stacked per-layer tensor.
     is_kv_second_tuple: ClassVar[bool] = False
-    # A sparse-attention indexer cache (DSA: DeepSeek-V3.2, GLM-5.3), not
-    # attention K/V. The engine registers it beside the attention caches and
-    # manages it itself; ``drop_indexer_caches`` keeps it away from connectors
-    # sized to the attention layer count.
+    # Sparse-attention (DSA) indexer cache, not attention K/V; see
+    # ``find_indexer_caches``.
     is_indexer: ClassVar[bool] = False
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:

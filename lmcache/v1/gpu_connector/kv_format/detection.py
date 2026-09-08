@@ -5,9 +5,6 @@
 off to the engine's :class:`EngineDetector` to reshape and identify the format.
 """
 
-# Standard
-from collections.abc import Mapping
-
 # Third Party
 import torch
 
@@ -75,49 +72,25 @@ def detect_format(
     return engine_kv_format, kv_caches
 
 
-def is_indexer_cache(
-    kv_cache: torch.Tensor,
-    serving_engine: EngineType,
-    layout_hints: "LayoutHints | None" = None,
-) -> bool:
-    """Return whether one per-layer tensor is a sparse-attention indexer cache.
+def find_indexer_caches(
+    kv_caches: dict[str, torch.Tensor], serving_engine: EngineType
+) -> list[str]:
+    """Return the names in *kv_caches* whose format spec declares ``is_indexer``.
 
-    Detects the tensor's format as a single-layer registration and reads the
-    ``is_indexer`` fact off its spec, so the answer follows the format table
-    rather than any engine layer class. Unrecognized layouts are not indexers.
+    DSA models (DeepSeek-V3.2, GLM-5.3) register a sparse-attention indexer
+    k-cache per sparse layer beside the attention KV. Each tensor is detected on
+    its own; layouts detection rejects are not indexers.
     """
-    kv_caches = attempt_permute_to_contiguous_view([kv_cache])
     detector = get_detector(serving_engine)
     if detector is None:
-        return False
-    engine_kv_format, _ = detector.discover(kv_caches, layout_hints or {})
-    return engine_kv_format is not None and get_spec_class(engine_kv_format).is_indexer
+        return []
 
+    def is_indexer(kv_cache: torch.Tensor) -> bool:
+        try:
+            view = attempt_permute_to_contiguous_view([kv_cache])
+            fmt, _ = detector.discover(view, {})
+        except ValueError:
+            return False
+        return fmt is not None and get_spec_class(fmt).is_indexer
 
-def drop_indexer_caches(
-    kv_caches: Mapping[str, torch.Tensor],
-    serving_engine: EngineType,
-    layout_hints: "LayoutHints | None" = None,
-) -> dict[str, torch.Tensor]:
-    """Return *kv_caches* without its indexer caches, in registration order.
-
-    DSA models (DeepSeek-V3.2, GLM-5.3) register an indexer k-cache per sparse
-    layer beside the attention KV caches. The engine manages those itself, and
-    connectors that size themselves to the attention layer count cannot carry
-    them, so registration paths call this before handing the caches on. Tensors
-    are returned as-is (no copies); a summary is logged only when something was
-    dropped.
-    """
-    kept = {
-        name: kv_cache
-        for name, kv_cache in kv_caches.items()
-        if not is_indexer_cache(kv_cache, serving_engine, layout_hints)
-    }
-    dropped = len(kv_caches) - len(kept)
-    if dropped:
-        logger.info(
-            "Skipping %d indexer KV caches, registering %d attention KV caches",
-            dropped,
-            len(kept),
-        )
-    return kept
+    return [name for name, t in kv_caches.items() if is_indexer(t)]

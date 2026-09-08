@@ -16,10 +16,9 @@ import torch
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import (
     describe_shape,
-    drop_indexer_caches,
+    find_indexer_caches,
     get_spec,
     get_spec_class,
-    is_indexer_cache,
 )
 import lmcache.lmcache_native as lmcache_native
 
@@ -385,16 +384,7 @@ def test_is_indexer_fact_pinned():
     assert indexer == {F.NL_X_NB_BSV_BSS}
 
 
-def test_is_indexer_cache_reads_the_spec_fact():
-    assert is_indexer_cache(_indexer_layer(), EngineType.VLLM)
-    # The MLA main cache shares the indexer's rank and list depth.
-    assert not is_indexer_cache(_t(NB, BS, HS), EngineType.VLLM)
-    # Same trailing dim in a real dtype is still MLA, not an indexer cache.
-    assert not is_indexer_cache(_t(NB, BS, INDEXER_HS), EngineType.VLLM)
-    assert not is_indexer_cache(_t(2, NB, BS, NH, HS), EngineType.VLLM)
-
-
-def test_drop_indexer_caches_keeps_attention_layers_in_order():
+def test_find_indexer_caches_names_only_the_indexer_layers():
     # A DSA registration: one MLA cache per layer plus an indexer k-cache on
     # the sparse layers, interleaved in one dict as vLLM hands it over.
     kv = {}
@@ -402,14 +392,17 @@ def test_drop_indexer_caches_keeps_attention_layers_in_order():
         kv[f"model.layers.{i}.self_attn.attn"] = _t(NB, BS, HS)
         if i % 2 == 0:
             kv[f"model.layers.{i}.self_attn.indexer.k_cache"] = _indexer_layer()
-    kept = drop_indexer_caches(kv, EngineType.VLLM)
-    assert list(kept) == [f"model.layers.{i}.self_attn.attn" for i in range(NL)]
-    # Same tensor objects: the filter never copies or re-views.
-    assert all(kept[name] is kv[name] for name in kept)
+    found = find_indexer_caches(kv, EngineType.VLLM)
+    assert found == [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (0, 2, 4)]
 
 
-def test_drop_indexer_caches_is_identity_without_indexers():
-    kv = {f"model.layers.{i}.self_attn.attn": _t(2, NB, BS, NH, HS) for i in range(NL)}
-    kept = drop_indexer_caches(kv, EngineType.VLLM)
-    assert list(kept) == list(kv)
-    assert all(kept[name] is kv[name] for name in kv)
+def test_find_indexer_caches_ignores_every_attention_format():
+    kv = {
+        "mha": _t(2, NB, BS, NH, HS),
+        "mla": _t(NB, BS, HS),
+        # The indexer's trailing dim in a real dtype is still MLA.
+        "mla132": _t(NB, BS, INDEXER_HS),
+        # A strided view detection rejects is not classified as an indexer.
+        "strided": torch.zeros(NB, 2 * BS, HS, dtype=DT)[:, ::2, :],
+    }
+    assert find_indexer_caches(kv, EngineType.VLLM) == []
