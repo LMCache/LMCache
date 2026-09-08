@@ -976,12 +976,12 @@ def test_startup_does_not_warn_for_default_heartbeat_interval(
     assert not any("reap" in msg for msg in warnings)
 
 
-def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
+def test_recover_callback_rebuilds_and_retires_transfer_ctx(
     fake_adapter, monkeypatch
 ) -> None:
-    """Pin current behavior: every recover-callback invocation rebuilds
-    ``transfer_ctx`` without closing the previous context (known IPC leak;
-    in-flight submissions may still hold a reference to the old context)."""
+    """Every recover-callback invocation rebuilds ``transfer_ctx`` and retires
+    the context it replaces, draining it first. This used to leave the old
+    context to the garbage collector, which never runs the unpin at all."""
     adapter, _send_mock, _ = fake_adapter
     contexts = _patch_transfer_context_factory(monkeypatch)
 
@@ -995,18 +995,16 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     assert len(contexts) == 1
     assert adapter.transfer_ctx is contexts[0]
 
-    # Each recover-callback invocation rebuilds transfer_ctx without closing
-    # the previous context (known IPC leak; in-flight submissions may still
-    # hold a reference to the old context).
     assert heartbeat.recover_callback() is True
     assert len(contexts) == 2
     assert adapter.transfer_ctx is contexts[1]
-    contexts[0].close.assert_not_called()
+    contexts[0].flush_inflight_stores.assert_called_once_with()
+    contexts[0].close.assert_called_once_with()
 
     assert heartbeat.recover_callback() is True
     assert len(contexts) == 3
     assert adapter.transfer_ctx is contexts[2]
-    contexts[1].close.assert_not_called()
+    contexts[1].close.assert_called_once_with()
 
 
 # For the experimental dispatcher
@@ -1040,3 +1038,132 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok
+
+
+def _registered_adapter(fake_adapter, monkeypatch) -> tuple:
+    """Register one KV cache and return ``(adapter, first_context, contexts)``."""
+    adapter, _send_mock, _future = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+    assert len(contexts) == 1
+    return adapter, contexts[0], contexts
+
+
+def test_failed_reregistration_keeps_serving_the_previous_context(
+    fake_adapter, monkeypatch
+):
+    """A context is published only once it has registered.
+
+    Publishing before ``register`` returns exposes a context whose transport
+    is not built yet, so a store landing in that window fails against a
+    half-built context instead of the working one it replaced.
+    """
+    adapter, old_ctx, _contexts = _registered_adapter(fake_adapter, monkeypatch)
+    failing_ctx = MagicMock(name="failing_ctx")
+    failing_ctx.register.side_effect = ConnectionError("server still down")
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda *a, **kw: failing_ctx
+    )
+
+    assert adapter._reregister_kv_caches_callback() is False
+
+    assert adapter.transfer_ctx is old_ctx
+    old_ctx.close.assert_not_called()
+
+
+def test_context_swap_waits_for_an_inflight_submit(fake_adapter, monkeypatch):
+    """The swap must not retire a context a store is still transferring into.
+
+    ``submit_store`` gathers into slot views over the old pool. Retiring that
+    context while the gather is in flight unmaps the pages the copy is
+    writing, which faults in native code and takes the whole engine down with
+    the rank.
+    """
+    adapter, old_ctx, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    second_created = threading.Event()
+    inner_factory = adapter_mod.create_transfer_context
+
+    def counting_factory(*args, **kwargs):
+        ctx = inner_factory(*args, **kwargs)
+        second_created.set()
+        return ctx
+
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", counting_factory)
+
+    submit_entered = threading.Event()
+    release_submit = threading.Event()
+    closed_during_submit: list[bool] = []
+
+    def blocking_submit(*_args, **_kwargs):
+        submit_entered.set()
+        assert release_submit.wait(timeout=10)
+        closed_during_submit.append(bool(old_ctx.close.call_args_list))
+        return MagicMock(name="store_future")
+
+    old_ctx.submit_store.side_effect = blocking_submit
+
+    storer = threading.Thread(
+        target=adapter.submit_store_request, args=("store", _op([[0]]), None)
+    )
+    storer.start()
+    assert submit_entered.wait(timeout=10)
+
+    swapper = threading.Thread(target=adapter._reregister_kv_caches_callback)
+    swapper.start()
+    try:
+        # The replacement is built before the swap, so this only says the
+        # re-registration is under way, not that it has taken effect.
+        assert second_created.wait(timeout=10)
+        published_during_submit = adapter.transfer_ctx
+    finally:
+        # Always release, so a failed assertion here does not also hang the
+        # store thread and bury the real reason.
+        release_submit.set()
+    storer.join(timeout=10)
+    swapper.join(timeout=10)
+    assert published_during_submit is old_ctx, "swapped while a store was in flight"
+    assert not storer.is_alive() and not swapper.is_alive()
+
+    assert closed_during_submit == [False], "old context closed under a live store"
+    assert adapter.transfer_ctx is contexts[1]
+    old_ctx.close.assert_called_once_with()
+
+
+def test_swap_leaves_a_wedged_context_open_rather_than_stalling_recovery(
+    fake_adapter, monkeypatch
+):
+    """A transfer outliving the drain deadline must not stall recovery.
+
+    The swap runs on the heartbeat thread, so blocking it without bound would
+    stop the pings that keep the worker from being reaped. Past the deadline
+    the replacement is published anyway and the old context is left open,
+    which leaks it but never closes a pool a copy is still writing into.
+    """
+    adapter, old_ctx, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    adapter._mq_timeout = 0.05
+    submit_entered = threading.Event()
+    release_submit = threading.Event()
+
+    def blocking_submit(*_args, **_kwargs):
+        submit_entered.set()
+        assert release_submit.wait(timeout=10)
+        return MagicMock(name="store_future")
+
+    old_ctx.submit_store.side_effect = blocking_submit
+    storer = threading.Thread(
+        target=adapter.submit_store_request, args=("store", _op([[0]]), None)
+    )
+    storer.start()
+    assert submit_entered.wait(timeout=10)
+
+    try:
+        assert adapter._reregister_kv_caches_callback() is True
+        assert adapter.transfer_ctx is contexts[1]
+        old_ctx.close.assert_not_called()
+    finally:
+        release_submit.set()
+        storer.join(timeout=10)
+    assert not storer.is_alive()

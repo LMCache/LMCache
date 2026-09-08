@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
@@ -1215,6 +1216,11 @@ class LMCacheMPWorkerAdapter:
         self.engine_group_infos: list[EngineGroupInfo] = []
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
+        # Guards the context swap against transfers already running on the
+        # context being replaced. Transfers hold a count; the swap waits for
+        # it to fall to zero before publishing and retiring.
+        self._ctx_cond = threading.Condition()
+        self._ctx_inflight = 0
 
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
@@ -1388,6 +1394,94 @@ class LMCacheMPWorkerAdapter:
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
+    @contextmanager
+    def _held_transfer_ctx(self) -> "Iterator[TransferContext | None]":
+        """Hold the published transfer context for the duration of a transfer.
+
+        The context is read once and pinned for the block: a server restart
+        re-registers on the heartbeat thread, and the transfer paths
+        dereference views into the pool the context owns. Reading the
+        attribute again mid-transfer, or letting the swap retire the context
+        while a copy is in flight, touches memory the replacement has already
+        unmapped.
+
+        Yields:
+            The published context, held until the block exits, or ``None``
+            when nothing is registered.
+        """
+        with self._ctx_cond:
+            ctx = self.transfer_ctx
+            if ctx is None:
+                yield None
+                return
+            self._ctx_inflight += 1
+        try:
+            yield ctx
+        finally:
+            with self._ctx_cond:
+                self._ctx_inflight -= 1
+                if not self._ctx_inflight:
+                    self._ctx_cond.notify_all()
+
+    def _publish_transfer_ctx(
+        self, new_ctx: TransferContext
+    ) -> "TransferContext | None":
+        """Publish a registered context once no transfer is using the old one.
+
+        The wait is bounded: this runs on the heartbeat thread, and blocking
+        it for an unbounded time would stop the pings that keep the worker
+        from being reaped.
+
+        Args:
+            new_ctx: The context to publish; must already be registered.
+
+        Returns:
+            The context that was replaced, for the caller to retire. ``None``
+            on the first registration, and also when transfers were still
+            running at the deadline: such a context is leaked rather than
+            closed under a live copy, which is the behaviour this replaces
+            and is still preferable to faulting the rank.
+        """
+        deadline = time.monotonic() + self._mq_timeout
+        with self._ctx_cond:
+            while self._ctx_inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._ctx_cond.wait(remaining)
+            old_ctx = self.transfer_ctx
+            self.transfer_ctx = new_ctx
+            if self._ctx_inflight:
+                logger.warning(
+                    "Transfers still in flight after %ss; leaving the replaced "
+                    "transfer context open instead of closing it under them",
+                    self._mq_timeout,
+                )
+                return None
+            return old_ctx
+
+    @staticmethod
+    def _retire_transfer_ctx(old_ctx: "TransferContext | None") -> None:
+        """Drain and close a context that is no longer published.
+
+        Closing is what unpins the SHM pool and unmaps it. Left to the
+        garbage collector, the unpin never runs at all, so the device keeps a
+        host registration over an address range that is unmapped later, at a
+        moment nothing orders against the copies still reading it.
+
+        Args:
+            old_ctx: The replaced context, or ``None`` on first registration.
+        """
+        if old_ctx is None:
+            return
+        try:
+            old_ctx.flush_inflight_stores()
+            torch_dev.synchronize()
+        except Exception:
+            logger.exception("Failed to drain the replaced transfer context")
+        finally:
+            old_ctx.close()
+
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -1407,11 +1501,11 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = self._layout_hints
-        self.transfer_ctx = transfer_ctx
         try:
-            # Register on the local, not self.transfer_ctx: a concurrent
-            # shutdown() may null self.transfer_ctx between publish and this
-            # call. The local is always non-None.
+            # Register before publishing: a context is visible to the transfer
+            # paths only once its transport exists, so a store arriving during
+            # a re-registration keeps using the context it replaces rather
+            # than failing against a half-built one.
             transfer_ctx.register(
                 self.instance_id,
                 kv_caches,
@@ -1430,6 +1524,7 @@ class LMCacheMPWorkerAdapter:
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+        self._retire_transfer_ctx(self._publish_transfer_ctx(transfer_ctx))
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first store/retrieve.
@@ -1571,20 +1666,21 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting store requests."
+        with self._held_transfer_ctx() as transfer_ctx:
+            if transfer_ctx is None:
+                raise RuntimeError(
+                    "Transfer context is not initialized. "
+                    "Call register_kv_caches() before submitting store requests."
+                )
+            future = transfer_ctx.submit_store(
+                request_id,
+                key,
+                self.instance_id,
+                self.kv_caches,
+                self._block_ids_per_group(op),
+                event,
+                self.blocks_in_chunk,
             )
-        future = self.transfer_ctx.submit_store(
-            request_id,
-            key,
-            self.instance_id,
-            self.kv_caches,
-            self._block_ids_per_group(op),
-            event,
-            self.blocks_in_chunk,
-        )
         self.store_futures[request_id] = future
         if event is not None:
             self.store_events[request_id] = event
@@ -1630,21 +1726,22 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting retrieve requests."
+        with self._held_transfer_ctx() as transfer_ctx:
+            if transfer_ctx is None:
+                raise RuntimeError(
+                    "Transfer context is not initialized. "
+                    "Call register_kv_caches() before submitting retrieve requests."
+                )
+            future = transfer_ctx.submit_retrieve(
+                request_id,
+                key,
+                self.instance_id,
+                self.kv_caches,
+                self._block_ids_per_group(op),
+                event,
+                self.blocks_in_chunk,
+                skip_first_n_tokens=op.skip_first_n_tokens,
             )
-        future = self.transfer_ctx.submit_retrieve(
-            request_id,
-            key,
-            self.instance_id,
-            self.kv_caches,
-            self._block_ids_per_group(op),
-            event,
-            self.blocks_in_chunk,
-            skip_first_n_tokens=op.skip_first_n_tokens,
-        )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
         if event is not None:
             self.retrieve_events[request_id] = event
@@ -2053,11 +2150,14 @@ class LMCacheMPWorkerAdapter:
         """
         if not need_flush_before_forward:
             return
-        if not self.is_healthy or self.transfer_ctx is None:
+        if not self.is_healthy:
             return
-        self.transfer_ctx.flush_inflight_stores()
-        # Force device sync here, compare to preemption, perf panelty is trivial
-        torch_dev.synchronize()
+        with self._held_transfer_ctx() as transfer_ctx:
+            if transfer_ctx is None:
+                return
+            transfer_ctx.flush_inflight_stores()
+            # Force device sync here, compare to preemption, perf panelty is trivial
+            torch_dev.synchronize()
 
     def shutdown(self) -> None:
         """
