@@ -243,3 +243,21 @@ def test_retrieve_metadata_uses_mm_adjusted_token_ids():
     assert metadata.op.token_ids == [1, 2, *v, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
+
+
+def test_store_metadata_ignores_scratch_groups():
+    """Qwen3.8-Flash-Next geometry: the one-block QSA ring (group 1) must
+    not cap the storable prefix at its eight slots."""
+    tracker = LMCacheMPRequestTracker(_FakeRequest(list(range(3200))))
+    tracker.allocated_block_ids = {0: [0, 1], 1: [9], 2: [2, 3], 3: [4, 5]}
+    tracker.num_scheduled_tokens = 3200
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker,
+        lmcache_tokens_per_chunk=1600,
+        group_tokens_per_block=[1600, 0, 1600, 1600],
+    )
+
+    assert metadata is not None
+    assert (metadata.op.start, metadata.op.end) == (0, 3200)
+    assert metadata.op.block_ids == [[0, 1], [], [2, 3], [4, 5]]
