@@ -1,6 +1,4 @@
-# Runtime bindings and unused type stubs are generated during build/test.
+# Runtime descriptor modules are generated during build/test.
 *_pb2.py
 *_pb2.pyi
-!common_pb2.pyi
-!p2p_service_pb2.pyi
 *_pb2_grpc.py
