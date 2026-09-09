@@ -50,6 +50,42 @@ requires_rust_raw_block_io = pytest.mark.skipif(
 )
 
 
+def test_raw_block_core_closed_stats_are_unavailable(tmp_path) -> None:
+    path = make_raw_block_file(tmp_path)
+    core = RawBlockCore(make_raw_block_core_config(path), key_namespace="object")
+    try:
+        status = core.report_status()
+        assert isinstance(status["rust_io"], dict)
+        assert status["rust_io"]["outstanding_requests"] == 0
+    finally:
+        core.close()
+    assert core.report_status()["rust_io"] is None
+
+
+def test_raw_block_core_snapshot_failure_does_not_change_health(
+    tmp_path, monkeypatch
+) -> None:
+    class UnavailableSnapshotDevice(_FakeRawDevice):
+        def io_stats_snapshot(self) -> dict[str, int]:
+            raise RuntimeError("snapshot unavailable")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "lmcache_rust_raw_block_io",
+        types.SimpleNamespace(
+            RawBlockDevice=lambda *args, **kwargs: UnavailableSnapshotDevice()
+        ),
+    )
+    path = make_raw_block_file(tmp_path)
+    core = RawBlockCore(make_raw_block_core_config(path), key_namespace="object")
+    try:
+        status = core.report_status()
+        assert status["is_healthy"] is True
+        assert status["rust_io"] is None
+    finally:
+        core.close()
+
+
 def test_normalize_raw_block_placement_ids_rejects_out_of_range() -> None:
     assert normalize_raw_block_placement_ids([65535], 1) == [65535]
 
@@ -934,6 +970,8 @@ def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
         status = core.report_status()
         assert status["next_slot"] == 2
         assert status["free_slot_count"] == 1
+        assert status["rust_io"]["write_attempts"] > 0
+        assert status["rust_io"]["outstanding_requests"] == 0
 
         put_recovered = core.put_many([recovered], [make_memory_obj(recovered_payload)])
 
