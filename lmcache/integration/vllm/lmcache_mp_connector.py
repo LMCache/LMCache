@@ -54,6 +54,9 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPRequestTracker,
     LMCacheMPWorkerMetadata,
 )
+from lmcache.integration.vllm.mp_server_launcher import (
+    is_mp_server_autostart_enabled,
+)
 from lmcache.integration.vllm.utils import (
     mla_only,
     vllm_layout_hints,
@@ -471,7 +474,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig | None" = None,
-    ):
+    ) -> None:
+        """Initialize a worker or scheduler connector from vLLM configuration.
+
+        Args:
+            vllm_config: Engine configuration, including connector extra config.
+            role: Scheduler or worker role.
+            kv_cache_config: Resolved cache groups, if supplied by vLLM.
+
+        Raises:
+            ValueError: If cache geometry or auto-start configuration is invalid,
+                including auto-start with multiple server endpoints.
+            ConnectionError: If the configured MP server cannot be reached.
+        """
         # Older supported vLLM releases allow connectors to omit this value,
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
@@ -525,6 +540,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
+        if (
+            is_mp_server_autostart_enabled(
+                vllm_config.kv_transfer_config.kv_connector_extra_config
+            )
+            and n_servers > 1
+        ):
+            raise ValueError(
+                "LMCache MP auto-start only supports a single server; "
+                "start multiple servers separately and disable lmcache.mp.autostart."
+            )
 
         validate_dcp_support(vllm_config, n_servers, kv_cache_config)
 
