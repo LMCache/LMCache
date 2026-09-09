@@ -758,12 +758,16 @@ All connector-level options are passed through
      - ``false``
      - Whether vLLM worker 0 should start a local ``lmcache server`` process
        before workers connect to it. Other local workers wait for the server to
-       become reachable. Only ``localhost``, ``127.0.0.1``, and ``::1`` are
-       supported.
+       become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
+       IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
+       because the MP ZMQ transport does not enable IPv6 sockets.
+       Auto-start supports exactly one server endpoint; configuring
+       multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
+       connector initialization.
    * - ``lmcache.mp.autostart.wait_timeout``
      - ``90.0``
      - Timeout (seconds) to wait for the auto-started server to respond to
-       ZMQ ``PING`` requests.
+       ZMQ ``PING`` requests. Must be positive and finite.
    * - ``lmcache.mp.autostart.server_args``
      - ``""``
      - Extra command-line arguments passed to the auto-started MP HTTP server

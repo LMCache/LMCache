@@ -4,7 +4,9 @@
 
 The vLLM multiprocess connector can optionally start a local LMCache MP server
 from the vLLM worker process. This is disabled by default and only targets
-single-node deployments where the connector endpoint resolves to localhost.
+single-node, single-server deployments with a local connector endpoint.
+Connector initialization rejects auto-start with more than one server URL,
+before creating adapters or waiting for a server.
 
 The feature exists to let `vllm serve` bring up the local MP server without a
 separate orchestration step. It does not replace explicit server management for
@@ -23,11 +25,11 @@ worker rank 0
   -> parse autostart config
   -> start local lmcache MP HTTP server if ZMQ PING is not already healthy
   -> wait for ZMQ PING
-  -> create MessageQueueClient
+  -> create transport request client
 
 other local workers
   -> wait for ZMQ PING
-  -> create MessageQueueClient
+  -> create transport request client
 
 scheduler adapter
   -> connect only
@@ -48,9 +50,14 @@ Autostart is controlled through `kv_connector_extra_config`:
 | `lmcache.mp.autostart.wait_timeout` | Seconds to wait for ZMQ PING readiness. |
 | `lmcache.mp.autostart.server_args` | Extra CLI args for the server process. |
 
-The connector derives the MP endpoint from `lmcache.mp.host` /
-`lmcache.mp.port`, or from the connector server URL when those keys are absent.
-Only `localhost`, `127.0.0.1`, and `::1` are accepted. Endpoint CLI flags
+The launcher uses the connector's resolved server URL. When
+`lmcache.mp.server_urls` is set, `lmcache.mp.host` and `lmcache.mp.port` are
+ignored, including during auto-start. Otherwise the connector builds the URL
+from those host/port settings.
+Only `localhost` and `127.0.0.1` are accepted. IPv6 endpoints (including `::1`)
+raise `ValueError` before probing or starting a process: the MP ZMQ transport
+does not enable IPv6 sockets. Disabling auto-start leaves connect-only behavior
+unchanged. Endpoint CLI flags
 `--host`, `--port`, and `--http-host` are rejected in `server_args` because the
 autostarted server must bind the same local endpoint the connector will use.
 
@@ -61,9 +68,11 @@ vLLM configuration.
 ## Health check and failure handling
 
 Readiness is checked through the same ZMQ path the connector uses for normal MP
-communication: a temporary `MessageQueueClient` sends `RequestType.PING` and
-waits for the response. This avoids coupling startup readiness to the HTTP
-frontend.
+communication: `RequestClientFactory.create` creates a temporary client and
+`client.ping(None)` checks server readiness without requiring an already
+registered worker instance. The transport handles PING payload serialization;
+the launcher does not duplicate its wire protocol. This avoids coupling startup
+readiness to the HTTP frontend. The wait timeout must be positive and finite.
 
 If worker 0 starts a process and it exits or fails to become healthy before the
 timeout, the launcher terminates that owned process and raises `ConnectionError`.
