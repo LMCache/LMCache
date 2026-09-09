@@ -623,13 +623,17 @@ class KeyDirectory(View):
             return
         token_ids.flags.writeable = False
         binding = self._token_bindings[chunk_hash]
-        replaced = bool(binding.token_ids.size) and not np.array_equal(
-            binding.token_ids, token_ids
+        # One chunk hash holding two contents means a hash collision or a
+        # misreporting emitter; retire the old fingerprint for every
+        # namespace, or the chunk stays discoverable under content it no
+        # longer has. Guarded on the index being live so a fleet without
+        # blend lookup never pays for the comparison.
+        replaced = (
+            self._blend_lookup_enabled
+            and bool(binding.token_ids.size)
+            and not np.array_equal(binding.token_ids, token_ids)
         )
-        if self._blend_lookup_enabled and replaced:
-            # Re-store with different content: retire the old fingerprint
-            # for every namespace, or the chunk stays discoverable under
-            # content it no longer has.
+        if replaced:
             self._blend_index.remove_chunk(binding.token_ids, chunk_hash)
         fresh_content = replaced or not binding.token_ids.size
         binding.token_ids = token_ids
