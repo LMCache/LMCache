@@ -234,9 +234,9 @@ class BlendIndex:
     def match(self, tokens: np.ndarray, namespace: BlendNamespace) -> list[BlendMatch]:
         """Find chunks ``namespace`` can retrieve, contained in ``tokens``.
 
-        Every candidate is verified token-exact, then narrowed to the
-        occupants ``namespace`` stores. Content held only by other
-        namespaces yields nothing.
+        Candidates are narrowed to the occupants ``namespace`` stores,
+        then verified token-exact. Content held only by other namespaces
+        yields nothing, and is rejected before the comparison.
 
         Args:
             tokens: The query token ids (any dtype castable to
@@ -263,23 +263,25 @@ class BlendIndex:
                 entry = self._fingerprint_table.get(int(probe[position]))
                 if entry is None:
                     continue  # bucket shared with another fingerprint
+                # Choose the occupant before verifying: a set membership
+                # test is far cheaper than comparing a full window, so
+                # content this namespace cannot retrieve is dropped
+                # without paying for the comparison.
+                candidate = self._retrievable_occupant(entry, namespace, seen)
+                if candidate is None:
+                    continue
                 cur_st = position * self._probe_stride
                 if not np.array_equal(query[cur_st : cur_st + window], entry.token_ids):
                     continue  # fingerprint collision: content differs
-                for chunk_hash, occupant in entry.occupants.items():
-                    # Skip occupants this namespace cannot retrieve, and
-                    # chunks already emitted elsewhere in the query.
-                    if chunk_hash in seen or namespace not in occupant.namespaces:
-                        continue
-                    seen.add(chunk_hash)
-                    matches.append(
-                        BlendMatch(
-                            chunk_hash=chunk_hash,
-                            old_st=occupant.token_offset,
-                            cur_st=cur_st,
-                        )
+                chunk_hash, token_offset = candidate
+                seen.add(chunk_hash)
+                matches.append(
+                    BlendMatch(
+                        chunk_hash=chunk_hash,
+                        old_st=token_offset,
+                        cur_st=cur_st,
                     )
-                    break  # occupants are content-identical; one suffices
+                )
         return matches
 
     def stats(self) -> BlendIndexStats:
@@ -307,6 +309,30 @@ class BlendIndex:
             )
 
     # -- Internals -------------------------------------------------------------
+
+    @staticmethod
+    def _retrievable_occupant(
+        entry: _FingerprintEntry, namespace: BlendNamespace, seen: set[bytes]
+    ) -> tuple[bytes, int] | None:
+        """Return the chunk of ``entry`` that ``namespace`` should be offered.
+
+        Occupants are content-identical, so the first one this namespace
+        claims and has not already been offered suffices. Call with the
+        lock held.
+
+        Args:
+            entry: The content entry whose occupants to choose from.
+            namespace: The requester's retrieval namespace.
+            seen: Chunk hashes already emitted for this query.
+
+        Returns:
+            ``(chunk_hash, token_offset)``, or ``None`` when this
+            namespace holds no unoffered chunk of the content.
+        """
+        for chunk_hash, occupant in entry.occupants.items():
+            if chunk_hash not in seen and namespace in occupant.namespaces:
+                return chunk_hash, occupant.token_offset
+        return None
 
     def _drop_entry_if_empty(self, poly: int, entry: _FingerprintEntry) -> None:
         """Retire ``entry`` once no chunk holds its content. Call with the

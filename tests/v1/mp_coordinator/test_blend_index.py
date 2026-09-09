@@ -597,6 +597,31 @@ def test_the_requester_s_own_chunk_is_found_behind_another_namespace_s():
     ]
 
 
+def test_repeated_content_offers_the_namespace_s_chunk_once():
+    """Choosing the occupant before verifying must not change the
+    at-most-one-per-chunk contract, nor let a foreign occupant leak in
+    when the content recurs."""
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"THEIRS", token_offset=0, namespace=OTHER_NS)
+    index.add(content, b"MINE", token_offset=512, namespace=NS)
+
+    matches = index.match(np.asarray([1, 2, 3, 4, 1, 2, 3, 4], dtype=np.uint64), NS)
+    assert _tuples(matches) == [(b"MINE", 512, 0)]
+
+
+def test_repeated_content_offers_a_second_chunk_of_the_same_namespace():
+    """``seen`` is per chunk, so a namespace holding two chunks of one
+    content gets each of them at its own query position."""
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"MINE_A", token_offset=0, namespace=NS)
+    index.add(content, b"MINE_B", token_offset=512, namespace=NS)
+
+    matches = index.match(np.asarray([1, 2, 3, 4, 1, 2, 3, 4], dtype=np.uint64), NS)
+    assert _tuples(matches) == [(b"MINE_A", 0, 0), (b"MINE_B", 512, 4)]
+
+
 def test_one_chunk_shared_by_two_namespaces_serves_both():
     """Identical prefixes produce one chunk hash, so both claims ride on
     one occupant and one copy of the content."""

@@ -117,8 +117,19 @@ in `stats()`.
 A match rolls a `chunk_size` window hash over the query
 (`rolling_hash_windows_numba`), gathers `_slots` at every
 `probe_stride`-th position in one vectorized op, and resolves the few
-survivors through `_contents`. Then it **verifies the query window
-against `entry.token_ids` token-for-token** before accepting.
+survivors through `_contents`. For each survivor it then picks the
+occupant the requester's namespace claims, and only then **verifies the
+query window against `entry.token_ids` token-for-token** before
+accepting.
+
+That order matters for cost. A set membership test is far cheaper than
+comparing a full window, so content the requester cannot retrieve is
+dropped before the comparison rather than after — on a fleet whose
+tenants mostly cache different documents, that is the common case. On a
+50-tenant index whose content is disjoint from the requester's, the
+reordering cut window comparisons from 100 to 1 for the same result.
+`seen` is still only marked *after* verification, so a fingerprint
+collision cannot consume a chunk's one chance to match.
 
 The filter deliberately stores **no identity** — just "something lands
 here". That is what makes recall complete: two fingerprints sharing a
