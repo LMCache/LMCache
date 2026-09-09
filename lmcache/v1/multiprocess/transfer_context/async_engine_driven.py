@@ -248,9 +248,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         # In pickle mode this is the costliest step (sync RPC
                         # round-trip). Running it here keeps the forward
                         # thread free.
-                        result = engine_driven_context.prepare_store(
-                            key, instance_id
-                        )
+                        result = engine_driven_context.prepare_store(key, instance_id)
                         out_buffers, chunk_indices = (
                             result if result is not None else (None, None)
                         )
