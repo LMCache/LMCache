@@ -26,7 +26,14 @@ if lsof -iTCP:"${LMCACHE_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
     exit 1
 fi
 
-SERVER_ARGS="--l1-size-gb ${CPU_BUFFER_SIZE} --eviction-policy LRU --max-workers ${MAX_WORKERS} --supported-transfer-mode non_gpu"
+# The MP server outlives vLLM. Record its listener for the parent cleanup script,
+# including when readiness fails after the server has already bound this port.
+record_mp_server_pid() {
+    lsof -t -iTCP:"${LMCACHE_PORT}" -sTCP:LISTEN >> "$PID_FILE" 2>/dev/null || true
+}
+trap record_mp_server_pid EXIT
+
+SERVER_ARGS="--l1-size-gb ${CPU_BUFFER_SIZE} --eviction-policy LRU --max-workers ${MAX_WORKERS} --supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
     SERVER_ARGS="${SERVER_ARGS}" \
