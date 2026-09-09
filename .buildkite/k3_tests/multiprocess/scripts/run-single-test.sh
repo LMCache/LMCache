@@ -20,7 +20,9 @@ source .buildkite/k3_tests/common_scripts/helpers.sh
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
-export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
+# Keep this aligned with wait-for-servers.sh. Large-model startup can exceed
+# five minutes on cold or contended CI nodes before the service is unhealthy.
+export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 export DEFAULT_MODEL="${DEFAULT_MODEL:-Qwen/Qwen3-14B}"
 export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"

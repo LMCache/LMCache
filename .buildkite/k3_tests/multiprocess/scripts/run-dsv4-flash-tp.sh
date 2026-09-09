@@ -106,7 +106,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 # Readiness timeout for the vLLM launch. Owned by the test (a 160GB fp8
 # TP-shard load is slow, and the first CI run also downloads the weights);
 # deliberately does NOT reuse MAX_WAIT_SECONDS, which run-single-test.sh
-# pre-exports to 300s -- that would shadow the value here.
+# pre-exports to 600s -- that would shadow the value here.
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-2700}"
 # DeepSeek-V4-Flash has multiple KV cache groups with different block
 # geometries. Keep per-group registration explicit instead of depending on the
