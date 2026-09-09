@@ -9,11 +9,6 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 # First Party
-from lmcache.v1.multiprocess.protocol import (
-    get_payload_classes,
-    get_response_class,
-)
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
@@ -28,7 +23,9 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_request_decoder,
     compile_response_decoder_for_type,
     compile_response_encoder,
-    compile_response_encoder_for_type,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.services import (
+    get_service_implementation_class,
 )
 
 
@@ -38,9 +35,8 @@ def _normalize_none_type(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class GrpcMethodCodec:
-    """Compiled protobuf converters for one transport-neutral RPC method."""
+    """Compiled protobuf converters for one generated gRPC method."""
 
-    request_type: RequestType
     client_name: str
     full_name: str
     request_message_class: type[Any]
@@ -53,14 +49,14 @@ class GrpcMethodCodec:
     response_decoder: ResponseDecoder
 
     def validate_handler(self, handler: Callable[..., Any]) -> None:
-        """Validate that a service handler implements the protocol contract.
+        """Validate that a service handler implements the gRPC contract.
 
         Args:
             handler: Bound service implementation method.
 
         Raises:
             TypeError: If request or response annotations differ from the
-                transport-neutral protocol definition.
+                annotated gRPC service contract.
         """
         _decoder, handler_payload_types = compile_request_decoder(
             self.request_message_class, handler
@@ -71,7 +67,7 @@ class GrpcMethodCodec:
         if handler_payload_types != self.payload_types:
             raise TypeError(
                 f"{self.full_name} handler payload annotations "
-                f"{handler_payload_types!r} do not match protocol types "
+                f"{handler_payload_types!r} do not match gRPC contract types "
                 f"{self.payload_types!r}"
             )
         if _normalize_none_type(handler_response_type) != _normalize_none_type(
@@ -79,7 +75,7 @@ class GrpcMethodCodec:
         ):
             raise TypeError(
                 f"{self.full_name} handler return annotation "
-                f"{handler_response_type!r} does not match protocol type "
+                f"{handler_response_type!r} does not match gRPC contract type "
                 f"{self.response_type!r}"
             )
 
@@ -100,37 +96,35 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
         Read-only codec lookup tables keyed by client and protobuf names.
 
     Raises:
-        RuntimeError: If a generated method has no protocol definition or a
+        RuntimeError: If a generated method has no service implementation or a
             duplicate method name is discovered.
-        TypeError: If a protobuf message cannot represent its protocol types.
+        TypeError: If a protobuf message cannot represent its annotated types.
     """
     by_client_name: dict[str, GrpcMethodCodec] = {}
     by_full_name: dict[str, GrpcMethodCodec] = {}
-    for _binding, method in iter_methods():
+    for binding, method in iter_methods():
         client_name = client_method_name(method.name)
-        try:
-            request_type = RequestType[client_name.upper()]
-        except KeyError as exc:
-            raise RuntimeError(
-                f"Generated gRPC method {method.full_name} has no matching "
-                f"RequestType.{client_name.upper()}"
-            ) from exc
-
         request_message_class = message_class(method.input_type)
         response_message_class = message_class(method.output_type)
-        payload_types = tuple(get_payload_classes(request_type))
-        response_type = get_response_class(request_type)
+        implementation_class = get_service_implementation_class(binding.descriptor.name)
+        contract_method = getattr(implementation_class, method.name, None)
+        if not callable(contract_method):
+            raise RuntimeError(
+                f"{implementation_class.__name__} has no gRPC method {method.full_name}"
+            )
+        _request_decoder, payload_types = compile_request_decoder(
+            request_message_class, contract_method
+        )
         request_encoder, request_decoder = compile_request_codec_for_types(
             request_message_class, payload_types
         )
-        response_encoder = compile_response_encoder_for_type(
-            response_message_class, response_type
+        response_encoder, response_type = compile_response_encoder(
+            response_message_class, contract_method
         )
         response_decoder = compile_response_decoder_for_type(
             response_message_class, response_type
         )
         codec = GrpcMethodCodec(
-            request_type=request_type,
             client_name=client_name,
             full_name=method.full_name,
             request_message_class=request_message_class,

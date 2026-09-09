@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 import importlib
+import subprocess
+import sys
 
 # Third Party
 import pytest
@@ -24,11 +26,6 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.protocol import (
-    get_payload_classes,
-    get_response_class,
-)
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
@@ -195,7 +192,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
 
 
 def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
-    """Every generated RPC has one transport-neutral method codec."""
+    """Every generated RPC has one codec derived from its gRPC service."""
     bindings = get_service_bindings()
     assert {
         "LMCacheDrivenService",
@@ -217,9 +214,19 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         name = client_method_name(method.name)
         codec = registry.by_full_name[method.full_name]
         assert registry.by_client_name[name] is codec
-        assert codec.request_type is RequestType[name.upper()]
-        assert codec.payload_types == tuple(get_payload_classes(codec.request_type))
-        assert codec.response_type == get_response_class(codec.request_type)
+
+    lookup_codec = registry.by_client_name["lookup"]
+    assert lookup_codec.payload_types == (IPCCacheServerKey, int)
+    assert lookup_codec.response_type is type(None)
+
+    store_codec = registry.by_client_name["store"]
+    assert store_codec.payload_types == (
+        IPCCacheServerKey,
+        int,
+        list[list[int]],
+        bytes,
+    )
+    assert store_codec.response_type == tuple[bytes, bool]
 
     registration_codec = registry.by_client_name[
         "register_kv_cache_engine_driven_context"
@@ -251,6 +258,35 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             num_physical_slots=32,
         ),
     )
+
+
+def test_grpc_imports_do_not_load_legacy_zmq_protocol() -> None:
+    """The gRPC transport imports without the legacy ZMQ protocol surface."""
+    script = r"""
+import importlib.abc
+import sys
+
+banned = (
+    "lmcache.v1.multiprocess.mq",
+    "lmcache.v1.multiprocess.protocol",
+    "lmcache.v1.multiprocess.protocols",
+    "lmcache.v1.multiprocess.transport.zmq_impl",
+)
+
+
+class LegacyProtocolBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in banned):
+            raise ImportError(f"gRPC imported legacy module: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, LegacyProtocolBlocker())
+import lmcache.v1.multiprocess.transport.grpc_impl.client
+import lmcache.v1.multiprocess.transport.grpc_impl.server
+import lmcache.v1.multiprocess.transport.grpc_impl.services
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:

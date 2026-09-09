@@ -1,14 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """gRPC adapter for the generated ``P2PService`` surface."""
 
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.transport.grpc_impl.services.base import (
     GrpcHandlerType,
     grpc_method,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 
 
 class P2PServiceImpl:

@@ -1,13 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """gRPC adapter for the generated ``LookupService`` surface."""
 
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.transport.grpc_impl.services.base import (
     GrpcHandlerType,
     grpc_method,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
 
 class LookupServiceImpl:
