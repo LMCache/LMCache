@@ -1273,6 +1273,10 @@ class RawBlockCore:
                     f"Aligned payload {total_len} exceeds slot capacity "
                     f"{payload_capacity}"
                 )
+            # zero_tail is not needed for correctness because the Rust write
+            # path always zeroes [payload_len, total_len). It is what lets that
+            # path submit this buffer directly instead of bouncing it, so the
+            # zero-copy fixed-buffer write is preserved.
             direct_view = self._build_direct_odirect_view(
                 memory_obj=memory_obj,
                 payload_len=payload_len,
@@ -1536,43 +1540,25 @@ class RawBlockCore:
             )
             return
 
-        can_batch = all(
-            int(payload_len) == int(total_len)
-            for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
-        )
-        # batched_write carries a single length per entry, so it cannot express
-        # O_DIRECT padding where payload_len < total_len. Fall back to
-        # write_uring, which takes both lengths and lets Rust build the aligned
-        # padded transfer.
-        if can_batch:
-            batch_id = raw_dev.batched_write(
-                [int(offset) for offset in offsets],
-                list(buffers),
-                [int(total_len) for total_len in total_lens],
-                per_write_placement_ids,
-            )
-            if not all(
-                self._wait_iouring_results(
-                    raw_dev,
-                    batch_id,
-                    len(offsets),
-                    "io_uring write",
-                )
-            ):
-                raise RuntimeError("raw-block io_uring write failed")
-            return
-
-        for offset, buf, payload_len, total_len, placement_id in zip(
-            offsets,
-            buffers,
-            payload_lens,
-            total_lens,
+        # batched_write takes payload_lens and total_lens separately, so it
+        # handles O_DIRECT padding (payload_len < total_len) by bouncing and
+        # zero-filling internally. All io_uring writes go through one batch.
+        batch_id = raw_dev.batched_write(
+            [int(offset) for offset in offsets],
+            list(buffers),
+            [int(total_len) for total_len in total_lens],
             per_write_placement_ids,
-            strict=True,
-        ):
-            raw_dev.write_uring(
-                int(offset), buf, int(payload_len), int(total_len), placement_id
+            [int(payload_len) for payload_len in payload_lens],
+        )
+        if not all(
+            self._wait_iouring_results(
+                raw_dev,
+                batch_id,
+                len(offsets),
+                "io_uring write",
             )
+        ):
+            raise RuntimeError("raw-block io_uring write failed")
 
     def _read_buffers(
         self,
