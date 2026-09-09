@@ -86,7 +86,7 @@ jobs:
               run: |
                 LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
                 if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-                  BASE="${GITHUB_REF_NAME#v}"
+                  BASE="${GITHUB_REF_NAME#v}+xpu"
                 elif [[ "${DEV_VERSION}" == "true" && -n "${LATEST_TAG}" ]]; then
                   COMMITS=$(git rev-list --count "${LATEST_TAG}..HEAD")
                   IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
@@ -106,18 +106,7 @@ jobs:
                 docker run --rm \
                   -v "${PWD}:/work/LMCache" \
                   --entrypoint bash "${XPU_IMAGE}" -lc '
-                  python3 - <<"PY" > /work/LMCache/dist/xpu-runtime.json
-                  import json
-                  import platform
-                  import torch
-                  import vllm
-
-                  print(json.dumps({
-                      "python": platform.python_version(),
-                      "torch": torch.__version__,
-                      "vllm": getattr(vllm, "__version__", "unknown"),
-                  }, indent=2, sort_keys=True))
-                  PY
+                  python3 -c "import json, platform, torch, vllm; print(json.dumps({\"python\": platform.python_version(), \"torch\": torch.__version__, \"vllm\": getattr(vllm, \"__version__\", \"unknown\")}, indent=2, sort_keys=True))" > /work/LMCache/dist/xpu-runtime.json
                 '
                 python3 - <<'PY'
                 import json

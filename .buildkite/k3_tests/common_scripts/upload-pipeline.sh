@@ -34,7 +34,7 @@ if should_skip_ci; then
     exit 0
 fi
 
-if [[ "${PIPELINE_FILE}" == */xpu/pipeline.yml ]]; then
+if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
     # The XPU template interpolates this into its Kubernetes pod image.
     source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
 fi

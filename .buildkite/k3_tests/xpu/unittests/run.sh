@@ -33,9 +33,9 @@ cd "${REPO_ROOT}"
 log "installing job dependencies"
 uv pip install -r requirements/common.txt -r requirements/test.txt
 
-log "building and installing LMCache XPU extension from source"
-export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
-BUILD_WITH_SYCL=1 uv pip install -e . --no-build-isolation
+# Includes the mandatory PR-base rebase before installing LMCache.
+export BUILD_WITH_SYCL=1
+source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 python - <<'PY'
 import lmcache
 import lmcache.xpu_ops

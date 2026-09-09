@@ -142,6 +142,7 @@ for os in $ALL_OSS; do
     # A single bad platform must not abort the loop, or the issue below
     # would never be created.
     if ! CI_PLATFORM=github_actions \
+        PIN_BACKEND=cpu \
         PIN_VLLM_STATUS="$pin_status" \
         PIN_VLLM_REASON="$pin_reason" \
         PIN_VLLM_DRY_RUN="${DRY_RUN:-0}" \

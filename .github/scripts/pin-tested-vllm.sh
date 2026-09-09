@@ -356,13 +356,24 @@ for attempt in 1 2 3; do
         exit 0
     fi
 
-    echo "[WARN] Pin branch changed; rebasing before retry ${attempt}/3" >&2
+    echo "[WARN] Pin branch changed; replaying update on retry ${attempt}/3" >&2
     git fetch origin "${CI_BRANCH}"
-    if ! git rebase "origin/${CI_BRANCH}"; then
-        git rebase --abort || true
-        echo "[ERROR] Pin update conflicts with a concurrent writer; refusing to overwrite ${CI_BRANCH}" >&2
-        exit 1
+    # Every writer appends to the shared JSONL history. Rebasing two appends
+    # often conflicts at EOF, so reset to the fetched branch and reapply this
+    # writer's record and compatibility pointer instead.
+    RECORD="$(tail -n1 "${HISTORY_FILE}")"
+    LATEST_CONTENT=""
+    if [[ "${PIN_BACKEND}" != "xpu" && -f "${LATEST_FILE}" ]]; then
+        LATEST_CONTENT="$(cat "${LATEST_FILE}")"
     fi
+    git reset --hard "origin/${CI_BRANCH}"
+    printf '%s\n' "${RECORD}" >> "${HISTORY_FILE}"
+    if [[ -n "${LATEST_CONTENT}" ]]; then
+        printf '%s\n' "${LATEST_CONTENT}" > "${LATEST_FILE}"
+    fi
+    git add -A
+    git -c user.email="ci@lmcache.ai" -c user.name="LMCache CI" \
+        commit -m "${COMMIT_MSG}"
 done
 
 echo "[ERROR] Failed to push pin update after 3 attempts" >&2
