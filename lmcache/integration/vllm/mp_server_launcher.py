@@ -407,13 +407,20 @@ class MPServerLauncher:
         )
 
     def shutdown(self) -> None:
-        """Terminate the auto-started MP server process.
+        """Terminate a process started by this launcher, if it is still running.
 
-        This is used for startup failure cleanup. Normal vLLM shutdown does not
-        call it because other vLLM instances may share the same MP server.
+        Used for startup failure cleanup; reusing an already healthy server
+        gives this launcher no process to terminate. Adapter shutdown does not
+        call this method, but vLLM may terminate the child through its own
+        process-tree cleanup. Server survival after vLLM exit is not guaranteed.
 
         Returns:
             None.
+
+        Raises:
+            OSError: If signaling or waiting for the owned process fails.
+            subprocess.TimeoutExpired: If the process does not exit within the
+                timeout after being killed.
         """
         if self._process is None:
             return

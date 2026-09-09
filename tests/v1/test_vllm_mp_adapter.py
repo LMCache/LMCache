@@ -369,7 +369,7 @@ def test_legacy_worker_adapter_does_not_autostart(monkeypatch) -> None:
 def test_worker_adapter_does_not_shutdown_autostarted_server_on_init_failure(
     monkeypatch,
 ) -> None:
-    """A shared auto-started server is not stopped by worker init failure."""
+    """Worker init failure does not call the launcher's shutdown method."""
     launcher = MagicMock(name="launcher")
     fake_client = FakeMQClient()
 

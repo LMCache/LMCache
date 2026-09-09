@@ -80,10 +80,21 @@ If the server is already healthy, worker 0 does not start another process.
 
 ## Lifetime
 
-The autostarted server is treated as a shared local service. Normal vLLM adapter
-shutdown does not terminate it because another vLLM instance may still be using
-the same MP server. Operators should stop the server process separately when it
-is no longer needed.
+The autostarted server is a child of vLLM worker 0, not an independently managed
+service. LMCache's adapter shutdown does not call the launcher's `shutdown()`
+method, but vLLM can terminate the child through its own process-tree cleanup.
+Real TP=2 testing with vLLM 0.28.0 confirmed that its default SIGTERM shutdown
+path recursively killed the MP server. This result does not establish the
+behavior of other vLLM versions or exit paths: neither survival nor automatic
+cleanup is guaranteed. Operators must stop any remaining auto-started server
+when it is no longer needed.
+
+Servers that must survive vLLM restarts or be shared across vLLM instances must
+be started and managed separately, outside the vLLM process tree. Connect-only
+mode supports this deployment, and auto-start still skips spawning when the
+configured server is already healthy. Keeping persistent service management
+external avoids adding daemonization, restart, or process-reaping policy to
+this startup convenience feature.
 
 ## Tests
 

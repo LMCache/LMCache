@@ -26,8 +26,8 @@ if lsof -iTCP:"${LMCACHE_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
     exit 1
 fi
 
-# The MP server outlives vLLM. Record its listener for the parent cleanup script,
-# including when readiness fails after the server has already bound this port.
+# Do not rely on vLLM shutdown to clean up the MP server. Record its listener
+# for the parent cleanup script, including readiness failures after binding.
 record_mp_server_pid() {
     lsof -t -iTCP:"${LMCACHE_PORT}" -sTCP:LISTEN >> "$PID_FILE" 2>/dev/null || true
 }

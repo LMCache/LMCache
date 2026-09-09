@@ -1222,8 +1222,8 @@ class LMCacheMPWorkerAdapter:
             # Only connectors that pass the actual vLLM worker rank can elect a
             # unique local server owner.
             if supports_autostart and parallel_strategy.vllm_worker_id == 0:
-                # Retain the Popen handle; normal adapter shutdown deliberately
-                # leaves the shared local server running.
+                # Retain the Popen handle without tying it to adapter shutdown.
+                # vLLM process-tree cleanup may still terminate the child server.
                 self._mp_server_launcher = maybe_start_mp_server_from_url(
                     extra_config=extra_config,
                     server_url=server_url,
