@@ -15,7 +15,7 @@ from google.protobuf.message import Message
 from google.protobuf.message_factory import GetMessageClass
 
 # First Party
-from lmcache.v1.multiprocess.transport.grpc_impl import protos
+from lmcache.v1.multiprocess.transport.grpc_impl import _proto_gen
 
 
 @dataclass(frozen=True)
@@ -40,10 +40,10 @@ def message_class(descriptor: object) -> type[Message]:
 
 @lru_cache(maxsize=1)
 def get_service_bindings() -> dict[str, ServiceBinding]:
-    """Load every generated ``*_service_pb2`` module in the proto package."""
-    package_prefix = f"{protos.__name__}."
+    """Load every generated ``*_service_pb2`` module in ``_proto_gen``."""
+    package_prefix = f"{_proto_gen.__name__}."
     bindings: dict[str, ServiceBinding] = {}
-    for module_info in pkgutil.iter_modules(protos.__path__, package_prefix):
+    for module_info in pkgutil.iter_modules(_proto_gen.__path__, package_prefix):
         if not module_info.name.endswith("_service_pb2"):
             continue
         proto_module = importlib.import_module(module_info.name)
@@ -55,7 +55,8 @@ def get_service_bindings() -> dict[str, ServiceBinding]:
     if not bindings:
         raise RuntimeError(
             "No generated gRPC services found. Run "
-            "`python -m lmcache.v1.multiprocess.transport.grpc_impl.protos.generate`."
+            "`python -m lmcache.v1.multiprocess.transport.grpc_impl."
+            "_proto_gen._generate`."
         )
     return bindings
 

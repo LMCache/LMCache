@@ -46,8 +46,8 @@ def _load_proto_generator() -> ModuleType:
         / "multiprocess"
         / "transport"
         / "grpc_impl"
-        / "protos"
-        / "generate.py"
+        / "_proto_gen"
+        / "_generate.py"
     )
     spec = importlib.util.spec_from_file_location(
         "_lmcache_proto_generate", generator_path

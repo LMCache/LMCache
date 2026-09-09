@@ -155,7 +155,7 @@ follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = [
-    "lmcache.v1.multiprocess.transport.grpc_impl.protos.*",
+    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.*",
 ]
 ignore_errors = true
 follow_imports = "skip"

@@ -257,10 +257,10 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
     """Service-owned codecs handle only their registered protobuf types."""
     registry = get_message_codec_registry()
     common_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl.protos.common_pb2"
+        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2"
     )
     p2p_service_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl.protos.p2p_service_pb2"
+        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
     )
 
     wrapper = _TestDeviceIPCWrapper()
