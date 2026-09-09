@@ -76,6 +76,12 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Max age (seconds) of a pending retrieve (KV load) before it is
+    # treated as failed: the request is reported finished with its blocks
+    # marked for recompute, instead of hanging in WAITING_FOR_REMOTE_KVS
+    # forever when a transfer result is lost. Healthy transfers complete
+    # in milliseconds; 0 disables the timeout.
+    retrieve_timeout = 30.0
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
     # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
@@ -1215,8 +1221,10 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = None
             set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
             set_use_vmm_api(cfg[ExtraConfigDefault.use_vmm_api.name])
+            self._retrieve_timeout = cfg[ExtraConfigDefault.retrieve_timeout.name]
         else:
             self._mp_transfer_mode = None
+            self._retrieve_timeout = ExtraConfigDefault.retrieve_timeout.default
         self.req_client = RequestClientFactory.create(server_url, context=context)
         self._mq_timeout = mq_timeout
 
@@ -1238,9 +1246,9 @@ class LMCacheMPWorkerAdapter:
 
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
-        # request_id -> (future, block_ids)
+        # request_id -> (future, block_ids, submitted_at monotonic)
         self.retrieve_futures: dict[
-            str, tuple[MessagingFuture[RetrieveResult], list[int]]
+            str, tuple[MessagingFuture[RetrieveResult], list[int], float]
         ] = {}
         # The IPC handle is not enough by itself; CUDA needs the exporting
         # event object to stay alive until the consumer is done with it.
@@ -1665,7 +1673,11 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
-        self.retrieve_futures[request_id] = (future, op.flat_block_ids)
+        self.retrieve_futures[request_id] = (
+            future,
+            op.flat_block_ids,
+            time.monotonic(),
+        )
         if event is not None:
             self.retrieve_events[request_id] = event
 
@@ -1786,6 +1798,41 @@ class LMCacheMPWorkerAdapter:
         self._returned_finished.update(ret_stores)
         return ret_stores
 
+    def _expire_timed_out_retrieves(self, finished_retrieves: set[str]) -> None:
+        """Force-fail retrieve futures pending past ``retrieve_timeout``.
+
+        A retrieve whose result never arrives would otherwise leave the
+        request parked in WAITING_FOR_REMOTE_KVS forever: the scheduler only
+        promotes out of that state when the id comes back in
+        finished_recving. Mirror the unhealthy-drain path for exactly that
+        request: report it finished here and mark its blocks so vLLM
+        recomputes them. ``0`` disables the timeout.
+        """
+        if self._retrieve_timeout <= 0:
+            return
+        now = time.monotonic()
+        for request_id, (r_future, r_block_ids, submitted_at) in list(
+            self.retrieve_futures.items()
+        ):
+            if r_future.query():
+                continue
+            age_s = now - submitted_at
+            if age_s < self._retrieve_timeout:
+                continue
+            self.retrieve_futures.pop(request_id, None)
+            self.retrieve_events.pop(request_id, None)
+            self.error_block_ids.update(r_block_ids)
+            finished_retrieves.add(request_id)
+            logger.warning(
+                "Retrieve for request_id=%s timed out after %.1fs "
+                "(limit %.1fs); marking %d blocks as failed so vLLM "
+                "recomputes them",
+                request_id,
+                age_s,
+                self._retrieve_timeout,
+                len(r_block_ids),
+            )
+
     @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids_from_engine: set[str]
@@ -1822,6 +1869,7 @@ class LMCacheMPWorkerAdapter:
             for request_id, (
                 _r_future,
                 r_block_ids,
+                _submitted_at,
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
@@ -1852,6 +1900,7 @@ class LMCacheMPWorkerAdapter:
 
         finished_stores = set()
         finished_retrieves = set()
+        self._expire_timed_out_retrieves(finished_retrieves)
         for request_id, s_future in self.store_futures.items():
             if not s_future.query():
                 continue
@@ -1866,7 +1915,9 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
+        for request_id, (r_future, r_block_ids, _submitted_at) in list(
+            self.retrieve_futures.items()
+        ):
             if not r_future.query():
                 continue
 
@@ -1950,6 +2001,7 @@ class LMCacheMPWorkerAdapter:
             for request_id, (
                 _r_future,
                 r_block_ids,
+                _submitted_at,
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
@@ -1987,7 +2039,10 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
+        self._expire_timed_out_retrieves(finished_retrieves)
+        for request_id, (r_future, r_block_ids, _submitted_at) in list(
+            self.retrieve_futures.items()
+        ):
             if not r_future.query():
                 continue
 
