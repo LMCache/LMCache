@@ -43,6 +43,7 @@ _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
+_MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
 
 # FDP placement ID semantics are shared by design across raw-block write paths.
@@ -579,6 +580,50 @@ class RawBlockCore:
         logger.info(
             "RawBlockCore: registered %d paged buffers for io_uring fixed I/O",
             len(buffers),
+        )
+
+    def register_fixed_buffer_range(self, ptr: int, size: int) -> None:
+        """Register one stable memory range for io_uring fixed-buffer I/O.
+
+        Args:
+            ptr: Base address of the stable memory range.
+            size: Size of the stable memory range in bytes.
+
+        Raises:
+            ValueError: If ``ptr`` or ``size`` is not positive.
+            Exception: Propagates errors from the Rust registration API.
+
+        Notes:
+            The range is divided into regions no larger than 1 GiB, which is
+            the maximum size supported for one io_uring registered buffer.
+        """
+        if self.io_engine != "io_uring":
+            return
+
+        ptr = int(ptr)
+        size = int(size)
+        if ptr <= 0:
+            raise ValueError("fixed-buffer range pointer must be > 0")
+        if size <= 0:
+            raise ValueError("fixed-buffer range size must be > 0")
+
+        buffer_ptrs: list[int] = []
+        buffer_sizes: list[int] = []
+        next_ptr = ptr
+        remaining = size
+        while remaining > 0:
+            region_size = min(remaining, _MAX_FIXED_BUFFER_REGION_BYTES)
+            buffer_ptrs.append(next_ptr)
+            buffer_sizes.append(region_size)
+            next_ptr += region_size
+            remaining -= region_size
+
+        self._rawdev().register_fixed_buffers(buffer_ptrs, buffer_sizes)
+        logger.info(
+            "RawBlockCore: registered %d regions covering %d bytes for "
+            "io_uring fixed I/O",
+            len(buffer_ptrs),
+            size,
         )
 
     def contains_key(self, encoded_key: str, *, lock: bool = False) -> bool:

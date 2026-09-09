@@ -32,6 +32,7 @@ pytest.importorskip("lmcache_rust_raw_block_io")
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
+from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (  # noqa: E402
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
@@ -129,6 +130,8 @@ class _FakeFdpCore:
         self.slot_bytes = RAW_BLOCK_CI_SLOT_BYTES
         self.meta_checkpoint_placement_id: int | None = None
         self.put_many_calls: list[list[int | None] | None] = []
+        self.fixed_buffer_range_calls: list[tuple[int, int]] = []
+        self.fixed_buffer_registration_error: Exception | None = None
 
     def fetch_fdp_status(self) -> list[tuple[int, int]]:
         return self.status
@@ -155,6 +158,11 @@ class _FakeFdpCore:
 
     def snapshot_indexed_keys(self) -> list[str]:
         return []
+
+    def register_fixed_buffer_range(self, ptr: int, size: int) -> None:
+        self.fixed_buffer_range_calls.append((ptr, size))
+        if self.fixed_buffer_registration_error is not None:
+            raise self.fixed_buffer_registration_error
 
     def close(self) -> None:
         pass
@@ -202,6 +210,144 @@ def _make_fdp_adapter(
         return_value=fake_core,
     ):
         return RawBlockL2Adapter(config)
+
+
+def _make_fixed_buffer_config(
+    *,
+    io_engine: str = "io_uring",
+    enable_zero_copy: bool = True,
+) -> RawBlockL2AdapterConfig:
+    return RawBlockL2AdapterConfig(
+        device_path="/tmp/raw-block",
+        capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
+        block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
+        header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
+        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+        meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
+        use_odirect=False,
+        enable_zero_copy=enable_zero_copy,
+        meta_enable_periodic=False,
+        meta_idle_quiet_ms=0,
+        io_engine=io_engine,
+        iouring_queue_depth=8,
+        num_store_workers=1,
+        num_lookup_workers=1,
+        num_load_workers=1,
+    )
+
+
+def _make_fixed_buffer_adapter(
+    fake_core: _FakeFdpCore,
+    config: RawBlockL2AdapterConfig,
+    l1_memory_desc: L1MemoryDesc | None,
+) -> RawBlockL2Adapter:
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+        return_value=fake_core,
+    ):
+        return RawBlockL2Adapter(config, l1_memory_desc)
+
+
+def test_raw_block_adapter_registers_eligible_l1_range() -> None:
+    fake_core = _FakeFdpCore()
+    stable_size = (1 << 30) + RAW_BLOCK_CI_BLOCK_ALIGN
+    l1_memory_desc = L1MemoryDesc(
+        ptr=0x4000,
+        size=2 << 30,
+        align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+        stable_registration_size=stable_size,
+    )
+    adapter = _make_fixed_buffer_adapter(
+        fake_core,
+        _make_fixed_buffer_config(),
+        l1_memory_desc,
+    )
+    try:
+        assert fake_core.fixed_buffer_range_calls == [(l1_memory_desc.ptr, stable_size)]
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize(
+    ("io_engine", "enable_zero_copy", "l1_memory_desc"),
+    [
+        (
+            "posix",
+            True,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+                stable_registration_size=8192,
+            ),
+        ),
+        (
+            "io_uring",
+            False,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+                stable_registration_size=8192,
+            ),
+        ),
+        ("io_uring", True, None),
+        (
+            "io_uring",
+            True,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+            ),
+        ),
+    ],
+)
+def test_raw_block_adapter_skips_ineligible_fixed_buffer_registration(
+    io_engine: str,
+    enable_zero_copy: bool,
+    l1_memory_desc: L1MemoryDesc | None,
+) -> None:
+    fake_core = _FakeFdpCore()
+    adapter = _make_fixed_buffer_adapter(
+        fake_core,
+        _make_fixed_buffer_config(
+            io_engine=io_engine,
+            enable_zero_copy=enable_zero_copy,
+        ),
+        l1_memory_desc,
+    )
+    try:
+        assert fake_core.fixed_buffer_range_calls == []
+    finally:
+        adapter.close()
+
+
+def test_raw_block_adapter_falls_back_when_fixed_buffer_registration_fails() -> None:
+    fake_core = _FakeFdpCore()
+    fake_core.fixed_buffer_registration_error = RuntimeError("memlock exhausted")
+    l1_memory_desc = L1MemoryDesc(
+        ptr=0x4000,
+        size=8192,
+        align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+        stable_registration_size=8192,
+    )
+
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+    ) as warning:
+        adapter = _make_fixed_buffer_adapter(
+            fake_core,
+            _make_fixed_buffer_config(),
+            l1_memory_desc,
+        )
+    try:
+        assert fake_core.fixed_buffer_range_calls == [(l1_memory_desc.ptr, 8192)]
+        assert adapter.report_status()["is_healthy"] is True
+        warning.assert_called_once()
+        assert "Falling back" in warning.call_args.args[0]
+    finally:
+        adapter.close()
 
 
 def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:

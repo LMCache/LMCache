@@ -560,8 +560,8 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Args:
             config: Validated raw-block adapter configuration.
-            l1_memory_desc: Optional L1 allocation descriptor used to validate
-                O_DIRECT alignment compatibility.
+            l1_memory_desc: Optional L1 allocation descriptor used for alignment
+                validation and fixed-buffer registration.
 
         Raises:
             ValueError: If O_DIRECT is enabled and L1 alignment is insufficient.
@@ -609,12 +609,29 @@ class RawBlockL2Adapter(L2AdapterInterface):
             self._fdp_placement_ids: list[int] = []
             if self._fdp_enabled:
                 self._configure_fdp(config.fdp_placement_ids)
-            if config.io_engine == "io_uring":
-                logger.warning(
-                    "RawBlockL2Adapter: MP raw_block uses io_uring without "
-                    "fixed-buffer registration; zero-copy fixed buffers are "
-                    "disabled unless registered by a future MP allocator path"
-                )
+            if config.io_engine == "io_uring" and config.enable_zero_copy:
+                if (
+                    l1_memory_desc is None
+                    or l1_memory_desc.stable_registration_size is None
+                ):
+                    logger.info(
+                        "RawBlockL2Adapter: no stable L1 range is eligible for "
+                        "io_uring fixed-buffer registration; using ordinary "
+                        "io_uring I/O"
+                    )
+                else:
+                    try:
+                        self._core.register_fixed_buffer_range(
+                            l1_memory_desc.ptr,
+                            l1_memory_desc.stable_registration_size,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "RawBlockL2Adapter: failed to register io_uring "
+                            "fixed buffers: %s. Falling back to ordinary "
+                            "io_uring I/O.",
+                            e,
+                        )
             self._max_capacity_bytes = int(
                 self._core.report_status().get("usable_capacity_bytes", 0)
             )
