@@ -2221,7 +2221,6 @@ class BlendModule(InstanceLivenessTarget):
         gpu_context: BaseCacheContext,
         resolved_groups: "list[tuple[torch.Tensor, int]]",
         batch: "list[tuple[CBMatchResult, Any]]",
-        head_size: int,
         staged_kernel: list[int],
     ) -> None:
         """Scatter one tmp-slot batch into the paged KV, one launch per
@@ -2230,12 +2229,14 @@ class BlendModule(InstanceLivenessTarget):
         kernel scatters ``size(2)`` tokens, so a full-capacity buffer would
         mis-align every later slot against ``slot_mapping``.
 
+        The kernel's head_size is each group's ``shape_desc.hs`` (the spec
+        per-head width: packed CS for fused formats, HS otherwise).
+
         Args:
             gpu_context (GPUCacheContext): The instance's GPU cache context.
             resolved_groups: Per STAGED kernel group ``(block_ids,
                 block_size)``, positionally aligned with ``staged_kernel``.
             batch: ``(match, memory_obj)`` pairs; slot ``i`` holds ``batch[i]``.
-            head_size: RoPE head size forwarded to the kernel.
             staged_kernel: Kernel-group indices blend staged (see
                 :meth:`_cb_staged_groups`); recurrent groups are absent and
                 never scattered.
@@ -2261,6 +2262,13 @@ class BlendModule(InstanceLivenessTarget):
             # blocks than the full group, so gpu_context.num_blocks (group
             # 0's) would truncate the other groups' bounds check.
             page_buffer_size = kgm.kernel_groups[group_idx].shape_desc.nb * group_bs
+            group_fmt = gpu_context.get_engine_kv_format(group_idx)
+            # The tmp slot buffers keep fused rows packed (kv_size 1 staging).
+            group_layout = (
+                lmcache_native.MemObjKVLayout.FUSED_PACKED
+                if get_spec_class(group_fmt).is_fused_packed
+                else lmcache_native.MemObjKVLayout.UNSPECIFIED
+            )
             tok_off = 0
             for slot_idx, n_tok in enumerate(tok_counts):
                 key_value = gpu_context.get_temp_kernel_group_buffer(
@@ -2278,9 +2286,10 @@ class BlendModule(InstanceLivenessTarget):
                     gpu_context.device,
                     page_buffer_size,
                     lmcache_native.TransferDirection.H2D,
-                    gpu_context.get_engine_kv_format(group_idx),
+                    group_fmt,
                     block_size=group_bs,
-                    head_size=head_size,
+                    head_size=kgm.kernel_groups[group_idx].shape_desc.hs,
+                    mem_obj_kv_layout=group_layout,
                 )
                 tok_off += n_tok
 
@@ -2383,7 +2392,9 @@ class BlendModule(InstanceLivenessTarget):
                 engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
                 page_buffer_size=group.shape_desc.nb * group_bs,
                 block_size=group_bs,
-                head_size=rope_state.head_size,
+                # Spec per-head width: packed CS for fused formats, HS
+                # otherwise (the scatter kernel's contract, not the rope's).
+                head_size=group.shape_desc.hs,
                 slot_mapping_base=0,
                 slot_mapping_capacity=0,
                 is_neox=rope_state.is_neox_style,
@@ -3193,7 +3204,6 @@ class BlendModule(InstanceLivenessTarget):
                                 gpu_context,
                                 resolved_groups,
                                 batch,
-                                rope_state.head_size,
                                 staged_kernel,
                             )
 

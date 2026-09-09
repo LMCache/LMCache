@@ -6,6 +6,9 @@ pure-torch gather, and writing it back into a zeroed pool (H2D) must
 restore the original bytes. Exercises the inflated per-block step that
 distinguishes a blocks-first pool from a layer-compact cache: the step
 rides in block_stride_elems, taken from the views' stride(0).
+
+These formats are fused-packed, so the kernel takes head_size as the
+packed content width CS and needs the buffer layout declared.
 """
 
 # Third Party
@@ -81,17 +84,18 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
     staging = torch.zeros(1, NL, len(slots), SPT, dtype=torch.float32, device="cuda")
 
     device_ops.multi_layer_kv_transfer(
-        staging,
-        ptrs,
-        slots,
-        torch.device("cuda:0"),
-        NB * BS,
-        int(lmcache_native.TransferDirection.D2H),
-        int(fmt),
-        BS,
-        CS // 2,
-        0,
-        block_stride,
+        key_value=staging,
+        key_value_ptrs=ptrs,
+        slot_mapping=slots,
+        paged_memory_device=torch.device("cuda:0"),
+        page_buffer_size=NB * BS,
+        direction=int(lmcache_native.TransferDirection.D2H),
+        engine_kv_format=int(fmt),
+        block_size=BS,
+        head_size=CS,
+        skip_prefix_n_tokens=0,
+        block_stride_elems=block_stride,
+        mem_obj_kv_layout=int(lmcache_native.MemObjKVLayout.FUSED_PACKED),
     )
     torch.cuda.synchronize()
     ref = torch_gather(buf, order, slots.cpu())
@@ -102,17 +106,18 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
     for b in {int(s) // BS for s in slots.cpu()}:
         buf[b, :NL].zero_()
     device_ops.multi_layer_kv_transfer(
-        staging,
-        ptrs,
-        slots,
-        torch.device("cuda:0"),
-        NB * BS,
-        int(lmcache_native.TransferDirection.H2D),
-        int(fmt),
-        BS,
-        CS // 2,
-        0,
-        block_stride,
+        key_value=staging,
+        key_value_ptrs=ptrs,
+        slot_mapping=slots,
+        paged_memory_device=torch.device("cuda:0"),
+        page_buffer_size=NB * BS,
+        direction=int(lmcache_native.TransferDirection.H2D),
+        engine_kv_format=int(fmt),
+        block_size=BS,
+        head_size=CS,
+        skip_prefix_n_tokens=0,
+        block_stride_elems=block_stride,
+        mem_obj_kv_layout=int(lmcache_native.MemObjKVLayout.FUSED_PACKED),
     )
     torch.cuda.synchronize()
     touched = sorted({int(s) // BS for s in slots.cpu()})

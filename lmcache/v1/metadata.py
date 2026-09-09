@@ -85,24 +85,50 @@ class LMCacheMetadata:
         return [self.kv_dtype]
 
     def get_shapes(self, num_tokens: Optional[int] = None) -> list[torch.Size]:
-        """Get the shapes of the KV cache in LMCache"""
+        """Get the shapes of the KV cache in LMCache.
+
+        Fused-packed kernel groups report the true split-KV shape
+        ``[2, num_layers, num_tokens, num_heads * head_size]`` — the
+        in-process transfer maps the logical planes onto the engine's packed
+        rows (``SPLIT_KV_2LTD``) — which also matches the pre-registration
+        ``kv_shape`` fallback, so the first store allocates the same shape
+        discovery later confirms.
+
+        Raises:
+            ValueError: If a fused-packed group reports an odd hidden dim.
+        """
+        # Lazy: the spec registry transitively imports modules that import
+        # this one at package init.
+        # First Party
+        from lmcache.v1.gpu_connector.kv_format.specs.registry import (
+            get_spec_class,
+        )
+
         if num_tokens is None:
             num_tokens = self.chunk_size
         klg_manager = self.kv_layer_groups_manager
         if klg_manager is not None and klg_manager.kernel_groups:
             # Read kv_size from each group's shape_desc rather than self.use_mla
             # so heterogeneous groups (should any ever co-exist) are handled.
-            return [
-                torch.Size(
-                    [
-                        group.shape_desc.kv_size,
-                        group.num_layers,
-                        num_tokens,
-                        group.hidden_dim_size,
-                    ]
+            shapes = []
+            for group in klg_manager.kernel_groups:
+                kv_size = group.shape_desc.kv_size
+                hidden = group.hidden_dim_size
+                fmt = group.engine_kv_format
+                # Keyed on the format's is_fused_packed fact, never on
+                # kv_size == 1 — MLA groups are kv_size 1 too and must keep
+                # their single-plane shape.
+                if fmt is not None and get_spec_class(fmt).is_fused_packed:
+                    if hidden % 2 != 0:
+                        raise ValueError(
+                            f"fused-packed group reports odd hidden dim {hidden}"
+                        )
+                    kv_size = 2
+                    hidden //= 2
+                shapes.append(
+                    torch.Size([kv_size, group.num_layers, num_tokens, hidden])
                 )
-                for group in klg_manager.kernel_groups
-            ]
+            return shapes
         return [
             torch.Size(
                 [
