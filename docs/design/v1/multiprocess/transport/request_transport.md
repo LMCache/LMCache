@@ -47,6 +47,20 @@ implementation through `--transport zmq` or `--transport grpc`.
 This abstraction covers MP request RPCs only. It does not select the mechanism
 used to move KV data between an engine worker and the server.
 
+### gRPC codecs
+
+gRPC keeps protobuf as its wire format. At startup, the transport combines each
+generated RPC descriptor with the existing transport-neutral
+`ProtocolDefinition` and compiles one request/response codec for that method.
+Both the client and server use this read-only registry, so adding an RPC requires
+one protocol definition rather than response-type checks in a central decoder.
+
+Most dataclasses and containers use the structural codec. Types that need a
+non-structural representation register a small codec next to the service that
+owns the protobuf message; shared types register in the common codec module.
+Missing protocol definitions, duplicate registrations, and handler annotation
+mismatches fail while the transport is initialized.
+
 ## Extending the transport
 
 A new transport implements the `RequestClient` contract inside its own

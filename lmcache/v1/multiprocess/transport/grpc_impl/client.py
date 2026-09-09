@@ -19,11 +19,10 @@ from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
-    message_class,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
-    decode_response_to_python,
-    encode_request_from_call,
+from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
+    GrpcMethodCodec,
+    get_method_codec_registry,
 )
 
 _GRPC_OPTIONS = (
@@ -66,7 +65,7 @@ def parse_grpc_target(server_url: str) -> str:
 @dataclass(frozen=True)
 class _ClientRpc:
     stub_method: Any
-    request_class: type[Any]
+    codec: GrpcMethodCodec
 
 
 ClientRpcCallable = Callable[..., MessagingFuture[Any]]
@@ -81,6 +80,7 @@ class GrpcMultiprocessClient(RequestClient):
         )
         stubs: dict[str, Any] = {}
         self._rpc_methods: dict[str, _ClientRpc] = {}
+        codec_registry = get_method_codec_registry()
         for binding, method in iter_methods():
             service_name = binding.descriptor.name
             stub = stubs.get(service_name)
@@ -93,7 +93,7 @@ class GrpcMultiprocessClient(RequestClient):
                 raise RuntimeError(f"Duplicate gRPC client method: {name}")
             self._rpc_methods[name] = _ClientRpc(
                 stub_method=getattr(stub, method.name),
-                request_class=message_class(method.input_type),
+                codec=codec_registry.by_full_name[method.full_name],
             )
         self._metadata = ((_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
 
@@ -138,7 +138,7 @@ class GrpcMultiprocessClient(RequestClient):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> MessagingFuture[Any]:
-        request = encode_request_from_call(rpc.request_class, args, kwargs)
+        request = rpc.codec.request_encoder(args, kwargs)
         future: MessagingFuture[Any] = MessagingFuture()
         call = rpc.stub_method.future(
             request,
@@ -148,7 +148,7 @@ class GrpcMultiprocessClient(RequestClient):
 
         def on_done(grpc_future: grpc.Future[Any]) -> None:
             try:
-                result = decode_response_to_python(grpc_future.result())
+                result = rpc.codec.response_decoder(grpc_future.result())
             except BaseException as exc:
                 future.set_exception(exc)
             else:
