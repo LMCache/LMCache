@@ -268,7 +268,7 @@ uv pip install -e . --no-build-isolation
 # generator and create the ignored bindings required when server.py is imported.
 uv pip install -r requirements/proto.txt
 echo "--- :gear: Generating LMCache gRPC bindings"
-python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/protos/generate.py"
+python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"
 
 uv pip freeze | sort > /tmp/env-after-lmcache.txt
 if ! diff -q /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt >/dev/null; then

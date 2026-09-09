@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """gRPC transport implementation for multiprocess requests."""
 
-# Standard
-from typing import Any
+# Future
+from __future__ import annotations
 
-# First Party
-from lmcache.v1.multiprocess.transport.base import RequestClient
+# Standard
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
 def create_request_client(
