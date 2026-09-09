@@ -1427,12 +1427,11 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = self._layout_hints
-        old_ctx = self.transfer_ctx
-        self.transfer_ctx = transfer_ctx
         try:
-            # Register on the local, not self.transfer_ctx: a concurrent
-            # shutdown() may null self.transfer_ctx between publish and this
-            # call. The local is always non-None.
+            # Register before publishing: a context becomes visible to the
+            # transfer paths only once its transport exists, so a store
+            # arriving mid-recovery keeps using the context it replaces
+            # instead of meeting a half-built one.
             transfer_ctx.register(
                 self.instance_id,
                 kv_caches,
@@ -1446,11 +1445,9 @@ class LMCacheMPWorkerAdapter:
                 engine_type=EngineType.VLLM,
             )
         except TimeoutError:
-            # Roll back: the new context never registered, so close it (it
-            # holds an SHM mapping but has no transfers) and keep the old
-            # context current — the next recovery attempt displaces and
-            # closes it through the success path below.
-            self.transfer_ctx = old_ctx
+            # Never published, so there is nothing to roll back: close the
+            # context that failed to register (it holds an SHM mapping but no
+            # transfers) and leave the working one current.
             try:
                 transfer_ctx.close()
             except Exception:
@@ -1460,6 +1457,8 @@ class LMCacheMPWorkerAdapter:
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+        old_ctx = self.transfer_ctx
+        self.transfer_ctx = transfer_ctx
         if old_ctx is not None:
             # Release the displaced context deterministically instead of at
             # GC time: its close() drains in-flight transfers before
@@ -1610,12 +1609,13 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is None:
             raise RuntimeError(
                 "Transfer context is not initialized. "
                 "Call register_kv_caches() before submitting store requests."
             )
-        future = self.transfer_ctx.submit_store(
+        future = transfer_ctx.submit_store(
             request_id,
             key,
             self.instance_id,
@@ -1669,12 +1669,13 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
+        transfer_ctx = self.transfer_ctx
+        if transfer_ctx is None:
             raise RuntimeError(
                 "Transfer context is not initialized. "
                 "Call register_kv_caches() before submitting retrieve requests."
             )
-        future = self.transfer_ctx.submit_retrieve(
+        future = transfer_ctx.submit_retrieve(
             request_id,
             key,
             self.instance_id,
@@ -2092,9 +2093,10 @@ class LMCacheMPWorkerAdapter:
         """
         if not need_flush_before_forward:
             return
-        if not self.is_healthy or self.transfer_ctx is None:
+        transfer_ctx = self.transfer_ctx
+        if not self.is_healthy or transfer_ctx is None:
             return
-        self.transfer_ctx.flush_inflight_stores()
+        transfer_ctx.flush_inflight_stores()
         # Force device sync here, compare to preemption, perf panelty is trivial
         torch_dev.synchronize()
 

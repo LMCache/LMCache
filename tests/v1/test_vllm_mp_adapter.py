@@ -252,9 +252,7 @@ def test_register_timeout_rolls_back_and_closes_unregistered_ctx(
         contexts.append(ctx)
         return ctx
 
-    monkeypatch.setattr(
-        adapter_mod, "create_transfer_context", _create_timing_out_ctx
-    )
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", _create_timing_out_ctx)
     with pytest.raises(ConnectionError, match="did not respond"):
         adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[1]
 
