@@ -80,17 +80,12 @@ class FakeMessageQueueClient:
         self.server_url = server_url
         self.context = context
         self.closed = False
-        self.requests: list[tuple[object, list[object], object]] = []
+        self.requests: list[int | None] = []
         self.instances.append(self)
 
-    def submit_request(
-        self,
-        request_type: object,
-        request_payloads: list[object],
-        response_cls: object,
-    ) -> FakeFuture:
+    def ping(self, instance_id: int | None) -> FakeFuture:
         """Record the request and return the configured fake future."""
-        self.requests.append((request_type, request_payloads, response_cls))
+        self.requests.append(instance_id)
         return self.future
 
     def close(self) -> None:
@@ -98,16 +93,13 @@ class FakeMessageQueueClient:
         self.closed = True
 
 
-class FakeRequestType:
-    """Minimal request type double for health checks."""
+class FakeRequestClientFactory:
+    """Factory double matching the public method-oriented client interface."""
 
-    PING = "PING"
-
-
-def fake_get_response_class(request_type: object) -> type[bool]:
-    """Return the fake response class for PING requests."""
-    assert request_type == FakeRequestType.PING
-    return bool
+    @staticmethod
+    def create(server_url: str, *, context: object) -> FakeMessageQueueClient:
+        """Return a recording client for the requested endpoint and context."""
+        return FakeMessageQueueClient(server_url, context)
 
 
 def fake_module(name: str, attrs: dict[str, object]) -> ModuleType:
@@ -134,21 +126,10 @@ def patch_mp_health_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setitem(
         sys.modules,
-        "lmcache.v1.multiprocess.mq",
+        "lmcache.v1.multiprocess.transport.factory",
         fake_module(
-            "lmcache.v1.multiprocess.mq",
-            {"MessageQueueClient": FakeMessageQueueClient},
-        ),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "lmcache.v1.multiprocess.protocol",
-        fake_module(
-            "lmcache.v1.multiprocess.protocol",
-            {
-                "RequestType": FakeRequestType,
-                "get_response_class": fake_get_response_class,
-            },
+            "lmcache.v1.multiprocess.transport.factory",
+            {"RequestClientFactory": FakeRequestClientFactory},
         ),
     )
 
@@ -202,6 +183,70 @@ def test_config_parses_server_args() -> None:
     assert config.server_args == ("--http-port", "18080", "--l1-size-gb", "20")
 
 
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), "-inf", "nan"])
+def test_config_rejects_nonfinite_timeout(timeout: float | str) -> None:
+    """An enabled launcher never accepts an unbounded or NaN deadline."""
+    with pytest.raises(ValueError, match="positive and finite"):
+        MPServerAutostartConfig.from_extra_config(
+            {
+                "lmcache.mp.autostart": True,
+                "lmcache.mp.autostart.wait_timeout": timeout,
+            },
+            "localhost",
+            5555,
+        )
+
+
+@pytest.mark.parametrize("port", [True, 65536, "65536"])
+def test_config_rejects_invalid_tcp_port(port: int | str) -> None:
+    """A server cannot bind a boolean or an out-of-range TCP port."""
+    with pytest.raises(ValueError, match="port must be"):
+        MPServerAutostartConfig.from_extra_config(
+            {"lmcache.mp.autostart": True}, "localhost", port
+        )
+
+
+@pytest.mark.parametrize(
+    "server_url",
+    [
+        "grpc://localhost:5555",
+        "tcp://localhost:65536",
+        "tcp://localhost:5555/path",
+        "tcp://user@localhost:5555",
+        "tcp://localhost:5555?ignored=1",
+    ],
+)
+def test_enabled_autostart_rejects_invalid_transport_url(server_url: str) -> None:
+    """Auto-start only launches the TCP endpoint it will actually probe."""
+    with pytest.raises(ValueError, match="Invalid LMCache MP server URL"):
+        maybe_start_mp_server_from_url(
+            extra_config={"lmcache.mp.autostart": True},
+            server_url=server_url,
+            zmq_context=MagicMock(),
+        )
+
+
+def test_config_import_works_without_torch() -> None:
+    """Configuration-only consumers keep the review-requested lazy boundary."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; sys.modules['torch'] = None; "
+                "from lmcache.integration.vllm.mp_server_launcher "
+                "import MPServerAutostartConfig; "
+                "assert sys.modules['torch'] is None; "
+                "assert 'lmcache.v1.multiprocess.transport' not in sys.modules"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     "server_args",
     [
@@ -229,25 +274,63 @@ def test_config_rejects_endpoint_server_args(server_args: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("server_host", "expected_host"),
+    "server_host",
     [
-        ("::1", "::1"),
-        ("[::1]:5555", "::1"),
-        ("tcp://::1", "::1"),
-        ("tcp://[::1]:5555", "::1"),
+        "::1",
+        "[::1]:5555",
+        "tcp://::1",
+        "tcp://[::1]:5555",
+        "::ffff:127.0.0.1",
     ],
 )
-def test_config_accepts_ipv6_loopback_hosts(
-    server_host: str,
-    expected_host: str,
-) -> None:
-    config = MPServerAutostartConfig.from_extra_config(
-        extra_config={"lmcache.mp.autostart": True},
-        server_host=server_host,
-        server_port=5555,
-    )
+def test_config_rejects_ipv6_hosts(server_host: str) -> None:
+    """Accepting an IPv6 host must not imply unsupported ZMQ IPv6 transport."""
+    with pytest.raises(ValueError, match="IPv6 is not supported"):
+        MPServerAutostartConfig.from_extra_config(
+            extra_config={"lmcache.mp.autostart": True},
+            server_host=server_host,
+            server_port=5555,
+        )
 
-    assert config.host == expected_host
+
+@pytest.mark.parametrize("wait_only", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "server_url",
+    ["tcp://[::1]:5555", "tcp://::1:5555", "tcp://[::ffff:127.0.0.1]:5555"],
+)
+def test_ipv6_autostart_fails_before_probe_or_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    wait_only: bool,
+    enabled: bool,
+    server_url: str,
+) -> None:
+    """Owner and waiter reject IPv6 early; disabled auto-start stays a no-op."""
+    probe = MagicMock()
+    spawn = MagicMock()
+    monkeypatch.setattr(launcher_mod, "is_mp_server_healthy", probe)
+    monkeypatch.setattr(launcher_mod.subprocess, "Popen", spawn)
+    operation = (
+        wait_for_mp_server_from_url if wait_only else maybe_start_mp_server_from_url
+    )
+    if enabled:
+        with pytest.raises(ValueError, match="IPv6 is not supported"):
+            operation(
+                extra_config={"lmcache.mp.autostart": enabled},
+                server_url=server_url,
+                zmq_context=MagicMock(),
+            )
+    else:
+        assert (
+            operation(
+                extra_config={"lmcache.mp.autostart": enabled},
+                server_url=server_url,
+                zmq_context=MagicMock(),
+            )
+            is None
+        )
+    probe.assert_not_called()
+    spawn.assert_not_called()
 
 
 def test_config_rejects_remote_host_when_enabled() -> None:
@@ -446,7 +529,7 @@ def test_maybe_start_mp_server_from_url_parses_local_server_url(monkeypatch) -> 
     assert instances[0].config.port == 5555
 
 
-def test_maybe_start_mp_server_from_url_prefers_configured_endpoint(
+def test_maybe_start_mp_server_from_url_prefers_resolved_endpoint(
     monkeypatch,
 ) -> None:
     instances = []
@@ -469,20 +552,20 @@ def test_maybe_start_mp_server_from_url_prefers_configured_endpoint(
     monkeypatch.setattr(launcher_mod, "MPServerLauncher", FakeLauncher)
     extra_config = {
         "lmcache.mp.autostart": True,
-        "lmcache.mp.host": "::1",
-        "lmcache.mp.port": 5555,
+        "lmcache.mp.host": "192.0.2.1",
+        "lmcache.mp.port": "ignored invalid port",
     }
     zmq_context = MagicMock()
 
     launcher = maybe_start_mp_server_from_url(
         extra_config=extra_config,
-        server_url="tcp://::1:5555",
+        server_url="tcp://127.0.0.1:6000",
         zmq_context=zmq_context,
     )
 
     assert launcher is instances[0]
-    assert instances[0].config.host == "::1"
-    assert instances[0].config.port == 5555
+    assert instances[0].config.host == "127.0.0.1"
+    assert instances[0].config.port == 6000
 
 
 def test_maybe_start_mp_server_from_url_rejects_missing_port_when_enabled() -> None:
@@ -612,7 +695,7 @@ def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
     assert client.server_url == "tcp://localhost:5555"
     assert client.context is zmq_context
     assert client.closed
-    assert client.requests == [("PING", [], bool)]
+    assert client.requests == [None]
     assert FakeMessageQueueClient.future.timeout == 0.25
 
 

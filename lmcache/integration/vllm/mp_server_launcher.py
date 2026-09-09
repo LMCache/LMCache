@@ -5,10 +5,11 @@
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 from urllib.parse import urlparse
+import math
 import shlex
 import subprocess
 import sys
@@ -23,24 +24,18 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 _AUTOSTART_KEY = "lmcache.mp.autostart"
-_HOST_KEY = "lmcache.mp.host"
-_PORT_KEY = "lmcache.mp.port"
 _SERVER_ARGS_KEY = "lmcache.mp.autostart.server_args"
 _WAIT_TIMEOUT_KEY = "lmcache.mp.autostart.wait_timeout"
 
 _DEFAULT_WAIT_TIMEOUT = 90.0
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_LOCAL_HOSTS = {"localhost", "127.0.0.1"}
 _DISALLOWED_SERVER_ARGS = {"--host", "--port", "--http-host"}
 _PING_TIMEOUT_SECONDS = 1.0
 _POLL_INTERVAL_SECONDS = 0.5
 _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
-def _load_mp_health_dependencies() -> tuple[
-    "_MessageQueueClientFactory",
-    "_RequestTypeNamespace",
-    Callable[[object], object | None],
-]:
+def _load_mp_health_dependencies() -> "_RequestClientFactory":
     """Load MQ health probe dependencies when a probe is executed.
 
     The MQ modules may require torch through transitive imports, while most of
@@ -48,59 +43,12 @@ def _load_mp_health_dependencies() -> tuple[
     imports lazy lets config-only callers import this launcher without torch.
 
     Returns:
-        The MQ client factory, request type namespace, and response-class
-        resolver used to send a PING request.
+        The transport client factory used to send a PING request.
     """
     # First Party
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
-    from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+    from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
-    return (
-        cast(_MessageQueueClientFactory, MessageQueueClient),
-        cast(_RequestTypeNamespace, RequestType),
-        cast(Callable[[object], object | None], get_response_class),
-    )
-
-
-def _create_message_queue_client(
-    factory: _MessageQueueClientFactory,
-    server_url: str,
-    zmq_context: zmq.Context,
-) -> _MessageQueueClient:
-    """Create an MQ client for MP server health probing.
-
-    Args:
-        factory: Lazy-loaded ``MessageQueueClient`` factory.
-        server_url: ZMQ URL of the LMCache MP server.
-        zmq_context: ZMQ context used to create the client.
-
-    Returns:
-        A message queue client connected to ``server_url``.
-    """
-    return factory(server_url, zmq_context)
-
-
-def _submit_ping(
-    client: _MessageQueueClient,
-    request_type: _RequestTypeNamespace,
-    response_class_getter: Callable[[object], object | None],
-) -> _MessagingFuture:
-    """Submit an MP server PING health probe through the MQ client.
-
-    Args:
-        client: MQ client used to submit the request.
-        request_type: Lazy-loaded request type namespace.
-        response_class_getter: Lazy-loaded response-class resolver.
-
-    Returns:
-        A messaging future for the PING response.
-    """
-    ping_request_type = request_type.PING
-    return client.submit_request(
-        ping_request_type,
-        [],
-        response_class_getter(ping_request_type),
-    )
+    return cast(_RequestClientFactory, RequestClientFactory)
 
 
 def _build_autostart_config_from_url(
@@ -121,30 +69,38 @@ def _build_autostart_config_from_url(
         ValueError: If an auto-start configuration value or server URL is
             invalid.
     """
-    if not _parse_bool(_get_extra_config_value(extra_config, _AUTOSTART_KEY)):
+    if not is_mp_server_autostart_enabled(extra_config):
         return MPServerAutostartConfig.from_extra_config(
             extra_config=extra_config,
             server_host="",
             server_port=0,
         )
 
-    server_host = _get_extra_config_value(extra_config, _HOST_KEY)
-    server_port_value = _get_extra_config_value(extra_config, _PORT_KEY)
-    if server_port_value is not None and not isinstance(server_port_value, (int, str)):
-        raise ValueError(
-            f"LMCache MP server port must be an integer: {server_port_value!r}"
-        )
-    server_port = server_port_value
-    if server_host is None or server_port is None:
+    try:
         parsed = urlparse(server_url if "://" in server_url else f"tcp://{server_url}")
-        if parsed.hostname is None or parsed.port is None:
-            raise ValueError(f"Invalid LMCache MP server URL: {server_url!r}")
-        server_host = parsed.hostname if server_host is None else server_host
-        server_port = parsed.port if server_port is None else server_port
+        if parsed.netloc.count(":") > 1:
+            raise ValueError(
+                "IPv6 is not supported by MP auto-start; use localhost or 127.0.0.1"
+            )
+        server_host, server_port = parsed.hostname, parsed.port
+        if (
+            parsed.scheme != "tcp"
+            or server_host is None
+            or server_port is None
+            or parsed.username is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Expected a local TCP host:port endpoint")
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid LMCache MP server URL: {server_url!r}: {exc}"
+        ) from exc
 
     return MPServerAutostartConfig.from_extra_config(
         extra_config=extra_config,
-        server_host=str(server_host),
+        server_host=server_host,
         server_port=server_port,
     )
 
@@ -175,8 +131,23 @@ def _parse_bool(value: object | None) -> bool:
     )
 
 
+def is_mp_server_autostart_enabled(extra_config: object | None) -> bool:
+    """Return whether connector extra config enables MP server auto-start.
+
+    Args:
+        extra_config: vLLM extra-config mapping, or None.
+
+    Returns:
+        The parsed boolean; missing keys or non-mappings disable auto-start.
+
+    Raises:
+        ValueError: If the value is not a boolean or recognized boolean string.
+    """
+    return _parse_bool(_get_extra_config_value(extra_config, _AUTOSTART_KEY))
+
+
 def _parse_port(value: object) -> int:
-    if isinstance(value, int):
+    if isinstance(value, int) and not isinstance(value, bool):
         port = value
     elif isinstance(value, str):
         try:
@@ -189,6 +160,8 @@ def _parse_port(value: object) -> int:
         raise ValueError(f"LMCache MP server port must be an integer: {value!r}")
     if port <= 0:
         raise ValueError(f"LMCache MP server port must be positive: {value!r}")
+    if port > 65535:
+        raise ValueError(f"LMCache MP server port must be at most 65535: {value!r}")
     return port
 
 
@@ -204,7 +177,8 @@ def _parse_server_args(value: object | None) -> tuple[str, ...]:
             if option == disallowed_arg or disallowed_arg.startswith(option):
                 raise ValueError(
                     f"{_SERVER_ARGS_KEY} cannot override {disallowed_arg}; "
-                    "configure the MP endpoint with lmcache.mp.host/port"
+                    "configure the MP endpoint with lmcache.mp.server_urls "
+                    "or lmcache.mp.host/port"
                 )
     return server_args
 
@@ -219,13 +193,19 @@ def _parse_wait_timeout(value: object | None) -> float:
             ) from exc
     else:
         raise ValueError(f"{_WAIT_TIMEOUT_KEY} must be a number, got {value!r}")
-    if wait_timeout <= 0:
-        raise ValueError(f"{_WAIT_TIMEOUT_KEY} must be positive, got {value!r}")
+    if not math.isfinite(wait_timeout) or wait_timeout <= 0:
+        raise ValueError(
+            f"{_WAIT_TIMEOUT_KEY} must be positive and finite, got {value!r}"
+        )
     return wait_timeout
 
 
 def _normalize_local_host(server_host: str) -> str:
     host_to_parse = server_host.strip()
+    if host_to_parse.removeprefix("tcp://").count(":") > 1:
+        raise ValueError(
+            "IPv6 is not supported by MP auto-start; use localhost or 127.0.0.1"
+        )
     if host_to_parse in _LOCAL_HOSTS:
         return host_to_parse
 
@@ -255,26 +235,17 @@ class _MessagingFuture(Protocol):
         """Return the completed result, or raise if unavailable."""
 
 
-class _MessageQueueClient(Protocol):
-    def submit_request(
-        self,
-        request_type: object,
-        request_payloads: list[object],
-        response_cls: object | None = None,
-    ) -> _MessagingFuture:
-        """Submit an MQ request and return its future."""
+class _RequestClient(Protocol):
+    def ping(self, instance_id: int | None) -> _MessagingFuture:
+        """Probe the server, optionally checking a registered instance."""
 
     def close(self) -> None:
         """Close the MQ client."""
 
 
-class _MessageQueueClientFactory(Protocol):
-    def __call__(self, server_url: str, context: zmq.Context) -> _MessageQueueClient:
-        """Create a message queue client."""
-
-
-class _RequestTypeNamespace(Protocol):
-    PING: object
+class _RequestClientFactory(Protocol):
+    def create(self, server_url: str, *, context: zmq.Context) -> _RequestClient:
+        """Create a transport client for the endpoint."""
 
 
 @dataclass(frozen=True)
@@ -298,16 +269,18 @@ class MPServerAutostartConfig:
 
         Args:
             extra_config: vLLM ``kv_connector_extra_config`` mapping.
-            server_host: LMCache MP server host from ``lmcache.mp.host``.
-            server_port: LMCache MP server port from ``lmcache.mp.port``.
+            server_host: Local IPv4 host (localhost or 127.0.0.1), optionally
+                prefixed with tcp://, from the resolved connector endpoint.
+            server_port: Port from the connector's resolved server endpoint.
 
         Returns:
             Parsed ``MPServerAutostartConfig``.
 
         Raises:
-            ValueError: If a configured value is invalid.
+            ValueError: If a configured value is invalid, including an IPv6 or
+                non-local host when auto-start is enabled.
         """
-        enabled = _parse_bool(_get_extra_config_value(extra_config, _AUTOSTART_KEY))
+        enabled = is_mp_server_autostart_enabled(extra_config)
         if not enabled:
             return cls(
                 enabled=False,
@@ -514,19 +487,11 @@ def is_mp_server_healthy(
         ``True`` if the server returns a successful PING response, otherwise
         ``False``.
     """
-    client: _MessageQueueClient | None = None
+    client: _RequestClient | None = None
     try:
-        (
-            message_queue_client_factory,
-            request_type,
-            response_class_getter,
-        ) = _load_mp_health_dependencies()
-        client = _create_message_queue_client(
-            message_queue_client_factory,
-            server_url,
-            zmq_context,
-        )
-        future = _submit_ping(client, request_type, response_class_getter)
+        factory = _load_mp_health_dependencies()
+        client = factory.create(server_url, context=zmq_context)
+        future = client.ping(None)
         return bool(future.result(timeout=timeout))
     except Exception:
         logger.debug("LMCache MP server ZMQ PING failed", exc_info=True)

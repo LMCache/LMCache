@@ -186,9 +186,9 @@ def _patch_transfer_context_factory(
 
 def _patch_request_client_factory(
     monkeypatch: pytest.MonkeyPatch,
-    client: MagicMock,
+    client: MagicMock | FakeMQClient,
 ) -> None:
-    """Make the transport-neutral factory return the supplied client."""
+    """Make the transport-neutral factory return the supplied client double."""
     factory = MagicMock(name="request_client_factory")
     factory.create.return_value = client
     monkeypatch.setattr(adapter_mod, "RequestClientFactory", factory)
@@ -250,7 +250,7 @@ def test_scheduler_adapter_does_not_autostart(monkeypatch) -> None:
 
     monkeypatch.setattr(adapter_mod, "maybe_start_mp_server_from_url", maybe_start)
     monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", FakeMQClient)
+    _patch_request_client_factory(monkeypatch, FakeMQClient())
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
 
     LMCacheMPSchedulerAdapter(
@@ -284,7 +284,7 @@ def test_worker_zero_autostarts_before_mq_client(monkeypatch) -> None:
     monkeypatch.setattr(adapter_mod, "maybe_start_mp_server_from_url", fake_maybe_start)
     wait_for_server = MagicMock(name="wait_for_mp_server_from_url")
     monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", RecordingMQClient)
+    monkeypatch.setattr(adapter_mod.RequestClientFactory, "create", RecordingMQClient)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
@@ -320,7 +320,7 @@ def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
     monkeypatch.setattr(
         adapter_mod, "wait_for_mp_server_from_url", fake_wait_for_server
     )
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", RecordingMQClient)
+    monkeypatch.setattr(adapter_mod.RequestClientFactory, "create", RecordingMQClient)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
@@ -348,7 +348,7 @@ def test_legacy_worker_adapter_does_not_autostart(monkeypatch) -> None:
 
     monkeypatch.setattr(adapter_mod, "maybe_start_mp_server_from_url", maybe_start)
     monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", FakeMQClient)
+    _patch_request_client_factory(monkeypatch, FakeMQClient())
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
@@ -383,7 +383,7 @@ def test_worker_adapter_does_not_shutdown_autostarted_server_on_init_failure(
         "wait_for_mp_server_from_url",
         MagicMock(name="wait_for_mp_server_from_url"),
     )
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    _patch_request_client_factory(monkeypatch, fake_client)
     monkeypatch.setattr(
         adapter_mod,
         "get_lmcache_chunk_size",

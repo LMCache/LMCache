@@ -1202,6 +1202,8 @@ class LMCacheMPWorkerAdapter:
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
+            ValueError: If enabled auto-start configuration is invalid.
+            ConnectionError: If auto-start fails or the MP server handshake fails.
         """
         (
             vllm_block_size,
