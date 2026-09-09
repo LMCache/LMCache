@@ -20,7 +20,7 @@ import types
 import pytest
 
 # First Party
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from lmcache.v1.storage_backend.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
@@ -33,6 +33,7 @@ from tests.v1.storage_backend.raw_block_test_utils import (
     RAW_BLOCK_CI_HEADER_BYTES,
     RAW_BLOCK_CI_META_TOTAL_BYTES,
     RAW_BLOCK_CI_SLOT_BYTES,
+    is_skip_safe_io_error,
     make_empty_memory_obj,
     make_memory_obj,
     make_object_key,
@@ -112,6 +113,39 @@ class _RecordingUringCmdRawDevice:
         end = self.read_cursor + total_len
         target[:total_len] = self.read_data[self.read_cursor : end]
         self.read_cursor = end
+
+
+class _RecordingNativeRawDevice:
+    """Record read batches while forwarding every I/O to the real Rust device."""
+
+    def __init__(self, device: Any) -> None:
+        self.device = device
+        self.read_batches: list[tuple[list[int], list[int]]] = []
+
+    def batched_read(
+        self,
+        offsets: list[int],
+        buffers: list[Any],
+        total_lens: list[int],
+    ) -> int:
+        """Record and submit a batch through the wrapped Rust implementation.
+
+        Args:
+            offsets: Device byte offsets for the reads.
+            buffers: Original destination buffers passed to Rust unchanged.
+            total_lens: Physical read lengths, including alignment padding.
+
+        Returns:
+            The batch ID returned by the real Rust device.
+
+        Raises:
+            Exception: Propagates native submission errors.
+        """
+        self.read_batches.append((list(offsets), list(total_lens)))
+        return self.device.batched_read(offsets, buffers, total_lens)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.device, name)
 
 
 def _buffer_address(buf: memoryview) -> int:
@@ -196,6 +230,107 @@ def test_raw_block_core_store_load_and_exists(tmp_path):
 
         assert load_result == [True, True, True]
         assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+    finally:
+        core.close()
+
+
+@requires_rust_raw_block_io
+@pytest.mark.skipif(sys.platform != "linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize(
+    "middle_payload_len,middle_address_offset",
+    [
+        pytest.param(4096, 0, id="aligned"),
+        pytest.param(4096, 1, id="mixed-alignment"),
+        pytest.param(4095, 0, id="padded-payload"),
+        pytest.param(4095, 1, id="mixed-alignment-and-padding"),
+    ],
+)
+def test_raw_block_core_iouring_load_batch_roundtrip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    middle_payload_len: int,
+    middle_address_offset: int,
+) -> None:
+    """Batch real O_DIRECT reads and preserve payload bytes and buffer guards.
+
+    Args:
+        tmp_path: Directory for the temporary backing file.
+        monkeypatch: Fixture used to install a recorder around the native device.
+        middle_payload_len: Logical byte length of the middle object.
+        middle_address_offset: Offset from alignment for its destination pointer.
+
+    Notes:
+        All reads, writes, and completion waits execute in the real Rust
+        extension. Only unsupported device initialization causes a skip;
+        store/load failures and incorrect data fail the test.
+    """
+    raw_block_io = pytest.importorskip("lmcache_rust_raw_block_io")
+    device_type = raw_block_io.RawBlockDevice
+
+    def create_recording_device(path: str, **kwargs: Any) -> _RecordingNativeRawDevice:
+        return _RecordingNativeRawDevice(device_type(path, **kwargs))
+
+    monkeypatch.setattr(raw_block_io, "RawBlockDevice", create_recording_device)
+    config = dataclasses.replace(
+        make_raw_block_core_config(make_raw_block_file(tmp_path)),
+        io_engine="io_uring",
+        use_odirect=True,
+        enable_zero_copy=True,
+        load_checkpoint_on_init=False,
+    )
+    try:
+        core = RawBlockCore(config, key_namespace="object")
+    except Exception as exc:
+        if is_skip_safe_io_error(exc):
+            pytest.skip(f"io_uring/O_DIRECT is unavailable on this runner: {exc}")
+        raise
+
+    try:
+        payload_sizes = [core.block_align, middle_payload_len, core.block_align]
+        payloads = [bytes([i + 1]) * size for i, size in enumerate(payload_sizes)]
+        specs = [encode_object_key(make_object_key(i)) for i in range(len(payloads))]
+        sources = [make_memory_obj(payload) for payload in payloads]
+        assert core.put_many(specs, sources).results == [True] * len(specs)
+
+        destinations: list[TensorMemoryObj] = []
+        guarded_buffers: list[tuple[TensorMemoryObj, int, int]] = []
+        sentinel = b"\xa5"
+        for i, source in enumerate(sources):
+            size = source.get_size()
+            backing = make_memory_obj(sentinel * (size + 2 * core.block_align))
+            start = core.block_align - backing.data_ptr % core.block_align
+            start += middle_address_offset if i == 1 else 0
+            end = start + size
+            destinations.append(
+                TensorMemoryObj(
+                    backing.raw_data[start:end],
+                    dataclasses.replace(source.metadata),
+                    parent_allocator=None,
+                )
+            )
+            guarded_buffers.append((backing, start, end))
+
+        assert [obj.data_ptr % core.block_align for obj in destinations] == [
+            0,
+            middle_address_offset,
+            0,
+        ]
+        native_device = core.raw_device()
+        assert isinstance(native_device, _RecordingNativeRawDevice)
+        native_device.read_batches.clear()
+
+        results = core.load_many_into([spec.encoded for spec in specs], destinations)
+
+        assert results == [True] * len(specs)
+        assert [memory_obj_bytes(obj) for obj in destinations] == payloads
+        assert len(native_device.read_batches) == 1
+        read_offsets, read_lengths = native_device.read_batches[0]
+        assert len(read_offsets) == len(specs)
+        assert read_lengths == [core.block_align] * len(specs)
+        for backing, start, end in guarded_buffers:
+            data = memory_obj_bytes(backing)
+            assert data[:start] == sentinel * start
+            assert data[end:] == sentinel * (len(data) - end)
     finally:
         core.close()
 
