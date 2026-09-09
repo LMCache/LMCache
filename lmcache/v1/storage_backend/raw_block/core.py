@@ -582,6 +582,30 @@ class RawBlockCore:
             len(buffers),
         )
 
+    def register_fixed_buffer_region(self, buffer_ptr: int, buffer_size: int) -> None:
+        """Register one contiguous memory region for io_uring fixed I/O.
+
+        Args:
+            buffer_ptr: Base address of the memory region.
+            buffer_size: Size of the memory region in bytes.
+
+        Raises:
+            ValueError: If the pointer or size is not positive.
+            Exception: Propagates Rust registration errors.
+        """
+        if self.io_engine != "io_uring":
+            return
+        if buffer_ptr <= 0:
+            raise ValueError("fixed buffer pointer must be positive")
+        if buffer_size <= 0:
+            raise ValueError("fixed buffer size must be positive")
+
+        self._rawdev().register_fixed_buffers([buffer_ptr], [buffer_size])
+        logger.info(
+            "RawBlockCore: registered one %d-byte region for io_uring fixed I/O",
+            buffer_size,
+        )
+
     def contains_key(self, encoded_key: str, *, lock: bool = False) -> bool:
         """Return whether one encoded key is present in the raw-block index.
 
