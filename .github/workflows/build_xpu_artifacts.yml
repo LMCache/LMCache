@@ -139,14 +139,8 @@ jobs:
                     set -euxo pipefail
                     WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                     python3 -m pip install --no-deps "$WHEEL"
-                      python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.xpu_ops
-                      python3 - <<"PY"
-                      import lmcache.xpu_ops as ops
-
-                      for name in ("TransferDirection", "EngineKVFormat", "multi_layer_kv_transfer"):
-                          assert hasattr(ops, name), f"lmcache.xpu_ops is missing {name}"
-                      print("LMCache XPU extension API surface OK")
-                      PY
+                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.xpu_ops
+                    python3 -c "import lmcache.xpu_ops as ops; required = (\"TransferDirection\", \"EngineKVFormat\", \"multi_layer_kv_transfer\"); missing = [name for name in required if not hasattr(ops, name)]; assert not missing, f\"lmcache.xpu_ops is missing {', '.join(missing)}\"; print(\"LMCache XPU extension API surface OK\")"
                     python3 -c "import lmcache, torch; print(\"LMCache import OK\"); print(\"Torch:\", torch.__version__)"
                   '
 
