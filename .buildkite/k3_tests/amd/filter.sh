@@ -9,7 +9,7 @@ _path_filter_amd_should_skip() {
     local changed_file="$1"
 
     case "$changed_file" in
-        .buildkite/k3_tests/amd/*|.buildkite/k3_tests/common_scripts/*)
+        .buildkite/k3_tests/amd/*)
             return 1
             ;;
         .buildkite/k3_tests/*/*)

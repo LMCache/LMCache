@@ -9,7 +9,7 @@ _path_filter_xpu_should_skip() {
     local changed_file="$1"
 
     case "$changed_file" in
-        .buildkite/k3_tests/xpu/*|.buildkite/k3_tests/common_scripts/*)
+        .buildkite/k3_tests/xpu/*)
             return 1
             ;;
         .buildkite/k3_tests/*/*)

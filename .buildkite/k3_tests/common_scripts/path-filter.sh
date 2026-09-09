@@ -62,6 +62,12 @@ _path_filter_should_skip_for_pipeline() {
         return 0
     fi
 
+    # Shared upload, helper, and filtering code affects every k3 pipeline.
+    # Classify it before the suite-local .buildkite/k3_tests/* exclusions.
+    if [[ "$changed_file" == .buildkite/k3_tests/common_scripts/* ]]; then
+        return 1
+    fi
+
     case "$pipeline_kind" in
         unit)
             case "$changed_file" in
