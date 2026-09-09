@@ -289,6 +289,35 @@ import lmcache.v1.multiprocess.transport.grpc_impl.services
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
+def test_generated_module_import_does_not_load_runtime_dependencies() -> None:
+    """Generated binding checks work in a PEP 517 build environment."""
+    script = r"""
+import importlib.abc
+import sys
+
+banned = (
+    "cachetools",
+    "lmcache.utils",
+    "lmcache.v1.multiprocess.futures",
+    "lmcache.v1.multiprocess.transport.base",
+)
+
+
+class RuntimeDependencyBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in banned):
+            raise ImportError(
+                f"generated module imported runtime dependency: {fullname}"
+            )
+        return None
+
+
+sys.meta_path.insert(0, RuntimeDependencyBlocker())
+import lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
 def test_service_message_codec_registry_round_trips_custom_types() -> None:
     """Service-owned codecs handle only their registered protobuf types."""
     registry = get_message_codec_registry()
