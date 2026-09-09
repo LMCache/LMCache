@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Protobuf/Python value codecs for the multiprocess gRPC transport.
+"""Compile protobuf/Python value converters for the gRPC transport.
 
-This module intentionally has no RPC method registry. The caller provides a
-generated request or response message class, and Python value conversion is
-derived from handler annotations plus protobuf field names. Adding an RPC
-should not require editing this file.
+This module contains only structural conversion rules. RPC ownership and
+Python request/response types are supplied by the method codec registry, while
+non-structural message conversions are supplied by service codec modules.
 """
 
 # Standard
@@ -27,17 +26,8 @@ import msgspec
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.multiprocess.custom_types import (
-    CBMatchResult,
-    CBUnifiedLookupResult,
-    DeviceIPCWrapper,
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
-    get_customized_decoder,
-    get_customized_encoder,
+from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
+    get_message_codec_registry,
 )
 
 _NONE_TYPE = type(None)
@@ -46,7 +36,7 @@ ValueEncoder = Callable[[Any], Any]
 ValueDecoder = Callable[[Any], Any]
 FieldWriter = Callable[[Any, Any], None]
 FieldReader = Callable[[Any], Any]
-RequestEncoder = Callable[..., Any]
+RequestEncoder = Callable[[tuple[Any, ...], dict[str, Any]], Any]
 RequestDecoder = Callable[[Any], tuple[Any, ...]]
 ResponseEncoder = Callable[[Any], Any]
 ResponseDecoder = Callable[[Any], Any]
@@ -67,10 +57,6 @@ def _unwrap_optional(py_type: Any) -> tuple[Any, bool]:
 
 def _is_enum_type(py_type: Any) -> bool:
     return isinstance(py_type, type) and issubclass(py_type, enum.Enum)
-
-
-def _is_device_wrapper_type(py_type: Any) -> bool:
-    return isinstance(py_type, type) and issubclass(py_type, DeviceIPCWrapper)
 
 
 def _sequence_type(py_type: Any) -> tuple[Any, bool] | None:
@@ -302,25 +288,9 @@ def _compile_message_codec(
     py_type, _ = _unwrap_optional(py_type)
     proto_fields = tuple(descriptor.fields)
 
-    if _is_device_wrapper_type(py_type):
-
-        def write_wrapper(message: Any, value: DeviceIPCWrapper) -> None:
-            message.pickled_payload = DeviceIPCWrapper.Serialize(value)
-
-        def read_wrapper(message: Any) -> DeviceIPCWrapper:
-            return DeviceIPCWrapper.Deserialize(message.pickled_payload)
-
-        return write_wrapper, read_wrapper
-
-    if py_type is torch.Size:
-
-        def write_size(message: Any, value: torch.Size) -> None:
-            message.dims.extend(value)
-
-        def read_size(message: Any) -> torch.Size:
-            return torch.Size(message.dims)
-
-        return write_size, read_size
+    registered = get_message_codec_registry().find(descriptor, py_type)
+    if registered is not None:
+        return registered.writer, registered.reader
 
     sequence = _sequence_type(py_type)
     if sequence is not None and len(proto_fields) == 1:
@@ -377,173 +347,119 @@ def _proto_has_same_descriptor(value: Any, descriptor: Any) -> bool:
     return hasattr(value, "DESCRIPTOR") and value.DESCRIPTOR is descriptor
 
 
-def _field_source_name(field_name: str, value: Any) -> str:
-    if hasattr(value, field_name):
-        return field_name
-    if field_name.startswith("encoded_") and hasattr(value, field_name[8:]):
-        return field_name[8:]
-    return field_name
-
-
-def _runtime_py_type_for_value(value: Any) -> Any:
-    if isinstance(value, enum.Enum):
-        return value.__class__
-    if isinstance(value, torch.dtype):
-        return torch.dtype
-    return type(value)
-
-
-def _write_field_from_runtime_value(message: Any, field: Any, value: Any) -> None:
-    if value is None:
-        return
-    if _is_map_field(field):
-        key_field = field.message_type.fields_by_name["key"]
-        value_field = field.message_type.fields_by_name["value"]
-        container = getattr(message, field.name)
-        for key, item in value.items():
-            encoded_key, _ = _compile_scalar_codec(
-                key_field, _runtime_py_type_for_value(key)
-            )
-            if value_field.message_type is None:
-                encoded_value, _ = _compile_scalar_codec(
-                    value_field, _runtime_py_type_for_value(item)
-                )
-                container[encoded_key(key)] = encoded_value(item)
-            else:
-                _write_message_from_runtime_value(
-                    container[encoded_key(key)], value_field.message_type, item
-                )
-        return
-
-    if field.is_repeated:
-        container = getattr(message, field.name)
-        if field.message_type is None:
-            for item in value:
-                encode_item, _ = _compile_scalar_codec(
-                    field, _runtime_py_type_for_value(item)
-                )
-                container.append(encode_item(item))
-        else:
-            for item in value:
-                _write_message_from_runtime_value(
-                    container.add(), field.message_type, item
-                )
-        return
-
-    if field.message_type is not None:
-        child = getattr(message, field.name)
-        _write_message_from_runtime_value(child, field.message_type, value)
-        child.SetInParent()
-        return
-
-    encode_value, _ = _compile_scalar_codec(field, _runtime_py_type_for_value(value))
-    setattr(message, field.name, encode_value(value))
-
-
-def _write_message_from_runtime_value(
-    message: Any,
-    descriptor: Any,
-    value: Any,
-) -> None:
-    if _proto_has_same_descriptor(value, descriptor):
-        message.CopyFrom(value)
-        return
-    if descriptor.name == "DeviceIpcWrapper":
-        message.pickled_payload = DeviceIPCWrapper.Serialize(value)
-        return
-    if descriptor.name == "TensorShape":
-        message.dims.extend(value)
-        return
-
-    proto_fields = tuple(descriptor.fields)
-    if isinstance(value, tuple) and len(value) == len(proto_fields):
-        for item, field in zip(value, proto_fields, strict=True):
-            _write_field_from_runtime_value(message, field, item)
-        return
-    if (
-        len(proto_fields) == 1
-        and not is_dataclass(value)
-        and not isinstance(value, msgspec.Struct)
-    ):
-        _write_field_from_runtime_value(message, proto_fields[0], value)
-        return
-
-    for field in proto_fields:
-        source_name = _field_source_name(field.name, value)
-        if isinstance(value, dict):
-            field_value = value.get(source_name)
-        else:
-            field_value = getattr(value, source_name)
-        _write_field_from_runtime_value(message, field, field_value)
-
-
-def _is_structured_runtime_value(value: Any, descriptor: Any) -> bool:
-    return (
-        _proto_has_same_descriptor(value, descriptor)
-        or is_dataclass(value)
-        or isinstance(value, (dict, msgspec.Struct))
-        or (isinstance(value, tuple) and len(value) == len(tuple(descriptor.fields)))
-    )
-
-
-def _compile_request_codec(
+def compile_request_codec_for_types(
     message_cls: Any,
     payload_types: tuple[Any, ...],
 ) -> tuple[RequestEncoder, RequestDecoder]:
+    """Compile one request codec from transport-neutral payload types.
+
+    Args:
+        message_cls: Generated protobuf request class.
+        payload_types: Python payload types declared by the protocol.
+
+    Returns:
+        A call encoder accepting ``(args, kwargs)`` and a protobuf decoder.
+
+    Raises:
+        TypeError: If the protobuf request cannot represent the payload types.
+    """
     proto_fields = tuple(message_cls.DESCRIPTOR.fields)
     if len(payload_types) == len(proto_fields):
         codecs = tuple(
             _compile_field_codec(field, py_type)
             for field, py_type in zip(proto_fields, payload_types, strict=True)
         )
-        if not codecs:
-            return (lambda: message_cls()), (lambda message: ())
-        if len(codecs) == 1:
-            writer, reader = codecs[0]
+        codecs_by_name = {
+            field.name: codec for field, codec in zip(proto_fields, codecs, strict=True)
+        }
 
-            def encode_one(value: Any) -> Any:
-                message = message_cls()
-                writer(message, value)
-                return message
-
-            def decode_one(message: Any) -> tuple[Any, ...]:
-                return (reader(message),)
-
-            return encode_one, decode_one
-
-        def encode_many(*payloads: Any) -> Any:
-            if len(payloads) != len(codecs):
+        def encode_fields(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if (
+                len(args) == 1
+                and not kwargs
+                and _proto_has_same_descriptor(args[0], message_cls.DESCRIPTOR)
+            ):
+                return args[0]
+            if args and kwargs:
                 raise TypeError(
-                    f"{message_cls.DESCRIPTOR.full_name} expects "
-                    f"{len(codecs)} payloads, got {len(payloads)}"
+                    "RPC call accepts either positional args or keyword fields"
                 )
             message = message_cls()
-            for value, (writer, _) in zip(payloads, codecs, strict=True):
+            if kwargs:
+                for name, value in kwargs.items():
+                    codec = codecs_by_name.get(name)
+                    if codec is None:
+                        raise TypeError(
+                            f"{message_cls.DESCRIPTOR.full_name} has no field {name!r}"
+                        )
+                    codec[0](message, value)
+                return message
+            if len(args) > len(codecs):
+                raise TypeError(
+                    f"{message_cls.DESCRIPTOR.full_name} accepts at most "
+                    f"{len(codecs)} positional values, got {len(args)}"
+                )
+            for value, (writer, _) in zip(args, codecs, strict=False):
                 writer(message, value)
             return message
 
-        def decode_many(message: Any) -> tuple[Any, ...]:
+        def decode_fields(message: Any) -> tuple[Any, ...]:
             return tuple(reader(message) for _, reader in codecs)
 
-        return encode_many, decode_many
+        return encode_fields, decode_fields
 
     if len(payload_types) == 1:
         write_message, read_message = _compile_message_codec(
             message_cls.DESCRIPTOR, payload_types[0]
         )
+        py_fields = _structured_fields(payload_types[0])
+        if py_fields is None or len(py_fields) != len(proto_fields):
+            raise TypeError(
+                f"no keyword request codec from {payload_types[0]!r} to "
+                f"{message_cls.DESCRIPTOR.full_name}"
+            )
+        keyword_codecs = {
+            field.name: _compile_field_codec(field, field_type)
+            for (_name, field_type), field in zip(py_fields, proto_fields, strict=True)
+        }
 
-        def encode_flat(value: Any) -> Any:
+        def encode_struct(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if (
+                len(args) == 1
+                and not kwargs
+                and _proto_has_same_descriptor(args[0], message_cls.DESCRIPTOR)
+            ):
+                return args[0]
+            if args and kwargs:
+                raise TypeError(
+                    "RPC call accepts either positional args or keyword fields"
+                )
             message = message_cls()
-            write_message(message, value)
+            if kwargs:
+                for name, value in kwargs.items():
+                    codec = keyword_codecs.get(name)
+                    if codec is None:
+                        raise TypeError(
+                            f"{message_cls.DESCRIPTOR.full_name} has no field {name!r}"
+                        )
+                    codec[0](message, value)
+                return message
+            if len(args) > 1:
+                raise TypeError(
+                    f"{message_cls.DESCRIPTOR.full_name} accepts at most one "
+                    f"structured payload, got {len(args)}"
+                )
+            if args:
+                write_message(message, args[0])
             return message
 
-        def decode_flat(message: Any) -> tuple[Any, ...]:
+        def decode_struct(message: Any) -> tuple[Any, ...]:
             return (read_message(message),)
 
-        return encode_flat, decode_flat
+        return encode_struct, decode_struct
 
     raise TypeError(
-        f"handler has {len(payload_types)} payloads but "
+        f"protocol has {len(payload_types)} payloads but "
         f"{message_cls.DESCRIPTOR.full_name} has {len(proto_fields)} fields"
     )
 
@@ -591,7 +507,7 @@ def compile_request_decoder(
         return (lambda _message: ()), payload_types
 
     if len(params) == len(proto_fields) or len(params) == 1:
-        _encoder, decoder = _compile_request_codec(message_cls, payload_types)
+        _encoder, decoder = compile_request_codec_for_types(message_cls, payload_types)
         return decoder, payload_types
 
     fields_by_name = message_cls.DESCRIPTOR.fields_by_name
@@ -697,229 +613,81 @@ def _write_response_value(
         writer(message, result)
         return
 
-    _write_message_from_runtime_value(message, message.DESCRIPTOR, result)
+    raise TypeError(
+        f"no response codec from {response_type!r} to {message.DESCRIPTOR.full_name}"
+    )
 
 
-def encode_request_from_call(
-    message_cls: Any,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-) -> Any:
-    """Build a protobuf request from a client method call."""
-    if (
-        len(args) == 1
-        and not kwargs
-        and _proto_has_same_descriptor(args[0], message_cls.DESCRIPTOR)
-    ):
-        return args[0]
-    if args and kwargs:
-        raise TypeError("RPC call accepts either positional args or keyword fields")
-
-    message = message_cls()
-    proto_fields = tuple(message_cls.DESCRIPTOR.fields)
-    if kwargs:
-        fields_by_name = message_cls.DESCRIPTOR.fields_by_name
-        for name, value in kwargs.items():
-            field = fields_by_name.get(name)
-            if field is None:
-                raise TypeError(
-                    f"{message_cls.DESCRIPTOR.full_name} has no field {name!r}"
-                )
-            _write_field_from_runtime_value(message, field, value)
-        return message
-
-    if (
-        len(args) == 1
-        and len(proto_fields) != 1
-        and _is_structured_runtime_value(args[0], message_cls.DESCRIPTOR)
-    ):
-        _write_message_from_runtime_value(message, message_cls.DESCRIPTOR, args[0])
-        return message
-
-    if len(args) > len(proto_fields):
-        raise TypeError(
-            f"{message_cls.DESCRIPTOR.full_name} accepts at most "
-            f"{len(proto_fields)} positional values, got {len(args)}"
-        )
-    for field, value in zip(proto_fields, args, strict=False):
-        _write_field_from_runtime_value(message, field, value)
-    return message
-
-
-def decode_response_to_python(response: Any) -> Any:
-    """Decode a protobuf response into LMCache's Python-facing result shape."""
-    descriptor = response.DESCRIPTOR
-    proto_fields = tuple(descriptor.fields)
-    if not proto_fields:
-        return None
-
-    if descriptor.name == "CbUnifiedLookupResponse":
-        if not response.HasField("payload"):
-            return None
-        return _read_cb_unified_lookup_payload(response.payload)
-    if descriptor.name == "P2pQueryLookupResultsResponse":
-        if not response.HasField("addresses"):
-            return None
-        return [
-            _read_transfer_channel_address(item)
-            for item in response.addresses.addresses
-        ]
-    if descriptor.name == "RegisterKvCacheEngineDrivenContextResponse":
-        return RegisterEngineDrivenContextResponse(
-            shm_name=response.shm_name,
-            pool_size=response.pool_size,
-        )
-    if descriptor.name == "PrepareStoreResponse":
-        return PrepareStoreResponse(context=_decode_mapping(response.encoded_context))
-    if descriptor.name == "PrepareRetrieveResponse":
-        return PrepareRetrieveResponse(
-            success=response.success,
-            data=response.data,
-            context=_decode_mapping(response.encoded_context),
-        )
-
-    if len(proto_fields) == 1:
-        return _read_response_field(response, proto_fields[0])
-    return tuple(_read_response_field(response, field) for field in proto_fields)
-
-
-def decode_response_to_type(response: Any, response_type: Any) -> Any:
-    """Decode a protobuf response to its transport-neutral Python type.
+def compile_response_decoder_for_type(
+    message_cls: Any, response_type: Any
+) -> ResponseDecoder:
+    """Compile a protobuf response decoder for a protocol response type.
 
     Args:
-        response: Generated protobuf response instance.
-        response_type: Python response type declared by the multiprocess
-            protocol.
+        message_cls: Generated protobuf response class.
+        response_type: Python response type declared by the protocol.
 
     Returns:
-        The decoded Python response value.
+        A callable that decodes the generated response message.
+
+    Raises:
+        TypeError: If the protobuf response cannot represent the Python type.
     """
+    fields = tuple(message_cls.DESCRIPTOR.fields)
     if response_type is None or response_type is type(None):
-        return None
+        if fields:
+            raise TypeError(
+                f"{message_cls.DESCRIPTOR.full_name} must be an empty response"
+            )
+        return lambda _message: None
 
     response_type, optional = _unwrap_optional(response_type)
-    fields = tuple(response.DESCRIPTOR.fields)
     if optional:
         if len(fields) != 1 or not fields[0].has_presence:
             raise TypeError(
-                f"{response.DESCRIPTOR.full_name} cannot represent an optional response"
+                f"{message_cls.DESCRIPTOR.full_name} cannot represent an "
+                "optional response"
             )
-        if not response.HasField(fields[0].name):
-            return None
         _writer, reader = _compile_field_codec(fields[0], response_type)
-        return reader(response)
+
+        def decode_optional(message: Any) -> Any:
+            if not message.HasField(fields[0].name):
+                return None
+            return reader(message)
+
+        return decode_optional
 
     py_fields = _structured_fields(response_type)
     if py_fields is not None and len(py_fields) == len(fields):
-        _writer, reader = _compile_message_codec(response.DESCRIPTOR, response_type)
-        return reader(response)
+        _writer, reader = _compile_message_codec(message_cls.DESCRIPTOR, response_type)
+        return reader
 
     if len(fields) == 1:
         _writer, reader = _compile_field_codec(fields[0], response_type)
-        return reader(response)
+        return reader
 
-    _writer, reader = _compile_message_codec(response.DESCRIPTOR, response_type)
-    return reader(response)
-
-
-def _read_response_field(message: Any, field: Any) -> Any:
-    if field.has_presence and not message.HasField(field.name):
-        return None
-    value = getattr(message, field.name)
-    if field.message_type is not None:
-        return _read_response_message(value)
-    if field.is_repeated:
-        return list(value)
-    return value
+    _writer, reader = _compile_message_codec(message_cls.DESCRIPTOR, response_type)
+    return reader
 
 
-def _read_response_message(message: Any) -> Any:
-    descriptor = message.DESCRIPTOR
-    if descriptor.name == "EventIpcHandleResult":
-        return (message.event_ipc_handle, message.success)
-    if descriptor.name == "TransferChannelAddress":
-        return _read_transfer_channel_address(message)
-    if descriptor.name == "TransferChannelAddressList":
-        return [_read_transfer_channel_address(item) for item in message.addresses]
-    if descriptor.name == "CBUnifiedLookupPayload":
-        return _read_cb_unified_lookup_payload(message)
-    if len(descriptor.fields) == 1:
-        return _read_response_field(message, descriptor.fields[0])
-    return tuple(_read_response_field(message, field) for field in descriptor.fields)
+def decode_response_to_type(response: Any, response_type: Any) -> Any:
+    """Decode one protobuf response to its declared Python type.
 
+    Args:
+        response: Generated protobuf response instance.
+        response_type: Python response type declared by the protocol.
 
-def _read_cb_match_result(message: Any) -> CBMatchResult:
-    return CBMatchResult(
-        old_st=message.old_st,
-        old_ed=message.old_ed,
-        cur_st=message.cur_st,
-        cur_ed=message.cur_ed,
-        hash=message.hash,
-    )
-
-
-def _read_cb_unified_lookup_payload(message: Any) -> CBUnifiedLookupResult:
-    return CBUnifiedLookupResult(
-        prefix_coverage_tokens=message.prefix_coverage_tokens,
-        non_prefix_segments=[
-            _read_cb_match_result(item) for item in message.non_prefix_segments
-        ],
-        segmented_prefix_segments=[
-            _read_cb_match_result(item) for item in message.segmented_prefix_segments
-        ],
-    )
-
-
-def _read_transfer_channel_address(message: Any) -> TransferChannelAddress:
-    return TransferChannelAddress(offset=message.offset, size=message.size)
-
-
-# These serializers remain part of the gRPC transport compatibility API.
-_SPECIAL_ENCODER_DECODERS = {
-    DeviceIPCWrapper: (
-        get_customized_encoder(DeviceIPCWrapper),
-        get_customized_decoder(DeviceIPCWrapper),
-    ),
-    list[DeviceIPCWrapper]: (
-        get_customized_encoder(list[DeviceIPCWrapper]),
-        get_customized_decoder(list[DeviceIPCWrapper]),
-    ),
-    MemoryLayoutDesc: (
-        get_customized_encoder(MemoryLayoutDesc),
-        get_customized_decoder(MemoryLayoutDesc),
-    ),
-    dict[int, MemoryLayoutDesc]: (
-        get_customized_encoder(dict[int, MemoryLayoutDesc]),
-        get_customized_decoder(dict[int, MemoryLayoutDesc]),
-    ),
-}
-
-
-def msgspec_encode(obj: Any, cls: Any) -> bytes:
-    """Encode a value with the public msgspec utility serializers."""
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
-        return encoder.encode(obj)
-    if cls in (bool, int):
-        obj = cls(obj)
-    return msgspec.msgpack.encode(obj)
-
-
-def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
-    """Decode a value with the public msgspec utility serializers."""
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
-        return decoder.decode(b_obj)
-    if cls in (bool, int):
-        return cls(msgspec.msgpack.decode(b_obj))
-    return msgspec.msgpack.decode(b_obj, type=cls)
+    Returns:
+        The decoded transport-neutral Python value.
+    """
+    decoder = compile_response_decoder_for_type(type(response), response_type)
+    return decoder(response)
 
 
 __all__ = [
+    "compile_request_codec_for_types",
     "compile_request_decoder",
+    "compile_response_decoder_for_type",
     "compile_response_encoder",
-    "decode_response_to_python",
-    "encode_request_from_call",
-    "msgspec_decode",
-    "msgspec_encode",
+    "decode_response_to_type",
 ]
