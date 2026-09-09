@@ -18,7 +18,7 @@
 use pyo3::exceptions::{PyMemoryError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::io;
 use std::os::unix::io::RawFd;
@@ -537,6 +537,22 @@ fn fetch_fdp_status(fd: RawFd, nsid: u32) -> Result<Vec<(u16, u16)>, PyErr> {
     Ok(status)
 }
 
+fn find_fixed_buffer(
+    fixed_buffers: &BTreeMap<usize, (u16, usize)>,
+    ptr: usize,
+    len: usize,
+) -> Option<u16> {
+    let request_end = ptr.checked_add(len)?;
+    let (&buffer_ptr, &(buffer_idx, buffer_size)) = fixed_buffers.range(..=ptr).next_back()?;
+    let buffer_end = buffer_ptr.checked_add(buffer_size)?;
+
+    if request_end <= buffer_end {
+        Some(buffer_idx)
+    } else {
+        None
+    }
+}
+
 fn placement_id_to_u16(pid: i32) -> PyResult<u16> {
     if pid == 0 {
         return Err(PyValueError::new_err(
@@ -571,6 +587,24 @@ mod tests {
         assert!(placement_id_to_u16(0).is_err());
         assert!(placement_id_to_u16(-1).is_err());
         assert!(placement_id_to_u16(65536).is_err());
+    }
+
+    #[test]
+    fn find_fixed_buffer_matches_exact_and_inner_ranges() {
+        let fixed_buffers = BTreeMap::from([(0x1000, (7, 0x2000))]);
+
+        assert_eq!(find_fixed_buffer(&fixed_buffers, 0x1000, 0x1000), Some(7));
+        assert_eq!(find_fixed_buffer(&fixed_buffers, 0x1800, 0x0800), Some(7));
+        assert_eq!(find_fixed_buffer(&fixed_buffers, 0x2000, 0x1000), Some(7));
+    }
+
+    #[test]
+    fn find_fixed_buffer_rejects_out_of_range_requests() {
+        let fixed_buffers = BTreeMap::from([(0x1000, (7, 0x2000))]);
+
+        assert_eq!(find_fixed_buffer(&fixed_buffers, 0x0fff, 1), None);
+        assert_eq!(find_fixed_buffer(&fixed_buffers, 0x2800, 0x1000), None);
+        assert_eq!(find_fixed_buffer(&fixed_buffers, usize::MAX, 1), None);
     }
 }
 
@@ -1068,7 +1102,7 @@ struct RawBlockDevice {
     shutdown: Option<Arc<AtomicBool>>,
     // Map from buffer pointer address to registered fixed buffer index
     // Used for zero-copy I/O with pre-registered buffers
-    fixed_buffer_map: Arc<Mutex<HashMap<usize, (u16, usize)>>>,
+    fixed_buffer_map: Arc<Mutex<BTreeMap<usize, (u16, usize)>>>,
     // Flag indicating if fixed buffers have been registered
     fixed_buffers_registered: Arc<AtomicBool>,
     // Count of currently in-flight I/O operations (global)
@@ -1982,7 +2016,7 @@ impl RawBlockDevice {
             queue: queue_opt,
             worker: worker_opt,
             shutdown: shutdown_opt,
-            fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
+            fixed_buffer_map: Arc::new(Mutex::new(BTreeMap::new())),
             fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
             in_flight_count: in_flight_count_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(0))),
             in_flight_cvar: in_flight_cvar_opt.unwrap_or_else(|| Arc::new(Condvar::new())),
@@ -2264,11 +2298,11 @@ impl RawBlockDevice {
         let use_uring_cmd = self.use_uring_cmd;
         let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
         // Clone the fixed buffer map before releasing GIL to avoid lock contention
-        let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
+        let fixed_buffer_map: BTreeMap<usize, (u16, usize)> = if fixed_buffers_registered {
             let map = self.fixed_buffer_map.lock().unwrap();
             map.clone()
         } else {
-            HashMap::new()
+            BTreeMap::new()
         };
 
         let nvme_cmd_data_base = if use_uring_cmd {
@@ -2304,7 +2338,7 @@ impl RawBlockDevice {
                 let comp = Arc::new(IoCompletion::new());
 
                 // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                let fixed_idx = find_fixed_buffer(&fixed_buffer_map, ptrs[i], total_len);
 
                 if use_odirect {
                     #[allow(clippy::manual_is_multiple_of)]
@@ -2561,7 +2595,7 @@ impl RawBlockDevice {
         let fixed_idx = if use_fixed && ptr_aligned {
             let map = self.fixed_buffer_map.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            find_fixed_buffer(&map, ptr_addr, total_len)
         } else {
             None
         };
@@ -2697,7 +2731,7 @@ impl RawBlockDevice {
         let fixed_idx = if use_fixed && ptr_aligned {
             let map = self.fixed_buffer_map.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            find_fixed_buffer(&map, ptr_addr, total_len)
         } else {
             None
         };
@@ -2873,11 +2907,11 @@ impl RawBlockDevice {
         let alignment = self.alignment;
         let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
         // Clone the fixed buffer map before releasing GIL to avoid lock contention
-        let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
+        let fixed_buffer_map: BTreeMap<usize, (u16, usize)> = if fixed_buffers_registered {
             let map = self.fixed_buffer_map.lock().unwrap();
             map.clone()
         } else {
-            HashMap::new()
+            BTreeMap::new()
         };
         // Get NVMe data for io_uring_cmd
         let nvme_cmd_data = self._build_nvme_cmd_data(0, 0)?;
@@ -2948,7 +2982,7 @@ impl RawBlockDevice {
                     } else {
                         // Fixed buffers are pre-registered with io_uring,
                         // enabling true zero-copy I/O.
-                        let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                        let fixed_idx = find_fixed_buffer(&fixed_buffer_map, ptrs[i], total_len);
                         (ptrs[i], fixed_idx, None, None, None)
                     };
 
