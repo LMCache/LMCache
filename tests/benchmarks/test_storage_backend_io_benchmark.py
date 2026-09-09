@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 # Third Party
 import pytest
@@ -82,7 +82,8 @@ def _make_benchmark(num_ops: int, concurrency: int) -> _TestBenchmark:
 def test_read_phase_rejects_empty_or_partial_results(returned_count: int) -> None:
     benchmark = _make_benchmark(num_ops=2, concurrency=1)
     returned = [_LoadedObject() for _ in range(returned_count)]
-    benchmark._backend = _ResultBackend(returned)  # type: ignore[assignment]
+    results = cast(list[Optional[MemoryObj]], returned)
+    benchmark._backend = _ResultBackend(results)  # type: ignore[assignment]
 
     with pytest.raises(
         RuntimeError,
