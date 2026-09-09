@@ -2,9 +2,10 @@
 
 ## Motivation
 
-MP clients previously constructed `MessageQueueClient` directly and submitted a
-`RequestType` with a positional payload list. This coupled every caller to ZMQ
-and made adding another request transport an application-wide change.
+MP clients previously constructed `MessageQueueClient` directly and submitted
+an integer request identifier with a positional payload list. This coupled
+every caller to ZMQ and made adding another request transport an
+application-wide change.
 
 The request transport is now split into a transport-neutral API and
 transport-specific implementations:
@@ -19,18 +20,22 @@ MP integration / SDK / benchmark
          RequestClient     -- named request methods
           /       \
          v         v
-   ZMQ facade   gRPC client
-         |
-         v
- MessageQueueClient
+   ZMQ client   gRPC client
+          \       /
+           v     v
+     Python request/response messages
+               |
+               v
+       business request handlers
 ```
 
 ## Design
 
 `RequestClient` defines named methods such as `lookup()`, `store()`, and
-`retrieve()`. The ZMQ facade translates each method back to the existing
-`RequestType`, payload order, and response type, so this refactor does not
-change the ZMQ wire protocol.
+`retrieve()`. Each call is represented internally by one Python request class
+and one Python response class from the domain modules under `rpc_messages/`.
+These classes are the transport-neutral RPC contract consumed by business
+request handlers.
 
 `RequestClientFactory` normalizes an endpoint and selects an implementation by
 scheme:
@@ -47,25 +52,38 @@ implementation through `--transport zmq` or `--transport grpc`.
 This abstraction covers MP request RPCs only. It does not select the mechanism
 used to move KV data between an engine worker and the server.
 
-## Protobuf contracts
+### Transport boundaries
 
-The planned gRPC transport keeps its wire contracts under
-`grpc_impl/protos/`. These `.proto` files are the source of truth for request
-and response messages; they do not enable the gRPC runtime by themselves.
+Both ZMQ and gRPC serialize the same complete Python request and response
+messages with the shared MessagePack representation. ZMQ sends the RPC route
+as an ASCII frame and places each encoded message in one additional frame.
+gRPC installs descriptor-derived generic method handlers whose
+serializer/deserializer operates directly on the Python message class. There
+is no protobuf object in the request path and no protobuf/Python conversion
+layer.
 
-Python protobuf modules are generated into `grpc_impl/_proto_gen/` during a
-package build. Most generated files remain ignored, while the type stubs used
-by handwritten adapters are tracked so static analysis also works from a
-source checkout. Regenerate the bindings after changing a schema with:
+The generated protobuf modules provide service and method descriptors only.
+Every RPC declares the same empty `TransportPayload` placeholder; gRPC uses it
+only to preserve the named route. Protobuf is not the payload data model.
+Consequently this internal Python transport is not wire-compatible with an
+independently generated protobuf client. This is intentional: domain-local
+Python messages, shared with ZMQ, are the canonical contract rather than a
+second protobuf object model.
 
-```bash
-pip install -r requirements/proto.txt
-python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
-```
+Server-side binding and scheduling are separate from serialization. A business
+handler is named `handle_<operation>` and uses the transport-neutral
+`@request_handler` annotation only for its `HandlerType` and client-affinity
+requirement. Both ZMQ and gRPC derive the same operation route from the
+handler/method name. A handler receives exactly one Python request message and
+returns exactly one Python response message. Server startup validates those
+annotations against the local RPC message registration.
 
-The generator cleans stale outputs, compiles every schema, rewrites generated
-imports to use the package-qualified path, and verifies that all generated
-Python modules import successfully.
+Adding an RPC therefore requires a route-only protobuf method declaration, a
+locally registered Python request/response pair in the owning `rpc_messages/`
+domain module, and a matching `handle_<operation>` business handler. Changing
+payload fields changes only the Python pair. No integer request enum,
+`ProtocolDefinition`, protobuf conversion, adapter registry, or per-RPC
+serialization definition is required.
 
 ## Extending the transport
 

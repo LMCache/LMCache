@@ -17,13 +17,13 @@ from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     ServiceBinding,
     get_service_bindings,
-    message_class,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
+    get_method_codec_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     RequestDecoder,
     ResponseEncoder,
-    compile_request_decoder,
-    compile_response_encoder,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.services.base import (
     GrpcHandlerType,
@@ -162,6 +162,7 @@ class GrpcMultiprocessServer:
             raise ValueError(f"Unknown generated gRPC service: {service_name}")
 
         service_handlers: dict[str, _GrpcRequestHandler] = {}
+        codec_registry = get_method_codec_registry()
         for method in binding.descriptor.methods:
             handler = getattr(implementation, method.name, None)
             if not callable(handler):
@@ -169,20 +170,16 @@ class GrpcMultiprocessServer:
                     f"{implementation.__class__.__name__} must implement "
                     f"{service_name}.{method.name}"
                 )
-            request_decoder, _ = compile_request_decoder(
-                message_class(method.input_type), handler
-            )
-            response_encoder, _ = compile_response_encoder(
-                message_class(method.output_type), handler
-            )
+            method_codec = codec_registry.by_full_name[method.full_name]
+            method_codec.validate_handler(handler)
             handler_type, requires_affinity = get_grpc_method_options(handler)
             full_name = method.full_name
             registered = _GrpcRequestHandler(
                 handler=handler,
                 handler_type=handler_type,
                 requires_client_affinity=requires_affinity,
-                request_decoder=request_decoder,
-                response_encoder=response_encoder,
+                request_decoder=method_codec.request_decoder,
+                response_encoder=method_codec.response_encoder,
             )
             self._handlers[full_name] = registered
             service_handlers[full_name] = registered
