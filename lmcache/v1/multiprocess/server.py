@@ -204,13 +204,25 @@ def _build_modules(
     # Build the transfer and blend modules first so the ManagementModule can
     # be constructed with them as liveness targets / reap listeners. They are
     # the InstanceLivenessTargets the reaper scans.
+    # A node started with --layerwise-batch > 0 serves the layer-wise path
+    # exclusively: the subclass keeps every other base request type, but
+    # rejects the per-chunk RETRIEVE.
+    lmcache_driven_cls: type[LMCacheDrivenTransferModule] = LMCacheDrivenTransferModule
+    if mp_config.layerwise_batch > 0:
+        # First Party
+        from lmcache.v1.multiprocess.modules.lmcache_driven_transfer_layerwise import (
+            LMCacheLayerwiseTransferModule,
+        )
+
+        lmcache_driven_cls = LMCacheLayerwiseTransferModule
+
     transfer_modules: list[EngineModule] = []
     if mp_config.supported_transfer_mode == "lmcache_driven":
-        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(lmcache_driven_cls(ctx))
     elif mp_config.supported_transfer_mode == "engine_driven":
         transfer_modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
-        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(lmcache_driven_cls(ctx))
         transfer_modules.append(EngineDrivenTransferModule(ctx))
     else:
         raise ValueError(
@@ -403,6 +415,7 @@ def run_cache_server(
         hash_algorithm=mp_config.hash_algorithm,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
+        layerwise_batch=mp_config.layerwise_batch,
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)
@@ -414,7 +427,16 @@ def run_cache_server(
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
     zmq_context = zmq.Context.instance()
-    server = MessageQueueServer(
+    # Only the layer-wise path registers a streaming handler, and only the
+    # streaming subclass knows how to dispatch one; every other deployment
+    # keeps the plain server and its unmodified dispatch.
+    server_cls: type[MessageQueueServer] = MessageQueueServer
+    if mp_config.layerwise_batch > 0:
+        # First Party
+        from lmcache.v1.multiprocess.mq_streaming import StreamingMessageQueueServer
+
+        server_cls = StreamingMessageQueueServer
+    server = server_cls(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=zmq_context,
     )

@@ -215,7 +215,9 @@ def _has_real_names(params):
 # (raised NotImplementedError unconditionally) — not a real fallback.
 _EXCLUDED_FUNCS: set[str] = {
     "execute_object_group_transfer",
+    "execute_object_group_transfer_layerwise",
     "execute_cb_retrieve_plan_flat",
+    "multi_layer_block_kv_transfer_layerwise",
 }
 
 # CUDA-only plan descriptors intentionally remain native-only. Descriptor

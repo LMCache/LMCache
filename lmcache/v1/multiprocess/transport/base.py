@@ -132,6 +132,20 @@ class RequestClient(Protocol):
 
     def cb_unified_lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]: ...
 
+    def register_layerwise_ipc_event_pool(
+        self, instance_id: int
+    ) -> MessagingFuture[Any]: ...
+
+    def retrieve_layerwise(
+        self,
+        key: Any,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: Any,
+        skip_first_n_tokens: int,
+        future: Any,
+    ) -> MessagingFuture[Any]: ...
+
     def p2p_lookup_and_lock(
         self, keys: list[Any], group_layout_descs: dict[int, Any]
     ) -> MessagingFuture[Any]: ...

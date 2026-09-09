@@ -1101,6 +1101,17 @@ def _normalize_lmcache_objects(
         elif _is_fused_kv_format(engine_kv_format):
             # Single plane: hs is the packed 2 * head_size.
             chunk_shape = (nl, chunk_tokens, nh * hs)
+        elif getattr(shape_desc, "kv_interleaved", False):
+            # Objects are laid out layer-major (nl, 2, ...) so that one layer's
+            # K and V are adjacent.  Expose the canonical (2, nl, ...) view via
+            # transpose -- a stride change, not a copy -- so every consumer
+            # below indexes ``[kv, layer]`` without knowing the wire layout.
+            return [
+                _tensor_from_ptr(
+                    ptr, (nl, 2, chunk_tokens, nh * hs), dtype, "cpu"
+                ).transpose(0, 1)
+                for ptr in lmcache_objects_ptrs
+            ]
         else:
             chunk_shape = (2, nl, chunk_tokens, nh * hs)
         return [
