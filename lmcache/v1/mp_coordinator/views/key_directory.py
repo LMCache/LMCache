@@ -473,7 +473,8 @@ class KeyDirectory(View):
                 token_ids.flags.writeable = False
                 binding.token_ids = token_ids
                 binding.token_offset = token_offset
-                self._index_binding(chunk_hash, binding)
+                for held in binding.keys:
+                    self._claim_binding(chunk_hash, binding, held)
             for instance_id, positions_ in l1_by_instance.items():
                 for position in positions_:
                     if not 0 <= position < len(key_table):
@@ -638,7 +639,8 @@ class KeyDirectory(View):
             # Other namespaces' keys may have attached while the binding had
             # no content, so claim it for all of them. Steady-state stores
             # take the single-key path instead of rehashing per rank.
-            self._index_binding(chunk_hash, binding)
+            for held in binding.keys:
+                self._claim_binding(chunk_hash, binding, held)
         else:
             self._claim_binding(chunk_hash, binding, key)
 
@@ -676,11 +678,6 @@ class KeyDirectory(View):
                 )
         if not binding.keys:
             del self._token_bindings[key.chunk_hash]
-
-    def _index_binding(self, chunk_hash: bytes, binding: _TokenBinding) -> None:
-        """Claim ``chunk_hash`` for every namespace holding it."""
-        for held in binding.keys:
-            self._claim_binding(chunk_hash, binding, held)
 
     def _claim_binding(
         self, chunk_hash: bytes, binding: _TokenBinding, key: ObjectKey
