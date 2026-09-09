@@ -254,8 +254,11 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     with engine_driven_context.transfer_guard():
                         # --- Phase 1: prepare_store ---
                         # In inline mode this is the costliest step (sync RPC
-                        # round-trip).  Running it here keeps the forward thread free.
-                        result = engine_driven_context.prepare_store(key, self._instance_id)
+                        # round-trip). Running it here keeps the forward
+                        # thread free.
+                        result = engine_driven_context.prepare_store(
+                            key, self._instance_id
+                        )
                         out_buffers, chunk_indices = (
                             result if result is not None else (None, None)
                         )
@@ -295,7 +298,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             gather_target = staged_chunks
 
                         # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
-                        with torch.inference_mode(), torch_dev.stream(self._copy_stream):
+                        with (
+                            torch.inference_mode(),
+                            torch_dev.stream(self._copy_stream),
+                        ):
                             _event.wait(stream=self._copy_stream)
 
                             gather_paged_kv_to_cpu(
@@ -441,7 +447,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             return
 
                         # --- Phase 2: gather every group on the copy stream ---
-                        with torch.inference_mode(), torch_dev.stream(self._copy_stream):
+                        with (
+                            torch.inference_mode(),
+                            torch_dev.stream(self._copy_stream),
+                        ):
                             event.wait(stream=self._copy_stream)
                             gathered = self._gather_multigroup(
                                 plans, kv_caches, group_block_ids
