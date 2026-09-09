@@ -131,6 +131,15 @@ reordering cut window comparisons from 100 to 1 for the same result.
 `seen` is still only marked *after* verification, so a fingerprint
 collision cannot consume a chunk's one chance to match.
 
+The two removals act on different levels, which is why neither can do the
+other's job: `remove_claim` drops **one holder** and the chunk survives for
+the rest (the `DELETE` path), while `remove_chunk` drops **the chunk and
+every claim on it** in one lock acquisition. Retiring per namespace instead
+would leave a window where `match` — which holds only the index lock —
+still finds the chunk under a not-yet-removed namespace while its content
+has already changed, re-RoPEing the new content's KV into the old
+content's position.
+
 The filter deliberately stores **no identity** — just "something lands
 here". That is what makes recall complete: two fingerprints sharing a
 slot both pass the filter and the dict resolves each correctly. A
@@ -158,9 +167,9 @@ Driven entirely by binding lifecycle in `KeyDirectory`:
 | `STORE` with `token_ids` | `add(tokens, chunk_hash, token_offset, ns)` |
 | `STORE` first filling a binding's content | `add` for **every** namespace on the binding |
 | re-`STORE` with different content | `remove_chunk`, then re-`add` per namespace |
-| `DELETE` of a namespace's last key for a chunk | `remove(tokens, chunk_hash, ns)` |
-| `DELETE` of a chunk's last placement overall | last `remove` drops the occupant |
-| `fence_instance` (restart / deregistration) | `remove` per dropped chunk |
+| `DELETE` of a namespace's last key for a chunk | `remove_claim(tokens, chunk_hash, ns)` |
+| `DELETE` of a chunk's last placement overall | the last `remove_claim` drops the occupant |
+| `fence_instance` (restart / deregistration) | `remove_claim` per dropped chunk |
 
 The namespace comes from the key the event carries, so nothing new is
 published for it. The steady-state store path claims for one namespace

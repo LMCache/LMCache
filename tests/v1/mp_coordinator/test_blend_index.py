@@ -143,7 +143,7 @@ def test_remove_makes_content_undiscoverable():
     index = _index()
     content = _content(1, 2, 3, 4)
     index.add(content, b"A", token_offset=0, namespace=NS)
-    index.remove(content, b"A", NS)
+    index.remove_claim(content, b"A", NS)
 
     assert index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS) == []
     assert index.stats().num_contents == 0
@@ -154,8 +154,8 @@ def test_remove_of_unknown_chunk_or_content_is_a_noop():
     content = _content(1, 2, 3, 4)
     index.add(content, b"A", token_offset=0, namespace=NS)
 
-    index.remove(content, b"UNKNOWN", NS)
-    index.remove(_content(9, 9, 9, 9), b"A", NS)
+    index.remove_claim(content, b"UNKNOWN", NS)
+    index.remove_claim(_content(9, 9, 9, 9), b"A", NS)
 
     assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS)) == [
         (b"A", 0, 0)
@@ -172,7 +172,7 @@ def test_identical_content_under_two_prefixes_survives_one_eviction():
     index.add(content, b"B", token_offset=512, namespace=NS)
     assert index.stats().num_chunks == 2
 
-    index.remove(content, b"A", NS)
+    index.remove_claim(content, b"A", NS)
 
     assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS)) == [
         (b"B", 512, 0)
@@ -205,7 +205,7 @@ def test_many_contents_stay_matchable_across_growth_and_compaction():
     survivors = {k: v for k, v in contents.items() if k[0] % 20 == 0}
     for chunk_hash, content in contents.items():
         if chunk_hash not in survivors:
-            index.remove(content, chunk_hash, NS)
+            index.remove_claim(content, chunk_hash, NS)
 
     assert index.stats().num_contents == len(survivors)
     for chunk_hash, content in survivors.items():
@@ -643,7 +643,7 @@ def test_releasing_one_namespace_leaves_the_other_matching():
     index.add(content, b"A", token_offset=0, namespace=NS)
     index.add(content, b"A", token_offset=0, namespace=OTHER_NS)
 
-    index.remove(content, b"A", NS)
+    index.remove_claim(content, b"A", NS)
 
     query = np.asarray([1, 2, 3, 4], dtype=np.uint64)
     assert index.match(query, NS) == []
@@ -657,8 +657,8 @@ def test_releasing_the_last_namespace_drops_the_content():
     index.add(content, b"A", token_offset=0, namespace=NS)
     index.add(content, b"A", token_offset=0, namespace=OTHER_NS)
 
-    index.remove(content, b"A", NS)
-    index.remove(content, b"A", OTHER_NS)
+    index.remove_claim(content, b"A", NS)
+    index.remove_claim(content, b"A", OTHER_NS)
 
     assert index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), OTHER_NS) == []
     assert index.stats().num_contents == 0

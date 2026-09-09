@@ -97,7 +97,7 @@ class _FingerprintEntry:
 class BlendIndex:
     """Thread-safe content fingerprint index for fragment lookups.
 
-    Mutations arrive through :meth:`add`, :meth:`remove`, and
+    Mutations arrive through :meth:`add`, :meth:`remove_claim`, and
     :meth:`remove_chunk` (driven by binding lifecycle); reads through
     :meth:`match` and :meth:`stats`.
     """
@@ -182,7 +182,7 @@ class BlendIndex:
             occupant.token_offset = token_offset
             occupant.namespaces.add(namespace)
 
-    def remove(
+    def remove_claim(
         self, token_ids: np.ndarray, chunk_hash: bytes, namespace: BlendNamespace
     ) -> None:
         """Drop ``namespace``'s claim on ``chunk_hash``.
@@ -210,7 +210,13 @@ class BlendIndex:
             if occupant.namespaces:
                 return
             del entry.occupants[chunk_hash]
-            self._drop_entry_if_empty(poly, entry)
+            if entry.occupants:
+                return
+            del self._fingerprint_table[poly]
+            # The bit stays until a rebuild: clearing it here could hide a
+            # different fingerprint sharing the bucket.
+            if self._bits_set > 2 * len(self._fingerprint_table):
+                self._rebuild_table()
 
     def remove_chunk(self, token_ids: np.ndarray, chunk_hash: bytes) -> None:
         """Drop ``chunk_hash`` and every namespace's claim on it.
@@ -229,7 +235,13 @@ class BlendIndex:
             entry = self._fingerprint_table.get(poly)
             if entry is None or entry.occupants.pop(chunk_hash, None) is None:
                 return
-            self._drop_entry_if_empty(poly, entry)
+            if entry.occupants:
+                return
+            del self._fingerprint_table[poly]
+            # The bit stays until a rebuild: clearing it here could hide a
+            # different fingerprint sharing the bucket.
+            if self._bits_set > 2 * len(self._fingerprint_table):
+                self._rebuild_table()
 
     def match(self, tokens: np.ndarray, namespace: BlendNamespace) -> list[BlendMatch]:
         """Find chunks ``namespace`` can retrieve, contained in ``tokens``.
@@ -263,25 +275,24 @@ class BlendIndex:
                 entry = self._fingerprint_table.get(int(probe[position]))
                 if entry is None:
                     continue  # bucket shared with another fingerprint
-                # Choose the occupant before verifying: a set membership
-                # test is far cheaper than comparing a full window, so
-                # content this namespace cannot retrieve is dropped
-                # without paying for the comparison.
-                candidate = self._retrievable_occupant(entry, namespace, seen)
-                if candidate is None:
-                    continue
-                cur_st = position * self._probe_stride
-                if not np.array_equal(query[cur_st : cur_st + window], entry.token_ids):
-                    continue  # fingerprint collision: content differs
-                chunk_hash, token_offset = candidate
-                seen.add(chunk_hash)
-                matches.append(
-                    BlendMatch(
-                        chunk_hash=chunk_hash,
-                        old_st=token_offset,
-                        cur_st=cur_st,
+                for chunk_hash, occupant in entry.occupants.items():
+                    if chunk_hash in seen or namespace not in occupant.namespaces:
+                        continue
+                    # Verifying only here spares foreign content the comparison.
+                    cur_st = position * self._probe_stride
+                    if not np.array_equal(
+                        query[cur_st : cur_st + window], entry.token_ids
+                    ):
+                        break  # fingerprint collision: content differs
+                    seen.add(chunk_hash)
+                    matches.append(
+                        BlendMatch(
+                            chunk_hash=chunk_hash,
+                            old_st=occupant.token_offset,
+                            cur_st=cur_st,
+                        )
                     )
-                )
+                    break  # occupants are content-identical; one suffices
         return matches
 
     def stats(self) -> BlendIndexStats:
@@ -309,41 +320,6 @@ class BlendIndex:
             )
 
     # -- Internals -------------------------------------------------------------
-
-    @staticmethod
-    def _retrievable_occupant(
-        entry: _FingerprintEntry, namespace: BlendNamespace, seen: set[bytes]
-    ) -> tuple[bytes, int] | None:
-        """Return the chunk of ``entry`` that ``namespace`` should be offered.
-
-        Occupants are content-identical, so the first one this namespace
-        claims and has not already been offered suffices. Call with the
-        lock held.
-
-        Args:
-            entry: The content entry whose occupants to choose from.
-            namespace: The requester's retrieval namespace.
-            seen: Chunk hashes already emitted for this query.
-
-        Returns:
-            ``(chunk_hash, token_offset)``, or ``None`` when this
-            namespace holds no unoffered chunk of the content.
-        """
-        for chunk_hash, occupant in entry.occupants.items():
-            if chunk_hash not in seen and namespace in occupant.namespaces:
-                return chunk_hash, occupant.token_offset
-        return None
-
-    def _drop_entry_if_empty(self, poly: int, entry: _FingerprintEntry) -> None:
-        """Retire ``entry`` once no chunk holds its content. Call with the
-        lock held."""
-        if entry.occupants:
-            return
-        del self._fingerprint_table[poly]
-        # The bit stays until a rebuild: clearing it here could hide a
-        # different fingerprint sharing the bucket.
-        if self._bits_set > 2 * len(self._fingerprint_table):
-            self._rebuild_table()
 
     def _fingerprint(self, token_ids: np.ndarray) -> int:
         """Return the 64-bit polynomial fingerprint of one chunk's content."""

@@ -623,11 +623,7 @@ class KeyDirectory(View):
             return
         token_ids.flags.writeable = False
         binding = self._token_bindings[chunk_hash]
-        # One chunk hash holding two contents means a hash collision or a
-        # misreporting emitter; retire the old fingerprint for every
-        # namespace, or the chunk stays discoverable under content it no
-        # longer has. Guarded on the index being live so a fleet without
-        # blend lookup never pays for the comparison.
+        # Content changed under a known hash: retire the stale fingerprint.
         replaced = (
             self._blend_lookup_enabled
             and bool(binding.token_ids.size)
@@ -675,7 +671,9 @@ class KeyDirectory(View):
                 BlendNamespace.from_object_key(held) == namespace
                 for held in binding.keys
             ):
-                self._blend_index.remove(binding.token_ids, key.chunk_hash, namespace)
+                self._blend_index.remove_claim(
+                    binding.token_ids, key.chunk_hash, namespace
+                )
         if not binding.keys:
             del self._token_bindings[key.chunk_hash]
 
