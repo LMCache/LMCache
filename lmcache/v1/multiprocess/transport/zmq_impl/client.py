@@ -192,6 +192,16 @@ class ZmqMultiprocessClient(RequestClient):
         """Check server health and refresh worker liveness."""
         return self._call(RequestType.PING, instance_id)
 
+    def ping_registered(
+        self, instance_id: int, registration_type: RequestType
+    ) -> MessagingFuture[Any]:
+        """Check server health and the worker's primary registration."""
+        return self._call(
+            RequestType.PING_REGISTERED,
+            instance_id,
+            registration_type,
+        )
+
     def report_block_allocation(
         self,
         instance_id: int,

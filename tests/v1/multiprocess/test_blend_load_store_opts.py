@@ -911,6 +911,25 @@ def test_register_rope_dual_cache_round_trip():
     assert len(state.cos_sin_caches) == 2
     assert state.group_to_cache == [0, 1]
     assert state.cache_for_group(1) is state.cos_sin_caches[1]
+    eng._transfer_module.get_and_touch_context_entry.assert_called_with(7)
+
+
+def test_retrieve_precomputed_marks_real_transfer_activity():
+    """Blend metadata setup is not readiness; the real scatter request is."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
+
+    eng = MagicMock(spec=blend_mod.BlendModule)
+    eng._transfer_module = MagicMock()
+    eng._transfer_module.get_and_touch_context_entry.return_value = None
+    retrieve = blend_mod.BlendModule.cb_retrieve_pre_computed.__get__(eng)
+
+    with pytest.raises(ValueError, match="not registered"):
+        retrieve(MagicMock(), [], [], 7, b"")
+
+    eng._transfer_module.get_and_touch_context_entry.assert_called_once_with(
+        7, transfer_activity=True
+    )
 
 
 def test_register_rope_rejects_invalid_group_to_cache():

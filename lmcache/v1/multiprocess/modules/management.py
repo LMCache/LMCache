@@ -2,7 +2,7 @@
 """Management and utility operations for the MPCacheServer."""
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import threading
 
 # First Party
@@ -40,10 +40,14 @@ class ManagementModule:
             whose per-instance registrations are refreshed on PING and scanned
             for staleness, plus any state mirror (e.g. ``BlendModule``)
             notified via ``drop_instance_state`` when an instance is reaped.
-        worker_reap_timeout_seconds: Silence budget for a ping-proven worker;
-            0 disables reaping (no thread is started).
-        worker_registration_grace_seconds: Silence budget for a worker that
-            registered but never pinged.
+        registration_targets: Registration request types mapped to the owning
+            liveness target for registration-aware worker heartbeats.
+        mirror_state_owner: The liveness target whose reaps invalidate mirrored
+            per-instance state. Reaps from other contexts with the same
+            ``instance_id`` do not notify mirrors.
+        worker_reap_timeout_seconds: Silence budget after both liveness signals;
+            0 disables reaping.
+        worker_registration_grace_seconds: Silence budget before both signals.
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
     """
@@ -52,6 +56,9 @@ class ManagementModule:
         self,
         ctx: MPCacheServerContext,
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
+        registration_targets: Mapping[RequestType, InstanceLivenessTarget]
+        | None = None,
+        mirror_state_owner: InstanceLivenessTarget | None = None,
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
         experimental_transfer: Sequence[str] = (),
@@ -59,6 +66,8 @@ class ManagementModule:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
+        self._registration_targets = dict(registration_targets or {})
+        self._mirror_state_owner = mirror_state_owner
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
         self._experimental_transfer = tuple(experimental_transfer)
@@ -102,6 +111,11 @@ class ManagementModule:
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(RequestType.PING, self.ping, ThreadPoolType.NORMAL),
+            HandlerSpec(
+                RequestType.PING_REGISTERED,
+                self.ping_registered,
+                ThreadPoolType.NORMAL,
+            ),
             HandlerSpec(RequestType.NOOP, self.debug, ThreadPoolType.SYNC),
             HandlerSpec(
                 RequestType.REPORT_BLOCK_ALLOCATION,
@@ -150,21 +164,37 @@ class ManagementModule:
                 target.touch_instance(instance_id)
         return True
 
-    def _reap_cycle(self) -> ThreadRunSummary:
-        """Run one reaper scan: reap stale workers, drop mirrored state.
+    def ping_registered(
+        self,
+        instance_id: int,
+        registration_type: RequestType,
+    ) -> bool:
+        """Refresh liveness and report whether the primary Context exists."""
+        target = self._registration_targets.get(registration_type)
+        registered = target is not None and target.touch_instance(instance_id)
+        # Preserve PING's refresh for optional Contexts without making them
+        # part of primary-registration recovery.
+        for other in self._liveness_targets:
+            if other is not target:
+                other.touch_instance(instance_id)
+        return registered
 
-        Each reaped instance id is passed to ``drop_instance_state`` on every
-        target; it is a no-op for targets that mirror nothing for that id.
+    def _reap_cycle(self) -> ThreadRunSummary:
+        """Run one reaper scan and drop mirrors owned by reaped Contexts.
 
         Returns:
             A summary recording how many instances were reaped this scan.
         """
         reaped: list[int] = []
+        mirror_reaped: list[int] = []
         for target in self._liveness_targets:
-            reaped.extend(
-                target.reap_stale_instances(self._reap_timeout, self._reap_grace)
+            target_reaped = target.reap_stale_instances(
+                self._reap_timeout, self._reap_grace
             )
-        for instance_id in reaped:
+            reaped.extend(target_reaped)
+            if target is self._mirror_state_owner:
+                mirror_reaped.extend(target_reaped)
+        for instance_id in mirror_reaped:
             for target in self._liveness_targets:
                 target.drop_instance_state(instance_id)
         return ThreadRunSummary(success=True, message=f"reaped={len(reaped)}")
