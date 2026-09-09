@@ -720,6 +720,96 @@ impl Drop for AlignedBuf {
     }
 }
 
+/// Source description for one prepared io_uring write.
+///
+/// Fields:
+/// - `ptr_addr`: Address to submit, either the caller buffer or the bounce
+/// - `bounce`: Bounce buffer that must stay alive until the write completes
+/// - `fixed_buffer_idx`: Registered fixed-buffer index, cleared when bouncing
+struct PreparedWriteBuffer {
+    ptr_addr: usize,
+    bounce: Option<Arc<AlignedBuf>>,
+    fixed_buffer_idx: Option<u16>,
+}
+
+// Report whether `len` bytes starting at `ptr_addr + offset` are all zero.
+fn buffer_range_is_zero(ptr_addr: usize, offset: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let ptr = (ptr_addr as *const u8).wrapping_add(offset);
+    // SAFETY: callers only pass ranges inside the buffer they hold, so
+    // [offset, offset + len) is readable for the lifetime of this call.
+    unsafe {
+        slice::from_raw_parts(ptr, len)
+            .iter()
+            .all(|byte| *byte == 0)
+    }
+}
+
+// Prepare one regular io_uring write so that `total_len` bytes can be submitted
+// while reading only within the source buffer bounds.
+//
+// The padding region [payload_len, total_len) is always written as zeroes. The
+// caller buffer is submitted directly when it can already satisfy that, which
+// keeps the fixed-buffer zero-copy path. A bounce buffer is used when the
+// source is shorter than `total_len`, its padding tail is not already zero, or
+// O_DIRECT requires an aligned address. The source buffer is never modified.
+fn prepare_iouring_write_buffer(
+    ptr_addr: usize,
+    cap: usize,
+    payload_len: usize,
+    total_len: usize,
+    use_odirect: bool,
+    alignment: usize,
+    fixed_buffer_idx: Option<u16>,
+) -> PyResult<PreparedWriteBuffer> {
+    if cap < payload_len {
+        return Err(PyValueError::new_err(format!(
+            "input buffer too small: cap={cap} need={payload_len}"
+        )));
+    }
+    if total_len < payload_len {
+        return Err(PyValueError::new_err("total_len must be >= payload_len"));
+    }
+
+    let needs_alignment_bounce = use_odirect && !ptr_addr.is_multiple_of(alignment);
+    let needs_capacity_bounce = cap < total_len;
+    let has_padding = payload_len < total_len;
+    let tail_is_zero = !has_padding
+        || (!needs_capacity_bounce
+            && buffer_range_is_zero(ptr_addr, payload_len, total_len - payload_len));
+    let needs_zero_bounce = has_padding && !tail_is_zero;
+    let needs_bounce = needs_alignment_bounce || needs_capacity_bounce || needs_zero_bounce;
+
+    if !needs_bounce {
+        return Ok(PreparedWriteBuffer {
+            ptr_addr,
+            bounce: None,
+            fixed_buffer_idx,
+        });
+    }
+
+    let bounce = AlignedBuf::new(total_len, alignment)?;
+    let bounce_ptr = bounce.as_mut_ptr();
+    // SAFETY: the bounce holds total_len bytes and cap >= payload_len was
+    // checked above, so both the copy and the zero-fill stay in bounds.
+    unsafe {
+        if payload_len > 0 {
+            std::ptr::copy_nonoverlapping(ptr_addr as *const u8, bounce_ptr, payload_len);
+        }
+        if total_len > payload_len {
+            std::ptr::write_bytes(bounce_ptr.add(payload_len), 0u8, total_len - payload_len);
+        }
+    }
+    let bounce_arc = Arc::new(bounce);
+    Ok(PreparedWriteBuffer {
+        ptr_addr: bounce_arc.as_ptr() as usize,
+        bounce: Some(bounce_arc),
+        fixed_buffer_idx: None,
+    })
+}
+
 // Acquire a Python buffer view with the requested mutability.
 fn get_pybuffer<'py>(
     py: Python<'py>,
@@ -2172,11 +2262,23 @@ impl RawBlockDevice {
     /// All writes are queued to the worker thread, which processes them
     /// in batches to maximize throughput.
     ///
+    /// `total_lens` gives the physical transfer length of each write and
+    /// `payload_lens` the logical length of the source data; omitting
+    /// `payload_lens` makes it equal to `total_lens`. Each source buffer is
+    /// read only within its bounds and is never modified, and the
+    /// padding region `[payload_len, total_len)` is always written as zeroes.
+    ///
     /// Returns a batch ID that must be passed to `wait_iouring()` to wait for
     /// completion and obtain a success bitmap plus sparse completion errors.
     /// Validation or request-preparation errors are raised instead of returning
     /// a batch ID.
-    #[pyo3(signature = (offsets, buffers, total_lens, placement_ids = None))]
+    #[pyo3(signature = (
+        offsets,
+        buffers,
+        total_lens,
+        placement_ids = None,
+        payload_lens = None,
+    ))]
     fn batched_write(
         &self,
         py: Python<'_>,
@@ -2184,6 +2286,7 @@ impl RawBlockDevice {
         buffers: Vec<Bound<'_, PyAny>>,
         total_lens: Vec<usize>,
         placement_ids: Option<Vec<Option<i32>>>,
+        payload_lens: Option<Vec<usize>>,
     ) -> PyResult<u64> {
         if !self.use_iouring {
             return Err(PyRuntimeError::new_err("io_uring not enabled"));
@@ -2213,6 +2316,39 @@ impl RawBlockDevice {
             vec![None; n]
         };
 
+        // payload_lens carries the logical (unpadded) length of each buffer. When
+        // omitted it equals total_lens, which reproduces the legacy behavior where
+        // the full transfer length is also the valid payload length.
+        let payload_lens: Vec<usize> = match payload_lens {
+            Some(p) => {
+                if p.len() != n {
+                    return Err(PyValueError::new_err(
+                        "payload_lens must have same length as offsets",
+                    ));
+                }
+                p
+            }
+            None => total_lens.clone(),
+        };
+        for i in 0..n {
+            if payload_lens[i] > total_lens[i] {
+                return Err(PyValueError::new_err("total_len must be >= payload_len"));
+            }
+        }
+        let align = self.alignment;
+        if self.use_odirect {
+            for i in 0..n {
+                #[allow(clippy::manual_is_multiple_of)]
+                if (offsets[i] as usize) % align != 0 {
+                    return Err(PyValueError::new_err("O_DIRECT requires aligned offset"));
+                }
+                #[allow(clippy::manual_is_multiple_of)]
+                if total_lens[i] % align != 0 {
+                    return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
+                }
+            }
+        }
+
         // Acquire buffer views to keep them alive until wait_iouring() completes
         let mut views = Vec::with_capacity(n);
         for buffer in &buffers {
@@ -2225,6 +2361,25 @@ impl RawBlockDevice {
                 return Err(PyValueError::new_err("null buffer pointer"));
             }
             views.push(view);
+        }
+
+        // Validate buffer capacities before allocating any batch tracking so the
+        // error path stays simple (just release the views).
+        let mut cap_err: Option<(usize, usize)> = None;
+        for (i, view) in views.iter().enumerate() {
+            let cap = view.len as usize;
+            if cap < payload_lens[i] {
+                cap_err = Some((cap, payload_lens[i]));
+                break;
+            }
+        }
+        if let Some((cap, need)) = cap_err {
+            for v in views {
+                release_pybuffer(v);
+            }
+            return Err(PyValueError::new_err(format!(
+                "input buffer too small: cap={cap} need={need}"
+            )));
         }
 
         // Generate a unique batch ID for this batch
@@ -2248,10 +2403,13 @@ impl RawBlockDevice {
             }
         }
 
-        // Extract pointers as usize before releasing GIL (raw pointers are not Send)
+        // Extract pointers and capacities as usize before releasing GIL (raw
+        // pointers are not Send).
         let mut ptrs = Vec::with_capacity(n);
+        let mut caps = Vec::with_capacity(n);
         for view in &views {
             ptrs.push(view.buf as usize);
+            caps.push(view.len as usize);
         }
 
         for view in views {
@@ -2297,8 +2455,9 @@ impl RawBlockDevice {
 
             // Prepare all requests, bounce buffers (if needed) and collect submission data.
             for i in 0..n {
-                let ptr = ptrs[i] as *const u8;
                 let total_len = total_lens[i];
+                let payload_len = payload_lens[i];
+                let cap = caps[i];
                 let offset = offsets[i];
 
                 let comp = Arc::new(IoCompletion::new());
@@ -2306,39 +2465,15 @@ impl RawBlockDevice {
                 // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
                 let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
 
-                if use_odirect {
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if (offset as usize) % alignment != 0 {
-                        return Err(PyValueError::new_err("O_DIRECT requires aligned offset"));
-                    }
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if total_len % alignment != 0 {
-                        return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
-                    }
-                }
-
-                // Misaligned pointer is handled via bounce buffer for writes
-                let (final_ptr, bounce_opt, fixed_idx) = if use_odirect {
-                    let align = alignment;
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if ptrs[i] % align != 0 {
-                        let bounce = AlignedBuf::new(total_len, align)?;
-                        unsafe {
-                            libc::memcpy(
-                                bounce.as_mut_ptr() as *mut libc::c_void,
-                                ptr as *const libc::c_void,
-                                total_len,
-                            );
-                        }
-                        let bounce_arc = std::sync::Arc::new(bounce);
-                        let bounce_ptr = bounce_arc.as_ptr();
-                        (bounce_ptr, Some(bounce_arc), None)
-                    } else {
-                        (ptr, None, fixed_idx)
-                    }
-                } else {
-                    (ptr, None, fixed_idx)
-                };
+                let prepared = prepare_iouring_write_buffer(
+                    ptrs[i],
+                    cap,
+                    payload_len,
+                    total_len,
+                    use_odirect,
+                    alignment,
+                    fixed_idx,
+                )?;
 
                 // Build NVMe command data
                 let placement_id_u16 = placement_ids[i];
@@ -2361,11 +2496,11 @@ impl RawBlockDevice {
                     fd,
                     offset,
                     len: total_len,
-                    ptr_addr: final_ptr as usize,
+                    ptr_addr: prepared.ptr_addr,
                     is_write: true,
                     completion: comp.clone(),
-                    fixed_buffer_idx: fixed_idx,
-                    bounce: bounce_opt,
+                    fixed_buffer_idx: prepared.fixed_buffer_idx,
+                    bounce: prepared.bounce,
                     original_ptr: None,
                     payload_len: None,
                     batch_id,
@@ -2634,6 +2769,10 @@ impl RawBlockDevice {
     }
 
     /// Synchronous write using io_uring.
+    ///
+    /// `total_len` defaults to `payload_len`. The source buffer is read only
+    /// within its bounds and is never modified, and the padding region
+    /// `[payload_len, total_len)` is always written as zeroes.
     #[pyo3(signature = (offset, data, payload_len, total_len = None, placement_id = None))]
     fn write_uring(
         &self,
@@ -2703,23 +2842,27 @@ impl RawBlockDevice {
         };
 
         let placement_id_u16 = placement_id.map(placement_id_to_u16).transpose()?;
+        let prepared = prepare_iouring_write_buffer(
+            ptr as usize,
+            cap,
+            payload_len,
+            total_len,
+            self.use_odirect,
+            align,
+            fixed_idx,
+        )?;
 
-        // Use bounce buffer if:
-        // Buffer is not aligned (O_DIRECT requirement)
-        // Buffer capacity is less than total_len
-        let use_bounce = !ptr_aligned || cap < total_len;
-
-        let res = if !use_bounce {
+        let res = if prepared.bounce.is_none() {
             self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
                 offset,
                 len: total_len,
-                ptr_addr: ptr as usize,
+                ptr_addr: prepared.ptr_addr,
                 is_write: true,
                 completion: comp.clone(),
-                fixed_buffer_idx: fixed_idx,
+                fixed_buffer_idx: prepared.fixed_buffer_idx,
                 bounce: None,
                 original_ptr: None,
                 payload_len: None,
@@ -2739,24 +2882,18 @@ impl RawBlockDevice {
             }
             py.allow_threads(move || comp.wait())
         } else {
-            let bounce = AlignedBuf::new(total_len, align)?;
-            let bounce_arc = std::sync::Arc::new(bounce);
-            let bounce_ptr = bounce_arc.as_mut_ptr();
-            // Copy data to bounce buffer before submission
-            unsafe {
-                std::ptr::copy_nonoverlapping(ptr, bounce_ptr, payload_len);
-            }
+            let bounce = prepared.bounce;
             self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
                 offset,
                 len: total_len,
-                ptr_addr: bounce_ptr as usize,
+                ptr_addr: prepared.ptr_addr,
                 is_write: true,
                 completion: comp.clone(),
                 fixed_buffer_idx: None,
-                bounce: Some(bounce_arc),
+                bounce,
                 original_ptr: None,
                 payload_len: Some(payload_len),
                 batch_id: 0,
