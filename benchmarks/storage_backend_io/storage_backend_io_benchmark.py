@@ -590,23 +590,71 @@ class StorageBackendBenchmark(ABC):
         return result
 
     def _execute_read_phase(self) -> list[tuple[CacheEngineKey, Optional[MemoryObj]]]:
-        """Execute the read phase and return results.
+        """Execute the read phase and require every requested object to load.
 
-        Override in subclass to customize read behavior.
+        Returns:
+            Read results in request order.
+
+        Raises:
+            RuntimeError: If a worker raises, returns an incomplete result, or
+                returns a missing object. Partial runs are rejected because
+                planned-operation throughput would otherwise be misleading.
         """
         slices = self._get_slices()
         read_results: list[tuple[CacheEngineKey, Optional[MemoryObj]]] = []
-        read_lock = threading.Lock()
+        loaded_objects: list[MemoryObj] = []
+        worker_errors: list[str] = []
+        missing_operations = 0
+        failed_operations = 0
+        unexpected_operations = 0
 
-        def submit_read_slice(start: int, end: int) -> None:
-            batch_keys = self._keys[start:end]
-            loaded = self._backend.batched_get_blocking(batch_keys)
-            with read_lock:
-                read_results.extend(zip(batch_keys, loaded, strict=False))
+        def submit_read_slice(start: int, end: int) -> list[Optional[MemoryObj]]:
+            return self._backend.batched_get_blocking(self._keys[start:end])
 
-        with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
-            for s in slices:
-                ex.submit(submit_read_slice, s[0], s[1])
+        with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+            futures = [
+                (start, end, executor.submit(submit_read_slice, start, end))
+                for start, end in slices
+            ]
+            for start, end, future in futures:
+                expected_count = end - start
+                try:
+                    loaded = future.result()
+                except Exception as error:
+                    missing_operations += expected_count
+                    worker_errors.append(
+                        f"keys[{start}:{end}]: {type(error).__name__}: {error}"
+                    )
+                    continue
+
+                returned_count = len(loaded)
+                missing_operations += max(0, expected_count - returned_count)
+                unexpected_operations += max(0, returned_count - expected_count)
+                failed_operations += sum(obj is None for obj in loaded[:expected_count])
+                loaded_objects.extend(obj for obj in loaded if obj is not None)
+                read_results.extend(
+                    zip(self._keys[start:end], loaded[:expected_count], strict=False)
+                )
+
+        if (
+            worker_errors
+            or missing_operations
+            or failed_operations
+            or unexpected_operations
+        ):
+            for loaded_obj in loaded_objects:
+                try:
+                    loaded_obj.ref_count_down()
+                except Exception:
+                    pass
+            details = (
+                f"missing_operations={missing_operations}, "
+                f"failed_operations={failed_operations}, "
+                f"unexpected_operations={unexpected_operations}"
+            )
+            if worker_errors:
+                details += f", worker_errors={worker_errors}"
+            raise RuntimeError(f"read benchmark incomplete: {details}")
 
         return read_results
 
