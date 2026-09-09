@@ -204,8 +204,42 @@ fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<b
     }
 }
 
-///Per batch tracking for in flight I/O operation
-type BatchTracking = (Arc<AtomicU64>, Arc<Condvar>);
+/// Per-batch tracking for in-flight I/O operations.
+struct BatchTracking {
+    remaining: Mutex<u64>,
+    completed: Condvar,
+}
+
+impl BatchTracking {
+    fn new() -> Self {
+        Self {
+            remaining: Mutex::new(0),
+            completed: Condvar::new(),
+        }
+    }
+
+    fn increment(&self) {
+        let mut remaining = self.remaining.lock().unwrap();
+        *remaining += 1;
+    }
+
+    fn decrement(&self) {
+        let mut remaining = self.remaining.lock().unwrap();
+        debug_assert!(*remaining > 0);
+        *remaining -= 1;
+        if *remaining == 0 {
+            self.completed.notify_all();
+        }
+    }
+
+    fn wait(&self) {
+        let remaining = self.remaining.lock().unwrap();
+        let _guard = self
+            .completed
+            .wait_while(remaining, |remaining| *remaining > 0)
+            .unwrap();
+    }
+}
 type IoUringCompletionErrors = Vec<(usize, String)>;
 type IoUringBatchResults = (Vec<bool>, IoUringCompletionErrors);
 
@@ -571,6 +605,34 @@ mod tests {
         assert!(placement_id_to_u16(0).is_err());
         assert!(placement_id_to_u16(-1).is_err());
         assert!(placement_id_to_u16(65536).is_err());
+    }
+
+    #[test]
+    fn batch_tracking_wait_handles_completion_before_wait() {
+        let tracking = BatchTracking::new();
+        tracking.increment();
+        tracking.decrement();
+        tracking.wait();
+    }
+
+    #[test]
+    fn batch_tracking_waits_for_all_completions() {
+        let tracking = Arc::new(BatchTracking::new());
+        tracking.increment();
+        tracking.increment();
+
+        let waiter_tracking = Arc::clone(&tracking);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = thread::spawn(move || {
+            waiter_tracking.wait();
+            done_tx.send(()).unwrap();
+        });
+
+        tracking.decrement();
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        tracking.decrement();
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        waiter.join().unwrap();
     }
 }
 
@@ -1078,7 +1140,7 @@ struct RawBlockDevice {
     in_flight_cvar: Arc<Condvar>,
     // Per-batch in-flight count tracking
     // Maps batch_id -> (in_flight_count, condition_variable)
-    batch_in_flight: Arc<Mutex<HashMap<u64, BatchTracking>>>,
+    batch_in_flight: Arc<Mutex<HashMap<u64, Arc<BatchTracking>>>>,
     // Worker wake-up: producer eventfd + ring CQ eventfd, both polled via
     // a single epoll_fd. Replaces the previous `Arc<Condvar>` which couldn't
     // be signaled from the kernel-side completion queue.
@@ -1290,7 +1352,7 @@ impl RawBlockDevice {
             let batched_completions =
                 Arc::new(Mutex::new(HashMap::<u64, Vec<Arc<IoCompletion>>>::new()));
             let next_batch_id = Arc::new(AtomicU64::new(1));
-            let batch_in_flight = Arc::new(Mutex::new(HashMap::<u64, BatchTracking>::new()));
+            let batch_in_flight = Arc::new(Mutex::new(HashMap::<u64, Arc<BatchTracking>>::new()));
 
             let ring_clone = ring.clone();
             let queue_clone = Arc::clone(&queue);
@@ -1388,7 +1450,7 @@ impl RawBlockDevice {
             fn decrement_in_flight(
                 in_flight_count: &Arc<AtomicU64>,
                 in_flight_cvar: &Arc<Condvar>,
-                batch_in_flight: &Arc<Mutex<HashMap<u64, BatchTracking>>>,
+                batch_in_flight: &Arc<Mutex<HashMap<u64, Arc<BatchTracking>>>>,
                 batch_id: u64,
             ) {
                 let prev = in_flight_count.fetch_sub(1, Ordering::Relaxed);
@@ -1397,12 +1459,12 @@ impl RawBlockDevice {
                 }
                 // Decrement per-batch in-flight count and notify if batch is complete
                 if batch_id != 0 {
-                    let batch_map = batch_in_flight.lock().unwrap();
-                    if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
-                        let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
-                        if prev_batch == 1 {
-                            batch_cvar.notify_all();
-                        }
+                    let batch_tracking = {
+                        let batch_map = batch_in_flight.lock().unwrap();
+                        batch_map.get(&batch_id).cloned()
+                    };
+                    if let Some(batch_tracking) = batch_tracking {
+                        batch_tracking.decrement();
                     }
                 }
             }
@@ -2233,10 +2295,7 @@ impl RawBlockDevice {
         // Initialize per-batch tracking for this batch
         {
             let mut batch_map = self.batch_in_flight.lock().unwrap();
-            batch_map.insert(
-                batch_id,
-                (Arc::new(AtomicU64::new(0)), Arc::new(Condvar::new())),
-            );
+            batch_map.insert(batch_id, Arc::new(BatchTracking::new()));
         }
 
         // Store buffer objects to keep them alive until they are complete
@@ -2383,8 +2442,8 @@ impl RawBlockDevice {
                 // Increment per-batch in-flight count
                 {
                     let batch_map = batch_in_flight.lock().unwrap();
-                    if let Some((batch_count, _)) = batch_map.get(&batch_id) {
-                        batch_count.fetch_add(1, Ordering::Relaxed);
+                    if let Some(batch_tracking) = batch_map.get(&batch_id) {
+                        batch_tracking.increment();
                     }
                 }
                 {
@@ -2444,10 +2503,10 @@ impl RawBlockDevice {
         }
 
         // Get the per-batch tracking for this batch
-        let (batch_count, batch_cvar) = {
+        let batch_tracking = {
             let batch_map = self.batch_in_flight.lock().unwrap();
             match batch_map.get(&batch_id) {
-                Some((count, cvar)) => (Arc::clone(count), Arc::clone(cvar)),
+                Some(batch_tracking) => Arc::clone(batch_tracking),
                 None => {
                     // Batch not found. This could be an empty batch or already completed
                     // Check if there are any completions for this batch
@@ -2464,16 +2523,7 @@ impl RawBlockDevice {
         };
 
         // Release the GIL while waiting for I/O to complete
-        py.allow_threads(move || {
-            let mutex = Mutex::new(());
-            let mut guard = mutex.lock().unwrap();
-            while batch_count.load(Ordering::Relaxed) > 0 {
-                let (g, _) = batch_cvar
-                    .wait_timeout(guard, Duration::from_micros(10))
-                    .unwrap();
-                guard = g;
-            }
-        });
+        py.allow_threads(move || batch_tracking.wait());
 
         // Check all completion results for errors for this specific batch
         let mut completions = self.batched_completions.lock().unwrap();
@@ -2842,10 +2892,7 @@ impl RawBlockDevice {
         // Initialize per-batch tracking for this batch
         {
             let mut batch_map = self.batch_in_flight.lock().unwrap();
-            batch_map.insert(
-                batch_id,
-                (Arc::new(AtomicU64::new(0)), Arc::new(Condvar::new())),
-            );
+            batch_map.insert(batch_id, Arc::new(BatchTracking::new()));
         }
 
         // Store buffer objects to keep them alive until they complete
@@ -2978,8 +3025,8 @@ impl RawBlockDevice {
                 // Increment per-batch in-flight count
                 {
                     let batch_map = batch_in_flight.lock().unwrap();
-                    if let Some((batch_count, _)) = batch_map.get(&batch_id) {
-                        batch_count.fetch_add(1, Ordering::Relaxed);
+                    if let Some(batch_tracking) = batch_map.get(&batch_id) {
+                        batch_tracking.increment();
                     }
                 }
 
