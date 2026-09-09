@@ -152,6 +152,30 @@ class IPCCacheServerKey:
 KVCache = list[DeviceIPCWrapper]
 
 
+class GroupLayout(msgspec.Struct):
+    """Per-LMCache-group layout for multi-group engine-driven registration.
+
+    Attributes:
+        num_layers: Number of KV layers in this group.
+        hidden_dim_size: Flattened hidden dimension per token for this group.
+        dtype_str: Torch dtype name for this group's KV tensors.
+        tokens_per_block: Tokens covered by one paged block of this group
+            (``EngineGroupInfo.tokens_per_block``; falls back to the engine
+            ``block_size`` when the engine reported ``0``).
+        window_tokens: Tokens stored per LMCache chunk for this group. Equals
+            the full chunk token count for full-attention groups; for a
+            sliding-window group it is ``min(chunk_tokens, sw_size_tokens)`` so
+            the server sizes each per-chunk object to the window. ``0`` means
+            "full chunk" (legacy workers that predate SW support).
+    """
+
+    num_layers: int
+    hidden_dim_size: int
+    dtype_str: str
+    tokens_per_block: int
+    window_tokens: int = 0
+
+
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
     """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
@@ -167,6 +191,10 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         num_physical_slots: Number of physical KV slots gathered into one
             LMCache chunk. ``None`` accepts the legacy protocol, where the
             server assumed one physical slot per logical token.
+        group_layouts: Per-group layouts for multi-group (hybrid-KV) workers,
+            in protocol group order. Empty means legacy single-group; the
+            top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
+            describe the sole group.
     """
 
     instance_id: int
@@ -178,6 +206,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     num_physical_slots: int | None = None
+    group_layouts: list[GroupLayout] = []
 
 
 @dataclass
