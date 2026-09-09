@@ -351,11 +351,11 @@ def compile_request_codec_for_types(
     message_cls: Any,
     payload_types: tuple[Any, ...],
 ) -> tuple[RequestEncoder, RequestDecoder]:
-    """Compile one request codec from transport-neutral payload types.
+    """Compile one request codec from gRPC service payload types.
 
     Args:
         message_cls: Generated protobuf request class.
-        payload_types: Python payload types declared by the protocol.
+        payload_types: Python payload types declared by the gRPC service.
 
     Returns:
         A call encoder accepting ``(args, kwargs)`` and a protobuf decoder.
@@ -459,7 +459,7 @@ def compile_request_codec_for_types(
         return encode_struct, decode_struct
 
     raise TypeError(
-        f"protocol has {len(payload_types)} payloads but "
+        f"gRPC contract has {len(payload_types)} payloads but "
         f"{message_cls.DESCRIPTOR.full_name} has {len(proto_fields)} fields"
     )
 
@@ -478,6 +478,8 @@ def _handler_params_and_payload_types(
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
         )
     ]
+    if params and params[0].name in ("self", "cls"):
+        params = params[1:]
     payload_types = tuple(hints.get(param.name, param.annotation) for param in params)
     return (
         params,
@@ -621,11 +623,11 @@ def _write_response_value(
 def compile_response_decoder_for_type(
     message_cls: Any, response_type: Any
 ) -> ResponseDecoder:
-    """Compile a protobuf response decoder for a protocol response type.
+    """Compile a protobuf response decoder for a gRPC response type.
 
     Args:
         message_cls: Generated protobuf response class.
-        response_type: Python response type declared by the protocol.
+        response_type: Python response type declared by the gRPC service.
 
     Returns:
         A callable that decodes the generated response message.
@@ -675,10 +677,10 @@ def decode_response_to_type(response: Any, response_type: Any) -> Any:
 
     Args:
         response: Generated protobuf response instance.
-        response_type: Python response type declared by the protocol.
+        response_type: Python response type declared by the gRPC service.
 
     Returns:
-        The decoded transport-neutral Python value.
+        The decoded Python value.
     """
     decoder = compile_response_decoder_for_type(type(response), response_type)
     return decoder(response)

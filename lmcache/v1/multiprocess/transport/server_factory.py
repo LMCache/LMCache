@@ -12,28 +12,31 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.config import MPServerConfig
     from lmcache.v1.multiprocess.engine_module import EngineModule
     from lmcache.v1.multiprocess.mq import MessageQueueServer
+    from lmcache.v1.multiprocess.transport.grpc_impl.server import (
+        GrpcMultiprocessServer,
+    )
 
 
 def create_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
-) -> MessageQueueServer:
-    """Create the configured request server used by the multiprocess runtime.
+) -> GrpcMultiprocessServer | MessageQueueServer:
+    """Create a configured request server for the selected transport.
 
     Args:
         modules: Ordered business modules composing the cache server.
-        mp_config: Multiprocess server configuration.
+        mp_config: Multiprocess server configuration selecting ZMQ or gRPC.
 
     Returns:
         Configured, but not yet started, request server.
-
-    Raises:
-        NotImplementedError: If the selected transport runtime is not available.
     """
-    if mp_config.transport != "zmq":
-        raise NotImplementedError(
-            f"Request transport {mp_config.transport!r} is not available yet"
+    if mp_config.transport == "grpc":
+        # First Party
+        from lmcache.v1.multiprocess.transport.grpc_impl.factory import (
+            build_grpc_request_server,
         )
+
+        return build_grpc_request_server(modules, mp_config)
 
     # First Party
     from lmcache.v1.multiprocess.transport.zmq_impl.server import (

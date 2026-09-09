@@ -1,8 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """gRPC adapter for the generated ``DebugService`` surface."""
 
-# First Party
-from lmcache.v1.multiprocess.modules.management import ManagementModule
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.modules.management import ManagementModule
 
 
 class DebugServiceImpl:

@@ -70,12 +70,15 @@ from lmcache.v1.multiprocess.config import (  # noqa: E402
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext  # noqa: E402
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
 from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
-from lmcache.v1.multiprocess.server import add_handler_helper  # noqa: E402
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (  # noqa: E402
     GrpcMultiprocessServer,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.services.p2p import (  # noqa: E402
     P2PServiceImpl,
+)
+from lmcache.v1.multiprocess.transport.zmq_impl.server import (  # noqa: E402
+    add_handler_helper,
+    get_zmq_handler_specs,
 )
 
 _PAGE = 4096
@@ -114,7 +117,7 @@ def _start_p2p_request_server(
         return f"grpc://{target}", grpc_server
 
     zmq_server = MessageQueueServer(f"tcp://{target}", zmq.Context.instance())
-    specs = controller.get_handlers()
+    specs = get_zmq_handler_specs(controller)
     for spec in specs:
         add_handler_helper(zmq_server, spec.request_type, spec.handler)
     zmq_server.add_normal_thread_pool(

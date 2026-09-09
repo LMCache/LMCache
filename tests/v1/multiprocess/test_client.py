@@ -104,8 +104,12 @@ def test_business_callers_create_clients_through_factory() -> None:
     repo_root = Path(__file__).parents[3]
     transport_root = repo_root / "lmcache/v1/multiprocess/transport"
     implementation_tests = {
+        repo_root
+        / "tests/v1/distributed/l2_adapters/test_p2p_l2_adapter_integration.py",
         repo_root / "tests/v1/multiprocess/test_client.py",
         repo_root / "tests/v1/multiprocess/test_mq.py",
+        repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
+        repo_root / "tests/v1/multiprocess/transport_test_utils.py",
     }
     violations: list[str] = []
     for source_root in (repo_root / "lmcache", repo_root / "tests"):
