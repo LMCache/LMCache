@@ -78,6 +78,17 @@ class LazyOffloadPendingStore:
         """
         return self._policy.pop_items_for_offload(self._select_count)
 
+    def has_inflight_store_work(self) -> bool:
+        """Return whether submitted stores are waiting for worker completion.
+
+        Returns:
+            True if submitted stores are still holding GPU blocks while they
+            wait for worker completion, otherwise False. Queued store metadata
+            alone does not require engine keepalive because it can only be
+            submitted by a step that schedules model tokens.
+        """
+        return bool(self._request_block_ids)
+
     def mark_req_finished(self, req_id: str):
         self._policy.mark_req_finished(req_id)
 

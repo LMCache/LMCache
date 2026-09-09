@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """E2E test for LMCache CacheBlend on ROCm with Triton sparse attention.
 
-Based on examples/blend_kv_v1/blend.py but adapted for ROCm:
+Based on examples/blend_in_process/blend.py but adapted for ROCm:
 - Uses FlashAttention backend (not FlashInfer)
 - enable_sparse routes to LMCTritonSparseBackend automatically
 """

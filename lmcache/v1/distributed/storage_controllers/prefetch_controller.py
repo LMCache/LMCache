@@ -193,10 +193,10 @@ class InFlightPrefetchRequest:
     request_id: PrefetchRequestId
     keys: list[ObjectKey]
     phase: PrefetchPhase
-    extra_count: int = 0
-    """Extra read locks per key (on top of the default 1) to acquire when
-    transitioning from write-locked to read-locked.  Must match the
-    ``extra_count`` used in the corresponding ``submit_prefetch_task`` call."""
+    num_kv_readers: int = 1
+    """Total read locks per key to acquire when transitioning from
+    write-locked to read-locked.  Must match the ``num_kv_readers`` of the
+    corresponding ``submit_prefetch_task`` spec."""
 
     policy: TrimPolicy = TrimPolicy.PREFIX
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
@@ -826,7 +826,7 @@ class PrefetchController(StorageControllerInterface):
     def _lock_l1_keys(
         self,
         keys: list[ObjectKey],
-        extra_count: int,
+        num_kv_readers: int,
         policy: TrimPolicy,
         attn_desc: AttnWindowDesc,
     ) -> Bitmap:
@@ -843,7 +843,7 @@ class PrefetchController(StorageControllerInterface):
                 (chunk 0's object groups x kv_ranks, then chunk 1's, ...).
                 StorageManager has already capped away its own L1 prefix
                 hit, so these keys start past it.
-            extra_count: Extra read locks per locked key.
+            num_kv_readers: Read locks per locked key.
             policy: The request's retained-subset policy.
             attn_desc: Per-group cross-chunk attention windows.
 
@@ -851,7 +851,7 @@ class PrefetchController(StorageControllerInterface):
             Bitmap of the key indices read-locked in L1, after releasing
             out-of-window sliding-window chunks.
         """
-        lock_results = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        lock_results = self._l1_manager.reserve_read(keys, read_locks=num_kv_readers)
         l1_readlocks = Bitmap(len(keys))
         for i, key in enumerate(keys):
             err, _obj = lock_results[key]
@@ -869,7 +869,7 @@ class PrefetchController(StorageControllerInterface):
         evictable = l1_readlocks & ~l1_window & within_l1_hit
         if evictable.popcount() > 0:
             self._l1_manager.finish_read(
-                evictable.gather(keys), extra_count=extra_count
+                evictable.gather(keys), read_locks=num_kv_readers
             )
             l1_readlocks = l1_readlocks & ~evictable
         return l1_readlocks
@@ -882,13 +882,13 @@ class PrefetchController(StorageControllerInterface):
         """Read-lock L1-resident keys, then submit lookup_and_lock to all
         live (non-draining) adapters for a new request."""
         l1_readlocks = self._lock_l1_keys(
-            spec.keys, spec.extra_count, spec.policy, spec.attn_desc
+            spec.keys, spec.num_kv_readers, spec.policy, spec.attn_desc
         )
         request = InFlightPrefetchRequest(
             request_id=request_id,
             keys=spec.keys,
             phase=PrefetchPhase.LOOKUP,
-            extra_count=spec.extra_count,
+            num_kv_readers=spec.num_kv_readers,
             policy=spec.policy,
             attn_desc=spec.attn_desc,
             mode=spec.mode,
@@ -1001,7 +1001,7 @@ class PrefetchController(StorageControllerInterface):
                 retained | l1_fallback_retain
             )
             self._l1_manager.finish_read(
-                stale.gather(request.keys), extra_count=request.extra_count
+                stale.gather(request.keys), read_locks=request.num_kv_readers
             )
 
         # Step 3 — reserve L1 write buffers for the plan keys.
@@ -1344,10 +1344,10 @@ class PrefetchController(StorageControllerInterface):
                 # Warm: make ready, lock nothing.
                 l1_mgr.finish_write(loaded_keys)
             else:
-                # write-locked -> read-locked; extra_count so each TP worker
-                # gets its own read lock.
+                # write-locked -> read-locked; num_kv_readers so each TP
+                # worker gets its own read lock.
                 l1_mgr.finish_write_and_reserve_read(
-                    loaded_keys, extra_count=request.extra_count
+                    loaded_keys, read_locks=request.num_kv_readers
                 )
 
         # Clean up failed keys
@@ -1397,13 +1397,13 @@ class PrefetchController(StorageControllerInterface):
             if request.l1_readlocks.popcount() > 0:
                 l1_mgr.finish_read(
                     request.l1_readlocks.gather(request.keys),
-                    extra_count=request.extra_count,
+                    read_locks=request.num_kv_readers,
                 )
                 request.l1_readlocks = Bitmap(num_keys)
         else:
             released = (result_bitmap & (~retained)).gather(request.keys)
             if released:
-                l1_mgr.finish_read(released, extra_count=request.extra_count)
+                l1_mgr.finish_read(released, read_locks=request.num_kv_readers)
 
         # LRU: the retained keys are the ones this request actually serves;
         # touch them (locking/unlocking never refreshes recency).
@@ -1484,7 +1484,7 @@ class PrefetchController(StorageControllerInterface):
             if request.l1_readlocks.popcount() > 0:
                 l1_mgr.finish_read(
                     request.l1_readlocks.gather(request.keys),
-                    extra_count=request.extra_count,
+                    read_locks=request.num_kv_readers,
                 )
             logger.warning(
                 "Cleaning up in-flight prefetch request %d (%d keys).",

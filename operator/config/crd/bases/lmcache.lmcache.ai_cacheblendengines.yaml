@@ -1264,7 +1264,7 @@ spec:
                 type: boolean
               image:
                 description: |-
-                  image defines the container image to use for the blend_v3 engine. This
+                  image defines the container image to use for the blend engine. This
                   may be a PRIVATE image; use imagePullSecrets to pull it.
                 properties:
                   pullPolicy:

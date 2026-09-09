@@ -21,9 +21,6 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.platform.ops_types import (
-    set_shape_desc_dtype,
-)
 from lmcache.v1.platform.torch_ops import (
     multi_layer_block_kv_transfer as fallback_multi_layer_block_kv_transfer,
 )
@@ -125,7 +122,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     sd.hs = 2 * HS
     sd.element_size = norm[0].element_size()
     sd.block_stride_elems = NH * BS * 2 * HS
-    set_shape_desc_dtype(sd, norm[0].dtype)
+    sd.dtype = norm[0].dtype
 
     block_ids = torch.tensor(list(range(NB)), dtype=torch.long)
 

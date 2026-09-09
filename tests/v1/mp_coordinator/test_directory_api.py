@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.schemas import encode_tokens
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def _client() -> TestClient:
@@ -202,7 +203,7 @@ def test_store_entry_with_tokens_populates_bindings():
         data = _post_events(client, [_batch(entries=[entry])])
         assert data == {"applied": 1, "duplicates": 0, "stale": 0}
 
-        key_directory = client.app.state.ctx.key_directory
+        key_directory = client.app.state.ctx.views.get(KeyDirectory)
         assert key_directory.get_token_ids([bytes.fromhex("aa")]) == [(1, 2, 3)]
 
 
@@ -340,6 +341,36 @@ def test_lookup_keys_form_returns_placements_and_tokens():
         assert len(results[0]["placements"]) == 1
         assert results[1]["token_ids"] == []  # unknown chunk
         assert results[1]["placements"] == []
+
+
+def test_lookup_and_listing_report_access_counts():
+    def _access(seq: int) -> dict:
+        return _batch(
+            seq=seq, event_type="access", backend="", entries=[{"key": _key(h="aa")}]
+        )
+
+    with _client() as client:
+        _post_events(
+            client,
+            [
+                _batch(
+                    seq=1,
+                    entries=[
+                        {"key": _key(h="aa"), "size_bytes": 1},
+                        {"key": _key(h="bb"), "size_bytes": 1},
+                    ],
+                ),
+                _access(seq=2),
+                _access(seq=3),
+            ],
+        )
+
+        results = _lookup(client, [_key(h="aa"), _key(h="bb"), _key(h="ff")])["results"]
+        assert [r["access_count"] for r in results] == [2, 0, 0]
+
+        listed = client.get("/directory/keys").json()["keys"]
+        by_hash = {row["key"]["chunk_hash_hex"]: row["access_count"] for row in listed}
+        assert by_hash == {"aa": 2, "bb": 0}
 
 
 def test_lookup_malformed_key_is_rejected():

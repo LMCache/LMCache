@@ -18,10 +18,12 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import math
 import os
 import random
 
 # First Party
+from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
     Sample,
@@ -300,7 +302,7 @@ class RagQaQualityWorkload(BaseWorkload):
         align = self._config.doc_align_tokens
         current = self._token_length(text)
         total = offset + current
-        target = -(-total // align) * align
+        target = math.ceil(total / align) * align
         if target == total:
             return text
 
@@ -488,9 +490,14 @@ class RagQaQualityWorkload(BaseWorkload):
         if request_id.startswith(_MEASURED_REQUEST_PREFIX):
             self._responses[request_id] = output
 
-    def run(self) -> None:
-        """Run the benchmark, then write the per-sample results file."""
-        super().run()
+    def run(self, warmup_policy: WarmupPolicy = WarmupPolicy.RUN) -> None:
+        """Run the benchmark, then write the per-sample results file.
+
+        Args:
+            warmup_policy: ``WarmupPolicy.SKIP`` starts the measured run
+                immediately, without prefilling the documents.
+        """
+        super().run(warmup_policy)
         self._write_results()
 
     # ------------------------------------------------------------------

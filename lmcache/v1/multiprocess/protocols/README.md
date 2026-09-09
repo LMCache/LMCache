@@ -12,9 +12,7 @@ protocols/
 ├── engine.py           # Engine operations (REGISTER/UNREGISTER, STORE, RETRIEVE, LOOKUP, PREPARE/COMMIT, ...)
 ├── controller.py       # Controller operations (CLEAR, GET_CHUNK_SIZE, PING)
 ├── debug.py            # Debug operations (NOOP)
-├── blend.py            # CacheBlend v1 operations (CB_STORE/RETRIEVE_PRE_COMPUTED, CB_STORE_FINAL, ...)
-├── blend_v2.py         # CacheBlend v2 lookup/retrieve (CB_*_V2)
-├── blend_v3.py         # CacheBlend v3 rope + unified lookup (CB_*_V3, CB_UNIFIED_LOOKUP)
+├── blend.py            # CacheBlend rope + unified lookup + retrieve (CB_REGISTER_ROPE, CB_UNREGISTER_ROPE, CB_RETRIEVE_PRE_COMPUTED, CB_UNIFIED_LOOKUP)
 ├── observability.py    # Observability events (REPORT_BLOCK_ALLOCATION)
 └── p2p.py              # Peer-to-peer transfers (P2P_LOOKUP_AND_LOCK, P2P_QUERY_LOOKUP_RESULTS, P2P_UNLOCK_OBJECTS)
 ```
@@ -28,7 +26,7 @@ The protocol system is designed to be modular, extensible, and IDE-friendly:
    - All request types visible to static analysis tools
    - Validation ensures enum stays in sync with protocol definitions
 
-2. **Protocol Modules**: Each module (engine, controller, debug, blend, blend_v2, blend_v3, observability, p2p) defines:
+2. **Protocol Modules**: Each module (engine, controller, debug, blend, observability, p2p) defines:
    - `REQUEST_NAMES`: List of request type names (for validation)
    - `get_protocol_definitions()`: Returns dict of name → ProtocolDefinition
 
@@ -49,7 +47,7 @@ To add new protocol operations:
 
 ### Option 1: Add to Existing Module
 
-If your operation fits an existing category (engine / controller / debug / blend / blend_v2 / blend_v3 / observability / p2p):
+If your operation fits an existing category (engine / controller / debug / blend / observability / p2p):
 
 1. **Add to the enum** in `protocols/base.py`:
    ```python
@@ -138,8 +136,6 @@ If you're adding a new category of operations:
        ("controller", controller),
        ("debug", debug),
        ("blend", blend),
-       ("blend_v2", blend_v2),
-       ("blend_v3", blend_v3),
        ("observability", observability),
        ("p2p", p2p),
        ("monitoring", monitoring),  # Add here
@@ -221,25 +217,18 @@ Cache management and configuration:
 Testing and monitoring:
 - `NOOP`: No-operation command for testing / heartbeat
 
-### CacheBlend v1 (`blend.py`)
-First-generation CacheBlend operations (pre-computed lookup / retrieve, final store, and blend-scoped KV cache registration):
-- `CB_LOOKUP_PRE_COMPUTED`
-- `CB_STORE_PRE_COMPUTED`
+### CacheBlend (`blend.py`)
+Paged-aware CacheBlend (non-prefix KV reuse). KV-cache registration rides the
+standard `REGISTER_KV_CACHE`; these requests add only the CB-specific state and
+paths. A payload-shape change means a new request name, not a rename -- the
+cacheblend plugin dispatches on these.
+- `CB_REGISTER_ROPE` / `CB_UNREGISTER_ROPE`
 - `CB_RETRIEVE_PRE_COMPUTED`
-- `CB_STORE_FINAL`
-- `CB_REGISTER_KV_CACHE`
-- `CB_UNREGISTER_KV_CACHE`
-
-### CacheBlend v2 (`blend_v2.py`)
-Second-generation CacheBlend lookup + retrieve:
-- `CB_LOOKUP_PRE_COMPUTED_V2`
-- `CB_RETRIEVE_PRE_COMPUTED_V2`
-
-### CacheBlend v3 (`blend_v3.py`)
-Third-generation CacheBlend with rope state and unified lookup:
-- `CB_REGISTER_ROPE_V3` / `CB_UNREGISTER_ROPE_V3`
-- `CB_RETRIEVE_PRE_COMPUTED_V3`
 - `CB_UNIFIED_LOOKUP`
+
+`CB_REGISTER_ROPE_V3`, `CB_UNREGISTER_ROPE_V3` and `CB_RETRIEVE_PRE_COMPUTED_V3`
+remain as deprecated enum aliases (same member and wire value) for plugins that
+have not yet moved to the unversioned names; they are not separate requests.
 
 ### Observability (`observability.py`)
 Server-side observability events:

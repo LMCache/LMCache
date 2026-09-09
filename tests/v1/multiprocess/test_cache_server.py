@@ -25,12 +25,10 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_response_class,
-)
 from lmcache.v1.multiprocess.server import run_cache_server
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
 # Configuration constants
 SERVER_HOST = "localhost"
@@ -156,7 +154,7 @@ BLOCKS_PER_KEY = 16
 
 
 def lookup_all(
-    client: MessageQueueClient,
+    client: RequestClient,
     keys: list[IPCCacheServerKey],
     timeout: float = DEFAULT_TIMEOUT,
 ) -> int:
@@ -169,30 +167,43 @@ def lookup_all(
     for key in keys:
         lookup_key = key.no_worker_id_version()
         # Phase 1: Submit lookup (server tracks by request_id, returns None)
-        client.submit_request(
-            RequestType.LOOKUP,
-            [lookup_key, 1],
-            get_response_class(RequestType.LOOKUP),
-        ).result(timeout=timeout)
+        client.lookup(lookup_key, 1).result(timeout=timeout)
         # Phase 2: Poll by request_id until done
         while True:
-            result = client.submit_request(
-                RequestType.QUERY_PREFETCH_STATUS,
-                [lookup_key.request_id],
-                get_response_class(RequestType.QUERY_PREFETCH_STATUS),
-            ).result(timeout=timeout)
+            result = client.query_prefetch_status(lookup_key.request_id).result(
+                timeout=timeout
+            )
             if result is not None:
                 total += result
                 break
     return total
 
 
+#: Exported event objects kept alive for the session: CUDA event handles are
+#: only importable while the exporting event object is alive (the timeline
+#: backend has no such requirement, but this keeps the harness valid for
+#: both backends).
+_EXPORTED_EVENT_KEEPALIVE: list[Any] = []
+
+
+def _recorded_event_handle() -> bytes:
+    """Create and record an event via this process's resolved event backend
+    and export its handle -- the client-side equivalent of what the worker
+    adapter does in production.
+    """
+    backend = get_event_ipc_backend(0)
+    event = backend.create_event(0)
+    backend.record_event(event, None)
+    _EXPORTED_EVENT_KEEPALIVE.append(event)
+    return backend.export_event(event, 0)
+
+
 def store_keys(
-    client: MessageQueueClient,
+    client: RequestClient,
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
-    event: Any,
+    event_handle: bytes,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> None:
     """Store keys one at a time using the single-key API."""
@@ -200,21 +211,17 @@ def store_keys(
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
         block_ids = gpu_block_ids[start:end]
-        future = client.submit_request(
-            RequestType.STORE,
-            [key, instance_id, [block_ids], event.ipc_handle()],
-            get_response_class(RequestType.STORE),
-        )
+        future = client.store(key, instance_id, [block_ids], event_handle)
         result = future.to_device_future().result(timeout=timeout)
         assert result is True, f"Store should succeed for key {i}"
 
 
 def retrieve_keys(
-    client: MessageQueueClient,
+    client: RequestClient,
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
-    event: Any,
+    event_handle: bytes,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> list[bool]:
     """Retrieve keys one at a time using the single-key API."""
@@ -223,11 +230,7 @@ def retrieve_keys(
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
         block_ids = gpu_block_ids[start:end]
-        future = client.submit_request(
-            RequestType.RETRIEVE,
-            [key, instance_id, [block_ids], event.ipc_handle(), 0],
-            get_response_class(RequestType.RETRIEVE),
-        )
+        future = client.retrieve(key, instance_id, [block_ids], event_handle, 0)
         result = future.to_device_future().result(timeout=timeout)
         results.append(result)
     return results
@@ -298,11 +301,11 @@ def zmq_context() -> Generator[zmq.Context, None, None]:
 @pytest.fixture(scope="function")
 def client(
     server_process: mp.Process, zmq_context: zmq.Context
-) -> Generator[MessageQueueClient, None, None]:
+) -> Generator[RequestClient, None, None]:
     """
     Fixture that provides a message queue client for each test function.
     """
-    client = MessageQueueClient(server_url=SERVER_URL, context=zmq_context)
+    client = RequestClientFactory.create(SERVER_URL, context=zmq_context)
     yield client
     # Client cleanup
     client.close()
@@ -324,7 +327,7 @@ def client_context() -> Generator[ClientContext, None, None]:
 
 @pytest.fixture(scope="function")
 def registered_instance(
-    client: MessageQueueClient, client_context: ClientContext
+    client: RequestClient, client_context: ClientContext
 ) -> Generator[int, None, None]:
     """
     Fixture that registers a KV cache instance and returns the instance ID.
@@ -335,18 +338,14 @@ def registered_instance(
     # Register KV cache. No engine group infos are sent, so the server
     # detects ``slots_per_block`` from the tensors and treats every group
     # as uncompressed (``compress_ratio == 1``).
-    future = client.submit_request(
-        RequestType.REGISTER_KV_CACHE,
-        [
-            instance_id,
-            client_context.get_kv_cache(),
-            "testmodel",
-            1,
-            EngineType.VLLM,
-            {},
-            [],
-        ],
-        get_response_class(RequestType.REGISTER_KV_CACHE),
+    future = client.register_kv_cache(
+        instance_id,
+        client_context.get_kv_cache(),
+        "testmodel",
+        1,
+        EngineType.VLLM,
+        {},
+        [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None, "Register should return None"
@@ -355,14 +354,8 @@ def registered_instance(
 
     # Unregister KV cache
     try:
-        client.submit_request(
-            RequestType.CLEAR, [], get_response_class(RequestType.CLEAR)
-        ).result(timeout=DEFAULT_TIMEOUT)
-        future = client.submit_request(
-            RequestType.UNREGISTER_KV_CACHE,
-            [instance_id],
-            get_response_class(RequestType.UNREGISTER_KV_CACHE),
-        )
+        client.clear().result(timeout=DEFAULT_TIMEOUT)
+        future = client.unregister_kv_cache(instance_id)
         future.result(timeout=DEFAULT_TIMEOUT)
     except Exception as e:
         print(f"Error during unregister: {e}")
@@ -381,7 +374,7 @@ def test_server_running(server_process: mp.Process):
 
 
 def test_register_unregister_kv_cache(
-    client: MessageQueueClient, client_context: ClientContext
+    client: RequestClient, client_context: ClientContext
 ):
     """
     Test registering and unregistering a KV cache.
@@ -390,34 +383,26 @@ def test_register_unregister_kv_cache(
 
     # Register. No engine group infos: geometry is detected from the
     # tensors (uncompressed).
-    future = client.submit_request(
-        RequestType.REGISTER_KV_CACHE,
-        [
-            instance_id,
-            client_context.get_kv_cache(),
-            "testmodel",
-            1,
-            EngineType.VLLM,
-            {},
-            [],
-        ],
-        get_response_class(RequestType.REGISTER_KV_CACHE),
+    future = client.register_kv_cache(
+        instance_id,
+        client_context.get_kv_cache(),
+        "testmodel",
+        1,
+        EngineType.VLLM,
+        {},
+        [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
     # Unregister
-    future = client.submit_request(
-        RequestType.UNREGISTER_KV_CACHE,
-        [instance_id],
-        get_response_class(RequestType.UNREGISTER_KV_CACHE),
-    )
+    future = client.unregister_kv_cache(instance_id)
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
 
 def test_store_and_lookup(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -427,11 +412,10 @@ def test_store_and_lookup(
     num_keys = 10
     keys = [create_cache_key(i) for i in range(num_keys)]
     gpu_block_ids = list(range(0, 16 * num_keys))
-    event = torch_dev.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     # Store
-    store_keys(client, keys, registered_instance, gpu_block_ids, event)
+    store_keys(client, keys, registered_instance, gpu_block_ids, event_handle)
 
     # Lookup - keys that exist
     lookup_result = lookup_all(client, keys)
@@ -444,7 +428,7 @@ def test_store_and_lookup(
 
 
 def test_store_fails_closed_on_incomplete_block_ids(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -464,19 +448,14 @@ def test_store_fails_closed_on_incomplete_block_ids(
     # One-chunk key (256 tokens == BLOCKS_PER_KEY blocks) but only half the
     # block IDs needed, so the chunk is not fully covered.
     key = create_cache_key(90001)
-    event = torch_dev.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     result = (
-        client.submit_request(
-            RequestType.STORE,
-            [
-                key,
-                registered_instance,
-                [list(range(BLOCKS_PER_KEY // 2))],
-                event.ipc_handle(),
-            ],
-            get_response_class(RequestType.STORE),
+        client.store(
+            key,
+            registered_instance,
+            [list(range(BLOCKS_PER_KEY // 2))],
+            event_handle,
         )
         .to_device_future()
         .result(timeout=DEFAULT_TIMEOUT)
@@ -486,7 +465,7 @@ def test_store_fails_closed_on_incomplete_block_ids(
 
 
 def test_store_retrieve_verify(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -495,15 +474,13 @@ def test_store_retrieve_verify(
     """
     num_keys = 20
     keys = [create_cache_key(i) for i in range(num_keys)]
-    event = torch_dev.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     # Store at the beginning of the cache
     store_block_ids = list(range(0, 16 * num_keys))
-    store_keys(client, keys, registered_instance, store_block_ids, event)
+    store_keys(client, keys, registered_instance, store_block_ids, event_handle)
 
-    event = torch_dev.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     # Call look up to ensure the data is ready to be retrieved
     lookup_result = lookup_all(client, keys)
@@ -514,7 +491,7 @@ def test_store_retrieve_verify(
     retrieve_offset = 40 * 16
     retrieve_block_ids = list(range(retrieve_offset, retrieve_offset + 16 * num_keys))
     retrieve_result = retrieve_keys(
-        client, keys, registered_instance, retrieve_block_ids, event
+        client, keys, registered_instance, retrieve_block_ids, event_handle
     )
 
     assert len(retrieve_result) == num_keys
@@ -539,7 +516,7 @@ def test_store_retrieve_verify(
 
 
 def test_retrieve_partial_miss(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -551,10 +528,9 @@ def test_retrieve_partial_miss(
     num_stored = 30
     stored_keys = [create_cache_key(i) for i in range(num_stored)]
     store_block_ids = list(range(0, 16 * num_stored))
-    event = torch_dev.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
-    store_keys(client, stored_keys, registered_instance, store_block_ids, event)
+    store_keys(client, stored_keys, registered_instance, store_block_ids, event_handle)
 
     # Lookup to ensure keys are stored
     lookup_result = lookup_all(client, stored_keys)
@@ -570,11 +546,10 @@ def test_retrieve_partial_miss(
         range(retrieve_offset_keys * 16, (retrieve_offset_keys + num_requested) * 16)
     )
 
-    event = torch_dev.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     retrieve_result = retrieve_keys(
-        client, all_keys, registered_instance, retrieve_block_ids, event
+        client, all_keys, registered_instance, retrieve_block_ids, event_handle
     )
 
     assert len(retrieve_result) == num_requested
@@ -590,17 +565,16 @@ def test_retrieve_partial_miss(
 
     # Try to retrieve the first 30 keys only (all exist)
     retrieve_block_ids_2 = list(range(0, 16 * num_stored))
-    event = torch_dev.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
     retrieve_result_2 = retrieve_keys(
-        client, stored_keys, registered_instance, retrieve_block_ids_2, event
+        client, stored_keys, registered_instance, retrieve_block_ids_2, event_handle
     )
     assert len(retrieve_result_2) == num_stored
     assert all(retrieve_result_2), "All stored keys should be retrieved successfully"
 
 
 def test_multiple_retrieve_operations(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -632,9 +606,8 @@ def test_multiple_retrieve_operations(
                 (batch_idx * keys_per_batch + keys_per_batch) * 16,
             )
         )
-        event = torch_dev.Event(interprocess=True)
-        event.record()
-        store_keys(client, keys, registered_instance, blocks, event)
+        event_handle = _recorded_event_handle()
+        store_keys(client, keys, registered_instance, blocks, event_handle)
 
     # Doing look up to ensure data is ready to be retrieved
     all_keys = [
@@ -647,8 +620,7 @@ def test_multiple_retrieve_operations(
 
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks
-    event = torch_dev.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
     for batch_idx in range(num_batches):
         keys = [
             create_cache_key(batch_idx * keys_per_batch + i)
@@ -663,7 +635,7 @@ def test_multiple_retrieve_operations(
         )
 
         retrieve_result = retrieve_keys(
-            client, keys, registered_instance, blocks, event
+            client, keys, registered_instance, blocks, event_handle
         )
         assert len(retrieve_result) == keys_per_batch
         assert all(retrieve_result), "All keys should be retrieved successfully"
@@ -683,7 +655,7 @@ def test_multiple_retrieve_operations(
 
 
 def test_multiple_store_operations(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -693,16 +665,15 @@ def test_multiple_store_operations(
     # Store batch 1
     keys1 = [create_cache_key(i) for i in range(30)]
     blocks1 = list(range(0, 16 * 30))
-    event = torch_dev.Event(interprocess=True)
-    event.record()
-    store_keys(client, keys1, registered_instance, blocks1, event)
+    event_handle = _recorded_event_handle()
+    store_keys(client, keys1, registered_instance, blocks1, event_handle)
 
     # Store batch 2
     keys2 = [create_cache_key(i + 30) for i in range(20)]
     blocks2 = list(range(30 * 16, 50 * 16))
 
     # Test with the same event for 2 store requests
-    store_keys(client, keys2, registered_instance, blocks2, event)
+    store_keys(client, keys2, registered_instance, blocks2, event_handle)
 
     # Verify all keys exist
     all_keys = keys1 + keys2
@@ -711,15 +682,11 @@ def test_multiple_store_operations(
 
 
 def test_get_chunk_size(
-    client: MessageQueueClient,
+    client: RequestClient,
 ):
     """
     Test retrieving the chunk size from the server.
     """
-    chunk_size = client.submit_request(
-        RequestType.GET_CHUNK_SIZE,
-        [],
-        get_response_class(RequestType.GET_CHUNK_SIZE),
-    ).result(timeout=DEFAULT_TIMEOUT)
+    chunk_size = client.get_chunk_size().result(timeout=DEFAULT_TIMEOUT)
 
     assert chunk_size == CHUNK_SIZE, f"Chunk size should be {CHUNK_SIZE}"

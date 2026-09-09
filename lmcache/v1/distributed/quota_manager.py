@@ -25,10 +25,13 @@ Salts without an explicit entry resolve through two different lenses:
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
+from typing import cast
 import threading
 
 # First Party
 from lmcache.v1.distributed.internal_api import QuotaEntry
+from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 
 
 class QuotaManager:
@@ -135,6 +138,51 @@ class QuotaManager:
         """
         with self._lock:
             return cache_salt in self._limits
+
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """Operator-set limits; nothing else can reconstruct them."""
+        return PersistenceType.METADATA
+
+    @property
+    def name(self) -> str:
+        """Name of this registry's section in a durable document."""
+        return "quotas"
+
+    def capture(self) -> Mapping[str, object]:
+        """Return the limits in durable form.
+
+        Taken under one lock acquisition, so the per-salt limits and the
+        default cannot disagree about a concurrent update.
+
+        Returns:
+            ``{"limits": {cache_salt: limit_bytes}, "default_limit_bytes":
+            int | None}``.
+        """
+        with self._lock:
+            return {
+                "limits": dict(self._limits),
+                "default_limit_bytes": self._default_limit_bytes,
+            }
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Replace the limits with a captured set.
+
+        Applied under one lock acquisition, so no reader sees a
+        half-restored table.
+
+        The document is the coordinator's own, so values are taken as
+        written.
+
+        Args:
+            state: A :meth:`capture` value, as decoded from the
+                document holding it — see there for the shape.
+        """
+        limits = cast("dict[str, int]", state["limits"])
+        default_limit_bytes = cast("int | None", state["default_limit_bytes"])
+        with self._lock:
+            self._limits = dict(limits)
+            self._default_limit_bytes = default_limit_bytes
 
     def list_quotas(self) -> list[QuotaEntry]:
         """Return a snapshot of all registered quotas.

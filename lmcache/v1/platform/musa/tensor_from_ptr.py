@@ -64,7 +64,9 @@ def _normalize_device(device: torch.device | str | int | object) -> torch.device
                 f"device; got {device!r}"
             )
         index = getattr(device, "index", None)
-        resolved = torch.device("musa", index)
+        resolved = (
+            torch.device("musa") if index is None else torch.device("musa", int(index))
+        )
     if resolved.type != "musa":
         raise ValueError(
             "construct_musa_tensor_from_data_pointer requires a MUSA "

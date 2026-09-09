@@ -5,6 +5,7 @@ in the multiprocess cache server.
 """
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional, overload
 import threading
@@ -42,7 +43,13 @@ class Session:
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
+    prefetch_locked_gids: tuple = ()
+    prefetch_group_windows: tuple[int, ...] = ()
     extras: dict[str, Any] = field(default_factory=dict)
+    _lookup_generation: int = field(default=0, repr=False)
+    _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
+        default_factory=set, repr=False
+    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
@@ -79,6 +86,10 @@ class Session:
 
         Returns:
             List of hash values for chunks in [start_chunk, end_chunk).
+
+        Raises:
+            ValueError: If an explicit ``end`` exceeds the current tokens
+                (hashing past them yields valid-looking garbage).
         """
         chunk_size = self.hasher.chunk_size
         assert start % chunk_size == 0, (
@@ -87,6 +98,12 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
+            if end is not None and end > len(self.token_ids):
+                raise ValueError(
+                    f"get_hashes end ({end}) exceeds the session's "
+                    f"{len(self.token_ids)} token(s); the session may have "
+                    "been recreated after request cleanup"
+                )
             if end is None:
                 # No explicit end: use the last full-chunk boundary.
                 # Lock must be held here because `self.token_ids` may be
@@ -124,6 +141,112 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
+    def begin_lookup(
+        self,
+        key: IPCCacheServerKey,
+        group_windows: tuple[int, ...],
+    ) -> None:
+        """Record a new lookup and reset its per-lookup release state."""
+        with self._lock:
+            self.lookup_ipc_key = key
+            self.prefetch_hit_chunks = -1
+            self.prefetch_locked_gids = ()
+            self.prefetch_group_windows = group_windows
+            self._lookup_generation += 1
+            self._failed_retrieve_releases.clear()
+
+    def record_prefetch_result(
+        self,
+        hit_chunks: int,
+        locked_gids: tuple[int, ...],
+    ) -> None:
+        """Record the lock set acquired by the current lookup."""
+        with self._lock:
+            self.prefetch_hit_chunks = hit_chunks
+            self.prefetch_locked_gids = locked_gids
+
+    def prepare_failed_retrieve_release(
+        self,
+        key: IPCCacheServerKey,
+    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
+        """Return a stable snapshot for a failed worker's lock release."""
+        if key.worker_id is None:
+            return None
+
+        with self._lock:
+            lookup_key = self.lookup_ipc_key
+            hit_chunks = self.prefetch_hit_chunks
+            if lookup_key is None or hit_chunks < 0:
+                return None
+
+            same_lookup = (
+                key.model_name == lookup_key.model_name
+                and key.world_size == lookup_key.world_size
+                and key.token_ids == lookup_key.token_ids
+                and key.cache_salt == lookup_key.cache_salt
+                and key.start >= lookup_key.start
+                and key.end <= lookup_key.end
+            )
+            if not same_lookup:
+                return None
+
+            return (
+                hit_chunks,
+                self.prefetch_locked_gids,
+                self.prefetch_group_windows,
+                self._lookup_generation,
+            )
+
+    def claim_failed_retrieve_release(
+        self,
+        instance_id: int,
+        key: IPCCacheServerKey,
+        lookup_generation: int,
+    ) -> bool:
+        """Atomically claim one failed worker's prepared lock release.
+
+        A scheduler lookup acquires read locks for every KV worker (or one
+        reader count per TP worker for MLA), while RETRIEVE responses are
+        per worker instance.  When a worker has lost its GPU registration,
+        only that instance's share may be released.  Claiming after key
+        resolution makes duplicate failed RETRIEVEs idempotent without
+        consuming the claim when resolution itself fails.
+
+        ``False`` is also returned when the session cannot prove ownership of
+        the requested range.  In that case it is safer to leave the lock to
+        its TTL than to decrement a concurrent request's anonymous L1 count.
+        """
+        if key.worker_id is None:
+            return False
+
+        with self._lock:
+            lookup_key = self.lookup_ipc_key
+            if lookup_key is None or lookup_generation != self._lookup_generation:
+                return False
+
+            same_lookup = (
+                key.model_name == lookup_key.model_name
+                and key.world_size == lookup_key.world_size
+                and key.token_ids == lookup_key.token_ids
+                and key.cache_salt == lookup_key.cache_salt
+                and key.start >= lookup_key.start
+                and key.end <= lookup_key.end
+            )
+            if not same_lookup:
+                return False
+
+            owner = (
+                lookup_generation,
+                instance_id,
+                key.worker_id,
+                key.start,
+                key.end,
+            )
+            if owner in self._failed_retrieve_releases:
+                return False
+            self._failed_retrieve_releases.add(owner)
+            return True
+
 
 class SessionManager:
     """Thread-safe manager for per-request sessions."""
@@ -141,6 +264,10 @@ class SessionManager:
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
+        #: Callbacks invoked for every destroyed session, so owners of
+        #: per-request state (e.g. entries in ``Session.extras``) can release
+        #: it however the request ended. See :meth:`_notify_destroyed`.
+        self.destroy_listeners: list[Callable[[Session], None]] = []
         self._cleanup_interval = cleanup_interval
         self._cleanup_thread: PeriodicThread | None = None
         if cleanup_interval is not None and cleanup_interval > 0:
@@ -164,6 +291,11 @@ class SessionManager:
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]
 
+    def get(self, request_id: str) -> Optional[Session]:
+        """Return an existing session without creating ownership state."""
+        with self._lock:
+            return self._sessions.get(request_id)
+
     def remove(self, request_id: str) -> Optional[Session]:
         """Remove a session by request_id.
 
@@ -174,12 +306,13 @@ class SessionManager:
             The removed session, or None if no session was found.
         """
         with self._lock:
-            if request_id in self._sessions:
-                session = self._sessions[request_id]
-                del self._sessions[request_id]
-                logger.debug("Removed session for request_id=%s", request_id)
-                return session
-            return None
+            if request_id not in self._sessions:
+                return None
+            session = self._sessions[request_id]
+            del self._sessions[request_id]
+            logger.debug("Removed session for request_id=%s", request_id)
+        self._notify_destroyed(session)
+        return session
 
     def cleanup_expired(self) -> int:
         """Remove sessions that have exceeded their TTL.
@@ -188,17 +321,38 @@ class SessionManager:
             Number of sessions removed.
         """
         now = time.time()
-        expired = []
+        expired: list[Session] = []
         with self._lock:
-            for rid, session in self._sessions.items():
+            for session in self._sessions.values():
                 if now - session.created_at > self._ttl:
-                    expired.append(rid)
-            for rid in expired:
-                del self._sessions[rid]
+                    expired.append(session)
+            for session in expired:
+                del self._sessions[session.request_id]
 
+        for session in expired:
+            self._notify_destroyed(session)
         if expired:
             logger.info("Cleaned up %d expired sessions", len(expired))
         return len(expired)
+
+    def _notify_destroyed(self, session: Session) -> None:
+        """Run every destroy listener for one removed session.
+
+        Called without the manager lock held: a listener may take other locks
+        (e.g. the storage manager's). A listener that raises is logged and
+        skipped so destruction always completes.
+
+        Args:
+            session: The session that was just removed.
+        """
+        for listener in list(self.destroy_listeners):
+            try:
+                listener(session)
+            except Exception:
+                logger.exception(
+                    "Session destroy listener failed for request_id=%s",
+                    session.request_id,
+                )
 
     def active_count(self) -> int:
         """Return the number of active sessions.

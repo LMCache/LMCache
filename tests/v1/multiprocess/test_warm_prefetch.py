@@ -69,7 +69,7 @@ class _FakeStorageManager:
             return None
         return _FakeBitmap(self.found)
 
-    def finish_read_prefetched(self, keys, extra_count: int = 0) -> None:
+    def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
         # Must never be called: the warm holds no lock.
         self.finish_called = True
 

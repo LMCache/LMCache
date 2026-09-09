@@ -26,9 +26,8 @@ import (
 
 const (
 	// cbEngineType is the value of the --engine-type flag that selects the
-	// CacheBlend V3 engine on the lmcache server binary. The server maps the
-	// value "blend" to BlendV3Module; "blend_v3" is no longer recognized
-	// (lmcache/v1/multiprocess/server.py).
+	// CacheBlend engine on the lmcache server binary. The server maps the
+	// value "blend" to BlendModule (lmcache/v1/multiprocess/server.py).
 	cbEngineType = "blend"
 
 	// cbL1AlignBytes is the value of the --l1-align-bytes flag required by the
@@ -90,7 +89,7 @@ func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1al
 	}
 }
 
-// BuildCBEngineArgs returns the server CLI args for the blend_v3 engine: the
+// BuildCBEngineArgs returns the server CLI args for the blend engine: the
 // proven LMCacheEngine serialization (--host/--port/--l1-size-gb/--chunk-size/
 // eviction/prometheus/L2) plus the CacheBlend-specific --engine-type blend and
 // --l1-align-bytes flags. The blend flags are inserted before the user-supplied
@@ -109,7 +108,7 @@ func BuildCBEngineArgs(spec *lmcachev1alpha1.CacheBlendEngineSpec) []string {
 	return args
 }
 
-// BuildCBEngineDaemonSet constructs the DaemonSet for the blend_v3 engine of the
+// BuildCBEngineDaemonSet constructs the DaemonSet for the blend engine of the
 // given CacheBlendEngine. It reuses the shared GPU/security pod-template
 // scaffolding (host /dev/shm sharing for CUDA IPC — hostPath mount by default,
 // host IPC namespace when spec.hostIPC=true — runtimeClassName=nvidia,
@@ -130,7 +129,7 @@ func BuildCBEngineDaemonSet(engine *lmcachev1alpha1.CacheBlendEngine) *appsv1.Da
 
 // BuildCBEngineLookupService creates the node-local lookup Service
 // (internalTrafficPolicy=Local) for the CacheBlendEngine, so opted-in vLLM pods
-// reach the blend_v3 engine on their own node.
+// reach the blend engine on their own node.
 func BuildCBEngineLookupService(engine *lmcachev1alpha1.CacheBlendEngine) *corev1.Service {
 	return buildLookupServiceCore(engine.Name, engine.Namespace, cbSpecToEngineSpec(&engine.Spec))
 }

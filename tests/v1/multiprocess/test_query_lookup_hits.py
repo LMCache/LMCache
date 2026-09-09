@@ -240,6 +240,7 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="m",
         world_size=world_size,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=(0,),
         start=0,

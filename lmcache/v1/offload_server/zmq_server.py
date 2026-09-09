@@ -66,10 +66,10 @@ class ZMQOffloadServer(OffloadServerInterface):
                     if not self.running:
                         logger.info("ZMQ socket closed, exiting offload server thread")
                         break
-                    logger.error(f"ZMQ error in offload server: {e}")
+                    logger.error("ZMQ error in offload server: %s", e)
                     break
                 except Exception as e:
-                    logger.error(f"Unexpected error in offload server: {e}")
+                    logger.error("Unexpected error in offload server: %s", e)
                     if not self.running:
                         break
 
@@ -103,7 +103,7 @@ class ZMQOffloadServer(OffloadServerInterface):
             self.socket.close(linger=0)
             logger.info("ZMQ socket closed")
         except Exception as e:
-            logger.warning(f"Error closing ZMQ socket: {e}")
+            logger.warning("Error closing ZMQ socket: %s", e)
 
         # Wait for thread with timeout to prevent deadlock
         if self.thread.is_alive():

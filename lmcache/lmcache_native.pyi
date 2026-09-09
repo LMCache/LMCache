@@ -27,6 +27,7 @@ class EngineKVFormat(IntEnum):
     NL_X_NB_BS_NH_CS = 13
     NL_X_NB_BSV_BSS = 14
     NL_X_TWO_NB_NH_ONE_BS_HS = 15
+    NL_X_TWO_X_NB_BS_NH_HS = 16
 
 # Backward-compat alias for EngineKVFormat.
 GPUKVFormat = EngineKVFormat
@@ -36,6 +37,35 @@ class TransferDirection(IntEnum):
 
     H2D = 0
     D2H = 1
+
+class PageBufferShapeDesc:
+    """Descriptor for one engine page-buffer layout."""
+
+    kv_size: int
+    nl: int
+    nb: int
+    bs: int
+    nh: int
+    hs: int
+    element_size: int
+    block_stride_elems: int
+    dtype: Any
+
+    def __init__(self) -> None: ...
+
+class KernelGroupSpec:
+    """Backend-agnostic descriptor for one blocked-transfer kernel group."""
+
+    def __init__(
+        self,
+        paged_buffer_ptrs: int,
+        lmcache_objects_ptrs: Sequence[int],
+        shape_desc: PageBufferShapeDesc,
+        lmcache_chunk_size: int,
+        engine_kv_format: int,
+        block_ids_base: int,
+        block_ids_capacity: int,
+    ) -> None: ...
 
 def is_kv_list(format: EngineKVFormat) -> bool:
     """Return whether the format stores KV as a list of per-token KV tensors."""
@@ -48,6 +78,9 @@ def is_cross_layer(format: EngineKVFormat) -> bool:
 
 def is_mla(format: EngineKVFormat) -> bool:
     """Return whether the format is an MLA variant (single latent KV head)."""
+
+def is_kv_second_tuple(format: EngineKVFormat) -> bool:
+    """Return whether each per-layer list entry is a (K, V) tuple of paged tensors."""
 
 class TTLLock:
     """

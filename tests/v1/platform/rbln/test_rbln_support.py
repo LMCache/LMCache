@@ -122,8 +122,9 @@ def test_detect_device_selects_rbln_when_forced(
     monkeypatch.setenv("DEVICE_TYPE", "rbln")
     stub = _StubTorch(SimpleNamespace(is_available=lambda: True))
     with patch.dict("sys.modules", {"torch": stub}):
-        torch_dev, device_type = _detect_device()
+        torch_dev, device_type, backend_name = _detect_device()
     assert device_type == "rbln"
+    assert backend_name == "rbln"
     assert torch_dev is stub.rbln
 
 

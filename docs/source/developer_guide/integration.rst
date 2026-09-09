@@ -46,3 +46,46 @@ When LMCache is integrated with vLLM, the inference pipeline is augmented to loo
 **Inference with Cache**: vLLM proceeds with inference. For any parts of the prompt where no cache was available (cache miss), the model computes new KV values as usual. Cached segments (e.g. previously seen text) are skipped in computation, significantly reducing the time-to-first-token (TTFT) and saving GPU cycles.
 
 **Async Cache Write**: After processing the prompt, any newly generated KV cache chunks (corresponding to this prompt's content) are handed off to LMCache for storage. This put operation is done asynchronously (in the background) so it doesn't delay the response. The response is returned to the user promptly, and LMCache's background tasks will offload the new KV data to CPU, disk, or other backends for future reuse.
+
+SGLang on MUSA
+--------------
+
+LMCache supports SGLang on Moore Threads MUSA devices. In-process transfers
+use TorchMUSA ``index_select`` and ``index_copy_`` and support:
+
+* non-layerwise MHA with separate K/V layer pools;
+* non-layerwise MLA; and
+* layerwise MHA.
+
+Layerwise MLA and multiprocess MLA are not supported. For in-process mode,
+configure LMCache without ``mp_host``/``mp_port``:
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_cpu: true
+   max_local_cpu_size: 20
+   use_layerwise: true  # MHA only; use false for non-layerwise MHA or MLA
+
+When SGLang passes a slot mapping for only the uncached suffix, LMCache applies
+the prefix offset before gathering or scattering rows.
+
+The multiprocess MUSA path supports MHA with separate K and V pools. It uses
+TorchMUSA memory/event IPC and the Torch block-transfer fallback. The handle
+path is opt-in and fail-closed; set this variable in both the SGLang worker and
+LMCache server environments:
+
+.. code-block:: bash
+
+   export LMCACHE_MUSA_HANDLE_TRANSFER=1
+
+Then configure the standalone server address as usual:
+
+.. code-block:: yaml
+
+   mp_host: 127.0.0.1
+   mp_port: 5556
+
+Startup fails with a capability error when the installed TorchMUSA does not
+provide compatible tensor IPC and event IPC APIs. LMCache does not substitute
+CUDA IPC wrappers for MUSA tensors.

@@ -512,6 +512,121 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].sw_size_chunks >= 1
         assert attn_desc.num_chunks_in_sw[1] == manager.object_groups[1].sw_size_chunks
 
+    def test_object_group_separation_standalone_group_buckets_alone(self):
+        # A tagged extra group (connector-private pool) buckets alone even
+        # though its window (-1) matches the full-attention bucket. The rest
+        # bucket as usual, ordered by first kernel group index, so a client
+        # registering without the pool sees identical object group indices
+        # for the shared groups.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=32),
+                EngineGroupInfo(2, (2,), extra_object_group_tag=1),
+            ],
+            separate_object_groups=True,
+        )
+        assert manager.num_kernel_groups == 3
+        assert manager.num_object_groups == 3
+        assert manager.object_groups[0].kernel_group_indices == [0]
+        assert manager.object_groups[0].sw_size_chunks == -1
+        assert manager.object_groups[1].kernel_group_indices == [1]
+        assert manager.object_groups[1].sw_size_chunks >= 1
+        assert manager.object_groups[2].kernel_group_indices == [2]
+        assert manager.object_groups[2].sw_size_chunks == -1
+        assert manager.object_groups[2].standalone
+
+    def test_extra_groups_sort_last_regardless_of_registration_order(self):
+        # The shared (regular) group ids must not shift when a connector
+        # registers its private pool FIRST: extras always sort after every
+        # regular group, so a stock client without the pool sees identical
+        # ids for the shared groups.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), extra_object_group_tag=1),
+                EngineGroupInfo(1, (1,)),
+                EngineGroupInfo(2, (2,), sw_size_tokens=32),
+            ],
+            separate_object_groups=True,
+        )
+        assert manager.num_object_groups == 3
+        # Regular groups first, in kernel order — same ids as pool-less.
+        assert manager.object_groups[0].kernel_group_indices == [1]
+        assert not manager.object_groups[0].standalone
+        assert manager.object_groups[1].kernel_group_indices == [2]
+        assert not manager.object_groups[1].standalone
+        # The extra pool lands last despite registering first.
+        assert manager.object_groups[2].kernel_group_indices == [0]
+        assert manager.object_groups[2].standalone
+        assert manager.get_attn_desc().group_kinds[2] == "standalone"
+
+    def test_extra_groups_sharing_a_tag_share_an_object_group(self):
+        # Two kernel groups carrying the same extra tag (e.g. same-block-size
+        # pools whose tensor identities differ) still form ONE object group.
+        # The third tensor's head count differs so identity detection keeps
+        # the pools as two kernel groups.
+        tensors = [
+            torch.randn(2, 32, 32, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 32, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 32, 16, 64, dtype=torch.float16),
+        ]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), extra_object_group_tag=1),
+                EngineGroupInfo(1, (2,), extra_object_group_tag=1),
+            ],
+            separate_object_groups=True,
+        )
+        assert manager.num_kernel_groups == 3
+        assert manager.num_object_groups == 2
+        assert manager.object_groups[0].kernel_group_indices == [0]
+        assert manager.object_groups[1].kernel_group_indices == [1, 2]
+        assert manager.object_groups[1].standalone
+
+    def test_full_sw_kv_exempts_recurrent_groups(self):
+        # Blend-mode full-window forcing widens sliding-window ATTENTION
+        # groups to full attention, but recurrent-state groups keep their
+        # restore window: position-bound snapshots the blend never touches.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=64),
+                EngineGroupInfo(2, (2,), sw_size_tokens=32, recurrent_state=True),
+            ],
+            separate_object_groups=True,
+        )
+        manager.enable_full_sw_kv()
+        attn_desc = manager.get_attn_desc()
+        assert attn_desc.num_chunks_in_sw[0] == -1
+        # The sliding-window attention group is forced to full attention...
+        assert attn_desc.num_chunks_in_sw[1] == -1
+        # ...but the recurrent group keeps its one-block window.
+        assert attn_desc.num_chunks_in_sw[2] >= 1
+        assert attn_desc.group_kinds == ("attention", "attention", "recurrent")
+
+    def test_object_group_separation_disabled_ignores_standalone_flag(self):
+        # With separation off, the extra-group tag has no effect: everything
+        # still collapses into the single fused object group.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), extra_object_group_tag=1),
+            ],
+            separate_object_groups=False,
+        )
+        assert manager.num_object_groups == 1
+        assert manager.object_groups[0].kernel_group_indices == [0, 1]
+
     def test_object_group_separation_enabled_non_hybrid_single_group(self):
         # Even with separation on, a non-hybrid model (no sliding-window groups)
         # yields a single full-attention object group.

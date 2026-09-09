@@ -12,8 +12,10 @@ import pytest
 # First Party
 from lmcache.tools.cache_simulator.lru_cache import LRUCache, LRUCacheFast
 from lmcache.tools.cache_simulator.simulator import (
+    _percentiles,
     compute_kv_bytes_per_chunk,
     load_lookup_events,
+    print_statistics,
     simulate,
 )
 
@@ -330,3 +332,50 @@ class TestSimulate:
     def test_invalid_kv_bytes_raises(self):
         with pytest.raises(ValueError):
             simulate([], cache_capacity_bytes=100, kv_bytes_per_chunk=0)
+
+
+# ---------------------------------------------------------------------------
+# Percentiles
+# ---------------------------------------------------------------------------
+
+
+class TestPercentiles:
+    def test_whole_ranks_do_not_advance_to_the_next_sample(self):
+        vals = [float(i) for i in range(1, 101)]
+        # Every one of these lands on a whole rank, the case where treating the
+        # rank as a 0-based index reports the single worst sample as p99.
+        assert _percentiles(vals, [25, 50, 75, 90, 99]) == {
+            "p25": 25.0,
+            "p50": 50.0,
+            "p75": 75.0,
+            "p90": 90.0,
+            "p99": 99.0,
+        }
+
+    def test_fractional_rank_rounds_up(self):
+        vals = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+        # 50 × 7 / 100 = 3.5 → rank 4 → index 3
+        assert _percentiles(vals, [50]) == {"p50": 40.0}
+
+
+# ---------------------------------------------------------------------------
+# print_statistics
+# ---------------------------------------------------------------------------
+
+
+class TestPrintStatistics:
+    def test_reported_p99_is_the_ninety_ninth_sample_not_the_max(self, capsys):
+        events = [
+            {"chunk_hashes": ["0xaa"], "seq_len": 300, "chunk_size": 256},
+            {"chunk_hashes": ["0xaa"], "seq_len": 300, "chunk_size": 256},
+        ]
+        results = simulate(events, cache_capacity_bytes=100, kv_bytes_per_chunk=1)
+        results["hit_prefix_lengths"] = list(range(1, 101))
+
+        print_statistics(results)
+
+        stat2 = capsys.readouterr().out.split("Stat 2")[1]
+        p99 = next(
+            line for line in stat2.splitlines() if line.strip().startswith("p99")
+        )
+        assert p99.endswith(": 99")

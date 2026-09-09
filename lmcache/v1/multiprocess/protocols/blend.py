@@ -1,109 +1,83 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Debug protocol definitions for testing and monitoring.
-
-This module defines the protocol for:
-- NOOP: No-operation command for testing connectivity and as a heartbeat
-"""
+"""Blend protocol definitions: rope registration, unified lookup, retrieve."""
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    CBMatchResult,
+    CBUnifiedLookupResult,
+    DeviceIPCWrapper,
+    IPCCacheServerKey,
+)
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
-# Define request names for this protocol group
 REQUEST_NAMES = [
-    "CB_LOOKUP_PRE_COMPUTED",
-    "CB_STORE_PRE_COMPUTED",
+    "CB_REGISTER_ROPE",
+    "CB_UNREGISTER_ROPE",
     "CB_RETRIEVE_PRE_COMPUTED",
-    "CB_STORE_FINAL",
-    "CB_REGISTER_KV_CACHE",
-    "CB_UNREGISTER_KV_CACHE",
+    "CB_UNIFIED_LOOKUP",
 ]
 
 
 def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
-    """
-    Returns protocol definitions for debug operations.
-
-    Returns:
-        Dictionary mapping request names to their protocol definitions
-    """
+    """Return the blend protocol definitions."""
     return {
-        # Lookup pre-computed chunks
-        # Payload:
-        #   - key: IPCCacheServerKey - The key containing the token ids
-        # Returns: List of tuples (start, end) indicating the match ranges
-        "CB_LOOKUP_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[IPCCacheServerKey],
-            response_class=list[tuple[int, int]],
-            handler_type=HandlerType.BLOCKING,
-        ),
-        # Store pre-computed chunks
-        # Payload:
-        #   - key: IPCCacheServerKey - The key containing the token ids
-        #   - offset: int - The starting offset in the CB KV cache buffer
-        #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - event_ipc_handle: bytes - IPC handle for event notification
-        #                       when the pre-computed chunks are ready
-        # Returns:
-        #   - IPC handle bytes
-        #   - boolean flag indicating if the store is successful
-        "CB_STORE_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[IPCCacheServerKey, int, int, bytes],
-            response_class=tuple[bytes, bool],
-            handler_type=HandlerType.BLOCKING,
-        ),
-        # Retrieve pre-computed chunks
-        # Payload:
-        #   - key: IPCCacheServerKey - The key containing the token ids
-        #   - ranges: List[tuple[int, int]] - List of tuples (start, end) indicating
-        #                                     the match ranges to retrieve
-        #   - offset: int - The starting offset in the CB KV cache buffer
-        #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - event_ipc_handle: bytes - IPC handle for event notification when the
-        #                       retrieval is complete
-        # Returns:
-        #   - IPC handle bytes
-        #   - boolean flag indicating if the retrieval is successful
-        "CB_RETRIEVE_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[IPCCacheServerKey, list[tuple[int, int]], int, int, bytes],
-            response_class=tuple[bytes, bool],
-            handler_type=HandlerType.BLOCKING,
-        ),
-        # Store final chunks after processing
-        # Payload:
-        #   - key: IPCCacheServerKey - The key containing the token ids
-        #   - offset: int - The starting offset in the CB KV cache buffer
-        #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - event_ipc_handle: bytes - IPC handle for event notification
-        #                       when the final chunks are stored
-        # Returns:
-        #   - IPC handle bytes
-        #   - boolean flag indicating if the store is successful
-        "CB_STORE_FINAL": ProtocolDefinition(
-            payload_classes=[IPCCacheServerKey, int, int, bytes],
-            response_class=tuple[bytes, bool],
-            handler_type=HandlerType.BLOCKING,
-        ),
-        # Register CB KV Cache
-        # Payload:
-        #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - kv_cache: KVCache - The CB KV cache configuration
-        #   - model_name: str - Name of the model associated with the engine
-        #   - world_size: int - World size of the engine
-        # Returns: None
-        "CB_REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int],
+        # Register rope state on a previously-registered instance.
+        # Payload: (instance_id, cos_sin_caches_ipc, head_size, is_neox_style,
+        #           group_to_cache, group_rot).
+        # cos_sin_caches_ipc: one IPC handle per distinct rope (dual-RoPE
+        # models send two); group_to_cache maps engine group
+        # idx -> cache idx (empty = all groups use cache 0).
+        # group_rot: per-engine-group rope window [offset_elems, width_elems]
+        # ([] entry = skip that group's re-RoPE; empty list = legacy
+        # inference). MLA models must declare it — see cb_register_rope.
+        # Returns: None.
+        "CB_REGISTER_ROPE": ProtocolDefinition(
+            payload_classes=[
+                int,
+                list[DeviceIPCWrapper],
+                int,
+                bool,
+                list[int],
+                list[list[int]],
+            ],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
-        # Unregister CB KV Cache
-        # Payload:
-        #   - instance_id: int - Unique identifier for the vLLM instance
-        # Returns: None
-        "CB_UNREGISTER_KV_CACHE": ProtocolDefinition(
+        # Drop rope state (paged KV cache lives on; use UNREGISTER_KV_CACHE).
+        # Payload: (instance_id,). Returns: None.
+        "CB_UNREGISTER_ROPE": ProtocolDefinition(
             payload_classes=[int],
             response_class=None,
             handler_type=HandlerType.SYNC,
+        ),
+        # Retrieve pre-computed chunks into the request's paged blocks.
+        # Payload: (key, cb_match_result, gpu_block_ids, instance_id,
+        #           event_ipc_handle).
+        # gpu_block_ids is per engine group (list[list[int]]).
+        "CB_RETRIEVE_PRE_COMPUTED": ProtocolDefinition(
+            payload_classes=[
+                IPCCacheServerKey,
+                list[CBMatchResult],
+                list[list[int]],
+                int,
+                bytes,
+            ],
+            response_class=tuple[bytes, bool],
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Unified lookup: server runs prefix lookup + non-prefix fingerprint
+        # match in one RPC, reconciles, and prefetches only the complement.
+        # Payload:
+        #   - key: IPCCacheServerKey carrying the query token IDs.
+        #   - tp_size: tensor-parallel size (for MLA multi-reader locking,
+        #     mirrors LOOKUP).
+        # Returns: CBUnifiedLookupResult(prefix_coverage_tokens,
+        #          non_prefix_segments).
+        "CB_UNIFIED_LOOKUP": ProtocolDefinition(
+            payload_classes=[IPCCacheServerKey, int],
+            # Nullable: handler returns None to defer until both the prefix and
+            # the sparse chunks are in L1 (mirrors dense QUERY_PREFETCH_STATUS).
+            response_class=CBUnifiedLookupResult | None,
+            handler_type=HandlerType.BLOCKING,
         ),
     }

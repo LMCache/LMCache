@@ -601,12 +601,12 @@ msgstr "与缓存混合功能相关的设置。"
 #: ../../source/api_reference/configurations.rst:151
 msgid ""
 "We have an end-to-end `example "
-"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_. We "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process>`_. We "
 "also have more :doc:`detailed documentation "
 "<../kv_cache_optimizations/blending>`."
 msgstr ""
 "我们有一个端到端的 `示例 "
-"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_。我们还有更多的"
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process>`_。我们还有更多的"
 " :doc:`详细文档 <../kv_cache_optimizations/blending>`。"
 
 #: ../../source/api_reference/configurations.rst:161

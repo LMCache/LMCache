@@ -41,7 +41,7 @@ engine worker adapter                            MP server
 |   -> re-register callback |   REGISTER        |   -> drop_instance_state(id) fan-out |
 |                           +------------------>|        |                |            |
 | register_kv_caches        |   STORE/RETRIEVE  |        v                v            |
-|  (no pings until traffic) |   (refresh too)   | LMCacheDriven/          BlendV3      |
+|  (no pings until traffic) |   (refresh too)   | LMCacheDriven/          Blend        |
 |                           |                   |  EngineDriven           (CB rope     |
 |                           |                   |  TransferModule          dropped)    |
 |                           |                   |  Entry{.., last_seen,               |
@@ -103,7 +103,7 @@ readers use the locked accessors `get_and_touch_context_entry` (get-and-refresh)
 the module lock, collect ids whose staleness exceeds their window and pop them;
 outside the lock, run the same cleanup as a client unregister and log a WARNING
 per instance (repeated reaps of one id signal a too-small timeout). Reaped ids are
-then passed to `drop_instance_state(id)` on every target; `BlendV3Module` drops
+then passed to `drop_instance_state(id)` on every target; `BlendModule` drops
 the reaped instance's per-instance CB state (e.g. rope state) there. (It no longer
 mirrors the GPU cache context — that mirror was removed upstream, so reaping the
 GPU entry now frees the context directly.) Collect+pop shares the module lock with
@@ -124,11 +124,11 @@ class InstanceLivenessTarget(Protocol):
 ```
 
 One protocol covers both reaper-driven roles. The transfer modules override the
-liveness methods (`touch`/`reap`/`count`); `BlendV3Module` overrides only
+liveness methods (`touch`/`reap`/`count`); `BlendModule` overrides only
 `drop_instance_state` to drop its mirrored CB state. `ManagementModule` receives
 all targets in a single injected list. (Earlier a separate one-method
 `InstanceReapListener` held `drop_instance_state`; it was folded in since only
-`BlendV3Module` ever implemented it.)
+`BlendModule` ever implemented it.)
 
 Config: `worker_reap_timeout_seconds` (default `120.0`; `0` disables, otherwise
 `>= 30.0`) and `worker_registration_grace_seconds` (default `3600.0`; `>=` the

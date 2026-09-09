@@ -17,6 +17,10 @@ from fastapi.responses import JSONResponse
 
 # First Party
 from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
+    FleetEvictionController,
+)
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     QuotaConfigRequest,
@@ -26,13 +30,16 @@ from lmcache.v1.mp_coordinator.schemas import (
     StatusListResponse,
     StatusResponse,
 )
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 router = APIRouter()
 
 _GB = 1024**3
 _DEFAULT_SALT_SENTINEL = "_default"
-# Quota / usage / status are L2-tier accounting today; other tiers are rejected.
-_SUPPORTED_TIER = Tier.L2
+# Quotas are enforced on L2 only, so quota writes reject any other tier.
+_QUOTA_TIER = Tier.L2
+# Usage is accounted on both concrete tiers, so status reads accept either.
+_ACCOUNTED_TIERS = (Tier.L1, Tier.L2)
 
 
 def _resolve_salt_from_api_path(cache_salt: str) -> str:
@@ -40,13 +47,49 @@ def _resolve_salt_from_api_path(cache_salt: str) -> str:
     return "" if cache_salt == _DEFAULT_SALT_SENTINEL else cache_salt
 
 
-def _require_supported_tier(tier: Tier) -> None:
-    """Raise ``HTTPException(400)`` unless ``tier`` is the supported one (``l2``)."""
-    if tier != _SUPPORTED_TIER:
+def _require_quota_tier(tier: Tier) -> None:
+    """Raise ``HTTPException(400)`` unless ``tier`` is quota-enforced (``l2``)."""
+    if tier != _QUOTA_TIER:
         raise HTTPException(
             status_code=400,
-            detail=f"tier {tier.value!r} not supported; only {_SUPPORTED_TIER.value!r}",
+            detail=(
+                f"quotas apply to tier {_QUOTA_TIER.value!r} only, not {tier.value!r}"
+            ),
         )
+
+
+def _require_accounted_tier(tier: Tier) -> None:
+    """Raise ``HTTPException(400)`` unless ``tier`` has usage accounting.
+
+    ``all`` is rejected: a key resident in both tiers holds bytes in
+    both, so a cross-tier total would double-count it.
+    """
+    if tier not in _ACCOUNTED_TIERS:
+        supported = ", ".join(repr(t.value) for t in _ACCOUNTED_TIERS)
+        raise HTTPException(
+            status_code=400,
+            detail=f"tier {tier.value!r} has no usage accounting; only {supported}",
+        )
+
+
+def _quota_entries_for_tier(store: QuotaManager, tier: Tier) -> dict[str, int]:
+    """Return the registered byte limits that apply to ``tier``.
+
+    Keyed ``cache_salt`` → limit in bytes. Quotas are enforced on L2
+    only, so every other tier has none: its status rows report no quota
+    rather than borrowing the L2 table's numbers, which govern different
+    bytes entirely.
+
+    Args:
+        store: The quota registry to read.
+        tier: The tier the caller is reporting on.
+
+    Returns:
+        The applicable limits, empty for any tier but ``l2``.
+    """
+    if tier != _QUOTA_TIER:
+        return {}
+    return {entry.cache_salt: entry.limit_bytes for entry in store.list_quotas()}
 
 
 def _gb(n_bytes: int) -> float:
@@ -69,12 +112,14 @@ async def set_quota_config(
     Returns:
         The applied config.
     """
-    _require_supported_tier(body.tier)
+    _require_quota_tier(body.tier)
     default_limit_bytes = (
         None if body.default_limit_gb is None else int(body.default_limit_gb * _GB)
     )
-    quota = get_context(request).eviction_controller.quota
-    quota.set_default_limit_bytes(default_limit_bytes)
+    ctx = get_context(request)
+    eviction = ctx.controllers.get(FleetEvictionController)
+    eviction.quota.set_default_limit_bytes(default_limit_bytes)
+    ctx.metadata_persister.save()
     return QuotaConfigResponse(default_limit_gb=body.default_limit_gb)
 
 
@@ -91,8 +136,8 @@ async def get_quota_config(
         The current config; ``default_limit_gb`` is ``null`` while
         unquota'd salts are exempt from eviction (the boot default).
     """
-    _require_supported_tier(tier)
-    quota = get_context(request).eviction_controller.quota
+    _require_quota_tier(tier)
+    quota = get_context(request).controllers.get(FleetEvictionController).quota
     default_limit = quota.get_default_limit_bytes()
     return QuotaConfigResponse(
         default_limit_gb=None if default_limit is None else _gb(default_limit)
@@ -115,15 +160,16 @@ async def set_quota(
     Returns:
         The applied quota, or a 400 JSON response if the limit is invalid.
     """
-    _require_supported_tier(body.tier)
+    _require_quota_tier(body.tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     limit_bytes = int(body.limit_gb * _GB)
+    ctx = get_context(request)
+    eviction = ctx.controllers.get(FleetEvictionController)
     try:
-        get_context(request).eviction_controller.quota.set_quota(
-            cache_salt, limit_bytes
-        )
+        eviction.quota.set_quota(cache_salt, limit_bytes)
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "invalid quota limit"})
+    ctx.metadata_persister.save()
     return QuotaResponse(cache_salt=cache_salt, limit_gb=body.limit_gb, status="ok")
 
 
@@ -140,10 +186,12 @@ async def delete_quota(
     Returns:
         ``QuotaResponse`` with ``status`` ``"removed"`` or ``"not_found"``.
     """
-    _require_supported_tier(tier)
+    _require_quota_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
-    quota = get_context(request).eviction_controller.quota
-    removed = quota.delete_quota(cache_salt)
+    ctx = get_context(request)
+    eviction = ctx.controllers.get(FleetEvictionController)
+    removed = eviction.quota.delete_quota(cache_salt)
+    ctx.metadata_persister.save()
     return QuotaResponse(
         cache_salt=cache_salt,
         limit_gb=0.0,
@@ -162,21 +210,24 @@ async def get_status(
 
     Args:
         cache_salt: Tenant identifier; use ``_default`` for the empty salt.
-        tier: Cache tier (only ``l2`` is supported today).
+        tier: Cache tier to report (``l1`` or ``l2``). Both the usage and
+            the quota fields describe that tier; since quotas are
+            enforced on L2 only, an ``l1`` request always reports
+            ``quota_exists=False``.
 
     Returns:
-        Combined quota and live usage detail.
+        Combined quota and live usage detail for ``tier``.
     """
-    _require_supported_tier(tier)
+    _require_accounted_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     ctx = get_context(request)
-    quota = ctx.eviction_controller.quota
-    usage = ctx.eviction_controller.usage.get(cache_salt)
-    exists = quota.has_quota(cache_salt)
-    limit = quota.get_limit_bytes(cache_salt)
+    quota = ctx.controllers.get(FleetEvictionController).quota
+    usage = ctx.views.get(CacheUsageManager).get_salt_bytes(tier, cache_salt)
+    exists = tier == _QUOTA_TIER and quota.has_quota(cache_salt)
+    limit = quota.get_limit_bytes(cache_salt) if exists else 0
     return StatusResponse(
         cache_salt=cache_salt,
-        quota_limit_gb=_gb(limit) if exists else 0.0,
+        quota_limit_gb=_gb(limit),
         quota_exists=exists,
         usage_gb=_gb(usage),
     )
@@ -187,18 +238,22 @@ async def list_status(request: Request, tier: Tier = Tier.L2) -> StatusListRespo
     """List quota and usage across all cache salts.
 
     Args:
-        tier: Cache tier (only ``l2`` is supported today).
+        tier: Cache tier to report (``l1`` or ``l2``). Both the usage and
+            the quota fields describe that tier; since quotas are
+            enforced on L2 only, an ``l1`` listing carries no quota rows
+            and every entry reports ``quota_exists=False``.
 
     Returns:
-        Total usage plus per-salt breakdown with quota info.
+        Total usage plus per-salt breakdown with quota info for ``tier``.
     """
-    _require_supported_tier(tier)
+    _require_accounted_tier(tier)
     ctx = get_context(request)
-    usage_view = ctx.eviction_controller.usage
-    quota_registry = ctx.eviction_controller.quota
-    by_salt = usage_view.get_all()
-    total = usage_view.get_total()
-    quota_entries = {e.cache_salt: e.limit_bytes for e in quota_registry.list_quotas()}
+    usage = ctx.views.get(CacheUsageManager)
+    eviction = ctx.controllers.get(FleetEvictionController)
+    usage_view = usage
+    by_salt = usage_view.get_bytes_by_salt(tier)
+    total = usage_view.get_total_bytes(tier)
+    quota_entries = _quota_entries_for_tier(eviction.quota, tier)
     all_salts = sorted(set(by_salt) | set(quota_entries))
     return StatusListResponse(
         total_gb=_gb(total),

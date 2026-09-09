@@ -113,6 +113,110 @@ jobs:
             --prerelease \
             dist/cu129/*.whl
 
+  # ROCm nightly. Unlike the CUDA wheels above (cibuildwheel on the runner), the
+  # ROCm wheel compiles HIP kernels inside the ROCm dev image, so it reuses the
+  # same reusable workflow the release pipeline calls. dev_version keeps it
+  # versioned like the CUDA nightlies (0.5.4.devN+rocm7.2) so a nightly can
+  # never be mistaken for a release.
+  nightly-rocm-wheel:
+    name: Build ROCm nightly wheel
+    uses: ./.github/workflows/build_rocm_artifacts.yml
+    with:
+      dev_version: true
+    secrets: inherit
+
+  publish-nightly-rocm:
+    name: Publish ROCm nightly wheel
+    runs-on: ubuntu-latest
+    needs: nightly-rocm-wheel
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Fetch ROCm nightly artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-rocm-artifacts
+          path: dist/rocm
+
+      - name: Publish ROCm wheels to rolling nightly-rocm release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ROCM_VERSION: ${{ needs.nightly-rocm-wheel.outputs.rocm_version }}
+        run: |
+          gh release delete nightly-rocm --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
+          gh release create nightly-rocm \
+            --repo ${{ github.repository }} \
+            --title "Nightly $(date +'%Y-%m-%d') · ROCm 7.2 (gfx942, gfx950)" \
+            --notes "Nightly ROCm 7.2 wheels built from \`dev\` on $(date +'%Y-%m-%d'),
+          for AMD Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X),
+          ABI-matched to the upstream \`vllm/vllm-openai-rocm\` image
+          (torch 2.11, cp312).
+
+          Install into an upstream vLLM ROCm container:
+          \`\`\`
+          pip install lmcache==${ROCM_VERSION} --no-deps \\
+            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-rocm
+          \`\`\`" \
+            --prerelease \
+            dist/rocm/*.whl
+
+  # MUSA nightly uses the same public-image build and smoke check as the
+  # release workflow, but receives a unique development version and is
+  # published to a rolling GitHub Release rather than PyPI.
+  nightly-musa-wheel:
+    name: Build MUSA nightly wheel
+    uses: ./.github/workflows/build_musa_artifacts.yml
+    with:
+      dev_version: true
+
+  publish-nightly-musa:
+    name: Publish MUSA nightly wheel
+    runs-on: ubuntu-latest
+    needs: nightly-musa-wheel
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Fetch MUSA nightly artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-musa-artifacts
+          path: dist/musa
+
+      - name: Publish MUSA wheels to rolling nightly-musa release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MUSA_VERSION: ${{ needs.nightly-musa-wheel.outputs.musa_version }}
+        run: |
+          gh release delete nightly-musa --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
+          gh release create nightly-musa \
+            --repo ${{ github.repository }} \
+            --title "Nightly $(date +'%Y-%m-%d') · Moore Threads MUSA" \
+            --notes "Nightly MUSA wheel for LMCache, built from \`dev\` on $(date +'%Y-%m-%d').
+
+          Built and smoke-tested in the validated public MUSA image. TorchMUSA,
+          the MUSA SDK, and device drivers remain host-owned and are not bundled
+          in the wheel.
+
+          Install inside the matching MUSA runtime image:
+          \`\`\`bash
+          pip install lmcache==${MUSA_VERSION} --no-deps \\
+            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-musa
+          \`\`\`" \
+            --prerelease \
+            dist/musa/*.whl
+
   nightly-build:
     name: Build image
     runs-on: ubuntu-latest

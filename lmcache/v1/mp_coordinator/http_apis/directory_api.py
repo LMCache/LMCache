@@ -6,7 +6,7 @@ on the typed :class:`CoordinatorContext`: placement lookup, fragment
 (blend) lookup, key/token-id listing, and stats — all read-only. The
 directory is written by the cache-event stream, which arrives on
 ``POST /events`` (see :mod:`events_api`). See
-``docs/design/v1/mp_coordinator/key_directory.md``.
+``docs/design/v1/mp_coordinator/views/key_directory.md``.
 """
 
 # Standard
@@ -18,7 +18,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 # First Party
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
-from lmcache.v1.mp_coordinator.key_directory import DirectoryStats
 from lmcache.v1.mp_coordinator.schemas import (
     BlendLookupRequest,
     BlendLookupResponse,
@@ -30,6 +29,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     DirectoryLookupResponse,
     decode_tokens,
 )
+from lmcache.v1.mp_coordinator.views.key_directory import DirectoryStats, KeyDirectory
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
@@ -53,8 +53,8 @@ async def lookup_placements(
 
     Returns:
         Chunk count plus one result per resolved key, in request order,
-        each with its known placements and the chunk's token ids
-        (both empty when the directory knows nothing about the key).
+        each with its known placements, the chunk's token ids, and the
+        key's access count. Unknown keys get empty lists and ``0``.
 
     Raises:
         HTTPException: 400 when the token sequence exceeds the
@@ -77,16 +77,21 @@ async def lookup_placements(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
-    placements = ctx.key_directory.lookup(obj_keys)
-    token_ids = ctx.key_directory.get_token_ids([key.chunk_hash for key in obj_keys])
+    directory = ctx.views.get(KeyDirectory)
+    placements = directory.lookup(obj_keys)
+    token_ids = directory.get_token_ids([key.chunk_hash for key in obj_keys])
+    access_counts = directory.get_access_counts(obj_keys)
     return DirectoryLookupResponse(
         chunks=chunks,
         results=[
             DirectoryKeyPlacements(
-                key=encoded, placements=key_placements, token_ids=list(tokens)
+                key=encoded,
+                placements=key_placements,
+                token_ids=list(tokens),
+                access_count=access_count,
             )
-            for encoded, key_placements, tokens in zip(
-                encoded_keys, placements, token_ids, strict=True
+            for encoded, key_placements, tokens, access_count in zip(
+                encoded_keys, placements, token_ids, access_counts, strict=True
             )
         ],
     )
@@ -109,7 +114,7 @@ async def blend_lookup(
     Returns:
         Matched chunks, ascending by query position.
     """
-    directory = get_context(request).key_directory
+    directory = get_context(request).views.get(KeyDirectory)
     tokens = decode_tokens(body.tokens_b64)
 
     def _match() -> BlendLookupResponse:
@@ -155,15 +160,16 @@ async def list_directory_keys(
 
     Returns:
         The number of keys matching the filters plus the requested page,
-        each key with its matching placements and the number of token
-        ids known for its chunk.
+        each key with its matching placements, the number of token ids
+        known for its chunk, and its access count.
     """
-    directory = get_context(request).key_directory
+    directory = get_context(request).views.get(KeyDirectory)
 
     def _scan() -> DirectoryListResponse:
         """Page the directory and shape the rows for the wire."""
         total, page = directory.list_keys(tier, instance_id, backend, offset, limit)
         token_ids = directory.get_token_ids([key.chunk_hash for key in page])
+        access_counts = directory.get_access_counts(list(page))
         return DirectoryListResponse(
             total=total,
             keys=[
@@ -171,9 +177,10 @@ async def list_directory_keys(
                     key=key.to_encoded_object_key(),
                     placements=placements,
                     num_tokens=len(tokens),
+                    access_count=access_count,
                 )
-                for (key, placements), tokens in zip(
-                    page.items(), token_ids, strict=True
+                for (key, placements), tokens, access_count in zip(
+                    page.items(), token_ids, access_counts, strict=True
                 )
             ],
         )
@@ -192,4 +199,4 @@ async def directory_stats(request: Request) -> DirectoryStats:
         applied seq, gap flag) lives on the ingest gate and is not
         exposed yet.
     """
-    return get_context(request).key_directory.stats()
+    return get_context(request).views.get(KeyDirectory).stats()

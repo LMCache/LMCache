@@ -84,8 +84,19 @@ if find_spec("lmcache.lmcache_native") is None:
     class TTLLock:
         """Minimal TTLLock fallback for tests that only import the symbol."""
 
+    class PageBufferShapeDesc:
+        """Minimal shape descriptor fallback for source-only imports."""
+
+    class KernelGroupSpec:
+        """Minimal kernel-group descriptor fallback for source-only imports."""
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
     fallback_module = types.ModuleType("lmcache.lmcache_native")
     fallback_module_any = cast(Any, fallback_module)
+    fallback_module_any.PageBufferShapeDesc = PageBufferShapeDesc
+    fallback_module_any.KernelGroupSpec = KernelGroupSpec
     fallback_module_any.Bitmap = Bitmap
     fallback_module_any.TTLLock = TTLLock
     sys.modules["lmcache.lmcache_native"] = fallback_module

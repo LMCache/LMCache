@@ -8,13 +8,13 @@ cache-event reporting) and **additive** (the local matcher still runs).
 
 Code: `lmcache/v1/mp_coordinator/blend_index.py`,
 `lmcache/v1/mp_coordinator/blend_client.py`,
-`lmcache/v1/multiprocess/modules/blend_v3.py`.
+`lmcache/v1/multiprocess/modules/blend.py`.
 Index internals: [blend_index.md](blend_index.md).
 
 ## Why
 
 CacheBlend lookup on its own is **local to one mp-server**: the matcher
-(`BlendTokenRangeMatcherV3`, `blend_v3.py`) indexes only chunks that
+(`BlendTokenRangeMatcher`, `modules/blend.py`) indexes only chunks that
 server stored, so a request routed to a different replica recomputes KV a
 peer already holds. As replicas scale, cache sharding works against
 reuse. The coordinator federates content fleet-wide so any server can

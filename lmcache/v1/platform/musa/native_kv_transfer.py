@@ -114,6 +114,13 @@ def try_native_multi_layer_block_kv_transfer(
         ``True`` when native dispatch completed and the caller should skip the
         torch fallback. ``False`` when the transfer is unsupported, disabled,
         unavailable, or rejected by the native module.
+
+    Notes:
+        Callers must stage lazy allocator-backed memory objects through
+        ``lmcache_memcpy_async_h2d`` or ``lmcache_memcpy_async_d2h`` before
+        entering this adapter. Its tensor-only interface does not retain the
+        allocator-relative host offset required to split copies at lazy pin
+        registration boundaries.
     """
     if not is_native_musa_kv_transfer_enabled():
         return False

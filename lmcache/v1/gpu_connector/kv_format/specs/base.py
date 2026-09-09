@@ -150,6 +150,9 @@ class KVFormatSpec(ABC):
     # ``num_blocks`` and ``block_size`` are folded into one PBS axis, which
     # leaves both of them undefined for this format.
     is_pbs_fused: ClassVar[bool] = False
+    # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
+    # than a single stacked per-layer tensor.
+    is_kv_second_tuple: ClassVar[bool] = False
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The
@@ -215,9 +218,12 @@ class KVFormatSpec(ABC):
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
         """Return device pointers for ``layer_indices`` in kernel-expected order.
 
-        Per-layer formats: one pointer per layer. SGLang two-list MHA: all K
-        pointers then all V. Cross-layer: a single base pointer (the kernel
-        walks layers itself, so ``layer_indices`` is ignored).
+        Per-layer formats: one pointer per layer.
+
+        SGLang two-list MHA: all K pointers, then all V pointers.
+
+        Cross-layer with a K/V axis: a single base pointer; the kernel walks
+        layers itself, so ``layer_indices`` is ignored.
         """
 
     def concrete_shape_str(self) -> str:

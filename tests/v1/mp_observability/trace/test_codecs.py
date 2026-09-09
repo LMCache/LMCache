@@ -166,12 +166,12 @@ class TestEncodeArgs:
         args = {
             "keys": [ObjectKey(chunk_hash=b"x", model_name="m", kv_rank=0)],
             "mode": "new",
-            "extra_count": 0,
+            "num_kv_readers": 1,
         }
         encoded = codecs.encode_args(args)
-        # mode and extra_count pass through; keys is wrapped.
+        # mode and num_kv_readers pass through; keys is wrapped.
         assert encoded["mode"] == "new"
-        assert encoded["extra_count"] == 0
+        assert encoded["num_kv_readers"] == 1
         assert isinstance(encoded["keys"], list)
         decoded = codecs.decode_args(encoded)
         assert decoded == args

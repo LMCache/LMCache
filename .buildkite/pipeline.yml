@@ -12,21 +12,10 @@ steps:
       source .venv-$BUILDKITE_BUILD_ID/bin/activate
       uv pip install --upgrade pip setuptools wheel
 
-      if command -v nvidia-smi >/dev/null 2>&1; then
-        source .buildkite/scripts/pick-free-gpu.sh 18000
-        export CUDA_LAUNCH_BLOCKING=1
-        # Pin torch to a version compatible with the CI machine's CUDA 12.x driver
-        uv pip install "torch>=2.6.0,<2.11.0"
-      else
-        source .buildkite/scripts/pick-free-gpu-amd.sh 18000
-        export AMD_SERIALIZE_KERNEL=1
-        export PYTORCH_ROCM_ARCH="gfx942"
-        export TORCH_DONT_CHECK_COMPILER_ABI=1
-        export CXX=hipcc
-        export BUILD_WITH_HIP=1
-        uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
-        uv pip install -r requirements/rocm_core.txt
-      fi
+      source .buildkite/scripts/pick-free-gpu.sh 18000
+      export CUDA_LAUNCH_BLOCKING=1
+      # Pin torch to a version compatible with the CI machine's CUDA 12.x driver
+      uv pip install "torch>=2.6.0,<2.11.0"
 
       uv pip install -r requirements/common.txt
       uv pip install -r requirements/test.txt
@@ -57,4 +46,4 @@ steps:
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
-      - "coverage-test/**/*"      
+      - "coverage-test/**/*"

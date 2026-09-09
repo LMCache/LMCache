@@ -19,7 +19,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.blend_index import BlendIndex
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 CHUNK = 4
 

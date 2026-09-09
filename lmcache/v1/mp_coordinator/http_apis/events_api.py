@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Cache-event ingest endpoint on the coordinator (fleet-level).
+"""HTTP cache-event source endpoint on the coordinator (fleet-level).
 
-The ``/events`` surface, thin over the :class:`EventGate`. Top-level
-rather than under ``/directory`` because the stream feeds every consumer
-of it, not one of them. See
+The ``/events`` surface is thin over :class:`HttpCacheEventSource`, which
+passes request-ordered batches through the common ingestor to
+:class:`EventGate`. It is top-level rather than under ``/directory``
+because the stream feeds every consumer of it, not one of them. See
 ``docs/design/v1/mp_coordinator/ingest.md``.
 """
 
@@ -12,7 +13,6 @@ from fastapi import APIRouter, Request
 
 # First Party
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
-from lmcache.v1.mp_coordinator.ingest.event_gate import IngestResult
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest, CacheEventsResponse
 
 router = APIRouter()
@@ -28,20 +28,19 @@ async def report_cache_events(
     emission order. Duplicates and stale incarnations are dropped and
     counted, not errors.
 
+    ``config`` batches ride the same path and reach the server-config
+    registry as a consumer, so they inherit the gate's fencing and ordering.
+
     Args:
         body: The event batches to ingest.
+        request: The FastAPI request carrying the coordinator context.
 
     Returns:
         Counts of applied and dropped batches.
     """
-    event_gate = get_context(request).event_gate
-    response = CacheEventsResponse()
-    for batch in body.batches:
-        result = event_gate.ingest(batch)
-        if result == IngestResult.ADMITTED:
-            response.applied += 1
-        elif result == IngestResult.DUPLICATE:
-            response.duplicates += 1
-        else:
-            response.stale += 1
-    return response
+    summary = get_context(request).event_source.ingest(body.batches)
+    return CacheEventsResponse(
+        applied=summary.applied,
+        duplicates=summary.duplicates,
+        stale=summary.stale,
+    )

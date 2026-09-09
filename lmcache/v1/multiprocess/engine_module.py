@@ -74,7 +74,7 @@ class InstanceLivenessTarget(Protocol):
       ``tracked_instance_count``). The transfer modules fill this role.
     * **State mirror** -- holds a second reference to a reaped instance's
       resources and releases it on demand (``drop_instance_state``).
-      ``BlendV3Module`` fills this role for its per-instance CB state.
+      ``BlendModule`` fills this role for its per-instance CB state.
 
     Every method defaults to a no-op, so an implementer subclasses this
     protocol and overrides only the role it fills. The management module
@@ -122,7 +122,7 @@ class InstanceLivenessTarget(Protocol):
 
         Called for every reaped ``instance_id``. A no-op unless the target
         keeps a second reference to that instance's resources (only mirrors
-        such as ``BlendV3Module`` override this).
+        such as ``BlendModule`` override this).
 
         Args:
             instance_id: The reaped worker's instance ID.

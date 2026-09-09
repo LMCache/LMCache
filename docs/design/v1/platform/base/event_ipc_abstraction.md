@@ -60,6 +60,34 @@ class EventIPCBackend(Protocol):
     def synchronize_event(self, event: object, device: object) -> None: ...
 ```
 
+### Ordering contract
+
+`import_event` must return an event that represents the *producer's* work, on
+the producer's stream, in the producer's process. The imported event is the
+only thing ordering the two processes: the producer records it and ships the
+handle without synchronizing, and the consumer's `wait_event` before touching
+shared KV-cache memory is what keeps it from reading blocks the producer has
+not finished writing.
+
+A backend must therefore not fabricate the event. Concretely, if
+`import_event` cannot open the handle and instead returns an event it created
+locally, or one it has already recorded and synchronized, then that event is
+complete the moment the consumer receives it. The subsequent `wait_event`
+returns immediately, the consumer's transfer kernel runs alongside the
+producer's writes, and it can read partially written KV-cache blocks.
+
+Substituting host-side synchronization does not work either. Draining the
+importing process's own streams says nothing about the exporting process --
+they are separate contexts, and without MPS-style serialization their kernels
+are interleaved rather than ordered.
+
+The failure is silent: no error is raised, and it only shows up as wrong cache
+contents under load. See LMCache/LMCache#4422 for a concrete case.
+
+If a device cannot support cross-process event import, it must fail
+`check_event_support` so the caller falls back to a transfer mode that does not
+depend on cross-process ordering, rather than silently degrading correctness.
+
 The lookup entry point is:
 
 ```python
@@ -140,7 +168,9 @@ class DeviceSpec:
 class CudaDeviceSpec(DeviceSpec):
     @property
     def event_ipc_backend(self) -> EventIPCBackend:
-        return DefaultEventIPCBackend(event_module=torch.cuda, ...)
+        # TimelineSemaphoreEventIPCBackend when isolated IPC is enabled
+        # (the default), else DefaultEventIPCBackend(event_module=torch.cuda)
+        return _select_event_ipc_backend(self.device_type)
 
 class MusaDeviceSpec(DeviceSpec):
     @property
@@ -150,6 +180,16 @@ class MusaDeviceSpec(DeviceSpec):
 
 This keeps platform capabilities together. Adding another backend requires a
 new platform package/spec, not an edit to the multiprocess transfer modules.
+
+CUDA selects between two backends via the process-global isolated-IPC switch
+(`lmcache/v1/platform/isolated_ipc.py`, default off): the timeline-semaphore
+backend works across containers that share no host IPC namespace or
+`/dev/shm` (see `../cuda/timeline_semaphore_event_ipc.md`), while
+`DefaultEventIPCBackend` uses CUDA interprocess event handles. The switch is
+set at process initialization from `lmcache.mp.isolated_ipc` (vLLM connector
+extra_config) and `--isolated-ipc` (MP server CLI), before the first backend
+resolution; the selection is module-level, not spec-instance state, so every
+`DeviceSpec` instance in the process resolves identically.
 
 ## Generic Multiprocess Flow
 

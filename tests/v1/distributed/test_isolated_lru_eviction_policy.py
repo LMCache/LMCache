@@ -12,6 +12,7 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
 from lmcache.v1.distributed.internal_api import EvictionDestination
+from lmcache.v1.mp_coordinator.utils.encoding import encode_key
 
 
 def _key(chunk_id: int, cache_salt: str = "") -> ObjectKey:
@@ -135,3 +136,27 @@ class TestEvictionAmount:
             key_eligible_filter=lambda k: k == k2,
         )
         assert actions[0].keys == [k2]
+
+
+class TestDurableState:
+    def test_the_restored_order_decides_who_is_evicted_first(self):
+        """A restore that reorders a bucket silently changes the victim,
+        which no other state would reveal."""
+        policy = IsolatedLRUEvictionPolicy()
+        # Created in reverse, so 3 sits at the LRU head; touching it sends
+        # it to the other end and leaves an order creation alone cannot.
+        policy.on_keys_created([_key(i) for i in (1, 2, 3)])
+        policy.on_keys_touched([_key(3)])
+
+        restored = IsolatedLRUEvictionPolicy()
+        restored.restore(policy.capture())
+
+        assert restored.capture()["buckets"][""] == [
+            encode_key(_key(2)),
+            encode_key(_key(1)),
+            encode_key(_key(3)),
+        ]
+        victims = restored.get_eviction_actions(expected_ratio=0.4, cache_salt="")
+        assert [key.chunk_hash for key in victims[0].keys] == [
+            ObjectKey.IntHash2Bytes(2)
+        ]

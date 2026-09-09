@@ -20,10 +20,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
-from lmcache.v1.platform.ops_types import (
-    PageBufferShapeDesc,
-    set_shape_desc_dtype,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -52,7 +49,6 @@ class DeviceOps:
     LaunchVar = ops_types.LaunchVar
     BatchStep = ops_types.BatchStep
     KernelGroupSpec = ops_types.KernelGroupSpec
-    set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
 
     # Bound from the native module by bind_native (declared for static analysis).
     TransferDirection: type[lmcache_native.TransferDirection]

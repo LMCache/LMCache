@@ -34,6 +34,12 @@ def _stub_lmcache_native() -> Generator[None, None, None]:
         return
 
     stub: Any = types.ModuleType(_MOD_NAME)
+    stub.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})
+    stub.KernelGroupSpec = type(
+        "KernelGroupSpec",
+        (),
+        {"__init__": lambda self, *args, **kwargs: None},
+    )
     stub.TTLLock = MagicMock()
     stub.Bitmap = MagicMock()
     stub.PeriodicEventNotifier = MagicMock()
