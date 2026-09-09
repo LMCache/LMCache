@@ -6,10 +6,12 @@ and ``get_tokens_per_block`` (attention-only block scaling). No GPU needed."""
 # Standard
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from typing import Literal
 import importlib.util
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
@@ -266,6 +268,8 @@ class AttentionSpec:
 class FullAttentionSpec(AttentionSpec):
     """Double for a concrete paged-attention spec."""
 
+    dcp_replicated: bool = False
+
 
 @dataclass
 class UniformTypeKVCacheSpecs:
@@ -286,6 +290,12 @@ def test_attention_group_scaled_by_dcp(dcp_size: int):
     """One attention block id spans block_size * dcp global tokens."""
     spec = _attention_spec(1024)
     assert get_tokens_per_block(spec, dcp_size) == 1024 * dcp_size
+
+
+def test_dcp_replicated_attention_group_is_not_scaled():
+    """A replicated attention spec keeps ordinary block coordinates."""
+    spec = FullAttentionSpec(block_size=16, dcp_replicated=True)
+    assert get_tokens_per_block(spec, 4) == 16
 
 
 def test_mamba_group_never_scaled():
@@ -410,6 +420,312 @@ def test_mamba_alignment_uses_resolved_page_not_cli_block_size():
     validate_mamba_step_alignment(
         _geometry_config(max_num_batched_tokens=4096), kv_config
     )
+
+
+@requires_vllm
+def test_exact_fit_recurrent_page_uses_one_opaque_slot():
+    """A valid page remains transferable when token rows cannot be aligned."""
+    # Third Party
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import (
+        apply_kv_cache_group_edits,
+    )
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    import lmcache.lmcache_native as lmcache_native
+
+    num_blocks = 3
+    logical_block_size = 4096
+    page_elems = 1_085_440
+    block_stride = 2 * page_elems
+    pool = torch.zeros(num_blocks * block_stride, dtype=torch.uint8)
+    recurrent = pool.as_strided(
+        (num_blocks, 1, 1, page_elems),
+        (block_stride, page_elems, page_elems, 1),
+        storage_offset=page_elems,
+    )
+    recurrent[1, 0, 0, :32] = torch.arange(32, dtype=torch.uint8)
+    spec = VllmMambaSpec(
+        block_size=logical_block_size,
+        shapes=((page_elems,),),
+        dtypes=(torch.uint8,),
+        page_size_padded=page_elems,
+        mamba_cache_mode="align",
+    )
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["recurrent"], spec)],
+    )
+
+    edited = apply_kv_cache_group_edits(
+        config,
+        {"recurrent": recurrent},
+        {"kv_layout": "NHD"},
+    )["recurrent"]
+
+    assert isinstance(edited, torch.Tensor)
+    assert edited.shape == (num_blocks, 1, page_elems)
+    assert edited.stride() == (block_stride, page_elems, 1)
+    assert edited.data_ptr() == recurrent.data_ptr()
+    assert torch.equal(edited[1, 0], recurrent[1, 0, 0])
+
+    manager = KVLayerGroupsManager(
+        [edited],
+        engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_NB_BS_HS],
+        engine_group_infos=[
+            EngineGroupInfo(
+                engine_group_id=0,
+                layer_indices=(0,),
+                tokens_per_block=logical_block_size,
+            )
+        ],
+        lmcache_tokens_per_chunk=logical_block_size,
+    )
+    group = manager.kernel_groups[0]
+    assert group.slots_per_block == 1
+    assert group.tokens_per_block == logical_block_size
+    assert group.calculate_slots(logical_block_size) == 1
+    assert group.shape_desc.hs == page_elems
+    assert group.shape_desc.block_stride_elems == block_stride
+
+
+@requires_vllm
+def test_padded_attention_page_preserves_declared_opaque_tail():
+    """Registration exposes all declared bytes and preserves block stride."""
+    # Third Party
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+    )
+    from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+    from vllm.v1.kv_cache_interface import (
+        MLAAttentionSpec,
+    )
+
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import (
+        apply_kv_cache_group_edits,
+    )
+
+    num_blocks = 3
+    semantic_page_elems = 32
+    declared_page_elems = 40
+    block_stride_elems = 80
+    pool = torch.arange(num_blocks * block_stride_elems, dtype=torch.uint8)
+    attention = pool.as_strided(
+        (num_blocks, 1, 4, 8),
+        (block_stride_elems, semantic_page_elems, 8, 1),
+    )
+    attention_spec = MLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.uint8,
+        page_size_padded=declared_page_elems,
+    )
+    recurrent_spec = VllmMambaSpec(
+        block_size=4,
+        shapes=((13,),),
+        dtypes=(torch.float32,),
+        page_size_padded=64,
+        mamba_cache_mode="align",
+    )
+    recurrent_pool = torch.zeros(num_blocks * 16, dtype=torch.float32)
+    recurrent = recurrent_pool.as_strided(
+        (num_blocks, 1, 1, 13),
+        (16, 13, 13, 1),
+    )
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], attention_spec),
+            KVCacheGroupSpec(["recurrent"], recurrent_spec),
+        ],
+    )
+
+    edited = apply_kv_cache_group_edits(
+        config,
+        {"attention": attention, "recurrent": recurrent},
+        {"kv_layout": "NHD"},
+    )["attention"]
+
+    assert isinstance(edited, torch.Tensor)
+    assert edited.shape == (num_blocks, 4, 10)
+    assert edited.stride() == (block_stride_elems, 10, 1)
+    assert edited.data_ptr() == attention.data_ptr()
+    assert torch.equal(
+        edited[1].reshape(-1),
+        pool[block_stride_elems : block_stride_elems + declared_page_elems],
+    )
+
+
+@requires_vllm
+def test_packed_attention_page_uses_one_opaque_physical_slot():
+    """A non-token-factorable page remains one exact logical block record."""
+    # Third Party
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+    )
+    from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+    from vllm.v1.kv_cache_interface import (
+        MLAAttentionSpec,
+    )
+
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import (
+        apply_kv_cache_group_edits,
+    )
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    import lmcache.lmcache_native as lmcache_native
+
+    num_blocks = 3
+    logical_block_size = 512
+    semantic_record_bytes = 304
+    semantic_page_bytes = logical_block_size * semantic_record_bytes
+    declared_page_bytes = 177_408
+    block_stride_bytes = 200_000
+    pool = torch.arange(num_blocks * block_stride_bytes, dtype=torch.int64).to(
+        torch.uint8
+    )
+    attention = pool.as_strided(
+        (num_blocks, 1, logical_block_size, semantic_record_bytes),
+        (block_stride_bytes, semantic_page_bytes, semantic_record_bytes, 1),
+    )
+    attention_spec = MLAAttentionSpec(
+        block_size=logical_block_size,
+        num_kv_heads=1,
+        head_size=semantic_record_bytes,
+        dtype=torch.uint8,
+        page_size_padded=declared_page_bytes,
+    )
+    recurrent_spec = VllmMambaSpec(
+        block_size=logical_block_size,
+        shapes=((13,),),
+        dtypes=(torch.float32,),
+        page_size_padded=logical_block_size * torch.float32.itemsize,
+        mamba_cache_mode="align",
+    )
+    recurrent_pool = torch.zeros(num_blocks * logical_block_size, dtype=torch.float32)
+    recurrent = recurrent_pool.as_strided(
+        (num_blocks, 1, 1, 13),
+        (logical_block_size, 13, 13, 1),
+    )
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], attention_spec),
+            KVCacheGroupSpec(["recurrent"], recurrent_spec),
+        ],
+    )
+
+    edited = apply_kv_cache_group_edits(
+        config,
+        {"attention": attention, "recurrent": recurrent},
+        {"kv_layout": "NHD"},
+    )["attention"]
+
+    assert isinstance(edited, torch.Tensor)
+    assert edited.shape == (num_blocks, 1, declared_page_bytes)
+    assert edited.stride() == (block_stride_bytes, declared_page_bytes, 1)
+    assert edited.data_ptr() == attention.data_ptr()
+    assert torch.equal(
+        edited[1].reshape(-1),
+        pool[block_stride_bytes : block_stride_bytes + declared_page_bytes],
+    )
+
+    manager = KVLayerGroupsManager(
+        [edited],
+        engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_NB_BS_HS],
+        engine_group_infos=[
+            EngineGroupInfo(
+                engine_group_id=0,
+                layer_indices=(0,),
+                tokens_per_block=logical_block_size,
+            )
+        ],
+        lmcache_tokens_per_chunk=4096,
+    )
+    group = manager.kernel_groups[0]
+    assert group.slots_per_block == 1
+    assert group.tokens_per_block == logical_block_size
+    assert group.calculate_slots(4096) == 8
+    assert group.shape_desc.hs == declared_page_bytes
+    assert group.shape_desc.block_stride_elems == block_stride_bytes
+
+
+@requires_vllm
+@pytest.mark.parametrize("attention_kind", ["mla", "standard"])
+def test_subpaged_attention_excludes_incomplete_logical_page_tail(
+    attention_kind: Literal["mla", "standard"],
+):
+    """A kernel-page pool registers every complete logical page."""
+    # Third Party
+    from vllm.v1.kv_cache_interface import FullAttentionSpec as VllmFullAttentionSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import (
+        apply_kv_cache_group_edits,
+    )
+
+    if attention_kind == "mla":
+        attention_spec = MLAAttentionSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.uint8,
+        )
+        attention = torch.arange(11 * 2 * 8, dtype=torch.uint8).reshape(11, 2, 8)
+        expected = attention[:10].reshape(5, 4, 8)
+    else:
+        attention_spec = VllmFullAttentionSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.uint8,
+        )
+        attention = torch.arange(11 * 2 * 2 * 8, dtype=torch.uint8).reshape(
+            11, 2, 2, 1, 8
+        )
+        expected = attention[:10].reshape(5, 2, 4, 1, 8)
+
+    recurrent_spec = VllmMambaSpec(
+        block_size=4,
+        shapes=((13,),),
+        dtypes=(torch.float32,),
+        page_size_padded=64,
+        mamba_cache_mode="align",
+    )
+    recurrent_pool = torch.zeros(5 * 16, dtype=torch.float32)
+    recurrent = recurrent_pool.as_strided((5, 1, 1, 13), (16, 13, 13, 1))
+    config = KVCacheConfig(
+        num_blocks=5,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], attention_spec),
+            KVCacheGroupSpec(["recurrent"], recurrent_spec),
+        ],
+    )
+
+    edited = apply_kv_cache_group_edits(
+        config,
+        {"attention": attention, "recurrent": recurrent},
+        {"kv_layout": "NHD"},
+    )["attention"]
+
+    assert isinstance(edited, torch.Tensor)
+    assert edited.data_ptr() == attention.data_ptr()
+    assert torch.equal(edited, expected)
 
 
 @requires_vllm
@@ -612,6 +928,16 @@ def test_uniform_type_wrapper_still_scales_under_dcp():
     )
     assert get_tokens_per_block(wrapped, 2) == 2048
     assert get_tokens_per_block(wrapped, 1) == 1024
+
+
+def test_uniform_wrapper_of_replicated_attention_is_not_scaled():
+    """Replication on every wrapped leaf keeps the wrapper unscaled."""
+    inner = FullAttentionSpec(block_size=16, dcp_replicated=True)
+    wrapped = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"layer.0": inner, "layer.1": inner},
+    )
+    assert get_tokens_per_block(wrapped, 4) == 16
 
 
 def test_uniform_type_wrapper_of_mamba_is_not_scaled():

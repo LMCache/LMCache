@@ -512,6 +512,42 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].sw_size_chunks >= 1
         assert attn_desc.num_chunks_in_sw[1] == manager.object_groups[1].sw_size_chunks
 
+    def test_recurrent_kernel_groups_get_distinct_object_groups(self):
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(4)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), sw_size_tokens=256, recurrent_state=True),
+                EngineGroupInfo(1, (1,), sw_size_tokens=256, recurrent_state=True),
+                EngineGroupInfo(2, (2,), sw_size_tokens=256, recurrent_state=True),
+                EngineGroupInfo(3, (3,)),
+            ],
+            separate_object_groups=True,
+        )
+
+        assert manager.num_kernel_groups == 4
+        assert manager.num_object_groups == 4
+        assert [
+            object_group.kernel_group_indices for object_group in manager.object_groups
+        ] == [[0], [1], [2], [3]]
+        object_group_idx_by_kernel_group = {
+            kernel_group_idx: object_group_idx
+            for object_group_idx, object_group in enumerate(manager.object_groups)
+            for kernel_group_idx in object_group.kernel_group_indices
+        }
+        assert [
+            object_group_idx_by_kernel_group[kernel_group_idx]
+            for kernel_group_idx in range(manager.num_kernel_groups)
+        ] == [0, 1, 2, 3]
+        attn_desc = manager.get_attn_desc()
+        assert attn_desc.group_kinds == (
+            "recurrent",
+            "recurrent",
+            "recurrent",
+            "attention",
+        )
+        assert attn_desc.num_chunks_in_sw == [1, 1, 1, -1]
+
     def test_object_group_separation_standalone_group_buckets_alone(self):
         # A tagged extra group (connector-private pool) buckets alone even
         # though its window (-1) matches the full-attention bucket. The rest

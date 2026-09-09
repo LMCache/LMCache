@@ -11,6 +11,15 @@ import time
 # Third Party
 import pytest
 
+# First Party
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
+    _object_key_to_filename,
+)
+from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+    _object_key_to_string,
+)
+
 
 def _import_fs_client() -> type:
     try:
@@ -80,6 +89,62 @@ def _submit_and_wait(
 ) -> tuple[int, bool, str, list[bool] | None]:
     future_id = getattr(client, method_name)([key], [view])
     return _wait_for_completion(client, future_id)
+
+
+@pytest.mark.parametrize(
+    ("wire_key", "filename"),
+    [
+        ("model@00000000@aabb", "model@0x00000000@aabb.data"),
+        (
+            "model@00000000@aabb@tenant",
+            "model@0x00000000@aabb@tenant.data",
+        ),
+    ],
+)
+def test_legacy_key_shapes_keep_their_filenames(
+    tmp_path, wire_key: str, filename: str
+) -> None:
+    """Three/four-field keys written by older clients remain readable."""
+    LMCacheFSClient = _import_fs_client()
+    payload = bytearray(b"legacy-payload")
+    client = LMCacheFSClient(str(tmp_path), 1)
+    try:
+        completion = _submit_and_wait(
+            client, "submit_batch_set", wire_key, memoryview(payload)
+        )
+        assert completion[1], completion[2]
+        assert (tmp_path / filename).read_bytes() == payload
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("cache_salt", ["", "tenant"])
+def test_current_object_group_keys_match_python_filename(
+    tmp_path, cache_salt: str
+) -> None:
+    """Native FS and Python FS use one path for current ObjectKeys."""
+    LMCacheFSClient = _import_fs_client()
+    key = ObjectKey(
+        chunk_hash=bytes.fromhex("aabbccdd"),
+        model_name="org/model",
+        kv_rank=0x01020304,
+        object_group_id=0x2A,
+        cache_salt=cache_salt,
+    )
+    payload = bytearray(b"object-group-payload")
+    client = LMCacheFSClient(str(tmp_path), 1)
+    try:
+        completion = _submit_and_wait(
+            client,
+            "submit_batch_set",
+            _object_key_to_string(key),
+            memoryview(payload),
+        )
+        assert completion[1], completion[2]
+        expected_path = tmp_path / _object_key_to_filename(key)
+        assert expected_path.read_bytes() == payload
+    finally:
+        client.close()
 
 
 def test_odirect_read_does_not_split_for_read_ahead(tmp_path) -> None:

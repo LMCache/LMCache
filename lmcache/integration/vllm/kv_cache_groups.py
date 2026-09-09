@@ -32,17 +32,24 @@ def _is_attention_spec(spec: Any) -> bool:
     return any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
 
 
+def _is_dcp_replicated_spec(spec: Any) -> bool:
+    """Return whether every leaf spec is explicitly replicated under DCP."""
+    inner = getattr(spec, "kv_cache_specs", None)
+    specs = list(inner.values()) if isinstance(inner, dict) else [spec]
+    return bool(specs) and all(getattr(leaf, "dcp_replicated", False) for leaf in specs)
+
+
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
-    Attention blocks span ``block_size * dcp_size`` tokens under DCP
-    (vLLM's ``resolve_kv_cache_block_sizes`` rule); recurrent state is
-    replicated, not sharded, and stays at ``block_size``.
+    Sharded attention blocks span ``block_size * dcp_size`` tokens under DCP.
+    Attention specs explicitly marked ``dcp_replicated`` and recurrent state
+    remain at ``block_size``.
     """
     block_size = kv_cache_spec.block_size
     if dcp_size <= 1:
         return block_size
-    if _is_attention_spec(kv_cache_spec):
+    if _is_attention_spec(kv_cache_spec) and not _is_dcp_replicated_spec(kv_cache_spec):
         return block_size * dcp_size
     return block_size
 

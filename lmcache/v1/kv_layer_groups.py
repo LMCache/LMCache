@@ -208,11 +208,11 @@ class KernelGroupInfo:
     """Sliding window size in logical tokens for this group's layers.
     ``-1`` means the layers are not sliding-window attention."""
     extra_object_group_tag: int = 0
-    """Connector-private extra-group tag. ``0`` = a regular group, bucketed
-    by (recurrent, window) under ``separate_object_groups``; ``> 0`` = an
-    extra group (e.g. the CacheBlend fused-aux pool) that buckets by tag —
-    groups sharing a tag share an object group, and extras always sort
-    after the regular groups."""
+    """Connector-private extra-group tag. ``0`` = a regular group; under
+    ``separate_object_groups``, recurrent regular groups remain independent
+    while attention regular groups bucket by window. ``> 0`` = an extra group
+    (e.g. the CacheBlend fused-aux pool) that buckets by tag — groups sharing a
+    tag share an object group, and extras always sort after the regular groups."""
     recurrent_state: bool = False
     """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
     rather than per-token attention KV. The window reflects restore
@@ -268,14 +268,16 @@ KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
 class _ObjectBucket(NamedTuple):
     """Object-group bucket key under ``separate_object_groups``.
 
-    Regular groups (``extra_tag == 0``) bucket by ``(recurrent, sw_chunks)``;
-    tagged extras bucket by ``extra_tag`` (their other fields ride along for
-    bookkeeping but extras never mix with regular groups).
+    Regular attention groups (``extra_tag == 0``) bucket by ``sw_chunks``;
+    regular recurrent groups also carry their kernel-group index so each stays
+    independent. Tagged extras bucket by ``extra_tag`` (their other fields ride
+    along for bookkeeping but extras never mix with regular groups).
     """
 
     extra_tag: int
     recurrent: bool
     sw_chunks: int
+    recurrent_group_idx: int
 
 
 @dataclass
@@ -353,10 +355,10 @@ class KVLayerGroupsManager:
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
-            separate_object_groups: When True, split kernel groups
-                into one object group per sliding-window size; when False
-                (default), all kernel groups share a single full-attention
-                object group.
+            separate_object_groups: When True, keep each recurrent kernel group
+                in its own object group and bucket attention kernel groups by
+                sliding-window size; when False (default), all kernel groups
+                share a single full-attention object group.
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -669,11 +671,12 @@ class KVLayerGroupsManager:
         """Bucket kernel groups into object groups.
 
         Puts all kernel groups into a single object group when object-group
-        separation is disabled (the default). Otherwise groups the kernel
-        groups by (recurrent, sliding-window chunks), except that tagged
-        extra groups (``extra_object_group_tag``, connector-private) bucket
-        by tag — and always sort after the regular groups, so the shared
-        group ids match a registration without any extras.
+        separation is disabled (the default). Otherwise each regular recurrent
+        kernel group becomes its own object group, while regular attention
+        groups bucket by sliding-window chunks. Tagged extra groups
+        (``extra_object_group_tag``, connector-private) bucket by tag and always
+        sort after the regular groups, so the shared group ids match a
+        registration without any extras.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -702,6 +705,11 @@ class KVLayerGroupsManager:
                 extra_tag=group.extra_object_group_tag,
                 recurrent=group.recurrent_state,
                 sw_chunks=sw_size_chunks,
+                recurrent_group_idx=(
+                    kernel_group_idx
+                    if group.extra_object_group_tag == 0 and group.recurrent_state
+                    else -1
+                ),
             )
             groups_by_bucket[bucket].append(kernel_group_idx)
             bucket_sw_size[bucket] = sw_size_chunks
