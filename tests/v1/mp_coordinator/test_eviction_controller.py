@@ -2,6 +2,7 @@
 """Tests for the coordinator eviction controller."""
 
 # Standard
+from collections.abc import Callable
 import asyncio
 import time
 
@@ -17,10 +18,17 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
+from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.controllers import build_controllers
+from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
+from lmcache.v1.mp_coordinator.views import build_views
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
+)
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 
@@ -37,6 +45,8 @@ def _setup(
     eviction_ratio: float = 0.5,
     trigger_watermark: float = 1.0,
     default_limit_bytes: int | None = 0,
+    check_interval: float = 0.0,
+    instances: tuple[MPInstance, ...] = (),
 ) -> tuple[FleetEvictionController, QuotaManager, CacheUsageManager]:
     """Build the controller plus the quota registry it owns and the
     usage view it reads.
@@ -50,8 +60,10 @@ def _setup(
     usage = CacheUsageManager()
     ctrl = FleetEvictionController(
         usage_manager=usage,
+        registry=_make_registry(*instances),
         eviction_ratio=eviction_ratio,
         trigger_watermark=trigger_watermark,
+        check_interval=check_interval,
     )
     ctrl.quota.set_default_limit_bytes(default_limit_bytes)
     return ctrl, ctrl.quota, usage
@@ -335,12 +347,13 @@ async def test_execute_evictions_dispatches_to_registered_instance():
     the right body shape. The LRU is NOT cleared by ``execute_evictions``
     itself — that happens later via the coordinator's cache-event stream
     handler when the MP server reports the deletion back."""
-    ctrl, qs, kd = _setup(eviction_ratio=1.0)
+    ctrl, qs, kd = _setup(
+        eviction_ratio=1.0,
+        instances=(_instance("mp-1", ip="10.0.0.7", port=8765),),
+    )
     k = _make_key("alice", h="aa")
     _store(ctrl, kd, k, 100)
     qs.set_quota("alice", 0)  # ratio=1.0 → full eviction
-
-    registry = _make_registry(_instance("mp-1", ip="10.0.0.7", port=8765))
 
     captured: dict[str, object] = {}
 
@@ -351,7 +364,7 @@ async def test_execute_evictions_dispatches_to_registered_instance():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
-        plan = await ctrl.execute_evictions(registry, client)
+        plan = await ctrl.execute_evictions(client)
         # Dispatch is fire-and-forget — wait for the background task
         # to actually issue the HTTP call before the client closes.
         await ctrl.wait_for_in_flight_dispatches()
@@ -386,19 +399,17 @@ async def test_execute_evictions_dispatches_to_registered_instance():
 async def test_execute_evictions_no_instances_skips_dispatch_and_keeps_lru():
     """No registered MP servers ⇒ the plan is logged but neither
     dispatched nor cleared from the LRU."""
-    ctrl, qs, kd = _setup(eviction_ratio=1.0)
+    ctrl, qs, kd = _setup(eviction_ratio=1.0)  # no registered instances
     k = _make_key("alice", h="bb")
     _store(ctrl, kd, k, 100)
     qs.set_quota("alice", 0)
-
-    registry = _make_registry()  # empty
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda r: pytest.fail("must not be called")  # type: ignore[arg-type]
         )
     ) as client:
-        plan = await ctrl.execute_evictions(registry, client)
+        plan = await ctrl.execute_evictions(client)
         await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {"alice": [k]}
@@ -410,18 +421,16 @@ async def test_execute_evictions_no_instances_skips_dispatch_and_keeps_lru():
 async def test_execute_evictions_http_failure_keeps_lru():
     """A non-2xx (or transport error) from the MP server must NOT
     clear the LRU — the next cycle should retry."""
-    ctrl, qs, kd = _setup(eviction_ratio=1.0)
+    ctrl, qs, kd = _setup(eviction_ratio=1.0, instances=(_instance("mp-1"),))
     k = _make_key("alice", h="cc")
     _store(ctrl, kd, k, 100)
     qs.set_quota("alice", 0)
-
-    registry = _make_registry(_instance("mp-1"))
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "internal"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        plan = await ctrl.execute_evictions(registry, client)
+        plan = await ctrl.execute_evictions(client)
         await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {"alice": [k]}
@@ -440,13 +449,11 @@ async def test_execute_evictions_chunks_large_plan(monkeypatch):
 
     monkeypatch.setattr(em, "MAX_DELETE_BATCH", 2)
 
-    ctrl, qs, kd = _setup(eviction_ratio=1.0)
+    ctrl, qs, kd = _setup(eviction_ratio=1.0, instances=(_instance("mp-1"),))
     keys = [_make_key("alice", h=f"{i:02x}") for i in range(5)]
     for k in keys:
         _store(ctrl, kd, k, 100)
     qs.set_quota("alice", 0)  # ratio=1.0 → full eviction of all 5 keys
-
-    registry = _make_registry(_instance("mp-1"))
 
     # Standard
     import json as _json
@@ -459,7 +466,7 @@ async def test_execute_evictions_chunks_large_plan(monkeypatch):
         return httpx.Response(200, json={"requested": len(body["keys"]), "ok": True})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        plan = await ctrl.execute_evictions(registry, client)
+        plan = await ctrl.execute_evictions(client)
         await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {"alice": keys}
@@ -474,14 +481,12 @@ async def test_execute_evictions_empty_plan_is_noop():
     """No salts over threshold ⇒ no HTTP dispatch."""
     ctrl, _, kd = _setup()
 
-    registry = _make_registry(_instance("mp-1"))
-
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda r: pytest.fail("must not be called")  # type: ignore[arg-type]
         )
     ) as client:
-        plan = await ctrl.execute_evictions(registry, client)
+        plan = await ctrl.execute_evictions(client)
         await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {}
@@ -708,60 +713,134 @@ def test_fence_instance_keeps_l2_usage_and_lru():
 
 
 # ============================================================================
-# run (the control loop)
+# start / stop (the control loop)
 # ============================================================================
 
 
-@pytest.mark.asyncio
-async def test_run_rejects_non_positive_check_interval():
-    ctrl, _, kd = _setup()
-    registry = _make_registry()
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))
-    ) as client:
-        with pytest.raises(ValueError, match="check_interval"):
-            await ctrl.run(registry, client, 0)
-        with pytest.raises(ValueError, match="check_interval"):
-            await ctrl.run(registry, client, -1.0)
-
-
-@pytest.mark.asyncio
-async def test_run_evicts_on_each_tick_until_cancelled():
-    """The loop dispatches an over-quota salt's victims, and stops when the
-    task is cancelled (how the app lifespan shuts it down)."""
-    ctrl, qs, kd = _setup(eviction_ratio=1.0)
-    k = _make_key("alice", h="aa")
-    _store(ctrl, kd, k, 100)
-    qs.set_quota("alice", 0)  # ratio=1.0 → full eviction
-    registry = _make_registry(_instance("mp-1"))
-
+def _recorder() -> tuple[list[str], Callable[[httpx.Request], httpx.Response]]:
+    """Return a list of dispatched URLs and the handler that fills it."""
     dispatched: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         dispatched.append(str(request.url))
         return httpx.Response(200, json={"requested": 1, "adapter": "s3", "ok": True})
 
+    return dispatched, handler
+
+
+@pytest.mark.asyncio
+async def test_a_zero_interval_starts_no_loop():
+    """The cadence is how an operator switches eviction off, so ``start``
+    has to accept zero rather than reject it -- and ``stop`` must still be
+    safe when nothing was started."""
+    ctrl, qs, kd = _setup(eviction_ratio=1.0, check_interval=0.0)
+    _store(ctrl, kd, _make_key("alice", h="aa"), 100)
+    qs.set_quota("alice", 0)
+    dispatched, handler = _recorder()
+
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        task = asyncio.create_task(ctrl.run(registry, client, 0.01))
-        # Long enough for several ticks, short enough to keep the test fast.
-        await asyncio.sleep(0.1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await ctrl.wait_for_in_flight_dispatches()
+        async with ctrl.run(ControllerRuntime(http_client=client)):
+            await asyncio.sleep(0.05)
+
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_the_loop_evicts_on_each_tick_until_stopped():
+    """The loop dispatches an over-quota salt's victims, and ``stop`` ends
+    it (how the app lifespan shuts it down)."""
+    ctrl, qs, kd = _setup(
+        eviction_ratio=1.0, check_interval=0.01, instances=(_instance("mp-1"),)
+    )
+    k = _make_key("alice", h="aa")
+    _store(ctrl, kd, k, 100)
+    qs.set_quota("alice", 0)  # ratio=1.0 → full eviction
+    dispatched, handler = _recorder()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with ctrl.run(ControllerRuntime(http_client=client)):
+            # Long enough for several ticks, short enough to keep the test fast.
+            await asyncio.sleep(0.1)
 
     assert dispatched, "the loop never dispatched an eviction"
     assert dispatched[0] == "http://10.0.0.1:8000/cache/objects"
 
 
 @pytest.mark.asyncio
-async def test_run_sleeps_before_the_first_check():
-    """Construction must not race the first pass: nothing is dispatched
-    before one interval has elapsed."""
-    ctrl, qs, kd = _setup(eviction_ratio=1.0)
+async def test_the_loop_sleeps_before_the_first_check():
+    """Startup must not race the first pass: nothing is dispatched before
+    one interval has elapsed."""
+    ctrl, qs, kd = _setup(eviction_ratio=1.0, check_interval=30.0)
     _store(ctrl, kd, _make_key("alice", h="aa"), 100)
     qs.set_quota("alice", 0)
-    registry = _make_registry(_instance("mp-1"))
+    dispatched, handler = _recorder()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with ctrl.run(ControllerRuntime(http_client=client)):
+            await asyncio.sleep(0.05)
+
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_a_dispatch_the_last_sweep_sent():
+    """A dispatch is fire-and-forget, so shutdown has to wait for one the
+    loop launched but never awaited, or the DELETE dies with the process."""
+    ctrl, qs, kd = _setup(
+        eviction_ratio=1.0, check_interval=0.01, instances=(_instance("mp-1"),)
+    )
+    _store(ctrl, kd, _make_key("alice", h="aa"), 100)
+    qs.set_quota("alice", 0)
+    arrived = asyncio.Event()
+    released = asyncio.Event()
+    completed: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        arrived.set()
+        await released.wait()
+        completed.append(str(request.url))
+        return httpx.Response(200, json={"requested": 1, "adapter": "s3", "ok": True})
+
+    async def serve(ready: asyncio.Event, done: asyncio.Event) -> None:
+        async with ctrl.run(ControllerRuntime(http_client=client)):
+            ready.set()
+            await done.wait()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ready, done = asyncio.Event(), asyncio.Event()
+        serving = asyncio.create_task(serve(ready, done))
+        await asyncio.wait_for(ready.wait(), timeout=5.0)
+        await asyncio.wait_for(arrived.wait(), timeout=5.0)
+        done.set()  # begins the exit half, which must wait for the dispatch
+        await asyncio.sleep(0.05)
+        assert not serving.done(), "exited while a dispatch was in flight"
+        released.set()
+        await asyncio.wait_for(serving, timeout=5.0)
+
+    assert completed, "the in-flight dispatch never finished"
+
+
+# ============================================================================
+# wiring: the controller reads the shared views, not private copies
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_the_controller_dispatches_to_the_shared_membership_view():
+    """Fleet membership is a view, so a controller built by discovery must
+    dispatch to an instance registered *after* it was constructed. A private
+    copy would see an empty fleet and silently evict nothing."""
+    config = MPCoordinatorConfig()
+    views = build_views(config)
+    ctrl = build_controllers(config, views).get(FleetEvictionController)
+    usage = views.get(CacheUsageManager)
+
+    # Registered through the view, well after the controller was built.
+    views.get(InstanceRegistry).register(_instance("mp-late", ip="10.9.9.9"))
+
+    k = _make_key("alice", h="aa")
+    ctrl.quota.set_default_limit_bytes(0)
+    _store(ctrl, usage, k, 100)
 
     dispatched: list[str] = []
 
@@ -770,10 +849,7 @@ async def test_run_sleeps_before_the_first_check():
         return httpx.Response(200, json={"requested": 1, "adapter": "s3", "ok": True})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        task = asyncio.create_task(ctrl.run(registry, client, 30.0))
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        assert await ctrl.execute_evictions(client) == {"alice": [k]}
+        await ctrl.wait_for_in_flight_dispatches()
 
-    assert dispatched == []
+    assert dispatched == ["http://10.9.9.9:8000/cache/objects"]

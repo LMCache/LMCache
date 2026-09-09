@@ -88,8 +88,8 @@ class _PrefetchJob:
     request_id: str
     # Number of tokens submitted for lookup (denominator for the L1+L2
     # token-level hit-rate metric).  Equals ``len(chunk_hashes) * chunk_size``
-    # on the happy path; 0 for early-exit paths (no GPU context matches
-    # or chunk_hashes is empty).  Consumed at ``MP_LOOKUP_PREFETCH_END``
+    # on the happy path; 0 on the early-exit paths (see
+    # ``early_exit_reason``).  Consumed at ``MP_LOOKUP_PREFETCH_END``
     # emission time in ``query_prefetch_status``.
     requested_tokens: int
     num_object_groups: int = 1
@@ -100,6 +100,9 @@ class _PrefetchJob:
     # tenant / isolation domain (an empty string means no salt set).
     model_name: str = ""
     cache_salt: str = ""
+    # Names the ``lookup()`` branch that returned before submitting a prefetch
+    # task; empty on the normal path.
+    early_exit_reason: str = ""
 
 
 class LookupModule:
@@ -231,6 +234,7 @@ class LookupModule:
                     requested_tokens=0,
                     model_name=model_name,
                     cache_salt=key.cache_salt,
+                    early_exit_reason="no_gpu_context",
                 )
             )
             return
@@ -254,6 +258,7 @@ class LookupModule:
                     requested_tokens=0,
                     model_name=model_name,
                     cache_salt=key.cache_salt,
+                    early_exit_reason="empty_chunk_hashes",
                 )
             )
             return
@@ -320,6 +325,7 @@ class LookupModule:
                     requested_tokens=0,
                     model_name=model_name,
                     cache_salt=key.cache_salt,
+                    early_exit_reason="no_group_layout_descs",
                 )
             )
             return
@@ -424,6 +430,20 @@ class LookupModule:
             tuple(range(job.attn_desc.num_object_groups)),
         )
 
+        # ``l1_hit_chunks`` is the prefix L1 could serve on its own under each
+        # object group's window rule, so L2's contribution is however much
+        # further ``found_count`` reaches -- not a count of L1-resident keys.
+        l1_chunks = job.handle.l1_hit_chunks
+        if l1_chunks > found_count:
+            logger.error(
+                "L1 hit chunks exceed total hit chunks: l1=%d total=%d request=%s",
+                l1_chunks,
+                found_count,
+                request_id,
+            )
+            l1_chunks = found_count
+        l2_chunks = found_count - l1_chunks
+
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
@@ -432,6 +452,9 @@ class LookupModule:
                     "found_count": found_count,
                     "requested_tokens": job.requested_tokens,
                     "hit_tokens": found_count * self._ctx.chunk_size,
+                    "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
+                    "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,
+                    "early_exit_reason": job.early_exit_reason,
                     "model_name": job.model_name,
                     "cache_salt": job.cache_salt,
                 },

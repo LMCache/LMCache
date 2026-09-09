@@ -1,0 +1,23 @@
+# MUSA containerized hardware smoke test.
+# The broad unit suite runs in the separate unit-tests-musa pipeline.
+
+env:
+  LMCACHE_TRACK_USAGE: "false"
+  MUSA_VISIBLE_DEVICES: "0"
+
+steps:
+  - label: "MUSA Hardware Smoke"
+    key: "musa_hardware_smoke"
+    command: bash .buildkite/k3_tests/musa/run-in-container.sh smoke
+    timeout_in_minutes: 60
+    concurrency: 1
+    concurrency_group: "lmcache/musa-hardware-smoke"
+
+    agents:
+      queue: "MooreThreads"
+
+    env:
+      MUSA_CI_ARTIFACT_DIR: "musa-ci-artifacts/smoke"
+
+    artifact_paths:
+      - "musa-ci-artifacts/smoke/**/*"

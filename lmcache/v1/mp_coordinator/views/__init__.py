@@ -33,7 +33,7 @@ def build_views(config: "MPCoordinatorConfig") -> Registry[View]:
         A registry with every discovered view built.
     """
     registry: Registry[View] = Registry(
-        list(discover(__path__, __name__, View)),
+        list(discover((__name__,), View)),
         build=lambda view_type, views: view_type.from_config(config, views),
     )
     built = registry.all()
