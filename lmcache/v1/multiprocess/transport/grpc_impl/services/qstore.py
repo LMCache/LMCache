@@ -1,17 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """gRPC adapter for the generated ``QStoreService`` surface."""
 
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.transport.grpc_impl.services.base import (
     GrpcHandlerType,
     grpc_method,
     require_service,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 
 
 class QStoreServiceImpl:

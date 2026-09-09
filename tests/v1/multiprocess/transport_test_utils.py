@@ -10,13 +10,13 @@ import zmq
 # First Party
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.server import add_handler_helper
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.services.lookup import (
     LookupServiceImpl,
 )
+from lmcache.v1.multiprocess.transport.zmq_impl.server import add_handler_helper
 
 RequestTransport = Literal["zmq", "grpc"]
 REQUEST_TRANSPORTS: tuple[RequestTransport, ...] = ("zmq", "grpc")

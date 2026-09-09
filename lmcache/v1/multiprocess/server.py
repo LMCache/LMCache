@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """MPCacheServer compositor and unified cache server entry point."""
 
+# Future
+from __future__ import annotations
+
 # Standard
+from typing import TYPE_CHECKING
 import argparse
 import shutil
 import signal
@@ -54,29 +58,16 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
-from lmcache.v1.multiprocess.mq import MessageQueueServer
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-    get_payload_classes,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.server import (
-    GrpcMultiprocessServer,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.services import (
-    BlendServiceImpl,
-    ControllerServiceImpl,
-    DebugServiceImpl,
-    EngineDrivenServiceImpl,
-    LMCacheDrivenServiceImpl,
-    LookupServiceImpl,
-    ObservabilityServiceImpl,
-    P2PServiceImpl,
-    QStoreServiceImpl,
-)
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.mq import MessageQueueServer
+    from lmcache.v1.multiprocess.transport.grpc_impl.server import (
+        GrpcMultiprocessServer,
+    )
 
 logger = init_logger(__name__)
 
@@ -308,77 +299,6 @@ def _build_modules(
     ]
 
 
-def _build_grpc_request_server(
-    modules: list[EngineModule],
-    mp_config: MPServerConfig,
-) -> GrpcMultiprocessServer:
-    """Build the gRPC server from concrete module-backed services."""
-    lookup_module = next(
-        module for module in modules if isinstance(module, LookupModule)
-    )
-    management_module = next(
-        module for module in modules if isinstance(module, ManagementModule)
-    )
-    p2p_controller = next(
-        module for module in modules if isinstance(module, P2PController)
-    )
-    lmcache_driven_module = next(
-        (
-            module
-            for module in modules
-            if isinstance(module, LMCacheDrivenTransferModule)
-        ),
-        None,
-    )
-    engine_driven_module = next(
-        (
-            module
-            for module in modules
-            if isinstance(module, EngineDrivenTransferModule)
-        ),
-        None,
-    )
-    qstore_module = next(
-        (module for module in modules if isinstance(module, QStoreModule)),
-        None,
-    )
-    blend_module = None
-    if mp_config.engine_type == "blend":
-        # First Party
-        from lmcache.v1.multiprocess.modules.blend import BlendModule
-
-        blend_module = next(
-            module for module in modules if isinstance(module, BlendModule)
-        )
-
-    server = GrpcMultiprocessServer(
-        bind_url=f"grpc://{mp_config.host}:{mp_config.port}",
-        max_gpu_workers=mp_config.max_gpu_workers,
-        max_cpu_workers=mp_config.max_cpu_workers,
-    )
-    server.add_service(
-        "LMCacheDrivenService",
-        LMCacheDrivenServiceImpl(
-            lmcache_driven_module,
-            blend_module if blend_module is not None else lmcache_driven_module,
-        ),
-    )
-    server.add_service(
-        "EngineDrivenService",
-        EngineDrivenServiceImpl(engine_driven_module),
-    )
-    server.add_service("LookupService", LookupServiceImpl(lookup_module))
-    server.add_service("QStoreService", QStoreServiceImpl(qstore_module))
-    server.add_service("ControllerService", ControllerServiceImpl(management_module))
-    server.add_service("DebugService", DebugServiceImpl(management_module))
-    server.add_service(
-        "ObservabilityService", ObservabilityServiceImpl(management_module)
-    )
-    server.add_service("P2PService", P2PServiceImpl(p2p_controller))
-    server.add_service("BlendService", BlendServiceImpl(blend_module))
-    return server
-
-
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
@@ -473,12 +393,9 @@ def run_cache_server(
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
     transport = mp_config.transport
-    if transport == "grpc":
-        server: GrpcMultiprocessServer | MessageQueueServer = (
-            _build_grpc_request_server(modules, mp_config)
-        )
-    else:
-        server = create_request_server(modules, mp_config)
+    server: GrpcMultiprocessServer | MessageQueueServer = create_request_server(
+        modules, mp_config
+    )
 
     logger.info(
         "LMCache %s cache server is running on %s:%d",

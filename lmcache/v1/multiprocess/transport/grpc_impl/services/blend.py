@@ -31,6 +31,12 @@ class BlendServiceImpl:
     def __init__(self, blend: BlendModule | None) -> None:
         self._blend = blend
 
+    def CbProtocolHandshake(self, client_version: int) -> tuple[int, bool]:
+        """Return the CacheBlend protocol version and compatibility result."""
+        return require_service(self._blend, "CacheBlend").cb_protocol_handshake(
+            client_version
+        )
+
     def CbRegisterRope(
         self,
         instance_id: int,

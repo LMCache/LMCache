@@ -16,6 +16,15 @@ message CbMatchResult {
   bytes hash = 5;
 }
 
+message CbProtocolHandshakeRequest {
+  int64 client_version = 1;
+}
+
+message CbProtocolHandshakeResponse {
+  int64 server_version = 1;
+  bool client_compatible = 2;
+}
+
 message CbUnregisterRopeRequest {
   int64 instance_id = 1;
 }
@@ -65,6 +74,8 @@ message CbRegisterRopeRequest {
 message CbRegisterRopeResponse {}
 
 service BlendService {
+  rpc CbProtocolHandshake(CbProtocolHandshakeRequest)
+      returns (CbProtocolHandshakeResponse);
   rpc CbRegisterRope(CbRegisterRopeRequest) returns (CbRegisterRopeResponse);
   rpc CbUnregisterRope(CbUnregisterRopeRequest)
       returns (CbUnregisterRopeResponse);
