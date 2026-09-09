@@ -1337,6 +1337,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         return ()
 
+    def has_pending_push_work(self) -> bool:
+        """Return whether vLLM should keep stepping for pending push work.
+
+        Returns:
+            True when scheduler-side lazy offload has submitted stores waiting
+            for worker completion. Queued stores are intentionally excluded:
+            they require a model-token step for submission and cannot progress
+            during a connector-only step. Non-lazy mode uses vLLM's normal
+            delayed-free path and does not need this keepalive.
+        """
+        if self.role != KVConnectorRole.SCHEDULER or not self.lazy_offload:
+            return False
+
+        return self._lazy_offload_manager.has_inflight_store_work()
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """Defer to vLLM; a connector preference is unsafe for now.

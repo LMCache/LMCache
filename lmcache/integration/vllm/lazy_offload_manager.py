@@ -407,6 +407,21 @@ class LazyOffloadManager:
         )
         return LazyOffloadActions(sessions_to_end=[request_id])
 
+    def has_inflight_store_work(self) -> bool:
+        """Whether submitted stores are still holding GPU blocks.
+
+        Buffered operations are deliberately excluded. They are emitted only
+        by a step that schedules model tokens, so a connector-only step
+        cannot advance them and keeping the engine awake for them would spin.
+        A submitted batch is different: its receipt arrives from the worker
+        without any further scheduling, and the blocks it pins stay pinned
+        until it does.
+
+        Returns:
+            True while at least one submitted batch awaits its receipt.
+        """
+        return bool(self._requests.in_flight_request_ids())
+
     def log_final_stats(self) -> None:
         """Write the policy's final counter ledger, when one was built."""
         if self._policy is not None:
