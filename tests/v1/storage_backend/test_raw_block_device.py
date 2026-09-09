@@ -5,11 +5,11 @@ from __future__ import annotations
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 import ctypes
 import mmap
 import os
 import platform
-from pathlib import Path
 
 # Third Party
 import pytest

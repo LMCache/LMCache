@@ -50,6 +50,7 @@ requires_rust_raw_block_io = pytest.mark.skipif(
 )
 
 
+@requires_rust_raw_block_io
 def test_raw_block_core_closed_stats_are_unavailable(tmp_path) -> None:
     path = make_raw_block_file(tmp_path)
     core = RawBlockCore(make_raw_block_core_config(path), key_namespace="object")
