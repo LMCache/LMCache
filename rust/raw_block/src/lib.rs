@@ -986,6 +986,18 @@ impl Drop for UringNotify {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoVecDescriptor {
+    base_addr: usize,
+    len: usize,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<IoVecDescriptor>() == std::mem::size_of::<libc::iovec>());
+    assert!(std::mem::align_of::<IoVecDescriptor>() == std::mem::align_of::<libc::iovec>());
+};
+
 /// Represents a single I/O submission to io_uring.
 ///
 /// This struct is sent from Python threads to the worker thread via a queue.
@@ -999,6 +1011,7 @@ impl Drop for UringNotify {
 /// - `is_write`: true for write, false for read
 /// - `completion`: Shared completion primitive for signaling result
 /// - `fixed_buffer_idx`: Index into registered fixed buffers (if using zero-copy)
+/// - `iovecs`: Optional vectored-I/O descriptors retained until completion.
 /// - `bounce`: optional bounce buffer when O_DIRECT requires alignment.
 /// - `original_ptr`: For reads with bounce buffer, the original destination pointer.
 /// - `payload_len`: For reads with bounce buffer, the actual payload length to copy back.
@@ -1013,6 +1026,7 @@ struct IoSubmission {
     is_write: bool,
     completion: Arc<IoCompletion>,
     fixed_buffer_idx: Option<u16>,
+    iovecs: Option<Arc<Vec<IoVecDescriptor>>>,
     bounce: Option<std::sync::Arc<AlignedBuf>>,
     original_ptr: Option<usize>,        // For bounce buffer reads
     payload_len: Option<usize>,         // For bounce buffer reads
@@ -1030,6 +1044,7 @@ impl Default for IoSubmission {
             is_write: false,
             completion: Arc::new(IoCompletion::new()),
             fixed_buffer_idx: None,
+            iovecs: None,
             bounce: None,
             original_ptr: None,
             payload_len: None,
@@ -1463,7 +1478,17 @@ impl RawBlockDevice {
                     }
                 } else {
                     // Regular read/write operations
-                    let sqe = if sub.is_write {
+                    let sqe = if let Some(iovecs) = &sub.iovecs {
+                        if sub.is_write {
+                            return Err(PyRuntimeError::new_err(
+                                "vectored io_uring submissions are read-only",
+                            ));
+                        }
+                        let iovec_ptr = iovecs.as_ptr().cast::<libc::iovec>();
+                        opcode::Readv::new(Fd(sub.fd), iovec_ptr, iovecs.len() as u32)
+                            .offset(sub.offset)
+                            .build()
+                    } else if sub.is_write {
                         if let Some(idx) = sub.fixed_buffer_idx {
                             opcode::WriteFixed::new(
                                 Fd(sub.fd),
@@ -1555,6 +1580,7 @@ impl RawBlockDevice {
                                         if cqe_result >= 0
                                             && (cqe_result as usize) < sub.len
                                             && sub.nvme_cmd_data.is_none()
+                                            && sub.iovecs.is_none()
                                         {
                                             let bytes_transferred = cqe_result as usize;
                                             // Update offset and length for resubmission
@@ -1636,6 +1662,7 @@ impl RawBlockDevice {
                                         if cqe_result >= 0
                                             && (cqe_result as usize) < sub.len
                                             && sub.nvme_cmd_data.is_none()
+                                            && sub.iovecs.is_none()
                                         {
                                             let bytes_transferred = cqe_result as usize;
                                             // Update offset and length for resubmission
@@ -2365,6 +2392,7 @@ impl RawBlockDevice {
                     is_write: true,
                     completion: comp.clone(),
                     fixed_buffer_idx: fixed_idx,
+                    iovecs: None,
                     bounce: bounce_opt,
                     original_ptr: None,
                     payload_len: None,
@@ -2566,67 +2594,82 @@ impl RawBlockDevice {
             None
         };
 
-        // Use bounce buffer if:
-        // Buffer is not aligned (O_DIRECT or io_uring_cmd PRP requirement)
-        // Buffer capacity is less than total_len
+        // Use a two-segment vectored read when only the padded tail needs a
+        // bounce buffer. io_uring_cmd cannot use Readv and keeps the full-bounce path.
         let use_bounce = !ptr_aligned || cap < total_len;
-
-        let res = if !use_bounce {
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
-            let comp = Arc::new(IoCompletion::new());
-            let sub = IoSubmission {
-                fd: self.fd,
-                offset,
-                len: total_len,
-                ptr_addr: ptr as usize,
-                is_write: false,
-                completion: comp.clone(),
-                fixed_buffer_idx: fixed_idx,
-                bounce: None,
-                original_ptr: None,
-                payload_len: None,
-                batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
-            };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
-            }
-            if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.signal_producer();
-            }
-            py.allow_threads(move || comp.wait())
+        let aligned_prefix = payload_len / align * align;
+        let use_hybrid_bounce = self.use_odirect
+            && !self.use_uring_cmd
+            && ptr_aligned
+            && cap < total_len
+            && aligned_prefix > 0;
+        let (ptr_addr, fixed_idx, iovecs, bounce, original_ptr, copy_back_len) = if !use_bounce {
+            (ptr as usize, fixed_idx, None, None, None, None)
+        } else if use_hybrid_bounce {
+            let tail_total = total_len - aligned_prefix;
+            let tail_payload = payload_len - aligned_prefix;
+            let bounce = Arc::new(AlignedBuf::new(tail_total, align)?);
+            let bounce_ptr = bounce.as_mut_ptr() as usize;
+            let iovecs = Arc::new(vec![
+                IoVecDescriptor {
+                    base_addr: ptr as usize,
+                    len: aligned_prefix,
+                },
+                IoVecDescriptor {
+                    base_addr: bounce_ptr,
+                    len: tail_total,
+                },
+            ]);
+            let original_ptr = (ptr as usize)
+                .checked_add(aligned_prefix)
+                .ok_or_else(|| PyValueError::new_err("buffer pointer overflow"))?;
+            (
+                ptr as usize,
+                None,
+                Some(iovecs),
+                Some(bounce),
+                Some(original_ptr),
+                Some(tail_payload),
+            )
         } else {
-            let bounce = AlignedBuf::new(total_len, align)?;
-            let bounce_arc = std::sync::Arc::new(bounce);
-            let bounce_ptr = bounce_arc.as_mut_ptr();
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
-            let comp = Arc::new(IoCompletion::new());
-            let sub = IoSubmission {
-                fd: self.fd,
-                offset,
-                len: total_len,
-                ptr_addr: bounce_ptr as usize,
-                is_write: false,
-                completion: comp.clone(),
-                fixed_buffer_idx: None,
-                bounce: Some(bounce_arc),
-                original_ptr: Some(ptr as usize),
-                payload_len: Some(payload_len),
-                batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
-            };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
-            }
-            if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.signal_producer();
-            }
-            py.allow_threads(move || comp.wait())
+            let bounce = Arc::new(AlignedBuf::new(total_len, align)?);
+            let bounce_ptr = bounce.as_mut_ptr() as usize;
+            (
+                bounce_ptr,
+                None,
+                None,
+                Some(bounce),
+                Some(ptr as usize),
+                Some(payload_len),
+            )
         };
+
+        self.in_flight_count.fetch_add(1, Ordering::Relaxed);
+        let comp = Arc::new(IoCompletion::new());
+        let sub = IoSubmission {
+            fd: self.fd,
+            offset,
+            len: total_len,
+            ptr_addr,
+            is_write: false,
+            completion: comp.clone(),
+            fixed_buffer_idx: fixed_idx,
+            iovecs,
+            bounce,
+            original_ptr,
+            payload_len: copy_back_len,
+            batch_id: 0,
+            nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+        };
+        {
+            let queue = self.queue.as_ref().expect("queue must exist");
+            let mut queue = queue.lock().unwrap();
+            queue.push(sub);
+        }
+        if let Some(batch_ready) = &self.batch_ready {
+            batch_ready.signal_producer();
+        }
+        let res = py.allow_threads(move || comp.wait());
 
         release_pybuffer(view);
         res?;
@@ -2720,6 +2763,7 @@ impl RawBlockDevice {
                 is_write: true,
                 completion: comp.clone(),
                 fixed_buffer_idx: fixed_idx,
+                iovecs: None,
                 bounce: None,
                 original_ptr: None,
                 payload_len: None,
@@ -2756,6 +2800,7 @@ impl RawBlockDevice {
                 is_write: true,
                 completion: comp.clone(),
                 fixed_buffer_idx: None,
+                iovecs: None,
                 bounce: Some(bounce_arc),
                 original_ptr: None,
                 payload_len: Some(payload_len),
@@ -2928,28 +2973,57 @@ impl RawBlockDevice {
                     true
                 };
                 let use_bounce = !ptr_aligned || cap < total_len;
+                let payload_len = std::cmp::min(cap, total_len);
+                let aligned_prefix = payload_len / alignment * alignment;
+                let use_hybrid_bounce = use_odirect
+                    && !use_uring_cmd
+                    && ptr_aligned
+                    && cap < total_len
+                    && aligned_prefix > 0;
 
                 let comp = Arc::new(IoCompletion::new());
 
-                let (ptr_addr, fixed_idx, bounce_opt, original_ptr_opt, payload_len_opt) =
-                    if use_bounce {
-                        let bounce = AlignedBuf::new(total_len, alignment)?;
-                        let bounce_arc = Arc::new(bounce);
-                        let bounce_ptr = bounce_arc.as_mut_ptr() as usize;
-                        // Copy-back bounded by caller capacity.
-                        let payload_len = std::cmp::min(cap, total_len);
+                let (ptr_addr, fixed_idx, iovecs, bounce_opt, original_ptr_opt, payload_len_opt) =
+                    if !use_bounce {
+                        let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                        (ptrs[i], fixed_idx, None, None, None, None)
+                    } else if use_hybrid_bounce {
+                        let tail_total = total_len - aligned_prefix;
+                        let tail_payload = payload_len - aligned_prefix;
+                        let bounce = Arc::new(AlignedBuf::new(tail_total, alignment)?);
+                        let bounce_ptr = bounce.as_mut_ptr() as usize;
+                        let iovecs = Arc::new(vec![
+                            IoVecDescriptor {
+                                base_addr: ptrs[i],
+                                len: aligned_prefix,
+                            },
+                            IoVecDescriptor {
+                                base_addr: bounce_ptr,
+                                len: tail_total,
+                            },
+                        ]);
+                        let original_ptr = ptrs[i]
+                            .checked_add(aligned_prefix)
+                            .ok_or_else(|| PyValueError::new_err("buffer pointer overflow"))?;
+                        (
+                            ptrs[i],
+                            None,
+                            Some(iovecs),
+                            Some(bounce),
+                            Some(original_ptr),
+                            Some(tail_payload),
+                        )
+                    } else {
+                        let bounce = Arc::new(AlignedBuf::new(total_len, alignment)?);
+                        let bounce_ptr = bounce.as_mut_ptr() as usize;
                         (
                             bounce_ptr,
                             None,
-                            Some(bounce_arc),
+                            None,
+                            Some(bounce),
                             Some(ptrs[i]),
                             Some(payload_len),
                         )
-                    } else {
-                        // Fixed buffers are pre-registered with io_uring,
-                        // enabling true zero-copy I/O.
-                        let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
-                        (ptrs[i], fixed_idx, None, None, None)
                     };
 
                 let sub = IoSubmission {
@@ -2960,6 +3034,7 @@ impl RawBlockDevice {
                     is_write: false, // read operation
                     completion: comp.clone(),
                     fixed_buffer_idx: fixed_idx,
+                    iovecs,
                     bounce: bounce_opt,
                     original_ptr: original_ptr_opt,
                     payload_len: payload_len_opt,
