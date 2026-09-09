@@ -73,6 +73,11 @@ class _IPCCacheServerKey:
 
 class TestUnifiedLMCacheMPConnector(unittest.TestCase):
     def setUp(self):
+        heartbeat_patcher = patch.object(
+            UnifiedLMCacheMPConnector, "_ensure_heartbeat_started"
+        )
+        heartbeat_patcher.start()
+        self.addCleanup(heartbeat_patcher.stop)
         self.connector = object.__new__(UnifiedLMCacheMPConnector)
         self.connector.page_size = 4
 
