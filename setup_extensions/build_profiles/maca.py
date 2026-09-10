@@ -52,11 +52,18 @@ class MacaProfile(BuildProfile):
         A MACA-enabled torch build exposes ``MACA_HOME``; a vanilla CUDA
         torch build does not. This is a more specific signal than checking
         for ``nvcc`` on ``PATH``, which MACA's cu-bridge shim also provides.
+
+        Catches broadly (not just ``ImportError``): importing
+        ``torch.utils.cpp_extension`` runs MACA-patched torch's own
+        module-level init code, which raises ``TypeError`` (not
+        ``ImportError``) when the ``MACA_PATH`` env var isn't set yet --
+        confirmed on real MACA hardware. ``detect()`` must never propagate,
+        since it also runs during auto-detection for unrelated profiles.
         """
         try:
             # Third Party
             from torch.utils.cpp_extension import MACA_HOME
-        except ImportError:
+        except Exception:
             return False
         return MACA_HOME is not None
 

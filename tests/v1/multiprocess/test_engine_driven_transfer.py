@@ -21,7 +21,6 @@ from lmcache.v1.multiprocess.posix_shm import (
     shm_open_pool_as_mmap,
     shm_unlink,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -470,6 +469,8 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     )
     future = MagicMock()
     future.result.return_value = RegisterEngineDrivenContextResponse()
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.return_value = future
     ctx = EngineDrivenTransferContext()
 
     ctx.register(
@@ -478,9 +479,8 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
+        req_client=req_client,
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
 
@@ -532,15 +532,16 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
 
     monkeypatch.setattr(worker_transfer, "gather_paged_kv_to_cpu", _fake_gather)
     ctx = EngineDrivenTransferContext()
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.return_value = future
     ctx.register(
         instance_id=1,
         kv_caches=_make_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
+        req_client=req_client,
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
     result = ctx.submit_store(
@@ -604,15 +605,16 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
 
     monkeypatch.setattr(worker_transfer, "scatter_cpu_to_paged_kv", _fake_scatter)
     ctx = EngineDrivenTransferContext()
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.return_value = future
     ctx.register(
         instance_id=1,
         kv_caches=_make_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
+        req_client=req_client,
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
     result = ctx.submit_retrieve(
@@ -831,7 +833,8 @@ def test_engine_driven_register_sends_num_physical_slots(
     )
     future = MagicMock()
     future.result.return_value = RegisterEngineDrivenContextResponse()
-    send_request = MagicMock(return_value=future)
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.return_value = future
 
     EngineDrivenTransferContext().register(
         instance_id=1,
@@ -839,13 +842,12 @@ def test_engine_driven_register_sends_num_physical_slots(
         model_name="m",
         world_size=1,
         blocks_in_chunk=8,
-        mq_client=MagicMock(),
+        req_client=req_client,
         mq_timeout=1.0,
-        send_request=send_request,
         layout_hints={"kv_layout": "NHD"},
     )
 
-    payload = send_request.call_args.args[2][0]
+    payload = req_client.register_kv_cache_engine_driven_context.call_args.args[0]
     assert isinstance(payload, RegisterEngineDrivenContextPayload)
     assert payload.num_physical_slots == 128
 
@@ -1597,7 +1599,7 @@ def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
                 block_size=1,
                 use_mla=False,
             ),
-            mq_client=MagicMock(),
+            req_client=MagicMock(),
             mq_timeout=1.0,
             shm_name=shm_name,
             pool_size=4096,
@@ -1629,28 +1631,16 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
         }
     ]
 
-    mq_client = MagicMock()
+    req_client = MagicMock()
 
-    def _submit_request(req_type, payload, response_cls):  # noqa: ARG001
-        if req_type == RequestType.PREPARE_STORE:
-            return _CompletedFuture(
-                PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
-            )
-        if req_type == RequestType.COMMIT_STORE:
-            _, _, commit_cpu_data = payload
-            assert commit_cpu_data == b""
-            return _CompletedFuture(True)
-        if req_type == RequestType.PREPARE_RETRIEVE:
-            return _CompletedFuture(
-                PrepareRetrieveResponse(
-                    success=True, data=b"", context={"slots": slots}
-                )
-            )
-        if req_type == RequestType.COMMIT_RETRIEVE:
-            return _CompletedFuture(True)
-        raise AssertionError(f"Unexpected request type: {req_type}")
-
-    mq_client.submit_request.side_effect = _submit_request
+    req_client.prepare_store.return_value = _CompletedFuture(
+        PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
+    )
+    req_client.commit_store.return_value = _CompletedFuture(True)
+    req_client.prepare_retrieve.return_value = _CompletedFuture(
+        PrepareRetrieveResponse(success=True, data=b"", context={"slots": slots})
+    )
+    req_client.commit_retrieve.return_value = _CompletedFuture(True)
 
     context = EngineDrivenContextShm(
         metadata=EngineDrivenContextMetadata(
@@ -1661,7 +1651,7 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
             block_size=1,
             use_mla=False,
         ),
-        mq_client=mq_client,
+        req_client=req_client,
         mq_timeout=1.0,
         shm_name=shm_name,
         pool_size=4096,
@@ -1675,6 +1665,7 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
             torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
         )
         assert context.commit_store(key, 1, store_views)
+        req_client.commit_store.assert_called_once_with(key, 1, b"")
 
         retrieve_views = context.prepare_retrieve(key=key, instance_id=1)
         assert retrieve_views is not None
@@ -1700,7 +1691,7 @@ def test_engine_driven_context_shm_init_raises_when_segment_missing() -> None:
                 block_size=1,
                 use_mla=False,
             ),
-            mq_client=MagicMock(),
+            req_client=MagicMock(),
             mq_timeout=1.0,
             shm_name="lmcache_missing_shm_segment",
             pool_size=4096,
@@ -1717,7 +1708,7 @@ def test_create_engine_driven_context_falls_back_to_pickle_without_shm_info() ->
             block_size=1,
             use_mla=False,
         ),
-        mq_client=MagicMock(),
+        req_client=MagicMock(),
         mq_timeout=1.0,
         shm_name="",
         pool_size=0,
@@ -1735,7 +1726,7 @@ def test_create_engine_driven_context_use_pickle_ignores_valid_shm_info() -> Non
             block_size=1,
             use_mla=False,
         ),
-        mq_client=MagicMock(),
+        req_client=MagicMock(),
         mq_timeout=1.0,
         shm_name="lmcache_valid_shm",
         pool_size=4096,
@@ -1757,7 +1748,7 @@ def test_engine_driven_context_shm_close_is_idempotent() -> None:
                 block_size=1,
                 use_mla=False,
             ),
-            mq_client=MagicMock(),
+            req_client=MagicMock(),
             mq_timeout=1.0,
             shm_name=shm_name,
             pool_size=4096,
