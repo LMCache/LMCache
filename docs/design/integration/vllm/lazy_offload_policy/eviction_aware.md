@@ -105,9 +105,14 @@ the true vLLM hit instead of 0.
   back. When the reuse interval is the shorter clock the window emits after
   the entry was already needed: the store lands, too late to be found. A
   request whose oldest pending op has waited longer than this bound is due
-  regardless of rank, is decided before the window-driven candidates, and
-  releases its whole surviving front (still capped by `max_drain_per_step`).
-  `0.0`, the default, disables it.
+  even when no block of it sits in the window, and then releases its whole
+  surviving front (still capped by `max_drain_per_step`). It is served after
+  every request that does hold a block in the window, so an expired backlog
+  cannot spend the budget a block about to be recycled needs. A request past
+  both is ranked and sized by the window: it releases the due front segment,
+  which always holds the op that made it overdue, and the ops behind that keep
+  their own admission clocks and come due on their own deadlines. `0.0`, the
+  default, disables it.
 - **Horizon calibration.** The default 2.5 steps came from a sweep over
   2.0-8.0 on two opposing Qwen3-8B/H200 workloads, balancing eviction loss
   (pushes it up) against store filtering (pushes it down). Calibrated, not

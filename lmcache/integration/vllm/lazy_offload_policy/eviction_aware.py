@@ -340,9 +340,9 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         closure). Requests in ``blocked_request_ids`` stay pending untouched:
         the worker holds one in-flight batch per request. Requests are served
         most imminent first until ``max_drain_per_step``; one whose deadline
-        passed is due wherever its blocks sit, but it is served after every
-        request holding a block in the window, so an expired backlog cannot
-        spend the budget that a block about to be recycled needs.
+        passed while no block of it sits in the window is due anyway, but it
+        is served after every request holding one, so an expired backlog
+        cannot spend the budget that a block about to be recycled needs.
 
         Args:
             signals: This step's allocation pressure, which updates the
@@ -404,9 +404,11 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             ]
             if in_window:
                 # A block the engine is about to recycle outranks a passed
-                # deadline, even for a request that is past both.
+                # deadline, and sizes the release too: a request past both
+                # emits its due front segment, which always holds the op that
+                # made it overdue. The ops behind it keep their own admission
+                # clocks and come due on their own deadlines.
                 candidates.append((min(in_window), order, request_id))
-                overdue_ids.discard(request_id)
             elif overdue:
                 candidates.append((_OVERDUE_RANK, order, request_id))
                 overdue_ids.add(request_id)

@@ -807,10 +807,13 @@ All connector-level options are passed through
        can lose buffered operations to eviction.
    * - ``lmcache.mp.lazy_offload_max_deferral_seconds``
      - ``0.0``
-     - ``EVICTION_AWARE`` only: upper bound on how long a buffered operation
-       may wait before it is emitted regardless of eviction pressure. Zero
-       leaves emission entirely to the danger window. Set it below the reuse
-       interval the workload has to beat.
+     - ``EVICTION_AWARE`` only: how long a buffered operation may wait before
+       it is emitted regardless of eviction pressure. Not a hard bound: no
+       drain runs on a step that schedules no tokens, a request whose store
+       is already in flight is skipped, and due operations that do not fit
+       in ``max_drain_per_step`` wait for a later step. Zero leaves emission
+       entirely to the danger window. Set it below the reuse interval the
+       workload has to beat.
    * - ``lmcache.mp.lazy_offload_threshold``
      - ``100``
      - ``FIFO`` only: number of finished buffered requests that triggers a
