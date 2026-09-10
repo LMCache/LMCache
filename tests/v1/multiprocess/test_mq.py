@@ -2,6 +2,7 @@
 # Standard
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
+from unittest.mock import MagicMock
 import multiprocessing as mp
 import sys
 import threading
@@ -21,6 +22,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -31,7 +33,10 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
-from lmcache.v1.multiprocess.server import add_handler_helper
+from lmcache.v1.multiprocess.transport.zmq_impl.server import (
+    add_handler_helper,
+    get_zmq_handler_specs,
+)
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -56,6 +61,19 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
         end=chunk_size,
         request_id=f"test_request_{index}",
     )
+
+
+def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
+    """The ZMQ adapter wires exactly the three P2P request types."""
+    controller = MagicMock(spec=P2PController)
+
+    request_types = {spec.request_type for spec in get_zmq_handler_specs(controller)}
+
+    assert request_types == {
+        RequestType.P2P_LOOKUP_AND_LOCK,
+        RequestType.P2P_QUERY_LOOKUP_RESULTS,
+        RequestType.P2P_UNLOCK_OBJECTS,
+    }
 
 
 def _server_process(
@@ -735,13 +753,36 @@ def test_server_survives_malformed_request_headers() -> None:
             assert undecodable_type_seen.wait(timeout=5)
 
         healthy = MessageQueueClient(server_url, context)
-        response = healthy.submit_request(RequestType.NOOP, [])
+        response: MessagingFuture[str] = healthy.submit_request(RequestType.NOOP, [])
         assert response.result(timeout=5) == "NOOP_OK"
         assert server.worker_thread.is_alive()
     finally:
         if healthy is not None:
             healthy.close()
         malformed.close()
+        server.close()
+
+
+def test_invalid_outbound_request_does_not_block_later_requests() -> None:
+    """An invalid request fails locally without blocking the outbound queue."""
+    server_url = "tcp://127.0.0.1:16025"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        invalid: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, [123]
+        )
+        healthy: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+
+        with pytest.raises(ValueError, match="Payload count mismatch"):
+            invalid.result(timeout=5)
+        assert healthy.result(timeout=5) == "NOOP_OK"
+    finally:
+        client.close()
         server.close()
 
 

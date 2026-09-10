@@ -26,13 +26,12 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
@@ -175,7 +174,7 @@ class AtomMPSchedulerAdapter:
         *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
     ) -> None:
-        client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+        client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
         self._parallel = parallel_config
         self._mq_timeout = mq_timeout
@@ -275,7 +274,7 @@ class AtomMPSchedulerAdapter:
         self._client.end_session(request_id)
 
     def shutdown(self) -> None:
-        """Close the scheduler-side message queue client."""
+        """Close the scheduler-side request client."""
         if self._closed:
             return
         self._closed = True
@@ -320,7 +319,7 @@ class AtomMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         transfer_mode: str | None = None,
     ) -> None:
-        client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+        client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
         self._block_size = block_size
         self._parallel = parallel_config

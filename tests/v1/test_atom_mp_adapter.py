@@ -84,10 +84,14 @@ class _FakeEvent:
         del stream
 
 
-@pytest.fixture(autouse=True)
-def _use_named_client_mock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep constructor mocks at the method-oriented client boundary."""
-    monkeypatch.setattr(atom_adapter, "ZmqMultiprocessClient", lambda client: client)
+def _patch_request_client_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    client: MagicMock,
+) -> None:
+    """Make the transport-neutral factory return the supplied client."""
+    factory = MagicMock(name="request_client_factory")
+    factory.create.return_value = client
+    monkeypatch.setattr(atom_adapter, "RequestClientFactory", factory)
 
 
 @pytest.fixture
@@ -97,7 +101,7 @@ def worker_with_transfer_context(
     """Construct a worker with its MQ and transfer boundaries stubbed."""
     client = MagicMock(name="req_client")
     transfer_context = MagicMock(name="transfer_context")
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
     monkeypatch.setattr(
         atom_adapter,
@@ -176,7 +180,7 @@ def test_atom_lookup_submits_valid_reader_count(
     future: MessagingFuture[None] = MessagingFuture()
     future.set_result(None)
     client.lookup.return_value = future
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
     scheduler = AtomMPSchedulerAdapter(
         server_url="tcp://127.0.0.1:5555",
@@ -341,7 +345,7 @@ def test_atom_adapter_constructor_closes_client_on_failure(
 ) -> None:
     """GET_CHUNK_SIZE and validation failures do not leak the MQ client."""
     client = MagicMock(name="req_client")
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     if failure_kind == "chunk_query":
         monkeypatch.setattr(
             atom_adapter,
@@ -367,7 +371,7 @@ def test_atom_constructor_preserves_error_when_client_close_fails(
     """Cleanup errors cannot replace the constructor's original failure."""
     client = MagicMock(name="req_client")
     client.close.side_effect = RuntimeError("close failed")
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(
         atom_adapter,
         "_get_chunk_size",
@@ -673,7 +677,7 @@ def test_atom_shutdown_discards_late_recovery_registration(
 
     recovery_context.register.side_effect = delayed_register
     contexts = iter([initial_context, recovery_context])
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
     monkeypatch.setattr(
         atom_adapter,
@@ -743,7 +747,7 @@ def test_atom_heartbeat_publish_and_start_are_one_lifecycle_transition(
 
     client = MagicMock(name="req_client")
     transfer_context = MagicMock(name="transfer_context")
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
     monkeypatch.setattr(
         atom_adapter,

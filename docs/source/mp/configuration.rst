@@ -790,6 +790,17 @@ All connector-level options are passed through
        handles. Set it together with the
        server's ``--isolated-ipc`` flag -- a mismatch fails at event
        import on whichever side receives the foreign handle.
+   * - ``lmcache.mp.use_vmm_api``
+     - ``false``
+     - Set when the engine allocates its KV cache through the CUDA VMM
+       API (vLLM's ``--enable-cumem-allocator``): such memory has no
+       legacy CUDA IPC handle, so KV-cache registration exports it via
+       ``cuMemExportToShareableHandle`` instead (a fabric handle when
+       the allocation is fabric-exportable -- requires an IMEX channel
+       device, e.g. ``NVIDIA_IMEX_CHANNELS=0`` -- or a POSIX fd
+       otherwise). Composes with ``lmcache.mp.isolated_ipc`` for
+       fabric-exportable pools; a POSIX-fd-only pool under isolated IPC
+       is rejected at registration.
 
 Environment Variables
 ---------------------

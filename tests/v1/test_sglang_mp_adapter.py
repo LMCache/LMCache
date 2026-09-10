@@ -223,12 +223,13 @@ def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
         "zmq",
         SimpleNamespace(Context=SimpleNamespace(instance=lambda: object())),
     )
+    request_client_factory = MagicMock(name="request_client_factory")
+    request_client_factory.create.return_value = req_client
     monkeypatch.setattr(
         adapter_mod,
-        "MessageQueueClient",
-        lambda _endpoint, _context: object(),
+        "RequestClientFactory",
+        request_client_factory,
     )
-    monkeypatch.setattr(adapter_mod, "ZmqMultiprocessClient", lambda _raw: req_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda _client: 4)
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
     monkeypatch.setattr(

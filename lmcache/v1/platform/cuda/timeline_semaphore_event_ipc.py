@@ -56,6 +56,8 @@ from lmcache.v1.platform.cuda.utils import (
     _cuda,
     _raw_stream_handle,
     _resolve_device_index,
+    cuda_ipc_handle_from_bytes,
+    cuda_ipc_handle_to_bytes,
     cudaStream_t,
 )
 
@@ -430,8 +432,7 @@ class TimelineSemaphoreEventIPCBackend:
                 if cached is not None:
                     base_ptr = cached
                 else:
-                    ipc_handle = _cuda.runtime.cudaIpcMemHandle_t()
-                    ipc_handle.reserved = handle_bytes
+                    ipc_handle = cuda_ipc_handle_from_bytes(handle_bytes)
                     with torch.cuda.device(device_index):
                         open_result = _cuda.runtime.cudaIpcOpenMemHandle(
                             ipc_handle,
@@ -612,7 +613,7 @@ class TimelineSemaphoreEventIPCBackend:
             buffer = _TimelineSemaphoreBuffer(
                 device_index=device_index,
                 base_ptr=int(base),
-                handle_bytes=bytes(handle.reserved),
+                handle_bytes=cuda_ipc_handle_to_bytes(handle),
                 buffer_ops_stream=buffer_stream,
             )
             with _HANDLE_REGISTRY_LOCK:

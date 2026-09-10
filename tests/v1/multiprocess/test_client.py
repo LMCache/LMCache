@@ -51,6 +51,10 @@ def test_all_request_types_have_explicit_named_methods() -> None:
     assert "submit_request" not in ZmqMultiprocessClient.__dict__
 
 
+def test_zmq_client_explicitly_inherits_shared_contract() -> None:
+    assert RequestClient in ZmqMultiprocessClient.__bases__
+
+
 def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     """Business callers must use named methods instead of ZMQ envelopes."""
     repo_root = Path(__file__).parents[3]
@@ -66,6 +70,35 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr == "submit_request":
                 violations.append(f"{path.relative_to(repo_root)}:{node.lineno}")
+
+    assert violations == []
+
+
+def test_business_callers_create_clients_through_factory() -> None:
+    """Transport implementations must not leak into business callers or tests."""
+    repo_root = Path(__file__).parents[3]
+    transport_root = repo_root / "lmcache/v1/multiprocess/transport"
+    implementation_tests = {
+        repo_root / "tests/v1/multiprocess/test_client.py",
+        repo_root / "tests/v1/multiprocess/test_mq.py",
+    }
+    violations: list[str] = []
+    for source_root in (repo_root / "lmcache", repo_root / "tests"):
+        for path in source_root.rglob("*.py"):
+            if path.is_relative_to(transport_root) or path in implementation_tests:
+                continue
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom) or node.module is None:
+                    continue
+                imports_raw_client = (
+                    node.module == "lmcache.v1.multiprocess.mq"
+                    and any(alias.name == "MessageQueueClient" for alias in node.names)
+                )
+                if imports_raw_client or node.module.startswith(
+                    "lmcache.v1.multiprocess.transport.zmq_impl"
+                ):
+                    violations.append(f"{path.relative_to(repo_root)}:{node.lineno}")
 
     assert violations == []
 

@@ -40,6 +40,7 @@ shape.
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
+| `GET /cache/pins` | operator/tools | paginated listing of pinned keys with their pin counts, filterable by `cache_salt` / `model_name` |
 | `POST /cache/delete` | operator | delete cached objects on a named server |
 | `GET /instances/usage` | operator/scheduler | fleet memory view: per-server, per-module usage vs declared capacity |
 | `GET /instances/{instance_id}/usage` | operator/scheduler | one server's memory compartments |
@@ -66,6 +67,8 @@ lmcache/v1/mp_coordinator/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
     event_broadcaster.py  # fans admitted events to the registered consumers
+    event_source.py     # source lifecycle/status contract
+    http_event_source.py  # non-durable POST /events push source
   discovery.py          # Registry + package scan, shared by views and controllers
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
@@ -180,10 +183,15 @@ Every fact the coordinator holds about fleet cache contents arrives
 through this layer, which decides **what** is admitted and **who** sees
 it. It holds no cache state itself. See [ingest.md](ingest.md).
 
+- `event_source.py` — common source lifecycle/status contract.
+- `http_event_source.py` — `HttpCacheEventSource`, today's non-durable
+  `POST /events` push adapter. Future durable sources use the same
+  `EventGate.ingest_batches` method but own their transport lifecycle
+  separately.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
-  emitter's L1 facts), `seq` dedup, gap detection. `ingest()` for a live
-  emitter stream, `reconcile()` for a scan that has no stream position.
+  emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
+  without stream positions are deliberately unsupported.
 - `event_broadcaster.py` — fans admitted batches (and fence
   notifications) to its registered `CacheEventConsumer`s: the key
   directory and the eviction manager. Adding a consumer is a wiring
@@ -203,7 +211,8 @@ Where the coordinator's fleet-level *doing* lives — the counterpart to
   requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
   mp server (all servers share the backing L2, so one dispatch evicts the
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
-  are excluded from eviction and delete. Reachable as
+  are excluded from eviction and delete; `GET /cache/pins` pages through
+  that table. Reachable as
   `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
 - `views/usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
   up per `cache_salt` (the tenant axis the eviction controller enforces
