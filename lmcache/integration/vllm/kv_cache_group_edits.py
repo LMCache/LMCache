@@ -51,6 +51,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
 from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
@@ -412,10 +413,12 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         padding, and any sibling layers on a shared pool, live between
         row and S).
 
-        Output for NHD: [num_blocks, block_size, 1, head_size] with
-        strides (S, head_size, head_size, 1). HND swaps dims 1 and 2:
+        Output for NHD / BLNHC: [num_blocks, block_size, 1, head_size] with
+        strides (S, head_size, head_size, 1). HND / BLHNC swaps dims 1 and 2:
         [num_blocks, 1, block_size, head_size] with strides
-        (S, block_size * head_size, head_size, 1).
+        (S, block_size * head_size, head_size, 1). Only stride(0) and
+        spec.page_size_bytes are read, so a blocks-first layout (layer dim
+        inside the block) views exactly like its layers-first twin.
 
         head_size = ceil(row / block_size), rounded up to the kernels'
         vector alignment, and block_size * head_size may exceed the row
@@ -426,9 +429,10 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
             "single-layer KV cache must be a torch.Tensor"
         )
         kv_layout = layout_hints.get("kv_layout", "none")
-        if kv_layout not in ("NHD", "HND"):
+        if kv_layout not in KV_LAYOUT_NAMES:
             raise ValueError(
-                f"Unsupported kv_layout: {kv_layout}. Only NHD and HND are supported."
+                f"Unsupported kv_layout: {kv_layout}. "
+                f"Supported: {', '.join(KV_LAYOUT_NAMES)}."
             )
         num_blocks = kv_cache.shape[0]
         row = kv_cache[0].numel()
@@ -455,7 +459,8 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
                 f"cannot tile a {row}-element state row into {block_size} "
                 f"aligned tokens within the {page_bytes}-byte page"
             )
-        if kv_layout == "NHD":
+        # BLNHC is blocks-first NHD (tokens before heads), BLHNC blocks-first HND.
+        if kv_layout in ("NHD", "BLNHC"):
             inner = (block_size, 1, head_size)
             inner_strides = (head_size, head_size, 1)
         else:
