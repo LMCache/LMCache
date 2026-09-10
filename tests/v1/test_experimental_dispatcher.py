@@ -34,9 +34,7 @@ def _feature_context(advertised: set[str] | None = None) -> FeatureContext:
     adapter = MagicMock(name="worker_adapter")
     adapter.model_name = MODEL
     adapter.experimental = {TRANSFER_QUERY} if advertised is None else advertised
-    return FeatureContext(
-        worker_adapter=adapter, send_lmcache_request=MagicMock(name="send")
-    )
+    return FeatureContext(worker_adapter=adapter)
 
 
 def test_query_cache_uses_the_suffixed_model_name() -> None:
