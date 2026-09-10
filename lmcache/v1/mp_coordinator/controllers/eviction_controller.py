@@ -10,7 +10,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, cast
 import asyncio
 import contextlib
@@ -50,6 +50,20 @@ if TYPE_CHECKING:
     from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class PinnedKey:
+    """One L2-pinned key and how many pins hold it.
+
+    Attributes:
+        key: The pinned key.
+        pin_count: Active pins on the key. ``unpin`` lowers it by one per
+            call; ``drop_pins`` removes the key outright.
+    """
+
+    key: ObjectKey
+    pin_count: int
 
 
 class FleetEvictionController(Controller):
@@ -250,6 +264,31 @@ class FleetEvictionController(Controller):
         """Remove each key from the L2 pin set (used by force delete; idempotent)."""
         for key in keys:
             self._pin_counts.pop(key, None)
+
+    def list_pins(
+        self, cache_salt: str, model_name: str, offset: int, limit: int
+    ) -> tuple[int, list[PinnedKey]]:
+        """Page through the L2 pin table.
+
+        Keys come back in the order they were first pinned. Pins taken
+        between two page reads can shift later pages by one.
+
+        Args:
+            cache_salt: Keep keys with this salt. Empty keeps every salt.
+            model_name: Keep keys for this model. Empty keeps every model.
+            offset: Matching keys to skip.
+            limit: Maximum keys to return.
+
+        Returns:
+            The number of keys matching the filters, and the requested page.
+        """
+        matching = [
+            PinnedKey(key=key, pin_count=count)
+            for key, count in self._pin_counts.items()
+            if (not cache_salt or key.cache_salt == cache_salt)
+            and (not model_name or key.model_name == model_name)
+        ]
+        return len(matching), matching[offset : offset + limit]
 
     def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
         """Select eviction candidates per ``cache_salt``.

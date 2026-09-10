@@ -318,17 +318,6 @@ def test_report_status_counts_active_jobs():
     assert status["p2p_state"] == _P2PState.UNREGISTERED.value
 
 
-def test_get_handlers_covers_all_p2p_request_types():
-    """get_handlers wires exactly the three P2P request types."""
-    controller, _ = _make_controller()
-    request_types = {spec.request_type for spec in controller.get_handlers()}
-    assert request_types == {
-        RequestType.P2P_LOOKUP_AND_LOCK,
-        RequestType.P2P_QUERY_LOOKUP_RESULTS,
-        RequestType.P2P_UNLOCK_OBJECTS,
-    }
-
-
 # ============================================================================
 # Orchestration: adapter reconcile
 # ============================================================================

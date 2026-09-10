@@ -109,8 +109,8 @@ class TestCommandMetadata:
         assert callable(sv_cmd.run_server_bench)
 
 
-class TestClientDelegation:
-    def test_cold_warm_flow_uses_one_client_and_closes(
+class TestCaseDelegation:
+    def test_runs_one_case_with_one_client(
         self,
         cmd: BenchCommand,
         parser: argparse.ArgumentParser,
@@ -121,26 +121,89 @@ class TestClientDelegation:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench import command as sv_cmd
-        from lmcache.cli.commands.bench.server_bench.client import (
-            LookupResult,
-            RequestContext,
-            TransferResult,
+        from lmcache.cli.commands.bench.server_bench.cases.base import (
+            BenchResult,
         )
 
         client = MagicMock()
-        cold_request = RequestContext(0, "req-0-cold", "cold", (1, 2), 2, 1, 2, 0, 1)
-        warm_request = RequestContext(0, "req-0-warm", "warm", (1, 2), 2, 1, 2, 0, 1)
-        client.create_request.side_effect = [cold_request, warm_request]
-        client.lookup.side_effect = [
-            LookupResult(0, 1, 0.0),
-            LookupResult(1, 1, 0.0),
-        ]
-        client.compute_checksums.side_effect = [["same"], ["same"]]
-        client.store.return_value = TransferResult("store", 2, 0.0, (0,), (0,), ())
-        client.retrieve.return_value = TransferResult(
-            "retrieve", 2, 0.0, (0,), (0,), ()
+        bench_case = MagicMock()
+        bench_case.name = "baseline"
+        case_result = BenchResult(
+            case_name="baseline",
+            completed_runs=2,
+            checks={"checksum_match": [True, False]},
         )
-        monkeypatch.setattr(sv_cmd, "ServerBenchClient", lambda *_args: client)
+        bench_case.run.return_value = case_result
+        client_factory = MagicMock(return_value=client)
+        case_factory = MagicMock(return_value=bench_case)
+        metrics = MagicMock()
+        config_section = MagicMock()
+        result_section = MagicMock()
+        metrics.add_section.side_effect = [config_section, result_section]
+        create_metrics = MagicMock(return_value=metrics)
+        monkeypatch.setattr(sv_cmd, "ServerBenchClient", client_factory)
+        monkeypatch.setattr(sv_cmd, "BaselineBenchCase", case_factory)
+        monkeypatch.setattr(cmd, "create_metrics", create_metrics)
+        args = parser.parse_args(
+            [
+                "bench",
+                "server",
+                "--mode",
+                "cpu",
+                "--start",
+                "5",
+                "--end",
+                "7",
+                "--interval",
+                "0",
+                "--quiet",
+            ]
+        )
+
+        sv_cmd.run_server_bench(cmd, args)
+
+        case_factory.assert_called_once_with(
+            sequence_count=2,
+            sequence_id_offset=5,
+            interval_seconds=0.0,
+        )
+        client.start.assert_called_once_with()
+        bench_case.run.assert_called_once()
+        assert bench_case.run.call_args.args[0] is client
+        client.close.assert_called_once_with()
+        create_metrics.assert_called_once_with("Server Bench Result", args, width=64)
+        result_section.add.assert_has_calls(
+            [
+                call("total_requests", "Total requests", 2),
+                call("checksum_ok", "Checksum OK", 1),
+                call("checksum_fail", "Checksum FAIL", 1),
+                call("pass_rate", "Pass rate (%)", 50.0),
+            ]
+        )
+        metrics.emit.assert_called_once_with()
+
+    def test_closes_client_when_case_fails(
+        self,
+        cmd: BenchCommand,
+        parser: argparse.ArgumentParser,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Standard
+        from unittest.mock import MagicMock
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import command as sv_cmd
+
+        client = MagicMock()
+        bench_case = MagicMock()
+        bench_case.name = "baseline"
+        bench_case.run.side_effect = RuntimeError("case failed")
+        monkeypatch.setattr(sv_cmd, "ServerBenchClient", MagicMock(return_value=client))
+        monkeypatch.setattr(
+            sv_cmd,
+            "BaselineBenchCase",
+            MagicMock(return_value=bench_case),
+        )
         args = parser.parse_args(
             [
                 "bench",
@@ -157,21 +220,10 @@ class TestClientDelegation:
             ]
         )
 
-        sv_cmd.run_server_bench(cmd, args)
+        with pytest.raises(SystemExit) as exc_info:
+            sv_cmd.run_server_bench(cmd, args)
 
-        client.start.assert_called_once_with()
-        assert client.create_request.call_args_list == [
-            call(0, request_id="req-0-cold", label="cold"),
-            call(0, request_id="req-0-warm", label="warm"),
-        ]
-        assert client.lookup.call_count == 2
-        client.zero_destination.assert_called_once_with(
-            warm_request, start_token=0, token_count=2
-        )
-        assert client.end_session.call_args_list == [
-            call(cold_request),
-            call(warm_request),
-        ]
+        assert exc_info.value.code == 1
         client.close.assert_called_once_with()
 
 
@@ -1133,9 +1185,6 @@ class TestClientMultiWorker:
                 kvcache_shape_spec="(2,64,16,1,1):float16:1",
                 num_blocks=64,
                 block_size=16,
-                start=0,
-                end=1,
-                quiet=True,
             ),
             lambda _message: None,
         )
@@ -1247,9 +1296,6 @@ class TestClientMultiWorker:
                 kvcache_shape_spec=("(%d,64,16,1,1):float16:1" % kv_size),
                 num_blocks=64,
                 block_size=16,
-                start=0,
-                end=1,
-                quiet=True,
             ),
             MagicMock(),
         )

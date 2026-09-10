@@ -28,9 +28,12 @@ class RequestType(enum.Enum):
     Enum of all available request types in the protocol system.
 
     When adding a new request type:
-    1. Add the enum member here
+    1. Append the member at the END of the enum, before the deprecated
+       aliases (values are auto-assigned in order; inserting mid-enum
+       renumbers later wire values and the frozen-table test fails)
     2. Add the protocol definition in the appropriate protocols/*.py file
-    3. The validation system will ensure they stay in sync
+    3. Add the pinned value to the frozen table in test_protocols.py
+    4. The validation system will ensure definitions stay in sync
 
     Organized by category:
     - Engine operations: Core KV cache operations
@@ -86,8 +89,9 @@ class RequestType(enum.Enum):
     # Experimental transfer intermediate tensor
     GET_EXPERIMENTAL = enum.auto()
 
-    # Deprecated aliases must follow every auto-valued member. On Python 3.10,
-    # placing aliases before auto() can reuse the preceding member's value.
+    CB_PROTOCOL_HANDSHAKE = enum.auto()
+
+    # Deprecated aliases.
     CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
     CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE
     CB_RETRIEVE_PRE_COMPUTED_V3 = CB_RETRIEVE_PRE_COMPUTED
