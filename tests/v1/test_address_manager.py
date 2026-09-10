@@ -412,7 +412,7 @@ class TestAddressManagerBatchedAllocation:
         allocated_before = manager.total_allocated_size
         free_before = manager.get_free_size()
 
-        with pytest.raises(ValueError, match="batch_size must be non-negative"):
+        with pytest.raises(RuntimeError, match="batch_size must be non-negative"):
             manager.batched_allocate(4096, batch_size)
 
         assert manager.total_allocated_size == allocated_before

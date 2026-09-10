@@ -1453,11 +1453,11 @@ class AddressManager:
             Note: the length of the return list is the same as the batch_size.
 
         Raises:
-            ValueError: If batch_size is negative.
-            RuntimeError: If no memory is available to allocate.
+            RuntimeError: If batch_size is negative or no memory is available
+                to allocate.
         """
         if batch_size < 0:
-            raise ValueError("batch_size must be non-negative")
+            raise RuntimeError("batch_size must be non-negative")
 
         aligned_size = self.compute_aligned_size(size)
         remaining = batch_size

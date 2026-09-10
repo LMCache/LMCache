@@ -150,6 +150,37 @@ def test_tensor_allocator(use_paging):
     allocator.close()
 
 
+@pytest.mark.parametrize("batch_size", [-1, -5])
+@pytest.mark.parametrize("allocated_pages", [0, 2, 4])
+def test_tensor_allocator_negative_batch_size(
+    batch_size: int, allocated_pages: int
+) -> None:
+    """Negative batches return None without changing existing allocations."""
+    tensor_buffer = torch.zeros(4096 * 4, dtype=torch.uint8, device="cpu")
+    allocator = TensorMemoryAllocator(tensor_buffer)
+    existing = None
+    try:
+        if allocated_pages:
+            existing = allocator.allocate(
+                torch.Size([4096 * allocated_pages]), torch.uint8
+            )
+            assert existing is not None
+        allocated_before = allocator.total_allocated_size
+        active_before = allocator.num_active_allocations
+
+        result = allocator.batched_allocate(torch.Size([4096]), torch.uint8, batch_size)
+
+        assert result is None
+        assert allocator.total_allocated_size == allocated_before
+        assert allocator.num_active_allocations == active_before
+        if existing is not None:
+            assert existing.is_valid()
+    finally:
+        if existing is not None:
+            allocator.free(existing)
+        allocator.close()
+
+
 @pytest.mark.parametrize(
     "alloc_cls",
     [
