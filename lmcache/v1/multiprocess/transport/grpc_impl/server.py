@@ -2,6 +2,7 @@
 """Multiprocess server driven by generated gRPC service descriptors."""
 
 # Standard
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -13,6 +14,11 @@ import grpc
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.request_handler import (
+    BoundRequestHandler,
+    iter_request_handlers,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     ServiceBinding,
@@ -24,10 +30,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     RequestDecoder,
     ResponseEncoder,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.services.base import (
-    GrpcHandlerType,
-    get_grpc_method_options,
 )
 
 logger = init_logger(__name__)
@@ -41,8 +43,9 @@ _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 
 @dataclass
 class _GrpcRequestHandler:
-    handler: Callable[..., Any]
-    handler_type: GrpcHandlerType
+    request_type: RequestType
+    handler: Callable[..., Any] | None
+    handler_type: HandlerType
     requires_client_affinity: bool
     request_decoder: RequestDecoder
     response_encoder: ResponseEncoder
@@ -80,11 +83,19 @@ class _GeneratedServicer:
         request: Any,
         context: grpc.ServicerContext,
     ) -> Any:
-        payloads = registered.request_decoder(request)
         try:
-            if registered.handler_type is GrpcHandlerType.SYNC:
+            if registered.handler is None:
+                context.abort(
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    f"{registered.request_type.name} is not enabled on this server",
+                )
+                raise RuntimeError("gRPC context abort unexpectedly returned")
+            payloads = registered.request_decoder(request)
+            if registered.handler_type is HandlerType.SYNC:
                 result = registered.handler(*payloads)
-            elif registered.requires_client_affinity:
+            elif registered.handler_type is HandlerType.BLOCKING and (
+                registered.requires_client_affinity
+            ):
                 affinity_key = self._affinity_key(context)
                 with self._affinity_submit_lock:
                     future = self._affinity_pool.submit(
@@ -93,10 +104,14 @@ class _GeneratedServicer:
                         affinity_key=affinity_key,
                     )
                 result = future.result()
-            else:
+            elif registered.handler_type is HandlerType.BLOCKING:
                 result = self._normal_pool.submit(
                     registered.handler, *payloads
                 ).result()
+            else:
+                raise NotImplementedError(
+                    f"{registered.handler_type.name} handlers are not supported"
+                )
             return registered.response_encoder(result)
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
@@ -111,7 +126,7 @@ class _GeneratedServicer:
 
 
 class GrpcMultiprocessServer:
-    """Register concrete implementations against generated gRPC services."""
+    """Register transport-neutral modules against generated gRPC services."""
 
     def __init__(
         self,
@@ -146,38 +161,53 @@ class GrpcMultiprocessServer:
         """Return the TCP port selected by gRPC, including for port zero."""
         return self._bound_port
 
-    def add_service(self, service_name: str, implementation: object) -> None:
-        """Register methods from a concrete protobuf service implementation.
+    def add_modules(self, modules: Sequence[object]) -> None:
+        """Register decorated module methods as generated gRPC services.
 
         Args:
-            service_name: Name declared by the generated protobuf service.
-            implementation: Object with one same-named method per proto RPC.
+            modules: Ordered business modules. A later module overrides an
+                earlier handler for the same request type.
 
         Raises:
-            ValueError: If the generated service does not exist.
-            TypeError: If an RPC implementation is missing.
+            TypeError: If a module handler does not match its protocol types.
+            ValueError: If a module exposes invalid handler metadata.
         """
-        binding = get_service_bindings().get(service_name)
-        if binding is None:
-            raise ValueError(f"Unknown generated gRPC service: {service_name}")
+        handlers_by_request: dict[RequestType, BoundRequestHandler] = {}
+        for module in modules:
+            for registered in iter_request_handlers(module):
+                handlers_by_request[registered.options.request_type] = registered
+
+        for binding in get_service_bindings().values():
+            self._add_generated_service(binding, handlers_by_request)
+
+    def _add_generated_service(
+        self,
+        binding: ServiceBinding,
+        handlers_by_request: dict[RequestType, BoundRequestHandler],
+    ) -> None:
+        service_name = binding.descriptor.name
 
         service_handlers: dict[str, _GrpcRequestHandler] = {}
         codec_registry = get_method_codec_registry()
         for method in binding.descriptor.methods:
-            handler = getattr(implementation, method.name, None)
-            if not callable(handler):
-                raise TypeError(
-                    f"{implementation.__class__.__name__} must implement "
-                    f"{service_name}.{method.name}"
-                )
             method_codec = codec_registry.by_full_name[method.full_name]
-            method_codec.validate_handler(handler)
-            handler_type, requires_affinity = get_grpc_method_options(handler)
+            bound_handler = handlers_by_request.get(method_codec.request_type)
+            if bound_handler is not None:
+                method_codec.validate_handler(bound_handler.handler)
             full_name = method.full_name
             registered = _GrpcRequestHandler(
-                handler=handler,
-                handler_type=handler_type,
-                requires_client_affinity=requires_affinity,
+                request_type=method_codec.request_type,
+                handler=(bound_handler.handler if bound_handler is not None else None),
+                handler_type=(
+                    bound_handler.options.handler_type
+                    if bound_handler is not None
+                    else HandlerType.SYNC
+                ),
+                requires_client_affinity=(
+                    bound_handler.options.requires_client_affinity
+                    if bound_handler is not None
+                    else False
+                ),
                 request_decoder=method_codec.request_decoder,
                 response_encoder=method_codec.response_encoder,
             )

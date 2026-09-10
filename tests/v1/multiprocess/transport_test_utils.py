@@ -9,27 +9,18 @@ import zmq
 
 # First Party
 from lmcache.v1.multiprocess.mq import MessageQueueServer
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.services.lookup import (
-    LookupServiceImpl,
+from lmcache.v1.multiprocess.transport.zmq_impl.server import (
+    ThreadPoolType,
+    add_handler_helper,
+    get_zmq_handler_specs,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl.server import add_handler_helper
 
 RequestTransport = Literal["zmq", "grpc"]
 REQUEST_TRANSPORTS: tuple[RequestTransport, ...] = ("zmq", "grpc")
 RequestServer = MessageQueueServer | GrpcMultiprocessServer
-
-_LOOKUP_HANDLERS = {
-    RequestType.LOOKUP: "lookup",
-    RequestType.QUERY_PREFETCH_STATUS: "query_prefetch_status",
-    RequestType.WAIT_PREFETCH_STATUS: "wait_prefetch_status",
-    RequestType.QUERY_PREFETCH_LOOKUP_HITS: "query_prefetch_lookup_hits",
-    RequestType.FREE_LOOKUP_LOCKS: "free_lookup_locks",
-    RequestType.END_SESSION: "end_session",
-}
 
 
 def request_server_url(transport: RequestTransport, port: int) -> str:
@@ -67,18 +58,23 @@ def start_lookup_request_server(
             max_cpu_workers=4,
             max_gpu_workers=1,
         )
-        grpc_server.add_service("LookupService", LookupServiceImpl(lookup))
+        grpc_server.add_modules([lookup])
         grpc_server.start()
         return grpc_server
 
     zmq_server = MessageQueueServer(server_url, zmq.Context.instance())
-    blocking_types: list[RequestType] = []
-    for request_type, method_name in _LOOKUP_HANDLERS.items():
-        handler = getattr(lookup, method_name, None)
-        if not callable(handler):
-            continue
-        add_handler_helper(zmq_server, request_type, handler)
-        blocking_types.append(request_type)
-    zmq_server.add_normal_thread_pool(blocking_types, max_workers=4)
+    specs = get_zmq_handler_specs(lookup)
+    for spec in specs:
+        add_handler_helper(
+            zmq_server,
+            spec.request_type,
+            spec.handler,
+            spec.handler_type,
+        )
+    normal_types = [
+        spec.request_type for spec in specs if spec.pool is ThreadPoolType.NORMAL
+    ]
+    if normal_types:
+        zmq_server.add_normal_thread_pool(normal_types, max_workers=4)
     zmq_server.start()
     return zmq_server

@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
@@ -77,6 +78,7 @@ class _FreeLocksHandler:
     def __init__(self) -> None:
         self.call: tuple[IPCCacheServerKey, int] | None = None
 
+    @request_handler(RequestType.FREE_LOOKUP_LOCKS, HandlerType.BLOCKING)
     def free_lookup_locks(self, key: IPCCacheServerKey, tp_size: int) -> None:
         """Record the decoded request payload."""
         self.call = (key, tp_size)

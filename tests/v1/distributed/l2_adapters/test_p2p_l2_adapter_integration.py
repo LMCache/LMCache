@@ -73,9 +73,6 @@ from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (  # noqa: E402
     GrpcMultiprocessServer,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.services.p2p import (  # noqa: E402
-    P2PServiceImpl,
-)
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (  # noqa: E402
     add_handler_helper,
     get_zmq_handler_specs,
@@ -112,7 +109,7 @@ def _start_p2p_request_server(
             max_cpu_workers=4,
             max_gpu_workers=4,
         )
-        grpc_server.add_service("P2PService", P2PServiceImpl(controller))
+        grpc_server.add_modules([controller])
         grpc_server.start()
         return f"grpc://{target}", grpc_server
 
