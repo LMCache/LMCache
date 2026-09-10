@@ -666,11 +666,10 @@ class LMCacheMPSchedulerAdapter:
         self._unacked_lookups: dict[str, _LookupAck] = {}
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
+        # request_id -> server URL -> (in-flight status future, submission time).
         self._lookup_status: dict[
             str, dict[str, tuple[MessagingFuture[Any], float]]
         ] = {}
-        self._lookup_releases: dict[str, list[tuple[str, MessagingFuture[Any]]]] = {}
-        self._failed_lookup_cleanup: set[str] = set()
         self._lookup_params: dict[
             str, tuple[list[int], str, dict[str, Any] | None]
         ] = {}
@@ -793,13 +792,7 @@ class LMCacheMPSchedulerAdapter:
             for later retrieve operations.
             In the meantime, this function will record the lookup request, and the
             status of the look up request can be checked by `check_lookup_result`.
-
-        Raises:
-            RuntimeError: A previous lock-release failure prevents safely
-                retrying this request ID with this adapter.
         """
-        if request_id in self._failed_lookup_cleanup:
-            raise RuntimeError(f"Cannot retry failed lookup cleanup: {request_id}")
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
@@ -854,13 +847,10 @@ class LMCacheMPSchedulerAdapter:
             per_server: Per-server hit chunk counts.
             min_chunks: Minimum hit chunk count across all servers.
         """
-        token_ids_l, cs, request_configs = self._lookup_params.get(
+        token_ids_l, cs, request_configs = self._lookup_params.pop(
             request_id, (None, None, None)
         )
         if token_ids_l is not None:
-            # A partial send failure leaves earlier releases ambiguous. Do not
-            # retry them and accidentally consume another request's read lock.
-            self._failed_lookup_cleanup.add(request_id)
             for url, hit_chunks in per_server.items():
                 if hit_chunks <= min_chunks:
                     continue
@@ -875,9 +865,7 @@ class LMCacheMPSchedulerAdapter:
                     cache_salt=cs or "",
                     request_configs=request_configs,
                 ).no_worker_id_version()
-                future = self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
-                self._lookup_releases.setdefault(request_id, []).append((url, future))
-            self._failed_lookup_cleanup.discard(request_id)
+                self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -903,12 +891,7 @@ class LMCacheMPSchedulerAdapter:
             An integer representing the total number of tokens matched
             in LMCache (prefix matching), or
             None if the lookup request is not finished yet.
-
-        Raises:
-            RuntimeError: Cleanup previously failed for this request ID.
         """
-        if request_id in self._failed_lookup_cleanup:
-            raise RuntimeError(f"Cannot retry failed lookup cleanup: {request_id}")
         if request_id not in self._pending_lookups:
             # No job — either unhealthy at submit time or already cleaned up.
             # Return the cached aggregate if any, otherwise 0.
@@ -929,10 +912,9 @@ class LMCacheMPSchedulerAdapter:
             # pool and may be reordered, and a status query for an unknown
             # request_id answers 0: a spurious miss whose prefetch locks are
             # never released. So never query until every server has acked.
-            for url, fut in list(ack.futures.items()):
-                if fut.query():
-                    fut.result(timeout=0)
-                    del ack.futures[url]
+            ack.futures = {
+                url: fut for url, fut in ack.futures.items() if not fut.query()
+            }
             if ack.futures:
                 if time.monotonic() - ack.submitted_at >= self._mq_timeout:
                     for url in ack.futures:
@@ -951,6 +933,7 @@ class LMCacheMPSchedulerAdapter:
 
         futures = self._lookup_status.setdefault(request_id, {})
         for url in unresolved_urls:
+            # Keep the same future until its reply arrives; never restart a poll.
             if url not in futures:
                 futures[url] = (
                     self.req_clients[url].query_prefetch_status(request_id),
@@ -963,6 +946,7 @@ class LMCacheMPSchedulerAdapter:
                     self._mark_lookup_timed_out(url)
                     return 0
                 continue
+            del futures[url]
             try:
                 r = fut.result(timeout=0)
             except TimeoutError:
@@ -972,7 +956,6 @@ class LMCacheMPSchedulerAdapter:
                 )
                 self._health_events[url].clear()
                 return 0
-            del futures[url]
             if r is None:
                 continue
             per_server[url] = int(r)
@@ -1009,15 +992,9 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the finished request.
         """
-        if (
-            request_id in self._pending_lookups
-            and request_id not in self._finished_lookup_results
-        ):
-            self._cancel_lookup(request_id)
         self._pending_lookups.discard(request_id)
         self._unacked_lookups.pop(request_id, None)
         self._lookup_status.pop(request_id, None)
-        self._lookup_releases.pop(request_id, None)
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
         self._lookup_params.pop(request_id, None)
@@ -1080,9 +1057,9 @@ class LMCacheMPSchedulerAdapter:
         """
         Notify LMCache server to remove the session for a finished request.
 
-        An unconsumed lookup is drained and its read locks released before
-        ending the session. This cancellation path may block up to the MQ
-        timeout; ordinary lookup observation remains nonblocking.
+        For unacked lookup results, this function will block waiting until
+        they are acked. Already-submitted status requests are also drained
+        before END_SESSION so their handlers cannot recreate the session.
 
         Args:
             request_id: The ID of the finished request.
@@ -1090,11 +1067,27 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy:
             return
 
-        if request_id in self._pending_lookups:
-            self._cancel_lookup(request_id)
-            self._pending_lookups.discard(request_id)
-            self.cleanup_lookup_result(request_id)
-            return
+        ack = self._unacked_lookups.pop(request_id, None)
+        if ack is not None:
+            remaining = max(
+                0.0, self._mq_timeout - (time.monotonic() - ack.submitted_at)
+            )
+            for url, fut in ack.futures.items():
+                try:
+                    fut.result(timeout=remaining)
+                except TimeoutError:
+                    self._mark_lookup_timed_out(url)
+                    return
+
+        # Status polling used to complete inside check_lookup_result(). Keep
+        # its ordering before END_SESSION when a request finishes early.
+        for url, (future, submitted_at) in self._lookup_status.pop(
+            request_id, {}
+        ).items():
+            remaining = max(0.0, self._mq_timeout - (time.monotonic() - submitted_at))
+            if not future.wait(timeout=remaining):
+                self._mark_lookup_timed_out(url)
+                return
 
         for url in self._server_urls:
             self.req_clients[url].end_session(request_id)
@@ -1121,62 +1114,6 @@ class LMCacheMPSchedulerAdapter:
             )
 
     # Helper functions
-    def _cancel_lookup(self, request_id: str) -> None:
-        """Drain an unconsumed lookup before releasing its pins and session."""
-        deadline = time.monotonic() + self._mq_timeout
-        while self.is_healthy:
-            token_count = self.check_lookup_result(request_id)
-            if token_count is not None:
-                break
-            if time.monotonic() >= deadline:
-                for url in self._server_urls:
-                    if url not in self._per_server_hits.get(request_id, {}):
-                        self._mark_lookup_timed_out(url)
-                return
-            time.sleep(0.001)
-        else:
-            return
-
-        if not self.is_healthy:
-            return
-        # Keep failures terminal even when a release was applied but its
-        # acknowledgement was lost. Retrying could free another reader's pin.
-        self._failed_lookup_cleanup.add(request_id)
-        releases = self._lookup_releases.pop(request_id, [])
-        params = self._lookup_params.get(request_id)
-        if token_count and params is not None:
-            token_ids, cache_salt, request_configs = params
-            key = self._create_key(
-                token_ids,
-                start=0,
-                end=min(token_count, len(token_ids)),
-                request_id=request_id,
-                cache_salt=cache_salt,
-                request_configs=request_configs,
-            ).no_worker_id_version()
-            releases.extend(
-                (url, self.req_clients[url].free_lookup_locks(key, self.tp_size))
-                for url in self._server_urls
-            )
-        # A status handler can create the session, and lock release needs its
-        # recorded prefix. Wait for both before END_SESSION, including tails
-        # already released by minimum-prefix aggregation.
-        for url, future in releases:
-            try:
-                future.result(timeout=max(0.0, deadline - time.monotonic()))
-            except TimeoutError:
-                self._mark_lookup_timed_out(url)
-                return
-        for url, client in self.req_clients.items():
-            try:
-                client.end_session(request_id).result(
-                    timeout=max(0.0, deadline - time.monotonic())
-                )
-            except TimeoutError:
-                self._mark_lookup_timed_out(url)
-                return
-        self._failed_lookup_cleanup.discard(request_id)
-
     def _create_key(
         self,
         token_ids: list[int],

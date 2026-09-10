@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Public adapter contracts for status polling and pre-allocation cancellation."""
+"""Public adapter contracts for nonblocking status polling."""
 
 # Standard
 from collections import deque
@@ -25,7 +25,6 @@ class CheckedFuture(MessagingFuture[Any]):
 
     def __init__(self) -> None:
         super().__init__()
-        self.poll_only = True
         self.observed_ready = False
 
     def query(self) -> bool:
@@ -36,9 +35,8 @@ class CheckedFuture(MessagingFuture[Any]):
 
     def result(self, timeout: float | None = None) -> Any:
         """Enforce nonblocking reads while testing scheduler callbacks."""
-        if self.poll_only:
-            assert timeout == 0, "lookup callback attempted a blocking future read"
-            assert self.observed_ready, "result read preceded ready query"
+        assert timeout == 0, "lookup callback attempted a blocking future read"
+        assert self.observed_ready, "result read preceded ready query"
         return super().result(timeout)
 
 
@@ -61,8 +59,7 @@ class Client:
         self.frees: list[Any] = []
         self.ends: list[str] = []
         self.free_ack = ready(None)
-        self.free_error: RuntimeError | None = None
-        self.free_called = threading.Event()
+        self.end_ack: MessagingFuture[Any] = MessagingFuture()
 
     def get_chunk_size(self) -> MessagingFuture[Any]:
         """Advertise the fixed chunk64 test geometry."""
@@ -83,15 +80,12 @@ class Client:
     def free_lookup_locks(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Record released ranges and expose their acknowledgement."""
         self.frees.append(key)
-        if self.free_error is not None:
-            raise self.free_error
-        self.free_called.set()
         return self.free_ack
 
     def end_session(self, request_id: str) -> MessagingFuture[Any]:
         """Record session removal after its preceding obligations."""
         self.ends.append(request_id)
-        return ready(None)
+        return self.end_ack
 
     def close(self) -> None:
         """Close the stub, which owns no transport resources."""
@@ -229,73 +223,18 @@ def test_status_deadline_does_not_restart_on_poll(
     assert client.queries == ["r"]
 
 
-def test_completed_lookup_ack_exception_is_not_success(
-    make_adapter: AdapterFactory,
-) -> None:
+def test_status_exception_allows_a_fresh_poll(make_adapter: AdapterFactory) -> None:
     adapter, (client,) = make_adapter()
-    adapter.maybe_submit_lookup_request("r", list(range(256)))
-    client.ack.set_exception(RuntimeError("LOOKUP send failed"))
-    with pytest.raises(RuntimeError, match="LOOKUP send failed"):
+    submit(adapter, [client])
+    client.status.set_exception(RuntimeError("status failed"))
+    with pytest.raises(RuntimeError, match="status failed"):
         adapter.check_lookup_result("r")
-    assert not client.queries
+    client.replies.append(ready(2))
+    assert resolved(adapter) == 128
+    assert client.queries == ["r", "r"]
 
 
-@pytest.mark.parametrize(
-    ("pending_ack", "first_reply"), [(False, None), (False, 2), (True, 2)]
-)
-def test_cancel_orders_late_status_free_ack_then_end(
-    make_adapter: AdapterFactory, pending_ack: bool, first_reply: int | None
-) -> None:
-    adapter, (client,) = make_adapter()
-    adapter.maybe_submit_lookup_request(
-        "r", list(range(256)), cache_salt="tenant", request_configs={"tag": "value"}
-    )
-    if not pending_ack:
-        client.ack.set_result(None)
-    assert adapter.check_lookup_result("r") is None
-    client.ack.poll_only = False
-    client.status.poll_only = False
-    if first_reply is None:
-        client.replies.append(ready(2))
-    client.free_ack = MessagingFuture()
-    done = threading.Event()
-    errors: list[BaseException] = []
-
-    def cancel() -> None:
-        try:
-            adapter.end_session("r")
-        except BaseException as error:
-            errors.append(error)
-        finally:
-            done.set()
-
-    thread = threading.Thread(target=cancel)
-    thread.start()
-    try:
-        assert not done.wait(0.05)
-        assert not client.frees and not client.ends
-        if pending_ack:
-            assert not client.queries
-            client.ack.set_result(None)
-        client.status.set_result(first_reply)
-        assert client.free_called.wait(1)
-        assert not done.is_set() and not client.ends
-        client.free_ack.set_result(None)
-        assert done.wait(1)
-        assert not errors
-        assert [(key.start, key.end) for key in client.frees] == [(0, 128)]
-        assert client.frees[0].cache_salt == "tenant"
-        assert client.frees[0].request_configs == {"tag": "value"}
-        assert client.ends == ["r"]
-    finally:
-        client.ack.set_result(None)
-        client.status.set_result(first_reply)
-        client.free_ack.set_result(None)
-        thread.join(timeout=6)
-        assert not thread.is_alive()
-
-
-def test_unequal_hits_then_cancel_releases_each_range_once(
+def test_unequal_hits_release_only_excess_tail_once(
     make_adapter: AdapterFactory,
 ) -> None:
     adapter, clients = make_adapter(2)
@@ -303,70 +242,59 @@ def test_unequal_hits_then_cancel_releases_each_range_once(
     for client, chunks in zip(clients, (4, 2), strict=True):
         client.status.set_result(chunks)
     assert resolved(adapter) == 128
-    adapter.end_session("r")
-    assert [(key.start, key.end) for key in clients[0].frees] == [(128, 256), (0, 128)]
-    assert [(key.start, key.end) for key in clients[1].frees] == [(0, 128)]
-    assert all(client.queries == ["r"] and client.ends == ["r"] for client in clients)
+    assert [adapter.check_lookup_result("r") for _ in range(5)] == [128] * 5
+    assert [(key.start, key.end) for key in clients[0].frees] == [(128, 256)]
+    assert not clients[1].frees
+    assert all(client.queries == ["r"] for client in clients)
 
 
-def test_allocation_cleanup_does_not_free_consumed_pins(
+def test_cleanup_discards_old_status_before_request_id_reuse(
     make_adapter: AdapterFactory,
 ) -> None:
     adapter, (client,) = make_adapter()
     submit(adapter, [client])
-    client.status.set_result(2)
-    assert resolved(adapter) == 128
+    assert adapter.check_lookup_result("r") is None
     adapter.cleanup_lookup_result("r")
     adapter.cleanup_lookup_result("r")
-    adapter.end_session("r")
-    assert not client.frees
-    assert client.ends == ["r"]
     assert adapter.check_lookup_result("r") == 0
+    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    client.replies.append(ready(0))
+    client.status.set_result(4)
+    assert resolved(adapter) == 0
+    assert len(client.lookups) == 2 and client.queries == ["r", "r"]
+    assert not client.frees
 
 
-def assert_cleanup_not_retried(
-    adapter: LMCacheMPSchedulerAdapter, clients: list[Client]
+@pytest.mark.parametrize("reply", [None, 2])
+def test_end_waits_for_already_sent_status_only(
+    make_adapter: AdapterFactory, reply: int | None
 ) -> None:
-    """A failed cleanup must not issue another release through any retry path."""
-    counts = [len(client.frees) for client in clients]
-    for _ in range(3):
-        for call in (
-            lambda: adapter.maybe_submit_lookup_request("r", list(range(256))),
-            lambda: adapter.check_lookup_result("r"),
-            lambda: adapter.end_session("r"),
-        ):
-            with pytest.raises(RuntimeError, match="failed lookup cleanup"):
-                call()
-        assert [len(client.frees) for client in clients] == counts
-    assert not any(client.ends for client in clients)
+    adapter, (client,) = make_adapter()
+    submit(adapter, [client])
+    assert adapter.check_lookup_result("r") is None
+    done = threading.Event()
+    errors: list[BaseException] = []
 
+    def finish() -> None:
+        try:
+            adapter.end_session("r")
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            done.set()
 
-def test_partial_tail_release_failure_cannot_double_free(
-    make_adapter: AdapterFactory,
-) -> None:
-    adapter, clients = make_adapter(3)
-    submit(adapter, clients)
-    for client, chunks in zip(clients, (4, 3, 2), strict=True):
-        client.status.set_result(chunks)
-    clients[1].free_error = RuntimeError("second tail send failed")
-    with pytest.raises(RuntimeError, match="second tail send failed"):
-        resolved(adapter)
-    assert [(key.start, key.end) for key in clients[0].frees] == [(128, 256)]
-    assert [len(client.frees) for client in clients] == [1, 1, 0]
-    assert_cleanup_not_retried(adapter, clients)
-
-
-def test_prefix_release_future_failure_cannot_double_free(
-    make_adapter: AdapterFactory,
-) -> None:
-    adapter, clients = make_adapter(2)
-    submit(adapter, clients)
-    for client in clients:
-        client.status.set_result(2)
-    assert resolved(adapter) == 128
-    clients[1].free_ack = MessagingFuture()
-    clients[1].free_ack.set_exception(RuntimeError("prefix release failed"))
-    with pytest.raises(RuntimeError, match="prefix release failed"):
-        adapter.end_session("r")
-    assert all([(key.start, key.end) for key in c.frees] == [(0, 128)] for c in clients)
-    assert_cleanup_not_retried(adapter, clients)
+    thread = threading.Thread(target=finish)
+    thread.start()
+    try:
+        assert not done.wait(0.05)
+        assert not client.ends
+        client.status.set_result(reply)
+        assert done.wait(1)
+        assert not errors
+        assert client.queries == ["r"] and client.ends == ["r"]
+        assert not client.frees
+        assert not client.end_ack.query()
+    finally:
+        client.status.set_result(reply)
+        thread.join(timeout=6)
+        assert not thread.is_alive()
