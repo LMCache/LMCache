@@ -8,6 +8,7 @@ rows, both in one engine group.
 
 # Standard
 from types import SimpleNamespace
+from typing import cast
 
 # Third Party
 import pytest
@@ -17,6 +18,7 @@ pytest.importorskip("vllm", reason="group edits import vLLM specs")
 
 # Third Party
 from vllm.v1.kv_cache_interface import (  # noqa: E402
+    KVCacheConfig,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -62,13 +64,19 @@ def _kernel_paged(num_states: int, kernel_rows: int, width: int, dtype) -> torch
     return torch.arange(numel).to(dtype).reshape(pages, 1, kernel_rows, width)
 
 
-def _config(groups: list[SimpleNamespace]) -> SimpleNamespace:
-    return SimpleNamespace(kv_cache_groups=groups, has_mamba_layers=True)
+def _config(groups: list[SimpleNamespace]) -> KVCacheConfig:
+    """Config double: the edits read only the groups and the Mamba gate."""
+    return cast(
+        KVCacheConfig,
+        SimpleNamespace(kv_cache_groups=groups, has_mamba_layers=True),
+    )
 
 
-def _edit(spec, kv_cache: torch.Tensor) -> torch.Tensor:
+def _edit(spec: MLAAttentionSpec, kv_cache: torch.Tensor) -> torch.Tensor:
     config = _config([SimpleNamespace(layer_names=["l"], kv_cache_spec=spec)])
-    return apply_kv_cache_group_edits(config, {"l": kv_cache}, layout_hints={})["l"]
+    edited = apply_kv_cache_group_edits(config, {"l": kv_cache}, layout_hints={})["l"]
+    assert isinstance(edited, torch.Tensor)
+    return edited
 
 
 def test_mla_kernel_pages_re_viewed_as_logical_block():
