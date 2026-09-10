@@ -13,10 +13,14 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    ContextEntry,
     LMCacheDrivenTransferModule,
     all_null_chunk_masks,
 )
@@ -95,13 +99,16 @@ def test_object_group_null_only_when_all_its_kernel_groups_null():
 # ------------------------------------------------------------------ #
 
 
-def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
+def _make_module(
+    monkeypatch: pytest.MonkeyPatch,
+    num_chunks: int,
+    num_chunks_in_sw: list[int],
+    group_kinds: tuple[str, ...] = (),
+) -> tuple[LMCacheDrivenTransferModule, list[list[str]], list[tuple[int, list]]]:
     """Build an LMCacheDrivenTransferModule with its collaborators mocked, and
     return (module, read_calls, transfer_calls) capturing what retrieve reads
     and transfers per object group."""
     num_object_groups = len(num_chunks_in_sw)
-
-    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
 
     kvlgm = SimpleNamespace(
         num_object_groups=num_object_groups,
@@ -116,10 +123,12 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     cache_context.max_batch_size = 8
 
     event_backend = MagicMock()
-    entry = SimpleNamespace(
-        cache_context=cache_context, model_name="m", event_backend=event_backend
+    entry = ContextEntry(
+        cache_context=cache_context,
+        model_name="m",
+        world_size=1,
+        event_backend=event_backend,
     )
-    module.get_and_touch_context_entry = MagicMock(return_value=entry)
 
     # Object keys: one distinct key per (group, chunk).
     obj_keys = [
@@ -137,7 +146,9 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         yield [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys]
 
     ctx.storage_manager.read_prefetched_results = MagicMock(side_effect=fake_read)
-    module._ctx = ctx
+    monkeypatch.setattr(mod, "DeviceHostFuncDispatcher", MagicMock())
+    module = LMCacheDrivenTransferModule(ctx)
+    monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _: entry)
 
     transfer_calls: list[tuple[int, list]] = []
 

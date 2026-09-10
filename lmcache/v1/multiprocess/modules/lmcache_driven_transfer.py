@@ -2,6 +2,8 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any, Generator, Sequence
@@ -642,6 +644,9 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        active_operations: Admitted STORE/RETRIEVE handlers using this context.
+        draining: Whether teardown has stopped new transfer admission.
+        context_closed: Whether device cleanup finished, for teardown retries.
     """
 
     cache_context: BaseCacheContext
@@ -650,6 +655,9 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    active_operations: int = 0
+    draining: bool = False
+    context_closed: bool = False
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -665,12 +673,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
-        # Guards all reads/writes of _cache_contexts. The reaper mutates it
-        # off the MQ main loop, so register/unregister/store/retrieve and
-        # report_status all serialize through this lock. Held only for dict
-        # ops -- never across context creation, layout-registry calls, or
-        # empty_cache (leaf-lock invariant: no thread holds two locks).
-        self._lock = threading.Lock()
+        # Admission and teardown select entries under the same condition.
+        # Waiting for handlers releases it; device cleanup runs outside it.
+        self._lock = threading.Condition()
+        self._release_lock = threading.Lock()
+        self._closing = False
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -709,13 +716,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             instance_id: The worker instance ID.
 
         Returns:
-            The entry, or None if the instance is not (or no longer) tracked.
+            The entry, or None if absent, draining, or the module is closing.
+
+        Notes:
+            This is a snapshot, not a lifetime reservation. STORE/RETRIEVE
+            hold their own reservation until the handler returns.
         """
         now = time.monotonic()
         with self._lock:
             entry = self._cache_contexts.get(instance_id)
-            if entry is not None:
-                entry.last_seen = now
+            if self._closing or entry is None or entry.draining:
+                return None
+            entry.last_seen = now
             return entry
 
     def _release_failed_retrieve_locks(
@@ -766,6 +778,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
 
+        Includes draining entries for cleanup diagnostics; does not reserve
+        their lifetime or authorize further device access.
+
         Returns:
             A new dict mapping instance ID to entry; does not refresh
             last-seen times.
@@ -800,6 +815,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         A ping-proven instance is judged against ``reap_timeout_s``; one
         that has never pinged against the larger ``registration_grace_s``.
+        Stops transfer admission and waits for admitted handlers before cleanup.
+        Retries draining entries even if a later heartbeat refreshed liveness.
 
         Args:
             reap_timeout_s: Silence budget for ping-proven instances.
@@ -809,60 +826,20 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             The instance IDs reaped this scan.
         """
         now = time.monotonic()
-        reaped: list[tuple[int, ContextEntry]] = []
-        with self._lock:
-            stale_ids = [
-                iid
-                for iid, entry in self._cache_contexts.items()
-                if now - entry.last_seen
+        reaped_ids = self._release_entries(
+            lambda _iid, entry: (
+                entry.draining
+                or now - entry.last_seen
                 > (
                     reap_timeout_s
                     if entry.has_liveness_signal
                     else registration_grace_s
                 )
-            ]
-            for iid in stale_ids:
-                reaped.append((iid, self._cache_contexts.pop(iid)))
-        reaped_ids: list[int] = []
-        entries: list[ContextEntry] = []
-        for iid, e in reaped:
-            logger.warning(
-                "Reaped GPU instance %d: silent for %.1fs (pinged=%s)",
-                iid,
-                now - e.last_seen,
-                e.has_liveness_signal,
             )
-            reaped_ids.append(iid)
-            entries.append(e)
-        if reaped:
-            del e  # a bound name would pin the final entry (see _release_entries)
-            reaped.clear()
-            self._release_entries(entries)
+        )
+        for instance_id in reaped_ids:
+            logger.warning("Reaped GPU instance %d", instance_id)
         return reaped_ids
-
-    def _release_entries(self, entries: list[ContextEntry]) -> None:
-        """Release a batch of entries and reclaim their device memory.
-
-        Args:
-            entries: The only remaining references to the released entries.
-                The list is cleared before memory is reclaimed.
-        """
-        if not entries:
-            return
-        for entry in entries:
-            entry.cache_context.close()
-            self._ctx.layout_desc_registry.unregister(
-                entry.model_name, entry.world_size
-            )
-        del entry
-        entries.clear()
-        # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
-        # tensor reference is gone (LMCache#4014), hence the clear() above.
-        torch_dev.empty_cache()
-        ipc_collect = getattr(torch_dev, "ipc_collect", None)
-        if ipc_collect is not None:
-            # Backends without IPC collection omit this optional operation.
-            ipc_collect()
 
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
@@ -919,15 +896,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         }
 
     def close(self) -> None:
-        """Release GPU resources owned by this module."""
-        # Stop the drain thread before storage_manager.close() so any
-        # in-flight completions reach a live storage manager.
-        self._device_host_func_dispatcher.stop()
+        """Stop admission and wait for handlers before releasing GPU contexts.
 
+        Device cleanup errors propagate, leaving unreleased contexts draining
+        for a later retry. The completion dispatcher stays live until every
+        context has closed.
+        """
         with self._lock:
-            entries = list(self._cache_contexts.values())
-            self._cache_contexts.clear()
-        self._release_entries(entries)
+            self._closing = True
+        self._release_entries(lambda _iid, _entry: True)
+        self._device_host_func_dispatcher.stop()
 
     def register_kv_cache(
         self,
@@ -953,15 +931,160 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+
+        Raises:
+            RuntimeError: The module is closing or the instance is draining.
         """
+        with self._lock:
+            if self._closing:
+                raise RuntimeError("KV cache module is closing")
+            existing = self._cache_contexts.get(instance_id)
+            if existing is not None and existing.draining:
+                raise RuntimeError("KV cache context is draining")
+        with self._release_lock:
+            self._register_kv_cache(
+                instance_id,
+                kv_caches,
+                model_name,
+                world_size,
+                engine_type,
+                layout_hints,
+                engine_group_infos,
+            )
+
+    def unregister_kv_cache(self, instance_id: int) -> None:
+        """Stop transfer admission and release one instance after its handlers.
+
+        Args:
+            instance_id: The GPU instance ID (such as PID).
+
+        Notes:
+            Missing instances are a no-op. Device cleanup errors propagate;
+            a failed context remains draining until cleanup is retried.
+        """
+        released = self._release_entries(lambda iid, _entry: iid == instance_id)
+        if released:
+            logger.info("Unregistered KV cache for GPU ID %d", instance_id)
+        else:
+            logger.warning(
+                "No registered GPU context found for instance ID %d", instance_id
+            )
+
+    @_lmcache_nvtx_annotate
+    def store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        """Store the GPU KV cache blocks to CPU.
+
+        Args:
+            key: The IPC key for the KV cache blocks.
+                Must have worker_id != None (worker store operation).
+            instance_id: The GPU instance ID (such as PID).
+            gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
+                group index.
+            event_ipc_handle: The IPC handle of the event to wait on.
+
+        Returns:
+            A tuple where the first element is the IPC handle of the event
+            that signals the completion of the store operation, and the second
+            element indicates whether the store operation completed without a
+            fatal error (not whether every requested chunk was stored; see
+            Notes). The event handle is empty when no device work was submitted.
+            Unregistered or draining instances return ``(b"", False)``.
+
+        Raises:
+            RuntimeError: If the backend does not support IPC event handles.
+
+        Notes:
+            All-or-nothing. If ``gpu_block_ids`` do not fully cover every chunk
+            ``key`` resolves to for every LMCache group (e.g. a caller/protocol
+            bug), or a copy fails, the whole store is skipped and nothing is
+            committed (logged at WARNING); a subsequent retrieve simply misses
+            and the engine recomputes. The boolean result reports whether the
+            store completed without such a failure.
+        """
+        with self._context_operation(instance_id) as entry:
+            try:
+                return self._store(
+                    key, instance_id, gpu_block_ids, event_ipc_handle, entry
+                )
+            finally:
+                # Drop the handler's reference before waking teardown.
+                del entry
+
+    @_lmcache_nvtx_annotate
+    def retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        skip_first_n_tokens: int = 0,
+    ) -> tuple[bytes, bool]:
+        """Retrieve the CPU KV cache and put into GPU blocks.
+
+        Args:
+            key: The IPC key for the KV cache blocks.
+                Must have worker_id != None (worker retrieve operation).
+            instance_id: The GPU instance ID (such as PID).
+            gpu_block_ids: GPU block IDs to retrieve into, indexed by LMCache
+                KV group index.
+            event_ipc_handle: The IPC handle of the event to wait on.
+            skip_first_n_tokens: Number of tokens to skip writing at
+                the start of the retrieve range. This avoids overwriting
+                APC-shared GPU blocks that may be read concurrently by other
+                requests.
+
+        Returns:
+            A tuple where the first element is the IPC handle of the event
+            that signals the completion of the retrieve operation, and the
+            second element indicates whether the key was successfully retrieved.
+            The event handle is empty when no device work was submitted.
+            Unregistered or draining instances return ``(b"", False)``.
+
+        Raises:
+            RuntimeError: If the backend does not support IPC event handles.
+        """
+        with self._context_operation(instance_id) as entry:
+            try:
+                return self._retrieve(
+                    key,
+                    instance_id,
+                    gpu_block_ids,
+                    event_ipc_handle,
+                    skip_first_n_tokens,
+                    entry,
+                )
+            finally:
+                del entry
+
+    def _register_kv_cache(
+        self,
+        instance_id: int,
+        kv_caches: KVCache,
+        model_name: str,
+        world_size: int,
+        engine_type: EngineType,
+        layout_hints: LayoutHints,
+        engine_group_infos: list[EngineGroupInfo],
+    ) -> None:
+        """Construct and publish a context while teardown is serialized."""
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
         # time so a stale entry is not reaped right after recovery. REGISTER
         # is SYNC-serialized on the MQ main loop, so it is the sole inserter.
         with self._lock:
+            if self._closing:
+                raise RuntimeError("KV cache module is closing")
             existing = self._cache_contexts.get(instance_id)
             if existing is not None:
+                if existing.draining:
+                    raise RuntimeError("KV cache context is draining")
                 existing.last_seen = now
                 logger.info(
                     "Instance %d already registered; refreshing liveness",
@@ -1019,68 +1142,76 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
-    def unregister_kv_cache(self, instance_id: int) -> None:
-        """Unregister the KV cache tensors for a given GPU instance ID.
-
-        Args:
-            instance_id: The GPU instance ID (such as PID).
-        """
+    @contextmanager
+    def _context_operation(self, instance_id: int) -> Iterator[ContextEntry | None]:
+        """Keep an admitted context alive until the handler exits."""
         with self._lock:
-            popped = [
-                e
-                for e in (self._cache_contexts.pop(instance_id, None),)
-                if e is not None
-            ]
-        if not popped:
-            logger.warning(
-                "No registered GPU context found for instance ID %d", instance_id
-            )
-            return
+            entry = self.get_and_touch_context_entry(instance_id)
+            if entry is not None:
+                entry.active_operations += 1
+        try:
+            yield entry
+        finally:
+            with self._lock:
+                if entry is not None:
+                    entry.active_operations -= 1
+                    del entry
+                    self._lock.notify_all()
 
-        # No scalar binding: `popped` must stay the only reference so
-        # _release_entries' reclaim actually unmaps the IPC segments.
-        self._release_entries(popped)
-        logger.info("Unregistered KV cache for GPU ID %d", instance_id)
+    def _release_entries(
+        self, selected: Callable[[int, ContextEntry], bool]
+    ) -> list[int]:
+        """Drain selected contexts, retaining failed cleanup for retry."""
+        # Serialize cleanup and registration across the selected batch.
+        with self._release_lock:
+            with self._lock:
+                entries = {
+                    iid: entry
+                    for iid, entry in self._cache_contexts.items()
+                    if selected(iid, entry)
+                }
+                for entry in entries.values():
+                    entry.draining = True
+                self._lock.wait_for(
+                    lambda: all(
+                        entry.active_operations == 0 for entry in entries.values()
+                    )
+                )
+            released: list[int] = []
+            try:
+                for iid, entry in entries.items():
+                    if not entry.context_closed:
+                        entry.cache_context.close()
+                        entry.context_closed = True
+                    self._ctx.layout_desc_registry.unregister(
+                        entry.model_name, entry.world_size
+                    )
+                    with self._lock:
+                        del self._cache_contexts[iid]
+                    released.append(iid)
+            finally:
+                # Drop entry references before collecting CUDA IPC mappings.
+                if entries:
+                    del entry
+                entries.clear()
+                if released:
+                    torch_dev.empty_cache()
+                    ipc_collect = getattr(torch_dev, "ipc_collect", None)
+                    if ipc_collect is not None:
+                        ipc_collect()
+            return released
 
-    @_lmcache_nvtx_annotate
-    def store(
+    def _store(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
+        entry: ContextEntry | None,
     ) -> tuple[bytes, bool]:
-        """Store the GPU KV cache blocks to CPU.
-
-        Args:
-            key: The IPC key for the KV cache blocks.
-                Must have worker_id != None (worker store operation).
-            instance_id: The GPU instance ID (such as PID).
-            gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
-                group index.
-            event_ipc_handle: The IPC handle of the event to wait on.
-
-        Returns:
-            A tuple where the first element is the IPC handle of the event
-            that signals the completion of the store operation, and the second
-            element indicates whether the store operation completed without a
-            fatal error (not whether every requested chunk was stored; see
-            Notes). The event handle is empty when no device work was submitted.
-
-        Raises:
-            RuntimeError: If the backend does not support IPC event handles.
-
-        Notes:
-            All-or-nothing. If ``gpu_block_ids`` do not fully cover every chunk
-            ``key`` resolves to for every LMCache group (e.g. a caller/protocol
-            bug), or a copy fails, the whole store is skipped and nothing is
-            committed (logged at WARNING); a subsequent retrieve simply misses
-            and the engine recomputes. The boolean result reports whether the
-            store completed without such a failure.
-        """
+        """Execute STORE while its context lifetime is reserved."""
         st = time.perf_counter()
 
-        entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
             # The worker can reconnect to a replacement server before its next
             # registration probe. No device work was submitted in that window,
@@ -1286,41 +1417,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             store_succeeded,
         )
 
-    @_lmcache_nvtx_annotate
-    def retrieve(
+    def _retrieve(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
-        skip_first_n_tokens: int = 0,
+        skip_first_n_tokens: int,
+        entry: ContextEntry | None,
     ) -> tuple[bytes, bool]:
-        """Retrieve the CPU KV cache and put into GPU blocks.
-
-        Args:
-            key: The IPC key for the KV cache blocks.
-                Must have worker_id != None (worker retrieve operation).
-            instance_id: The GPU instance ID (such as PID).
-            gpu_block_ids: GPU block IDs to retrieve into, indexed by LMCache
-                KV group index.
-            event_ipc_handle: The IPC handle of the event to wait on.
-            skip_first_n_tokens: Number of tokens to skip writing at
-                the start of the retrieve range. This avoids overwriting
-                APC-shared GPU blocks that may be read concurrently by other
-                requests.
-
-        Returns:
-            A tuple where the first element is the IPC handle of the event
-            that signals the completion of the retrieve operation, and the
-            second element indicates whether the key was successfully retrieved.
-            The event handle is empty when no device work was submitted.
-
-        Raises:
-            RuntimeError: If the backend does not support IPC event handles.
-        """
+        """Execute RETRIEVE while its context lifetime is reserved."""
         st = time.perf_counter()
 
-        entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
             # See store(): there is no completion event because no device work
             # was submitted. The False result lets the caller recover or
