@@ -13,9 +13,9 @@ Three layers under test:
 1. ``_cb_group_rope_geometry`` — the declared-window branch and its guards
    (CPU, no CUDA).
 2. ``rotary_embedding_k_fused_strided`` on a trailing-window slice — the
-   Python batched-rope path (`_apply_cb_rope_batched`): the slice advances
-   ``data_ptr`` to the window, ``head_stride`` hops full latent rows, and the
-   content dims must come back bit-identical.
+   kernel-level window contract: the slice advances ``data_ptr`` to the
+   window, ``head_stride`` hops full latent rows, and the content dims must
+   come back bit-identical.
 3. ``execute_cb_retrieve_plan_flat`` with ``CBGroupSpec.rope_base_offset`` —
    the native-plan path: same window expressed as a byte offset off each tmp
    slot's base pointer (staging + rope only; scatter is a separate concern).

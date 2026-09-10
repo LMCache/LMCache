@@ -210,8 +210,8 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
     assert len(mem) == 3 and all(o is not None for o in mem)
 
 
-def test_retrieve_never_reads_standalone_groups(monkeypatch):
-    """The std retrieve skips connector-private (standalone) object groups.
+def test_retrieve_never_reads_aux_groups(monkeypatch):
+    """The std retrieve skips connector-private aux object groups.
 
     Their consumer is the CB retrieve, the op's block-id entry for them is a
     discard placeholder, and the lookup does not lock their keys -- reading
@@ -222,7 +222,7 @@ def test_retrieve_never_reads_standalone_groups(monkeypatch):
         monkeypatch,
         num_chunks,
         num_chunks_in_sw=[1, -1, -1],
-        group_kinds=("recurrent", "attention", "standalone"),
+        group_kinds=("recurrent", "attention", "aux"),
     )
     gpu_block_ids = [[0, 0, 7], [1, 2, 3], [9, 9, 9]]
 
@@ -235,6 +235,6 @@ def test_retrieve_never_reads_standalone_groups(monkeypatch):
     assert ok is True
 
     # Recurrent group reads its one-block window; attention reads everything;
-    # the standalone group is read by NOBODY and transferred by nobody.
+    # the aux group is read by NOBODY and transferred by nobody.
     assert read_calls == [["g0c2"], [f"g1c{c}" for c in range(3)]]
     assert [g for g, _ in transfer_calls] == [0, 1]

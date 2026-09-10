@@ -30,6 +30,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.transport.zmq_impl.server import get_zmq_handler_specs
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
@@ -231,9 +232,11 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
 
 def test_transfer_modules_delegate_main_unregister_to_management() -> None:
     """Primary transfer modules must not register competing unregister handlers."""
-    gpu_handlers = {spec.request_type for spec in _bare_gpu_module().get_handlers()}
+    gpu_handlers = {
+        spec.request_type for spec in get_zmq_handler_specs(_bare_gpu_module())
+    }
     non_gpu_handlers = {
-        spec.request_type for spec in _bare_non_gpu_module().get_handlers()
+        spec.request_type for spec in get_zmq_handler_specs(_bare_non_gpu_module())
     }
 
     assert RequestType.UNREGISTER_KV_CACHE not in gpu_handlers
@@ -350,7 +353,7 @@ def test_management_owns_unified_unregister_handlers() -> None:
     """Both transfer modes route their main unregister through management."""
     mgmt = ManagementModule(MagicMock(), liveness_targets=[_StateOwner(7)])
 
-    handlers = {spec.request_type: spec.handler for spec in mgmt.get_handlers()}
+    handlers = {spec.request_type: spec.handler for spec in get_zmq_handler_specs(mgmt)}
 
     assert handlers[RequestType.UNREGISTER_KV_CACHE] == mgmt.unregister_instance
     assert (
