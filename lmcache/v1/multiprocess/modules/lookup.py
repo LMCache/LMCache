@@ -22,11 +22,6 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    ThreadPoolType,
-)
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -129,41 +124,6 @@ class LookupModule:
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
-
-    def get_handlers(self) -> list[HandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            List of handler specs for lookup-related request types.
-        """
-        return [
-            HandlerSpec(RequestType.LOOKUP, self.lookup, ThreadPoolType.NORMAL),
-            HandlerSpec(
-                RequestType.QUERY_PREFETCH_STATUS,
-                self.query_prefetch_status,
-                ThreadPoolType.NORMAL,
-            ),
-            HandlerSpec(
-                RequestType.WAIT_PREFETCH_STATUS,
-                self.wait_prefetch_status,
-                ThreadPoolType.NORMAL,
-            ),
-            HandlerSpec(
-                RequestType.QUERY_PREFETCH_LOOKUP_HITS,
-                self.query_prefetch_lookup_hits,
-                ThreadPoolType.NORMAL,
-            ),
-            HandlerSpec(
-                RequestType.FREE_LOOKUP_LOCKS,
-                self.free_lookup_locks,
-                ThreadPoolType.NORMAL,
-            ),
-            HandlerSpec(
-                RequestType.END_SESSION,
-                self.end_session,
-                ThreadPoolType.NORMAL,
-            ),
-        ]
 
     def report_status(self) -> dict[str, int]:
         """Return module-specific status information.
