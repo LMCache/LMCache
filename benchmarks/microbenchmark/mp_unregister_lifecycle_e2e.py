@@ -22,7 +22,10 @@ from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessageQueueServer
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.server import add_handler_helper
+from lmcache.v1.multiprocess.transport.zmq_impl.server import (
+    add_handler_helper,
+    get_zmq_handler_specs,
+)
 
 
 @dataclass
@@ -149,7 +152,7 @@ def run_e2e(instances: int, workers: int, duplicates: int) -> dict[str, object]:
         RequestType.UNREGISTER_KV_CACHE,
         RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
     }
-    for spec in management.get_handlers():
+    for spec in get_zmq_handler_specs(management):
         if spec.request_type in unregister_types:
             add_handler_helper(server, spec.request_type, spec.handler)
 
