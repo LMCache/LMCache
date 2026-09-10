@@ -15,6 +15,7 @@ from __future__ import annotations
 from functools import lru_cache
 from types import ModuleType
 from typing import TypeAlias
+import ctypes
 
 # Third Party
 import torch
@@ -53,6 +54,66 @@ class _CudaBindings:
 
 #: Shared lazy accessor for modules of the cuda platform package.
 _cuda = _CudaBindings()
+
+
+def _cuda_ipc_handle_size() -> int:
+    """Return the byte size of a CUDA IPC memory handle."""
+    return int(getattr(_cuda.runtime, "CUDA_IPC_HANDLE_SIZE", 64))
+
+
+def cuda_ipc_handle_to_bytes(handle: object) -> bytes:
+    """Copy an opaque CUDA IPC memory handle into a byte string.
+
+    cuda-bindings 13.4 no longer exposes the underlying ``reserved`` field on
+    ``cudaIpcMemHandle_t``. ``getPtr`` is available on both the old structured
+    representation and the new opaque representation.
+
+    Args:
+        handle: A cuda-python ``cudaIpcMemHandle_t`` instance.
+
+    Returns:
+        The fixed-size serialized CUDA IPC memory handle.
+
+    Raises:
+        TypeError: If ``handle`` does not expose cuda-python's ``getPtr`` API.
+    """
+    get_ptr = getattr(handle, "getPtr", None)
+    if not callable(get_ptr):
+        raise TypeError("CUDA IPC memory handle does not expose getPtr()")
+    return ctypes.string_at(int(get_ptr()), _cuda_ipc_handle_size())
+
+
+def cuda_ipc_handle_from_bytes(handle_bytes: bytes) -> object:
+    """Reconstruct an opaque CUDA IPC memory handle from bytes.
+
+    The bytes are copied through cuda-python's stable ``getPtr`` interface so
+    this works with both structured and opaque ``cudaIpcMemHandle_t`` objects.
+
+    Args:
+        handle_bytes: Bytes previously returned by
+            :func:`cuda_ipc_handle_to_bytes`.
+
+    Returns:
+        A cuda-python ``cudaIpcMemHandle_t`` instance owning a copy of the
+        supplied bytes.
+
+    Raises:
+        ValueError: If ``handle_bytes`` has the wrong size.
+        TypeError: If the cuda-python handle does not expose ``getPtr``.
+    """
+    handle_size = _cuda_ipc_handle_size()
+    if len(handle_bytes) != handle_size:
+        raise ValueError(
+            "Invalid CUDA IPC memory handle size: "
+            f"expected {handle_size} bytes, got {len(handle_bytes)}"
+        )
+
+    handle = _cuda.runtime.cudaIpcMemHandle_t()
+    get_ptr = getattr(handle, "getPtr", None)
+    if not callable(get_ptr):
+        raise TypeError("CUDA IPC memory handle does not expose getPtr()")
+    ctypes.memmove(int(get_ptr()), handle_bytes, handle_size)
+    return handle
 
 
 def _CHECK_CUDA(result: tuple[object, ...], what: str) -> None:
