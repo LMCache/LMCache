@@ -78,13 +78,21 @@ _SUBPAGEABLE_ATTENTION_KINDS = frozenset(
 def _declares_slot_compression(spec: KVCacheSpec) -> bool:
     """Return whether a spec declares slot compression (must not be edited).
 
-    Covers ``MLAAttentionSpec.compress_ratio > 1`` (DeepSeek-V4 slot packing)
-    and ``TQFullAttentionSpec.tq_slot_size > 0`` (TurboQuant slots); such
-    groups belong to the compression path in ``lmcache.v1.kv_layer_groups``.
+    Covers ``tokens_per_state > 1`` (DeepSeek-V4 slot packing; ``compress_ratio``
+    on older vLLM) and ``TQFullAttentionSpec.tq_slot_size > 0`` (TurboQuant
+    slots); such groups belong to the compression path in
+    ``lmcache.v1.kv_layer_groups``.
     """
     return (
-        getattr(spec, "compress_ratio", 1) > 1 or getattr(spec, "tq_slot_size", 0) > 0
+        getattr(spec, "tokens_per_state", 1) > 1
+        or getattr(spec, "compress_ratio", 1) > 1
+        or getattr(spec, "tq_slot_size", 0) > 0
     )
+
+
+def _num_states(spec: KVCacheSpec) -> int:
+    """Return the stored states per logical block (``block_size`` on old vLLM)."""
+    return getattr(spec, "num_states", spec.block_size)
 
 
 def _leaf_specs(spec: KVCacheSpec) -> list[KVCacheSpec]:
@@ -459,13 +467,15 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
 
 
 class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
-    """Re-view a kernel-paged attention tensor as logical-block pages.
+    """Re-view a kernel-paged MLA cache as logical-block pages.
 
-    For vLLM 0.26 or later
-
-    Example on Kimi K3 , where 768 is the block size
-    - Input: [N * 12, 64, 576]
-    - Output: [N, 768, 576] (where 768 = 12 * 64)
+    For vLLM 0.26 or later. Covers the rank-3 ``[NB, states, C]`` cache
+    (Kimi K3: ``[N * 12, 64, 576]`` -> ``[N, 768, 576]``) and the unified
+    rank-4 ``[NB, 1, states, C]`` cache (GLM-5.3-Flash: sparse MLA at 64 rows
+    and the kpool indexer at 32 rows under a 1152-token block). The target is
+    ``spec.num_states`` (``block_size / tokens_per_state``), so declared slot
+    compression is preserved and the server still derives it from
+    ``tokens_per_block / slots_per_block``.
     """
 
     name = "subpaged-mla-attention-view"
@@ -473,10 +483,9 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
     def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
         return (
             get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MLA_ATTENTION
-            and not _declares_slot_compression(spec)
             and isinstance(kv_cache, torch.Tensor)
-            and kv_cache.ndim == 3
-            and kv_cache.shape[1] != spec.block_size
+            and kv_cache.ndim in (3, 4)
+            and kv_cache.shape[-2] != _num_states(spec)
         )
 
     def apply(
@@ -487,32 +496,36 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
     ) -> torch.Tensor:
         """Re-view ``kv_cache`` at logical-block granularity.
 
-        The tensor is kernel-paged as ``(num_kernel_pages, 2,
-        kernel_block_size, num_kv_heads, head_size)``; the result is
-        ``(num_logical_blocks, 2, spec.block_size, num_heads, head_size)``
-        over the same storage.
+        The tensor is kernel-paged as ``(num_kernel_pages, [1,] kernel_rows,
+        content)``; the result is ``(num_blocks, [1,] spec.num_states,
+        content)`` over the same storage.
 
         Raises:
-            ValueError: If the layout is not the expected kernel-paged shape,
-                the sizes do not divide evenly, or the kernel pages of one
-                logical block do not tile its page bytes exactly (which would
-                indicate an undeclared packed layout that must not be edited).
+            ValueError: If the cache has more than one head slot, the sizes
+                do not divide evenly, the tensor is not contiguous, or the
+                kernel pages of one logical block do not tile its page bytes
+                exactly (an undeclared packed layout that must not be edited).
         """
         assert isinstance(kv_cache, torch.Tensor)
-        logical_block_size = spec.block_size
-        kernel_block_size = kv_cache.shape[1]
-        if logical_block_size % kernel_block_size != 0:
+        if kv_cache.ndim == 4 and kv_cache.shape[1] != 1:
             raise ValueError(
-                f"logical block size {logical_block_size} is not a multiple of "
-                f"kernel block size {kernel_block_size}"
+                f"MLA cache must have one head slot to re-view, got "
+                f"{tuple(kv_cache.shape)}"
             )
-        ratio = logical_block_size // kernel_block_size
+        num_states = _num_states(spec)
+        kernel_rows = kv_cache.shape[-2]
+        if num_states % kernel_rows != 0:
+            raise ValueError(
+                f"logical states {num_states} is not a multiple of kernel "
+                f"rows {kernel_rows}"
+            )
+        ratio = num_states // kernel_rows
 
         num_kernel_pages = kv_cache.shape[0]
         if num_kernel_pages % ratio != 0:
             raise ValueError(
                 f"kernel page count {num_kernel_pages} is not a multiple of "
-                f"the logical/kernel block ratio {ratio}"
+                f"the logical/kernel page ratio {ratio}"
             )
         kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
         if kernel_page_bytes * ratio != spec.page_size_bytes:
@@ -522,11 +535,12 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
             )
         if not kv_cache.is_contiguous():
             raise ValueError(
-                "kernel-paged attention KV tensor must be contiguous to "
-                "re-view as logical pages"
+                "kernel-paged MLA cache must be contiguous to re-view as logical pages"
             )
 
-        return kv_cache.view(num_kernel_pages // ratio, logical_block_size, -1)
+        return kv_cache.view(
+            num_kernel_pages // ratio, *kv_cache.shape[1:-2], num_states, -1
+        )
 
 
 # Rule registry, in match priority order.
@@ -572,8 +586,9 @@ def apply_kv_cache_group_edits(
     edited = dict(kv_caches)
     counts: Counter[str] = Counter()
     for group in kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
+        per_layer_specs = getattr(group.kv_cache_spec, "kv_cache_specs", None)
         for name in group.layer_names:
+            spec = per_layer_specs[name] if per_layer_specs else group.kv_cache_spec
             for edit in _EDITS:
                 if edit.matches(spec, kv_caches[name]):
                     edited[name] = edit.apply(spec, kv_caches[name], layout_hints)
