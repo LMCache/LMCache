@@ -33,7 +33,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
     get_message_codec_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    client_method_name,
     get_service_bindings,
     iter_methods,
 )
@@ -210,16 +209,12 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     registry = get_method_codec_registry()
     generated_methods = {method.full_name for _, method in iter_methods()}
     assert set(registry.by_full_name) == generated_methods
-    for _binding, method in iter_methods():
-        name = client_method_name(method.name)
-        codec = registry.by_full_name[method.full_name]
-        assert registry.by_client_name[name] is codec
 
-    lookup_codec = registry.by_client_name["lookup"]
+    lookup_codec = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
     assert lookup_codec.payload_types == (IPCCacheServerKey, int)
     assert lookup_codec.response_type is type(None)
 
-    store_codec = registry.by_client_name["store"]
+    store_codec = registry.by_full_name["lmcache.mp.LMCacheDrivenService.Store"]
     assert store_codec.payload_types == (
         IPCCacheServerKey,
         int,
@@ -228,8 +223,8 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     )
     assert store_codec.response_type == tuple[bytes, bool]
 
-    registration_codec = registry.by_client_name[
-        "register_kv_cache_engine_driven_context"
+    registration_codec = registry.by_full_name[
+        "lmcache.mp.EngineDrivenService.RegisterKvCacheEngineDrivenContext"
     ]
     registration_request = registration_codec.request_encoder(
         (),
