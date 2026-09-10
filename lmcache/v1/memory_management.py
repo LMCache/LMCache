@@ -1443,7 +1443,8 @@ class AddressManager:
         Args:
             size: The requested size of the memory block. Should be greater
                 than 0.
-            batch_size: The number of memory blocks to allocate.
+            batch_size: The number of memory blocks to allocate. Must be
+                non-negative; zero returns an empty list.
 
         Returns:
             A list of tuple (address, allocated_size) where address is the starting
@@ -1452,8 +1453,12 @@ class AddressManager:
             Note: the length of the return list is the same as the batch_size.
 
         Raises:
+            ValueError: If batch_size is negative.
             RuntimeError: If no memory is available to allocate.
         """
+        if batch_size < 0:
+            raise ValueError("batch_size must be non-negative")
+
         aligned_size = self.compute_aligned_size(size)
         remaining = batch_size
         allocate_result: list[tuple[int, int]] = []
@@ -1496,21 +1501,6 @@ class AddressManager:
             raise RuntimeError(
                 f"Failed to batched allocate {batch_size} memory blocks "
                 f"of size {size} because no enough memory is available"
-            )
-        if len(allocate_result) != batch_size:
-            # The length of allocate_result is not equal to batch_size;
-            # free list is untouched, no rollback needed
-            logger.warning(
-                "Failed to batched allocate %d memory blocks of size %d "
-                "because the length of allocate_result %d is not equal to batch_size",
-                batch_size,
-                size,
-                len(allocate_result),
-            )
-            raise RuntimeError(
-                f"Failed to batched allocate {batch_size} memory blocks "
-                f"of size {size} because the length of allocate_result "
-                f"{len(allocate_result)} is not equal to batch_size"
             )
 
         # Allocation succeeded; batch-update the free list
