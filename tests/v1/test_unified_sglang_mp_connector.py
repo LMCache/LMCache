@@ -11,9 +11,9 @@ import torch
 
 # First Party
 from lmcache.integration.sglang.unified_lmcache_mp_connector import (
-    LMCacheKVGroup,
     LMCacheLoadOperation,
     LMCacheLookupOperation,
+    SGLangKVComponentGroup,
     UnifiedLMCacheMPConnector,
 )
 from lmcache.utils import EngineType
@@ -109,16 +109,16 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
     def test_mla_only_allows_full_and_swa_attention_groups(self):
         groups = [
-            LMCacheKVGroup("full", ()),
-            LMCacheKVGroup("swa", (), sliding_window_size=4096),
+            SGLangKVComponentGroup("full", ()),
+            SGLangKVComponentGroup("swa", (), sliding_window_size=4096),
         ]
 
         self.assertTrue(self.connector._is_mla_only(True, groups))
 
     def test_mla_only_rejects_recurrent_hybrid_groups(self):
         groups = [
-            LMCacheKVGroup("full", ()),
-            LMCacheKVGroup("mamba", (), recurrent_state=True),
+            SGLangKVComponentGroup("full", ()),
+            SGLangKVComponentGroup("mamba", (), recurrent_state=True),
         ]
 
         self.assertFalse(self.connector._is_mla_only(True, groups))
@@ -243,8 +243,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
     def test_component_block_ids_expand_to_kernel_groups(self):
         self.connector._kv_groups = (
-            LMCacheKVGroup("full", (), tokens_per_block=4, slots_per_block=4),
-            LMCacheKVGroup("swa", (), tokens_per_block=4, slots_per_block=4),
+            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
+            SGLangKVComponentGroup("swa", (), tokens_per_block=4, slots_per_block=4),
         )
         self.connector._kernel_group_to_engine_group = (0, 1, 1)
         block_ids = self.connector._block_ids_for_transfer(
@@ -300,7 +300,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4
         connector._kv_groups = (
-            LMCacheKVGroup(
+            SGLangKVComponentGroup(
                 "full",
                 (
                     torch.empty(5, 4, 1, 8),
@@ -309,7 +309,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 tokens_per_block=4,
                 slots_per_block=4,
             ),
-            LMCacheKVGroup(
+            SGLangKVComponentGroup(
                 "swa",
                 (
                     torch.empty(12, 1, 8),
@@ -332,7 +332,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
     def test_group_info_specs_mark_mamba_as_recurrent_one_block_window(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector._kv_groups = (
-            LMCacheKVGroup(
+            SGLangKVComponentGroup(
                 "mamba",
                 (torch.empty(12, 1, 32),),
                 sliding_window_size=256,
@@ -352,7 +352,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
     def test_group_info_specs_keep_dsa_sidecar_in_full_address_space(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector._kv_groups = (
-            LMCacheKVGroup(
+            SGLangKVComponentGroup(
                 "full",
                 (
                     torch.empty(3, 1, 64, dtype=torch.bfloat16),
@@ -379,8 +379,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
-            LMCacheKVGroup("full", (), tokens_per_block=4, slots_per_block=4),
-            LMCacheKVGroup("swa", (), tokens_per_block=4, slots_per_block=4),
+            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
+            SGLangKVComponentGroup("swa", (), tokens_per_block=4, slots_per_block=4),
         )
         connector._kernel_group_to_engine_group = (0, 1)
         connector._store_submitted_tokens = {}
@@ -420,7 +420,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
-            LMCacheKVGroup("full", (), tokens_per_block=4, slots_per_block=4),
+            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
         )
         connector._kernel_group_to_engine_group = (0,)
         connector._store_submitted_tokens = {}
@@ -454,8 +454,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
-            LMCacheKVGroup("full", (), tokens_per_block=4, slots_per_block=4),
-            LMCacheKVGroup(
+            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
+            SGLangKVComponentGroup(
                 "swa",
                 (),
                 sliding_window_size=8,
@@ -495,8 +495,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.page_size = 4
         connector.chunk_size = 8
         connector._kv_groups = (
-            LMCacheKVGroup("full", (), tokens_per_block=4, slots_per_block=4),
-            LMCacheKVGroup(
+            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
+            SGLangKVComponentGroup(
                 "swa",
                 (),
                 sliding_window_size=8,
@@ -533,8 +533,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
-            LMCacheKVGroup("full", (), tokens_per_block=1, slots_per_block=1),
-            LMCacheKVGroup(
+            SGLangKVComponentGroup("full", (), tokens_per_block=1, slots_per_block=1),
+            SGLangKVComponentGroup(
                 "mamba",
                 (),
                 sliding_window_size=4,
@@ -576,8 +576,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.kv_worker_id = 0
         connector.instance_id = 1
         connector._kv_groups = (
-            LMCacheKVGroup("full", (), tokens_per_block=1, slots_per_block=1),
-            LMCacheKVGroup(
+            SGLangKVComponentGroup("full", (), tokens_per_block=1, slots_per_block=1),
+            SGLangKVComponentGroup(
                 "mamba",
                 (),
                 sliding_window_size=4,
