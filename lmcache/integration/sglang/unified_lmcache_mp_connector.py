@@ -65,7 +65,7 @@ class LMCacheLookupOperation:
 
 
 @dataclass(frozen=True)
-class LMCacheKVGroup:
+class SGLangKVComponentGroup:
     """One SGLang KV address space exposed as one LMCache engine group.
 
     ``kv_tensors`` are registered as independent, single-plane byte-equivalent
@@ -134,7 +134,7 @@ class UnifiedLMCacheMPConnector:
         pp_rank: int = 0,
         pp_group: Optional[dist.ProcessGroup] = None,
         page_size: int,
-        kv_groups: list[LMCacheKVGroup],
+        kv_groups: list[SGLangKVComponentGroup],
         mla_enabled: bool = False,
     ) -> None:
         try:
@@ -165,7 +165,7 @@ class UnifiedLMCacheMPConnector:
                 "LMCache MP currently requires contiguous SGLang NHD/MLA tensors"
             )
 
-        resolved_groups: list[LMCacheKVGroup] = []
+        resolved_groups: list[SGLangKVComponentGroup] = []
         for group in kv_groups:
             tokens_per_block = group.tokens_per_block or page_size
             slots_per_block = group.slots_per_block or page_size
@@ -199,7 +199,7 @@ class UnifiedLMCacheMPConnector:
                         f"tensor_rows_per_block={rows_per_block}"
                     )
             resolved_groups.append(
-                LMCacheKVGroup(
+                SGLangKVComponentGroup(
                     name=group.name,
                     kv_tensors=group.kv_tensors,
                     sliding_window_size=group.sliding_window_size,
@@ -216,7 +216,7 @@ class UnifiedLMCacheMPConnector:
         # Preserve token-native attention as [NB, BS, NH, HS] and token-native
         # MLA as [NB, BS, HS]. Page-native sidecars and recurrent state use an
         # explicit single-plane opaque view [NB, 1, 1, elements].
-        wire_groups: list[LMCacheKVGroup] = []
+        wire_groups: list[SGLangKVComponentGroup] = []
         for group in resolved_groups:
             wire_tensors = tuple(
                 self._to_wire_block_tensor(
@@ -246,7 +246,7 @@ class UnifiedLMCacheMPConnector:
                     f"block counts: {sorted(wire_block_counts)}"
                 )
             wire_groups.append(
-                LMCacheKVGroup(
+                SGLangKVComponentGroup(
                     name=group.name,
                     kv_tensors=wire_tensors,
                     sliding_window_size=group.sliding_window_size,
@@ -390,7 +390,7 @@ class UnifiedLMCacheMPConnector:
     @staticmethod
     def _is_mla_only(
         mla_enabled: bool,
-        kv_groups: list[LMCacheKVGroup],
+        kv_groups: list[SGLangKVComponentGroup],
     ) -> bool:
         """Match vLLM's MLA-only optimization eligibility.
 
@@ -969,7 +969,7 @@ class UnifiedLMCacheMPConnector:
         return success
 
     def _store_group_blocks_are_valid(
-        self, group: LMCacheKVGroup, blocks: list[int]
+        self, group: SGLangKVComponentGroup, blocks: list[int]
     ) -> bool:
         """Validate null blocks after applying LMCache's per-chunk SWA cut."""
         if group.recurrent_state:
