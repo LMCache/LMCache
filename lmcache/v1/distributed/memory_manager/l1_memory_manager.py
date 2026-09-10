@@ -3,6 +3,11 @@
 
 # Standard
 from multiprocessing import shared_memory
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import torch
+
 
 # First Party
 from lmcache.logging import init_logger
@@ -79,11 +84,13 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             _unlink_stale_shm(shm_name)
             return MixedMemoryAllocator(
                 config.size_in_bytes,
+                use_hugepages=config.use_hugepages,
                 align_bytes=config.align_bytes,
                 shm_name=shm_name,
             )
         return MixedMemoryAllocator(
             config.size_in_bytes,
+            use_hugepages=config.use_hugepages,
             align_bytes=config.align_bytes,
         )
 
@@ -215,6 +222,21 @@ class L1MemoryManager:
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
         )
+
+    def get_spdk_buffer(self) -> Optional["torch.Tensor"]:
+        """Return the underlying CPU buffer for SPDK external memory registration.
+
+        This method exposes the main CPU memory buffer so that ``RawBlockCore``
+        can register it with SPDK for zero-copy DMA operations in MP mode.
+
+        Returns:
+            The torch.Tensor backing the L1 buffer if the allocator exposes
+            ``get_spdk_buffer()``, otherwise ``None``.
+        """
+        get_spdk_buffer = getattr(self._allocator, "get_spdk_buffer", None)
+        if callable(get_spdk_buffer):
+            return get_spdk_buffer()
+        return None
 
     def close(self) -> None:
         """

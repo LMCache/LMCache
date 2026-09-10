@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar,
 import asyncio
 import functools
 import hashlib
+import os
 import re
 import threading
 import traceback
@@ -35,7 +36,10 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 
-SPDK_DEFAULT_MEM_SIZE_MB = 4096
+_SPDK_MEM_SIZE_MB_ENV = os.environ.get("LMCACHE_SPDK_MEM_SIZE_MB")
+SPDK_DEFAULT_MEM_SIZE_MB = (
+    int(_SPDK_MEM_SIZE_MB_ENV) if _SPDK_MEM_SIZE_MB_ENV is not None else 4096
+)
 HUGEPAGE_SIZE = 2 * 1024 * 1024
 HUGEPAGE_SIZE_MB = HUGEPAGE_SIZE // (1024 * 1024)
 
