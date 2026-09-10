@@ -152,8 +152,7 @@ open:
 LMCache excludes scratch groups end to end:
 
 - `is_scratch_spec` (`kv_cache_groups.py`) detects the spec by
-  `prefix_cacheable`, and by class name for `CircularBufferSpec` on vLLM
-  builds that predate the property.
+  `prefix_cacheable`; specs without the property are token-paged.
 - `get_tokens_per_block` reports `0` for them; `0` is the scratch marker
   throughout the scheduler-side geometry.
 - Registration tags their layers `EXCLUDED_ENGINE_GROUP`, so they form no
