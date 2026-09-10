@@ -541,9 +541,9 @@ Adding a new request type
    (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``) and
    add its ``HandlerSpec`` to ``get_zmq_handler_specs()`` in the ZMQ transport
    adapter.
-4. ``build_zmq_request_server()`` registers every ``HandlerSpec`` returned for
-   the loaded modules via ``add_handler_helper()`` — no manual registration
-   step is needed.
+4. ``create_request_server()`` selects the transport. Its ZMQ implementation
+   registers every ``HandlerSpec`` returned for the loaded modules — no manual
+   registration step is needed.
 
 Key Source Files
 ----------------
