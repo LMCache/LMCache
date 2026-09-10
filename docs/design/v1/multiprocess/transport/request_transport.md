@@ -49,17 +49,30 @@ used to move KV data between an engine worker and the server.
 
 ### gRPC codecs
 
-gRPC keeps protobuf as its wire format. At startup, the transport combines each
-generated RPC descriptor with the existing transport-neutral
-`ProtocolDefinition` and compiles one request/response codec for that method.
-Both the client and server use this read-only registry, so adding an RPC requires
-one protocol definition rather than response-type checks in a central decoder.
+gRPC keeps protobuf as its wire format. During initialization, each generated
+gRPC method is mapped to a transport-neutral `RequestType`. Its method codec
+combines the protobuf descriptor, which defines the wire schema, with the
+payload and response types exposed by `ProtocolDefinition`, which define the
+corresponding Python contract. Both the client and server use the resulting
+read-only registry.
 
 Most dataclasses and containers use the structural codec. Types that need a
-non-structural representation register a small codec next to the service that
-owns the protobuf message; shared types register in the common codec module.
-Missing protocol definitions, duplicate registrations, and handler annotation
-mismatches fail while the transport is initialized.
+non-structural representation register an explicit message codec in
+`grpc_impl/codecs/`, organized by protobuf message domain; types shared across
+domains register in the common codec module. Missing protocol definitions and
+duplicate registrations fail while the method codec registry is initialized.
+
+Server-side binding and scheduling are separate from serialization. Business
+module methods use the transport-neutral `@request_handler` annotation to
+declare their `RequestType`, `HandlerType`, and client-affinity requirement.
+Both ZMQ and gRPC discover this metadata. When gRPC registers the modules, it
+also validates each handler's parameter and return annotations against the
+Python contract used to compile that method's codec.
+
+Adding an RPC therefore requires a protobuf method, a matching `RequestType`
+and `ProtocolDefinition`, and an annotated business-module handler. A custom
+message codec is needed only when the structural codec cannot represent the
+Python type directly.
 
 ## Extending the transport
 
