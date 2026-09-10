@@ -1,4 +1,4 @@
-0.28.1rc1.dev582+gd2906091b
-short_sha=d2906091b
-full_sha=d2906091bfc579cebefe3d8e8fb9077397ce9882
-archive_index_url=https://wheels.vllm.ai/d2906091bfc579cebefe3d8e8fb9077397ce9882/cu130
+0.29.0
+short_sha=
+full_sha=
+archive_index_url=
