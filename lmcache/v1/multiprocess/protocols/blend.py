@@ -15,7 +15,15 @@ REQUEST_NAMES = [
     "CB_UNREGISTER_ROPE",
     "CB_RETRIEVE_PRE_COMPUTED",
     "CB_UNIFIED_LOOKUP",
+    "CB_PROTOCOL_HANDSHAKE",
 ]
+
+BLEND_PROTOCOL_VERSION = 1
+
+
+def handshake_response(client_version: int) -> tuple[int, bool]:
+    """Answer a CB_PROTOCOL_HANDSHAKE with (server_version, client_compatible)."""
+    return (BLEND_PROTOCOL_VERSION, client_version == BLEND_PROTOCOL_VERSION)
 
 
 def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
@@ -79,5 +87,10 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             # the sparse chunks are in L1 (mirrors dense QUERY_PREFETCH_STATUS).
             response_class=CBUnifiedLookupResult | None,
             handler_type=HandlerType.BLOCKING,
+        ),
+        "CB_PROTOCOL_HANDSHAKE": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=tuple[int, bool],
+            handler_type=HandlerType.SYNC,
         ),
     }
