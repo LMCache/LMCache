@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
@@ -79,6 +80,7 @@ class _QueryLookupHitsHandler:
         self.result = result
         self.request_id: str | None = None
 
+    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
     def query_prefetch_lookup_hits(self, request_id: str) -> int | None:
         """Record the request ID and return the configured result."""
         self.request_id = request_id

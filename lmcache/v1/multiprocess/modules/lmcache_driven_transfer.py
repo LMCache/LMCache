@@ -48,6 +48,8 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -922,6 +924,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             self._cache_contexts.clear()
         self._release_entries(entries)
 
+    @request_handler(RequestType.REGISTER_KV_CACHE)
     def register_kv_cache(
         self,
         instance_id: int,
@@ -1012,6 +1015,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
+    @request_handler(RequestType.UNREGISTER_KV_CACHE)
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister the KV cache tensors for a given GPU instance ID.
 
@@ -1035,6 +1039,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         self._release_entries(popped)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
+    @request_handler(
+        RequestType.STORE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     @_lmcache_nvtx_annotate
     def store(
         self,
@@ -1283,6 +1292,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             store_succeeded,
         )
 
+    @request_handler(
+        RequestType.RETRIEVE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     @_lmcache_nvtx_annotate
     def retrieve(
         self,
