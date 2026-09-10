@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.platform.base.device_spec import DeviceSpec
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
+from lmcache.v1.platform.npu.pin_memory import NpuPinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -47,6 +49,10 @@ class NpuDeviceSpec(DeviceSpec):
         from lmcache.v1.platform.npu.device_ops import NpuDeviceOps
 
         return NpuDeviceOps
+
+    @property
+    def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
+        return NpuPinMemoryBackend
 
     def is_available(self) -> bool:
         """Check NPU availability without importing ``lmcache.__init__``.

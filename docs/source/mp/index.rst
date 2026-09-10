@@ -1,6 +1,11 @@
 Overview
 ========
 
+.. toctree::
+   :hidden:
+
+   request_transport
+
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances connect to over ZMQ.  One LMCache server per node can serve
 multiple vLLM pods, providing process isolation, shared caching, and

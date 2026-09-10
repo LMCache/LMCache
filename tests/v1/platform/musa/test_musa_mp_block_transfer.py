@@ -543,7 +543,14 @@ def test_musa_block_transfer_device_non_mla_d2h_and_h2d() -> None:
         .add(layer_idx * 1000)
         for layer_idx in range(num_layers)
     ]
-    chunk = torch.zeros(2, num_layers, chunk_tokens, hidden_dim, device=device)
+    chunk = torch.zeros(
+        2,
+        num_layers,
+        chunk_tokens,
+        hidden_dim,
+        device=device,
+        dtype=dtype,
+    )
     block_ids = torch.tensor([1, 3], device=device, dtype=torch.int64)
     shape_desc = _shape_desc(
         num_layers=num_layers,
@@ -593,7 +600,13 @@ def test_musa_block_transfer_device_mla_d2h_and_h2d() -> None:
         .add(layer_idx * 1000)
         for layer_idx in range(num_layers)
     ]
-    chunk = torch.zeros(num_layers, chunk_tokens, head_size, device=device)
+    chunk = torch.zeros(
+        num_layers,
+        chunk_tokens,
+        head_size,
+        device=device,
+        dtype=dtype,
+    )
     block_ids = torch.tensor([0, 2], device=device, dtype=torch.int64)
     shape_desc = _shape_desc(
         num_layers=num_layers,

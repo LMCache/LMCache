@@ -141,34 +141,48 @@ and using deterministic file names derived from `ObjectKey`.
 | Aspect | Static | Dynamic |
 |---|---|---|
 | File lifecycle | All opened at init, closed at shutdown | Opened per store/load, closed after each transfer |
-| File naming | Random UUID (`obj_{i}_{uuid}.bin`) | Deterministic from ObjectKey (`{model}_{rank}_{hash}.bin`) |
+| File naming | Random UUID (`obj_{i}_{uuid}.bin`) | Readable fields (`{model}_{rank}_{group}_{hash}[@{cache_salt}].bin`) |
 | Nixl registration | Single prepped dlist for all storage | Per-operation register → transfer → deregister |
 | Pool / page indices | `NixlObjPool` manages fixed slots | No pool; `NixlStoreObj.page_indices` unused (`[]`) |
 | Capacity control | Pool size (slot count) | `max_capacity_gb` (byte-based) |
 | Persist/recover | Not supported | Supported |
 | Batching | One DMA transfer per batch of keys | One DMA transfer per key (each key = separate file) |
 
+For compatibility, keys with an empty `cache_salt` retain the legacy filename
+and chunk-hash shard. Keys with a non-empty salt append `@<cache_salt>` before
+the `.bin` extension, matching the trailing-salt representation used by the S3
+and filesystem L2 adapters. Sharded layouts continue to use the chunk hash for
+the directory levels; the filename provides the salt isolation.
+
 ### Key Components
 
 #### `DynamicNixlStorageAgent`
 
-Similar to `NixlStorageAgent` but only registers L1 memory at init. Storage
-file registration is per-operation:
+Base class for dynamic NIXL storage agents. It owns the NIXL agent, L1 memory
+registration, page-index calculation, transfer lifecycle, and shutdown. The
+backend-specific subclasses operate on `ObjectKey` values rather than exposing
+storage paths to the adapter; this keeps the shared mechanics reusable by both
+file and object-storage backends.
 
-- `dynamic_store_file(mem_indices, file_path, page_size)` — create file,
+#### `FileDynamicNixlStorageAgent`
+
+The file-backed implementation registers L1 memory at initialization and
+performs file registration per operation:
+
+- `dynamic_store(mem_indices, key)` — create the key's data file,
   register with Nixl, DMA write, deregister, close fd.
-- `dynamic_load_file(mem_indices, file_path, page_size)` — open existing
-  file, register, DMA read, deregister, close fd.
-- `dynamic_delete_file(file_path)` — `os.unlink()`.
+- `dynamic_load(mem_indices, key)` — open the key's existing data file,
+  register, DMA read, deregister, close fd.
+- `dynamic_delete(key)` — delete the key's data file with `os.unlink()`.
 
 #### `DynamicNixlStoreL2Adapter`
 
 Same `L2AdapterInterface` contract as the static adapter. Differences:
 
-- **Store:** Iterates per key, calling `dynamic_store_file` for each.
+- **Store:** Iterates per key, calling `dynamic_store` for each.
   Checks `_total_bytes + obj_size > _max_capacity_bytes` before each write;
   stops the batch if capacity is exceeded.
-- **Delete:** Removes the file from disk via `dynamic_delete_file` in
+- **Delete:** Removes the file from disk via `dynamic_delete` in
   addition to removing the key from `_memory_objects`.
 - **Capacity:** Tracks `_total_bytes` (incremented on store and on
   secondary lookup, decremented on delete). `get_usage()` returns
@@ -244,6 +258,12 @@ In `close()`, after the event loop has stopped:
 
 No metadata JSON is written — the deterministic `ObjectKey → filename`
 mapping is sufficient to rediscover each file on restart.
+
+Files created by older releases for non-empty salts are ambiguous because the
+legacy filename did not record the salt. Salted lookup does not fall back to
+that path. Clear or quarantine the old cache directory before upgrading a
+deployment that previously used salted dynamic-NIXL traffic; unsalted paths
+remain compatible.
 
 #### Secondary Lookup (lazy disk recovery)
 

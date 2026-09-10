@@ -15,7 +15,7 @@ accounting concerns and live in the ``/quota`` group (:mod:`quota_api`).
 from dataclasses import asdict
 
 # Third Party
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 import httpx
 
@@ -32,11 +32,14 @@ from lmcache.v1.mp_coordinator.http_apis.dependencies import (
 from lmcache.v1.mp_coordinator.schemas import (
     DeleteRequest,
     DeleteResponse,
+    PinListResponse,
+    PinnedKeyInfo,
     PinRequest,
     PinResponse,
     PrefetchRequest,
     PrefetchResponse,
 )
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
@@ -67,7 +70,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
     """
     ctx = get_context(request)
     prefetch = ctx.controllers.get(PrefetchManager)
-    target = ctx.registry.get(body.instance_id)
+    target = ctx.views.get(InstanceRegistry).get(body.instance_id)
     if target is None:
         raise HTTPException(
             status_code=404,
@@ -121,7 +124,7 @@ async def get_prefetch_status(
     """
     ctx = get_context(request)
     prefetch = ctx.controllers.get(PrefetchManager)
-    target = ctx.registry.get(instance_id)
+    target = ctx.views.get(InstanceRegistry).get(instance_id)
     if target is None:
         raise HTTPException(
             status_code=404,
@@ -223,6 +226,45 @@ async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
     )
 
 
+@router.get("/cache/pins")
+async def list_pins(
+    request: Request,
+    cache_salt: str = "",
+    model_name: str = "",
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=1000, ge=1, le=10000),
+) -> PinListResponse:
+    """List the keys pinned against L2 eviction, one page at a time.
+
+    Reads the coordinator's pin table. Pins are fleet-wide, so there is no
+    ``instance_id`` filter, and they apply to L2 only, so there is no
+    ``tier`` filter.
+
+    Args:
+        request: The FastAPI request carrying the coordinator context.
+        cache_salt: Keep keys with this salt. Empty keeps every salt.
+        model_name: Keep keys for this model. Empty keeps every model.
+        offset: Matching keys to skip.
+        limit: Maximum keys to return.
+
+    Returns:
+        ``PinListResponse`` with the filtered total and the requested page,
+        each key with its pin count.
+    """
+    eviction = get_context(request).controllers.get(FleetEvictionController)
+    total, page = eviction.list_pins(cache_salt, model_name, offset, limit)
+    return PinListResponse(
+        total=total,
+        pins=[
+            PinnedKeyInfo(
+                key=pinned.key.to_encoded_object_key(),
+                pin_count=pinned.pin_count,
+            )
+            for pinned in page
+        ],
+    )
+
+
 # -- Delete dispatch ---------------------------------------------------------
 
 
@@ -246,7 +288,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
     """
     ctx = get_context(request)
     eviction = ctx.controllers.get(FleetEvictionController)
-    target = ctx.registry.get(body.instance_id)
+    target = ctx.views.get(InstanceRegistry).get(body.instance_id)
     if target is None:
         raise HTTPException(
             status_code=404,

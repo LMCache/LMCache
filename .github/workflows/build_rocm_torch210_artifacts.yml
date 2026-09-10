@@ -119,9 +119,22 @@ jobs:
                     --entrypoint bash "${ROCM_PYTORCH_IMAGE}" -lc '
                       set -euo pipefail
                       python -m pip uninstall -y lmcache
-                      # Minimal dependencies needed to import the integration
-                      # adapters; never resolve the unpinned torch dependency.
-                      python -m pip install "numpy<=2.2.6" cachetools numba
+                      # Minimal dependencies needed to import the native and ATOM
+                      # integration modules; never resolve the unpinned torch
+                      # dependency from the wheel metadata.
+                      python -m pip install \
+                        aiohttp \
+                        "numpy<=2.2.6" \
+                        cachetools \
+                        msgspec \
+                        numba \
+                        "prometheus-client>=0.18.0,<=0.24.1" \
+                        psutil \
+                        py-cpuinfo \
+                        pyyaml \
+                        "pyzmq>=25.0.0" \
+                        requests \
+                        sortedcontainers
                       python -m pip install --no-deps --force-reinstall /wheel/*.whl
                       cd /tmp
                       python /validate_rocm_torch210_wheel.py

@@ -56,6 +56,7 @@ enum class EngineKVFormat : int {
   /*
   used by:
   - vLLM MLA
+  - SGLang MLA via MP daemon
   */
 
   TWO_X_NL_X_NBBS_NH_HS = 4,

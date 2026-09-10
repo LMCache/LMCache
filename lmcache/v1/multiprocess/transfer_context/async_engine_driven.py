@@ -151,6 +151,25 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         with self._inflight_lock:
             self._staging_pool.setdefault(key, []).extend(chunks)
 
+    def create_recorded_event(self) -> IPCEvent:
+        """Create a local event that orders compute before the copy stream.
+
+        Returns:
+            A local device event recorded on the current stream. The event is
+            never exported across processes.
+
+        Raises:
+            RuntimeError: If :meth:`register` has not completed.
+        """
+        if self._engine_driven_context is None:
+            raise RuntimeError(
+                "Async engine-driven transfer context is not registered. "
+                "Call register() before creating transfer events."
+            )
+        event = torch_dev.Event()
+        event.record(torch_dev.current_stream())
+        return event
+
     def submit_store(
         self,
         _request_id: str,
@@ -158,7 +177,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent,
+        _event: IPCEvent | None,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
         """Three-phase async store (prepare, gather and commit all in background).
@@ -189,6 +208,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             raise RuntimeError(
                 "Engine-driven transfer context is not registered. "
                 "Call register() before submit_store()."
+            )
+        if _event is None:
+            raise RuntimeError(
+                "Async engine-driven transfer requires a local ordering event."
             )
         completion: MessagingFuture[bool] = MessagingFuture()
         engine_driven_context = self._engine_driven_context
