@@ -1305,6 +1305,9 @@ the ConfigMap or add ``--kv-transfer-config`` yourself.
 Pods without a ``lmcache.ai/pd-role`` annotation that are bound to a PD engine
 fall back to the bare ``LMCacheMPConnector`` config (no NIXL) -- they still
 benefit from the LMCache KV cache without participating in disaggregation.
+A pod whose annotation carries any **other** value (e.g. a typo like
+``prefill``) is skipped entirely and stamped with the ``unknown-pd-role``
+skip reason, rather than silently receiving the non-PD config.
 
 Router
 ~~~~~~
@@ -1345,6 +1348,13 @@ CacheBlend PD
   carries no CacheBlend connector at all.
 - Pods without a ``pd-role`` annotation fall back to the bare
   ``CBKVConnector`` config, as for a non-PD ``CacheBlendEngine``.
+
+The webhook mutation is asymmetric to match: **decoder pods receive only**
+``--kv-transfer-config`` and the NIXL env vars -- no CacheBlend payload
+staging, no ``PYTHONPATH``, none of the CacheBlend vLLM flags
+(``--enforce-eager`` would needlessly disable CUDA graphs on the decode
+role), and no engine ``/dev/shm`` wiring.  ``injection.payloadImage`` is
+therefore not required for a decoder-only engine.
 
 Opt pods in with the CacheBlend label/annotation pair plus the same
 ``lmcache.ai/pd-role`` annotation:

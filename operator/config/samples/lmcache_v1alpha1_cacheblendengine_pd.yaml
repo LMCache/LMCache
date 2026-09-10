@@ -24,9 +24,13 @@
 #   VLLM_NIXL_SIDE_CHANNEL_HOST = pod's own IP (downward API status.podIP)
 #   VLLM_NIXL_SIDE_CHANNEL_PORT = spec.pd.nixlSideChannelPort (5558 default)
 #
+# Decoder pods receive ONLY the connection config and the NIXL env vars —
+# no CacheBlend payload staging or vLLM flags (they never load the plugin).
+# injection.payloadImage is required only when the engine serves prefillers.
+#
 # PREREQUISITES:
 #   1. Deploy this engine (payloadImage must point at the CacheBlend plugin
-#      payload, as for any CacheBlendEngine).
+#      payload for the prefiller side).
 #   2. Deploy prefiller and decoder vLLM pods with the opt-in label plus the
 #      pd-role annotations (see vllm_pd_disaggregation.yaml for the pod
 #      shape; swap the lmcache annotations for the cacheblend ones above).
