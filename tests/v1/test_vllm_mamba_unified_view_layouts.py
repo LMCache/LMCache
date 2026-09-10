@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Layout coverage for the Mamba unified-state view in kv_cache_group_edits."""
 
+# Standard
+from typing import cast
+
 # Third Party
 import pytest
 import torch
@@ -18,6 +21,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
 from lmcache.integration.vllm.kv_cache_group_edits import (  # noqa: E402
     apply_kv_cache_group_edits,
 )
+from lmcache.v1.gpu_connector.utils import LayoutHints  # noqa: E402
 
 NUM_BLOCKS = 3
 BLOCK_SIZE = 16
@@ -71,9 +75,11 @@ def test_mamba_unified_view_blocks_first_matches_layers_first(
     """BLNHC views like NHD and BLHNC like HND, over the same storage."""
     config, kv_caches = _unified_mamba_layer()
 
-    edited = apply_kv_cache_group_edits(config, kv_caches, {"kv_layout": kv_layout})
+    layout_hints = cast(LayoutHints, {"kv_layout": kv_layout})
+    edited = apply_kv_cache_group_edits(config, kv_caches, layout_hints)
 
     view = edited["layer.0"]
+    assert isinstance(view, torch.Tensor)
     assert tuple(view.shape) == (NUM_BLOCKS, *inner_shape)
     assert view.stride(0) == BLOCK_STEP
     assert view.data_ptr() == kv_caches["layer.0"].data_ptr()
