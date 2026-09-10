@@ -189,7 +189,7 @@ to correlate START/END pairs.
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
 | `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `str`, `int`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `model_name`, `cache_salt` | `int`, `int`, `int`, `str`, `str` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
@@ -213,6 +213,29 @@ know `chunk_size`:
   empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
+- `l1_hit_tokens` and `l2_hit_tokens` split `hit_tokens` by the tier that
+  served it.  `l1_hit_tokens` comes from `PrefetchHandle.l1_hit_chunks` —
+  the prefix L1 alone could serve under each object group's attention
+  window rule — so a chunk whose out-of-window keys were never fetched is
+  still an L1 hit.  `l2_hit_tokens` is the remainder: how much further
+  `found_count` reached once L2 completed.  **Invariant:
+  `l1_hit_tokens + l2_hit_tokens == hit_tokens`, exactly, on every path**,
+  so a dashboard summing the two can never exceed 100%.
+- `early_exit_reason` names the branch of `lookup()` that returned before a
+  prefetch task was submitted.  Always present; `""` on the normal path.
+  Vocabulary:
+
+  | Value | Meaning | Operator action |
+  |---|---|---|
+  | `""` | Normal path (including a genuine cold miss) | None — inspect the hit rate |
+  | `no_gpu_context` | No layout registered for this model / world size | Configuration or registration bug; also logged at `error` |
+  | `empty_chunk_hashes` | Prompt shorter than one chunk | None — a workload property, not a cache failure |
+  | `no_group_layout_descs` | No per-object-group layouts registered for this model / world size | Configuration or registration bug; also logged at `error` |
+
+  Without it `found_count == 0` conflates a cold miss with every early
+  exit.  Extensions are additive: a new value may be added without a
+  dashboard migration, as with the `L2_PREFETCH_FAILED` `reason`
+  vocabulary.
 - `model_name` and `cache_salt` are captured at lookup time from
   `IPCCacheServerKey` and surface as OTel attributes on the
   `lmcache_mp.lookup_*_tokens` counters so the hit rate can be sliced

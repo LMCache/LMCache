@@ -25,6 +25,10 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Derive a deterministic storage object name from an object key.
 
+    A non-empty ``cache_salt`` is appended as a trailing ``@``-delimited
+    field, matching the S3 and filesystem L2 adapters. An empty salt retains
+    the exact legacy filename.
+
     Args:
         key: Key identifying the stored cache object.
 
@@ -33,22 +37,21 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """
     safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
+    salt_suffix = f"@{key.cache_salt}" if key.cache_salt else ""
     return (
-        f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}.bin"
+        f"{safe_model_name}_{key.kv_rank:08x}_"
+        f"{key.object_group_id:x}_{chunk_hex}{salt_suffix}.bin"
     )
 
 
 def _object_key_to_relpath(key: ObjectKey) -> str:
-    """Relative path ``<hex[:2]>/<hex[2:4]>/filename`` — a 2-level hash-prefix
-    subdir tree (GDS-style) keyed on the chunk-hash hex.
+    """Return a two-level chunk-hash-sharded path for ``key``.
 
-    ``hex`` is ``chunk_hash.hex()``, the same value embedded in the filename, so
-    the two subdir levels are the first four hex chars of the hash and match the
-    filename's hash prefix (e.g. ``834e...`` -> ``83/4e/``). Spreads files
-    across up to 256*256 subdirectories instead of one flat directory.
+    The shard remains independent of ``cache_salt``; salted keys with the same
+    chunk hash have distinct filenames inside the same shard.
     """
-    h = key.chunk_hash.hex()
-    return os.path.join(h[:2], h[2:4], _object_key_to_filename(key))
+    chunk_hex = key.chunk_hash.hex()
+    return os.path.join(chunk_hex[:2], chunk_hex[2:4], _object_key_to_filename(key))
 
 
 class DynamicNixlStorageAgent(ABC):

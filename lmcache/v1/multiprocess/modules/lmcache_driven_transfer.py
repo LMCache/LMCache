@@ -687,6 +687,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
         self._device_host_func_dispatcher.start()
 
+    def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
+        """Register *handler* for *kind* on the per-process device host-func
+        dispatcher (stream-ordered callbacks without a driver-thread GIL
+        acquire); pair with ``submit_callback_to_stream``."""
+        self._device_host_func_dispatcher.register(kind, handler, payload_type)
+
     @property
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
@@ -1418,15 +1424,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
-            # Standalone (connector-private) groups are never served by the
+            # Aux (connector-private) groups are never served by the
             # std retrieve: the lookup does not lock their keys and their
             # block-id entry is a placeholder -- reading them would be an
             # unlocked read of a plane nobody consumes here.
             attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
             skipped_groups = {
-                g
-                for g, kind in enumerate(attn_desc.group_kinds)
-                if kind == "standalone"
+                g for g, kind in enumerate(attn_desc.group_kinds) if kind == "aux"
             }
             group_skips = [
                 0 if window < 0 else max(0, num_chunks - window)
