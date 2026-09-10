@@ -32,18 +32,14 @@ def _is_attention_spec(spec: Any) -> bool:
     return any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
 
 
-#: The one vLLM scratch spec that predates the ``prefix_cacheable`` property.
-_LEGACY_SCRATCH_SPEC_NAME = "CircularBufferSpec"
-
-
 def is_scratch_spec(spec: Any) -> bool:
     """Return whether the spec is a per-request scratch buffer.
 
     A scratch group holds one block per request, addressed by position modulo
     the block size rather than by token range; vLLM marks it
-    ``prefix_cacheable = False`` and never restores it. Checked by that
-    property, or by class name on vLLM builds that predate it.
-    ``UniformTypeKVCacheSpecs`` is unwrapped first.
+    ``prefix_cacheable = False`` and never restores it. Specs without the
+    property (older vLLM) are token-paged. ``UniformTypeKVCacheSpecs`` is
+    unwrapped first.
 
     Args:
         spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
@@ -54,9 +50,7 @@ def is_scratch_spec(spec: Any) -> bool:
     inner = getattr(spec, "kv_cache_specs", None)
     if isinstance(inner, dict) and inner:
         spec = next(iter(inner.values()))
-    if not getattr(spec, "prefix_cacheable", True):
-        return True
-    return any(cls.__name__ == _LEGACY_SCRATCH_SPEC_NAME for cls in type(spec).__mro__)
+    return not getattr(spec, "prefix_cacheable", True)
 
 
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
