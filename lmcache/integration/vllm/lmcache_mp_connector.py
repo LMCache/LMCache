@@ -594,6 +594,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            self._pending_finished_requests: set[str] = set()
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -1232,6 +1233,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 connectors output.
         """
         if not self.lazy_offload:
+            finished = self._pending_finished_requests.intersection(
+                connector_output.finished_sending or ()
+            )
+            for req_id in finished:
+                self.scheduler_adapter.end_session(req_id)
+                self.scheduler_adapter.cleanup_lookup_result(req_id)
+                self._pending_finished_requests.remove(req_id)
             return
         if not self._gpu_block_pool:
             raise ValueError("Lazy offload is enabled but gpu block pool is not binded")
@@ -1287,7 +1295,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
-        # have not been offloaded, the touch operation in end_session is incorrect
+        # A final STORE can be submitted after generation finishes. Wait for
+        # all workers' finished_sending before ending a successful session.
+        if not self.lazy_offload and request.status in (
+            RequestStatus.FINISHED_STOPPED,
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+        ):
+            self._pending_finished_requests.add(request.request_id)
+            return True, (return_params or None)
+
+        # Preserve lazy offload and abort/error cleanup behavior.
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
         # Drop lookup state for a request aborted before its lookup was
