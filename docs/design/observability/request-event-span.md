@@ -98,8 +98,8 @@ The `hit_tokens` / `requested_tokens` / `hit_rate` trio also appears on the
 specific to the MP path and are not set on `"cb.request"`.
 
 `CB_LOOKUP_END` carries the hit accounting in its metadata, computed at the
-emit site in `lmcache/v1/multiprocess/modules/blend.py`
-(`BlendModule.cb_unified_lookup`):
+emit site in `lmcache/v1/multiprocess/modules/blend/lookup.py`
+(`BlendModule.cb_unified_lookup`, the `LookupMixin` on `BlendModule`):
 
 | Field | Value |
 |-------|-------|
@@ -246,7 +246,7 @@ root "request"  [═════════════════════
 | `lmcache/v1/mp_observability/subscribers/tracing/mp_server.py` | Root span logic: `_pending_store_count`, `_pending_retrieve_count`, `_deferred_session_end_ts`; handlers `_on_request_start`, `_on_store_submitted`, `_on_retrieve_submitted`, `_on_session_end`; helpers `_get_or_create_request_span`, `_close_request_span` |
 | `lmcache/v1/mp_observability/subscribers/tracing/span_registry.py` | `SpanRegistry`: shared dict of open spans keyed by `(session_id, span_name)` for cross-subscriber parent lookup |
 | `tests/v1/mp_observability/subscribers/tracing/test_mp_server.py` | Tests for all scenarios including retrieve deferral |
-| `lmcache/v1/multiprocess/modules/blend.py` | `prefix_hits` and per-component hit tokens in `CB_LOOKUP_END` metadata |
+| `lmcache/v1/multiprocess/modules/blend/lookup.py` | `prefix_hits` and per-component hit tokens in `CB_LOOKUP_END` metadata (on `BlendModule.cb_unified_lookup`) |
 | `lmcache/v1/mp_observability/subscribers/tracing/cb_server.py` | Stamp `prefix_hits` and hit rates on `"cb.request"` root span from `CB_LOOKUP_END` |
 | `tests/v1/mp_observability/subscribers/tracing/test_cb_server.py` | `prefix_hits` attribute tests |
 
