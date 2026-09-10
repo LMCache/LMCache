@@ -4,7 +4,7 @@
 # Standard
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 import importlib
 import subprocess
 import sys
@@ -16,6 +16,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
@@ -26,6 +27,8 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
@@ -35,6 +38,9 @@ from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     get_service_bindings,
     iter_methods,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.factory import (
+    build_grpc_request_server,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     get_method_codec_registry,
@@ -76,6 +82,24 @@ class _TestDeviceIPCWrapper(DeviceIPCWrapper):
     def to_tensor(self) -> torch.Tensor:
         """The codec test does not reconstruct a device tensor."""
         raise NotImplementedError
+
+
+@pytest.mark.parametrize(
+    ("modules", "expected_message"),
+    [
+        ([], "Expected exactly one LookupModule, found 0"),
+        (
+            [object.__new__(LookupModule), object.__new__(LookupModule)],
+            "Expected exactly one LookupModule, found 2",
+        ),
+    ],
+)
+def test_grpc_server_factory_validates_required_modules(
+    modules: list[EngineModule], expected_message: str
+) -> None:
+    """The public factory reports missing and duplicate required modules."""
+    with pytest.raises(RuntimeError, match=expected_message):
+        build_grpc_request_server(modules, cast(MPServerConfig, object()))
 
 
 @pytest.fixture
