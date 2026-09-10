@@ -31,9 +31,10 @@ class SpdkIoEngineCore {
    *
    * @param core_mask: Hex string representing available cores (e.g., "0x3" for
    * cores 0 and 1). Must be non-empty
+   * @param mem_size_mb: SPDK hugepage memory size in MB (0 = use SPDK default).
    * @return: 0 on success, negative error code on failure.
    */
-  int init_spdk(const char* core_mask) const;
+  int init_spdk(const char* core_mask, int mem_size_mb) const;
   void deinit_spdk() const;
 
   /* SPDK memory allocation/free functions */

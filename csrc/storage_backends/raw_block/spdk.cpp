@@ -231,9 +231,9 @@ static int resolve_worker_cores(const char* core_mask) {
 // C wrapper functions for ctypes FFI compatibility
 extern "C" {
 
-int core_init_spdk(void* core_ptr, const char* core_mask) {
+int core_init_spdk(void* core_ptr, const char* core_mask, int mem_size_mb) {
   auto* core = static_cast<SpdkIoEngineCore*>(core_ptr);
-  return const_cast<SpdkIoEngineCore*>(core)->init_spdk(core_mask);
+  return const_cast<SpdkIoEngineCore*>(core)->init_spdk(core_mask, mem_size_mb);
 }
 
 void core_deinit_spdk(void* core_ptr) {
@@ -300,15 +300,16 @@ int core_get_device_size(void* core_ptr, uint64_t* result_size) {
 
 }  // extern "C"
 
-int SpdkIoEngineCore::init_spdk(const char* core_mask) const {
+int SpdkIoEngineCore::init_spdk(const char* core_mask, int mem_size_mb) const {
   struct spdk_env_opts m_opts;
   int ret = -1;
 
   spdk_env_opts_init(&m_opts);
   m_opts.name = "lmcache_spdk";
 
-  if ((core_mask == nullptr) || (core_mask[0] == '\0')) {
-    std::cerr << "[init_spdk] Core Mask cannot be uninitialized" << std::endl;
+  if ((core_mask == nullptr) || (core_mask[0] == '\0') || (0 == mem_size_mb)) {
+    std::cerr << "[init_spdk] Core Mask, mem size cannot be uninitialized"
+              << std::endl;
     return -1;
   }
 
@@ -319,6 +320,11 @@ int SpdkIoEngineCore::init_spdk(const char* core_mask) const {
 
   // Use the resolved (possibly synthesized) core mask.
   m_opts.core_mask = core_mask;
+
+  // Set SPDK memory size for hugepage allocation (if configured)
+  if (mem_size_mb > 0) {
+    m_opts.mem_size = mem_size_mb;
+  }
 
   ret = spdk_env_init(&m_opts);
   if (ret < 0) {

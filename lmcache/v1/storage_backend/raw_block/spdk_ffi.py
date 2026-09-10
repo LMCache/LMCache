@@ -73,6 +73,7 @@ class SpdkIoEngineFFI:
         self._init_spdk.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
+            ctypes.c_int,
         ]
         self._init_spdk.restype = ctypes.c_int
 
@@ -184,7 +185,7 @@ class SpdkIoEngineFFI:
             except Exception as e:
                 logger.error("Error freeing SPDK DMA memory: %s", e)
 
-    def init(self, core_mask: str = "") -> int:
+    def init(self, core_mask: str = "", mem_size_mb: int = 0) -> int:
         """Initialize the SPDK environment.
 
         The DPDK/SPDK core mask and memory size are passed here instead of via
@@ -196,13 +197,15 @@ class SpdkIoEngineFFI:
         Args:
             core_mask: Hex string representing available cores
                       (e.g., "0x3f" for cores 0-5). Must be non-empty.
+            mem_size_mb: Hugepage memory size in MB to reserve for the SPDK
+                         environment.
 
         Returns:
             0 on success, non-zero on failure.
         """
         core_mask_bytes = core_mask.encode("utf-8") if core_mask else b""
 
-        rc = self._init_spdk(self._obj, core_mask_bytes)
+        rc = self._init_spdk(self._obj, core_mask_bytes, ctypes.c_int(mem_size_mb))
         if rc == 0:
             logger.debug("SPDK environment initialized successfully")
         else:
