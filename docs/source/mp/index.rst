@@ -539,9 +539,10 @@ Adding a new request type
    or ``p2p``) and add the request name to that module's ``REQUEST_NAMES``.
 3. Implement the handler method on the appropriate ``EngineModule``
    (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``) and
-   expose it as a ``HandlerSpec`` from that module's ``get_handlers()``.
-4. ``run_cache_server()`` registers every ``HandlerSpec`` returned by the
-   loaded modules via ``add_handler_helper()`` — no manual registration
+   add its ``HandlerSpec`` to ``get_zmq_handler_specs()`` in the ZMQ transport
+   adapter.
+4. ``build_zmq_request_server()`` registers every ``HandlerSpec`` returned for
+   the loaded modules via ``add_handler_helper()`` — no manual registration
    step is needed.
 
 Key Source Files
@@ -560,8 +561,12 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/engine_context.py``
      - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
-     - ``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType``
-       (per-module handler registration)
+     - Transport-neutral ``EngineModule`` protocol
+   * - ``lmcache/v1/multiprocess/transport/server_factory.py``
+     - Transport-neutral request-server construction boundary
+   * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``
+     - ZMQ ``HandlerSpec`` and ``ThreadPoolType`` definitions, per-module
+       handler adapters, and message queue server construction
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
