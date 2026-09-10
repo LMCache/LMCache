@@ -319,8 +319,13 @@ def create_engine_group_infos_from_vllm(
         else ()
     )
 
+    # Scratch groups skip format discovery: their layers are excluded below and
+    # never transferred, so a layout the transfer kernels reject must not fail
+    # registration.
     layer_index_groups = [
-        [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
+        [layer_to_idx[name] for name in group.layer_names]
+        for group in vllm_groups
+        if not is_scratch_spec(group.kv_cache_spec)
     ]
 
     # CacheBlend fused-aux (presence-gated): the pool joins detection as

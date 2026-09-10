@@ -155,8 +155,10 @@ LMCache excludes scratch groups end to end:
   `prefix_cacheable`; specs without the property are token-paged.
 - `get_tokens_per_block` reports `0` for them; `0` is the scratch marker
   throughout the scheduler-side geometry.
-- Registration tags their layers `EXCLUDED_ENGINE_GROUP`, so they form no
-  info and no kernel group.
+- Registration skips format discovery for their layers and tags them
+  `EXCLUDED_ENGINE_GROUP`, so they form no info and no kernel group. Since
+  their bytes are never transferred, a scratch tensor whose layout the
+  transfer kernels reject must not fail registration.
 - Every computation over `group_tokens_per_block` (storable-prefix minimum in
   `GetStoreMetadata`, `slice_block_ids_per_group`, hit alignment, chunk-size
   validation) skips spans of `0`.
