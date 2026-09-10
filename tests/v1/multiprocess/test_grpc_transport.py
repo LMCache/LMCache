@@ -4,7 +4,7 @@
 # Standard
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 import importlib
 import subprocess
 import sys
@@ -16,7 +16,6 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
@@ -27,8 +26,23 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.modules.blend import BlendModule
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
+from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.request_handler import (
+    iter_request_handlers,
+    request_handler,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
@@ -39,25 +53,11 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     get_service_bindings,
     iter_methods,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.factory import (
-    build_grpc_request_server,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     get_method_codec_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.services import (
-    BlendServiceImpl,
-    ControllerServiceImpl,
-    DebugServiceImpl,
-    EngineDrivenServiceImpl,
-    LMCacheDrivenServiceImpl,
-    LookupServiceImpl,
-    ObservabilityServiceImpl,
-    P2PServiceImpl,
-    QStoreServiceImpl,
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
@@ -84,32 +84,20 @@ class _TestDeviceIPCWrapper(DeviceIPCWrapper):
         raise NotImplementedError
 
 
-@pytest.mark.parametrize(
-    ("modules", "expected_message"),
-    [
-        ([], "Expected exactly one LookupModule, found 0"),
-        (
-            [object.__new__(LookupModule), object.__new__(LookupModule)],
-            "Expected exactly one LookupModule, found 2",
-        ),
-    ],
-)
-def test_grpc_server_factory_validates_required_modules(
-    modules: list[EngineModule], expected_message: str
-) -> None:
-    """The public factory reports missing and duplicate required modules."""
-    with pytest.raises(RuntimeError, match=expected_message):
-        build_grpc_request_server(modules, cast(MPServerConfig, object()))
-
-
 @pytest.fixture
 def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
     calls = _Calls()
 
     class FakeModules:
+        @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
         def lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
             calls.lookup = (key, tp_size)
 
+        @request_handler(
+            RequestType.STORE,
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
         def store(
             self,
             key: IPCCacheServerKey,
@@ -122,6 +110,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert event_ipc_handle == b"input-event"
             return b"output-event", key.model_name == "model"
 
+        @request_handler(
+            RequestType.PREPARE_STORE,
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
         def prepare_store(
             self, key: IPCCacheServerKey, instance_id: int
         ) -> PrepareStoreResponse:
@@ -131,6 +124,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 context={"slots": [{"offset": 8}], "chunk_indices": [2]}
             )
 
+        @request_handler(
+            RequestType.PREPARE_RETRIEVE,
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
         def prepare_retrieve(
             self, key: IPCCacheServerKey, instance_id: int
         ) -> PrepareRetrieveResponse:
@@ -142,18 +140,22 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 context={"slot": 3},
             )
 
+        @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
         def register_kv_cache_engine_driven_context(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
+        @request_handler(RequestType.PING, HandlerType.BLOCKING)
         def ping(self, instance_id: int | None) -> bool:
             return instance_id == 7
 
+        @request_handler(RequestType.NOOP)
         def debug(self) -> str:
             return "ok"
 
+        @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
         def report_block_allocations(
             self,
             instance_id: int,
@@ -162,6 +164,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         ) -> None:
             calls.allocation = (instance_id, model_name, records)
 
+        @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
         def cb_unified_lookup(
             self, key: IPCCacheServerKey, tp_size: int
         ) -> CBUnifiedLookupResult | None:
@@ -172,6 +175,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
             )
 
+        @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
         def p2p_lookup_and_lock(
             self,
             keys: list[ObjectKey],
@@ -182,6 +186,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
 
+        @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
         def p2p_query_lookup_results(
             self, task_id: int
         ) -> list[TransferChannelAddress] | None:
@@ -194,15 +199,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         max_cpu_workers=2,
         max_gpu_workers=1,
     )
-    server.add_service("LMCacheDrivenService", LMCacheDrivenServiceImpl(None, modules))
-    server.add_service("EngineDrivenService", EngineDrivenServiceImpl(modules))
-    server.add_service("LookupService", LookupServiceImpl(modules))
-    server.add_service("QStoreService", QStoreServiceImpl(None))
-    server.add_service("ControllerService", ControllerServiceImpl(modules))
-    server.add_service("DebugService", DebugServiceImpl(modules))
-    server.add_service("ObservabilityService", ObservabilityServiceImpl(modules))
-    server.add_service("P2PService", P2PServiceImpl(modules))
-    server.add_service("BlendService", BlendServiceImpl(modules))
+    server.add_modules([modules])
     server.start()
     client = GrpcMultiprocessClient(  # type: ignore[abstract]
         f"grpc://127.0.0.1:{server.bound_port}"
@@ -235,6 +232,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert set(registry.by_full_name) == generated_methods
 
     lookup_codec = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
+    assert lookup_codec.request_type is RequestType.LOOKUP
     assert lookup_codec.payload_types == (IPCCacheServerKey, int)
     assert lookup_codec.response_type is type(None)
 
@@ -279,16 +277,38 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     )
 
 
-def test_grpc_imports_do_not_load_legacy_zmq_protocol() -> None:
-    """The gRPC transport imports without the legacy ZMQ protocol surface."""
+def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
+    """Every generated RPC resolves to one compatible module annotation."""
+    module_types = (
+        LookupModule,
+        ManagementModule,
+        P2PController,
+        LMCacheDrivenTransferModule,
+        EngineDrivenTransferModule,
+        QStoreModule,
+        BlendModule,
+    )
+    handlers = {
+        registered.options.request_type: registered.handler
+        for module_type in module_types
+        for registered in iter_request_handlers(module_type)
+    }
+    registry = get_method_codec_registry()
+    codecs = tuple(registry.by_full_name.values())
+
+    assert set(handlers) == {codec.request_type for codec in codecs}
+    for codec in codecs:
+        codec.validate_handler(handlers[codec.request_type])
+
+
+def test_grpc_imports_do_not_load_zmq_runtime() -> None:
+    """The gRPC transport imports without loading the ZMQ runtime."""
     script = r"""
 import importlib.abc
 import sys
 
 banned = (
     "lmcache.v1.multiprocess.mq",
-    "lmcache.v1.multiprocess.protocol",
-    "lmcache.v1.multiprocess.protocols",
     "lmcache.v1.multiprocess.transport.zmq_impl",
 )
 
@@ -303,7 +323,6 @@ class LegacyProtocolBlocker(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, LegacyProtocolBlocker())
 import lmcache.v1.multiprocess.transport.grpc_impl.client
 import lmcache.v1.multiprocess.transport.grpc_impl.server
-import lmcache.v1.multiprocess.transport.grpc_impl.services
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 

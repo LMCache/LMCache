@@ -2,7 +2,6 @@
 # Standard
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
-from unittest.mock import MagicMock
 import multiprocessing as mp
 import sys
 import threading
@@ -22,7 +21,6 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -33,6 +31,8 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
+from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
     get_zmq_handler_specs,
@@ -64,10 +64,22 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
 
 
 def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
-    """The ZMQ adapter wires exactly the three P2P request types."""
-    controller = MagicMock(spec=P2PController)
+    """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
 
-    request_types = {spec.request_type for spec in get_zmq_handler_specs(controller)}
+    class P2PHandlers:
+        @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
+        def lookup(self) -> None:
+            return None
+
+        @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
+        def query(self) -> None:
+            return None
+
+        @request_handler(RequestType.P2P_UNLOCK_OBJECTS, HandlerType.BLOCKING)
+        def unlock(self) -> None:
+            return None
+
+    request_types = {spec.request_type for spec in get_zmq_handler_specs(P2PHandlers())}
 
     assert request_types == {
         RequestType.P2P_LOOKUP_AND_LOCK,

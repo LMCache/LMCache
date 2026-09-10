@@ -20,6 +20,8 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.request_handler import request_handler
 
 logger = init_logger(__name__)
 
@@ -46,6 +48,7 @@ class RegistrationMixin:
             self, gpu_context: Any, rope_state: _CBRopeState, max_batch: int
         ) -> Any: ...
 
+    @request_handler(RequestType.CB_REGISTER_ROPE)
     def cb_register_rope(
         self,
         instance_id: int,
@@ -193,6 +196,7 @@ class RegistrationMixin:
         except Exception:
             logger.debug("CB plan pre-warm skipped", exc_info=True)
 
+    @request_handler(RequestType.CB_UNREGISTER_ROPE)
     def cb_unregister_rope(self, instance_id: int) -> None:
         """Drop the instance's CB rope state; the paged KV cache stays intact."""
         self._cb_rope_state.pop(instance_id, None)
