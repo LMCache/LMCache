@@ -59,6 +59,7 @@ class TestWhatIsFound:
     def test_the_views_are_the_fleet_read_models(self):
         assert {type(v).__name__ for v in build_views(MPCoordinatorConfig()).all()} == {
             "CacheUsageManager",
+            "InstanceRegistry",
             "KeyDirectory",
             "ServerConfigRegistry",
         }

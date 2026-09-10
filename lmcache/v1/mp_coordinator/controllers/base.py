@@ -2,16 +2,19 @@
 """What makes a class in this package a controller.
 
 A controller acts: it holds policy, drives loops, and answers requests
-that change what the fleet does. It reads the fleet's state from views
-rather than keeping its own copy.
-
-Controllers may depend on views and on other controllers. Views cannot
-depend on controllers -- their ``from_config`` is handed no way to reach
-one -- so the direction cannot invert by accident.
+that change what the fleet does. It reads the fleet's state from views,
+and depends on nothing else -- not on another controller, which would
+break as soon as that one shipped elsewhere.
 """
 
 # Standard
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+# Third Party
+import httpx
 
 if TYPE_CHECKING:
     # First Party
@@ -20,13 +23,29 @@ if TYPE_CHECKING:
     from lmcache.v1.mp_coordinator.views.base import View
 
 
+@dataclass(frozen=True)
+class ControllerRuntime:
+    """What a controller can only be handed once the app is running.
+
+    One field today. It stays a struct so that a second loop-bound
+    collaborator can be added without touching the signature of every
+    controller that never asked for it.
+
+    Attributes:
+        http_client: Shared client for outbound calls to mp servers.
+    """
+
+    http_client: httpx.AsyncClient
+
+
 class Controller:
     """A collaborator the coordinator builds once at startup.
 
-    Subclass to have discovery construct it. Consuming the cache-event
-    stream and holding durable state are separate protocols -- implement
-    ``consume`` or ``get_durable_components`` and discovery picks that up
-    too, so a controller that does neither declares neither.
+    Subclass to have discovery construct it. Construction and lifetime
+    are the whole interface, both defaulted. Consuming the cache-event
+    stream, holding durable state and answering HTTP are protocols:
+    implement ``consume``, ``get_durable_components`` or ``get_routers``
+    and discovery picks that up too.
     """
 
     @classmethod
@@ -34,18 +53,43 @@ class Controller:
         cls,
         config: "MPCoordinatorConfig",
         views: "Registry[View]",
-        controllers: "Registry[Controller]",
     ) -> "Controller":
         """Build this controller.
 
-        Defaults to needing none of the arguments, so only a controller
-        that reads configuration or depends on a peer writes this hook.
-        Ask either registry and the peer is built on demand -- there is no
-        construction order to get right.
+        Views are built on demand, so there is no construction order to
+        get right.
 
         Args:
             config: The coordinator configuration.
             views: The fleet's read models.
-            controllers: The registry being populated.
         """
         return cls()
+
+    @asynccontextmanager
+    async def run(self, runtime: ControllerRuntime) -> AsyncIterator[None]:
+        """Run background work for as long as the app is serving.
+
+        Start the work, ``yield`` exactly once -- the app serves for the
+        duration of that yield -- then shut it down in a ``finally``, so
+        teardown runs whether shutdown was clean or an exception unwound
+        the stack::
+
+            task = asyncio.create_task(self._loop())
+            try:
+                yield
+            finally:
+                task.cancel()
+
+        Entered once inside the lifespan, so tasks may be created here. A
+        context manager rather than a start/stop pair so a controller that
+        fails to enter cannot leave the ones before it running, and one
+        that never entered is never torn down.
+
+        Yielding without starting anything is how configuration switches
+        the work off. Defaults to no work at all.
+
+        Args:
+            runtime: What cannot come from :meth:`from_config`, because
+                it binds to the running event loop.
+        """
+        yield

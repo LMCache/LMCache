@@ -274,9 +274,22 @@ class MPServerTracingSubscriber(EventSubscriber):
                 hit_rate = (
                     hit_tokens / requested_tokens if requested_tokens > 0 else 0.0
                 )
+                l1_hit_tokens = int(event.metadata["l1_hit_tokens"])
+                l2_hit_tokens = int(event.metadata["l2_hit_tokens"])
+                denom = requested_tokens or 1  # 0.0 rates when nothing requested
                 root_span.set_attribute("hit_tokens", hit_tokens)
                 root_span.set_attribute("requested_tokens", requested_tokens)
                 root_span.set_attribute("hit_rate", hit_rate)
+                # Typed root-span attributes: the child-span loop above
+                # stringifies every metadata value, so these cannot be
+                # aggregated numerically from there.
+                root_span.set_attribute("l1_hit_tokens", l1_hit_tokens)
+                root_span.set_attribute("l2_hit_tokens", l2_hit_tokens)
+                root_span.set_attribute("l1_hit_rate", l1_hit_tokens / denom)
+                root_span.set_attribute("l2_hit_rate", l2_hit_tokens / denom)
+                root_span.set_attribute(
+                    "early_exit_reason", str(event.metadata["early_exit_reason"])
+                )
 
         if event.event_type == EventType.MP_STORE_END:
             if (count := self._pending_store_count.get(sid, 0)) > 0:

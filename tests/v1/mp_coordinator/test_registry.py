@@ -5,7 +5,10 @@
 import time
 
 # First Party
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
+)
 
 
 def _instance(instance_id: str, heartbeat: float = 0.0) -> MPInstance:
