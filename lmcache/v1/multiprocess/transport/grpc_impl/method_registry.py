@@ -10,7 +10,6 @@ from typing import Any, Callable
 
 # First Party
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    client_method_name,
     iter_methods,
     message_class,
 )
@@ -37,7 +36,6 @@ def _normalize_none_type(value: Any) -> Any:
 class GrpcMethodCodec:
     """Compiled protobuf converters for one generated gRPC method."""
 
-    client_name: str
     full_name: str
     request_message_class: type[Any]
     response_message_class: type[Any]
@@ -82,9 +80,8 @@ class GrpcMethodCodec:
 
 @dataclass(frozen=True)
 class GrpcMethodCodecRegistry:
-    """Read-only lookup tables for all generated gRPC method codecs."""
+    """Read-only lookup table for all generated gRPC method codecs."""
 
-    by_client_name: Mapping[str, GrpcMethodCodec]
     by_full_name: Mapping[str, GrpcMethodCodec]
 
 
@@ -93,17 +90,15 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
     """Build and validate codecs for all generated gRPC methods.
 
     Returns:
-        Read-only codec lookup tables keyed by client and protobuf names.
+        Read-only codec lookup table keyed by full protobuf method name.
 
     Raises:
-        RuntimeError: If a generated method has no service implementation or a
-            duplicate method name is discovered.
+        RuntimeError: If a generated method has no service implementation or
+            its full protobuf method name is duplicated.
         TypeError: If a protobuf message cannot represent its annotated types.
     """
-    by_client_name: dict[str, GrpcMethodCodec] = {}
     by_full_name: dict[str, GrpcMethodCodec] = {}
     for binding, method in iter_methods():
-        client_name = client_method_name(method.name)
         request_message_class = message_class(method.input_type)
         response_message_class = message_class(method.output_type)
         implementation_class = get_service_implementation_class(binding.descriptor.name)
@@ -125,7 +120,6 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
             response_message_class, response_type
         )
         codec = GrpcMethodCodec(
-            client_name=client_name,
             full_name=method.full_name,
             request_message_class=request_message_class,
             response_message_class=response_message_class,
@@ -136,15 +130,11 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
             response_encoder=response_encoder,
             response_decoder=response_decoder,
         )
-        if client_name in by_client_name:
-            raise RuntimeError(f"Duplicate gRPC client method: {client_name}")
         if method.full_name in by_full_name:
             raise RuntimeError(f"Duplicate generated gRPC method: {method.full_name}")
-        by_client_name[client_name] = codec
         by_full_name[method.full_name] = codec
 
     return GrpcMethodCodecRegistry(
-        by_client_name=MappingProxyType(by_client_name),
         by_full_name=MappingProxyType(by_full_name),
     )
 
