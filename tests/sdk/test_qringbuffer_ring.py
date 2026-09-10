@@ -69,6 +69,31 @@ def test_allocate_beyond_capacity_leaves_free_list_intact() -> None:
     assert ring.allocate(4) is not None  # capacity was not consumed
 
 
+def test_usage_snapshot_tracks_current_and_high_watermark_blocks() -> None:
+    """Usage snapshots remain exact after allocation failure and reclaim."""
+    ring = _ring()
+
+    initial = ring.usage_snapshot()
+    assert initial.capacity_blocks == 4
+    assert initial.free_blocks == 4
+    assert initial.used_blocks == 0
+    assert initial.high_watermark_blocks == 0
+
+    blocks = ring.allocate(3)
+    assert blocks is not None
+    assert ring.allocate(2) is None
+    allocated = ring.usage_snapshot()
+    assert allocated.used_blocks == 3
+    assert allocated.free_blocks == 1
+    assert allocated.high_watermark_blocks == 3
+
+    ring.free(blocks)
+    reclaimed = ring.usage_snapshot()
+    assert reclaimed.used_blocks == 0
+    assert reclaimed.free_blocks == 4
+    assert reclaimed.high_watermark_blocks == 3
+
+
 def test_free_drops_double_and_out_of_range_frees() -> None:
     """Check that freeing a block that is already free or does not exist is
     logged and dropped."""
