@@ -29,8 +29,15 @@ import (
 
 const (
 	// nvidiaRuntimeClass is the RuntimeClass name registered by the NVIDIA GPU
-	// Operator; engine pods request it when gpuVendor is nvidia.
+	// Operator; engine pods request it when gpuVendor is nvidia unless
+	// spec.runtimeClassName overrides it.
 	nvidiaRuntimeClass = "nvidia"
+
+	// engineContainerName is the engine container name. GPU Operator NRI/CDI
+	// clusters that omit runtimeClassName must annotate this same name, e.g.
+	// nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all via
+	// spec.podAnnotations.
+	engineContainerName = "lmcache"
 
 	// lmcacheServerBinary is the entrypoint binary for the LMCache server inside
 	// the engine image.
@@ -117,10 +124,11 @@ func buildDaemonSetCore(
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
-	// An explicit spec.RuntimeClassName overrides the vendor-derived default; an
-	// empty string clears it so pods use the default container runtime. This is
-	// needed on NVIDIA clusters without the GPU Operator, where the "nvidia"
-	// RuntimeClass object is absent and the pods would otherwise be admission-rejected.
+	// spec.runtimeClassName wins: "" clears it (default container runtime),
+	// any other value is used as-is. Unset keeps the vendor default.
+	// GPU Operator NRI/CDI clusters also omit runtimeClassName; set
+	// spec.podAnnotations to request the management CDI device. The operator
+	// does not add that annotation itself.
 	if spec.RuntimeClassName != nil {
 		if *spec.RuntimeClassName == "" {
 			runtimeClassName = nil
@@ -355,7 +363,7 @@ func buildDaemonSetCore(
 					InitContainers:     spec.InitContainers,
 					Containers: []corev1.Container{
 						{
-							Name:            "lmcache",
+							Name:            engineContainerName,
 							Image:           fmt.Sprintf("%s:%s", imgRepo, imgTag),
 							ImagePullPolicy: imgPullPolicy,
 							Command:         containerCommand,

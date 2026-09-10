@@ -40,6 +40,9 @@ Prerequisites
 
 - Kubernetes 1.20+
 - ``kubectl`` configured to access your cluster
+- NVIDIA GPU Operator on NVIDIA clusters (default). Classic installs
+  register RuntimeClass ``nvidia``. CDI+NRI installs often have no
+  RuntimeClass objects; see :ref:`mp-operator-nri-cdi` below.
 - (Optional) `Prometheus Operator <https://github.com/prometheus-operator/prometheus-operator>`_
   for ServiceMonitor support
 
@@ -569,6 +572,14 @@ GPU & Security
      - ``nvidia``
      - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
        (runs on the default runtime).
+   * - ``runtimeClassName``
+     - vendor default
+     - Override the engine pod RuntimeClass. Unset keeps the vendor default
+       (``nvidia`` for NVIDIA, omitted for AMD). An empty string omits
+       ``runtimeClassName`` so pods use the default container runtime.
+       Empty does **not** add a CDI annotation; on GPU Operator NRI/CDI
+       clusters set that yourself via ``podAnnotations`` (see
+       :ref:`mp-operator-nri-cdi`).
    * - ``hostIPC``
      - ``false``
      - Run the pod in the host IPC namespace instead of mounting the host's
@@ -587,6 +598,55 @@ GPU & Security
        RuntimeClass device injection, so privileged is the only path to
        ``/dev/kfd``/``/dev/dri``). Enabling it requires the namespace to allow
        the ``privileged`` Pod Security Standard.
+
+.. _mp-operator-nri-cdi:
+
+GPU Operator NRI/CDI
+~~~~~~~~~~~~~~~~~~~~
+
+CDI+NRI GPU Operator installs often have **no** ``RuntimeClass`` objects.
+The operator's NVIDIA default (``runtimeClassName: nvidia``) then leaves
+engine pods Pending (``RuntimeClass "nvidia" not found``).
+
+To see GPUs without claiming ``nvidia.com/gpu``:
+
+1. Set ``spec.runtimeClassName`` to an empty string so the operator omits
+   RuntimeClass.
+2. Request the management CDI device on the CR. The operator copies
+   ``spec.podAnnotations`` onto the DaemonSet pods. The engine container
+   name is ``lmcache``:
+
+   .. code-block:: yaml
+
+       spec:
+         runtimeClassName: ""
+         podAnnotations:
+           nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all
+
+Do not rely on an empty ``runtimeClassName`` to inject CDI. Clusters whose
+default runtime is already NVIDIA only need the empty field.
+
+3. If the engine namespace is not the GPU Operator install namespace:
+
+   - **3-1.** NVIDIA Container Toolkit **≥ v1.20.0**: add the engine
+     namespace to the NVIDIA Container Toolkit env
+     ``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES``. Set it with Helm
+     ``toolkit.env`` at install time, or with ``ClusterPolicy``
+     ``spec.toolkit.env`` on an existing install.
+     (`NVIDIA: Requesting a Management CDI Device
+     <https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/cdi.html>`_)
+   - **3-2.** toolkit **< v1.20.0**: ``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES``
+     is not available. The engine can see GPUs only if it runs in the
+     toolkit install namespace (typically ``gpu-operator``).
+
+For reference, toolkit v1.20.0 became the GPU Operator Helm default in
+v26.7.0. The default allowed namespace is the toolkit install namespace;
+from 1.20, additional namespaces can be listed in
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES``, and the toolkit namespace remains
+allowed.
+
+A copy-paste CR is at
+``operator/config/samples/lmcache_v1alpha1_lmcacheengine_nri.yaml``.
 
 Scheduling
 ~~~~~~~~~~

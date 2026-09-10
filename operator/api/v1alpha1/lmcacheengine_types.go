@@ -429,7 +429,9 @@ type LMCacheEngineSpec struct {
 	// it explicitly to run on a cluster whose GPU runtime is already the default
 	// (e.g. NVIDIA nodes without the GPU Operator, where no "nvidia" RuntimeClass
 	// object exists); an empty string omits runtimeClassName so pods use the
-	// default container runtime.
+	// default container runtime. On GPU Operator NRI/CDI clusters, combine an
+	// empty string with spec.podAnnotations
+	// nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all.
 	// +optional
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 

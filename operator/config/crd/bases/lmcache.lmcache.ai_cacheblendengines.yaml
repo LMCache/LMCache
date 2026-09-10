@@ -1678,6 +1678,16 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              runtimeClassName:
+                description: |-
+                  runtimeClassName overrides the RuntimeClass for the engine pods. When unset,
+                  it is derived from gpuVendor: "nvidia" uses the NVIDIA GPU Operator's
+                  "nvidia" RuntimeClass, "amd" uses none (the default container runtime). An
+                  empty string omits runtimeClassName so pods use the default container
+                  runtime. On GPU Operator NRI/CDI clusters, combine an empty string with
+                  spec.podAnnotations nvidia.cdi.k8s.io/container.lmcache:
+                  management.nvidia.com/gpu=all.
+                type: string
               server:
                 description: |-
                   server defines server configuration. chunkSize defaults to 256 because

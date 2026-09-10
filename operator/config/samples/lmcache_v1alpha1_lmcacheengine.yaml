@@ -143,6 +143,17 @@ spec:
   # cannot see them otherwise. Requires the namespace to allow the privileged
   # Pod Security Standard.
   # privileged: false
+  #
+  # GPU Operator NRI/CDI clusters have no RuntimeClass objects. Set this to an
+  # empty string so the operator omits runtimeClassName, and set podAnnotations
+  # to nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all.
+  # If the engine runs outside the GPU Operator install namespace, NVIDIA
+  # Container Toolkit v1.20.0+ is required and
+  # NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES must include the engine namespace.
+  # See lmcache_v1alpha1_lmcacheengine_nri.yaml.
+  # runtimeClassName: ""
+  # podAnnotations:
+  #   nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all
 
   # -- Extra CLI flags (appended last, can override any auto-generated flag) --
   # extraArgs: []
