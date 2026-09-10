@@ -87,7 +87,26 @@ class LazyOffloadPendingStore:
         self._pending_request_ids.difference_update(item.request_id for item in items)
         return items
 
+    def has_inflight_store_work(self) -> bool:
+        """Return whether submitted stores are waiting for worker completion.
+
+        Returns:
+            True if submitted stores are still holding GPU blocks while they
+            wait for worker completion, otherwise False. Queued store metadata
+            alone does not require engine keepalive because it can only be
+            submitted by a step that schedules model tokens.
+        """
+        return bool(self._request_block_ids)
+
     def mark_req_finished(self, req_id: str) -> None:
+        """Mark a queued request as finished in the offload policy.
+
+        Args:
+            req_id: Identifier of the completed request.
+
+        Raises:
+            ValueError: If the FIFO policy has no queued item for ``req_id``.
+        """
         self._policy.mark_req_finished(req_id)
 
     def has_pending_request(self, req_id: str) -> bool:
