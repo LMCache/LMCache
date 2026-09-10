@@ -7,7 +7,7 @@ Remote Storage Plugins
 
 
 LMCache supports built-in remote storage connectors for Redis, InfiniStore,
-MooncakeStore, S3, Hugging Face Buckets, and more.
+MooncakeStore, S3, Google Cloud Storage, Hugging Face Buckets, and more.
 The remote storage plugin system provides the ability to add custom storage connectors through dynamic loading. This enables extending remote storage capabilities without modifying core code.
 
 .. note::
@@ -47,7 +47,7 @@ The framework extracts the *type* portion (everything before the first ``.``) to
 
 Using Built-in Connectors via Plugins
 -------------------------------------
-Built-in connectors (``fs``, ``mooncakestore``, ``hfbucket``, etc.) can be used
+Built-in connectors (``fs``, ``mooncakestore``, ``gcs``, ``hfbucket``, etc.) can be used
 directly via ``remote_storage_plugins`` without specifying ``module_path`` or
 ``class_name``. Their configuration is placed under ``extra_config``:
 
@@ -86,6 +86,16 @@ Built-in Hugging Face Buckets example:
     extra_config:
       remote_storage_plugin.hfbucket.bucket_handle: hf://buckets/my-org/lmcache-kv/prod
       remote_storage_plugin.hfbucket.token_env: HF_TOKEN
+
+Built-in Google Cloud Storage example:
+
+.. code-block:: yaml
+
+    remote_storage_plugins: ["gcs"]
+    extra_config:
+      remote_storage_plugin.gcs.bucket_uri: gs://my-lmcache-bucket/prod
+      remote_storage_plugin.gcs.project: my-gcp-project
+      remote_storage_plugin.gcs.credentials_path: /etc/gcp/service-account.json
 
 How to Integrate Custom Remote Storage with LMCache
 ---------------------------------------------------

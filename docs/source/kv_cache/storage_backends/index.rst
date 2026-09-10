@@ -21,6 +21,7 @@ Supported Backends
    eic
    fs
    gds
+   gcs
    hfbucket
    infinistore
    local_storage
