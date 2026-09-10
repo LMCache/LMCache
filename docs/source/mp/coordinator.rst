@@ -1189,15 +1189,67 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
         }'
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
 
-**Delete (removing cache by token sequence).** Delete a token sequence's cache
-on one named server, addressed by token ids. The coordinator resolves the tokens
-to object keys locally (like pin) and issues a single key-addressed
-``DELETE /cache/objects`` to the named server, which removes them from the
-requested tier(s). The ``tier`` field selects the tier(s): ``l1`` deletes only
-the named server's L1, ``l2`` only L2, ``all`` both. When the tier includes L2,
-the coordinator first drops any key it is protecting with an L2 pin from the
-delete set unless ``force`` is set — so a pinned key is retained in every tier
-the delete would have touched; ``force`` deletes them and drops those pins.
+``GET /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+List the keys currently pinned in the L2 eviction plan.
+
+**Query parameters** (all optional):
+
+.. list-table::
+   :header-rows: 1
+   :width: 100%
+   :widths: 18 16 66
+
+   * - Parameter
+     - Type
+     - Description
+   * - ``cache_salt``
+     - string
+     - Only keys with this salt. Default: all salts.
+   * - ``model_name``
+     - string
+     - Only keys for this model. Default: all models.
+   * - ``offset``
+     - int
+     - Matching keys to skip (``>= 0``). Default ``0``.
+   * - ``limit``
+     - int
+     - Maximum keys to return (``1``-``10000``). Default ``1000``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "total": 12,
+      "pins": [
+        {
+          "key": {
+            "chunk_hash_hex": "aa12...",
+            "model_name": "Qwen/Qwen3-8B",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": "user-a"
+          },
+          "pin_count": 2
+        }
+      ]
+    }
+
+``total`` is the number of pinned keys matching the filters; ``pins`` is the
+requested page in first-pinned order, each with its current ``pin_count``.
+
+**HTTP status codes:**
+
+- ``200``: listed.
+- ``422``: ``offset`` or ``limit`` out of range.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s 'http://localhost:9300/cache/pins?cache_salt=user-a&limit=100'
 
 ``POST /cache/delete``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
