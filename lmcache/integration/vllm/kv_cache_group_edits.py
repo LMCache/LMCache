@@ -38,7 +38,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Mapping
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 # Third Party
 from vllm.v1.kv_cache_interface import (
@@ -49,9 +49,12 @@ from vllm.v1.kv_cache_interface import (
 )
 import torch
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.utils import LayoutHints
+
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
 
@@ -95,12 +98,23 @@ def _leaf_specs(spec: KVCacheSpec) -> list[KVCacheSpec]:
     return [spec]
 
 
+def _is_circular_buffer_spec(spec: KVCacheSpec) -> bool:
+    """Return whether a spec is vLLM's request-scoped circular buffer.
+
+    Detection by class name keeps this module importable with older supported
+    vLLM releases that do not define ``CircularBufferSpec``.
+    """
+    return any(cls.__name__ == "CircularBufferSpec" for cls in type(spec).__mro__)
+
+
 def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     """Reject KV cache group specs the transfer path cannot serve correctly.
 
     Rejected, with one aggregated error listing every offending group:
 
     - ``CrossAttentionSpec`` (encoder-decoder caches).
+    - ``CircularBufferSpec``: one request-lifetime ring block cannot provide
+      the historical per-chunk snapshots required by LMCache prefix storage.
     - Mamba groups with ``mamba_cache_mode`` other than ``"align"`` or
       ``"all"``: the remaining mode (``"none"``) keeps no reusable per-block
       state snapshots.
@@ -123,7 +137,13 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
         for spec in _leaf_specs(group.kv_cache_spec):
             kind = get_kv_cache_spec_kind(spec)
-            if kind == KVCacheSpecKind.CROSS_ATTENTION:
+            if _is_circular_buffer_spec(spec):
+                unsupported.append(
+                    f"group {group_idx}: CircularBufferSpec "
+                    "(one request-lifetime ring block cannot provide "
+                    "per-chunk snapshots)"
+                )
+            elif kind == KVCacheSpecKind.CROSS_ATTENTION:
                 unsupported.append(f"group {group_idx}: CrossAttentionSpec")
             elif kind == KVCacheSpecKind.MAMBA and getattr(
                 spec, "mamba_cache_mode", "none"
