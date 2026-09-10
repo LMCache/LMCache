@@ -220,7 +220,10 @@ def get_vllm_scheduler_block_size(
     return scheduler_block_size
 
 
-def get_dcp_decorated_model_name(vllm_config: VllmConfig) -> str:
+def get_dcp_decorated_model_name(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None" = None,
+) -> str:
     """Decorate the model name with its non-trivial DCP interleave layout.
 
     Embedding the DCP interleave size in the LMCache model name prevents a
@@ -228,6 +231,7 @@ def get_dcp_decorated_model_name(vllm_config: VllmConfig) -> str:
 
     Args:
         vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
 
     Returns:
         The decorated cache model name, or the original model name when DCP or
@@ -236,7 +240,19 @@ def get_dcp_decorated_model_name(vllm_config: VllmConfig) -> str:
     model_name = vllm_config.model_config.model
     parallel_config = vllm_config.parallel_config
     dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
-    interleave = getattr(parallel_config, "cp_kv_cache_interleave_size", 1)
+    interleave = original = getattr(parallel_config, "cp_kv_cache_interleave_size", 1)
+    # adjust_dcp_kv_cache_interleave_size runs per worker, so the scheduler's
+    # config keeps the pre-adjustment value. Delegate to vLLM (idempotent, and
+    # gated differently across versions), then restore what it owns.
+    adjust = getattr(vllm_config, "adjust_dcp_kv_cache_interleave_size", None)
+    if adjust is not None and kv_cache_config is not None:
+        try:
+            adjust(kv_cache_config)
+            interleave = getattr(
+                parallel_config, "cp_kv_cache_interleave_size", original
+            )
+        finally:
+            parallel_config.cp_kv_cache_interleave_size = original
     if dcp_size <= 1 or interleave == 1:
         return model_name
     return f"{model_name}{_DCP_LAYOUT_NAMESPACE}d{dcp_size}-interleave{interleave}"
@@ -412,14 +428,11 @@ def build_parallel_strategy_from_vllm_config(
     )
 
 
-def _ensure_zmq_scheme(server_url: str) -> str:
-    """Ensure a ZMQ server URL carries a transport scheme.
+def _ensure_transport_scheme(server_url: str) -> str:
+    """Ensure a multiprocess server URL carries a transport scheme.
 
-    ZeroMQ requires an explicit transport (e.g. ``tcp://``) in the address;
-    a bare ``host:port`` such as ``127.0.0.1:5557`` is rejected with
-    ``ZMQError: Invalid argument``. Users naturally configure
-    ``lmcache.mp.host`` as a plain IP/hostname, so prepend ``tcp://`` when no
-    scheme is present.
+    Preserve explicit schemes so the request client factory can select the
+    transport. Bare endpoints retain the legacy ZMQ TCP behavior.
 
     Args:
         server_url: A server URL, with or without a ``<scheme>://`` prefix.
@@ -474,7 +487,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
-        cache_model_name = get_dcp_decorated_model_name(vllm_config)
+        cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
 
@@ -506,9 +519,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # Normalize so a bare host:port (no transport scheme) is accepted;
-        # ZMQ requires an explicit transport such as ``tcp://``.
-        server_urls = [_ensure_zmq_scheme(u) for u in server_urls]
+        # Preserve explicit transport schemes and default bare host:port
+        # endpoints to the legacy ZMQ TCP transport.
+        server_urls = [_ensure_transport_scheme(u) for u in server_urls]
 
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
@@ -1090,7 +1103,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker = self._get_or_create_request_tracker(request)
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=list(request.all_token_ids),
+            token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
         )
@@ -1277,6 +1290,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # have not been offloaded, the touch operation in end_session is incorrect
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
+        # Drop lookup state for a request aborted before its lookup was
+        # consumed (update_state_after_alloc never ran for it).
+        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
         if self.lazy_offload:
             self._pending_store.mark_req_finished(request.request_id)
@@ -1299,6 +1315,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             New KV cache events since the last call.
         """
         return ()
+
+    def has_pending_push_work(self) -> bool:
+        """Return whether vLLM should keep stepping for pending push work.
+
+        Returns:
+            True when scheduler-side lazy offload has submitted stores waiting
+            for worker completion. Queued stores are intentionally excluded:
+            they require a model-token step for submission and cannot progress
+            during a connector-only step. Non-lazy mode uses vLLM's normal
+            delayed-free path and does not need this keepalive.
+        """
+        if self.role != KVConnectorRole.SCHEDULER or not self.lazy_offload:
+            return False
+
+        pending_store = getattr(self, "_pending_store", None)
+        return pending_store is not None and pending_store.has_inflight_store_work()
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

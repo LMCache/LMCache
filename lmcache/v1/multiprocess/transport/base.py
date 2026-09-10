@@ -9,7 +9,7 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 
 
 class RequestClient(Protocol):
-    """Define method-oriented multiprocess requests shared by transports."""
+    """Base class for method-oriented multiprocess request clients."""
 
     def register_kv_cache(
         self,
@@ -131,6 +131,8 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[Any]: ...
 
     def cb_unified_lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]: ...
+
+    def cb_protocol_handshake(self, client_version: int) -> MessagingFuture[Any]: ...
 
     def p2p_lookup_and_lock(
         self, keys: list[Any], group_layout_descs: dict[int, Any]
