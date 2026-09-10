@@ -54,7 +54,11 @@ def attempt_permute_to_contiguous_view(
     Recovers the vLLM HND case: tensors allocated physically as
     ``[2, NB, NH, BS, HS]`` but exposed logically as
     ``[2, NB, BS, NH, HS]`` via a dim permute. Sorting dims by stride
-    undoes the permute without touching storage.
+    undoes the permute without touching storage. A size-1 dim that ties
+    on stride with a neighbour is placed innermost among the tied dims,
+    so a dim-0-padded view gets the same dim order the contiguous branch
+    re-derives from strides (e.g. vLLM ``BLNHC`` with one head:
+    ``[NB, 1, BS, HS]`` becomes ``[NB, BS, 1, HS]``).
 
     For tensors that remain non-contiguous even after dim-permute
     recovery (e.g. vLLM unified KV pool views where dim-0 has an
@@ -74,7 +78,16 @@ def attempt_permute_to_contiguous_view(
     """
     if isinstance(kv_caches, torch.Tensor):
         strides = kv_caches.stride()
-        perm = sorted(range(kv_caches.ndim), key=lambda i: strides[i], reverse=True)
+        shape = kv_caches.shape
+        # A size-1 dim can tie on stride with its neighbour (e.g. one head
+        # under vLLM BLNHC: head and token strides both equal head_size).
+        # Break ties by placing it innermost, matching the shape the
+        # contiguous branch re-derives from strides.
+        perm = sorted(
+            range(kv_caches.ndim),
+            key=lambda i: (strides[i], shape[i] != 1),
+            reverse=True,
+        )
         result = kv_caches.permute(perm)
         if result.is_contiguous():
             return result.view(_get_expected_shape(result.stride(), result.numel()))

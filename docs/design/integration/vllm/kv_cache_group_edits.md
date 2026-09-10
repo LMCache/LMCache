@@ -67,6 +67,17 @@ page space. The edit re-views the tensor as
 `view()`, valid because `k` kernel pages tile each logical page's bytes
 exactly (enforced; see Invariants).
 
+### 3. Sub-paged MLA
+
+The same re-paging for MLA-style caches, rank-3 `[NB, states, C]` (Kimi K3)
+or unified rank-4 `[NB, 1, states, C]` (GLM-5.3-Flash: sparse MLA at 64 rows
+and the kpool indexer at 32 rows under a 1152-token block). The target is
+`spec.num_states` (`block_size / tokens_per_state`) rather than `block_size`,
+so a declared slot compression survives the view and the compression path
+still derives it from `tokens_per_block / slots_per_block`. Each layer is
+matched against its own leaf spec: GLM's MLA and indexer layers share one
+`UniformTypeKVCacheSpecs` group with different `num_states`.
+
 ## Startup validation
 
 `validate_kv_cache_groups` (called at connector init and again at
@@ -88,11 +99,12 @@ docstring for the full check-when list.
 
 ## Non-edit: declared compression
 
-Groups whose spec *declares* slot compression — `MLAAttentionSpec.
-compress_ratio > 1` (DeepSeek-V4 slot packing, `storage_block_size <
-block_size`) or `TQFullAttentionSpec.tq_slot_size > 0` — genuinely store fewer
-physical slots than logical tokens. They must reach the compression path in
-`lmcache/v1/kv_layer_groups.py` unedited. (DeepSeek-V3.2's `fp8_ds_mla` cache
+Groups whose spec *declares* slot compression — `tokens_per_state > 1`
+(DeepSeek-V4 slot packing; `compress_ratio` on older vLLM) or
+`TQFullAttentionSpec.tq_slot_size > 0` — genuinely store fewer physical
+slots than logical tokens. They must reach the compression path in
+`lmcache/v1/kv_layer_groups.py` with their slot count intact; only the MLA
+rule (3) views them, and it preserves that count. (DeepSeek-V3.2's `fp8_ds_mla` cache
 packs *bytes per slot*, not slots per block: its specs keep
 `block_size == scheduler block size` and `compress_ratio == 1`, so it never
 needs an edit either.)

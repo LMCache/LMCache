@@ -199,9 +199,9 @@ class LMCacheMPRequestMetadata:
             group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
-                ``lmcache_tokens_per_chunk`` (hybrid models can mix different values).
+                ``lmcache_tokens_per_chunk`` (hybrid models can mix different
+                values); ``0`` marks a scratch group that is never stored.
         """
-        num_engine_groups = len(group_tokens_per_block)
         # NOTE: the invariant here is that `num_stored_tokens` should
         # always be a multiple of `lmcache_tokens_per_chunk`
         # TODO: This should be checked every time we update the num_stored_tokens
@@ -231,14 +231,15 @@ class LMCacheMPRequestMetadata:
         # gemma-4 sliding: one 32-token ID covers 2x the tokens of a
         # 16-token full-attention ID).
         allocated_lengths = tracker.num_allocated_blocks()
-        allocated_tokens = (
-            min(
-                allocated_lengths.get(engine_group_idx, 0)
-                * group_tokens_per_block[engine_group_idx]
-                for engine_group_idx in range(num_engine_groups)
-            )
-            if num_engine_groups > 0
-            else 0
+        allocated_tokens = min(
+            (
+                allocated_lengths.get(engine_group_idx, 0) * tokens_per_block
+                for engine_group_idx, tokens_per_block in enumerate(
+                    group_tokens_per_block
+                )
+                if tokens_per_block > 0
+            ),
+            default=0,
         )
         min_available_tokens = min(
             len(tracker.all_token_ids),
@@ -294,7 +295,8 @@ class LMCacheMPRequestMetadata:
             group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
-                ``lmcache_tokens_per_chunk`` (hybrid models can mix different values).
+                ``lmcache_tokens_per_chunk`` (hybrid models can mix different
+                values); ``0`` marks a scratch group that is never retrieved.
         """
         if not tracker.is_ready_for_retrieving():
             return None

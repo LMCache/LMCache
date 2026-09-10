@@ -467,3 +467,67 @@ def test_conversion_tokens_per_block_unscaled_without_dcp():
 
     assert [g.tokens_per_block for g in default] == [16, 16]
     assert [g.tokens_per_block for g in explicit] == [16, 16]
+
+
+@dataclass
+class CircularBufferSpec(AttentionSpec):
+    """Per-request scratch ring (QSA compressor state); opts out of caching."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+def test_conversion_excludes_scratch_group_layers():
+    """Scratch groups cover no tokens: their layers form no info."""
+    # First Party
+    from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
+    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+
+    ring = CircularBufferSpec(block_size=8)
+    assert get_tokens_per_block(ring, 1) == 0
+    assert get_tokens_per_block(MockKVCacheSpec(block_size=8), 1) == 8
+
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=1600)),
+                MockKVCacheGroup(["layer.1"], ring),
+                MockKVCacheGroup(["layer.2"], MambaSpec(block_size=1600)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1", "layer.2"]),
+    )
+
+    assert [g.engine_group_id for g in spec] == [0, 2]
+    assert get_engine_group_indices(spec, 3) == [0, EXCLUDED_ENGINE_GROUP, 2]
+
+
+def test_conversion_skips_format_discovery_for_scratch_layers():
+    """A scratch ring whose layout format discovery would reject must not block
+    registration: its layers skip discovery and stay excluded."""
+    # First Party
+    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+
+    # Interior padding between the two heads (dim-1 stride 700 != tight 560):
+    # a layout format discovery rejects outright.
+    num_blocks, capacity, head_size, block_step = 3, 4, 140, 1400
+    storage = torch.zeros(num_blocks * block_step, dtype=torch.bfloat16)
+    ring_cache = storage.as_strided(
+        (num_blocks, 2, capacity, head_size), (block_step, 700, head_size, 1)
+    )
+    kv_caches = _same_shape_caches(["layer.0"])
+    kv_caches["layer.1"] = ring_cache
+
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], CircularBufferSpec(block_size=capacity)),
+            ]
+        ),
+        kv_caches,
+    )
+
+    assert [g.engine_group_id for g in spec] == [0]
+    assert get_engine_group_indices(spec, 2) == [0, EXCLUDED_ENGINE_GROUP]
