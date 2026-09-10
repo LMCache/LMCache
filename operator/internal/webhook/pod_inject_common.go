@@ -74,9 +74,7 @@ const (
 	SkipReasonTargetContainerNotFound = "target-container-not-found"
 
 	// SkipReasonUnknownPDRole is stamped when the pod's pd-role annotation is
-	// set to a value other than "prefiller" or "decoder". Injecting a fallback
-	// config would silently ignore the pod's requested PD role, so the webhook
-	// declines to mutate instead.
+	// set to a value other than "prefiller" or "decoder".
 	SkipReasonUnknownPDRole = "unknown-pd-role"
 )
 
@@ -132,8 +130,7 @@ func (k injectionKeys) gate(
 // pdRole must be lmcachev1alpha1.PDRolePrefiller or PDRoleDecoder when the engine
 // is in PD mode, and empty for non-PD engines. It selects the appropriate
 // kv-transfer-config key from the connection ConfigMap; any other non-empty
-// value skips the injection with SkipReasonUnknownPDRole rather than silently
-// serving the non-PD fallback config to a pod that requested a PD role.
+// value skips the injection with SkipReasonUnknownPDRole.
 //
 // Parameters:
 //   - specDefault: the engine's default target container name (nil = first); the

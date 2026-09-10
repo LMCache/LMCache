@@ -188,10 +188,9 @@ func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev
 }
 
 // buildCBPDConnectionConfigMap produces the PD ConfigMap for a CacheBlendEngine.
-// Unlike the LMCacheEngine PD ConfigMap, the two roles are asymmetric: blending
-// is a prefill-time operation, so only the prefiller pairs the CacheBlend
-// connector with NIXL in a MultiConnector, while the decoder — which only
-// receives KV from the prefiller — uses a bare NixlConnector.
+// Unlike the LMCacheEngine PD ConfigMap, the roles are asymmetric: the
+// prefiller config is a MultiConnector, the decoder config a bare
+// NixlConnector (see DESIGN.md, "The injection webhook", for the rationale).
 //
 // The ConfigMap carries three data keys (same names as the LMCacheEngine PD
 // ConfigMap, selected by the webhook from the lmcache.ai/pd-role annotation):
