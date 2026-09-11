@@ -749,11 +749,11 @@ All connector-level options are passed through
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
    * - ``lmcache.mp.nonblocking_lookup_status``
-     - ``false``
-     - Poll lookup-status replies without blocking the scheduler. Enable only
-       when scheduler callbacks run frequently; long prefill steps can delay
-       observation of an already-ready reply. The default waits for each
-       status RPC reply in the current callback. LOOKUP acknowledgement polling
+     - ``true``
+     - Poll lookup-status replies without blocking the scheduler by default.
+       Set to ``false`` to wait for each status RPC reply in the current
+       callback, for example when long prefill steps delay observation of an
+       already-ready reply. LOOKUP acknowledgement polling
        remains asynchronous. Available with the current ``LMCacheMPConnector``.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``

@@ -102,7 +102,10 @@ def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
     context = zmq.Context()
 
     def create(
-        count: int = 1, timeout: float = 5, nonblocking: bool | str | None = True
+        count: int = 1,
+        timeout: float = 5,
+        nonblocking: bool | str | None = None,
+        extra_config: dict[str, Any] | None = None,
     ) -> tuple[LMCacheMPSchedulerAdapter, list[Client]]:
         """Return a scheduler and its per-server RPC stubs."""
         clients = [Client() for _ in range(count)]
@@ -119,7 +122,7 @@ def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
             16,
             ParallelStrategy(False, count, 0, count, 1, count),
             mq_timeout=timeout,
-            extra_config=None
+            extra_config=extra_config
             if nonblocking is None
             else {
                 "lmcache.mp.nonblocking_lookup_status": nonblocking,
@@ -153,9 +156,9 @@ def resolved(adapter: LMCacheMPSchedulerAdapter) -> int:
     raise AssertionError("completed status did not become observable")
 
 
-@pytest.mark.parametrize("setting", [None, False, "false"])
-def test_default_status_reply_is_consumed_in_the_same_callback(
-    make_adapter: AdapterFactory, setting: bool | str | None
+@pytest.mark.parametrize("setting", [False, "false"])
+def test_explicit_blocking_status_reply_is_consumed_in_the_same_callback(
+    make_adapter: AdapterFactory, setting: bool | str
 ) -> None:
     adapter, (client,) = make_adapter(nonblocking=setting)
     submit(adapter, [client])
@@ -197,11 +200,16 @@ def test_default_status_reply_is_consumed_in_the_same_callback(
         assert not thread.is_alive()
 
 
-@pytest.mark.parametrize("setting", [True, "true"])
-def test_nonblocking_status_requires_explicit_opt_in(
-    make_adapter: AdapterFactory, setting: bool | str
+@pytest.mark.parametrize(
+    ("setting", "extra_config"),
+    [(None, None), (None, {}), (True, None), ("true", None)],
+)
+def test_status_polling_is_nonblocking_by_default(
+    make_adapter: AdapterFactory,
+    setting: bool | str | None,
+    extra_config: dict[str, Any] | None,
 ) -> None:
-    adapter, (client,) = make_adapter(nonblocking=setting)
+    adapter, (client,) = make_adapter(nonblocking=setting, extra_config=extra_config)
     submit(adapter, [client])
     assert adapter.check_lookup_result("r") is None
     assert client.queries == ["r"]
@@ -213,7 +221,7 @@ def test_nonblocking_status_requires_explicit_opt_in(
 def test_blocking_status_none_defers_and_zero_is_cached(
     make_adapter: AdapterFactory,
 ) -> None:
-    adapter, (client,) = make_adapter(nonblocking=None)
+    adapter, (client,) = make_adapter(nonblocking=False)
     submit(adapter, [client])
     client.replies = deque([ready(None), ready(0)])
     assert adapter.check_lookup_result("r") is None
@@ -226,7 +234,7 @@ def test_blocking_status_none_defers_and_zero_is_cached(
 def test_blocking_mode_preserves_nonblocking_lookup_ack(
     make_adapter: AdapterFactory,
 ) -> None:
-    adapter, (client,) = make_adapter(nonblocking=None)
+    adapter, (client,) = make_adapter(nonblocking=False)
     adapter.maybe_submit_lookup_request("r", list(range(256)))
     assert adapter.check_lookup_result("r") is None
     assert not client.queries

@@ -76,8 +76,8 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
-    # Opt in only when lookup callbacks run frequently enough to observe replies.
-    nonblocking_lookup_status = False
+    # Poll status replies without blocking the scheduler by default.
+    nonblocking_lookup_status = True
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
     # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
@@ -882,10 +882,10 @@ class LMCacheMPSchedulerAdapter:
 
         First polls, without blocking, whether every server has acknowledged
         the LOOKUP sent by ``maybe_submit_lookup_request``; while any ack is
-        outstanding this returns None. Once all servers have acked, waits for
-        QUERY_PREFETCH_STATUS replies by default. Setting
-        ``lmcache.mp.nonblocking_lookup_status`` to True instead polls one
-        outstanding future per unresolved server without waiting. Returns the
+        outstanding this returns None. Once all servers have acked, polls one
+        outstanding QUERY_PREFETCH_STATUS future per unresolved server without
+        waiting by default. Setting ``lmcache.mp.nonblocking_lookup_status`` to
+        False instead waits for each reply in the current callback. Returns the
         matched token count when the prefetch is complete, or None if still
         in progress.
 
