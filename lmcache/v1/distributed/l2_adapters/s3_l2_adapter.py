@@ -24,6 +24,8 @@ import ctypes
 import threading
 import xml.etree.ElementTree as ET
 
+from . import s3_bucket_router as _bucket_router  # per-cache_salt bucket routing (PR feature)
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.api import MemoryLayoutDesc
@@ -327,6 +329,14 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     - max_capacity_gb (float): aggregate capacity used by
       ``get_usage()``; ``0`` disables aggregate eviction
       (``usage_fraction == -1.0``).
+    - s3_bucket_mode (str): ``"single"`` (default, upstream behavior — one
+      bucket) or ``"per_cache_salt"`` (route each ``cache_salt`` to its own
+      physical bucket for multi-tenant isolation on a shared box).
+    - s3_bucket_template (str): bucket-name format used in ``per_cache_salt``
+      mode; supports ``{salt}`` (sanitized cache_salt) and ``{base}`` (the
+      ``s3_endpoint``'s bucket name), e.g. ``"kv-cache-{salt}"`` or
+      ``"{base}-{salt}"``. Empty (default) → ``"{base}-{salt}"``. Unsalted KV
+      and ``"single"`` mode both use the ``s3_endpoint`` bucket unchanged.
     """
 
     def __init__(
@@ -340,6 +350,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
+        s3_bucket_mode: str = "single",
+        s3_bucket_template: str = "",
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -350,6 +362,25 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.max_capacity_gb = max_capacity_gb
+        # Multi-tenant per-cache_salt bucket isolation (opt-in; default
+        # reproduces exact single-bucket upstream behavior).
+        #   s3_bucket_mode: "single" (default) or "per_cache_salt".
+        #   s3_bucket_template: bucket-name format for per_cache_salt mode;
+        #     supports {salt} (sanitized cache_salt) and {base} (the
+        #     s3_endpoint's bucket name), e.g. "kv-cache-{salt}".
+        if s3_bucket_mode not in ("single", "per_cache_salt"):
+            raise ValueError("s3_bucket_mode must be 'single' or 'per_cache_salt'")
+        self.s3_bucket_mode = s3_bucket_mode
+        self.s3_bucket_template = s3_bucket_template
+        # Fail fast on a malformed template (unknown placeholder / bad spec) at
+        # config time rather than on the first PUT in per_cache_salt mode.
+        if s3_bucket_mode == "per_cache_salt":
+            try:
+                (s3_bucket_template or "{base}-{salt}").format(salt="x", base="x")
+            except (KeyError, ValueError, IndexError) as e:
+                raise ValueError(
+                    f"invalid s3_bucket_template {s3_bucket_template!r}: {e}"
+                ) from e
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -394,6 +425,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             aws_access_key_id=_opt_str("aws_access_key_id"),
             aws_secret_access_key=_opt_str("aws_secret_access_key"),
             max_capacity_gb=float(max_cap),
+            s3_bucket_mode=d.get("s3_bucket_mode", "single"),
+            s3_bucket_template=(_opt_str("s3_bucket_template") or ""),
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -452,6 +485,19 @@ class S3L2Adapter(L2AdapterInterface):
         self._endpoint = endpoint
         self._region = config.s3_region
         self._enable_s3express = config.s3_enable_s3express
+        # per-cache_salt bucket routing (multi-tenant isolation)
+        self._bucket_mode = config.s3_bucket_mode
+        self._bucket_template = config.s3_bucket_template or "{base}-{salt}"
+        self._base_bucket = endpoint.split(".", 1)[0]
+        self._host_suffix = endpoint.partition(".")[2]  # s3.<region>.amazonaws.com
+        self._seen_salts: set[str] = set()  # salts observed → buckets to list for eviction
+        self._ensured_buckets: set[str] = set()  # tenant buckets provisioned this process
+        self._bucket_creation_lock = threading.Lock()  # serialize provisioning
+        self._mgmt_s3 = None  # lazy boto3 client for bucket create/lifecycle (control plane)
+        # Auto-provision a tenant bucket on first use (+ TTL). Disable to require
+        # buckets to be pre-created by an onboarding hook.
+        self._auto_create_bucket = config.s3_bucket_mode == "per_cache_salt"
+        self._bucket_ttl_days = 30
 
         # awscrt client setup (mirrors s3_connector.py:103-153)
         event_loop_group = io.EventLoopGroup(config.s3_num_io_threads)
@@ -745,11 +791,45 @@ class S3L2Adapter(L2AdapterInterface):
                     "S3 connection disabled (circuit-broken); listing unavailable"
                 )
 
-        fut = asyncio.run_coroutine_threadsafe(
-            self._execute_list(prefix, max_keys, cursor),
-            self._loop,
-        )
-        entries, next_token = fut.result(timeout=30.0)
+        if self._bucket_mode != "per_cache_salt":
+            fut = asyncio.run_coroutine_threadsafe(
+                self._execute_list(prefix, max_keys, cursor),
+                self._loop,
+            )
+            entries, next_token = fut.result(timeout=30.0)
+        else:
+            # Per-tenant buckets: list the base + every observed tenant bucket,
+            # paginating across them with a composite cursor
+            # (bucket_index, in-bucket-token). Deletes the eviction controller
+            # issues route back to the right bucket via _make_request.
+            hosts = _bucket_router.bucket_hosts(
+                self._endpoint, self._seen_salts, self._bucket_mode, self._bucket_template
+            )
+            idx, token = _bucket_router.decode_cursor(cursor)
+            entries, next_token = [], None
+            while idx < len(hosts):
+                # Request only the remaining page budget so many small tenant
+                # buckets aggregate into one full page instead of forcing a
+                # round-trip per (mostly-empty) bucket.
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._execute_list(
+                        prefix, max_keys - len(entries), token, host=hosts[idx]
+                    ),
+                    self._loop,
+                )
+                e, t = fut.result(timeout=30.0)
+                entries.extend(e)
+                if t:  # this bucket has more pages → resume here next call
+                    next_token = _bucket_router.encode_cursor(idx, t)
+                    break
+                idx += 1  # bucket exhausted → continue into the next bucket
+                token = None
+                if len(entries) >= max_keys:  # page full → resume at next bucket
+                    next_token = (
+                        _bucket_router.encode_cursor(idx, None)
+                        if idx < len(hosts) else None
+                    )
+                    break
         page_entries = tuple(
             KeyEntry(key=k.to_encoded_object_key(), size_bytes=sz) for k, sz in entries
         )
@@ -828,11 +908,95 @@ class S3L2Adapter(L2AdapterInterface):
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
+    # ---- Multi-tenant per-cache_salt bucket routing (PR feature) ----------
+    # Pure routing logic lives in s3_bucket_router (dependency-free + unit-tested).
+    def _endpoint_for_key(self, key_str: str) -> str:
+        host = _bucket_router.resolve_bucket_host(
+            key_str,
+            base_endpoint=self._endpoint,
+            mode=self._bucket_mode,
+            template=self._bucket_template,
+        )
+        if host != self._endpoint:
+            # remember which tenant buckets we've written to, for per-bucket
+            # eviction/listing (mutated from request threads → hold the lock).
+            with self._lock:
+                self._seen_salts.add(
+                    _bucket_router.sanitize_salt(_bucket_router.salt_of_key(key_str))
+                )
+            if self._auto_create_bucket:
+                self._ensure_bucket(host)
+        return host
+
+    def _ensure_bucket(self, host: str) -> None:
+        """Provision a tenant bucket (idempotent, once per process) + a TTL
+        lifecycle, so per_cache_salt routing works without a separate
+        onboarding step. Control-plane only — uses boto3 (not the CRT data
+        client). Failures are logged, not raised: a missing bucket surfaces
+        later as a normal PUT error rather than killing the request path.
+
+        Thread-safe: the bucket is only recorded in ``_ensured_buckets`` after
+        a successful create+lifecycle, and provisioning is serialized by
+        ``_bucket_creation_lock`` so concurrent writers to a new tenant don't
+        race (a fast-path check avoids taking the lock once provisioned)."""
+        bucket = host.split(".", 1)[0]
+        with self._lock:
+            if bucket in self._ensured_buckets:
+                return
+        with self._bucket_creation_lock:
+            with self._lock:  # re-check: another thread may have finished while we waited
+                if bucket in self._ensured_buckets:
+                    return
+            try:
+                import boto3
+                from botocore.exceptions import ClientError
+
+                if self._mgmt_s3 is None:
+                    self._mgmt_s3 = boto3.client(
+                        "s3",
+                        region_name=self._region,
+                        aws_access_key_id=self._config.aws_access_key_id,
+                        aws_secret_access_key=self._config.aws_secret_access_key,
+                    )
+                try:
+                    # us-east-1 is the S3 default region and rejects an explicit
+                    # LocationConstraint; every other region requires it.
+                    if self._region == "us-east-1":
+                        self._mgmt_s3.create_bucket(Bucket=bucket)
+                    else:
+                        self._mgmt_s3.create_bucket(
+                            Bucket=bucket,
+                            CreateBucketConfiguration={
+                                "LocationConstraint": self._region
+                            },
+                        )
+                    logger.info("Auto-provisioned tenant KV bucket %s", bucket)
+                except ClientError as e:
+                    code = e.response.get("Error", {}).get("Code", "")
+                    if code not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                        raise
+                self._mgmt_s3.put_bucket_lifecycle_configuration(
+                    Bucket=bucket,
+                    LifecycleConfiguration={"Rules": [{
+                        "ID": "kv-cache-ttl", "Filter": {"Prefix": ""},
+                        "Status": "Enabled",
+                        "Expiration": {"Days": self._bucket_ttl_days},
+                    }]},
+                )
+                # Only mark provisioned after success, so a failed create isn't
+                # cached as "done" (a later write would then 404 forever).
+                with self._lock:
+                    self._ensured_buckets.add(bucket)
+            except Exception:
+                logger.warning(
+                    "Failed to auto-provision tenant bucket %s", bucket, exc_info=True
+                )
+
     def _make_request(
         self, method: str, key_str: str, *, body_stream=None, extra_headers=None
     ):
         headers = HttpHeaders()
-        headers.add("Host", self._endpoint)
+        headers.add("Host", self._endpoint_for_key(key_str))
         if extra_headers:
             for k, v in extra_headers:
                 headers.add(k, v)
@@ -956,8 +1120,9 @@ class S3L2Adapter(L2AdapterInterface):
         prefix: Optional[str],
         max_keys: int,
         continuation_token: Optional[str],
+        host: Optional[str] = None,
     ):
-        """Build a ListObjectsV2 request.
+        """Build a ListObjectsV2 request against ``host`` (default: the base bucket).
 
         Returns ``(s3_req, body_chunks, captured)``. The caller awaits
         ``s3_req.finished_future`` and assembles the XML from
@@ -976,7 +1141,7 @@ class S3L2Adapter(L2AdapterInterface):
         path = "/?" + urlencode(params, quote_via=url_quote)
 
         headers = HttpHeaders()
-        headers.add("Host", self._endpoint)
+        headers.add("Host", host or self._endpoint)
         req = HttpRequest("GET", path, headers)
 
         body_chunks: list[bytes] = []
@@ -1232,10 +1397,11 @@ class S3L2Adapter(L2AdapterInterface):
         prefix: Optional[str],
         max_keys: int,
         continuation_token: Optional[str],
+        host: Optional[str] = None,
     ) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
-        """Issue one ``ListObjectsV2`` call and parse the response."""
+        """Issue one ``ListObjectsV2`` call against ``host`` and parse the response."""
         s3_req, body_chunks, _captured = self._list_request(
-            prefix, max_keys, continuation_token
+            prefix, max_keys, continuation_token, host=host
         )
         await asyncio.wrap_future(s3_req.finished_future)
         return _parse_list_response_xml(b"".join(body_chunks))
