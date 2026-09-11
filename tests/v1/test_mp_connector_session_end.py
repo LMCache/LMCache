@@ -2,7 +2,7 @@
 """Tests for how the MP connector reports a finished request's end.
 
 The server's commit policy decides from ``SessionEndInfo`` whether the
-request's final sliding window is copied to L2. The connector has to read the
+request's final window is copied to L2. The connector has to read the
 finish reason and stop token while the vLLM ``Request`` is still around, and
 in lazy-offload mode hold them until ``END_SESSION`` is finally sent from
 ``update_connector_output``.

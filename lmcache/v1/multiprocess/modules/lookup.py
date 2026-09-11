@@ -624,9 +624,9 @@ class LookupModule:
         request_id: str,
         end_info: SessionEndInfo,
     ) -> None:
-        """Copy the finished request's sliding window to L2 if it earned it.
+        """Copy the finished request's live window to L2 if it earned it.
 
-        Whether the store path writes sliding-window chunks to L2 is the
+        Whether the store path writes windowed chunks to L2 is the
         store policy's decision; a window that only L1 holds is lost when L1
         evicts it, and the next turn of the same conversation pays a full
         prefill. A commit does not depend on that decision: when a request
@@ -639,9 +639,9 @@ class LookupModule:
         about the session's bookkeeping changes, and a commit that never
         happens costs timeliness, not correctness.
 
-        Which chunks: for every sliding-window object group with window ``w``,
-        the ``w`` chunks ending at each anchor. Full-attention groups are
-        skipped -- the store path already wrote them through. Anchors come
+        Which chunks: for every windowed object group with window ``w``, the
+        ``w`` chunks ending at each anchor. Whole-prefix groups are skipped --
+        the store path already wrote them through. Anchors come
         from :func:`resolve_anchor`, which is why this method, and not the
         caller, knows about ``w``: an anchor is an end offset and each group
         derives its own start from it.
@@ -685,7 +685,7 @@ class LookupModule:
         commit_keys: list[ObjectKey] = []
         for group_id, window in enumerate(attn_desc.num_chunks_in_sw):
             if window < 0:
-                continue  # full attention: already written through
+                continue  # whole prefix: already written through
             lo = max(0, anchor_chunk - window)
             commit_keys.extend(
                 ipc_key_to_object_keys(key, hashes[lo:anchor_chunk], [group_id])[0]
@@ -695,12 +695,12 @@ class LookupModule:
             return
 
         logger.debug(
-            "Committing %d sliding-window key(s) for request %s at anchor %d",
+            "Committing %d windowed key(s) for request %s at anchor %d",
             len(commit_keys),
             session.request_id,
             anchor,
         )
-        self._ctx.storage_manager.flush_l1_keys_to_l2(commit_keys)
+        self._ctx.storage_manager.copy_l1_keys_to_l2(commit_keys)
 
     def _chunk_major_object_keys(
         self,

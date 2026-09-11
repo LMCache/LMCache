@@ -755,7 +755,7 @@ class StorageManager:
         """
         self._l1_manager.touch_keys(keys)
 
-    def flush_l1_keys_to_l2(self, keys: list[ObjectKey]) -> None:
+    def copy_l1_keys_to_l2(self, keys: list[ObjectKey]) -> None:
         """Copy L1 keys to every active L2 adapter, keeping the L1 copy.
 
         Asynchronous and best effort: the store policy is not consulted,
@@ -765,7 +765,7 @@ class StorageManager:
         Args:
             keys (list[ObjectKey]): L1 object keys to copy. Empty is a no-op.
         """
-        self._store_controller.submit_flush(keys)
+        self._store_controller.submit_copy(keys)
 
     def delete_l1_keys(
         self, keys: list[ObjectKey], force: bool = False
@@ -816,7 +816,7 @@ class StorageManager:
     def object_group_classifier(self) -> ObjectGroupClassifier:
         """Registry of per-model object-group attention layouts.
 
-        Object-group-aware store policies (``full_attention_only``) consult it to
+        Object-group-aware store policies (``defer_windowed``) consult it to
         tell full-attention chunks from sliding-window ones. The serving layer
         registers a model's :class:`~lmcache.v1.distributed.api.AttnWindowDesc`
         here when it registers the model's KV cache, and drops it when the

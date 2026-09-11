@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit and integration tests for FullAttentionOnlyStorePolicy.
+Unit and integration tests for DeferWindowedStorePolicy.
 
-The policy keeps sliding-window object groups out of L2 and writes every other
+The policy keeps windowed object groups out of L2 and writes every other
 key through, exactly like DefaultStorePolicy. The StoreController tests at the
 bottom need a torch runtime and are gated the way the other L1-backed modules
 in this directory are.
@@ -25,8 +25,8 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2AdapterConfig,
 )
 from lmcache.v1.distributed.object_group_classifier import ObjectGroupClassifier
-from lmcache.v1.distributed.storage_controllers.full_attention_only_store_policy import (  # noqa: E501
-    FullAttentionOnlyStorePolicy,
+from lmcache.v1.distributed.storage_controllers.defer_windowed_store_policy import (
+    DeferWindowedStorePolicy,
 )
 from lmcache.v1.distributed.storage_controllers.store_controller import StoreController
 from lmcache.v1.distributed.storage_controllers.store_policy import (
@@ -42,11 +42,11 @@ requires_torch_runtime = pytest.mark.skipif(
 
 MODEL_NAME = "test_model"
 
-# Group 0 is full attention, group 1 is a 4-chunk sliding window.
+# Group 0 needs the whole prefix, group 1 is windowed with 4 chunks.
 HYBRID_DESC = AttnWindowDesc(num_chunks_in_sw=[-1, 4])
 
-FULL_ATTENTION_GROUP = 0
-SLIDING_WINDOW_GROUP = 1
+WHOLE_PREFIX_GROUP = 0
+WINDOWED_GROUP = 1
 
 
 # =============================================================================
@@ -56,7 +56,7 @@ SLIDING_WINDOW_GROUP = 1
 
 def make_object_key(
     chunk_id: int,
-    object_group_id: int = FULL_ATTENTION_GROUP,
+    object_group_id: int = WHOLE_PREFIX_GROUP,
     model_name: str = MODEL_NAME,
 ) -> ObjectKey:
     """Create a test ObjectKey in the given object group."""
@@ -74,11 +74,11 @@ def make_descriptor(index: int) -> AdapterDescriptor:
     return AdapterDescriptor(index=index, config=config)
 
 
-def make_hybrid_policy() -> FullAttentionOnlyStorePolicy:
+def make_hybrid_policy() -> DeferWindowedStorePolicy:
     """Create a policy whose classifier knows the hybrid test model."""
     classifier = ObjectGroupClassifier()
     classifier.register(MODEL_NAME, HYBRID_DESC)
-    return FullAttentionOnlyStorePolicy(classifier)
+    return DeferWindowedStorePolicy(classifier)
 
 
 # =============================================================================
@@ -86,23 +86,23 @@ def make_hybrid_policy() -> FullAttentionOnlyStorePolicy:
 # =============================================================================
 
 
-class TestFullAttentionOnlyStoreTargets:
-    """Test FullAttentionOnlyStorePolicy.select_store_targets."""
+class TestDeferWindowedStoreTargets:
+    """Test DeferWindowedStorePolicy.select_store_targets."""
 
-    def test_full_attention_keys_go_to_every_adapter(self):
+    def test_whole_prefix_keys_go_to_every_adapter(self):
         """Full-attention keys are written through like the default policy."""
         policy = make_hybrid_policy()
-        keys = [make_object_key(i, FULL_ATTENTION_GROUP) for i in range(3)]
+        keys = [make_object_key(i, WHOLE_PREFIX_GROUP) for i in range(3)]
         adapters = [make_descriptor(0), make_descriptor(1)]
 
         result = policy.select_store_targets(keys, adapters)
 
         assert result == {0: keys, 1: keys}
 
-    def test_sliding_window_keys_reach_no_adapter(self):
+    def test_windowed_keys_reach_no_adapter(self):
         """Sliding-window keys appear in no adapter's list."""
         policy = make_hybrid_policy()
-        keys = [make_object_key(i, SLIDING_WINDOW_GROUP) for i in range(3)]
+        keys = [make_object_key(i, WINDOWED_GROUP) for i in range(3)]
         adapters = [make_descriptor(0), make_descriptor(1)]
 
         result = policy.select_store_targets(keys, adapters)
@@ -113,7 +113,7 @@ class TestFullAttentionOnlyStoreTargets:
     def test_unknown_model_keys_go_to_every_adapter(self):
         """An unclassifiable key is stored, never silently dropped."""
         policy = make_hybrid_policy()
-        keys = [make_object_key(0, SLIDING_WINDOW_GROUP, model_name="other_model")]
+        keys = [make_object_key(0, WINDOWED_GROUP, model_name="other_model")]
         adapters = [make_descriptor(0)]
 
         result = policy.select_store_targets(keys, adapters)
@@ -133,8 +133,8 @@ class TestFullAttentionOnlyStoreTargets:
     def test_mixed_batch_keeps_key_order(self):
         """Full-attention keys keep their relative order in every list."""
         policy = make_hybrid_policy()
-        full_keys = [make_object_key(i, FULL_ATTENTION_GROUP) for i in range(4)]
-        window_keys = [make_object_key(i, SLIDING_WINDOW_GROUP) for i in range(4)]
+        full_keys = [make_object_key(i, WHOLE_PREFIX_GROUP) for i in range(4)]
+        window_keys = [make_object_key(i, WINDOWED_GROUP) for i in range(4)]
         # Interleave: fa0, sw0, fa1, sw1, ...
         keys = [k for pair in zip(full_keys, window_keys, strict=True) for k in pair]
         adapters = [make_descriptor(0), make_descriptor(1)]
@@ -147,14 +147,14 @@ class TestFullAttentionOnlyStoreTargets:
     def test_no_adapters_yields_empty_plan(self):
         """With no adapters attached the plan is empty."""
         policy = make_hybrid_policy()
-        keys = [make_object_key(0, FULL_ATTENTION_GROUP)]
+        keys = [make_object_key(0, WHOLE_PREFIX_GROUP)]
 
         assert policy.select_store_targets(keys, []) == {}
 
     def test_adapter_lists_are_independent_copies(self):
         """Each adapter gets its own list, safe for callers to mutate."""
         policy = make_hybrid_policy()
-        keys = [make_object_key(0, FULL_ATTENTION_GROUP)]
+        keys = [make_object_key(0, WHOLE_PREFIX_GROUP)]
         adapters = [make_descriptor(0), make_descriptor(1)]
 
         result = policy.select_store_targets(keys, adapters)
@@ -165,8 +165,8 @@ class TestFullAttentionOnlyStoreTargets:
     def test_classification_follows_late_registration(self):
         """A model registered after construction is classified from then on."""
         classifier = ObjectGroupClassifier()
-        policy = FullAttentionOnlyStorePolicy(classifier)
-        keys = [make_object_key(0, SLIDING_WINDOW_GROUP)]
+        policy = DeferWindowedStorePolicy(classifier)
+        keys = [make_object_key(0, WINDOWED_GROUP)]
         adapters = [make_descriptor(0)]
 
         assert policy.select_store_targets(keys, adapters) == {0: keys}
@@ -175,15 +175,15 @@ class TestFullAttentionOnlyStoreTargets:
         assert policy.select_store_targets(keys, adapters) == {0: []}
 
 
-class TestFullAttentionOnlyL1Deletions:
-    """Test FullAttentionOnlyStorePolicy.select_l1_deletions."""
+class TestDeferWindowedL1Deletions:
+    """Test DeferWindowedStorePolicy.select_l1_deletions."""
 
     def test_never_deletes_from_l1(self):
         """The clean copy stays in L1 for every class of key."""
         policy = make_hybrid_policy()
         keys = [
-            make_object_key(0, FULL_ATTENTION_GROUP),
-            make_object_key(1, SLIDING_WINDOW_GROUP),
+            make_object_key(0, WHOLE_PREFIX_GROUP),
+            make_object_key(1, WINDOWED_GROUP),
             make_object_key(2, model_name="other_model"),
         ]
 
@@ -196,7 +196,7 @@ class TestFullAttentionOnlyL1Deletions:
         assert policy.select_l1_deletions([]) == []
 
 
-class TestFullAttentionOnlyRegistration:
+class TestDeferWindowedRegistration:
     """Test the policy's registration in the store policy registry."""
 
     def test_created_by_name_with_injected_classifier(self):
@@ -204,10 +204,10 @@ class TestFullAttentionOnlyRegistration:
         classifier = ObjectGroupClassifier()
         classifier.register(MODEL_NAME, HYBRID_DESC)
 
-        policy = create_store_policy("full_attention_only", classifier)
+        policy = create_store_policy("defer_windowed", classifier)
 
-        assert isinstance(policy, FullAttentionOnlyStorePolicy)
-        keys = [make_object_key(0, SLIDING_WINDOW_GROUP)]
+        assert isinstance(policy, DeferWindowedStorePolicy)
+        keys = [make_object_key(0, WINDOWED_GROUP)]
         assert policy.select_store_targets(keys, [make_descriptor(0)]) == {0: []}
 
     def test_default_policy_ignores_the_classifier(self):
@@ -218,8 +218,8 @@ class TestFullAttentionOnlyRegistration:
         policy = create_store_policy("default", classifier)
 
         keys = [
-            make_object_key(0, FULL_ATTENTION_GROUP),
-            make_object_key(1, SLIDING_WINDOW_GROUP),
+            make_object_key(0, WHOLE_PREFIX_GROUP),
+            make_object_key(1, WINDOWED_GROUP),
         ]
         assert policy.select_store_targets(keys, [make_descriptor(0)]) == {0: keys}
 
@@ -280,11 +280,11 @@ def l1_manager():
 
 
 @requires_torch_runtime
-class TestFullAttentionOnlyStoreController:
-    """Test full_attention_only end to end through the StoreController."""
+class TestDeferWindowedStoreController:
+    """Test defer_windowed end to end through the StoreController."""
 
-    def test_only_full_attention_reaches_l2_both_stay_in_l1(self, l1_manager):
-        """A mixed L1 write stores only the full-attention key to L2."""
+    def test_only_whole_prefix_reaches_l2_both_stay_in_l1(self, l1_manager):
+        """A mixed L1 write stores only the whole-prefix key to L2."""
         classifier = ObjectGroupClassifier()
         classifier.register(MODEL_NAME, HYBRID_DESC)
         adapter = MockL2Adapter(
@@ -294,12 +294,12 @@ class TestFullAttentionOnlyStoreController:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=create_store_policy("full_attention_only", classifier),
+            policy=create_store_policy("defer_windowed", classifier),
         )
         ctrl.start()
 
-        full_key = make_object_key(0, FULL_ATTENTION_GROUP)
-        window_key = make_object_key(1, SLIDING_WINDOW_GROUP)
+        full_key = make_object_key(0, WHOLE_PREFIX_GROUP)
+        window_key = make_object_key(1, WINDOWED_GROUP)
         keys = [full_key, window_key]
 
         layout = make_layout()
@@ -314,16 +314,16 @@ class TestFullAttentionOnlyStoreController:
         l1_manager.finish_write(written)
 
         assert wait_for_condition(lambda: adapter.debug_has_key(full_key)), (
-            "The full-attention key should be stored to L2"
+            "The whole-prefix key should be stored to L2"
         )
         # Give the controller a chance to do the wrong thing before asserting.
         time.sleep(0.5)
         assert not adapter.debug_has_key(window_key), (
-            "The sliding-window key must not be stored to L2"
+            "The windowed key must not be stored to L2"
         )
         assert adapter.debug_get_stored_object_count() == 1
 
-        # Both keys keep their L1 copy: full_attention_only never deletes from L1.
+        # Both keys keep their L1 copy: defer_windowed never deletes from L1.
         assert l1_manager.get_object_state(full_key) is not None
         assert l1_manager.get_object_state(window_key) is not None
 

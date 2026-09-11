@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Commit policy: does a finished request's sliding window earn an L2 copy?
+Commit policy: does a finished request's live window earn an L2 copy?
 
-Whether a sliding-window chunk reaches L2 on the store path is the store
+Whether a windowed chunk reaches L2 on the store path is the store
 policy's decision. A window that only L1 holds is lost the moment L1 evicts
 it, and the next turn of the same conversation then pays a full prefill.
 
@@ -21,11 +21,12 @@ Two decisions, deliberately split:
 * **where** the window ends is per deployment, not per request: it follows
   from whether the serving frontend echoes the previous turn's reasoning back
   in the next prompt, which is a property of the chat template and the client,
-  not of one message. It is server configuration (``--commit-anchor``), and
-  :func:`resolve_anchor` turns it into a chunk-aligned token offset.
+  not of one message. It is server configuration
+  (``--window-commit-anchor``), and :func:`resolve_anchor` turns it into a
+  chunk-aligned token offset.
 
 Nothing here knows about chunk sizes, object groups, or window widths: an
-anchor is an *end* offset, and the caller derives each sliding-window group's
+anchor is an *end* offset, and the caller derives each windowed group's
 ``w`` trailing chunks from it. That is why the policy returns a bool rather
 than a range -- a range that under-covers a group's window would be written
 and never read, and this API cannot express one.
@@ -107,10 +108,10 @@ class CommitContext:
 
     attn_desc: AttnWindowDesc
     """The model's per-object-group attention windows. A policy that wants to
-    price a commit can read the sliding-window widths from here."""
+    price a commit can read the window widths from here."""
 
     anchor: CommitAnchor
-    """Where the deployment puts a committed window (``--commit-anchor``).
+    """Where the deployment puts a committed window (``--window-commit-anchor``).
 
     Decides what a policy has to look at: a window at ``generation_end`` is
     worth committing only if the generation ended where a follow-up resumes,
@@ -160,7 +161,7 @@ class CommitPolicyConfig:
     Args:
         policy: Registered commit policy name.
         anchor: Where the committed window ends.
-        boundary_token_ids: Token ids that count as a chat turn boundary for
+        turn_boundary_token_ids: Token ids that count as a chat turn boundary for
             this deployment. Empty accepts any token a request stopped on.
             The set also chooses *which* boundaries commit on a model that
             ends a tool call and a final answer on different tokens: gpt-oss
@@ -169,13 +170,13 @@ class CommitPolicyConfig:
             ``{200012}`` only tool calls, and empty commits both.
     """
 
-    policy: str = "stop_token"
+    policy: str = "turn_end"
     anchor: CommitAnchor = CommitAnchor.GENERATION_END
-    boundary_token_ids: frozenset[int] = frozenset()
+    turn_boundary_token_ids: frozenset[int] = frozenset()
 
 
 DEFAULT_COMMIT_CONFIG = CommitPolicyConfig()
-"""The built-in default: ``stop_token`` with any stop token accepted."""
+"""The built-in default: ``turn_end`` with any stop token accepted."""
 
 
 def register_commit_policy(name: str, policy_cls: type[CommitPolicy]) -> None:
@@ -289,7 +290,7 @@ def resolve_anchor(ctx: CommitContext, chunk_size: int) -> int:
 # -----------------------------------------------------------------------------
 
 
-class StopTokenCommitPolicy(CommitPolicy):
+class TurnEndCommitPolicy(CommitPolicy):
     """Commit when the window's position is one a follow-up will resume at.
 
     What that takes depends on where the deployment anchors the window.
@@ -318,13 +319,13 @@ class StopTokenCommitPolicy(CommitPolicy):
     tool-call window cannot wait in L1 any more than an answer's can.
 
     Args:
-        boundary_token_ids: Ids that count as a turn boundary. Empty accepts
+        turn_boundary_token_ids: Ids that count as a turn boundary. Empty accepts
             any stop token, which is right for a model whose only stop token
             is its turn marker.
     """
 
-    def __init__(self, boundary_token_ids: frozenset[int] = frozenset()) -> None:
-        self._boundary_token_ids = boundary_token_ids
+    def __init__(self, turn_boundary_token_ids: frozenset[int] = frozenset()) -> None:
+        self._turn_boundary_token_ids = turn_boundary_token_ids
 
     def should_commit(self, ctx: CommitContext) -> bool:
         """Return whether the request stopped on a turn boundary.
@@ -345,12 +346,12 @@ class StopTokenCommitPolicy(CommitPolicy):
             return reason not in ("", "abort", "error")
         if reason != "stop":
             return False
-        if not self._boundary_token_ids:
+        if not self._turn_boundary_token_ids:
             return True
-        return ctx.end_info.stop_token_id in self._boundary_token_ids
+        return ctx.end_info.stop_token_id in self._turn_boundary_token_ids
 
 
 register_commit_policy_factory(
-    "stop_token",
-    lambda cfg: StopTokenCommitPolicy(cfg.boundary_token_ids),
+    "turn_end",
+    lambda cfg: TurnEndCommitPolicy(cfg.turn_boundary_token_ids),
 )
