@@ -35,7 +35,18 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
     _send_unregister_kv_cache,
 )
+from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.rpc_messages import (
+    LookupRequest,
+    LookupResponse,
+    QueryPrefetchStatusRequest,
+    QueryPrefetchStatusResponse,
+    UnregisterKvCacheEngineDrivenContextRequest,
+    UnregisterKvCacheEngineDrivenContextResponse,
+    UnregisterKvCacheRequest,
+    UnregisterKvCacheResponse,
+)
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -593,10 +604,9 @@ class _LookupRouter:
     """Fake ROUTER implementing the LOOKUP / QUERY_PREFETCH_STATUS
     subset of the MP server protocol.
 
-    * ``LOOKUP`` replies with **no payload** (void response) — the
-      real server-side handler returns ``None``. Regression for a
-      bug where the client treated the empty frame list as a
-      timeout and printed ``LOOKUP timeout``.
+    * ``LOOKUP`` replies with an empty ``LookupResponse`` message,
+      which the client unwraps to ``None``. Regression for a bug where
+      the caller treated that successful void result as a timeout.
     * ``QUERY_PREFETCH_STATUS`` accepts a ``request_id`` (str) and
       returns ``None`` on the first N polls, then a fixed chunk
       count — exercising both the in-progress and done branches.
@@ -634,16 +644,21 @@ class _LookupRouter:
             identity, uid_f, type_f, *payload = frames
             req_type = msgspec.msgpack.decode(type_f, type=RequestType)
             if req_type == RequestType.LOOKUP:
-                # Void reply: no payload frame.
-                self._router.send_multipart([identity, uid_f, type_f])
+                msgspec_decode(payload[0], cls=LookupRequest)
+                body = msgspec_encode(LookupResponse(), cls=LookupResponse)
+                self._router.send_multipart([identity, uid_f, type_f, body])
             elif req_type == RequestType.QUERY_PREFETCH_STATUS:
-                req_id = msgspec.msgpack.decode(payload[0], type=str)
-                self.last_query_request_id = req_id
+                request = msgspec_decode(payload[0], cls=QueryPrefetchStatusRequest)
+                self.last_query_request_id = request.request_id
                 if self._in_progress_left > 0:
                     self._in_progress_left -= 1
-                    body = msgspec.msgpack.encode(None)
+                    chunk_count = None
                 else:
-                    body = msgspec.msgpack.encode(self._hit_chunks)
+                    chunk_count = self._hit_chunks
+                body = msgspec_encode(
+                    QueryPrefetchStatusResponse(chunk_count=chunk_count),
+                    cls=QueryPrefetchStatusResponse,
+                )
                 self._router.send_multipart([identity, uid_f, type_f, body])
 
 
@@ -652,11 +667,11 @@ class TestLookupProtocol:
         ctx = zmq.Context.instance()
         return RequestClientFactory.create(endpoint, context=ctx)
 
-    def test_send_lookup_void_reply_is_success(
+    def test_send_lookup_empty_response_is_success(
         self,
         router_endpoint: str,
     ) -> None:
-        """LOOKUP handler returns None (void) — must not be timeout."""
+        """An empty LOOKUP response unwraps to None without becoming a timeout."""
         router = _LookupRouter(router_endpoint)
         router.start()
         try:
@@ -699,11 +714,11 @@ class TestLookupProtocol:
 
 
 class _UnregisterRouter:
-    """Fake ROUTER that records UNREGISTER requests and replies void.
+    """Fake ROUTER that records UNREGISTER requests and replies successfully.
 
     Both ``UNREGISTER_KV_CACHE`` and
     ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` carry a single
-    ``instance_id`` payload and return ``None`` (void). This fake
+    ``instance_id`` field and return an empty response message. This fake
     records the request type and decoded ``instance_id`` of the last
     UNREGISTER it saw so the test can assert the bench sends the
     correct protocol for each transfer mode.
@@ -738,9 +753,22 @@ class _UnregisterRouter:
                 RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
             ):
                 self.last_request_type = req_type
-                self.last_instance_id = msgspec.msgpack.decode(payload[0], type=int)
-                # Void reply: no payload frame.
-                self._router.send_multipart([identity, uid_f, type_f])
+                if req_type == RequestType.UNREGISTER_KV_CACHE:
+                    request = msgspec_decode(payload[0], cls=UnregisterKvCacheRequest)
+                    self.last_instance_id = request.instance_id
+                    body = msgspec_encode(
+                        UnregisterKvCacheResponse(), cls=UnregisterKvCacheResponse
+                    )
+                else:
+                    engine_request = msgspec_decode(
+                        payload[0], cls=UnregisterKvCacheEngineDrivenContextRequest
+                    )
+                    self.last_instance_id = engine_request.instance_id
+                    body = msgspec_encode(
+                        UnregisterKvCacheEngineDrivenContextResponse(),
+                        cls=UnregisterKvCacheEngineDrivenContextResponse,
+                    )
+                self._router.send_multipart([identity, uid_f, type_f, body])
 
 
 class TestUnregisterKVCache:
