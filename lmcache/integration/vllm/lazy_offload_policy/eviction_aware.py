@@ -408,6 +408,13 @@ class EvictionAwareStoreQueue(OffloadPolicy):
                 # emits its due front segment, which always holds the op that
                 # made it overdue. The ops behind it keep their own admission
                 # clocks and come due on their own deadlines.
+                # TODO: free-queue pressure is the only retirement mechanism
+                # modelled here. A sliding-window layer retires a block on a
+                # token schedule instead, which is predictable but invisible
+                # in the free queue, so such an op waits for its deadline
+                # rather than being released when its data is about to go.
+                # Size the release per attention type: one due-predictor per
+                # mechanism, emit up to the last index any of them marks due.
                 candidates.append((min(in_window), order, request_id))
             elif overdue:
                 candidates.append((_OVERDUE_RANK, order, request_id))
@@ -551,6 +558,12 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             False once any covered block was recycled, which means the
             operation's data is gone.
         """
+        # TODO: an operation's blocks span every KV cache group, so on a
+        # hybrid model the shortest-lived group decides for all layers: one
+        # recycled sliding-window block drops the operation and the request's
+        # whole tail, including full-attention layers whose data is still
+        # live. Splitting the check needs per-group token ranges in
+        # LoadStoreOp.
         return all(
             self._pool.blocks[block_id].block_hash == snapshot
             for block_id, snapshot in op.block_hashes.items()
