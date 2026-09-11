@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Registration primitives for protobuf/Python message codecs."""
+"""Registration primitives for protobuf/Python message adapters."""
 
 # Standard
 from dataclasses import dataclass
@@ -16,12 +16,12 @@ MessageReader = Callable[[ProtoMessageT], PythonValueT]
 
 
 @dataclass(frozen=True)
-class RegisteredMessageCodec(Generic[ProtoMessageT, PythonValueT]):
+class RegisteredMessageAdapter(Generic[ProtoMessageT, PythonValueT]):
     """Convert one Python type to and from one protobuf message type.
 
     Args:
         protobuf_type: Fully-qualified protobuf message name.
-        python_type: Python type handled by this codec.
+        python_type: Python type handled by this adapter.
         writer: Function that writes a Python value into a protobuf message.
         reader: Function that reads a Python value from a protobuf message.
         include_subclasses: Whether subclasses of ``python_type`` also match.
@@ -34,7 +34,7 @@ class RegisteredMessageCodec(Generic[ProtoMessageT, PythonValueT]):
     include_subclasses: bool = False
 
     def matches(self, descriptor: Any, python_type: Any) -> bool:
-        """Return whether this codec handles a descriptor/type pair.
+        """Return whether this adapter handles a descriptor/type pair.
 
         Args:
             descriptor: Protobuf message descriptor to inspect.
@@ -54,25 +54,27 @@ class RegisteredMessageCodec(Generic[ProtoMessageT, PythonValueT]):
         )
 
 
-class MessageCodecRegistry:
-    """Immutable collection of explicitly registered message codecs."""
+class MessageAdapterRegistry:
+    """Immutable collection of explicitly registered message adapters."""
 
-    def __init__(self, codecs: tuple[RegisteredMessageCodec[Any, Any], ...]) -> None:
+    def __init__(
+        self, adapters: tuple[RegisteredMessageAdapter[Any, Any], ...]
+    ) -> None:
         keys: set[tuple[str, type[Any]]] = set()
-        for codec in codecs:
-            key = (codec.protobuf_type, codec.python_type)
+        for adapter in adapters:
+            key = (adapter.protobuf_type, adapter.python_type)
             if key in keys:
                 raise ValueError(
-                    "Duplicate protobuf/Python message codec registration: "
-                    f"{codec.protobuf_type} and {codec.python_type!r}"
+                    "Duplicate protobuf/Python message adapter registration: "
+                    f"{adapter.protobuf_type} and {adapter.python_type!r}"
                 )
             keys.add(key)
-        self._codecs = codecs
+        self._adapters = adapters
 
     def find(
         self, descriptor: Any, python_type: Any
-    ) -> RegisteredMessageCodec[Any, Any] | None:
-        """Return the unique codec for a descriptor/type pair.
+    ) -> RegisteredMessageAdapter[Any, Any] | None:
+        """Return the unique adapter for a descriptor/type pair.
 
         Args:
             descriptor: Protobuf message descriptor to inspect.
@@ -86,11 +88,13 @@ class MessageCodecRegistry:
             TypeError: If multiple registrations match the same pair.
         """
         matches = tuple(
-            codec for codec in self._codecs if codec.matches(descriptor, python_type)
+            adapter
+            for adapter in self._adapters
+            if adapter.matches(descriptor, python_type)
         )
         if len(matches) > 1:
             raise TypeError(
-                "Ambiguous protobuf/Python message codec registration for "
+                "Ambiguous protobuf/Python message adapter registration for "
                 f"{descriptor.full_name} and {python_type!r}"
             )
         return matches[0] if matches else None

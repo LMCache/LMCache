@@ -32,16 +32,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload: None
         # Returns: None
         "CLEAR": ProtocolDefinition(
-            payload_classes=[],
-            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Get chunk size configuration
         # Payload: None
         # Returns: int - The chunk size value
         "GET_CHUNK_SIZE": ProtocolDefinition(
-            payload_classes=[],
-            response_class=int,
             handler_type=HandlerType.SYNC,
         ),
         # Ping
@@ -52,8 +48,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # slow SYNC REGISTER_KV_CACHE would stall it) and lets pool saturation
         # surface as worker degraded mode.
         "PING": ProtocolDefinition(
-            payload_classes=[int | None],
-            response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),
         # Get the enabled experimental intermediate tensor transfer types
@@ -61,8 +55,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: list[str]: the experimental intermediate tensor transfer
         # types the server was launched with (empty when none are enabled)
         "GET_EXPERIMENTAL": ProtocolDefinition(
-            payload_classes=[],
-            response_class=list[str],
             handler_type=HandlerType.SYNC,
         ),
     }

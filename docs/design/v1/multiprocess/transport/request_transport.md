@@ -19,18 +19,21 @@ MP integration / SDK / benchmark
          RequestClient     -- named request methods
           /       \
          v         v
-   ZMQ facade   gRPC client
-         |
-         v
- MessageQueueClient
+   ZMQ client   gRPC client
+          \       /
+           v     v
+     Python request/response messages
+               |
+               v
+       business request handlers
 ```
 
 ## Design
 
 `RequestClient` defines named methods such as `lookup()`, `store()`, and
-`retrieve()`. The ZMQ facade translates each method back to the existing
-`RequestType`, payload order, and response type, so this refactor does not
-change the ZMQ wire protocol.
+`retrieve()`. Each call is represented internally by one Python request class
+and one Python response class from `rpc_messages.py`. These classes are the
+transport-neutral RPC contract consumed by business request handlers.
 
 `RequestClientFactory` normalizes an endpoint and selects an implementation by
 scheme:
@@ -47,32 +50,30 @@ implementation through `--transport zmq` or `--transport grpc`.
 This abstraction covers MP request RPCs only. It does not select the mechanism
 used to move KV data between an engine worker and the server.
 
-### gRPC codecs
+### Transport boundaries
 
-gRPC keeps protobuf as its wire format. During initialization, each generated
-gRPC method is mapped to a transport-neutral `RequestType`. Its method codec
-combines the protobuf descriptor, which defines the wire schema, with the
-payload and response types exposed by `ProtocolDefinition`, which define the
-corresponding Python contract. Both the client and server use the resulting
-read-only registry.
+ZMQ serializes one complete Python request message into one request frame and
+one complete Python response message into one response frame. It no longer
+serializes an RPC as a positional list of independently typed payload frames.
 
-Most dataclasses and containers use the structural codec. Types that need a
-non-structural representation register an explicit message codec in
-`grpc_impl/codecs/`, organized by protobuf message domain; types shared across
-domains register in the common codec module. Missing protocol definitions and
-duplicate registrations fail while the method codec registry is initialized.
+gRPC keeps protobuf as its wire format. Each generated method binding maps its
+protobuf input and output classes to the same Python request and response
+classes used by ZMQ. Protobuf conversion therefore exists only at the gRPC
+client/server boundary. Small leaf adapters remain for values whose native
+Python representation is intentionally different from protobuf, such as
+`DeviceIPCWrapper` and `torch.Size`.
 
 Server-side binding and scheduling are separate from serialization. Business
 module methods use the transport-neutral `@request_handler` annotation to
 declare their `RequestType`, `HandlerType`, and client-affinity requirement.
-Both ZMQ and gRPC discover this metadata. When gRPC registers the modules, it
-also validates each handler's parameter and return annotations against the
-Python contract used to compile that method's codec.
+Both ZMQ and gRPC discover this metadata. A handler receives exactly one Python
+request message and returns exactly one Python response message. Server startup
+validates those annotations against the shared RPC message registry.
 
 Adding an RPC therefore requires a protobuf method, a matching `RequestType`
-and `ProtocolDefinition`, and an annotated business-module handler. A custom
-message codec is needed only when the structural codec cannot represent the
-Python type directly.
+and `ProtocolDefinition`, a Python request/response pair in `rpc_messages.py`,
+and an annotated business-module handler. No per-RPC serialization definition
+is required by either transport.
 
 ## Extending the transport
 

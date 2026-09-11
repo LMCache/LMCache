@@ -27,8 +27,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload: None
         # Returns: str - A confirmation message
         "NOOP": ProtocolDefinition(
-            payload_classes=[],
-            response_class=str,
             handler_type=HandlerType.SYNC,
         ),
     }

@@ -5,7 +5,6 @@ Base types and classes for the multiprocess protocol system.
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Optional
 import enum
 
 
@@ -103,11 +102,7 @@ class ProtocolDefinition:
     Defines the structure and behavior of a protocol request.
 
     Attributes:
-        payload_classes: List of expected payload types in order
-        response_class: Expected response type, or None if no response
         handler_type: How the handler should be executed (SYNC/BLOCKING/NON_BLOCKING)
     """
 
-    payload_classes: list[Any]
-    response_class: Optional[Any]
     handler_type: HandlerType

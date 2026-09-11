@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Custom protobuf codecs owned by the P2P gRPC service."""
+"""Custom protobuf adapters owned by the P2P gRPC service."""
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs.base import (
-    RegisteredMessageCodec,
+from lmcache.v1.multiprocess.transport.grpc_impl.message_adapters.base import (
+    RegisteredMessageAdapter,
 )
 
 
@@ -21,16 +21,16 @@ def _read_tensor_shape(message: p2p_service_pb2.TensorShape) -> torch.Size:
     return torch.Size(message.dims)
 
 
-def get_message_codecs() -> tuple[
-    RegisteredMessageCodec[p2p_service_pb2.TensorShape, torch.Size], ...
+def get_message_adapters() -> tuple[
+    RegisteredMessageAdapter[p2p_service_pb2.TensorShape, torch.Size], ...
 ]:
-    """Return custom codecs used by the P2P protobuf service.
+    """Return custom adapters used by the P2P protobuf service.
 
     Returns:
         Explicit registrations for P2P non-structural message types.
     """
     return (
-        RegisteredMessageCodec(
+        RegisteredMessageAdapter(
             protobuf_type="lmcache.mp.TensorShape",
             python_type=torch.Size,
             writer=_write_tensor_shape,

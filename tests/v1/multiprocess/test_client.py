@@ -7,7 +7,12 @@ import ast
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.rpc_messages import (
+    CbUnregisterRopeRequest,
+    LookupRequest,
+    RpcRequest,
+)
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -23,17 +28,16 @@ class _RecordingMessageQueueClient(MessageQueueClient):
     """Record requests without opening a ZMQ socket."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[RequestType, list[Any], Any | None]] = []
+        self.calls: list[tuple[RequestType, RpcRequest]] = []
         self.closed = False
 
     def submit_request(
         self,
         request_type: RequestType,
-        request_payloads: list[Any],
-        response_cls: Any | None = None,
+        request_message: RpcRequest,
     ) -> MessagingFuture[Any]:
         future: MessagingFuture[Any] = MessagingFuture()
-        self.calls.append((request_type, request_payloads, response_cls))
+        self.calls.append((request_type, request_message))
         future.set_result(request_type)
         return future
 
@@ -142,8 +146,7 @@ def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
     assert transport.calls == [
         (
             RequestType.LOOKUP,
-            ["key", 4],
-            get_response_class(RequestType.LOOKUP),
+            LookupRequest(key="key", tp_size=4),  # type: ignore[arg-type]
         )
     ]
 
@@ -157,8 +160,7 @@ def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
     assert transport.calls == [
         (
             RequestType.CB_UNREGISTER_ROPE,
-            [7],
-            get_response_class(RequestType.CB_UNREGISTER_ROPE),
+            CbUnregisterRopeRequest(instance_id=7),
         )
     ]
 

@@ -2,7 +2,7 @@
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
+from typing import Any, Callable, Generic, TypeVar, get_type_hints
 import enum
 import inspect
 import itertools
@@ -15,10 +15,8 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
-    DeviceIPCWrapper,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -28,8 +26,15 @@ from lmcache.v1.multiprocess.futures import (
 from lmcache.v1.multiprocess.protocol import (
     HandlerType,
     RequestType,
-    get_payload_classes,
-    get_response_class,
+    get_request_message_class,
+    get_response_message_class,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    RpcRequest,
+    RpcResponse,
+    unwrap_request_message,
+    unwrap_response_message,
+    wrap_response_message,
 )
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 
@@ -50,63 +55,22 @@ def decode_request_uid(b_uid: bytes) -> RequestUID:
     return msgspec.msgpack.decode(b_uid, type=RequestUID)
 
 
-def unwrap_request_payloads(
-    b_payloads: list[bytes], payload_clss: list[Any]
-) -> list[Any]:
-    if len(b_payloads) != len(payload_clss):
-        raise ValueError("Payload count does not match expected count")
-
-    decoded_payloads = [
-        msgspec_decode(payload, cls=cls)
-        for payload, cls in zip(b_payloads, payload_clss, strict=False)
-    ]
-    return decoded_payloads
-
-
-_SPECIAL_ENCODER_DECODERS = {
-    DeviceIPCWrapper: (
-        get_customized_encoder(DeviceIPCWrapper),
-        get_customized_decoder(DeviceIPCWrapper),
-    ),
-    list[DeviceIPCWrapper]: (
-        get_customized_encoder(list[DeviceIPCWrapper]),
-        get_customized_decoder(list[DeviceIPCWrapper]),
-    ),
-    MemoryLayoutDesc: (
-        get_customized_encoder(MemoryLayoutDesc),
-        get_customized_decoder(MemoryLayoutDesc),
-    ),
-    dict[int, MemoryLayoutDesc]: (
-        get_customized_encoder(dict[int, MemoryLayoutDesc]),
-        get_customized_decoder(dict[int, MemoryLayoutDesc]),
-    ),
-}
-
-
 def msgspec_encode(obj: Any, cls: Any) -> bytes:
-    # Handle special cases
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
-        return encoder.encode(obj)
     # Defensive guard: coerce obj to the declared cls so that
     # e.g. a bool passed as int (or vice-versa) is encoded in the
     # wire format that msgspec_decode expects for that cls.
     if cls in (bool, int):
         obj = cls(obj)
-    return msgspec.msgpack.encode(obj)
+    return get_customized_encoder(cls).encode(obj)
 
 
 def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
-    # Handle special cases
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
-        return decoder.decode(b_obj)
     # Defensive guard: msgspec strict-validates wire format
     # (bool ≠ int in msgpack), but runtime type may not match
     # declared cls. Decode untyped, then coerce.
     if cls in (bool, int):
         return cls(msgspec.msgpack.decode(b_obj))
-    return msgspec.msgpack.decode(b_obj, type=cls)
+    return get_customized_decoder(cls).decode(b_obj)
 
 
 # Shared polling loop for MessageQueueClient instances
@@ -276,7 +240,7 @@ class MessageQueueClient:
         request_uid: RequestUID
         future: MessagingFuture[Any]
         request_type: RequestType
-        request_payloads: list[Any]
+        request_message: RpcRequest
 
     def __init__(self, server_url: str, context: zmq.Context):
         # Socket
@@ -304,35 +268,25 @@ class MessageQueueClient:
                     b_request_type = msgspec_encode(
                         wrapped_request.request_type, cls=RequestType
                     )
-                    payload_classes = get_payload_classes(wrapped_request.request_type)
-                    if len(payload_classes) != len(wrapped_request.request_payloads):
-                        expected_classes = [cls.__name__ for cls in payload_classes]
-                        actual_classes = [
-                            type(payload).__name__
-                            for payload in wrapped_request.request_payloads
-                        ]
-                        raise ValueError(
-                            f"Payload count mismatch for request "
-                            f"{wrapped_request.request_type}: "
-                            f"expected {len(payload_classes)} payloads "
-                            f"{expected_classes}, "
-                            f"got {len(wrapped_request.request_payloads)} payloads "
-                            f"{actual_classes}. "
-                            f"This is likely caused by a version mismatch between "
-                            f"the lmcache client and lmcache server."
+                    request_class = get_request_message_class(
+                        wrapped_request.request_type
+                    )
+                    if not isinstance(
+                        wrapped_request.request_message,
+                        request_class,
+                    ):
+                        raise TypeError(
+                            f"{wrapped_request.request_type.name} requires "
+                            f"{request_class.__name__}, got "
+                            f"{type(wrapped_request.request_message).__name__}"
                         )
-
-                    b_payloads = [
-                        msgspec_encode(payload, cls=cls)
-                        for payload, cls in zip(
-                            wrapped_request.request_payloads,
-                            payload_classes,
-                            strict=False,
-                        )
-                    ]
+                    b_request = msgspec_encode(
+                        wrapped_request.request_message,
+                        cls=request_class,
+                    )
                     self.pending_futures[request_uid] = wrapped_request.future
                     self.socket.send_multipart(
-                        [b_request_uid, b_request_type] + b_payloads
+                        [b_request_uid, b_request_type, b_request]
                     )
                 except Exception as exc:
                     self.pending_futures.pop(request_uid, None)
@@ -358,29 +312,26 @@ class MessageQueueClient:
         b_request_uid, b_request_type, *b_response = msg
         request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
         request_type = msgspec_decode(b_request_type, cls=RequestType)
-        response_cls = get_response_class(request_type)
+        response_cls = get_response_message_class(request_type)
 
         if request_uid in self.pending_futures:
             future = self.pending_futures.pop(request_uid)
             if b_response:
                 response = msgspec_decode(b_response[0], cls=response_cls)
-                future.set_result(response)
+                future.set_result(unwrap_response_message(response))
             else:
-                future.set_result(None)
+                raise ValueError(f"Missing response message for {request_type.name}")
 
     def submit_request(
         self,
         request_type: RequestType,
-        request_payloads: list[Any],
-        response_cls: Optional[T] = None,
+        request_message: RpcRequest,
     ) -> MessagingFuture[T]:
         """Submit a request to the server.
 
         Args:
             request_type (RequestType): The type of the request.
-            request_payloads (list[Any]): The payloads of the request.
-            response_cls (Optional[T]): The expected response class.
-                This should be get from `get_response_class(request_type)`.
+            request_message: A transport-neutral Python RPC request.
 
         Returns:
             MessagingFuture[T]: A future that will hold the response.
@@ -392,7 +343,7 @@ class MessageQueueClient:
                 request_uid=request_uid,
                 future=future,
                 request_type=request_type,
-                request_payloads=request_payloads,
+                request_message=request_message,
             )
         )
         self._polling_loop.notify()
@@ -426,16 +377,18 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
 
     def __init__(
         self,
-        payload_clss: list[Any],
+        request_cls: type[RpcRequest],
         response_cls: ResponseType,
         handler: Callable[..., ResponseType],
     ):
-        self.payload_clss = payload_clss
+        self.request_cls = request_cls
         self.response_cls = response_cls
         self.handler = handler
 
     def __call__(self, payloads: list[bytes]) -> ResponseType:
-        return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
+        if len(payloads) != 1:
+            raise ValueError("ZMQ RPC requires exactly one request message frame")
+        return self.handler(msgspec_decode(payloads[0], cls=self.request_cls))
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -456,12 +409,12 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
 
     def __init__(
         self,
-        payload_clss: list[Any],
+        request_cls: type[RpcRequest],
         response_cls: ResponseType,
         handler: Callable[..., ResponseType],
     ):
         self.executor: ThreadPoolExecutor | AffinityThreadPool | None = None
-        self.payload_clss = payload_clss
+        self.request_cls = request_cls
         self.handler = handler
         self.response_cls = response_cls
 
@@ -472,12 +425,14 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
             "BlockingRequestHandler has no executor assigned. "
             "Call add_normal_thread_pool or add_affinity_thread_pool first."
         )
-        decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
+        if len(payloads) != 1:
+            raise ValueError("ZMQ RPC requires exactly one request message frame")
+        request = msgspec_decode(payloads[0], cls=self.request_cls)
         if isinstance(self.executor, AffinityThreadPool):
             return self.executor.submit(
-                self.handler, *decoded_payloads, affinity_key=affinity_key
+                self.handler, request, affinity_key=affinity_key
             )
-        return self.executor.submit(self.handler, *decoded_payloads)
+        return self.executor.submit(self.handler, request)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -549,10 +504,7 @@ class MessageQueueServer:
         response = handler_entry(payloads)
         response_cls = handler_entry.get_response_class()
         b_response = msgspec_encode(response, cls=response_cls)
-        if response is not None:
-            self.socket.send_multipart(prefix_frames + [b_response])
-        else:
-            self.socket.send_multipart(prefix_frames)
+        self.socket.send_multipart(prefix_frames + [b_response])
 
     def _call_blocking_handler(
         self,
@@ -578,11 +530,7 @@ class MessageQueueServer:
                 response = fut.result()
                 response_cls = handler_entry.get_response_class()
                 b_response = msgspec_encode(response, cls=response_cls)
-                frames_to_send = (
-                    prefix_frames + [b_response]
-                    if response is not None
-                    else prefix_frames
-                )
+                frames_to_send = prefix_frames + [b_response]
 
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
@@ -685,32 +633,27 @@ class MessageQueueServer:
             )
         ]
 
-        payload_clss = get_payload_classes(request_type)
-        if len(params) != len(payload_clss):
+        request_cls = get_request_message_class(request_type)
+        if len(params) != 1:
             logger.error(
-                "Handler for %s expects %d arguments, but got %d",
+                "Handler for %s expects one request argument, but got %d",
                 request_type,
-                len(payload_clss),
                 len(params),
             )
             return False
-
-        for i, (param, expected_cls) in enumerate(
-            zip(params, payload_clss, strict=False)
-        ):
-            ann = hints.get(param.name, param.annotation)
-            if not same_type(ann, expected_cls):
-                logger.error(
-                    "Handler for %s argument %d expects type %s, but got %s",
-                    request_type,
-                    i,
-                    expected_cls,
-                    ann,
-                )
-                return False
+        param = params[0]
+        ann = hints.get(param.name, param.annotation)
+        if not same_type(ann, request_cls):
+            logger.error(
+                "Handler for %s expects request type %s, but got %s",
+                request_type,
+                request_cls,
+                ann,
+            )
+            return False
 
         return_ann = hints.get("return", sig.return_annotation)
-        expected_return_cls = get_response_class(request_type)
+        expected_return_cls = get_response_message_class(request_type)
         if not same_type(return_ann, expected_return_cls):
             logger.error(
                 "Handler for %s expects return type %s, but got %s",
@@ -724,7 +667,6 @@ class MessageQueueServer:
     def add_handler(
         self,
         request_type: RequestType,
-        payload_clss: list[Any],
         handler_type: HandlerType,
         handler,
     ) -> None:
@@ -732,40 +674,47 @@ class MessageQueueServer:
 
         Args:
             request_type (RequestType): The type of the request to handle.
-            payload_clss (list[Any]): The expected payload classes for the request.
-                This should be get from `get_payload_classes(request_type)`.
+            handler_type: Scheduling policy for the request.
             handler (callable): The handler function that takes the payloads
                 as arguments.
         """
         if not self._inspect_handler_signature(request_type, handler):
-            raise ValueError(
-                f"Handler signature does not match for request type: {request_type}"
-            )
+            compatibility_handler = handler
 
+            def handler(request: RpcRequest) -> RpcResponse:
+                result = compatibility_handler(*unwrap_request_message(request))
+                return wrap_response_message(request_type.name, result)
+
+            handler.__annotations__ = {
+                "request": get_request_message_class(request_type),
+                "return": get_response_message_class(request_type),
+            }
+
+        request_cls = get_request_message_class(request_type)
         match handler_type:
             case HandlerType.SYNC:
-                self.add_sync_handler(request_type, payload_clss, handler)
+                self.add_sync_handler(request_type, request_cls, handler)
             case HandlerType.BLOCKING:
-                self.add_blocking_handler(request_type, payload_clss, handler)
+                self.add_blocking_handler(request_type, request_cls, handler)
             case HandlerType.NON_BLOCKING:
                 raise NotImplementedError("Non-blocking handler is not supported yet")
             case _:
                 raise ValueError(f"Unknown handler type: {handler_type}")
 
     def add_sync_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self, request_type: RequestType, request_cls: type[RpcRequest], handler
     ) -> None:
-        response_cls = get_response_class(request_type)
+        response_cls = get_response_message_class(request_type)
         self.handlers[request_type] = SyncRequestHandler(
-            payload_clss, response_cls, handler
+            request_cls, response_cls, handler
         )
 
     def add_blocking_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self, request_type: RequestType, request_cls: type[RpcRequest], handler
     ) -> None:
-        response_cls = get_response_class(request_type)
+        response_cls = get_response_message_class(request_type)
         self.handlers[request_type] = BlockingRequestHandler(
-            payload_clss, response_cls, handler
+            request_cls, response_cls, handler
         )
 
     def add_nonblocking_handler(

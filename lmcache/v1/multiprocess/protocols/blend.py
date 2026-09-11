@@ -2,12 +2,6 @@
 """Blend protocol definitions: rope registration, unified lookup, retrieve."""
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import (
-    CBMatchResult,
-    CBUnifiedLookupResult,
-    DeviceIPCWrapper,
-    IPCCacheServerKey,
-)
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 REQUEST_NAMES = [
@@ -40,22 +34,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # inference). MLA models must declare it — see cb_register_rope.
         # Returns: None.
         "CB_REGISTER_ROPE": ProtocolDefinition(
-            payload_classes=[
-                int,
-                list[DeviceIPCWrapper],
-                int,
-                bool,
-                list[int],
-                list[list[int]],
-            ],
-            response_class=None,
             handler_type=HandlerType.SYNC,
         ),
         # Drop rope state (paged KV cache lives on; use UNREGISTER_KV_CACHE).
         # Payload: (instance_id,). Returns: None.
         "CB_UNREGISTER_ROPE": ProtocolDefinition(
-            payload_classes=[int],
-            response_class=None,
             handler_type=HandlerType.SYNC,
         ),
         # Retrieve pre-computed chunks into the request's paged blocks.
@@ -63,14 +46,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #           event_ipc_handle).
         # gpu_block_ids is per engine group (list[list[int]]).
         "CB_RETRIEVE_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[
-                IPCCacheServerKey,
-                list[CBMatchResult],
-                list[list[int]],
-                int,
-                bytes,
-            ],
-            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Unified lookup: server runs prefix lookup + non-prefix fingerprint
@@ -82,15 +57,9 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: CBUnifiedLookupResult(prefix_coverage_tokens,
         #          non_prefix_segments).
         "CB_UNIFIED_LOOKUP": ProtocolDefinition(
-            payload_classes=[IPCCacheServerKey, int],
-            # Nullable: handler returns None to defer until both the prefix and
-            # the sparse chunks are in L1 (mirrors dense QUERY_PREFETCH_STATUS).
-            response_class=CBUnifiedLookupResult | None,
             handler_type=HandlerType.BLOCKING,
         ),
         "CB_PROTOCOL_HANDSHAKE": ProtocolDefinition(
-            payload_classes=[int],
-            response_class=tuple[int, bool],
             handler_type=HandlerType.SYNC,
         ),
     }

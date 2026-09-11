@@ -1,55 +1,68 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compile and register codecs for every generated gRPC method."""
+"""Compile and register adapters for every generated gRPC method."""
 
 # Standard
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from types import MappingProxyType
-from typing import Any, Callable
+from typing import Any, Callable, get_type_hints
+import inspect
 
 # First Party
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
-    get_payload_classes,
-    get_response_class,
+    get_request_message_class,
+    get_response_message_class,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
     message_class,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
-    RequestDecoder,
-    RequestEncoder,
+from lmcache.v1.multiprocess.transport.grpc_impl.message_conversion import (
     ResponseDecoder,
     ResponseEncoder,
-    compile_request_codec_for_types,
-    compile_request_decoder,
+    build_request_conversion,
     compile_response_decoder_for_type,
-    compile_response_encoder,
     compile_response_encoder_for_type,
 )
 
+RequestToProto = Callable[[Any], Any]
+ProtoToRequest = Callable[[Any], Any]
 
-def _normalize_none_type(value: Any) -> Any:
-    return None if value is type(None) else value
+
+def _build_request_boundary(
+    protobuf_class: type[Any], python_class: type[Any]
+) -> tuple[RequestToProto, ProtoToRequest]:
+    encode_call, decode_call = build_request_conversion(
+        protobuf_class,
+        (python_class,),
+    )
+
+    def request_to_proto(request: Any) -> Any:
+        return encode_call((request,), {})
+
+    def proto_to_request(request: Any) -> Any:
+        return decode_call(request)[0]
+
+    return request_to_proto, proto_to_request
 
 
 @dataclass(frozen=True)
-class GrpcMethodCodec:
+class GrpcMethodBinding:
     """Compiled protobuf converters for one generated gRPC method."""
 
     full_name: str
     request_type: RequestType
     request_message_class: type[Any]
     response_message_class: type[Any]
-    payload_types: tuple[Any, ...]
-    response_type: Any
-    request_encoder: RequestEncoder
-    request_decoder: RequestDecoder
-    response_encoder: ResponseEncoder
-    response_decoder: ResponseDecoder
+    python_request_class: type[Any]
+    python_response_class: type[Any]
+    request_to_proto: RequestToProto
+    proto_to_request: ProtoToRequest
+    response_to_proto: ResponseEncoder
+    proto_to_response: ResponseDecoder
 
     def validate_handler(self, handler: Callable[..., Any]) -> None:
         """Validate that a service handler implements the gRPC contract.
@@ -61,48 +74,53 @@ class GrpcMethodCodec:
             TypeError: If request or response annotations differ from the
                 annotated gRPC service contract.
         """
-        _decoder, handler_payload_types = compile_request_decoder(
-            self.request_message_class, handler
-        )
-        _encoder, handler_response_type = compile_response_encoder(
-            self.response_message_class, handler
-        )
-        if handler_payload_types != self.payload_types:
-            raise TypeError(
-                f"{self.full_name} handler payload annotations "
-                f"{handler_payload_types!r} do not match gRPC contract types "
-                f"{self.payload_types!r}"
+        signature = inspect.signature(handler)
+        hints = get_type_hints(handler)
+        parameters = tuple(
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
             )
-        if _normalize_none_type(handler_response_type) != _normalize_none_type(
-            self.response_type
+        )
+        if parameters and parameters[0].name in ("self", "cls"):
+            parameters = parameters[1:]
+        if len(parameters) != 1 or hints.get(parameters[0].name) is not (
+            self.python_request_class
         ):
             raise TypeError(
+                f"{self.full_name} handler must accept exactly one "
+                f"{self.python_request_class.__name__}"
+            )
+        if hints.get("return") is not self.python_response_class:
+            raise TypeError(
                 f"{self.full_name} handler return annotation "
-                f"{handler_response_type!r} does not match gRPC contract type "
-                f"{self.response_type!r}"
+                f"must be {self.python_response_class.__name__}"
             )
 
 
 @dataclass(frozen=True)
-class GrpcMethodCodecRegistry:
-    """Read-only lookup table for all generated gRPC method codecs."""
+class GrpcMethodRegistry:
+    """Read-only lookup table for all generated gRPC method adapters."""
 
-    by_full_name: Mapping[str, GrpcMethodCodec]
+    by_full_name: Mapping[str, GrpcMethodBinding]
 
 
 @lru_cache(maxsize=1)
-def get_method_codec_registry() -> GrpcMethodCodecRegistry:
-    """Build and validate codecs for all generated gRPC methods.
+def get_method_registry() -> GrpcMethodRegistry:
+    """Build and validate adapters for all generated gRPC methods.
 
     Returns:
-        Read-only codec lookup table keyed by full protobuf method name.
+        Read-only adapter lookup table keyed by full protobuf method name.
 
     Raises:
         RuntimeError: If a generated method has no matching request type, or
             a protobuf method or request type is duplicated.
         TypeError: If a protobuf message cannot represent its annotated types.
     """
-    by_full_name: dict[str, GrpcMethodCodec] = {}
+    by_full_name: dict[str, GrpcMethodBinding] = {}
     request_types: set[RequestType] = set()
     for _binding, method in iter_methods():
         request_name = client_method_name(method.name).upper()
@@ -120,42 +138,42 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
 
         request_message_class = message_class(method.input_type)
         response_message_class = message_class(method.output_type)
-        payload_types = tuple(get_payload_classes(request_type))
-        request_encoder, request_decoder = compile_request_codec_for_types(
-            request_message_class, payload_types
+        python_request_class = get_request_message_class(request_type)
+        python_response_class = get_response_message_class(request_type)
+        request_to_proto, proto_to_request = _build_request_boundary(
+            request_message_class,
+            python_request_class,
         )
-        response_class = get_response_class(request_type)
-        response_type = type(None) if response_class is None else response_class
-        response_encoder = compile_response_encoder_for_type(
-            response_message_class, response_type
+        response_to_proto = compile_response_encoder_for_type(
+            response_message_class, python_response_class
         )
-        response_decoder = compile_response_decoder_for_type(
-            response_message_class, response_type
+        proto_to_response = compile_response_decoder_for_type(
+            response_message_class, python_response_class
         )
-        codec = GrpcMethodCodec(
+        adapter = GrpcMethodBinding(
             full_name=method.full_name,
             request_type=request_type,
             request_message_class=request_message_class,
             response_message_class=response_message_class,
-            payload_types=payload_types,
-            response_type=response_type,
-            request_encoder=request_encoder,
-            request_decoder=request_decoder,
-            response_encoder=response_encoder,
-            response_decoder=response_decoder,
+            python_request_class=python_request_class,
+            python_response_class=python_response_class,
+            request_to_proto=request_to_proto,
+            proto_to_request=proto_to_request,
+            response_to_proto=response_to_proto,
+            proto_to_response=proto_to_response,
         )
         if method.full_name in by_full_name:
             raise RuntimeError(f"Duplicate generated gRPC method: {method.full_name}")
-        by_full_name[method.full_name] = codec
+        by_full_name[method.full_name] = adapter
         request_types.add(request_type)
 
-    return GrpcMethodCodecRegistry(
+    return GrpcMethodRegistry(
         by_full_name=MappingProxyType(by_full_name),
     )
 
 
 __all__ = [
-    "GrpcMethodCodec",
-    "GrpcMethodCodecRegistry",
-    "get_method_codec_registry",
+    "GrpcMethodBinding",
+    "GrpcMethodRegistry",
+    "get_method_registry",
 ]
