@@ -553,7 +553,10 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._req_client.store(
             key, instance_id, block_ids, event_ipc_handle
-        ).to_device_future(device=self._device)
+        ).to_device_future(
+            device=self._device,
+            event_backend=self._event_backend,
+        )
 
     def submit_q_store(
         self,
@@ -577,7 +580,10 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._req_client.store_q(
             key, instance_id, block_ids, event_ipc_handle
-        ).to_device_future(device=self._device)
+        ).to_device_future(
+            device=self._device,
+            event_backend=self._event_backend,
+        )
 
     def submit_retrieve(
         self,
@@ -628,7 +634,10 @@ class LMCacheDrivenTransferContext(TransferContext):
             block_ids,
             event_ipc_handle,
             skip_first_n_tokens,
-        ).to_device_future(device=self._device)
+        ).to_device_future(
+            device=self._device,
+            event_backend=self._event_backend,
+        )
 
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""
