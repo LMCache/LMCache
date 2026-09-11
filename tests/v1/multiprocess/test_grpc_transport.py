@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 import importlib
 import subprocess
@@ -354,6 +355,21 @@ sys.meta_path.insert(0, RuntimeDependencyBlocker())
 import lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2
 """
     subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_generated_protobuf_type_stubs_are_available() -> None:
+    """Generated protobuf modules include static type information."""
+    module_names = (
+        "common_pb2",
+        "p2p_service_pb2",
+    )
+    package = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
+
+    for module_name in module_names:
+        module = importlib.import_module(f"{package}.{module_name}")
+        assert module.__file__ is not None
+        module_path = Path(module.__file__)
+        assert module_path.with_suffix(".pyi").is_file()
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:
