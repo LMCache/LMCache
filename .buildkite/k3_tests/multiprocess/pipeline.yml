@@ -22,7 +22,7 @@ x-flaky-retry: &flaky-retry
 x-pod-1gpu: &pod-1gpu
   containers:
     - name: container-0
-      image: lmcache/ci-base:latest
+      image: lmcacheci/lmcache-ci-base:latest
       imagePullPolicy: Never
       resources: { limits: { "nvidia.com/gpu": "1" } }
       volumeMounts:
@@ -65,7 +65,7 @@ steps:
               podSpec:
                 containers:
                   - name: container-0
-                    image: lmcache/ci-base:latest
+                    image: lmcacheci/lmcache-ci-base:latest
                     imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "4" } }
                     volumeMounts:
@@ -90,7 +90,7 @@ steps:
               podSpec: &pod-2gpu
                 containers:
                   - name: container-0
-                    image: lmcache/ci-base:latest
+                    image: lmcacheci/lmcache-ci-base:latest
                     imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "2" } }
                     volumeMounts: &vol-mounts
@@ -179,7 +179,7 @@ steps:
               podSpec: &pod-1gpu-dshm
                 containers:
                   - name: container-0
-                    image: lmcache/ci-base:latest
+                    image: lmcacheci/lmcache-ci-base:latest
                     imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts:
@@ -269,7 +269,7 @@ steps:
               podSpec:
                 containers:
                   - name: container-0
-                    image: lmcache/ci-base:latest
+                    image: lmcacheci/lmcache-ci-base:latest
                     imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts:
@@ -314,7 +314,7 @@ steps:
               podSpec:
                 containers:
                   - name: container-0
-                    image: lmcache/ci-base:latest
+                    image: lmcacheci/lmcache-ci-base:latest
                     imagePullPolicy: Never
                     resources:
                       requests:
@@ -348,7 +348,7 @@ steps:
           podSpec:
             containers:
               - name: container-0
-                image: lmcache/ci-base:latest
+                image: lmcacheci/lmcache-ci-base:latest
                 imagePullPolicy: Never
                 resources: { limits: { "nvidia.com/gpu": "2" } }
                 env:
