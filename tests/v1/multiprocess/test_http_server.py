@@ -87,7 +87,7 @@ def client_with_engine(mock_engine):
     ``app.state.engine``.
     """
     app.state.engine = mock_engine
-    app.state.context = build_context(mock_engine)
+    app.state.context = build_context(mock_engine, instance_id="test")
     client = TestClient(app)
     yield client
     client.close()
@@ -145,7 +145,7 @@ class TestCacheChecksumsEndpoint:
     def test_mixed_format_supported(self, mock_mixed_engine):
         """Two different KV formats are gathered per layer, not rejected."""
         app.state.engine = mock_mixed_engine
-        app.state.context = build_context(mock_mixed_engine)
+        app.state.context = build_context(mock_mixed_engine, instance_id="test")
         client = TestClient(app)
         try:
             resp = client.post(

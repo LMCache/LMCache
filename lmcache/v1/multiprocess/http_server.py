@@ -114,7 +114,7 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     # Typed per-app context the cache handlers resolve via ``get_context``
     # (built now that the engine is ready).
-    app.state.context = build_context(engine)
+    app.state.context = build_context(engine, instance_id=mp_config.instance_id)
     app.state.plugin_launcher = plugin_launcher
 
     # Optionally register this server with an MP coordinator (enabled when

@@ -158,7 +158,7 @@ def _make_adapters_app(sm) -> FastAPI:
     app = FastAPI()
     app.include_router(config_router)
     if sm is not None:
-        app.state.context = build_context(_FakeEngine(sm))
+        app.state.context = build_context(_FakeEngine(sm), instance_id="test")
     return app
 
 
