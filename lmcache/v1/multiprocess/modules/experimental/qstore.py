@@ -33,9 +33,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.platform.base.event_ipc import (
-    get_event_ipc_backend,
-)
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
@@ -46,6 +43,9 @@ from lmcache.v1.multiprocess.rpc_messages import (
     StoreResponse,
     UnregisterKvCacheRequest,
     UnregisterKvCacheResponse,
+)
+from lmcache.v1.platform.base.event_ipc import (
+    get_event_ipc_backend,
 )
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
