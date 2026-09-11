@@ -69,6 +69,17 @@ class TestFilenameRoundtrip:
         )
         assert fn0 != fn1
 
+    def test_reserved_marker_in_model_name_is_rejected(self):
+        """A literal slash escape marker must not collide with a slash."""
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="org/model-SEP-name",
+            kv_rank=42,
+        )
+
+        with pytest.raises(ValueError, match="reserved filesystem encoding marker"):
+            _object_key_to_filename(key)
+
     def test_unsalted_format(self):
         """Unsalted keys use the 4-field shape."""
         fn = "llama@0x0000002a@0@deadbeef.data"

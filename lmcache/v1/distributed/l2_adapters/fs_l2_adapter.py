@@ -51,6 +51,9 @@ logger = init_logger(__name__)
 _KEY_SEP = "@"
 # ``@`` in both ``model_name`` and ``cache_salt`` is rejected by
 # ObjectKey.__post_init__, so splitting on ``@`` is unambiguous.
+# ``-SEP-`` is reserved by the filesystem codec for escaped slashes. A
+# literal occurrence in ``model_name`` would otherwise be indistinguishable
+# from a slash after decoding.
 # Kept in sync with native_connector_l2_adapter.py and
 # csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
@@ -111,6 +114,11 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable. ``object_group_id`` is written in plain hex.
     """
+    if _PATH_SLASH_REPLACEMENT in key.model_name:
+        raise ValueError(
+            "model_name contains the reserved filesystem encoding marker "
+            f"{_PATH_SLASH_REPLACEMENT!r}"
+        )
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
     base = (
         f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
