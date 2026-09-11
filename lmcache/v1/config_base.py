@@ -193,17 +193,18 @@ def _resolve_config_aliases(
 
     # Process each key in the input
     for key, value in config_dict.items():
-        if key in deprecated_configs:
-            # Log deprecation warning
+        if key in config_aliases:
+            # Old name for a current key: warn if it is also flagged
+            # deprecated, then map to the current name regardless. (The alias
+            # check must not sit inside the deprecated branch, or aliases that
+            # are not in deprecated_configs get dropped as "unknown".)
+            if key in deprecated_configs:
+                logger.warning("%s (source: %s)", deprecated_configs[key], source)
+            resolved[config_aliases[key]] = value
+        elif key in deprecated_configs:
+            # Deprecated key with no alias: warn and keep for compatibility
             logger.warning("%s (source: %s)", deprecated_configs[key], source)
-
-            # Map to new key if alias exists
-            if key in config_aliases:
-                new_key = config_aliases[key]
-                resolved[new_key] = value
-            else:
-                # Keep deprecated key for backward compatibility
-                resolved[key] = value
+            resolved[key] = value
         elif key in config_definitions:
             # Valid configuration key
             resolved[key] = value
