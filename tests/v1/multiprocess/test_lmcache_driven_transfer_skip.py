@@ -149,6 +149,8 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         batch_size,
         skip_first_n_tokens,
         direction,
+        *,
+        transfer_key,
     ):
         transfer_calls.append((object_group_id, list(memory_objs)))
 

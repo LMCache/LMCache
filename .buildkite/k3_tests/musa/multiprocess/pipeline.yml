@@ -24,6 +24,9 @@ steps:
     timeout_in_minutes: 60
     env:
       MUSA_CI_ARTIFACT_DIR: "musa-ci-artifacts/smoke"
+      MUSA_MP_TEST_MODE: "lm_eval"
+      LIMIT: "4"
+      NUM_CONCURRENT: "2"
     artifact_paths:
       - "musa-ci-artifacts/smoke/**/*"
 

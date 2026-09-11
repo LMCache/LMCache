@@ -55,8 +55,8 @@ Optional debugging overrides:
 | `MUSA_E2E_STARTUP_TIMEOUT` | `300` (`900` for the SGLang step) | Model-server startup timeout in seconds |
 | `MUSA_E2E_TOP_K` | `1` | Greedy decoding setting used for deterministic output comparison |
 | `MUSA_CI_PYTHON` | `python3` | Override the Python executable inside the MUSA image |
-| `MUSA_CI_ZMQ_PORT` | `6555` | Override the MP server ZMQ port |
-| `MUSA_CI_HTTP_PORT` | `7555` | Override the MP server HTTP port |
+| `MUSA_CI_ZMQ_PORT` | `6555` | Override the shared MP server port |
+| `MUSA_CI_HTTP_PORT` | `7555` | Legacy override; unused by the shared MP runner |
 
 ## GitHub trigger settings
 
@@ -165,9 +165,8 @@ the container. The SGLang image is fixed for the gating step; the step can be
 - LMCache selects the `musa` device backend.
 - The MUSA-compatible unit-test allowlist passes, excluding benchmark tests,
   CUDA/XPU/SGLang markers, and known optional Triton/NIXL modules.
-- Focused MUSA connector, pin-memory, real-device block-transfer, and MP tests
-  pass.
-- The LMCache MP server reaches `/healthcheck` and terminates cleanly.
+- The shared multiprocess `lm_eval` runner launches LMCache and vLLM on MUSA,
+  exercises a cold and warm workload, and validates repeatability.
 - vLLM baseline, LMCache cold, and LMCache warm completions are identical;
   the warm request has a retrieval signal in the server logs.
 - SGLang baseline, LMCache cold, and LMCache warm chat completions are
