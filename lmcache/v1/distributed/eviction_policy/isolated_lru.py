@@ -54,8 +54,11 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         default_destination: EvictionDestination = EvictionDestination.DISCARD,
     ):
         self._lock = threading.Lock()
-        # cache_salt -> ordered {ObjectKey: None} (oldest first).
-        self._per_salt_order: dict[str, OrderedDict[ObjectKey, None]] = {}
+        # cache_salt -> ordered {ObjectKey: size} (oldest first).
+        self._per_salt_order: dict[str, OrderedDict[ObjectKey, int | None]] = {}
+        self._per_salt_total_size: dict[str, int] = {}
+        self._per_salt_total_size_squared: dict[str, int] = {}
+        self._per_salt_unknown_size_count: dict[str, int] = {}
         # Registered destinations (first one wins if any are registered,
         # matching LRUEvictionPolicy semantics).
         self._destinations: list[EvictionDestination] = []
@@ -70,18 +73,51 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         if not keys:
             return
         with self._lock:
-            # Same prefix-match ordering rationale as ``LRUEvictionPolicy``:
-            # later keys in a request should be evicted first, so we
-            # insert in reverse to place the final key at the LRU head.
             for key in reversed(keys):
                 order = self._per_salt_order.get(key.cache_salt)
                 if order is None:
                     order = OrderedDict()
                     self._per_salt_order[key.cache_salt] = order
-                if key in order:
+                if key.cache_salt in self._per_salt_total_size:
+                    if key in order:
+                        order.move_to_end(key)
+                    else:
+                        order[key] = None
+                        self._per_salt_unknown_size_count[key.cache_salt] += 1
+                elif key in order:
                     order.move_to_end(key)
                 else:
                     order[key] = None
+
+    def on_keys_created_with_sizes(
+        self,
+        keys: list[ObjectKey],
+        sizes: list[int],
+    ) -> None:
+        """Track newly created keys and their byte sizes per salt.
+
+        Args:
+            keys: Keys that have been created.
+            sizes: Size in bytes for each key.
+
+        Raises:
+            ValueError: If ``keys`` and ``sizes`` have different lengths.
+        """
+        if len(keys) != len(sizes):
+            raise ValueError("keys and sizes must have the same length")
+        if not keys:
+            return
+        with self._lock:
+            # Same prefix-match ordering rationale as ``LRUEvictionPolicy``:
+            # later keys in a request should be evicted first, so we
+            # insert in reverse to place the final key at the LRU head.
+            for key, size in zip(reversed(keys), reversed(sizes), strict=True):
+                order = self._per_salt_order.get(key.cache_salt)
+                if order is None:
+                    order = OrderedDict()
+                    self._per_salt_order[key.cache_salt] = order
+                self._enable_size_tracking(key.cache_salt, order)
+                self._store_sized_key(key.cache_salt, order, key, size)
 
     def on_keys_touched(self, keys: list[ObjectKey]) -> None:
         if not keys:
@@ -100,11 +136,40 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
                 order = self._per_salt_order.get(key.cache_salt)
                 if order is None:
                     continue
-                order.pop(key, None)
+                if key.cache_salt in self._per_salt_total_size:
+                    if key not in order:
+                        continue
+                    size = order.pop(key)
+                    if size is None:
+                        self._per_salt_unknown_size_count[key.cache_salt] -= 1
+                    else:
+                        self._per_salt_total_size[key.cache_salt] -= size
+                        self._per_salt_total_size_squared[key.cache_salt] -= size * size
+                elif key in order:
+                    del order[key]
+                else:
+                    continue
                 if not order:
                     # Drop the empty bucket so ``list``/iteration
                     # snapshots stay compact.
                     del self._per_salt_order[key.cache_salt]
+                    self._per_salt_total_size.pop(key.cache_salt, None)
+                    self._per_salt_total_size_squared.pop(key.cache_salt, None)
+                    self._per_salt_unknown_size_count.pop(key.cache_salt, None)
+
+    def on_eviction_attempted(self, keys: list[ObjectKey]) -> None:
+        """Defer attempted keys within their salt buckets.
+
+        Args:
+            keys: Keys submitted to an eviction destination, in LRU order.
+        """
+        if not keys:
+            return
+        with self._lock:
+            for key in keys:
+                order = self._per_salt_order.get(key.cache_salt)
+                if order is not None and key in order:
+                    order.move_to_end(key)
 
     def get_eviction_actions(
         self,
@@ -121,10 +186,10 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         falling back to a global pool.
 
         Args:
-            expected_ratio: Fraction of the candidate pool to evict,
-                clamped to ``[0.0, 1.0]``. If the ratio rounds down to
-                zero and the pool is non-empty, at least one key is
-                returned (matches ``LRUEvictionPolicy``).
+            expected_ratio: Fraction of the bucket's tracked eviction weight
+                to evict, clamped to ``[0.0, 1.0]``. L2 keys are weighted by
+                bytes; callers without sizes use unit weight. If the target
+                rounds down to zero, at least one key is returned.
             key_eligible_filter: Optional predicate — keys failing the
                 filter (e.g. locked) are skipped.
             cache_salt: The salt whose bucket to evict from. Required.
@@ -146,25 +211,46 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             )
         with self._lock:
             order = self._per_salt_order.get(cache_salt)
-            pool = list(order.keys()) if order else []
-
-            if not pool:
+            if not order:
                 return []
 
             expected_ratio = max(0.0, min(1.0, expected_ratio))
-            target_count = int(len(pool) * expected_ratio)
-            if expected_ratio > 0 and target_count == 0:
-                target_count = 1
-            if target_count == 0:
-                return []
-
             keys_to_evict: list[ObjectKey] = []
-            for key in pool:
-                if key_eligible_filter is not None and not key_eligible_filter(key):
-                    continue
-                keys_to_evict.append(key)
-                if len(keys_to_evict) >= target_count:
-                    break
+            # n * sum(size^2) == sum(size)^2 iff all sizes are equal.
+            if (
+                cache_salt not in self._per_salt_total_size
+                or self._per_salt_unknown_size_count[cache_salt] > 0
+                or len(order) * self._per_salt_total_size_squared[cache_salt]
+                == self._per_salt_total_size[cache_salt] ** 2
+            ):
+                target_count = int(len(order) * expected_ratio)
+                if expected_ratio > 0 and target_count == 0:
+                    target_count = 1
+                if target_count == 0:
+                    return []
+                for key in order:
+                    if key_eligible_filter is not None and not key_eligible_filter(key):
+                        continue
+                    keys_to_evict.append(key)
+                    if len(keys_to_evict) >= target_count:
+                        break
+            else:
+                target_size = int(
+                    self._per_salt_total_size[cache_salt] * expected_ratio
+                )
+                if expected_ratio > 0 and target_size == 0:
+                    target_size = 1
+                if target_size == 0:
+                    return []
+                selected_size = 0
+                for key, size in order.items():
+                    if key_eligible_filter is not None and not key_eligible_filter(key):
+                        continue
+                    assert size is not None
+                    keys_to_evict.append(key)
+                    selected_size += size
+                    if selected_size >= target_size:
+                        break
 
             if not keys_to_evict:
                 return []
@@ -205,21 +291,28 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         return "lru_order"
 
     def capture(self) -> Mapping[str, object]:
-        """Return each bucket's eviction order, least-recently-used first.
+        """Return each bucket's eviction order and optional byte weights.
 
-        The ordering *is* the state: recency lives in position, not in a
-        timestamp, so nothing outside this policy can reconstruct it.
+        Recency lives in position, not in a timestamp. Byte weights also
+        belong here because durable components restore independently.
 
         Returns:
-            ``{"buckets": {cache_salt: [key, ...]}}``, each list in
-            eviction order.
+            ``{"buckets": {cache_salt: [key, ...]}, "sizes":
+            {cache_salt: [size, ...]}}``. ``sizes`` contains only buckets
+            where every object size is known.
         """
         with self._lock:
             return {
                 "buckets": {
                     cache_salt: [encode_key(key) for key in order]
                     for cache_salt, order in self._per_salt_order.items()
-                }
+                },
+                "sizes": {
+                    cache_salt: list(order.values())
+                    for cache_salt, order in self._per_salt_order.items()
+                    if cache_salt in self._per_salt_total_size
+                    and self._per_salt_unknown_size_count[cache_salt] == 0
+                },
             }
 
     def restore(self, state: Mapping[str, object]) -> None:
@@ -231,15 +324,72 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         Args:
             state: A :meth:`capture` value, as decoded from the
                 checkpoint holding it.
+
+        Raises:
+            ValueError: If a bucket has a different number of keys and sizes.
         """
         buckets = cast("Mapping[str, list[object]]", state["buckets"])
+        sizes = cast("Mapping[str, list[int]]", state.get("sizes", {}))
         with self._lock:
-            self._per_salt_order = {
-                cache_salt: OrderedDict(
-                    (decode_key(encoded), None) for encoded in ordered
+            restored_order: dict[str, OrderedDict[ObjectKey, int | None]] = {}
+            restored_total_size: dict[str, int] = {}
+            restored_total_size_squared: dict[str, int] = {}
+            restored_unknown_size_count: dict[str, int] = {}
+            for cache_salt, ordered in buckets.items():
+                bucket_sizes = sizes.get(cache_salt)
+                if bucket_sizes is None:
+                    restored_order[cache_salt] = OrderedDict(
+                        (decode_key(encoded), None) for encoded in ordered
+                    )
+                    continue
+                if len(bucket_sizes) != len(ordered):
+                    raise ValueError(
+                        f"bucket {cache_salt!r} has {len(ordered)} keys but "
+                        f"{len(bucket_sizes)} sizes"
+                    )
+                restored_order[cache_salt] = OrderedDict(
+                    (decode_key(encoded), size)
+                    for encoded, size in zip(ordered, bucket_sizes, strict=True)
                 )
-                for cache_salt, ordered in buckets.items()
-            }
+                restored_total_size[cache_salt] = sum(bucket_sizes)
+                restored_total_size_squared[cache_salt] = sum(
+                    size * size for size in bucket_sizes
+                )
+                restored_unknown_size_count[cache_salt] = 0
+            self._per_salt_order = restored_order
+            self._per_salt_total_size = restored_total_size
+            self._per_salt_total_size_squared = restored_total_size_squared
+            self._per_salt_unknown_size_count = restored_unknown_size_count
 
+    # -- Internals ----------------------------------------------------------------
 
-# -- Internals ----------------------------------------------------------------
+    def _enable_size_tracking(
+        self,
+        cache_salt: str,
+        order: OrderedDict[ObjectKey, int | None],
+    ) -> None:
+        if cache_salt in self._per_salt_total_size:
+            return
+        self._per_salt_total_size[cache_salt] = 0
+        self._per_salt_total_size_squared[cache_salt] = 0
+        self._per_salt_unknown_size_count[cache_salt] = len(order)
+
+    def _store_sized_key(
+        self,
+        cache_salt: str,
+        order: OrderedDict[ObjectKey, int | None],
+        key: ObjectKey,
+        size: int,
+    ) -> None:
+        if key in order:
+            old_size = order[key]
+            if old_size is None:
+                self._per_salt_unknown_size_count[cache_salt] -= 1
+            else:
+                self._per_salt_total_size[cache_salt] -= old_size
+                self._per_salt_total_size_squared[cache_salt] -= old_size * old_size
+            order.move_to_end(key)
+
+        order[key] = size
+        self._per_salt_total_size[cache_salt] += size
+        self._per_salt_total_size_squared[cache_salt] += size * size

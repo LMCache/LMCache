@@ -15,7 +15,7 @@ contract below and restores itself from its own section:
 | `KeyDirectory` | `key_directory` | A restarted MP server re-announces its L1, but nothing re-announces bytes already resting in L2 |
 | `CacheUsageManager` | `cache_usage` | Byte accounting for those same placements; quota enforcement is blind without it |
 | `EventGate` | `stream_cursors` | Fencing compares an arriving batch against a prior incarnation; with no cursor there is nothing to compare, and a restarted server's stale L1 slice is advertised forever |
-| `IsolatedLRUEvictionPolicy` | `lru_order` | Recency is position, not a timestamp |
+| `IsolatedLRUEvictionPolicy` | `lru_order` | Recency is positional; complete byte weights drive eviction |
 | `FleetEvictionController` | `pins` | Operator intent |
 | `QuotaManager` | `quotas` | Operator intent |
 
