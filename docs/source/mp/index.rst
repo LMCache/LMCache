@@ -539,9 +539,9 @@ Adding a new request type
 3. Implement the handler on the appropriate ``EngineModule`` using those
    Python request/response types, then decorate it with ``@request_handler``.
    The annotation is the single source of scheduling and affinity metadata.
-4. ``create_request_server()`` selects the transport. ZMQ sends the Python
-   messages directly; gRPC automatically maps the same messages to and from
-   generated protobuf classes. No per-transport handler registration or
+4. ``create_request_server()`` selects the transport. ZMQ and gRPC serialize
+   the same Python messages directly with the shared MessagePack
+   representation. No per-transport handler registration, protobuf object, or
    per-RPC conversion definition is needed.
 
 Key Source Files
@@ -593,8 +593,8 @@ Key Source Files
      - Transport-neutral Python request/response messages and RPC registry
    * - ``lmcache/v1/multiprocess/request_handler.py``
      - Common handler annotation, discovery, and scheduling metadata
-   * - ``lmcache/v1/multiprocess/transport/grpc_impl/message_conversion.py``
-     - Automatic Python message to protobuf structural conversion
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/method_registry.py``
+     - Descriptor-derived gRPC method names mapped to Python message contracts
    * - ``lmcache/v1/distributed/storage_manager.py``
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``

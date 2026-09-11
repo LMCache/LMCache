@@ -17,9 +17,6 @@ GENERATED_PACKAGE = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
 
 SPDX_HEADER = "# SPDX-License-Identifier: Apache-2.0\n"
 MYPY_IGNORE = "# mypy: ignore-errors\n"
-RUFF_IGNORE = "# ruff: noqa\n"
-FORMAT_OFF = "# fmt: off\n"
-ISORT_SKIP = "# isort: skip_file\n"
 FLAT_PB2_IMPORT_RE = re.compile(
     r"^import ([A-Za-z_][A-Za-z0-9_]*_pb2) as ([A-Za-z_][A-Za-z0-9_]*)$",
     re.MULTILINE,
@@ -51,16 +48,8 @@ def _patch_generated_file(path: Path) -> None:
     prefix = ""
     if not text.startswith(SPDX_HEADER):
         prefix += SPDX_HEADER
-    if path.suffix == ".py":
-        if MYPY_IGNORE not in text.splitlines()[:5]:
-            prefix += MYPY_IGNORE
-    else:
-        if RUFF_IGNORE not in text.splitlines()[:5]:
-            prefix += RUFF_IGNORE
-        if FORMAT_OFF not in text.splitlines()[:5]:
-            prefix += FORMAT_OFF
-        if ISORT_SKIP not in text.splitlines()[:5]:
-            prefix += ISORT_SKIP
+    if MYPY_IGNORE not in text.splitlines()[:5]:
+        prefix += MYPY_IGNORE
     path.write_text(prefix + text)
 
 

@@ -31,6 +31,8 @@ from lmcache.v1.multiprocess.protocol import (
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.rpc_messages import (
     RpcRequest,
+    deserialize_rpc_message,
+    serialize_rpc_message,
     unwrap_response_message,
 )
 from lmcache.v1.platform import EventNotifier, create_event_notifier
@@ -277,9 +279,9 @@ class MessageQueueClient:
                             f"{request_class.__name__}, got "
                             f"{type(wrapped_request.request_message).__name__}"
                         )
-                    b_request = msgspec_encode(
+                    b_request = serialize_rpc_message(
                         wrapped_request.request_message,
-                        cls=request_class,
+                        request_class,
                     )
                     self.pending_futures[request_uid] = wrapped_request.future
                     self.socket.send_multipart(
@@ -314,7 +316,7 @@ class MessageQueueClient:
         if request_uid in self.pending_futures:
             future = self.pending_futures.pop(request_uid)
             if b_response:
-                response = msgspec_decode(b_response[0], cls=response_cls)
+                response = deserialize_rpc_message(b_response[0], response_cls)
                 future.set_result(unwrap_response_message(response))
             else:
                 raise ValueError(f"Missing response message for {request_type.name}")
@@ -385,7 +387,7 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
     def __call__(self, payloads: list[bytes]) -> ResponseType:
         if len(payloads) != 1:
             raise ValueError("ZMQ RPC requires exactly one request message frame")
-        return self.handler(msgspec_decode(payloads[0], cls=self.request_cls))
+        return self.handler(deserialize_rpc_message(payloads[0], self.request_cls))
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -424,7 +426,7 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         )
         if len(payloads) != 1:
             raise ValueError("ZMQ RPC requires exactly one request message frame")
-        request = msgspec_decode(payloads[0], cls=self.request_cls)
+        request = deserialize_rpc_message(payloads[0], self.request_cls)
         if isinstance(self.executor, AffinityThreadPool):
             return self.executor.submit(
                 self.handler, request, affinity_key=affinity_key
@@ -500,7 +502,7 @@ class MessageQueueServer:
         """
         response = handler_entry(payloads)
         response_cls = handler_entry.get_response_class()
-        b_response = msgspec_encode(response, cls=response_cls)
+        b_response = serialize_rpc_message(response, response_cls)
         self.socket.send_multipart(prefix_frames + [b_response])
 
     def _call_blocking_handler(
@@ -526,7 +528,7 @@ class MessageQueueServer:
             try:
                 response = fut.result()
                 response_cls = handler_entry.get_response_class()
-                b_response = msgspec_encode(response, cls=response_cls)
+                b_response = serialize_rpc_message(response, response_cls)
                 frames_to_send = prefix_frames + [b_response]
 
                 self.output_queue.put(frames_to_send)
