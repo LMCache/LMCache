@@ -97,6 +97,7 @@ class StorageManager:
         self._lifecycle_lock = threading.Lock()
         # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
+        self._closed = False
         self._registered_l2_listeners: list[L2AdapterListener] = []
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
         self._adapter_descriptors: dict[int, AdapterDescriptor] = {}
@@ -1019,6 +1020,8 @@ class StorageManager:
             The stable id assigned to the new adapter.
         """
         with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("StorageManager is closed")
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
@@ -1059,6 +1062,8 @@ class StorageManager:
                 retry.
         """
         with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("StorageManager is closed")
             if adapter_id not in self._l2_adapters:
                 raise ValueError(f"No L2 adapter with id {adapter_id}")
 
@@ -1113,17 +1118,27 @@ class StorageManager:
         """
         Close the storage manager and release all resources.
         """
-        self._prefetch_controller.stop()
-        self._store_controller.stop()
-        self._eviction_controller.stop()
-        self._l2_eviction_controller.stop()
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
 
-        PeriodicEventNotifier.shutdown()
+            self._prefetch_controller.stop()
+            self._store_controller.stop()
+            self._eviction_controller.stop()
+            self._l2_eviction_controller.stop()
 
-        for adapter in self._l2_adapters.values():
-            adapter.close()
+            PeriodicEventNotifier.shutdown()
 
-        self._l1_manager.close()
+            with self._adapters_lock:
+                adapters = list(self._l2_adapters.values())
+                self._l2_adapters.clear()
+                self._adapter_descriptors.clear()
+
+            for adapter in adapters:
+                adapter.close()
+
+            self._l1_manager.close()
 
     def report_status(self) -> dict:
         """Return a status dict aggregating all sub-component statuses."""
@@ -1155,6 +1170,8 @@ class StorageManager:
             listener: The listener to register.
         """
         with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("StorageManager is closed")
             self._registered_l2_listeners.append(listener)
             for adapter in self._l2_adapters.values():
                 adapter.register_listener(listener)
