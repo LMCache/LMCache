@@ -107,20 +107,26 @@ class AsyncPQExecutor(BaseJobExecutor):
                 (sentinel_priority, next(self._counter), _SENTINEL, None, {}, None)
             )
 
-        # Cancel all worker futures to ensure they stop
-        # Even when wait=False, we should cancel workers to prevent hanging coroutines
-        for fut in self._workers:
-            if not fut.done():
-                fut.cancel()
-
         if wait:
-            # Let workers drain tasks and exit gracefully
+            # Let workers drain tasks and exit gracefully. Cancelling before
+            # draining would stop a worker before it consumes its sentinel, so
+            # `task_done` would never be called for that item and this join
+            # would wait forever.
             await self._queue.join()
+            # Cancel all worker futures after queue is drained
+            for fut in self._workers:
+                if not fut.done():
+                    fut.cancel()
             # Wait for all workers to complete (with cancellation handling)
             await asyncio.gather(
                 *[asyncio.wrap_future(fut, loop=self.loop) for fut in self._workers],
                 return_exceptions=True,
             )
+        else:
+            # When wait=False, just cancel workers immediately
+            for fut in self._workers:
+                if not fut.done():
+                    fut.cancel()
 
     def shutdown(self, wait: bool = True) -> None:
         """Sync shutdown — blocks the calling thread until shutdown is complete."""
