@@ -43,6 +43,10 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    CbUnifiedLookupRequest,
+    CbUnifiedLookupResponse,
+)
 
 logger = init_logger(__name__)
 
@@ -441,6 +445,14 @@ class LookupMixin:
         return leading, retained
 
     @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
+    def handle_cb_unified_lookup(
+        self, request: CbUnifiedLookupRequest
+    ) -> CbUnifiedLookupResponse:
+        """Handle a transport-neutral CacheBlend lookup request."""
+        return CbUnifiedLookupResponse(
+            payload=self.cb_unified_lookup(request.key, request.tp_size)
+        )
+
     def cb_unified_lookup(
         self, key: IPCCacheServerKey, tp_size: int
     ) -> CBUnifiedLookupResult | None:

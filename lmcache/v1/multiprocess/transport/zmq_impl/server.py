@@ -13,10 +13,7 @@ import zmq
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.mq import MessageQueueServer
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-)
+from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
 
@@ -59,25 +56,20 @@ def add_handler_helper(
     server: MessageQueueServer,
     request_type: RequestType,
     handler_function: Callable[..., Any],
-    handler_type: HandlerType | None = None,
+    handler_type: HandlerType,
 ) -> None:
-    """Register one legacy request handler with a ZMQ server.
+    """Register one annotated request handler with a ZMQ server.
 
     Args:
         server: ZMQ message queue server.
-        request_type: Legacy request type to register.
+        request_type: Request type to register.
         handler_function: Callable that handles the decoded payloads.
-        handler_type: Execution type from the common handler annotation. The
-            protocol definition is used when omitted for compatibility.
+        handler_type: Execution type from the common handler annotation.
 
     Returns:
         None.
     """
-    server.add_handler(
-        request_type,
-        handler_type or get_handler_type(request_type),
-        handler_function,
-    )
+    server.add_handler(request_type, handler_type, handler_function)
 
 
 def get_zmq_handler_specs(module: object) -> list[HandlerSpec]:

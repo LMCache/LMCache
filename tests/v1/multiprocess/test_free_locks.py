@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the FREE_LOOKUP_LOCKS protocol: enum registration, protocol definition,
+Tests for the FREE_LOOKUP_LOCKS protocol: enum registration, message contract,
 request-transport round-trip, server handler, and client-side adapter API.
 """
 
@@ -16,7 +16,6 @@ from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
-    get_handler_type,
     get_request_message_class,
     get_response_message_class,
 )
@@ -67,12 +66,6 @@ def test_free_locks_response_message_class():
     )
 
 
-def test_free_locks_handler_type():
-    """FREE_LOOKUP_LOCKS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RequestType.FREE_LOOKUP_LOCKS)
-    assert handler_type == HandlerType.BLOCKING
-
-
 # ============================================================================
 # Request-transport round-trip test
 # ============================================================================
@@ -85,9 +78,12 @@ class _FreeLocksHandler:
         self.call: tuple[IPCCacheServerKey, int] | None = None
 
     @request_handler(RequestType.FREE_LOOKUP_LOCKS, HandlerType.BLOCKING)
-    def free_lookup_locks(self, key: IPCCacheServerKey, tp_size: int) -> None:
+    def free_lookup_locks(
+        self, request: FreeLookupLocksRequest
+    ) -> FreeLookupLocksResponse:
         """Record the decoded request payload."""
-        self.call = (key, tp_size)
+        self.call = (request.key, request.tp_size)
+        return FreeLookupLocksResponse()
 
 
 @pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)

@@ -38,6 +38,10 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.protocols.blend import handshake_response
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    CbProtocolHandshakeRequest,
+    CbProtocolHandshakeResponse,
+)
 from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
@@ -149,6 +153,13 @@ class BlendModule(
         return self._ctx
 
     @request_handler(RequestType.CB_PROTOCOL_HANDSHAKE)
+    def handle_cb_protocol_handshake(
+        self, request: CbProtocolHandshakeRequest
+    ) -> CbProtocolHandshakeResponse:
+        """Handle a transport-neutral CacheBlend version handshake."""
+        server_version, compatible = self.cb_protocol_handshake(request.client_version)
+        return CbProtocolHandshakeResponse(server_version, compatible)
+
     def cb_protocol_handshake(self, client_version: int) -> tuple[int, bool]:
         return handshake_response(client_version)
 

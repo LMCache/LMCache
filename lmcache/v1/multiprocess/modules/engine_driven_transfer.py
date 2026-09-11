@@ -29,6 +29,28 @@ from lmcache.v1.multiprocess.protocols.engine import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    CommitRetrieveRequest,
+    CommitRetrieveResponse,
+    CommitStoreRequest,
+    CommitStoreResponse,
+    PrepareRetrieveRequest,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    PrepareRetrieveResponse as RpcPrepareRetrieveResponse,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    PrepareStoreRequest,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    PrepareStoreResponse as RpcPrepareStoreResponse,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    RegisterKvCacheEngineDrivenContextRequest,
+    RegisterKvCacheEngineDrivenContextResponse,
+    UnregisterKvCacheEngineDrivenContextRequest,
+    UnregisterKvCacheEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
 # Local
@@ -255,6 +277,88 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         return self._ctx.resolve_obj_keys(key, [0])[0]
 
     @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
+    def handle_register_kv_cache_engine_driven_context(
+        self, request: RegisterKvCacheEngineDrivenContextRequest
+    ) -> RegisterKvCacheEngineDrivenContextResponse:
+        """Handle a transport-neutral engine-context registration."""
+        result = self.register_kv_cache_engine_driven_context(
+            RegisterEngineDrivenContextPayload(
+                instance_id=request.instance_id,
+                model_name=request.model_name,
+                world_size=request.world_size,
+                block_size=request.block_size,
+                num_layers=request.num_layers,
+                hidden_dim_size=request.hidden_dim_size,
+                dtype_str=request.dtype_str,
+                use_mla=request.use_mla,
+                num_physical_slots=request.num_physical_slots,
+            )
+        )
+        return RegisterKvCacheEngineDrivenContextResponse(
+            shm_name=result.shm_name,
+            pool_size=result.pool_size,
+        )
+
+    @request_handler(RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
+    def handle_unregister_kv_cache(
+        self, request: UnregisterKvCacheEngineDrivenContextRequest
+    ) -> UnregisterKvCacheEngineDrivenContextResponse:
+        """Handle a transport-neutral engine-context removal."""
+        self.unregister_kv_cache(request.instance_id)
+        return UnregisterKvCacheEngineDrivenContextResponse()
+
+    @request_handler(
+        RequestType.PREPARE_STORE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
+    def handle_prepare_store(
+        self, request: PrepareStoreRequest
+    ) -> RpcPrepareStoreResponse:
+        """Handle a transport-neutral prepare-store request."""
+        result = self.prepare_store(request.key, request.instance_id)
+        return RpcPrepareStoreResponse(context=result.context)
+
+    @request_handler(
+        RequestType.COMMIT_STORE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
+    def handle_commit_store(self, request: CommitStoreRequest) -> CommitStoreResponse:
+        """Handle a transport-neutral commit-store request."""
+        return CommitStoreResponse(
+            success=self.commit_store(request.key, request.instance_id, request.data)
+        )
+
+    @request_handler(
+        RequestType.PREPARE_RETRIEVE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
+    def handle_prepare_retrieve(
+        self, request: PrepareRetrieveRequest
+    ) -> RpcPrepareRetrieveResponse:
+        """Handle a transport-neutral prepare-retrieve request."""
+        result = self.prepare_retrieve(request.key, request.instance_id)
+        return RpcPrepareRetrieveResponse(
+            success=result.success,
+            data=result.data,
+            context=result.context,
+        )
+
+    @request_handler(
+        RequestType.COMMIT_RETRIEVE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
+    def handle_commit_retrieve(
+        self, request: CommitRetrieveRequest
+    ) -> CommitRetrieveResponse:
+        """Handle a transport-neutral commit-retrieve request."""
+        return CommitRetrieveResponse(
+            success=self.commit_retrieve(request.key, request.instance_id)
+        )
+
     def register_kv_cache_engine_driven_context(
         self,
         payload: RegisterEngineDrivenContextPayload,
@@ -356,7 +460,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             shm_name=shm_name, pool_size=pool_size
         )
 
-    @request_handler(RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister a non-GPU KV cache context for the given instance ID.
 
@@ -377,11 +480,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         self._release_entry(instance_id, entry)
         logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
 
-    @request_handler(
-        RequestType.PREPARE_STORE,
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    )
     @_lmcache_nvtx_annotate
     def prepare_store(
         self,
@@ -408,11 +506,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         session.extras["store_start_time"] = time.perf_counter()
         return response
 
-    @request_handler(
-        RequestType.COMMIT_STORE,
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    )
     @_lmcache_nvtx_annotate
     def commit_store(
         self,
@@ -455,11 +548,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
         return result
 
-    @request_handler(
-        RequestType.PREPARE_RETRIEVE,
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    )
     @_lmcache_nvtx_annotate
     def prepare_retrieve(
         self,
@@ -489,11 +577,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         session.extras["retrieve_start_time"] = time.perf_counter()
         return response
 
-    @request_handler(
-        RequestType.COMMIT_RETRIEVE,
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    )
     @_lmcache_nvtx_annotate
     def commit_retrieve(
         self,

@@ -26,6 +26,11 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    EventIpcHandleResult,
+    StoreRequest,
+    StoreResponse,
+)
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -59,6 +64,16 @@ class StoreMixin:
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
+    def handle_store(self, request: StoreRequest) -> StoreResponse:
+        """Handle a transport-neutral CacheBlend store request."""
+        event_ipc_handle, success = self.store(
+            request.key,
+            request.instance_id,
+            request.gpu_block_ids,
+            request.event_ipc_handle,
+        )
+        return StoreResponse(EventIpcHandleResult(event_ipc_handle, success))
+
     def store(
         self,
         key: IPCCacheServerKey,

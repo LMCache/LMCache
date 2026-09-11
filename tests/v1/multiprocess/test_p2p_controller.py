@@ -28,11 +28,11 @@ from lmcache.v1.multiprocess.modules.p2p_controller import (
 from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
-    get_handler_type,
     get_request_message_class,
     get_response_message_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.request_handler import get_request_handler_options
 from lmcache.v1.multiprocess.rpc_messages import (
     P2pLookupAndLockRequest,
     P2pLookupAndLockResponse,
@@ -85,7 +85,9 @@ def test_p2p_lookup_and_lock_protocol():
         get_response_message_class(RequestType.P2P_LOOKUP_AND_LOCK)
         is P2pLookupAndLockResponse
     )
-    assert get_handler_type(RequestType.P2P_LOOKUP_AND_LOCK) == HandlerType.BLOCKING
+    options = get_request_handler_options(P2PController.handle_p2p_lookup_and_lock)
+    assert options is not None
+    assert options.handler_type is HandlerType.BLOCKING
 
 
 def test_p2p_query_lookup_results_protocol():
@@ -99,9 +101,9 @@ def test_p2p_query_lookup_results_protocol():
         get_response_message_class(RequestType.P2P_QUERY_LOOKUP_RESULTS)
         is P2pQueryLookupResultsResponse
     )
-    assert (
-        get_handler_type(RequestType.P2P_QUERY_LOOKUP_RESULTS) == HandlerType.BLOCKING
-    )
+    options = get_request_handler_options(P2PController.handle_p2p_query_lookup_results)
+    assert options is not None
+    assert options.handler_type is HandlerType.BLOCKING
 
 
 def test_p2p_unlock_objects_protocol():
@@ -114,7 +116,9 @@ def test_p2p_unlock_objects_protocol():
         get_response_message_class(RequestType.P2P_UNLOCK_OBJECTS)
         is P2pUnlockObjectsResponse
     )
-    assert get_handler_type(RequestType.P2P_UNLOCK_OBJECTS) == HandlerType.BLOCKING
+    options = get_request_handler_options(P2PController.handle_p2p_unlock_objects)
+    assert options is not None
+    assert options.handler_type is HandlerType.BLOCKING
 
 
 # ============================================================================

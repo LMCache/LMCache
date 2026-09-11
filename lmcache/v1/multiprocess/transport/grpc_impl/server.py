@@ -24,9 +24,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     ServiceBinding,
     get_service_bindings,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.message_conversion import (
-    ResponseEncoder,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     get_method_registry,
 )
@@ -47,7 +44,7 @@ class _GrpcRequestHandler:
     handler_type: HandlerType
     requires_client_affinity: bool
     request_decoder: Callable[[Any], Any]
-    response_encoder: ResponseEncoder
+    response_encoder: Callable[[Any], Any]
 
 
 class _GeneratedServicer:

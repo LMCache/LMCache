@@ -45,10 +45,35 @@ from lmcache.v1.multiprocess.request_handler import (
     request_handler,
 )
 from lmcache.v1.multiprocess.rpc_messages import (
+    CbUnifiedLookupRequest,
+    CbUnifiedLookupResponse,
+    EventIpcHandleResult,
     LookupRequest,
     LookupResponse,
+    NoopRequest,
+    NoopResponse,
+    P2pLookupAndLockRequest,
+    P2pLookupAndLockResponse,
+    P2pQueryLookupResultsRequest,
+    P2pQueryLookupResultsResponse,
+    PingRequest,
+    PingResponse,
+    PrepareRetrieveRequest,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    PrepareRetrieveResponse as RpcPrepareRetrieveResponse,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    PrepareStoreRequest,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    PrepareStoreResponse as RpcPrepareStoreResponse,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
     RegisterKvCacheEngineDrivenContextRequest,
     RegisterKvCacheEngineDrivenContextResponse,
+    ReportBlockAllocationRequest,
+    ReportBlockAllocationResponse,
     StoreRequest,
     StoreResponse,
 )
@@ -99,25 +124,22 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
 
     class FakeModules:
         @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
-        def lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
-            calls.lookup = (key, tp_size)
+        def lookup(self, request: LookupRequest) -> LookupResponse:
+            calls.lookup = (request.key, request.tp_size)
+            return LookupResponse()
 
         @request_handler(
             RequestType.STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
-        def store(
-            self,
-            key: IPCCacheServerKey,
-            instance_id: int,
-            block_ids: list[list[int]],
-            event_ipc_handle: bytes,
-        ) -> tuple[bytes, bool]:
-            assert instance_id == 7
-            assert block_ids == [[1, 2], [3]]
-            assert event_ipc_handle == b"input-event"
-            return b"output-event", key.model_name == "model"
+        def store(self, request: StoreRequest) -> StoreResponse:
+            assert request.instance_id == 7
+            assert request.gpu_block_ids == [[1, 2], [3]]
+            assert request.event_ipc_handle == b"input-event"
+            return StoreResponse(
+                EventIpcHandleResult(b"output-event", request.key.model_name == "model")
+            )
 
         @request_handler(
             RequestType.PREPARE_STORE,
@@ -125,11 +147,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             requires_client_affinity=True,
         )
         def prepare_store(
-            self, key: IPCCacheServerKey, instance_id: int
-        ) -> PrepareStoreResponse:
-            assert key.request_configs == {"blend": True}
-            assert instance_id == 7
-            return PrepareStoreResponse(
+            self, request: PrepareStoreRequest
+        ) -> RpcPrepareStoreResponse:
+            assert request.key.request_configs == {"blend": True}
+            assert request.instance_id == 7
+            return RpcPrepareStoreResponse(
                 context={"slots": [{"offset": 8}], "chunk_indices": [2]}
             )
 
@@ -139,11 +161,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             requires_client_affinity=True,
         )
         def prepare_retrieve(
-            self, key: IPCCacheServerKey, instance_id: int
-        ) -> PrepareRetrieveResponse:
-            assert key.request_configs == {"blend": True}
-            assert instance_id == 7
-            return PrepareRetrieveResponse(
+            self, request: PrepareRetrieveRequest
+        ) -> RpcPrepareRetrieveResponse:
+            assert request.key.request_configs == {"blend": True}
+            assert request.instance_id == 7
+            return RpcPrepareRetrieveResponse(
                 success=True,
                 data=b"retrieved",
                 context={"slot": 3},
@@ -151,56 +173,60 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
 
         @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
         def register_kv_cache_engine_driven_context(
-            self, payload: RegisterEngineDrivenContextPayload
-        ) -> RegisterEngineDrivenContextResponse:
-            assert payload.num_physical_slots == 32
-            return RegisterEngineDrivenContextResponse("shared-memory", 4096)
+            self, request: RegisterKvCacheEngineDrivenContextRequest
+        ) -> RegisterKvCacheEngineDrivenContextResponse:
+            assert request.num_physical_slots == 32
+            return RegisterKvCacheEngineDrivenContextResponse("shared-memory", 4096)
 
         @request_handler(RequestType.PING, HandlerType.BLOCKING)
-        def ping(self, instance_id: int | None) -> bool:
-            return instance_id == 7
+        def ping(self, request: PingRequest) -> PingResponse:
+            return PingResponse(request.instance_id == 7)
 
         @request_handler(RequestType.NOOP)
-        def debug(self) -> str:
-            return "ok"
+        def debug(self, request: NoopRequest) -> NoopResponse:
+            return NoopResponse("ok")
 
         @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
         def report_block_allocations(
-            self,
-            instance_id: int,
-            model_name: str,
-            records: list[BlockAllocationRecord],
-        ) -> None:
-            calls.allocation = (instance_id, model_name, records)
+            self, request: ReportBlockAllocationRequest
+        ) -> ReportBlockAllocationResponse:
+            calls.allocation = (
+                request.instance_id,
+                request.model_name,
+                request.records,
+            )
+            return ReportBlockAllocationResponse()
 
         @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
         def cb_unified_lookup(
-            self, key: IPCCacheServerKey, tp_size: int
-        ) -> CBUnifiedLookupResult | None:
-            assert key.model_name == "model"
-            assert tp_size == 2
-            return CBUnifiedLookupResult(
-                prefix_coverage_tokens=16,
-                non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
+            self, request: CbUnifiedLookupRequest
+        ) -> CbUnifiedLookupResponse:
+            assert request.key.model_name == "model"
+            assert request.tp_size == 2
+            return CbUnifiedLookupResponse(
+                CBUnifiedLookupResult(
+                    prefix_coverage_tokens=16,
+                    non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
+                )
             )
 
         @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
         def p2p_lookup_and_lock(
-            self,
-            keys: list[ObjectKey],
-            group_layout_descs: dict[int, MemoryLayoutDesc],
-        ) -> int:
-            assert keys[0].cache_salt == "tenant"
-            assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
-            assert group_layout_descs[0].dtypes == [torch.float16]
-            return 41
+            self, request: P2pLookupAndLockRequest
+        ) -> P2pLookupAndLockResponse:
+            assert request.keys[0].cache_salt == "tenant"
+            assert request.group_layout_descs[0].shapes == [torch.Size([2, 4])]
+            assert request.group_layout_descs[0].dtypes == [torch.float16]
+            return P2pLookupAndLockResponse(41)
 
         @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
         def p2p_query_lookup_results(
-            self, task_id: int
-        ) -> list[TransferChannelAddress] | None:
-            assert task_id == 41
-            return [TransferChannelAddress(offset=8, size=16)]
+            self, request: P2pQueryLookupResultsRequest
+        ) -> P2pQueryLookupResultsResponse:
+            assert request.task_id == 41
+            return P2pQueryLookupResultsResponse(
+                [TransferChannelAddress(offset=8, size=16)]
+            )
 
     modules: Any = FakeModules()
     server = GrpcMultiprocessServer(

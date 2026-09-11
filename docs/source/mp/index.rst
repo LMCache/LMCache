@@ -534,16 +534,15 @@ Adding a new request type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
-2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   or ``p2p``) and add the request name to that module's ``REQUEST_NAMES``.
-3. Implement the handler method on the appropriate ``EngineModule``
-   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``) and
-   add its ``HandlerSpec`` to ``get_zmq_handler_specs()`` in the ZMQ transport
-   adapter.
-4. ``create_request_server()`` selects the transport. Its ZMQ implementation
-   registers every ``HandlerSpec`` returned for the loaded modules — no manual
-   registration step is needed.
+2. Add the transport-neutral Python request/response dataclasses to
+   ``rpc_messages.py`` and register the pair in ``RPC_MESSAGE_TYPES``.
+3. Implement the handler on the appropriate ``EngineModule`` using those
+   Python request/response types, then decorate it with ``@request_handler``.
+   The annotation is the single source of scheduling and affinity metadata.
+4. ``create_request_server()`` selects the transport. ZMQ sends the Python
+   messages directly; gRPC automatically maps the same messages to and from
+   generated protobuf classes. No per-transport handler registration or
+   per-RPC conversion definition is needed.
 
 Key Source Files
 ----------------
@@ -589,7 +588,13 @@ Key Source Files
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
    * - ``lmcache/v1/multiprocess/protocols/base.py``
-     - RequestType, HandlerType, ProtocolDefinition
+     - RequestType and HandlerType enums
+   * - ``lmcache/v1/multiprocess/rpc_messages.py``
+     - Transport-neutral Python request/response messages and RPC registry
+   * - ``lmcache/v1/multiprocess/request_handler.py``
+     - Common handler annotation, discovery, and scheduling metadata
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/message_conversion.py``
+     - Automatic Python message to protobuf structural conversion
    * - ``lmcache/v1/distributed/storage_manager.py``
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``

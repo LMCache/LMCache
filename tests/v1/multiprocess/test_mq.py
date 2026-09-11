@@ -27,16 +27,19 @@ from lmcache.v1.multiprocess.mq import (
     MessageQueueServer,
     msgspec_encode,
 )
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-)
+from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
     GetChunkSizeRequest,
     GetChunkSizeResponse,
     NoopRequest,
+    P2pLookupAndLockRequest,
+    P2pLookupAndLockResponse,
+    P2pQueryLookupResultsRequest,
+    P2pQueryLookupResultsResponse,
+    P2pUnlockObjectsRequest,
+    P2pUnlockObjectsResponse,
     make_request_message,
 )
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
@@ -46,6 +49,13 @@ from lmcache.v1.multiprocess.transport.zmq_impl.server import (
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
+
+_BLOCKING_TEST_REQUESTS = {
+    RequestType.STORE,
+    RequestType.RETRIEVE,
+    RequestType.LOOKUP,
+    RequestType.REPORT_BLOCK_ALLOCATION,
+}
 
 # ==============================================================================
 # MessageQueueServer and MessageQueueClient Tests Infrastructure
@@ -74,16 +84,18 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
 
     class P2PHandlers:
         @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
-        def lookup(self) -> None:
-            return None
+        def lookup(self, request: P2pLookupAndLockRequest) -> P2pLookupAndLockResponse:
+            return P2pLookupAndLockResponse(1)
 
         @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
-        def query(self) -> None:
-            return None
+        def query(
+            self, request: P2pQueryLookupResultsRequest
+        ) -> P2pQueryLookupResultsResponse:
+            return P2pQueryLookupResultsResponse(None)
 
         @request_handler(RequestType.P2P_UNLOCK_OBJECTS, HandlerType.BLOCKING)
-        def unlock(self) -> None:
-            return None
+        def unlock(self, request: P2pUnlockObjectsRequest) -> P2pUnlockObjectsResponse:
+            return P2pUnlockObjectsResponse()
 
     request_types = {spec.request_type for spec in get_zmq_handler_specs(P2PHandlers())}
 
@@ -92,6 +104,22 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
         RequestType.P2P_QUERY_LOOKUP_RESULTS,
         RequestType.P2P_UNLOCK_OBJECTS,
     }
+
+
+def test_zmq_rejects_legacy_payload_handler_signature() -> None:
+    """ZMQ requires the same complete Python message contract as gRPC."""
+
+    def legacy_handler() -> str:
+        return "legacy"
+
+    server = MessageQueueServer(
+        "inproc://strict-message-handler", zmq.Context.instance()
+    )
+    try:
+        with pytest.raises(TypeError, match="Python request and response"):
+            server.add_handler(RequestType.NOOP, HandlerType.SYNC, legacy_handler)
+    finally:
+        server.close()
 
 
 def _server_process(
@@ -109,16 +137,17 @@ def _server_process(
         shutdown_event: Event to signal server shutdown
         request_handlers: Dict mapping RequestType to handler functions
     """
-    # First Party
-    from lmcache.v1.multiprocess.protocol import HandlerType
-
     context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
 
     # Register all handlers
     blocking_types: list[RequestType] = []
     for request_type, handler in request_handlers.items():
-        handler_type = get_handler_type(request_type)
+        handler_type = (
+            HandlerType.BLOCKING
+            if request_type in _BLOCKING_TEST_REQUESTS
+            else HandlerType.SYNC
+        )
         server.add_handler(request_type, handler_type, handler)
         if handler_type == HandlerType.BLOCKING:
             blocking_types.append(request_type)
@@ -699,7 +728,12 @@ def test_shared_loop_dispatch():
 
     # Start server in-process
     server = MessageQueueServer(server_url, context)
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    add_handler_helper(
+        server,
+        RequestType.NOOP,
+        test_mq_handler_helpers.noop_handler,
+        HandlerType.SYNC,
+    )
     server.start()
 
     try:
@@ -737,7 +771,12 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
     server_url = "tcp://127.0.0.1:16025"
     context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    add_handler_helper(
+        server,
+        RequestType.NOOP,
+        test_mq_handler_helpers.noop_handler,
+        HandlerType.SYNC,
+    )
     server.start()
 
     client = MessageQueueClient(server_url, context)
@@ -862,9 +901,17 @@ def test_add_normal_thread_pool():
     server = MessageQueueServer("tcp://127.0.0.1:15700", context)
 
     add_handler_helper(
-        server, RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler
+        server,
+        RequestType.LOOKUP,
+        test_mq_handler_helpers.lookup_handler,
+        HandlerType.BLOCKING,
     )
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    add_handler_helper(
+        server,
+        RequestType.NOOP,
+        test_mq_handler_helpers.noop_handler,
+        HandlerType.SYNC,
+    )
 
     lookup_handler = server.handlers[RequestType.LOOKUP]
     assert isinstance(lookup_handler, BlockingRequestHandler)
@@ -888,9 +935,17 @@ def test_add_affinity_thread_pool():
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15700", context)
 
-    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
     add_handler_helper(
-        server, RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
+        server,
+        RequestType.STORE,
+        test_mq_handler_helpers.store_handler,
+        HandlerType.BLOCKING,
+    )
+    add_handler_helper(
+        server,
+        RequestType.RETRIEVE,
+        test_mq_handler_helpers.retrieve_handler,
+        HandlerType.BLOCKING,
     )
 
     store_handler = server.handlers[RequestType.STORE]
@@ -917,7 +972,12 @@ def test_normal_pool_error_on_sync_handler():
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15701", context)
 
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    add_handler_helper(
+        server,
+        RequestType.NOOP,
+        test_mq_handler_helpers.noop_handler,
+        HandlerType.SYNC,
+    )
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
         server.add_normal_thread_pool([RequestType.NOOP], max_workers=1)
@@ -932,7 +992,12 @@ def test_affinity_pool_error_on_sync_handler():
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15701", context)
 
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    add_handler_helper(
+        server,
+        RequestType.NOOP,
+        test_mq_handler_helpers.noop_handler,
+        HandlerType.SYNC,
+    )
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
         server.add_affinity_thread_pool([RequestType.NOOP], max_workers=1)
@@ -966,12 +1031,23 @@ def test_multiple_pools():
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15703", context)
 
-    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
     add_handler_helper(
-        server, RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
+        server,
+        RequestType.STORE,
+        test_mq_handler_helpers.store_handler,
+        HandlerType.BLOCKING,
     )
     add_handler_helper(
-        server, RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler
+        server,
+        RequestType.RETRIEVE,
+        test_mq_handler_helpers.retrieve_handler,
+        HandlerType.BLOCKING,
+    )
+    add_handler_helper(
+        server,
+        RequestType.LOOKUP,
+        test_mq_handler_helpers.lookup_handler,
+        HandlerType.BLOCKING,
     )
 
     server.add_affinity_thread_pool(
@@ -1005,7 +1081,12 @@ def test_start_fails_without_pool_assignment():
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15704", context)
 
-    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
+    add_handler_helper(
+        server,
+        RequestType.STORE,
+        test_mq_handler_helpers.store_handler,
+        HandlerType.BLOCKING,
+    )
     # Don't assign any pool
 
     with pytest.raises(RuntimeError, match="no thread pool assigned"):

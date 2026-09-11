@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Tests for the QUERY_PREFETCH_LOOKUP_HITS protocol: enum registration,
-protocol definition, request-transport round-trip, and server handler.
+message contract, request-transport round-trip, and server handler.
 """
 
 # Standard
@@ -22,7 +22,6 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
-    get_handler_type,
     get_request_message_class,
     get_response_message_class,
 )
@@ -69,12 +68,6 @@ def test_query_prefetch_lookup_hits_response_message_class():
     )
 
 
-def test_query_prefetch_lookup_hits_handler_type():
-    """QUERY_PREFETCH_LOOKUP_HITS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
-    assert handler_type == HandlerType.BLOCKING
-
-
 # ============================================================================
 # Request-transport round-trip tests
 # ============================================================================
@@ -88,10 +81,12 @@ class _QueryLookupHitsHandler:
         self.request_id: str | None = None
 
     @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
-    def query_prefetch_lookup_hits(self, request_id: str) -> int | None:
+    def query_prefetch_lookup_hits(
+        self, request: QueryPrefetchLookupHitsRequest
+    ) -> QueryPrefetchLookupHitsResponse:
         """Record the request ID and return the configured result."""
-        self.request_id = request_id
-        return self.result
+        self.request_id = request.request_id
+        return QueryPrefetchLookupHitsResponse(self.result)
 
 
 @pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)

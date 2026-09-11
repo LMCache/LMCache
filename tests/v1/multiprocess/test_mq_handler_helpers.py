@@ -8,25 +8,41 @@ and passed between processes during multiprocessing tests.
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    KVCache,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import KeyType
+from lmcache.v1.multiprocess.rpc_messages import (
+    EventIpcHandleResult,
+    FreeLookupLocksRequest,
+    FreeLookupLocksResponse,
+    LookupRequest,
+    LookupResponse,
+    NoopRequest,
+    NoopResponse,
+    RegisterKvCacheRequest,
+    RegisterKvCacheResponse,
+    ReportBlockAllocationRequest,
+    ReportBlockAllocationResponse,
+    RetrieveRequest,
+    RetrieveResponse,
+    StoreRequest,
+    StoreResponse,
+    UnregisterKvCacheRequest,
+    UnregisterKvCacheResponse,
+)
 
 # ==============================================================================
 # NOOP Request Handlers
 # ==============================================================================
 
 
-def noop_handler() -> str:
+def noop_handler(request: NoopRequest) -> NoopResponse:
     """
     Dummy handler for NOOP requests.
     Takes no arguments and returns a simple string response.
     """
-    return "NOOP_OK"
+    return NoopResponse("NOOP_OK")
 
 
 # ==============================================================================
@@ -35,14 +51,8 @@ def noop_handler() -> str:
 
 
 def register_kv_cache_handler(
-    gpu_id: int,
-    kv_cache: KVCache,
-    model_name: str,
-    world_size: int,
-    engine_type: EngineType,
-    layout_hints: LayoutHints,
-    engine_group_infos: list[EngineGroupInfo],
-) -> None:
+    request: RegisterKvCacheRequest,
+) -> RegisterKvCacheResponse:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
 
@@ -61,26 +71,29 @@ def register_kv_cache_handler(
     """
     # In a real implementation, this would register the KV cache
     # For testing, we just validate the inputs are received correctly
-    assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
-    assert isinstance(kv_cache, list), (
-        f"Expected kv_cache to be list, got {type(kv_cache)}"
+    assert isinstance(request.instance_id, int), (
+        f"Expected gpu_id to be int, got {type(request.instance_id)}"
     )
-    assert isinstance(model_name, str), (
-        f"Expected model_name to be str, got {type(model_name)}"
+    assert isinstance(request.kv_cache, list), (
+        f"Expected kv_cache to be list, got {type(request.kv_cache)}"
     )
-    assert isinstance(world_size, int), (
-        f"Expected world_size to be int, got {type(world_size)}"
+    assert isinstance(request.model_name, str), (
+        f"Expected model_name to be str, got {type(request.model_name)}"
     )
-    assert isinstance(engine_type, EngineType), (
-        f"Expected engine_type to be EngineType, got {type(engine_type)}"
+    assert isinstance(request.world_size, int), (
+        f"Expected world_size to be int, got {type(request.world_size)}"
     )
-    assert isinstance(layout_hints, dict), (
-        f"Expected layout_hints to be dict, got {type(layout_hints)}"
+    assert isinstance(request.engine_type, EngineType), (
+        f"Expected engine_type to be EngineType, got {type(request.engine_type)}"
     )
-    assert isinstance(engine_group_infos, list), (
-        f"Expected engine_group_infos to be a list, got {type(engine_group_infos)}"
+    assert isinstance(request.layout_hints, dict), (
+        f"Expected layout_hints to be dict, got {type(request.layout_hints)}"
     )
-    # No return value (returns None implicitly)
+    assert isinstance(request.engine_group_infos, list), (
+        "Expected engine_group_infos to be a list, got "
+        f"{type(request.engine_group_infos)}"
+    )
+    return RegisterKvCacheResponse()
 
 
 # ==============================================================================
@@ -88,7 +101,9 @@ def register_kv_cache_handler(
 # ==============================================================================
 
 
-def unregister_kv_cache_handler(gpu_id: int) -> None:
+def unregister_kv_cache_handler(
+    request: UnregisterKvCacheRequest,
+) -> UnregisterKvCacheResponse:
     """
     Dummy handler for UNREGISTER_KV_CACHE requests.
 
@@ -100,8 +115,10 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
     """
     # In a real implementation, this would unregister the KV cache for the given GPU
     # For testing, we just validate the input is received correctly
-    assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
-    # No return value (returns None implicitly)
+    assert isinstance(request.instance_id, int), (
+        f"Expected gpu_id to be int, got {type(request.instance_id)}"
+    )
+    return UnregisterKvCacheResponse()
 
 
 # ==============================================================================
@@ -109,9 +126,7 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 # ==============================================================================
 
 
-def store_handler(
-    key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]], ipc_handle: bytes
-) -> tuple[bytes, bool]:
+def store_handler(request: StoreRequest) -> StoreResponse:
     """
     Dummy handler for STORE requests.
 
@@ -124,18 +139,22 @@ def store_handler(
     Returns:
         tuple[bytes, bool]: (event handle, success flag)
     """
-    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
-    assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
-    assert isinstance(gpu_block_ids, list), (
-        f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
+    assert isinstance(request.key, KeyType), (
+        f"Expected key to be KeyType, got {type(request.key)}"
     )
-    assert all(isinstance(block_ids, list) for block_ids in gpu_block_ids), (
+    assert isinstance(request.instance_id, int), (
+        f"Expected gpu_id to be int, got {type(request.instance_id)}"
+    )
+    assert isinstance(request.gpu_block_ids, list), (
+        f"Expected gpu_block_ids to be list, got {type(request.gpu_block_ids)}"
+    )
+    assert all(isinstance(block_ids, list) for block_ids in request.gpu_block_ids), (
         "Expected gpu_block_ids to be list[list[int]]"
     )
-    assert isinstance(ipc_handle, bytes), (
-        f"Expected ipc_handle to be bytes, got {type(ipc_handle)}"
+    assert isinstance(request.event_ipc_handle, bytes), (
+        f"Expected ipc_handle to be bytes, got {type(request.event_ipc_handle)}"
     )
-    return b"\x01" * 64, True
+    return StoreResponse(EventIpcHandleResult(b"\x01" * 64, True))
 
 
 # ==============================================================================
@@ -143,13 +162,7 @@ def store_handler(
 # ==============================================================================
 
 
-def retrieve_handler(
-    key: KeyType,
-    gpu_id: int,
-    gpu_block_ids: list[list[int]],
-    event_handler: bytes,
-    skip_first_n_tokens: int = 0,
-) -> tuple[bytes, bool]:
+def retrieve_handler(request: RetrieveRequest) -> RetrieveResponse:
     """
     Dummy handler for RETRIEVE requests.
 
@@ -163,21 +176,26 @@ def retrieve_handler(
     Returns:
         tuple[bytes, bool]: (event handle, success flag)
     """
-    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
-    assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
-    assert isinstance(gpu_block_ids, list), (
-        f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
+    assert isinstance(request.key, KeyType), (
+        f"Expected key to be KeyType, got {type(request.key)}"
     )
-    assert all(isinstance(block_ids, list) for block_ids in gpu_block_ids), (
+    assert isinstance(request.instance_id, int), (
+        f"Expected gpu_id to be int, got {type(request.instance_id)}"
+    )
+    assert isinstance(request.gpu_block_ids, list), (
+        f"Expected gpu_block_ids to be list, got {type(request.gpu_block_ids)}"
+    )
+    assert all(isinstance(block_ids, list) for block_ids in request.gpu_block_ids), (
         "Expected gpu_block_ids to be list[list[int]]"
     )
-    assert isinstance(event_handler, bytes), (
-        f"Expected event_handler to be bytes, got {type(event_handler)}"
+    assert isinstance(request.event_ipc_handle, bytes), (
+        f"Expected event_handler to be bytes, got {type(request.event_ipc_handle)}"
     )
-    assert isinstance(skip_first_n_tokens, int), (
-        f"Expected skip_first_n_tokens to be int, got {type(skip_first_n_tokens)}"
+    assert isinstance(request.skip_first_n_tokens, int), (
+        "Expected skip_first_n_tokens to be int, got "
+        f"{type(request.skip_first_n_tokens)}"
     )
-    return b"\x01" * 64, True
+    return RetrieveResponse(EventIpcHandleResult(b"\x01" * 64, True))
 
 
 # ==============================================================================
@@ -185,7 +203,7 @@ def retrieve_handler(
 # ==============================================================================
 
 
-def lookup_handler(key: KeyType, tp_size: int) -> None:
+def lookup_handler(request: LookupRequest) -> LookupResponse:
     """
     Dummy handler for LOOKUP requests.
 
@@ -199,8 +217,13 @@ def lookup_handler(key: KeyType, tp_size: int) -> None:
     """
     # In a real implementation, this would look up the key in the cache
     # For testing, we just validate the input
-    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
-    assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
+    assert isinstance(request.key, KeyType), (
+        f"Expected key to be KeyType, got {type(request.key)}"
+    )
+    assert isinstance(request.tp_size, int), (
+        f"Expected tp_size to be int, got {type(request.tp_size)}"
+    )
+    return LookupResponse()
 
 
 # ==============================================================================
@@ -208,7 +231,9 @@ def lookup_handler(key: KeyType, tp_size: int) -> None:
 # ==============================================================================
 
 
-def free_locks_handler(key: KeyType, tp_size: int) -> None:
+def free_locks_handler(
+    request: FreeLookupLocksRequest,
+) -> FreeLookupLocksResponse:
     """
     Dummy handler for FREE_LOOKUP_LOCKS requests.
 
@@ -220,8 +245,13 @@ def free_locks_handler(key: KeyType, tp_size: int) -> None:
     Returns:
         None
     """
-    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
-    assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
+    assert isinstance(request.key, KeyType), (
+        f"Expected key to be KeyType, got {type(request.key)}"
+    )
+    assert isinstance(request.tp_size, int), (
+        f"Expected tp_size to be int, got {type(request.tp_size)}"
+    )
+    return FreeLookupLocksResponse()
 
 
 # ==============================================================================
@@ -230,10 +260,8 @@ def free_locks_handler(key: KeyType, tp_size: int) -> None:
 
 
 def report_block_allocations_handler(
-    instance_id: int,
-    model_name: str,
-    records: list[BlockAllocationRecord],
-) -> None:
+    request: ReportBlockAllocationRequest,
+) -> ReportBlockAllocationResponse:
     """
     Dummy handler for REPORT_BLOCK_ALLOCATION requests.
 
@@ -246,13 +274,14 @@ def report_block_allocations_handler(
     Returns:
         None
     """
-    assert isinstance(records, list), (
-        f"Expected records to be list, got {type(records)}"
+    assert isinstance(request.records, list), (
+        f"Expected records to be list, got {type(request.records)}"
     )
-    for rec in records:
+    for rec in request.records:
         assert isinstance(rec, BlockAllocationRecord), (
             f"Expected BlockAllocationRecord, got {type(rec)}"
         )
         assert isinstance(rec.req_id, str)
         assert isinstance(rec.new_block_ids, list)
         assert isinstance(rec.new_token_ids, list)
+    return ReportBlockAllocationResponse()

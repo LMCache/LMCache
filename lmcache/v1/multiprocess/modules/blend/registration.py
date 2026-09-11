@@ -22,6 +22,12 @@ from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    CbRegisterRopeRequest,
+    CbRegisterRopeResponse,
+    CbUnregisterRopeRequest,
+    CbUnregisterRopeResponse,
+)
 
 logger = init_logger(__name__)
 
@@ -49,6 +55,28 @@ class RegistrationMixin:
         ) -> Any: ...
 
     @request_handler(RequestType.CB_REGISTER_ROPE)
+    def handle_cb_register_rope(
+        self, request: CbRegisterRopeRequest
+    ) -> CbRegisterRopeResponse:
+        """Handle a transport-neutral RoPE registration."""
+        self.cb_register_rope(
+            request.instance_id,
+            request.cos_sin_caches_ipc,
+            request.head_size,
+            request.is_neox_style,
+            request.group_to_cache,
+            request.group_rot,
+        )
+        return CbRegisterRopeResponse()
+
+    @request_handler(RequestType.CB_UNREGISTER_ROPE)
+    def handle_cb_unregister_rope(
+        self, request: CbUnregisterRopeRequest
+    ) -> CbUnregisterRopeResponse:
+        """Handle a transport-neutral RoPE removal."""
+        self.cb_unregister_rope(request.instance_id)
+        return CbUnregisterRopeResponse()
+
     def cb_register_rope(
         self,
         instance_id: int,
@@ -196,7 +224,6 @@ class RegistrationMixin:
         except Exception:
             logger.debug("CB plan pre-warm skipped", exc_info=True)
 
-    @request_handler(RequestType.CB_UNREGISTER_ROPE)
     def cb_unregister_rope(self, instance_id: int) -> None:
         """Drop the instance's CB rope state; the paged KV cache stays intact."""
         self._cb_rope_state.pop(instance_id, None)

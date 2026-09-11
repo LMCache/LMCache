@@ -3,26 +3,19 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable, TypeVar, cast, get_type_hints
+from typing import Any, Callable, TypeVar, get_type_hints
 import inspect
 
 # First Party
 from lmcache.v1.multiprocess.protocol import (
-    get_handler_type,
     get_request_message_class,
     get_response_message_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.rpc_messages import (
-    RpcRequest,
-    unwrap_request_message,
-    wrap_response_message,
-)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
 _HANDLER_OPTIONS_ATTR = "__lmcache_request_handler_options__"
-_MISSING = object()
 
 
 @dataclass(frozen=True)
@@ -84,43 +77,9 @@ def request_handler(
         requires_client_affinity=requires_client_affinity,
     )
 
-    request_class = get_request_message_class(request_type)
-    response_class = get_response_message_class(request_type)
-
     def decorate(func: F) -> F:
-        hints = get_type_hints(func)
-        parameters = tuple(inspect.signature(func).parameters.values())[1:]
-        if (
-            len(parameters) == 1
-            and hints.get(parameters[0].name) is request_class
-            and hints.get("return") is response_class
-        ):
-            setattr(func, _HANDLER_OPTIONS_ATTR, options)
-            return func
-
-        def dispatch(
-            self: object,
-            request: object = _MISSING,
-            *args: Any,
-            **kwargs: Any,
-        ) -> Any:
-            if request is _MISSING:
-                return func(self, *args, **kwargs)
-            if not isinstance(request, request_class) or args or kwargs:
-                return func(self, request, *args, **kwargs)
-            result = func(self, *unwrap_request_message(cast(RpcRequest, request)))
-            return wrap_response_message(request_type.name, result)
-
-        dispatch.__name__ = func.__name__
-        dispatch.__qualname__ = func.__qualname__
-        dispatch.__doc__ = func.__doc__
-        dispatch.__module__ = func.__module__
-        dispatch.__annotations__ = {
-            "request": request_class,
-            "return": response_class,
-        }
-        setattr(dispatch, _HANDLER_OPTIONS_ATTR, options)
-        return dispatch  # type: ignore[return-value]
+        setattr(func, _HANDLER_OPTIONS_ATTR, options)
+        return func
 
     return decorate
 
@@ -152,7 +111,7 @@ def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
 
     Raises:
         ValueError: If one module registers a request more than once, or its
-            annotation disagrees with the protocol definition.
+            annotations disagree with the Python RPC message contract.
     """
     handlers: list[BoundRequestHandler] = []
     seen: set[RequestType] = set()
@@ -166,13 +125,6 @@ def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
             raise ValueError(
                 f"{module_type.__name__} has multiple handlers for "
                 f"{options.request_type.name}"
-            )
-        expected_handler_type = get_handler_type(options.request_type)
-        if options.handler_type is not expected_handler_type:
-            raise ValueError(
-                f"{module_type.__name__}.{handler.__name__} declares "
-                f"{options.handler_type.name} for {options.request_type.name}, "
-                f"but the protocol declares {expected_handler_type.name}"
             )
         signature = inspect.signature(handler)
         hints = get_type_hints(handler)
