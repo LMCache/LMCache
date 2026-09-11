@@ -129,6 +129,9 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != nvidiaRuntimeClass {
 		t.Fatalf("expected RuntimeClassName=nvidia, got %v", podSpec.RuntimeClassName)
 	}
+	if _, ok := ds.Spec.Template.Annotations["nvidia.cdi.k8s.io/container."+engineContainerName]; ok {
+		t.Fatal("default nvidia RuntimeClass should not set the NRI/CDI annotation")
+	}
 
 	if len(podSpec.Containers) != 1 {
 		t.Fatalf("expected 1 container, got %d", len(podSpec.Containers))
@@ -233,6 +236,22 @@ func TestBuildCBEngineDaemonSet_AMDNoRuntimeClass(t *testing.T) {
 	ds = BuildCBEngineDaemonSet(engine)
 	if !ds.Spec.Template.Spec.HostIPC {
 		t.Fatal("expected HostIPC=true when spec.hostIPC=true for AMD")
+	}
+}
+
+func TestBuildCBEngineDaemonSet_RuntimeClassNameEmptyOmitsWithoutCDI(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.RuntimeClassName = ptr("")
+
+	ds := BuildCBEngineDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if podSpec.RuntimeClassName != nil {
+		t.Fatalf("expected nil RuntimeClassName when spec.runtimeClassName is empty, got %q", *podSpec.RuntimeClassName)
+	}
+	wantCDI := "nvidia.cdi.k8s.io/container." + engineContainerName
+	if _, ok := ds.Spec.Template.Annotations[wantCDI]; ok {
+		t.Fatal("empty runtimeClassName must not auto-add the NRI/CDI annotation")
 	}
 }
 

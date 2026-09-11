@@ -131,6 +131,12 @@ Prerequisites
 - At least 4 GPUs per node
 - ``kubectl`` configured to access your cluster
 
+Classic GPU Operator installs register RuntimeClass ``nvidia``. CDI+NRI
+installs often have no RuntimeClass objects. On those clusters omit
+``runtimeClassName`` on the LMCache DaemonSet and request a management CDI
+device (see *GPU Operator NRI/CDI* below). The operator path is
+:ref:`mp-operator-nri-cdi`.
+
 Step-by-Step
 ~~~~~~~~~~~~
 
@@ -206,10 +212,41 @@ Architecture Notes
   memory sharing (see *Isolated IPC* above for the plan to remove this
   requirement).
 - **GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain
-  exclusively allocated to vLLM pods.  The NVIDIA container runtime
-  automatically provides GPU access for IPC-based memory transfers.
+  exclusively allocated to vLLM pods. On classic GPU Operator installs the
+  NVIDIA container runtime (RuntimeClass ``nvidia``) provides GPU access
+  for IPC-based memory transfers. On CDI+NRI installs there is no
+  ``nvidia`` RuntimeClass; omit it and request a management CDI device
+  instead (see below).
 - **Multiple vLLM pods** on the same node automatically connect to the same
   LMCache DaemonSet instance.
+
+GPU Operator NRI/CDI
+^^^^^^^^^^^^^^^^^^^^
+
+If ``kubectl get runtimeclass`` is empty, do not set ``runtimeClassName``
+on the DaemonSet. Request the management CDI device on the pod (the
+container name must match the annotation key):
+
+.. code-block:: yaml
+
+    metadata:
+      annotations:
+        nvidia.cdi.k8s.io/container.lmcache-server: management.nvidia.com/gpu=all
+
+If the DaemonSet namespace is not the GPU Operator install namespace,
+NVIDIA Container Toolkit **≥ v1.20.0** takes extra namespaces from
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES`` (Helm ``toolkit.env``, or
+``ClusterPolicy`` ``spec.toolkit.env``).
+(`NVIDIA: Requesting a Management CDI Device
+<https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/cdi.html>`_)
+Below v1.20.0 that env is not available, so the DaemonSet can see GPUs
+only in the toolkit install namespace (typically ``gpu-operator``).
+
+For reference, toolkit v1.20.0 became the GPU Operator Helm default in
+v26.7.0. The default allowed namespace is the toolkit install namespace;
+from 1.20, additional namespaces can be listed in
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES``, and the toolkit namespace remains
+allowed.
 
 .. note::
    LMCache pods on nodes without GPUs will crash with CUDA initialization

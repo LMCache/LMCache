@@ -1430,6 +1430,9 @@ func TestBuildDaemonSet_GPUVendorNvidiaDefault(t *testing.T) {
 	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != nvidiaRuntimeClass {
 		t.Fatalf("expected RuntimeClassName=nvidia, got %v", podSpec.RuntimeClassName)
 	}
+	if _, ok := ds.Spec.Template.Annotations["nvidia.cdi.k8s.io/container."+engineContainerName]; ok {
+		t.Fatal("default nvidia RuntimeClass should not set the NRI/CDI annotation")
+	}
 
 	c := podSpec.Containers[0]
 	if !hasEnvAll(c.Env, "NVIDIA_VISIBLE_DEVICES") {
@@ -1451,12 +1454,92 @@ func TestBuildDaemonSet_GPUVendorAMD(t *testing.T) {
 	if podSpec.RuntimeClassName != nil {
 		t.Fatalf("expected nil RuntimeClassName for AMD, got %q", *podSpec.RuntimeClassName)
 	}
+	if _, ok := ds.Spec.Template.Annotations["nvidia.cdi.k8s.io/container."+engineContainerName]; ok {
+		t.Fatal("AMD vendor should not set the NVIDIA NRI/CDI annotation")
+	}
 
 	c := podSpec.Containers[0]
 	for _, e := range c.Env {
 		if e.Name == "NVIDIA_VISIBLE_DEVICES" || e.Name == "NVIDIA_DRIVER_CAPABILITIES" {
 			t.Fatalf("unexpected NVIDIA env var on AMD vendor: %s=%s", e.Name, e.Value)
 		}
+	}
+}
+
+func TestBuildDaemonSet_RuntimeClassNameOverride(t *testing.T) {
+	cases := []struct {
+		name      string
+		vendor    *string
+		override  *string
+		wantClass *string // nil => no runtimeClassName on the pod
+	}{
+		{"nvidia default keeps the nvidia RuntimeClass", nil, nil, ptr(nvidiaRuntimeClass)},
+		{"empty override clears it on nvidia (default runtime)", nil, ptr(""), nil},
+		{"non-empty override wins on nvidia", nil, ptr("customrc"), ptr("customrc")},
+		{"non-empty override wins on amd", ptr(lmcachev1alpha1.GPUVendorAMD), ptr("customrc"), ptr("customrc")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := minimalEngine()
+			if tc.vendor != nil {
+				engine.Spec.GPUVendor = tc.vendor
+			}
+			engine.Spec.RuntimeClassName = tc.override
+			engine.SetDefaults()
+
+			got := BuildDaemonSet(engine).Spec.Template.Spec.RuntimeClassName
+			if tc.wantClass == nil {
+				if got != nil {
+					t.Fatalf("expected no RuntimeClassName, got %q", *got)
+				}
+				return
+			}
+			if got == nil || *got != *tc.wantClass {
+				t.Fatalf("expected RuntimeClassName=%q, got %v", *tc.wantClass, got)
+			}
+		})
+	}
+}
+
+func TestBuildDaemonSet_RuntimeClassNameEmptyOmitsWithoutCDI(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.RuntimeClassName = ptr("")
+	engine.SetDefaults()
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if podSpec.RuntimeClassName != nil {
+		t.Fatalf("expected nil RuntimeClassName when spec.runtimeClassName is empty, got %q", *podSpec.RuntimeClassName)
+	}
+	wantCDI := "nvidia.cdi.k8s.io/container." + engineContainerName
+	if _, ok := ds.Spec.Template.Annotations[wantCDI]; ok {
+		t.Fatal("empty runtimeClassName must not auto-add the NRI/CDI annotation")
+	}
+
+	c := podSpec.Containers[0]
+	if !hasEnvAll(c.Env, "NVIDIA_VISIBLE_DEVICES") {
+		t.Fatal("empty runtimeClassName must keep NVIDIA_VISIBLE_DEVICES=all")
+	}
+}
+
+func TestBuildDaemonSet_RuntimeClassNameEmptyPreservesPodAnnotations(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.RuntimeClassName = ptr("")
+	engine.Spec.PodAnnotations = map[string]string{
+		"example.com/keep": "yes",
+		"nvidia.cdi.k8s.io/container." + engineContainerName: "management.nvidia.com/gpu=all",
+	}
+	engine.SetDefaults()
+
+	ds := BuildDaemonSet(engine)
+	ann := ds.Spec.Template.Annotations
+	if ann["example.com/keep"] != "yes" {
+		t.Fatalf("expected user podAnnotation to be preserved, got %v", ann)
+	}
+	wantCDI := "nvidia.cdi.k8s.io/container." + engineContainerName
+	if ann[wantCDI] != "management.nvidia.com/gpu=all" {
+		t.Fatalf("expected user CDI podAnnotation to be copied, got %v", ann)
 	}
 }
 
