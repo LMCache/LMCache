@@ -22,7 +22,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -276,7 +276,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         non-GPU transfers."""
         return self._ctx.resolve_obj_keys(key, [0])[0]
 
-    @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
+    @request_handler()
     def handle_register_kv_cache_engine_driven_context(
         self, request: RegisterKvCacheEngineDrivenContextRequest
     ) -> RegisterKvCacheEngineDrivenContextResponse:
@@ -299,8 +299,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             pool_size=result.pool_size,
         )
 
-    @request_handler(RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
-    def handle_unregister_kv_cache(
+    @request_handler()
+    def handle_unregister_kv_cache_engine_driven_context(
         self, request: UnregisterKvCacheEngineDrivenContextRequest
     ) -> UnregisterKvCacheEngineDrivenContextResponse:
         """Handle a transport-neutral engine-context removal."""
@@ -308,7 +308,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         return UnregisterKvCacheEngineDrivenContextResponse()
 
     @request_handler(
-        RequestType.PREPARE_STORE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -320,7 +319,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         return RpcPrepareStoreResponse(context=result.context)
 
     @request_handler(
-        RequestType.COMMIT_STORE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -331,7 +329,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
 
     @request_handler(
-        RequestType.PREPARE_RETRIEVE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -347,7 +344,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
 
     @request_handler(
-        RequestType.COMMIT_RETRIEVE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )

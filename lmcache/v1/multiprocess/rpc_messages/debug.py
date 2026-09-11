@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 
 # First Party
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages.registry import register_rpc_message_types
 
 
@@ -21,7 +20,7 @@ class NoopResponse:
     message: str
 
 
-register_rpc_message_types(RequestType.NOOP, NoopRequest, NoopResponse)
+register_rpc_message_types("noop", NoopRequest, NoopResponse)
 
 
 __all__ = ["NoopRequest", "NoopResponse"]

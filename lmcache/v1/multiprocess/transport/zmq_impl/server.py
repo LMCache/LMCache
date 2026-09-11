@@ -13,7 +13,7 @@ import zmq
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.mq import MessageQueueServer
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RpcOperation
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
 
@@ -31,13 +31,13 @@ class HandlerSpec:
     """Describe one ZMQ request handler and its worker pool.
 
     Args:
-        request_type: ZMQ request type served by the handler.
+        operation: ZMQ route served by the handler.
         handler: Callable that processes the decoded request payloads.
         handler_type: Whether to execute inline or on a worker.
         requires_client_affinity: Whether to use the client-affinity pool.
     """
 
-    request_type: RequestType
+    operation: RpcOperation
     handler: Callable[..., Any]
     handler_type: HandlerType
     requires_client_affinity: bool
@@ -54,7 +54,7 @@ class HandlerSpec:
 
 def add_handler_helper(
     server: MessageQueueServer,
-    request_type: RequestType,
+    operation: RpcOperation,
     handler_function: Callable[..., Any],
     handler_type: HandlerType,
 ) -> None:
@@ -62,14 +62,14 @@ def add_handler_helper(
 
     Args:
         server: ZMQ message queue server.
-        request_type: Request type to register.
+        operation: RPC route to register.
         handler_function: Callable that handles the decoded payloads.
         handler_type: Execution type from the common handler annotation.
 
     Returns:
         None.
     """
-    server.add_handler(request_type, handler_type, handler_function)
+    server.add_handler(operation, handler_type, handler_function)
 
 
 def get_zmq_handler_specs(module: object) -> list[HandlerSpec]:
@@ -84,7 +84,7 @@ def get_zmq_handler_specs(module: object) -> list[HandlerSpec]:
     """
     return [
         HandlerSpec(
-            request_type=registered.options.request_type,
+            operation=registered.options.operation,
             handler=registered.handler,
             handler_type=registered.options.handler_type,
             requires_client_affinity=registered.options.requires_client_affinity,
@@ -114,24 +114,24 @@ def build_zmq_request_server(
     for spec in all_specs:
         add_handler_helper(
             server,
-            spec.request_type,
+            spec.operation,
             spec.handler,
             spec.handler_type,
         )
 
-    affinity_types = [
-        spec.request_type for spec in all_specs if spec.pool is ThreadPoolType.AFFINITY
+    affinity_operations = [
+        spec.operation for spec in all_specs if spec.pool is ThreadPoolType.AFFINITY
     ]
-    normal_types = [
-        spec.request_type for spec in all_specs if spec.pool is ThreadPoolType.NORMAL
+    normal_operations = [
+        spec.operation for spec in all_specs if spec.pool is ThreadPoolType.NORMAL
     ]
-    if affinity_types:
+    if affinity_operations:
         server.add_affinity_thread_pool(
-            affinity_types, max_workers=mp_config.max_gpu_workers
+            affinity_operations, max_workers=mp_config.max_gpu_workers
         )
-    if normal_types:
+    if normal_operations:
         server.add_normal_thread_pool(
-            normal_types, max_workers=mp_config.max_cpu_workers
+            normal_operations, max_workers=mp_config.max_cpu_workers
         )
     return server
 

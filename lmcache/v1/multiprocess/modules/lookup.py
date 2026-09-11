@@ -22,7 +22,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
     EndSessionRequest,
@@ -159,13 +159,13 @@ class LookupModule:
     # Handlers
     # -----------------------------------------------------------------
 
-    @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_lookup(self, request: LookupRequest) -> LookupResponse:
         """Handle a transport-neutral lookup request."""
         self.lookup(request.key, request.tp_size)
         return LookupResponse()
 
-    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_query_prefetch_lookup_hits(
         self, request: QueryPrefetchLookupHitsRequest
     ) -> QueryPrefetchLookupHitsResponse:
@@ -174,7 +174,7 @@ class LookupModule:
             chunk_count=self.query_prefetch_lookup_hits(request.request_id)
         )
 
-    @request_handler(RequestType.QUERY_PREFETCH_STATUS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_query_prefetch_status(
         self, request: QueryPrefetchStatusRequest
     ) -> QueryPrefetchStatusResponse:
@@ -183,7 +183,7 @@ class LookupModule:
             chunk_count=self.query_prefetch_status(request.request_id)
         )
 
-    @request_handler(RequestType.WAIT_PREFETCH_STATUS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_wait_prefetch_status(
         self, request: WaitPrefetchStatusRequest
     ) -> WaitPrefetchStatusResponse:
@@ -192,7 +192,7 @@ class LookupModule:
             chunk_count=self.wait_prefetch_status(request.request_id, request.timeout)
         )
 
-    @request_handler(RequestType.FREE_LOOKUP_LOCKS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_free_lookup_locks(
         self, request: FreeLookupLocksRequest
     ) -> FreeLookupLocksResponse:
@@ -200,7 +200,7 @@ class LookupModule:
         self.free_lookup_locks(request.key, request.tp_size)
         return FreeLookupLocksResponse()
 
-    @request_handler(RequestType.END_SESSION, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_end_session(self, request: EndSessionRequest) -> EndSessionResponse:
         """Handle a transport-neutral session completion request."""
         self.end_session(request.request_id)

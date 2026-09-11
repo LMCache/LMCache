@@ -11,7 +11,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
     ClearRequest,
@@ -133,7 +133,7 @@ class ManagementModule:
                 target.touch_instance(instance_id)
         return True
 
-    @request_handler(RequestType.PING, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_ping(self, request: PingRequest) -> PingResponse:
         """Handle a transport-neutral ping request."""
         return PingResponse(ok=self.ping(request.instance_id))
@@ -165,7 +165,7 @@ class ManagementModule:
         """
         return self._ctx.chunk_size
 
-    @request_handler(RequestType.GET_CHUNK_SIZE)
+    @request_handler()
     def handle_get_chunk_size(
         self, request: GetChunkSizeRequest
     ) -> GetChunkSizeResponse:
@@ -182,7 +182,7 @@ class ManagementModule:
         """
         return list(self._experimental_transfer)
 
-    @request_handler(RequestType.GET_EXPERIMENTAL)
+    @request_handler()
     def handle_get_experimental(
         self, request: GetExperimentalRequest
     ) -> GetExperimentalResponse:
@@ -196,7 +196,7 @@ class ManagementModule:
             self._ctx.storage_manager.clear(force=True)
             self._ctx.storage_manager.memcheck()
 
-    @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_clear(self, request: ClearRequest) -> ClearResponse:
         """Handle a transport-neutral cache-clear request."""
         self.clear()
@@ -210,7 +210,7 @@ class ManagementModule:
         """
         return "OK"
 
-    @request_handler(RequestType.NOOP)
+    @request_handler()
     def handle_noop(self, request: NoopRequest) -> NoopResponse:
         """Handle a transport-neutral no-op request."""
         return NoopResponse(message=self.debug())
@@ -240,8 +240,8 @@ class ManagementModule:
             )
         )
 
-    @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
-    def handle_report_block_allocations(
+    @request_handler(HandlerType.BLOCKING)
+    def handle_report_block_allocation(
         self, request: ReportBlockAllocationRequest
     ) -> ReportBlockAllocationResponse:
         """Handle a transport-neutral block-allocation report."""

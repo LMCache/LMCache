@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages.registry import register_rpc_message_types
 
 
@@ -109,26 +108,22 @@ class CommitRetrieveResponse:
 
 
 register_rpc_message_types(
-    RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+    "register_kv_cache_engine_driven_context",
     RegisterKvCacheEngineDrivenContextRequest,
     RegisterKvCacheEngineDrivenContextResponse,
 )
 register_rpc_message_types(
-    RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+    "unregister_kv_cache_engine_driven_context",
     UnregisterKvCacheEngineDrivenContextRequest,
     UnregisterKvCacheEngineDrivenContextResponse,
 )
+register_rpc_message_types("prepare_store", PrepareStoreRequest, PrepareStoreResponse)
+register_rpc_message_types("commit_store", CommitStoreRequest, CommitStoreResponse)
 register_rpc_message_types(
-    RequestType.PREPARE_STORE, PrepareStoreRequest, PrepareStoreResponse
+    "prepare_retrieve", PrepareRetrieveRequest, PrepareRetrieveResponse
 )
 register_rpc_message_types(
-    RequestType.COMMIT_STORE, CommitStoreRequest, CommitStoreResponse
-)
-register_rpc_message_types(
-    RequestType.PREPARE_RETRIEVE, PrepareRetrieveRequest, PrepareRetrieveResponse
-)
-register_rpc_message_types(
-    RequestType.COMMIT_RETRIEVE, CommitRetrieveRequest, CommitRetrieveResponse
+    "commit_retrieve", CommitRetrieveRequest, CommitRetrieveResponse
 )
 
 

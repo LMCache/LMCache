@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages.registry import register_rpc_message_types
 
 
@@ -91,30 +90,28 @@ class EndSessionResponse:
     """Acknowledge session cleanup."""
 
 
-register_rpc_message_types(RequestType.LOOKUP, LookupRequest, LookupResponse)
+register_rpc_message_types("lookup", LookupRequest, LookupResponse)
 register_rpc_message_types(
-    RequestType.QUERY_PREFETCH_STATUS,
+    "query_prefetch_status",
     QueryPrefetchStatusRequest,
     QueryPrefetchStatusResponse,
 )
 register_rpc_message_types(
-    RequestType.WAIT_PREFETCH_STATUS,
+    "wait_prefetch_status",
     WaitPrefetchStatusRequest,
     WaitPrefetchStatusResponse,
 )
 register_rpc_message_types(
-    RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+    "query_prefetch_lookup_hits",
     QueryPrefetchLookupHitsRequest,
     QueryPrefetchLookupHitsResponse,
 )
 register_rpc_message_types(
-    RequestType.FREE_LOOKUP_LOCKS,
+    "free_lookup_locks",
     FreeLookupLocksRequest,
     FreeLookupLocksResponse,
 )
-register_rpc_message_types(
-    RequestType.END_SESSION, EndSessionRequest, EndSessionResponse
-)
+register_rpc_message_types("end_session", EndSessionRequest, EndSessionResponse)
 
 
 __all__ = [

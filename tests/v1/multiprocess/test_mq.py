@@ -8,7 +8,6 @@ import threading
 import time
 
 # Third Party
-import msgspec
 import pytest
 import torch
 import zmq
@@ -27,7 +26,6 @@ from lmcache.v1.multiprocess.mq import (
     MessageQueueServer,
     msgspec_encode,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
@@ -51,10 +49,10 @@ from lmcache.v1.multiprocess.transport.zmq_impl.server import (
 from tests.v1.multiprocess import test_mq_handler_helpers
 
 _BLOCKING_TEST_REQUESTS = {
-    RequestType.STORE,
-    RequestType.RETRIEVE,
-    RequestType.LOOKUP,
-    RequestType.REPORT_BLOCK_ALLOCATION,
+    "store",
+    "retrieve",
+    "lookup",
+    "report_block_allocation",
 }
 
 # ==============================================================================
@@ -79,30 +77,34 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
     )
 
 
-def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
+def test_zmq_handler_specs_cover_all_p2p_operations() -> None:
     """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
 
     class P2PHandlers:
-        @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
-        def lookup(self, request: P2pLookupAndLockRequest) -> P2pLookupAndLockResponse:
+        @request_handler(HandlerType.BLOCKING)
+        def handle_p2p_lookup_and_lock(
+            self, request: P2pLookupAndLockRequest
+        ) -> P2pLookupAndLockResponse:
             return P2pLookupAndLockResponse(1)
 
-        @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
-        def query(
+        @request_handler(HandlerType.BLOCKING)
+        def handle_p2p_query_lookup_results(
             self, request: P2pQueryLookupResultsRequest
         ) -> P2pQueryLookupResultsResponse:
             return P2pQueryLookupResultsResponse(None)
 
-        @request_handler(RequestType.P2P_UNLOCK_OBJECTS, HandlerType.BLOCKING)
-        def unlock(self, request: P2pUnlockObjectsRequest) -> P2pUnlockObjectsResponse:
+        @request_handler(HandlerType.BLOCKING)
+        def handle_p2p_unlock_objects(
+            self, request: P2pUnlockObjectsRequest
+        ) -> P2pUnlockObjectsResponse:
             return P2pUnlockObjectsResponse()
 
-    request_types = {spec.request_type for spec in get_zmq_handler_specs(P2PHandlers())}
+    operations = {spec.operation for spec in get_zmq_handler_specs(P2PHandlers())}
 
-    assert request_types == {
-        RequestType.P2P_LOOKUP_AND_LOCK,
-        RequestType.P2P_QUERY_LOOKUP_RESULTS,
-        RequestType.P2P_UNLOCK_OBJECTS,
+    assert operations == {
+        "p2p_lookup_and_lock",
+        "p2p_query_lookup_results",
+        "p2p_unlock_objects",
     }
 
 
@@ -117,7 +119,7 @@ def test_zmq_rejects_legacy_payload_handler_signature() -> None:
     )
     try:
         with pytest.raises(TypeError, match="Python request and response"):
-            server.add_handler(RequestType.NOOP, HandlerType.SYNC, legacy_handler)
+            server.add_handler("noop", HandlerType.SYNC, legacy_handler)
     finally:
         server.close()
 
@@ -126,7 +128,7 @@ def _server_process(
     server_url: str,
     ready_event: EventClass,
     shutdown_event: EventClass,
-    request_handlers: dict[RequestType, Callable],
+    request_handlers: dict[str, Callable],
 ):
     """
     Server process that runs the MessageQueueServer.
@@ -135,13 +137,13 @@ def _server_process(
         server_url: URL to bind the server to
         ready_event: Event to signal when server is ready
         shutdown_event: Event to signal server shutdown
-        request_handlers: Dict mapping RequestType to handler functions
+        request_handlers: Dict mapping operation to handler functions
     """
     context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
 
     # Register all handlers
-    blocking_types: list[RequestType] = []
+    blocking_types: list[str] = []
     for request_type, handler in request_handlers.items():
         handler_type = (
             HandlerType.BLOCKING
@@ -171,7 +173,7 @@ def _server_process(
 def _run_client_test(
     server_url: str,
     ready_event: EventClass,
-    request_type: RequestType,
+    request_type: str,
     payloads: list[Any],
     expected_response: Any,
     num_requests: int = 1,
@@ -210,7 +212,7 @@ def _run_client_test(
         for _ in range(num_requests):
             future: MessagingFuture[Any] = client.submit_request(
                 request_type,
-                make_request_message(request_type.name, *payloads),
+                make_request_message(request_type, *payloads),
             )
             futures.append(future)
 
@@ -245,14 +247,14 @@ class MessageQueueTestHelper:
 
     Usage:
         1. Create an instance with server URL
-        2. Register handlers for different RequestTypes
+        2. Register handlers for different RPC operations
         3. Call run_test() to execute the test with client requests
 
     Example:
         helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5556")
-        helper.register_handler(RequestType.NOOP, noop_handler)
+        helper.register_handler("noop", noop_handler)
         helper.run_test(
-            request_type=RequestType.NOOP,
+            request_type="noop",
             payloads=[],
             expected_response="NOOP_OK",
             num_requests=10,  # Each client sends 10 requests
@@ -262,16 +264,16 @@ class MessageQueueTestHelper:
 
     def __init__(self, server_url: str = "tcp://127.0.0.1:5556"):
         self.server_url = server_url
-        self.handlers: dict[RequestType, Callable] = {}
+        self.handlers: dict[str, Callable] = {}
         self.ctx = mp.get_context("spawn")
 
     def register_handler(
         self,
-        request_type: RequestType,
+        request_type: str,
         handler: Callable,
     ) -> "MessageQueueTestHelper":
         """
-        Register a handler for a specific RequestType.
+        Register a handler for a specific RPC operation.
 
         Args:
             request_type: The type of request to handle
@@ -285,7 +287,7 @@ class MessageQueueTestHelper:
 
     def run_test(
         self,
-        request_type: RequestType,
+        request_type: str,
         payloads: list[Any],
         expected_response: Any,
         num_requests: int = 1,
@@ -371,7 +373,7 @@ class MessageQueueTestHelper:
 
 
 # ==============================================================================
-# Tests for Different RequestTypes
+# Tests for different RPC operations
 # ==============================================================================
 
 
@@ -382,11 +384,11 @@ def test_mq_noop_request():
     """
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5556")
-    helper.register_handler(RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    helper.register_handler("noop", test_mq_handler_helpers.noop_handler)
 
     # Run test with single request
     helper.run_test(
-        request_type=RequestType.NOOP,
+        request_type="noop",
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=1,
@@ -399,11 +401,11 @@ def test_mq_noop_multiple_requests():
     Verifies that server can handle multiple sequential requests.
     """
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5557")
-    helper.register_handler(RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    helper.register_handler("noop", test_mq_handler_helpers.noop_handler)
 
     # Run test with multiple requests
     helper.run_test(
-        request_type=RequestType.NOOP,
+        request_type="noop",
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=10,
@@ -416,11 +418,11 @@ def test_mq_noop_multiple_clients():
     Verifies that server can handle requests from multiple clients simultaneously.
     """
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5558")
-    helper.register_handler(RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    helper.register_handler("noop", test_mq_handler_helpers.noop_handler)
 
     # Run test with multiple clients, each sending multiple requests
     helper.run_test(
-        request_type=RequestType.NOOP,
+        request_type="noop",
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=5,
@@ -453,12 +455,12 @@ def test_mq_register_kv_cache():
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5559")
     helper.register_handler(
-        RequestType.REGISTER_KV_CACHE, test_mq_handler_helpers.register_kv_cache_handler
+        "register_kv_cache", test_mq_handler_helpers.register_kv_cache_handler
     )
 
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
-        request_type=RequestType.REGISTER_KV_CACHE,
+        request_type="register_kv_cache",
         payloads=[
             gpu_id,
             kv_cache,
@@ -483,13 +485,13 @@ def test_mq_unregister_kv_cache():
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5560")
     helper.register_handler(
-        RequestType.UNREGISTER_KV_CACHE,
+        "unregister_kv_cache",
         test_mq_handler_helpers.unregister_kv_cache_handler,
     )
 
     # Run test with UNREGISTER_KV_CACHE request
     helper.run_test(
-        request_type=RequestType.UNREGISTER_KV_CACHE,
+        request_type="unregister_kv_cache",
         payloads=[gpu_id],
         expected_response=None,
         num_requests=1,
@@ -506,13 +508,13 @@ def test_mq_unregister_kv_cache_multiple_clients():
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5561")
     helper.register_handler(
-        RequestType.UNREGISTER_KV_CACHE,
+        "unregister_kv_cache",
         test_mq_handler_helpers.unregister_kv_cache_handler,
     )
 
     # Run test with multiple clients
     helper.run_test(
-        request_type=RequestType.UNREGISTER_KV_CACHE,
+        request_type="unregister_kv_cache",
         payloads=[gpu_id],
         expected_response=None,
         num_requests=3,
@@ -534,11 +536,11 @@ def test_mq_store():
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5562")
-    helper.register_handler(RequestType.STORE, test_mq_handler_helpers.store_handler)
+    helper.register_handler("store", test_mq_handler_helpers.store_handler)
 
     # Run test with STORE request
     helper.run_test(
-        request_type=RequestType.STORE,
+        request_type="store",
         payloads=[key, gpu_id, gpu_block_ids, test_handle],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
@@ -559,13 +561,11 @@ def test_mq_retrieve():
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5563")
-    helper.register_handler(
-        RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
-    )
+    helper.register_handler("retrieve", test_mq_handler_helpers.retrieve_handler)
 
     # Run test with RETRIEVE request
     helper.run_test(
-        request_type=RequestType.RETRIEVE,
+        request_type="retrieve",
         payloads=[key, gpu_id, gpu_block_ids, test_handle, 0],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
@@ -586,11 +586,11 @@ def test_mq_lookup():
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
-    helper.register_handler(RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler)
+    helper.register_handler("lookup", test_mq_handler_helpers.lookup_handler)
 
     # Run test with LOOKUP request
     helper.run_test(
-        request_type=RequestType.LOOKUP,
+        request_type="lookup",
         payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
@@ -610,11 +610,11 @@ def test_mq_lookup_with_different_key():
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
-    helper.register_handler(RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler)
+    helper.register_handler("lookup", test_mq_handler_helpers.lookup_handler)
 
     # Run test with LOOKUP request
     helper.run_test(
-        request_type=RequestType.LOOKUP,
+        request_type="lookup",
         payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
@@ -642,12 +642,12 @@ def test_mq_report_block_allocation():
 
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5566")
     helper.register_handler(
-        RequestType.REPORT_BLOCK_ALLOCATION,
+        "report_block_allocation",
         test_mq_handler_helpers.report_block_allocations_handler,
     )
 
     helper.run_test(
-        request_type=RequestType.REPORT_BLOCK_ALLOCATION,
+        request_type="report_block_allocation",
         payloads=[42, "test-model", records],
         expected_response=None,
         num_requests=1,
@@ -662,12 +662,12 @@ def test_mq_report_block_allocation_empty():
 
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5567")
     helper.register_handler(
-        RequestType.REPORT_BLOCK_ALLOCATION,
+        "report_block_allocation",
         test_mq_handler_helpers.report_block_allocations_handler,
     )
 
     helper.run_test(
-        request_type=RequestType.REPORT_BLOCK_ALLOCATION,
+        request_type="report_block_allocation",
         payloads=[0, "", records],
         expected_response=None,
         num_requests=1,
@@ -730,7 +730,7 @@ def test_shared_loop_dispatch():
     server = MessageQueueServer(server_url, context)
     add_handler_helper(
         server,
-        RequestType.NOOP,
+        "noop",
         test_mq_handler_helpers.noop_handler,
         HandlerType.SYNC,
     )
@@ -746,12 +746,8 @@ def test_shared_loop_dispatch():
         assert loop._ref_count == 2
 
         # Both clients submit requests concurrently
-        futures_a = [
-            client_a.submit_request(RequestType.NOOP, NoopRequest()) for _ in range(5)
-        ]
-        futures_b = [
-            client_b.submit_request(RequestType.NOOP, NoopRequest()) for _ in range(5)
-        ]
+        futures_a = [client_a.submit_request("noop", NoopRequest()) for _ in range(5)]
+        futures_b = [client_b.submit_request("noop", NoopRequest()) for _ in range(5)]
 
         # All futures should resolve with the correct response
         for future in futures_a:
@@ -773,7 +769,7 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
     server = MessageQueueServer(server_url, context)
     add_handler_helper(
         server,
-        RequestType.NOOP,
+        "noop",
         test_mq_handler_helpers.noop_handler,
         HandlerType.SYNC,
     )
@@ -782,12 +778,10 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
     client = MessageQueueClient(server_url, context)
     try:
         invalid: MessagingFuture[int] = client.submit_request(
-            RequestType.GET_CHUNK_SIZE,
+            "get_chunk_size",
             123,  # type: ignore[arg-type]
         )
-        healthy: MessagingFuture[str] = client.submit_request(
-            RequestType.NOOP, NoopRequest()
-        )
+        healthy: MessagingFuture[str] = client.submit_request("noop", NoopRequest())
 
         with pytest.raises(TypeError, match="GetChunkSizeRequest"):
             invalid.result(timeout=5)
@@ -801,9 +795,8 @@ def test_client_survives_undecodable_response() -> None:
     """
     Test that an undecodable response does not stop later requests working.
 
-    RequestType is an enum.auto() enum, so its wire values are declaration
-    positions. A peer running a newer protocol can answer with a value this
-    build's enum does not contain, which fails to decode on arrival.
+    A peer can answer with an unknown operation name, which fails route
+    resolution on arrival.
 
     All MessageQueueClient instances in a process are serviced by one shared
     polling loop, so if such a response tears that loop down every client is
@@ -813,8 +806,7 @@ def test_client_survives_undecodable_response() -> None:
     server_url = "tcp://127.0.0.1:16030"
     context = zmq.Context.instance()
 
-    unknown_value = max(member.value for member in RequestType) + 1
-    b_unknown = msgspec.msgpack.encode(unknown_value)
+    b_unknown = b"unknown_operation"
     chunk_size = 256
 
     router = context.socket(zmq.ROUTER)
@@ -844,10 +836,10 @@ def test_client_survives_undecodable_response() -> None:
         client = MessageQueueClient(server_url, context)
 
         # The poisoned request cannot be resolved: without a decodable
-        # request_type there is no way to match it to its future, so it times
+        # operation there is no way to decode its response, so it times
         # out. That much is expected -- what matters is what happens after.
         poisoned: MessagingFuture[int] = client.submit_request(
-            RequestType.GET_CHUNK_SIZE, GetChunkSizeRequest()
+            "get_chunk_size", GetChunkSizeRequest()
         )
         with pytest.raises(TimeoutError):
             poisoned.result(timeout=1)
@@ -855,7 +847,7 @@ def test_client_survives_undecodable_response() -> None:
         # A later, well-formed request must still be served. If the bad
         # response tore down the shared polling loop, this times out too.
         healthy: MessagingFuture[int] = client.submit_request(
-            RequestType.GET_CHUNK_SIZE, GetChunkSizeRequest()
+            "get_chunk_size", GetChunkSizeRequest()
         )
         assert healthy.result(timeout=5) == chunk_size
 
@@ -902,22 +894,22 @@ def test_add_normal_thread_pool():
 
     add_handler_helper(
         server,
-        RequestType.LOOKUP,
+        "lookup",
         test_mq_handler_helpers.lookup_handler,
         HandlerType.BLOCKING,
     )
     add_handler_helper(
         server,
-        RequestType.NOOP,
+        "noop",
         test_mq_handler_helpers.noop_handler,
         HandlerType.SYNC,
     )
 
-    lookup_handler = server.handlers[RequestType.LOOKUP]
+    lookup_handler = server.handlers["lookup"]
     assert isinstance(lookup_handler, BlockingRequestHandler)
     assert lookup_handler.executor is None
 
-    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=4)
+    server.add_normal_thread_pool(["lookup"], max_workers=4)
 
     assert lookup_handler.executor is not None
     assert len(server.extra_pools) == 1
@@ -937,26 +929,24 @@ def test_add_affinity_thread_pool():
 
     add_handler_helper(
         server,
-        RequestType.STORE,
+        "store",
         test_mq_handler_helpers.store_handler,
         HandlerType.BLOCKING,
     )
     add_handler_helper(
         server,
-        RequestType.RETRIEVE,
+        "retrieve",
         test_mq_handler_helpers.retrieve_handler,
         HandlerType.BLOCKING,
     )
 
-    store_handler = server.handlers[RequestType.STORE]
-    retrieve_handler = server.handlers[RequestType.RETRIEVE]
+    store_handler = server.handlers["store"]
+    retrieve_handler = server.handlers["retrieve"]
     assert isinstance(store_handler, BlockingRequestHandler)
     assert isinstance(retrieve_handler, BlockingRequestHandler)
     assert store_handler.executor is None
 
-    server.add_affinity_thread_pool(
-        [RequestType.STORE, RequestType.RETRIEVE], max_workers=2
-    )
+    server.add_affinity_thread_pool(["store", "retrieve"], max_workers=2)
 
     assert isinstance(store_handler.executor, AffinityThreadPool)
     assert store_handler.executor is retrieve_handler.executor
@@ -974,13 +964,13 @@ def test_normal_pool_error_on_sync_handler():
 
     add_handler_helper(
         server,
-        RequestType.NOOP,
+        "noop",
         test_mq_handler_helpers.noop_handler,
         HandlerType.SYNC,
     )
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
-        server.add_normal_thread_pool([RequestType.NOOP], max_workers=1)
+        server.add_normal_thread_pool(["noop"], max_workers=1)
 
     server.close()
 
@@ -994,13 +984,13 @@ def test_affinity_pool_error_on_sync_handler():
 
     add_handler_helper(
         server,
-        RequestType.NOOP,
+        "noop",
         test_mq_handler_helpers.noop_handler,
         HandlerType.SYNC,
     )
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
-        server.add_affinity_thread_pool([RequestType.NOOP], max_workers=1)
+        server.add_affinity_thread_pool(["noop"], max_workers=1)
 
     server.close()
 
@@ -1013,10 +1003,10 @@ def test_pool_error_on_unregistered():
     server = MessageQueueServer("tcp://127.0.0.1:15702", context)
 
     with pytest.raises(ValueError, match="No handler registered"):
-        server.add_normal_thread_pool([RequestType.STORE], max_workers=1)
+        server.add_normal_thread_pool(["store"], max_workers=1)
 
     with pytest.raises(ValueError, match="No handler registered"):
-        server.add_affinity_thread_pool([RequestType.STORE], max_workers=1)
+        server.add_affinity_thread_pool(["store"], max_workers=1)
 
     server.close()
 
@@ -1033,31 +1023,29 @@ def test_multiple_pools():
 
     add_handler_helper(
         server,
-        RequestType.STORE,
+        "store",
         test_mq_handler_helpers.store_handler,
         HandlerType.BLOCKING,
     )
     add_handler_helper(
         server,
-        RequestType.RETRIEVE,
+        "retrieve",
         test_mq_handler_helpers.retrieve_handler,
         HandlerType.BLOCKING,
     )
     add_handler_helper(
         server,
-        RequestType.LOOKUP,
+        "lookup",
         test_mq_handler_helpers.lookup_handler,
         HandlerType.BLOCKING,
     )
 
-    server.add_affinity_thread_pool(
-        [RequestType.STORE, RequestType.RETRIEVE], max_workers=2
-    )
-    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=3)
+    server.add_affinity_thread_pool(["store", "retrieve"], max_workers=2)
+    server.add_normal_thread_pool(["lookup"], max_workers=3)
 
-    store_handler = server.handlers[RequestType.STORE]
-    retrieve_handler = server.handlers[RequestType.RETRIEVE]
-    lookup_handler = server.handlers[RequestType.LOOKUP]
+    store_handler = server.handlers["store"]
+    retrieve_handler = server.handlers["retrieve"]
+    lookup_handler = server.handlers["lookup"]
     assert isinstance(store_handler, BlockingRequestHandler)
     assert isinstance(retrieve_handler, BlockingRequestHandler)
     assert isinstance(lookup_handler, BlockingRequestHandler)
@@ -1083,7 +1071,7 @@ def test_start_fails_without_pool_assignment():
 
     add_handler_helper(
         server,
-        RequestType.STORE,
+        "store",
         test_mq_handler_helpers.store_handler,
         HandlerType.BLOCKING,
     )

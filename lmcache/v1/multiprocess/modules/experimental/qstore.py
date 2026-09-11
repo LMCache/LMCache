@@ -33,7 +33,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
     EventIpcHandleResult,
@@ -230,7 +230,7 @@ class QStoreModule(InstanceLivenessTarget):
             self._q_contexts.clear()
         self._release_entries(entries)
 
-    @request_handler(RequestType.REGISTER_Q_CACHE)
+    @request_handler()
     def handle_register_q_cache(
         self, request: RegisterKvCacheRequest
     ) -> RegisterKvCacheResponse:
@@ -246,7 +246,7 @@ class QStoreModule(InstanceLivenessTarget):
         )
         return RegisterKvCacheResponse()
 
-    @request_handler(RequestType.UNREGISTER_Q_CACHE)
+    @request_handler()
     def handle_unregister_q_cache(
         self, request: UnregisterKvCacheRequest
     ) -> UnregisterKvCacheResponse:
@@ -255,7 +255,6 @@ class QStoreModule(InstanceLivenessTarget):
         return UnregisterKvCacheResponse()
 
     @request_handler(
-        RequestType.STORE_Q,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )

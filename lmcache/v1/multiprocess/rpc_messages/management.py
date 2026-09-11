@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 
 # First Party
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages.registry import register_rpc_message_types
 
 
@@ -57,14 +56,12 @@ class PingResponse:
     ok: bool
 
 
-register_rpc_message_types(RequestType.CLEAR, ClearRequest, ClearResponse)
+register_rpc_message_types("clear", ClearRequest, ClearResponse)
+register_rpc_message_types("get_chunk_size", GetChunkSizeRequest, GetChunkSizeResponse)
 register_rpc_message_types(
-    RequestType.GET_CHUNK_SIZE, GetChunkSizeRequest, GetChunkSizeResponse
+    "get_experimental", GetExperimentalRequest, GetExperimentalResponse
 )
-register_rpc_message_types(
-    RequestType.GET_EXPERIMENTAL, GetExperimentalRequest, GetExperimentalResponse
-)
-register_rpc_message_types(RequestType.PING, PingRequest, PingResponse)
+register_rpc_message_types("ping", PingRequest, PingResponse)
 
 
 __all__ = [

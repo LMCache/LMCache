@@ -48,7 +48,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
     EventIpcHandleResult,
@@ -935,7 +935,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             self._cache_contexts.clear()
         self._release_entries(entries)
 
-    @request_handler(RequestType.REGISTER_KV_CACHE)
+    @request_handler()
     def handle_register_kv_cache(
         self, request: RegisterKvCacheRequest
     ) -> RegisterKvCacheResponse:
@@ -951,7 +951,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
         return RegisterKvCacheResponse()
 
-    @request_handler(RequestType.UNREGISTER_KV_CACHE)
+    @request_handler()
     def handle_unregister_kv_cache(
         self, request: UnregisterKvCacheRequest
     ) -> UnregisterKvCacheResponse:
@@ -960,7 +960,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return UnregisterKvCacheResponse()
 
     @request_handler(
-        RequestType.STORE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -975,7 +974,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return StoreResponse(EventIpcHandleResult(event_ipc_handle, success))
 
     @request_handler(
-        RequestType.RETRIEVE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )

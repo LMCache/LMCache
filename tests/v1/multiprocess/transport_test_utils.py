@@ -67,14 +67,14 @@ def start_lookup_request_server(
     for spec in specs:
         add_handler_helper(
             zmq_server,
-            spec.request_type,
+            spec.operation,
             spec.handler,
             spec.handler_type,
         )
-    normal_types = [
-        spec.request_type for spec in specs if spec.pool is ThreadPoolType.NORMAL
+    normal_operations = [
+        spec.operation for spec in specs if spec.pool is ThreadPoolType.NORMAL
     ]
-    if normal_types:
-        zmq_server.add_normal_thread_pool(normal_types, max_workers=4)
+    if normal_operations:
+        zmq_server.add_normal_thread_pool(normal_operations, max_workers=4)
     zmq_server.start()
     return zmq_server

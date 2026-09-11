@@ -9,7 +9,6 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages.registry import register_rpc_message_types
 
 
@@ -87,27 +86,27 @@ class RetrieveResponse:
 
 
 register_rpc_message_types(
-    RequestType.REGISTER_KV_CACHE, RegisterKvCacheRequest, RegisterKvCacheResponse
+    "register_kv_cache", RegisterKvCacheRequest, RegisterKvCacheResponse
 )
 register_rpc_message_types(
-    RequestType.UNREGISTER_KV_CACHE,
+    "unregister_kv_cache",
     UnregisterKvCacheRequest,
     UnregisterKvCacheResponse,
 )
-register_rpc_message_types(RequestType.STORE, StoreRequest, StoreResponse)
-register_rpc_message_types(RequestType.RETRIEVE, RetrieveRequest, RetrieveResponse)
+register_rpc_message_types("store", StoreRequest, StoreResponse)
+register_rpc_message_types("retrieve", RetrieveRequest, RetrieveResponse)
 # QStore owns distinct operations but deliberately shares the LMCache-driven
 # payload shapes.  Keep those aliases beside the payload classes, not in a
 # repository-wide protocol table.
 register_rpc_message_types(
-    RequestType.REGISTER_Q_CACHE, RegisterKvCacheRequest, RegisterKvCacheResponse
+    "register_q_cache", RegisterKvCacheRequest, RegisterKvCacheResponse
 )
 register_rpc_message_types(
-    RequestType.UNREGISTER_Q_CACHE,
+    "unregister_q_cache",
     UnregisterKvCacheRequest,
     UnregisterKvCacheResponse,
 )
-register_rpc_message_types(RequestType.STORE_Q, StoreRequest, StoreResponse)
+register_rpc_message_types("store_q", StoreRequest, StoreResponse)
 
 
 __all__ = [
