@@ -5,6 +5,7 @@ from unittest.mock import patch
 import os
 import select
 import tempfile
+import threading
 
 # Third Party
 import pytest
@@ -634,5 +635,114 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
                 load_bitmap = adapter.query_load_result(load_task_id)
             assert load_bitmap is not None
             assert str(load_bitmap) == "00"
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_delete_indexed_key_deducts_slot_bytes():
+    """delete() on an indexed key must deduct exactly slot_bytes from usage.
+
+    This verifies the was_indexed=True accounting path: _notify_keys_stored
+    added slot_bytes when the key committed; _notify_keys_deleted must subtract
+    the same amount so usage returns to zero.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        slot_bytes = 64 * 1024
+        adapter = RawBlockL2Adapter(_make_config(dev_path, slot_bytes=slot_bytes))
+        try:
+            key = _create_object_key(51)
+            obj = _create_memory_obj()
+
+            _run_store(adapter, [key], [obj])
+            assert adapter.get_usage().total_bytes_used == slot_bytes
+
+            adapter.delete([key])
+            assert adapter.get_usage().total_bytes_used == 0
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_delete_toctou_commits_before_delete_many():
+    """delete() reports was_indexed=True when the store commits before delete_many runs.
+
+    This is the exact TOCTOU scenario the fix targets:
+      1. delete() is called while the key is still inflight.
+      2. Before delete_many() acquires the lock the write completes, moving
+         the key from _inflight to _index and incrementing usage by slot_bytes.
+      3. delete_many() then finds the key in _index (was_indexed=True) and
+         subtracts slot_bytes, returning usage to 0.
+
+    The old code used two separate lock acquisitions: get_metadata_many() saw
+    the key as inflight (meta=None) then delete_many() found it indexed.  The
+    mismatch caused size=0 to be reported, leaving usage overcounted forever.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        adapter = RawBlockL2Adapter(_make_config(dev_path))
+        try:
+            key = _create_object_key(52)
+            obj = _create_memory_obj()
+            slot_bytes = adapter._core.slot_bytes
+
+            write_started = threading.Event()
+            write_proceed = threading.Event()
+            original_write = adapter._core._write_one
+
+            def paused_write(*args, **kwargs):
+                write_started.set()
+                write_proceed.wait(timeout=5.0)
+                return original_write(*args, **kwargs)
+
+            delete_reached_delete_many = threading.Event()
+            delete_may_proceed = threading.Event()
+            original_delete_many = adapter._core.delete_many
+
+            def intercepted_delete_many(*args, **kwargs):
+                delete_reached_delete_many.set()
+                delete_may_proceed.wait(timeout=5.0)
+                return original_delete_many(*args, **kwargs)
+
+            with patch.object(adapter._core, "_write_one", side_effect=paused_write):
+                adapter.submit_store_task([key], [obj])
+                assert write_started.wait(timeout=5.0), "_write_one did not start"
+
+                # Key is in _inflight.  Intercept delete_many so we can let the
+                # write commit between when delete() starts and delete_many runs.
+                with patch.object(
+                    adapter._core, "delete_many", side_effect=intercepted_delete_many
+                ):
+                    delete_thread = threading.Thread(
+                        target=lambda: adapter.delete([key]), daemon=True
+                    )
+                    delete_thread.start()
+                    assert delete_reached_delete_many.wait(timeout=5.0), (
+                        "delete_many was not reached"
+                    )
+
+                    # delete_many is paused.  Let the write complete so the key
+                    # transitions from _inflight to _index (usage = slot_bytes).
+                    write_proceed.set()
+                    assert _wait_event_fd(adapter.get_store_event_fd()), (
+                        "store did not complete"
+                    )
+                    adapter.pop_completed_store_tasks()
+                    assert adapter.get_usage().total_bytes_used == int(slot_bytes)
+
+                    # Now let delete_many run.  It finds the key indexed
+                    # (was_indexed=True) and subtracts slot_bytes.
+                    delete_may_proceed.set()
+                    delete_thread.join(timeout=5.0)
+
+            assert not delete_thread.is_alive(), "delete thread did not finish"
+            assert adapter.get_usage().total_bytes_used == 0
         finally:
             adapter.close()

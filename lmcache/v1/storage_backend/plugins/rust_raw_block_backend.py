@@ -371,7 +371,7 @@ class RustRawBlockBackend(StoragePluginInterface):
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         spec = encode_legacy_key(key)
         with self._pin_lock:
-            removed = self._core.delete_many([spec.encoded], force=force)[0]
+            removed = self._core.delete_many([spec.encoded], force=force)[0].deleted
             if removed:
                 self._pinned_keys.discard(spec.encoded)
         return removed
