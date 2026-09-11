@@ -32,7 +32,6 @@ from lmcache.v1.multiprocess.group_view import (
 )
 from lmcache.v1.multiprocess.mq import MessagingFuture
 from lmcache.v1.multiprocess.transfer_context import (
-    EngineDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
@@ -1425,7 +1424,12 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
+        transfer_ctx = create_transfer_context(
+            kv_caches,
+            instance_id=self.instance_id,
+            req_client=self.req_client,
+            mode=self._mp_transfer_mode,
+        )
         layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
         try:
@@ -1433,12 +1437,10 @@ class LMCacheMPWorkerAdapter:
             # shutdown() may null self.transfer_ctx between publish and this
             # call. The local is always non-None.
             transfer_ctx.register(
-                self.instance_id,
                 kv_caches,
                 self.model_name,
                 self.world_size,
                 self.blocks_in_chunk,
-                self.req_client,
                 self._mq_timeout,
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
@@ -1599,7 +1601,6 @@ class LMCacheMPWorkerAdapter:
         future = self.transfer_ctx.submit_store(
             request_id,
             key,
-            self.instance_id,
             self.kv_caches,
             self._block_ids_per_group(op),
             event,
@@ -1658,7 +1659,6 @@ class LMCacheMPWorkerAdapter:
         future = self.transfer_ctx.submit_retrieve(
             request_id,
             key,
-            self.instance_id,
             self.kv_caches,
             self._block_ids_per_group(op),
             event,
@@ -2091,21 +2091,18 @@ class LMCacheMPWorkerAdapter:
             if self._heartbeat is not None:
                 self._heartbeat.stop()
 
-        logger.info("Unregistering kv caches")
-        try:
-            if isinstance(self.transfer_ctx, EngineDrivenTransferContext):
-                future = self.req_client.unregister_kv_cache_engine_driven_context(
-                    self.instance_id
+        if self.transfer_ctx is not None:
+            logger.info("Unregistering kv caches")
+            try:
+                future = self.transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "LMCache server did not respond to unregister within %ss. "
+                    "Proceeding with shutdown.",
+                    self._mq_timeout,
                 )
-            else:
-                future = self.req_client.unregister_kv_cache(self.instance_id)
-            future.result(timeout=self._mq_timeout)
-        except TimeoutError:
-            logger.warning(
-                "LMCache server did not respond to unregister within %ss. "
-                "Proceeding with shutdown.",
-                self._mq_timeout,
-            )
 
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "shutdown")

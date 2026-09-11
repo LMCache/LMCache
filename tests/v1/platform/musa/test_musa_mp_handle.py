@@ -3,6 +3,7 @@
 # Standard
 from types import SimpleNamespace
 from typing import NoReturn, cast
+from unittest.mock import MagicMock
 import importlib
 
 # Third Party
@@ -275,7 +276,9 @@ def test_create_transfer_context_auto_keeps_musa_on_data_path() -> None:
         create_transfer_context,
     )
 
-    context = create_transfer_context(_fake_musa_kv_caches())
+    context = create_transfer_context(
+        _fake_musa_kv_caches(), instance_id=1, req_client=MagicMock()
+    )
 
     assert isinstance(context, EngineDrivenTransferContext)
 
@@ -286,7 +289,12 @@ def test_create_transfer_context_musa_handle_requires_capability() -> None:
     from lmcache.v1.multiprocess.transfer_context import create_transfer_context
 
     with pytest.raises(ValueError, match="not available"):
-        create_transfer_context(_fake_musa_kv_caches(), mode="lmcache_driven")
+        create_transfer_context(
+            _fake_musa_kv_caches(),
+            instance_id=1,
+            req_client=MagicMock(),
+            mode="lmcache_driven",
+        )
 
 
 def test_create_transfer_context_musa_handle_allowed_when_available(
@@ -308,6 +316,8 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
 
     context = create_transfer_context(
         _fake_musa_kv_caches(),
+        instance_id=1,
+        req_client=MagicMock(),
         mode="lmcache_driven",
     )
 
