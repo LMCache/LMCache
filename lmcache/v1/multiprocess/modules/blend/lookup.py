@@ -41,7 +41,7 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
     _narrow_attn_desc,
 )
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
     CbUnifiedLookupRequest,
@@ -444,7 +444,7 @@ class LookupMixin:
         )
         return leading, retained
 
-    @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def handle_cb_unified_lookup(
         self, request: CbUnifiedLookupRequest
     ) -> CbUnifiedLookupResponse:

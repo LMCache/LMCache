@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the QUERY_PREFETCH_LOOKUP_HITS protocol: enum registration,
-message contract, request-transport round-trip, and server handler.
+Tests for the ``query_prefetch_lookup_hits`` RPC route, message contract,
+request-transport round-trip, and server handler.
 """
 
 # Standard
@@ -21,7 +21,6 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.protocol import (
-    RequestType,
     get_request_message_class,
     get_response_message_class,
 )
@@ -46,24 +45,18 @@ from tests.v1.multiprocess.transport_test_utils import (
 # ============================================================================
 
 
-def test_query_prefetch_lookup_hits_in_request_type():
-    """QUERY_PREFETCH_LOOKUP_HITS should be a member of RequestType."""
-    assert hasattr(RequestType, "QUERY_PREFETCH_LOOKUP_HITS")
-    assert isinstance(RequestType.QUERY_PREFETCH_LOOKUP_HITS, RequestType)
-
-
 def test_query_prefetch_lookup_hits_request_message_class():
-    """QUERY_PREFETCH_LOOKUP_HITS should use its Python request message."""
+    """The route should use its Python request message."""
     assert (
-        get_request_message_class(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+        get_request_message_class("query_prefetch_lookup_hits")
         is QueryPrefetchLookupHitsRequest
     )
 
 
 def test_query_prefetch_lookup_hits_response_message_class():
-    """QUERY_PREFETCH_LOOKUP_HITS should use its Python response message."""
+    """The route should use its Python response message."""
     assert (
-        get_response_message_class(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+        get_response_message_class("query_prefetch_lookup_hits")
         is QueryPrefetchLookupHitsResponse
     )
 
@@ -80,8 +73,8 @@ class _QueryLookupHitsHandler:
         self.result = result
         self.request_id: str | None = None
 
-    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
-    def query_prefetch_lookup_hits(
+    @request_handler(HandlerType.BLOCKING)
+    def handle_query_prefetch_lookup_hits(
         self, request: QueryPrefetchLookupHitsRequest
     ) -> QueryPrefetchLookupHitsResponse:
         """Record the request ID and return the configured result."""

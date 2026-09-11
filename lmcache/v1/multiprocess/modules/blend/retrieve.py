@@ -42,7 +42,7 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
     _CBRopeState,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
     CbRetrievePreComputedRequest,
@@ -539,7 +539,6 @@ class RetrieveMixin:
         return len(release_keys)
 
     @request_handler(
-        RequestType.CB_RETRIEVE_PRE_COMPUTED,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )

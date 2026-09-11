@@ -11,7 +11,7 @@ import inspect
 
 # First Party
 from lmcache.v1.multiprocess.protocol import (
-    RequestType,
+    RpcOperation,
     get_request_message_class,
     get_response_message_class,
 )
@@ -27,7 +27,7 @@ class GrpcMethodBinding:
 
     full_name: str
     method_path: str
-    request_type: RequestType
+    operation: RpcOperation
     python_request_class: type[Any]
     python_response_class: type[Any]
 
@@ -83,38 +83,34 @@ def get_method_registry() -> GrpcMethodRegistry:
         Read-only contract lookup table keyed by full protobuf method name.
 
     Raises:
-        RuntimeError: If a generated method has no matching request type, or
-            a protobuf method or request type is duplicated.
+        RuntimeError: If a generated method has no locally declared Python
+            message contract, or a protobuf method or operation is duplicated.
     """
     by_full_name: dict[str, GrpcMethodBinding] = {}
-    request_types: set[RequestType] = set()
+    operations: set[RpcOperation] = set()
     for _binding, method in iter_methods():
-        request_name = client_method_name(method.name).upper()
+        operation = client_method_name(method.name)
         try:
-            request_type = RequestType[request_name]
-        except KeyError as exc:
+            python_request_class = get_request_message_class(operation)
+            python_response_class = get_response_message_class(operation)
+        except ValueError as exc:
             raise RuntimeError(
-                f"Generated gRPC method {method.full_name} has no matching "
-                f"RequestType.{request_name}"
+                f"Generated gRPC method {method.full_name} has no matching Python "
+                f"RPC contract for {operation!r}"
             ) from exc
-        if request_type in request_types:
-            raise RuntimeError(
-                f"Duplicate generated gRPC request type: {request_type.name}"
-            )
-
-        python_request_class = get_request_message_class(request_type)
-        python_response_class = get_response_message_class(request_type)
+        if operation in operations:
+            raise RuntimeError(f"Duplicate generated gRPC operation: {operation}")
         adapter = GrpcMethodBinding(
             full_name=method.full_name,
             method_path=(f"/{method.containing_service.full_name}/{method.name}"),
-            request_type=request_type,
+            operation=operation,
             python_request_class=python_request_class,
             python_response_class=python_response_class,
         )
         if method.full_name in by_full_name:
             raise RuntimeError(f"Duplicate generated gRPC method: {method.full_name}")
         by_full_name[method.full_name] = adapter
-        request_types.add(request_type)
+        operations.add(operation)
 
     return GrpcMethodRegistry(
         by_full_name=MappingProxyType(by_full_name),

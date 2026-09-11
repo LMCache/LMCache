@@ -7,7 +7,6 @@ import ast
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.rpc_messages import (
     CbUnregisterRopeRequest,
     LookupRequest,
@@ -28,28 +27,28 @@ class _RecordingMessageQueueClient(MessageQueueClient):
     """Record requests without opening a ZMQ socket."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[RequestType, RpcRequest]] = []
+        self.calls: list[tuple[str, RpcRequest]] = []
         self.closed = False
 
     def submit_request(
         self,
-        request_type: RequestType,
+        operation: str,
         request_message: RpcRequest,
     ) -> MessagingFuture[Any]:
         future: MessagingFuture[Any] = MessagingFuture()
-        self.calls.append((request_type, request_message))
-        future.set_result(request_type)
+        self.calls.append((operation, request_message))
+        future.set_result(operation)
         return future
 
     def close(self) -> None:
         self.closed = True
 
 
-def test_all_request_types_have_explicit_named_methods() -> None:
+def test_all_registered_operations_have_explicit_named_methods() -> None:
     contract_names = {
         name for name, value in RequestClient.__dict__.items() if callable(value)
     }
-    expected_names = {name.lower() for name in RequestType.__members__}
+    expected_names = {client_method_name(method.name) for _, method in iter_methods()}
 
     assert expected_names <= contract_names
     zmq_method_names = {
@@ -142,16 +141,16 @@ def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
 
     future = client.lookup("key", 4)
 
-    assert future.result(timeout=0) is RequestType.LOOKUP
+    assert future.result(timeout=0) == "lookup"
     assert transport.calls == [
         (
-            RequestType.LOOKUP,
+            "lookup",
             LookupRequest(key="key", tp_size=4),  # type: ignore[arg-type]
         )
     ]
 
 
-def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
+def test_compatibility_alias_delegates_to_same_zmq_operation() -> None:
     transport = _RecordingMessageQueueClient()
     client = ZmqMultiprocessClient(transport)
 
@@ -159,7 +158,7 @@ def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
 
     assert transport.calls == [
         (
-            RequestType.CB_UNREGISTER_ROPE,
+            "cb_unregister_rope",
             CbUnregisterRopeRequest(instance_id=7),
         )
     ]

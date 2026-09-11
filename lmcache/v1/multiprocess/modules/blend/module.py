@@ -35,7 +35,6 @@ from lmcache.v1.multiprocess.modules.blend.store import (
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.protocols.blend import handshake_response
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
@@ -152,7 +151,7 @@ class BlendModule(
     def context(self) -> MPCacheServerContext:
         return self._ctx
 
-    @request_handler(RequestType.CB_PROTOCOL_HANDSHAKE)
+    @request_handler()
     def handle_cb_protocol_handshake(
         self, request: CbProtocolHandshakeRequest
     ) -> CbProtocolHandshakeResponse:

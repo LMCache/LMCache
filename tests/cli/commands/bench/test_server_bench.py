@@ -36,7 +36,6 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_unregister_kv_cache,
 )
 from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages import (
     LookupRequest,
     LookupResponse,
@@ -642,12 +641,12 @@ class _LookupRouter:
                 continue
             frames = self._router.recv_multipart()
             identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
-            if req_type == RequestType.LOOKUP:
+            req_type = type_f.decode("ascii")
+            if req_type == "lookup":
                 msgspec_decode(payload[0], cls=LookupRequest)
                 body = msgspec_encode(LookupResponse(), cls=LookupResponse)
                 self._router.send_multipart([identity, uid_f, type_f, body])
-            elif req_type == RequestType.QUERY_PREFETCH_STATUS:
+            elif req_type == "query_prefetch_status":
                 request = msgspec_decode(payload[0], cls=QueryPrefetchStatusRequest)
                 self.last_query_request_id = request.request_id
                 if self._in_progress_left > 0:
@@ -725,7 +724,7 @@ class _UnregisterRouter:
     """
 
     def __init__(self, endpoint: str) -> None:
-        self.last_request_type: RequestType | None = None
+        self.last_operation: str | None = None
         self.last_instance_id: int | None = None
         self._ctx = zmq.Context.instance()
         self._router = self._ctx.socket(zmq.ROUTER)
@@ -747,13 +746,13 @@ class _UnregisterRouter:
                 continue
             frames = self._router.recv_multipart()
             identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
+            req_type = type_f.decode("ascii")
             if req_type in (
-                RequestType.UNREGISTER_KV_CACHE,
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+                "unregister_kv_cache",
+                "unregister_kv_cache_engine_driven_context",
             ):
-                self.last_request_type = req_type
-                if req_type == RequestType.UNREGISTER_KV_CACHE:
+                self.last_operation = req_type
+                if req_type == "unregister_kv_cache":
                     request = msgspec_decode(payload[0], cls=UnregisterKvCacheRequest)
                     self.last_instance_id = request.instance_id
                     body = msgspec_encode(
@@ -789,7 +788,7 @@ class TestUnregisterKVCache:
                 _send_unregister_kv_cache(client, instance_id=7, use_handle=True)
                 is True
             )
-            assert router.last_request_type == RequestType.UNREGISTER_KV_CACHE
+            assert router.last_operation == "unregister_kv_cache"
             assert router.last_instance_id == 7
             client.close()
         finally:
@@ -808,10 +807,7 @@ class TestUnregisterKVCache:
                 _send_unregister_kv_cache(client, instance_id=0, use_handle=False)
                 is True
             )
-            assert (
-                router.last_request_type
-                == RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
-            )
+            assert router.last_operation == "unregister_kv_cache_engine_driven_context"
             assert router.last_instance_id == 0
             client.close()
         finally:
@@ -878,8 +874,8 @@ class _RegisterEngineDrivenRouter:
                 continue
             frames = self._router.recv_multipart()
             identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
-            if req_type == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT:
+            req_type = type_f.decode("ascii")
+            if req_type == "register_kv_cache_engine_driven_context":
                 self.last_payload = msgspec.msgpack.decode(
                     payload[0], type=self._payload_type
                 )
@@ -1469,7 +1465,7 @@ class _LifetimeCheckingFuture:
 class _LifetimeCheckingClient:
     def __init__(self, future: _LifetimeCheckingFuture) -> None:
         self.future = future
-        self.calls: list[tuple[RequestType, list[object]]] = []
+        self.calls: list[tuple[str, list[object]]] = []
 
     def store(
         self,
@@ -1478,9 +1474,7 @@ class _LifetimeCheckingClient:
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> _LifetimeCheckingFuture:
-        self.calls.append(
-            (RequestType.STORE, [key, instance_id, block_ids, event_ipc_handle])
-        )
+        self.calls.append(("store", [key, instance_id, block_ids, event_ipc_handle]))
         return self.future
 
     def retrieve(
@@ -1493,7 +1487,7 @@ class _LifetimeCheckingClient:
     ) -> _LifetimeCheckingFuture:
         self.calls.append(
             (
-                RequestType.RETRIEVE,
+                "retrieve",
                 [
                     key,
                     instance_id,
@@ -1510,7 +1504,7 @@ class _LifetimeCheckingClient:
     ("request_type", "invoke", "expected_status"),
     [
         (
-            RequestType.STORE,
+            "store",
             lambda helpers, client, key: helpers._send_store(  # noqa: SLF001
                 client,
                 key,
@@ -1522,7 +1516,7 @@ class _LifetimeCheckingClient:
             "stored",
         ),
         (
-            RequestType.RETRIEVE,
+            "retrieve",
             lambda helpers, client, key: helpers._send_retrieve(  # noqa: SLF001
                 client,
                 key,
@@ -1539,7 +1533,7 @@ class _LifetimeCheckingClient:
 )
 def test_handle_mode_keeps_exported_event_alive_until_reply(
     monkeypatch: pytest.MonkeyPatch,
-    request_type: RequestType,
+    request_type: str,
     invoke,
     expected_status: str,
 ) -> None:
@@ -1575,7 +1569,7 @@ def test_handle_mode_keeps_exported_event_alive_until_reply(
         (
             request_type,
             [key, 0, [[0, 1]], b"evt-handle"]
-            if request_type is RequestType.STORE
+            if request_type == "store"
             else [key, 0, [[0]], b"evt-handle", 0],
         )
     ]
@@ -1590,7 +1584,7 @@ def test_handle_mode_keeps_exported_event_alive_until_reply(
     ("request_type", "invoke"),
     [
         (
-            RequestType.STORE,
+            "store",
             lambda helpers, client, key: helpers._send_store(  # noqa: SLF001
                 client,
                 key,
@@ -1601,7 +1595,7 @@ def test_handle_mode_keeps_exported_event_alive_until_reply(
             ),
         ),
         (
-            RequestType.RETRIEVE,
+            "retrieve",
             lambda helpers, client, key: helpers._send_retrieve(  # noqa: SLF001
                 client,
                 key,
@@ -1617,7 +1611,7 @@ def test_handle_mode_keeps_exported_event_alive_until_reply(
 )
 def test_handle_mode_timeout_retains_exported_event_on_raw_future(
     monkeypatch: pytest.MonkeyPatch,
-    request_type: RequestType,
+    request_type: str,
     invoke,
 ) -> None:
     """Timeout does not release the exported event before the raw future does."""
@@ -1656,7 +1650,7 @@ def test_handle_mode_timeout_retains_exported_event_on_raw_future(
         (
             request_type,
             [key, 0, [[0, 1]], b"evt-handle"]
-            if request_type is RequestType.STORE
+            if request_type == "store"
             else [key, 0, [[0]], b"evt-handle", 0],
         )
     ]

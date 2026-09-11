@@ -7,9 +7,7 @@ from typing import Any
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-)
+from lmcache.v1.multiprocess.protocol import RpcOperation
 from lmcache.v1.multiprocess.rpc_messages import make_request_message
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
@@ -39,7 +37,7 @@ class ZmqMultiprocessClient(RequestClient):
     ) -> MessagingFuture[Any]:
         """Register a worker KV cache with the multiprocess server."""
         return self._call(
-            RequestType.REGISTER_KV_CACHE,
+            "register_kv_cache",
             instance_id,
             kv_cache,
             model_name,
@@ -51,7 +49,7 @@ class ZmqMultiprocessClient(RequestClient):
 
     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[Any]:
         """Unregister a worker KV cache."""
-        return self._call(RequestType.UNREGISTER_KV_CACHE, instance_id)
+        return self._call("unregister_kv_cache", instance_id)
 
     def register_q_cache(
         self,
@@ -65,7 +63,7 @@ class ZmqMultiprocessClient(RequestClient):
     ) -> MessagingFuture[Any]:
         """Register a worker Q cache with the multiprocess server."""
         return self._call(
-            RequestType.REGISTER_Q_CACHE,
+            "register_q_cache",
             instance_id,
             q_cache,
             model_name,
@@ -77,7 +75,7 @@ class ZmqMultiprocessClient(RequestClient):
 
     def unregister_q_cache(self, instance_id: int) -> MessagingFuture[Any]:
         """Unregister a worker Q cache."""
-        return self._call(RequestType.UNREGISTER_Q_CACHE, instance_id)
+        return self._call("unregister_q_cache", instance_id)
 
     def store_q(
         self,
@@ -87,9 +85,7 @@ class ZmqMultiprocessClient(RequestClient):
         event_ipc_handle: bytes,
     ) -> MessagingFuture[Any]:
         """Store Q-cache blocks."""
-        return self._call(
-            RequestType.STORE_Q, key, instance_id, block_ids, event_ipc_handle
-        )
+        return self._call("store_q", key, instance_id, block_ids, event_ipc_handle)
 
     def store(
         self,
@@ -99,9 +95,7 @@ class ZmqMultiprocessClient(RequestClient):
         event_ipc_handle: bytes,
     ) -> MessagingFuture[Any]:
         """Store KV-cache blocks."""
-        return self._call(
-            RequestType.STORE, key, instance_id, block_ids, event_ipc_handle
-        )
+        return self._call("store", key, instance_id, block_ids, event_ipc_handle)
 
     def retrieve(
         self,
@@ -113,7 +107,7 @@ class ZmqMultiprocessClient(RequestClient):
     ) -> MessagingFuture[Any]:
         """Retrieve KV-cache blocks."""
         return self._call(
-            RequestType.RETRIEVE,
+            "retrieve",
             key,
             instance_id,
             block_ids,
@@ -123,73 +117,71 @@ class ZmqMultiprocessClient(RequestClient):
 
     def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Start a prefix lookup."""
-        return self._call(RequestType.LOOKUP, key, tp_size)
+        return self._call("lookup", key, tp_size)
 
     def query_prefetch_status(self, request_id: str) -> MessagingFuture[Any]:
         """Query a prefetch task without blocking for completion."""
-        return self._call(RequestType.QUERY_PREFETCH_STATUS, request_id)
+        return self._call("query_prefetch_status", request_id)
 
     def wait_prefetch_status(
         self, request_id: str, timeout: float
     ) -> MessagingFuture[Any]:
         """Wait for a prefetch task to complete."""
-        return self._call(RequestType.WAIT_PREFETCH_STATUS, request_id, timeout)
+        return self._call("wait_prefetch_status", request_id, timeout)
 
     def query_prefetch_lookup_hits(self, request_id: str) -> MessagingFuture[Any]:
         """Query lookup hits while prefetch is in progress."""
-        return self._call(RequestType.QUERY_PREFETCH_LOOKUP_HITS, request_id)
+        return self._call("query_prefetch_lookup_hits", request_id)
 
     def free_lookup_locks(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Release read locks acquired by lookup."""
-        return self._call(RequestType.FREE_LOOKUP_LOCKS, key, tp_size)
+        return self._call("free_lookup_locks", key, tp_size)
 
     def end_session(self, request_id: str) -> MessagingFuture[Any]:
         """End a request session."""
-        return self._call(RequestType.END_SESSION, request_id)
+        return self._call("end_session", request_id)
 
     def register_kv_cache_engine_driven_context(
         self, payload: Any
     ) -> MessagingFuture[Any]:
         """Register an engine-driven transfer context."""
-        return self._call(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT, payload)
+        return self._call("register_kv_cache_engine_driven_context", payload)
 
     def unregister_kv_cache_engine_driven_context(
         self, instance_id: int
     ) -> MessagingFuture[Any]:
         """Unregister an engine-driven transfer context."""
-        return self._call(
-            RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT, instance_id
-        )
+        return self._call("unregister_kv_cache_engine_driven_context", instance_id)
 
     def prepare_store(self, key: Any, instance_id: int) -> MessagingFuture[Any]:
         """Prepare an engine-driven store."""
-        return self._call(RequestType.PREPARE_STORE, key, instance_id)
+        return self._call("prepare_store", key, instance_id)
 
     def commit_store(
         self, key: Any, instance_id: int, data: bytes
     ) -> MessagingFuture[Any]:
         """Commit an engine-driven store."""
-        return self._call(RequestType.COMMIT_STORE, key, instance_id, data)
+        return self._call("commit_store", key, instance_id, data)
 
     def prepare_retrieve(self, key: Any, instance_id: int) -> MessagingFuture[Any]:
         """Prepare an engine-driven retrieve."""
-        return self._call(RequestType.PREPARE_RETRIEVE, key, instance_id)
+        return self._call("prepare_retrieve", key, instance_id)
 
     def commit_retrieve(self, key: Any, instance_id: int) -> MessagingFuture[Any]:
         """Commit an engine-driven retrieve."""
-        return self._call(RequestType.COMMIT_RETRIEVE, key, instance_id)
+        return self._call("commit_retrieve", key, instance_id)
 
     def clear(self) -> MessagingFuture[Any]:
         """Clear all server caches."""
-        return self._call(RequestType.CLEAR)
+        return self._call("clear")
 
     def get_chunk_size(self) -> MessagingFuture[Any]:
         """Return the server chunk size."""
-        return self._call(RequestType.GET_CHUNK_SIZE)
+        return self._call("get_chunk_size")
 
     def ping(self, instance_id: int | None) -> MessagingFuture[Any]:
         """Check server health and refresh worker liveness."""
-        return self._call(RequestType.PING, instance_id)
+        return self._call("ping", instance_id)
 
     def report_block_allocation(
         self,
@@ -199,7 +191,7 @@ class ZmqMultiprocessClient(RequestClient):
     ) -> MessagingFuture[Any]:
         """Report block-allocation changes."""
         return self._call(
-            RequestType.REPORT_BLOCK_ALLOCATION,
+            "report_block_allocation",
             instance_id,
             model_name,
             records,
@@ -207,7 +199,7 @@ class ZmqMultiprocessClient(RequestClient):
 
     def noop(self) -> MessagingFuture[Any]:
         """Send a no-op request."""
-        return self._call(RequestType.NOOP)
+        return self._call("noop")
 
     def cb_register_rope(
         self,
@@ -220,7 +212,7 @@ class ZmqMultiprocessClient(RequestClient):
     ) -> MessagingFuture[Any]:
         """Register blend RoPE state."""
         return self._call(
-            RequestType.CB_REGISTER_ROPE,
+            "cb_register_rope",
             instance_id,
             cos_sin_caches_ipc,
             head_size,
@@ -231,7 +223,7 @@ class ZmqMultiprocessClient(RequestClient):
 
     def cb_unregister_rope(self, instance_id: int) -> MessagingFuture[Any]:
         """Unregister blend RoPE state."""
-        return self._call(RequestType.CB_UNREGISTER_ROPE, instance_id)
+        return self._call("cb_unregister_rope", instance_id)
 
     def cb_retrieve_pre_computed(
         self,
@@ -243,7 +235,7 @@ class ZmqMultiprocessClient(RequestClient):
     ) -> MessagingFuture[Any]:
         """Retrieve blend pre-computed blocks."""
         return self._call(
-            RequestType.CB_RETRIEVE_PRE_COMPUTED,
+            "cb_retrieve_pre_computed",
             key,
             match_results,
             block_ids,
@@ -253,11 +245,11 @@ class ZmqMultiprocessClient(RequestClient):
 
     def cb_unified_lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Run a blend unified lookup."""
-        return self._call(RequestType.CB_UNIFIED_LOOKUP, key, tp_size)
+        return self._call("cb_unified_lookup", key, tp_size)
 
     def cb_protocol_handshake(self, client_version: int) -> MessagingFuture[Any]:
         """Exchange blend protocol versions with the server."""
-        return self._call(RequestType.CB_PROTOCOL_HANDSHAKE, client_version)
+        return self._call("cb_protocol_handshake", client_version)
 
     def p2p_lookup_and_lock(
         self,
@@ -265,19 +257,19 @@ class ZmqMultiprocessClient(RequestClient):
         group_layout_descs: dict[int, Any],
     ) -> MessagingFuture[Any]:
         """Look up and lock peer-transfer objects."""
-        return self._call(RequestType.P2P_LOOKUP_AND_LOCK, keys, group_layout_descs)
+        return self._call("p2p_lookup_and_lock", keys, group_layout_descs)
 
     def p2p_query_lookup_results(self, task_id: int) -> MessagingFuture[Any]:
         """Query peer-transfer lookup results."""
-        return self._call(RequestType.P2P_QUERY_LOOKUP_RESULTS, task_id)
+        return self._call("p2p_query_lookup_results", task_id)
 
     def p2p_unlock_objects(self, keys: list[Any]) -> MessagingFuture[Any]:
         """Release peer-transfer object locks."""
-        return self._call(RequestType.P2P_UNLOCK_OBJECTS, keys)
+        return self._call("p2p_unlock_objects", keys)
 
     def get_experimental(self) -> MessagingFuture[Any]:
         """Return the server's experimental capabilities."""
-        return self._call(RequestType.GET_EXPERIMENTAL)
+        return self._call("get_experimental")
 
     # Compatibility aliases used by older blend plugins.
     cb_register_rope_v3 = cb_register_rope
@@ -289,9 +281,9 @@ class ZmqMultiprocessClient(RequestClient):
         self._message_queue_client.close()
 
     def _call(
-        self, request_type: RequestType, *request_payloads: Any
+        self, operation: RpcOperation, *request_payloads: Any
     ) -> MessagingFuture[Any]:
         return self._message_queue_client.submit_request(
-            request_type,
-            make_request_message(request_type.name, *request_payloads),
+            operation,
+            make_request_message(operation, *request_payloads),
         )

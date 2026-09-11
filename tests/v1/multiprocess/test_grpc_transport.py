@@ -37,7 +37,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
@@ -123,17 +122,16 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
     calls = _Calls()
 
     class FakeModules:
-        @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
-        def lookup(self, request: LookupRequest) -> LookupResponse:
+        @request_handler(HandlerType.BLOCKING)
+        def handle_lookup(self, request: LookupRequest) -> LookupResponse:
             calls.lookup = (request.key, request.tp_size)
             return LookupResponse()
 
         @request_handler(
-            RequestType.STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
-        def store(self, request: StoreRequest) -> StoreResponse:
+        def handle_store(self, request: StoreRequest) -> StoreResponse:
             assert request.instance_id == 7
             assert request.gpu_block_ids == [[1, 2], [3]]
             assert request.event_ipc_handle == b"input-event"
@@ -142,11 +140,10 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             )
 
         @request_handler(
-            RequestType.PREPARE_STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
-        def prepare_store(
+        def handle_prepare_store(
             self, request: PrepareStoreRequest
         ) -> RpcPrepareStoreResponse:
             assert request.key.request_configs == {"blend": True}
@@ -156,11 +153,10 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             )
 
         @request_handler(
-            RequestType.PREPARE_RETRIEVE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
-        def prepare_retrieve(
+        def handle_prepare_retrieve(
             self, request: PrepareRetrieveRequest
         ) -> RpcPrepareRetrieveResponse:
             assert request.key.request_configs == {"blend": True}
@@ -171,23 +167,23 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 context={"slot": 3},
             )
 
-        @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
-        def register_kv_cache_engine_driven_context(
+        @request_handler()
+        def handle_register_kv_cache_engine_driven_context(
             self, request: RegisterKvCacheEngineDrivenContextRequest
         ) -> RegisterKvCacheEngineDrivenContextResponse:
             assert request.num_physical_slots == 32
             return RegisterKvCacheEngineDrivenContextResponse("shared-memory", 4096)
 
-        @request_handler(RequestType.PING, HandlerType.BLOCKING)
-        def ping(self, request: PingRequest) -> PingResponse:
+        @request_handler(HandlerType.BLOCKING)
+        def handle_ping(self, request: PingRequest) -> PingResponse:
             return PingResponse(request.instance_id == 7)
 
-        @request_handler(RequestType.NOOP)
-        def debug(self, request: NoopRequest) -> NoopResponse:
+        @request_handler()
+        def handle_noop(self, request: NoopRequest) -> NoopResponse:
             return NoopResponse("ok")
 
-        @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
-        def report_block_allocations(
+        @request_handler(HandlerType.BLOCKING)
+        def handle_report_block_allocation(
             self, request: ReportBlockAllocationRequest
         ) -> ReportBlockAllocationResponse:
             calls.allocation = (
@@ -197,8 +193,8 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             )
             return ReportBlockAllocationResponse()
 
-        @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
-        def cb_unified_lookup(
+        @request_handler(HandlerType.BLOCKING)
+        def handle_cb_unified_lookup(
             self, request: CbUnifiedLookupRequest
         ) -> CbUnifiedLookupResponse:
             assert request.key.model_name == "model"
@@ -210,8 +206,8 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 )
             )
 
-        @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
-        def p2p_lookup_and_lock(
+        @request_handler(HandlerType.BLOCKING)
+        def handle_p2p_lookup_and_lock(
             self, request: P2pLookupAndLockRequest
         ) -> P2pLookupAndLockResponse:
             assert request.keys[0].cache_salt == "tenant"
@@ -219,8 +215,8 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert request.group_layout_descs[0].dtypes == [torch.float16]
             return P2pLookupAndLockResponse(41)
 
-        @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
-        def p2p_query_lookup_results(
+        @request_handler(HandlerType.BLOCKING)
+        def handle_p2p_query_lookup_results(
             self, request: P2pQueryLookupResultsRequest
         ) -> P2pQueryLookupResultsResponse:
             assert request.task_id == 41
@@ -271,12 +267,10 @@ def test_rpc_surface_is_derived_from_route_only_descriptors() -> None:
         assert method.output_type.full_name == "lmcache.mp.TransportPayload"
         assert not method.input_type.fields
         assert not method.output_type.fields
-        assert (
-            method_binding.request_type.name == client_method_name(method.name).upper()
-        )
+        assert method_binding.operation == client_method_name(method.name)
 
     lookup_binding = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
-    assert lookup_binding.request_type is RequestType.LOOKUP
+    assert lookup_binding.operation == "lookup"
     assert lookup_binding.python_request_class is LookupRequest
     assert lookup_binding.python_response_class is LookupResponse
     assert lookup_binding.python_request_class.__module__.endswith(".lookup")
@@ -320,16 +314,16 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         BlendModule,
     )
     handlers = {
-        registered.options.request_type: registered.handler
+        registered.options.operation: registered.handler
         for module_type in module_types
         for registered in iter_request_handlers(module_type)
     }
     registry = get_method_registry()
     adapters = tuple(registry.by_full_name.values())
 
-    assert set(handlers) == {adapter.request_type for adapter in adapters}
+    assert set(handlers) == {adapter.operation for adapter in adapters}
     for adapter in adapters:
-        adapter.validate_handler(handlers[adapter.request_type])
+        adapter.validate_handler(handlers[adapter.operation])
 
 
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:

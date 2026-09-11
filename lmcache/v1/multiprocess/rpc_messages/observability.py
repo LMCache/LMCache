@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages.registry import register_rpc_message_types
 
 
@@ -25,7 +24,7 @@ class ReportBlockAllocationResponse:
 
 
 register_rpc_message_types(
-    RequestType.REPORT_BLOCK_ALLOCATION,
+    "report_block_allocation",
     ReportBlockAllocationRequest,
     ReportBlockAllocationResponse,
 )

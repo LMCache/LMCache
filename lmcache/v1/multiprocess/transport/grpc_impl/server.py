@@ -15,7 +15,8 @@ import grpc
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocol import RpcOperation
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     iter_request_handlers,
@@ -44,7 +45,7 @@ _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 
 @dataclass
 class _GrpcRequestHandler:
-    request_type: RequestType
+    operation: RpcOperation
     handler: Callable[..., Any] | None
     handler_type: HandlerType
     requires_client_affinity: bool
@@ -88,7 +89,7 @@ class _GrpcServiceDispatcher:
             if registered.handler is None:
                 context.abort(
                     grpc.StatusCode.UNIMPLEMENTED,
-                    f"{registered.request_type.name} is not enabled on this server",
+                    f"{registered.operation} is not enabled on this server",
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
             if registered.handler_type is HandlerType.SYNC:
@@ -164,35 +165,35 @@ class GrpcMultiprocessServer:
 
         Args:
             modules: Ordered business modules. A later module overrides an
-                earlier handler for the same request type.
+            earlier handler for the same RPC operation.
 
         Raises:
             TypeError: If a module handler does not match its protocol types.
             ValueError: If a module exposes invalid handler metadata.
         """
-        handlers_by_request: dict[RequestType, BoundRequestHandler] = {}
+        handlers_by_operation: dict[RpcOperation, BoundRequestHandler] = {}
         for module in modules:
             for registered in iter_request_handlers(module):
-                handlers_by_request[registered.options.request_type] = registered
+                handlers_by_operation[registered.options.operation] = registered
 
         for binding in get_service_bindings().values():
-            self._add_generated_service(binding, handlers_by_request)
+            self._add_generated_service(binding, handlers_by_operation)
 
     def _add_generated_service(
         self,
         binding: ServiceBinding,
-        handlers_by_request: dict[RequestType, BoundRequestHandler],
+        handlers_by_operation: dict[RpcOperation, BoundRequestHandler],
     ) -> None:
         service_handlers: dict[str, _GrpcRequestHandler] = {}
         method_registry = get_method_registry()
         for method in binding.descriptor.methods:
             method_binding = method_registry.by_full_name[method.full_name]
-            bound_handler = handlers_by_request.get(method_binding.request_type)
+            bound_handler = handlers_by_operation.get(method_binding.operation)
             if bound_handler is not None:
                 method_binding.validate_handler(bound_handler.handler)
             full_name = method.full_name
             registered = _GrpcRequestHandler(
-                request_type=method_binding.request_type,
+                operation=method_binding.operation,
                 handler=(bound_handler.handler if bound_handler is not None else None),
                 handler_type=(
                     bound_handler.options.handler_type

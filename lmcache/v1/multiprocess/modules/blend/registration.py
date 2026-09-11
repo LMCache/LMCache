@@ -20,7 +20,6 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.rpc_messages import (
     CbRegisterRopeRequest,
@@ -54,7 +53,7 @@ class RegistrationMixin:
             self, gpu_context: Any, rope_state: _CBRopeState, max_batch: int
         ) -> Any: ...
 
-    @request_handler(RequestType.CB_REGISTER_ROPE)
+    @request_handler()
     def handle_cb_register_rope(
         self, request: CbRegisterRopeRequest
     ) -> CbRegisterRopeResponse:
@@ -69,7 +68,7 @@ class RegistrationMixin:
         )
         return CbRegisterRopeResponse()
 
-    @request_handler(RequestType.CB_UNREGISTER_ROPE)
+    @request_handler()
     def handle_cb_unregister_rope(
         self, request: CbUnregisterRopeRequest
     ) -> CbUnregisterRopeResponse:

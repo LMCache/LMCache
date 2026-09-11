@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the FREE_LOOKUP_LOCKS protocol: enum registration, message contract,
+Tests for the ``free_lookup_locks`` route, message contract,
 request-transport round-trip, server handler, and client-side adapter API.
 """
 
@@ -15,7 +15,6 @@ import pytest
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.protocol import (
-    RequestType,
     get_request_message_class,
     get_response_message_class,
 )
@@ -44,26 +43,14 @@ from tests.v1.multiprocess.transport_test_utils import (
 # ============================================================================
 
 
-def test_free_locks_in_request_type():
-    """FREE_LOOKUP_LOCKS should be a member of RequestType."""
-    assert hasattr(RequestType, "FREE_LOOKUP_LOCKS")
-    assert isinstance(RequestType.FREE_LOOKUP_LOCKS, RequestType)
-
-
 def test_free_locks_request_message_class():
-    """FREE_LOOKUP_LOCKS should use its Python request message."""
-    assert (
-        get_request_message_class(RequestType.FREE_LOOKUP_LOCKS)
-        is FreeLookupLocksRequest
-    )
+    """The route should use its Python request message."""
+    assert get_request_message_class("free_lookup_locks") is FreeLookupLocksRequest
 
 
 def test_free_locks_response_message_class():
-    """FREE_LOOKUP_LOCKS should use its Python response message."""
-    assert (
-        get_response_message_class(RequestType.FREE_LOOKUP_LOCKS)
-        is FreeLookupLocksResponse
-    )
+    """The route should use its Python response message."""
+    assert get_response_message_class("free_lookup_locks") is FreeLookupLocksResponse
 
 
 # ============================================================================
@@ -77,8 +64,8 @@ class _FreeLocksHandler:
     def __init__(self) -> None:
         self.call: tuple[IPCCacheServerKey, int] | None = None
 
-    @request_handler(RequestType.FREE_LOOKUP_LOCKS, HandlerType.BLOCKING)
-    def free_lookup_locks(
+    @request_handler(HandlerType.BLOCKING)
+    def handle_free_lookup_locks(
         self, request: FreeLookupLocksRequest
     ) -> FreeLookupLocksResponse:
         """Record the decoded request payload."""

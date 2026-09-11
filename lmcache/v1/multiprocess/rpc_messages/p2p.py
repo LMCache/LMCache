@@ -7,7 +7,6 @@ from dataclasses import dataclass
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages.registry import register_rpc_message_types
 
 
@@ -53,15 +52,15 @@ class P2pUnlockObjectsResponse:
 
 
 register_rpc_message_types(
-    RequestType.P2P_LOOKUP_AND_LOCK, P2pLookupAndLockRequest, P2pLookupAndLockResponse
+    "p2p_lookup_and_lock", P2pLookupAndLockRequest, P2pLookupAndLockResponse
 )
 register_rpc_message_types(
-    RequestType.P2P_QUERY_LOOKUP_RESULTS,
+    "p2p_query_lookup_results",
     P2pQueryLookupResultsRequest,
     P2pQueryLookupResultsResponse,
 )
 register_rpc_message_types(
-    RequestType.P2P_UNLOCK_OBJECTS, P2pUnlockObjectsRequest, P2pUnlockObjectsResponse
+    "p2p_unlock_objects", P2pUnlockObjectsRequest, P2pUnlockObjectsResponse
 )
 
 

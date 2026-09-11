@@ -10,7 +10,6 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.rpc_messages.lmcache_driven import EventIpcHandleResult
 from lmcache.v1.multiprocess.rpc_messages.registry import register_rpc_message_types
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
@@ -94,25 +93,25 @@ class CbUnifiedLookupResponse:
 
 
 register_rpc_message_types(
-    RequestType.CB_PROTOCOL_HANDSHAKE,
+    "cb_protocol_handshake",
     CbProtocolHandshakeRequest,
     CbProtocolHandshakeResponse,
 )
 register_rpc_message_types(
-    RequestType.CB_REGISTER_ROPE, CbRegisterRopeRequest, CbRegisterRopeResponse
+    "cb_register_rope", CbRegisterRopeRequest, CbRegisterRopeResponse
 )
 register_rpc_message_types(
-    RequestType.CB_UNREGISTER_ROPE,
+    "cb_unregister_rope",
     CbUnregisterRopeRequest,
     CbUnregisterRopeResponse,
 )
 register_rpc_message_types(
-    RequestType.CB_RETRIEVE_PRE_COMPUTED,
+    "cb_retrieve_pre_computed",
     CbRetrievePreComputedRequest,
     CbRetrievePreComputedResponse,
 )
 register_rpc_message_types(
-    RequestType.CB_UNIFIED_LOOKUP, CbUnifiedLookupRequest, CbUnifiedLookupResponse
+    "cb_unified_lookup", CbUnifiedLookupRequest, CbUnifiedLookupResponse
 )
 
 

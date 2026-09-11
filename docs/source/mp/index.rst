@@ -71,7 +71,7 @@ High-Level Architecture
          v
     MessageQueueServer (mq.py)
          |
-         | dispatch by RequestType
+         | dispatch by RPC operation
          v
     MPCacheServer (server.py)
          |
@@ -110,7 +110,7 @@ and/or ``EngineDrivenTransferModule`` depending on
 ``engine_driven`` loads just one,
 ``auto`` loads both — plus the blend module when
 ``--engine-type blend`` is set). Starts a ``MessageQueueServer``,
-registers handlers for every ``RequestType`` exposed by the loaded
+registers handlers for every annotated RPC operation exposed by the loaded
 modules, and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
@@ -134,27 +134,31 @@ for inspecting detailed internal state.  The ZMQ server runs as part of the
 same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
 
-ZMQ Protocol
-------------
+Request Transport Protocol
+--------------------------
 
-Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
+ZMQ communicates over a DEALER/ROUTER socket pair. Each request carries its
+lower-snake-case RPC operation as an ASCII frame and one complete Python
+request message; the response echoes the operation frame and carries one
+complete Python response message. gRPC routes the same operations by service
+method name and serializes those same Python messages.
 
-**RequestType enum** (defined in ``protocols/base.py``):
+**RPC operation routes** (locally registered beside their Python messages):
 
 .. list-table::
    :header-rows: 1
    :widths: 35 20 45
 
-   * - Request Type
+   * - Operation
      - Handler Type
      - Description
-   * - ``REGISTER_KV_CACHE``
+   * - ``register_kv_cache``
      - SYNC
      - Register GPU KV cache tensors for a vLLM instance.
-   * - ``UNREGISTER_KV_CACHE``
+   * - ``unregister_kv_cache``
      - SYNC
      - Unregister KV cache tensors.
-   * - ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
+   * - ``register_kv_cache_engine_driven_context``
      - SYNC
      - Register an engine-driven KV cache context (CPU/accelerator
        workers using the PREPARE/COMMIT transfer path). Loaded only when
@@ -162,118 +166,118 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
        Returns a ``RegisterEngineDrivenContextResponse`` carrying the
        SHM segment name and pool size when the SHM path is in use
        (empty for the pickle path).
-   * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
+   * - ``unregister_kv_cache_engine_driven_context``
      - SYNC
      - Unregister an engine-driven KV cache context.
-   * - ``STORE``
+   * - ``store``
      - BLOCKING
      - Store KV cache chunks from GPU to L1 (CPU). LMCache-driven
        transfer path (CUDA IPC); loaded only when
        ``--supported-transfer-mode`` is ``lmcache_driven`` or ``auto``.
-   * - ``RETRIEVE``
+   * - ``retrieve``
      - BLOCKING
      - Copy KV cache chunks from L1 (CPU) back to GPU. LMCache-driven
        transfer path (CUDA IPC); loaded only when
        ``--supported-transfer-mode`` is ``lmcache_driven`` or ``auto``.
-   * - ``PREPARE_STORE``
+   * - ``prepare_store``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare store-side
        transfer state for a key. Loaded when ``--supported-transfer-mode``
        is ``engine_driven`` or ``auto``.
-   * - ``COMMIT_STORE``
+   * - ``commit_store``
      - BLOCKING
      - (Engine-driven path) Worker commits the chunk's serialized bytes
        (pickle path) or releases the prepared SHM slot (SHM path) so the
        server can persist into L1 storage.
-   * - ``PREPARE_RETRIEVE``
+   * - ``prepare_retrieve``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare the
        retrieval payload for a key. The pickle path returns the bytes
        inline; the SHM path returns slot info so the worker can read
        from shared memory.
-   * - ``COMMIT_RETRIEVE``
+   * - ``commit_retrieve``
      - BLOCKING
      - (Engine-driven path) Worker acknowledges retrieval completion so
        the server can release the underlying read locks and reclaim any
        transport state.
-   * - ``LOOKUP``
+   * - ``lookup``
      - BLOCKING
      - Submit a prefix lookup; the prefetch job is tracked server-side by
        request_id.
-   * - ``QUERY_PREFETCH_STATUS``
+   * - ``query_prefetch_status``
      - BLOCKING
      - Poll a prefetch job by request_id. Returns the loaded chunk count
        when done, or ``None`` while the prefetch is still in progress.
-   * - ``WAIT_PREFETCH_STATUS``
+   * - ``wait_prefetch_status``
      - BLOCKING
      - (SGLang only) Block until a prefetch job completes, then return its
        loaded chunk count, or ``None`` on timeout. The blocking alternative
-       to polling ``QUERY_PREFETCH_STATUS``.
-   * - ``QUERY_PREFETCH_LOOKUP_HITS``
+       to polling ``query_prefetch_status``.
+   * - ``query_prefetch_lookup_hits``
      - BLOCKING
      - Query the lookup-phase hit chunk count by request_id, before the
        prefetch finishes. Returns ``None`` while the lookup is still
        running.
-   * - ``FREE_LOOKUP_LOCKS``
+   * - ``free_lookup_locks``
      - BLOCKING
      - Release read locks from a cancelled lookup without doing a full
        RETRIEVE.
-   * - ``END_SESSION``
+   * - ``end_session``
      - BLOCKING
      - Remove session state for a finished request.
-   * - ``CLEAR``
+   * - ``clear``
      - BLOCKING
      - Clear all cached data.
-   * - ``GET_CHUNK_SIZE``
+   * - ``get_chunk_size``
      - SYNC
      - Return the server's chunk size.
-   * - ``PING``
+   * - ``ping``
      - BLOCKING
      - Liveness ping; the handler always returns ``True``.
-   * - ``REPORT_BLOCK_ALLOCATION``
+   * - ``report_block_allocation``
      - BLOCKING
      - Fire-and-forget channel for the vLLM scheduler to report GPU block
        allocation events to the observability subsystem.
-   * - ``NOOP``
+   * - ``noop``
      - SYNC
      - Debug heartbeat -- returns a confirmation string.
-   * - ``CB_REGISTER_ROPE``
+   * - ``cb_register_rope``
      - SYNC
      - (Blend) Share the RoPE cos/sin cache onto a context already
-       registered via ``REGISTER_KV_CACHE``.
-   * - ``CB_UNREGISTER_ROPE``
+       registered via ``register_kv_cache``.
+   * - ``cb_unregister_rope``
      - SYNC
      - (Blend) Drop the RoPE state (paged KV cache lives on; use
-       ``UNREGISTER_KV_CACHE`` to release that).
-   * - ``CB_RETRIEVE_PRE_COMPUTED``
+       ``unregister_kv_cache`` to release that).
+   * - ``cb_retrieve_pre_computed``
      - BLOCKING
      - (Blend) Scatter all matched chunks (prefix- and non-prefix-hit)
        into paged KV by per-token block ID; re-RoPE only the shifted subset.
-   * - ``CB_UNIFIED_LOOKUP``
+   * - ``cb_unified_lookup``
      - BLOCKING
      - (Blend) Sole lookup path: one RPC runs prefix + non-prefix
        match, reconciles, issues one sparse-coalesced prefetch, and
        classifies per-TP-rank. Returns ``CBUnifiedLookupResult`` (or
        ``None`` while the prefetch is still in flight).
-   * - ``P2P_LOOKUP_AND_LOCK``
+   * - ``p2p_lookup_and_lock``
      - BLOCKING
      - (P2P) Look up the given keys and read-lock the locally cached
        prefix. Returns a task id which the caller passes to
-       ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
+       ``p2p_query_lookup_results`` to poll for the transfer addresses.
        Served by ``P2PController`` (loaded unconditionally by
        ``_build_modules()``); whether this server also acts as a P2P
        client is controlled by ``--p2p-advertise-url`` -- see
        :doc:`p2p`.
-   * - ``P2P_QUERY_LOOKUP_RESULTS``
+   * - ``p2p_query_lookup_results``
      - BLOCKING
      - (P2P) Poll the transfer addresses for a lookup task. Returns a
        list of ``TransferChannelAddress`` once the lookup is complete,
        or ``None`` while the lookup is still in progress or its
        results have already been consumed.
-   * - ``P2P_UNLOCK_OBJECTS``
+   * - ``p2p_unlock_objects``
      - BLOCKING
      - (P2P) Release the read locks previously taken by
-       ``P2P_LOOKUP_AND_LOCK`` on the given keys.
+       ``p2p_lookup_and_lock`` on the given keys.
 
 **Handler types:**
 
@@ -530,15 +534,17 @@ Adding an observability subscriber
    concern (metrics / logging / tracing), gated on the corresponding
    CLI flag if needed.
 
-Adding a new request type
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Adding a new RPC operation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Add a new member to ``RequestType`` in ``protocols/base.py``.
-2. Add the transport-neutral Python request/response dataclasses and their
+1. Add the transport-neutral Python request/response dataclasses and their
    registration in the owning ``rpc_messages/`` domain module.
-3. Implement the handler on the appropriate ``EngineModule`` using those
-   Python request/response types, then decorate it with ``@request_handler``.
-   The annotation is the single source of scheduling and affinity metadata.
+2. Add the route-only protobuf method whose normalized client method name
+   matches the operation.
+3. Implement ``handle_<operation>`` on the appropriate ``EngineModule`` using
+   those Python request/response types, then decorate it with
+   ``@request_handler``. The annotation is the single source of scheduling and
+   affinity metadata.
 4. ``create_request_server()`` selects the transport. ZMQ and gRPC serialize
    the same Python messages directly with the shared MessagePack
    representation. No per-transport handler registration, protobuf object, or
@@ -588,7 +594,7 @@ Key Source Files
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
    * - ``lmcache/v1/multiprocess/protocols/base.py``
-     - RequestType and HandlerType enums
+     - HandlerType scheduling enum
    * - ``lmcache/v1/multiprocess/rpc_messages/``
      - Domain-local transport-neutral Python request/response messages and
        their local registrations

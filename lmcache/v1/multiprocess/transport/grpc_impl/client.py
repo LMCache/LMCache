@@ -153,7 +153,7 @@ class GrpcMultiprocessClient(RequestClient):
         python_request = (
             request_class(**kwargs)
             if kwargs
-            else make_request_message(rpc.binding.request_type.name, *args)
+            else make_request_message(rpc.binding.operation, *args)
         )
         future: MessagingFuture[Any] = MessagingFuture()
         call = rpc.method.future(

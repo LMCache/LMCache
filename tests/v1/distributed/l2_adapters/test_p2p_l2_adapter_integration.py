@@ -118,12 +118,12 @@ def _start_p2p_request_server(
     for spec in specs:
         add_handler_helper(
             zmq_server,
-            spec.request_type,
+            spec.operation,
             spec.handler,
             spec.handler_type,
         )
     zmq_server.add_normal_thread_pool(
-        [spec.request_type for spec in specs],
+        [spec.operation for spec in specs],
         max_workers=4,
     )
     zmq_server.start()
