@@ -62,7 +62,7 @@ ENV NVCC_THREADS=$nvcc_threads
 ARG CUDA_VERSION
 ARG VLLM_VERSION=nightly
 
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
 
