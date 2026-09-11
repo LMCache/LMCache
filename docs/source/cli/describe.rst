@@ -216,3 +216,8 @@ The ``engine_kv_shape`` field uses short names from the ``EngineKVFormat`` enum:
      - head_size
    * - PBS
      - page_buffer_size (NB × BS)
+   * - BSxVALS
+     - block_size (DSA indexer cache: per-block fp8 values region;
+       ``NL_X_NB_BSV_BSS`` renders as ``NL x [NB, BSxVALS, BSxSCALES]``)
+   * - BSxSCALES
+     - block_size (DSA indexer cache: per-block fp32 scales region)
