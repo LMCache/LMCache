@@ -98,13 +98,20 @@ def _leaf_specs(spec: KVCacheSpec) -> list[KVCacheSpec]:
     return [spec]
 
 
-def _is_circular_buffer_spec(spec: KVCacheSpec) -> bool:
-    """Return whether a spec is vLLM's request-scoped circular buffer.
+def _is_non_prefix_cacheable_spec(spec: KVCacheSpec) -> bool:
+    """Return whether a spec holds request-scoped, non-shareable state.
 
-    Detection by class name keeps this module importable with older supported
-    vLLM releases that do not define ``CircularBufferSpec``.
+    Current vLLM releases expose this through ``prefix_cacheable``. The class
+    name fallback covers older revisions that define these scratch specs but
+    do not expose the property on ``KVCacheSpec``.
     """
-    return any(cls.__name__ == "CircularBufferSpec" for cls in type(spec).__mro__)
+    prefix_cacheable = getattr(spec, "prefix_cacheable", None)
+    if prefix_cacheable is not None:
+        return prefix_cacheable is False
+    return any(
+        cls.__name__ in ("CircularBufferSpec", "KpoolTailSpec")
+        for cls in type(spec).__mro__
+    )
 
 
 def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
@@ -113,8 +120,9 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     Rejected, with one aggregated error listing every offending group:
 
     - ``CrossAttentionSpec`` (encoder-decoder caches).
-    - ``CircularBufferSpec``: one request-lifetime ring block cannot provide
-      the historical per-chunk snapshots required by LMCache prefix storage.
+    - Specs with ``prefix_cacheable=False``, including ``CircularBufferSpec``
+      and ``KpoolTailSpec``: request-scoped scratch state cannot provide the
+      historical per-chunk snapshots required by LMCache prefix storage.
     - Mamba groups with ``mamba_cache_mode`` other than ``"align"`` or
       ``"all"``: the remaining mode (``"none"``) keeps no reusable per-block
       state snapshots.
@@ -136,14 +144,15 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     unsupported: list[str] = []
     for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
         for spec in _leaf_specs(group.kv_cache_spec):
-            kind = get_kv_cache_spec_kind(spec)
-            if _is_circular_buffer_spec(spec):
+            if _is_non_prefix_cacheable_spec(spec):
                 unsupported.append(
-                    f"group {group_idx}: CircularBufferSpec "
-                    "(one request-lifetime ring block cannot provide "
-                    "per-chunk snapshots)"
+                    f"group {group_idx}: {type(spec).__name__} "
+                    "(non-prefix-cacheable request-scoped state cannot "
+                    "provide per-chunk snapshots)"
                 )
-            elif kind == KVCacheSpecKind.CROSS_ATTENTION:
+                continue
+            kind = get_kv_cache_spec_kind(spec)
+            if kind == KVCacheSpecKind.CROSS_ATTENTION:
                 unsupported.append(f"group {group_idx}: CrossAttentionSpec")
             elif kind == KVCacheSpecKind.MAMBA and getattr(
                 spec, "mamba_cache_mode", "none"
