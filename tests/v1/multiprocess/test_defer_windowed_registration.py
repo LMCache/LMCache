@@ -130,12 +130,8 @@ class TestRegistrationHook:
             MODEL_NAME, 1, make_layout(), attn_desc=HYBRID_DESC
         )
 
-        assert (
-            classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
-        )
-        assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
+        assert classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
 
     def test_last_unregister_clears_the_classifier(self, server_context):
         """The layout survives until the last worker unregisters."""
@@ -145,9 +141,7 @@ class TestRegistrationHook:
         registry.register(MODEL_NAME, 1, make_layout(), attn_desc=HYBRID_DESC)
 
         registry.unregister(MODEL_NAME, 1)
-        assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
 
         registry.unregister(MODEL_NAME, 1)
         assert classifier.classify(make_object_key(1)) is ObjectGroupClass.UNKNOWN
@@ -160,9 +154,7 @@ class TestRegistrationHook:
         registry.register(MODEL_NAME, 8, make_layout(), attn_desc=HYBRID_DESC)
 
         registry.unregister(MODEL_NAME, 8)
-        assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
 
         registry.unregister(MODEL_NAME, 1)
         assert classifier.classify(make_object_key(1)) is ObjectGroupClass.UNKNOWN
@@ -207,9 +199,7 @@ class TestConflictingLayoutForwarding:
         # The layout registry still took the new descriptor...
         assert registry.find_attn_desc(MODEL_NAME, 1).num_chunks_in_sw == [-1]
         # ...while the classifier kept the first one.
-        assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
 
     def test_rejected_registration_is_not_unregistered_twice(self):
         """A rejected forward does not decrement the classifier later."""

@@ -51,9 +51,7 @@ class TestClassify:
         classifier = ObjectGroupClassifier()
         classifier.register("test_model", HYBRID_DESC)
 
-        assert (
-            classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
-        )
+        assert classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
 
     def test_windowed_groups(self):
         """Groups with a bounded window classify as windowed."""
@@ -122,9 +120,7 @@ class TestRegistrationLifetime:
         classifier.register("test_model", HYBRID_DESC)
 
         classifier.unregister("test_model")
-        assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
 
         classifier.unregister("test_model")
         assert classifier.classify(make_object_key(1)) is ObjectGroupClass.UNKNOWN
@@ -136,9 +132,7 @@ class TestRegistrationLifetime:
 
         classifier.unregister("never_registered")
 
-        assert (
-            classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
-        )
+        assert classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
 
     def test_re_register_after_unregister(self):
         """A model can be registered again with a new layout once dropped."""
@@ -147,9 +141,7 @@ class TestRegistrationLifetime:
         classifier.unregister("test_model")
         classifier.register("test_model", AttnWindowDesc(num_chunks_in_sw=[2]))
 
-        assert (
-            classifier.classify(make_object_key(0)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(0)) is ObjectGroupClass.WINDOWED
 
 
 class TestConflictingRegistration:
@@ -171,9 +163,7 @@ class TestConflictingRegistration:
         with pytest.raises(ValueError):
             classifier.register("test_model", AttnWindowDesc(num_chunks_in_sw=[-1]))
 
-        assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         classifier.unregister("test_model")
         assert classifier.classify(make_object_key(1)) is ObjectGroupClass.UNKNOWN
 
@@ -183,9 +173,7 @@ class TestConflictingRegistration:
         classifier.register("test_model", AttnWindowDesc([-1, 4, 1], world_size=1))
         classifier.register("test_model", AttnWindowDesc([-1, 4, 1], world_size=8))
 
-        assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
 
     def test_same_windows_different_group_kinds_accepted(self):
         """group_kinds does not take part in the compatibility check either."""
@@ -196,6 +184,4 @@ class TestConflictingRegistration:
             AttnWindowDesc([-1, 4], group_kinds=("attention", "recurrent")),
         )
 
-        assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
-        )
+        assert classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
