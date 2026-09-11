@@ -20,6 +20,29 @@ static constexpr const char* PATH_SLASH_REPLACEMENT = "-SEP-";
 static constexpr const char* FILE_EXT = ".data";
 static constexpr const char* TMP_EXT = ".tmp";
 
+// Bytes of reads the connector keeps outstanding against storage when
+// read_io_depth is on and no explicit figure is configured.
+//
+// Throughput is set by bytes in flight, not by object count, so this is
+// the figure that decides it.  1536 MiB is a compromise chosen from a
+// sweep of 96 MiB to 6 GiB across four conditions, as the value whose
+// WORST case is best rather than the value that wins any single one:
+//
+//   local NVMe array, O_DIRECT     99.0% of the best pinned budget
+//   single local NVMe              89.3%
+//   8 ms per-read latency          98.9%
+//   32 ms per-read latency         99.8%
+//
+// The asymmetry is what sets it.  At 32 ms, which is the range
+// network-attached storage runs at, 768 MiB delivers 58% of what 1536 MiB
+// does and 384 MiB delivers 32%.  Being too large is not free but is much
+// cheaper: the worst case measured is the single NVMe giving up 10.7%
+// between 96 MiB and 1536 MiB.  A deployment that knows its storage can
+// do better by pinning its own value, and a single slow device is the
+// case most worth pinning.  See
+// docs/design/v1/distributed/l2_adapters/native-connector-read-depth.md.
+static constexpr size_t kDefaultReadMaxBytesInFlight = size_t{1536} << 20;
+
 // Per-worker connection state for the FS connector.
 // Each worker maintains its own I/O buffer for O_DIRECT.
 struct WorkerFSConn {
@@ -34,9 +57,16 @@ struct WorkerFSConn {
 
 class FSConnector : public ConnectorBase<WorkerFSConn> {
  public:
+  // read_io_depth: reader threads dedicated to executing reads.  Zero
+  //   keeps the legacy path, where reads run on the worker threads and
+  //   the depth against the device therefore equals num_workers.
+  // read_max_bytes_in_flight: bytes this connector may keep outstanding,
+  //   shared across its workers.  Zero selects
+  //   kDefaultReadMaxBytesInFlight when read_io_depth is positive.
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,
-              size_t read_ahead_size = 0);
+              size_t read_ahead_size = 0, int read_io_depth = 0,
+              size_t read_max_bytes_in_flight = 0);
   ~FSConnector() override;
 
  protected:
