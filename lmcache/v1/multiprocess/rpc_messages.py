@@ -8,7 +8,7 @@ only for adapting them to their wire representation.
 
 # Standard
 from dataclasses import dataclass, field, fields
-from typing import Any
+from typing import Any, TypeVar
 
 # First Party
 from lmcache.utils import EngineType
@@ -34,8 +34,14 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse as LegacyRegisterContextResponse,
 )
+from lmcache.v1.multiprocess.custom_types import (
+    get_customized_decoder,
+    get_customized_encoder,
+)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+
+MessageT = TypeVar("MessageT")
 
 
 @dataclass(frozen=True)
@@ -655,4 +661,41 @@ def unwrap_response_message(response: RpcResponse) -> Any:
     return values[0] if len(values) == 1 else values
 
 
-__all__ = [name for name in globals() if name.endswith(("Request", "Response"))]
+def serialize_rpc_message(message: MessageT, message_type: type[MessageT]) -> bytes:
+    """Serialize one transport-neutral RPC message.
+
+    Args:
+        message: Python request or response instance.
+        message_type: Registered concrete message type for the RPC method.
+
+    Returns:
+        MessagePack bytes shared by every request transport.
+
+    Raises:
+        TypeError: If ``message`` does not match ``message_type`` or contains an
+            unsupported value.
+    """
+    if not isinstance(message, message_type):
+        raise TypeError(
+            f"expected {message_type.__name__}, got {type(message).__name__}"
+        )
+    return get_customized_encoder(message_type).encode(message)
+
+
+def deserialize_rpc_message(payload: bytes, message_type: type[MessageT]) -> MessageT:
+    """Deserialize one transport-neutral RPC message.
+
+    Args:
+        payload: MessagePack bytes received from a request transport.
+        message_type: Registered concrete message type for the RPC method.
+
+    Returns:
+        A Python request or response instance.
+    """
+    return get_customized_decoder(message_type).decode(payload)
+
+
+__all__ = [name for name in globals() if name.endswith(("Request", "Response"))] + [
+    "deserialize_rpc_message",
+    "serialize_rpc_message",
+]

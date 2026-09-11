@@ -52,16 +52,19 @@ used to move KV data between an engine worker and the server.
 
 ### Transport boundaries
 
-ZMQ serializes one complete Python request message into one request frame and
-one complete Python response message into one response frame. It no longer
-serializes an RPC as a positional list of independently typed payload frames.
+Both ZMQ and gRPC serialize the same complete Python request and response
+messages with the shared MessagePack representation. ZMQ places each encoded
+message in one frame. gRPC installs descriptor-derived generic method handlers
+whose serializer/deserializer operates directly on the Python message class.
+There is no protobuf object in the request path and no protobuf/Python
+conversion layer.
 
-gRPC keeps protobuf as its wire format. Each generated method binding maps its
-protobuf input and output classes to the same Python request and response
-classes used by ZMQ. Protobuf conversion therefore exists only at the gRPC
-client/server boundary. Small leaf adapters remain for values whose native
-Python representation is intentionally different from protobuf, such as
-`DeviceIPCWrapper` and `torch.Size`.
+The generated protobuf modules provide service and method descriptors only.
+They preserve the named gRPC surface, but protobuf is not the payload data
+model. Consequently this internal Python transport is not wire-compatible with
+an independently generated protobuf client. This is intentional: the canonical
+contract is `rpc_messages.py`, shared with ZMQ, rather than a second protobuf
+object model.
 
 Server-side binding and scheduling are separate from serialization. Business
 module methods use the transport-neutral `@request_handler` annotation as the
@@ -71,10 +74,10 @@ handler receives exactly one Python request message and returns exactly one
 Python response message. Server startup validates those annotations against
 the shared RPC message registry.
 
-Adding an RPC therefore requires a protobuf method, a matching `RequestType`,
-a Python request/response pair in `rpc_messages.py`, and an annotated business
-handler. No separate `ProtocolDefinition` or per-RPC serialization definition
-is required.
+Adding an RPC therefore requires a protobuf method name, a matching
+`RequestType`, a same-named Python request/response pair in `rpc_messages.py`,
+and an annotated business handler. No separate `ProtocolDefinition`, protobuf
+conversion, adapter registry, or per-RPC serialization definition is required.
 
 ## Extending the transport
 

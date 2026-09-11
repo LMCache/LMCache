@@ -59,8 +59,8 @@ def _load_proto_generator() -> ModuleType:
     return module
 
 
-class _BuildPyWithGrpcStubs(_build_py):
-    """Generate ignored gRPC bindings before packaging LMCache."""
+class _BuildPyWithProtoDescriptors(_build_py):
+    """Generate ignored protobuf descriptors before packaging LMCache."""
 
     def run(self) -> None:
         distribution_name = self.distribution.get_name().replace("_", "-").lower()
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     policy = BuildPolicy()
     profile = policy.resolve_profile()
     ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
-    cmdclass["build_py"] = _BuildPyWithGrpcStubs
+    cmdclass["build_py"] = _BuildPyWithProtoDescriptors
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     extras_require: dict[str, list[str]] = {}

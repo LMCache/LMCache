@@ -5,6 +5,7 @@
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable
 import threading
 
@@ -18,6 +19,10 @@ from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     iter_request_handlers,
+)
+from lmcache.v1.multiprocess.rpc_messages import (
+    deserialize_rpc_message,
+    serialize_rpc_message,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
@@ -43,11 +48,11 @@ class _GrpcRequestHandler:
     handler: Callable[..., Any] | None
     handler_type: HandlerType
     requires_client_affinity: bool
-    request_decoder: Callable[[Any], Any]
-    response_encoder: Callable[[Any], Any]
+    request_class: type[Any]
+    response_class: type[Any]
 
 
-class _GeneratedServicer:
+class _GrpcServiceDispatcher:
     def __init__(
         self,
         binding: ServiceBinding,
@@ -86,9 +91,8 @@ class _GeneratedServicer:
                     f"{registered.request_type.name} is not enabled on this server",
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
-            python_request = registered.request_decoder(request)
             if registered.handler_type is HandlerType.SYNC:
-                result = registered.handler(python_request)
+                result = registered.handler(request)
             elif registered.handler_type is HandlerType.BLOCKING and (
                 registered.requires_client_affinity
             ):
@@ -96,19 +100,17 @@ class _GeneratedServicer:
                 with self._affinity_submit_lock:
                     future = self._affinity_pool.submit(
                         registered.handler,
-                        python_request,
+                        request,
                         affinity_key=affinity_key,
                     )
                 result = future.result()
             elif registered.handler_type is HandlerType.BLOCKING:
-                result = self._normal_pool.submit(
-                    registered.handler, python_request
-                ).result()
+                result = self._normal_pool.submit(registered.handler, request).result()
             else:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
                 )
-            return registered.response_encoder(result)
+            return result
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
@@ -181,8 +183,6 @@ class GrpcMultiprocessServer:
         binding: ServiceBinding,
         handlers_by_request: dict[RequestType, BoundRequestHandler],
     ) -> None:
-        service_name = binding.descriptor.name
-
         service_handlers: dict[str, _GrpcRequestHandler] = {}
         method_registry = get_method_registry()
         for method in binding.descriptor.methods:
@@ -204,24 +204,38 @@ class GrpcMultiprocessServer:
                     if bound_handler is not None
                     else False
                 ),
-                request_decoder=method_binding.proto_to_request,
-                response_encoder=method_binding.response_to_proto,
+                request_class=method_binding.python_request_class,
+                response_class=method_binding.python_response_class,
             )
             self._handlers[full_name] = registered
             service_handlers[full_name] = registered
 
-        servicer = _GeneratedServicer(
+        dispatcher = _GrpcServiceDispatcher(
             binding,
             service_handlers,
             self._normal_pool,
             self._affinity_pool,
             self._affinity_submit_lock,
         )
-        add_servicer = getattr(
-            binding.grpc_module,
-            f"add_{service_name}Servicer_to_server",
+        rpc_handlers = {
+            method.name: grpc.unary_unary_rpc_method_handler(
+                getattr(dispatcher, method.name),
+                request_deserializer=partial(
+                    deserialize_rpc_message,
+                    message_type=service_handlers[method.full_name].request_class,
+                ),
+                response_serializer=partial(
+                    serialize_rpc_message,
+                    message_type=service_handlers[method.full_name].response_class,
+                ),
+            )
+            for method in binding.descriptor.methods
+        }
+        generic_handler = grpc.method_handlers_generic_handler(
+            binding.descriptor.full_name,
+            rpc_handlers,
         )
-        add_servicer(servicer, self._server)
+        self._server.add_generic_rpc_handlers((generic_handler,))
 
     def start(self) -> None:
         """Start accepting gRPC requests."""

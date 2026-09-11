@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compile and register adapters for every generated gRPC method."""
+"""Bind generated gRPC method names to transport-neutral Python messages."""
 
 # Standard
 from collections.abc import Mapping
@@ -18,29 +18,18 @@ from lmcache.v1.multiprocess.protocol import (
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
-    message_class,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.message_conversion import (
-    MessageToProto,
-    ProtoToMessage,
-    build_message_conversion,
 )
 
 
 @dataclass(frozen=True)
 class GrpcMethodBinding:
-    """Compiled protobuf converters for one generated gRPC method."""
+    """Python request/response contract for one generated gRPC method."""
 
     full_name: str
+    method_path: str
     request_type: RequestType
-    request_message_class: type[Any]
-    response_message_class: type[Any]
     python_request_class: type[Any]
     python_response_class: type[Any]
-    request_to_proto: MessageToProto
-    proto_to_request: ProtoToMessage
-    response_to_proto: MessageToProto
-    proto_to_response: ProtoToMessage
 
     def validate_handler(self, handler: Callable[..., Any]) -> None:
         """Validate that a service handler implements the gRPC contract.
@@ -81,22 +70,21 @@ class GrpcMethodBinding:
 
 @dataclass(frozen=True)
 class GrpcMethodRegistry:
-    """Read-only lookup table for all generated gRPC method adapters."""
+    """Read-only lookup table for all generated gRPC method contracts."""
 
     by_full_name: Mapping[str, GrpcMethodBinding]
 
 
 @lru_cache(maxsize=1)
 def get_method_registry() -> GrpcMethodRegistry:
-    """Build and validate adapters for all generated gRPC methods.
+    """Build and validate Python contracts for all generated gRPC methods.
 
     Returns:
-        Read-only adapter lookup table keyed by full protobuf method name.
+        Read-only contract lookup table keyed by full protobuf method name.
 
     Raises:
         RuntimeError: If a generated method has no matching request type, or
             a protobuf method or request type is duplicated.
-        TypeError: If a protobuf message cannot represent its annotated types.
     """
     by_full_name: dict[str, GrpcMethodBinding] = {}
     request_types: set[RequestType] = set()
@@ -114,28 +102,26 @@ def get_method_registry() -> GrpcMethodRegistry:
                 f"Duplicate generated gRPC request type: {request_type.name}"
             )
 
-        request_message_class = message_class(method.input_type)
-        response_message_class = message_class(method.output_type)
         python_request_class = get_request_message_class(request_type)
         python_response_class = get_response_message_class(request_type)
-        request_to_proto, proto_to_request = build_message_conversion(
-            request_message_class,
-            python_request_class,
-        )
-        response_to_proto, proto_to_response = build_message_conversion(
-            response_message_class, python_response_class
-        )
+        if method.input_type.name != python_request_class.__name__:
+            raise RuntimeError(
+                f"{method.full_name} declares protobuf request "
+                f"{method.input_type.name}, but its Python request is "
+                f"{python_request_class.__name__}"
+            )
+        if method.output_type.name != python_response_class.__name__:
+            raise RuntimeError(
+                f"{method.full_name} declares protobuf response "
+                f"{method.output_type.name}, but its Python response is "
+                f"{python_response_class.__name__}"
+            )
         adapter = GrpcMethodBinding(
             full_name=method.full_name,
+            method_path=(f"/{method.containing_service.full_name}/{method.name}"),
             request_type=request_type,
-            request_message_class=request_message_class,
-            response_message_class=response_message_class,
             python_request_class=python_request_class,
             python_response_class=python_response_class,
-            request_to_proto=request_to_proto,
-            proto_to_request=proto_to_request,
-            response_to_proto=response_to_proto,
-            proto_to_response=proto_to_response,
         )
         if method.full_name in by_full_name:
             raise RuntimeError(f"Duplicate generated gRPC method: {method.full_name}")

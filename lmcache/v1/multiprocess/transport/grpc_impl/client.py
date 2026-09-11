@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Method-oriented client built directly from generated gRPC descriptors."""
+"""Method-oriented gRPC client for transport-neutral Python RPC messages."""
 
 # Future
 from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable
 from urllib.parse import urlparse
 import uuid
@@ -16,7 +17,9 @@ import grpc
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.rpc_messages import (
+    deserialize_rpc_message,
     make_request_message,
+    serialize_rpc_message,
     unwrap_response_message,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -68,7 +71,7 @@ def parse_grpc_target(server_url: str) -> str:
 
 @dataclass(frozen=True)
 class _ClientRpc:
-    stub_method: Any
+    method: Any
     binding: GrpcMethodBinding
 
 
@@ -82,22 +85,26 @@ class GrpcMultiprocessClient(RequestClient):
         self._channel = grpc.insecure_channel(
             parse_grpc_target(server_url), options=_GRPC_OPTIONS
         )
-        stubs: dict[str, Any] = {}
         self._rpc_methods: dict[str, _ClientRpc] = {}
         method_registry = get_method_registry()
-        for binding, method in iter_methods():
-            service_name = binding.descriptor.name
-            stub = stubs.get(service_name)
-            if stub is None:
-                stub_class = getattr(binding.grpc_module, f"{service_name}Stub")
-                stub = stub_class(self._channel)
-                stubs[service_name] = stub
+        for _service, method in iter_methods():
             name = client_method_name(method.name)
             if name in self._rpc_methods:
                 raise RuntimeError(f"Duplicate gRPC client method: {name}")
+            method_binding = method_registry.by_full_name[method.full_name]
             self._rpc_methods[name] = _ClientRpc(
-                stub_method=getattr(stub, method.name),
-                binding=method_registry.by_full_name[method.full_name],
+                method=self._channel.unary_unary(
+                    method_binding.method_path,
+                    request_serializer=partial(
+                        serialize_rpc_message,
+                        message_type=method_binding.python_request_class,
+                    ),
+                    response_deserializer=partial(
+                        deserialize_rpc_message,
+                        message_type=method_binding.python_response_class,
+                    ),
+                ),
+                binding=method_binding,
             )
         self._metadata = ((_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
 
@@ -148,18 +155,16 @@ class GrpcMultiprocessClient(RequestClient):
             if kwargs
             else make_request_message(rpc.binding.request_type.name, *args)
         )
-        request = rpc.binding.request_to_proto(python_request)
         future: MessagingFuture[Any] = MessagingFuture()
-        call = rpc.stub_method.future(
-            request,
+        call = rpc.method.future(
+            python_request,
             metadata=self._metadata,
             wait_for_ready=True,
         )
 
         def on_done(grpc_future: grpc.Future[Any]) -> None:
             try:
-                response = rpc.binding.proto_to_response(grpc_future.result())
-                result = unwrap_response_message(response)
+                result = unwrap_response_message(grpc_future.result())
             except BaseException as exc:
                 future.set_exception(exc)
             else:

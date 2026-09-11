@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Generate Python gRPC bindings from the multiprocess service schemas."""
+"""Generate protobuf descriptors for multiprocess gRPC service discovery."""
 
 # Standard
 from pathlib import Path
@@ -17,9 +17,6 @@ GENERATED_PACKAGE = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
 
 SPDX_HEADER = "# SPDX-License-Identifier: Apache-2.0\n"
 MYPY_IGNORE = "# mypy: ignore-errors\n"
-RUFF_IGNORE = "# ruff: noqa\n"
-FORMAT_OFF = "# fmt: off\n"
-ISORT_SKIP = "# isort: skip_file\n"
 FLAT_PB2_IMPORT_RE = re.compile(
     r"^import ([A-Za-z_][A-Za-z0-9_]*_pb2) as ([A-Za-z_][A-Za-z0-9_]*)$",
     re.MULTILINE,
@@ -27,7 +24,7 @@ FLAT_PB2_IMPORT_RE = re.compile(
 
 
 def _generated_files(directory: Path) -> tuple[Path, ...]:
-    """Return generated protobuf modules, stubs, and gRPC modules."""
+    """Return generated protobuf modules and obsolete generated artifacts."""
     return (
         tuple(directory.glob("*_pb2.py"))
         + tuple(directory.glob("*_pb2.pyi"))
@@ -51,21 +48,13 @@ def _patch_generated_file(path: Path) -> None:
     prefix = ""
     if not text.startswith(SPDX_HEADER):
         prefix += SPDX_HEADER
-    if path.suffix == ".py":
-        if MYPY_IGNORE not in text.splitlines()[:5]:
-            prefix += MYPY_IGNORE
-    else:
-        if RUFF_IGNORE not in text.splitlines()[:5]:
-            prefix += RUFF_IGNORE
-        if FORMAT_OFF not in text.splitlines()[:5]:
-            prefix += FORMAT_OFF
-        if ISORT_SKIP not in text.splitlines()[:5]:
-            prefix += ISORT_SKIP
+    if MYPY_IGNORE not in text.splitlines()[:5]:
+        prefix += MYPY_IGNORE
     path.write_text(prefix + text)
 
 
 def generate() -> None:
-    """Generate all protobuf and gRPC modules under ``_proto_gen``.
+    """Generate protobuf descriptor modules under ``_proto_gen``.
 
     Returns:
         None.
@@ -84,15 +73,13 @@ def generate() -> None:
             "grpc_tools.protoc",
             f"-I{PROTO_DIR}",
             f"--python_out={GENERATED_DIR}",
-            f"--pyi_out={GENERATED_DIR}",
-            f"--grpc_python_out={GENERATED_DIR}",
             *(str(path) for path in proto_files),
         ]
     )
     if result != 0:
         raise RuntimeError(f"grpc_tools.protoc failed with exit code {result}")
 
-    generated_files = _generated_files(GENERATED_DIR)
+    generated_files = tuple(sorted(GENERATED_DIR.glob("*_pb2.py")))
     for path in generated_files:
         _patch_generated_file(path)
 

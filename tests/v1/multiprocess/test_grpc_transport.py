@@ -4,9 +4,7 @@
 # Standard
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-import importlib
 import subprocess
 import sys
 
@@ -15,6 +13,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.custom_types import (
@@ -72,10 +71,13 @@ from lmcache.v1.multiprocess.rpc_messages import (
 from lmcache.v1.multiprocess.rpc_messages import (
     RegisterKvCacheEngineDrivenContextRequest,
     RegisterKvCacheEngineDrivenContextResponse,
+    RegisterKvCacheRequest,
     ReportBlockAllocationRequest,
     ReportBlockAllocationResponse,
     StoreRequest,
     StoreResponse,
+    deserialize_rpc_message,
+    serialize_rpc_message,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -83,9 +85,6 @@ from lmcache.v1.multiprocess.transport.grpc_impl.client import (
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     get_service_bindings,
     iter_methods,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.message_adapters import (
-    get_message_adapter_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     get_method_registry,
@@ -103,7 +102,7 @@ class _Calls:
 
 
 class _TestDeviceIPCWrapper(DeviceIPCWrapper):
-    """Pickle-safe test wrapper for the shared custom adapter."""
+    """Pickle-safe test wrapper for transport-neutral serialization."""
 
     def __init__(self) -> None:
         self.handle = b"handle"
@@ -247,7 +246,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
 
 
 def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
-    """Every generated RPC has one adapter derived from its gRPC service."""
+    """Every generated RPC has one Python contract derived by convention."""
     bindings = get_service_bindings()
     assert {
         "LMCacheDrivenService",
@@ -293,8 +292,8 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         use_mla=False,
         num_physical_slots=32,
     )
-    registration_request = registration_binding.request_to_proto(python_request)
-    assert registration_binding.proto_to_request(registration_request) == python_request
+    payload = serialize_rpc_message(python_request, type(python_request))
+    assert deserialize_rpc_message(payload, type(python_request)) == python_request
     assert (
         registration_binding.python_response_class
         is RegisterKvCacheEngineDrivenContextResponse
@@ -334,6 +333,8 @@ import sys
 banned = (
     "lmcache.v1.multiprocess.mq",
     "lmcache.v1.multiprocess.transport.zmq_impl",
+    "lmcache.v1.multiprocess.transport.grpc_impl.message_conversion",
+    "lmcache.v1.multiprocess.transport.grpc_impl.message_adapters",
 )
 
 
@@ -341,6 +342,8 @@ class LegacyProtocolBlocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if any(fullname == name or fullname.startswith(name + ".") for name in banned):
             raise ImportError(f"gRPC imported legacy module: {fullname}")
+        if fullname.endswith("_pb2_grpc"):
+            raise ImportError(f"gRPC imported generated stub module: {fullname}")
         return None
 
 
@@ -380,49 +383,40 @@ import lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
-def test_generated_protobuf_type_stubs_are_available() -> None:
-    """Generated protobuf modules include static type information."""
-    module_names = (
-        "common_pb2",
-        "p2p_service_pb2",
-    )
-    package = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
-
-    for module_name in module_names:
-        module = importlib.import_module(f"{package}.{module_name}")
-        assert module.__file__ is not None
-        module_path = Path(module.__file__)
-        assert module_path.with_suffix(".pyi").is_file()
-
-
-def test_service_message_method_registry_round_trips_custom_types() -> None:
-    """Service-owned adapters handle only their registered protobuf types."""
-    registry = get_message_adapter_registry()
-    common_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2"
-    )
-    p2p_service_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
-    )
-
+def test_transport_neutral_serialization_round_trips_custom_types() -> None:
+    """The shared Python message format handles non-primitive domain values."""
     wrapper = _TestDeviceIPCWrapper()
-    wrapper_message = common_pb2.DeviceIpcWrapper()
-    wrapper_adapter = registry.find(wrapper_message.DESCRIPTOR, type(wrapper))
-    assert wrapper_adapter is not None
-    wrapper_adapter.writer(wrapper_message, wrapper)
-    decoded_wrapper = wrapper_adapter.reader(wrapper_message)
+    registration = RegisterKvCacheRequest(
+        instance_id=7,
+        kv_cache=[wrapper],
+        model_name="model",
+        world_size=1,
+        engine_type=EngineType.MOCK,
+        layout_hints={},
+        engine_group_infos=[],
+    )
+    decoded_registration = deserialize_rpc_message(
+        serialize_rpc_message(registration, RegisterKvCacheRequest),
+        RegisterKvCacheRequest,
+    )
+    decoded_wrapper = decoded_registration.kv_cache[0]
     assert type(decoded_wrapper) is _TestDeviceIPCWrapper
-    assert decoded_wrapper == wrapper
+    assert decoded_wrapper.__dict__ == wrapper.__dict__
 
-    shape = torch.Size([2, 4])
-    shape_message = p2p_service_pb2.TensorShape()
-    shape_adapter = registry.find(shape_message.DESCRIPTOR, torch.Size)
-    assert shape_adapter is not None
-    shape_adapter.writer(shape_message, shape)
-    assert shape_adapter.reader(shape_message) == shape
+    p2p_request = P2pLookupAndLockRequest(
+        keys=[ObjectKey(b"chunk", "model", 0)],
+        group_layout_descs={0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
+    )
+    assert (
+        deserialize_rpc_message(
+            serialize_rpc_message(p2p_request, P2pLookupAndLockRequest),
+            P2pLookupAndLockRequest,
+        )
+        == p2p_request
+    )
 
 
-def test_generated_grpc_services_communicate_end_to_end(
+def test_descriptor_derived_grpc_services_communicate_end_to_end(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
 ) -> None:
     client, calls = grpc_client

@@ -17,7 +17,7 @@ def create_request_client(
     *,
     context: Any | None = None,
 ) -> RequestClient:
-    """Create a generated-stub gRPC request client.
+    """Create a descriptor-driven gRPC request client.
 
     Args:
         server_url: gRPC endpoint selected by the request client factory.
