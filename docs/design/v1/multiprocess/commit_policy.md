@@ -10,7 +10,7 @@ instead of writing every windowed chunk through.
 A windowed object group is one whose reuse needs only a bounded number of
 trailing chunks: sliding-window attention, and also align/all-mode Mamba
 and linear-attention groups, which behave like a window of one block. The
-group's class comes from `AttnWindowDesc.num_chunks_in_sw[g]` — `-1` is
+group's class comes from `AttnWindowDesc.num_chunks_in_sw[g]`: `-1` is
 `WHOLE_PREFIX`, `w >= 1` is `WINDOWED`.
 
 ### Why most windowed KV is wasted in L2
@@ -21,7 +21,7 @@ Resuming a sequence at token offset `p` requires:
 - **Windowed KV**: only the last `w` chunks, `[p - w, p)`.
 
 Every older windowed chunk is dead weight for prefix reuse. These chunks
-are also the large ones — per chunk, a windowed object group holds an
+are also the large ones: per chunk, a windowed object group holds an
 order of magnitude more bytes than a whole-prefix group.
 
 The `default` store policy writes every chunk through to L2, so most L2
@@ -32,7 +32,7 @@ question unanswered: which window still needs to reach L2, and when?
 
 ### The right window depends on where the turn ends
 
-The window worth committing ends at offset `p` — wherever the next
+The window worth committing ends at offset `p`, wherever the next
 request's prefix match will stop. While a request is running, `p` is
 unknown: the sequence is still growing. Once the request finishes, `p` is
 known.
@@ -40,7 +40,7 @@ known.
 A chat model ends its turn by emitting a turn-end token. If the request
 stopped on that token, it ended exactly where the next prompt resumes. If
 the request was aborted, hit its length cap, errored, or tripped repetition
-detection, it ended mid-turn — and no follow-up resumes there.
+detection, it ended mid-turn, and no follow-up resumes there.
 
 ### The commit: copy the live window at `END_SESSION`
 
@@ -51,7 +51,7 @@ hit. The write lands during idle time between turns, before the follow-up
 arrives and before L1 pressure can evict the window.
 
 Windowed chunks outside a committed window never leave L1. Eviction
-simply discards them.
+discards them.
 
 ## 2. Design
 
@@ -77,7 +77,7 @@ The design splits the commit into two decisions:
   one request.
 * **Whether** to commit (`CommitPolicy`): a per-request decision based on
   how the engine says the request ended. What counts as evidence depends on
-  the anchor — a window at `generation_end` is worth committing only if the
+  the anchor: a window at `generation_end` is worth committing only if the
   generation ended where a follow-up resumes, while a window at `prompt_end`
   covers a prompt the follow-up re-sends regardless. The policy therefore
   sees the anchor in its `CommitContext`.
@@ -96,8 +96,8 @@ later from `update_connector_output`; the value waits in
 | `stop_token_id` | `request.stop_reason` if it is an `int`, else the last of `request.output_token_ids` | Token the generation stopped on; `-1` when unknown |
 
 vLLM sets `stop_reason` only for `stop_token_ids`. A stop on the model's
-own EOS leaves it `None` (`check_stop` in `vllm/v1/core/sched/utils.py`) —
-the ordinary chat case — so the connector falls back to the last generated
+own EOS leaves it `None` (`check_stop` in `vllm/v1/core/sched/utils.py`),
+the ordinary chat case, so the connector falls back to the last generated
 token. `NO_SESSION_END_INFO` (all defaults) is what an engine that observes
 nothing sends; every built-in policy treats it as "do not commit".
 
@@ -132,7 +132,7 @@ The built-in `turn_end` policy decides by anchor:
   tripped repetition detection ended mid-turn. A mid-turn tail may be
   re-rendered or never sent again, so committing its window risks a write
   that is never read.
-- **`prompt_end`**: the generation's ending is irrelevant — the prompt is
+- **`prompt_end`**: the generation's ending is irrelevant: the prompt is
   re-sent either way. Returns `True` for every finish reason except
   `abort`, `error`, and an empty report, the cases where the conversation
   itself may not continue.
@@ -144,7 +144,7 @@ The built-in `turn_end` policy decides by anchor:
 boundary. For each windowed object group `g`, `_maybe_commit_window` takes
 the `num_chunks_in_sw[g]` chunks ending at that boundary and resolves their
 `ObjectKey`s through the session's hash chain. Whole-prefix groups are
-skipped — the store path already wrote them through.
+skipped: the store path already wrote them through.
 
 | Anchor | Offset | Right when |
 |---|---|---|
@@ -159,7 +159,7 @@ loop. Nothing runs on the `END_SESSION` handler's thread.
 
 The store loop takes an L1 read lock on each key (`reserve_read`), submits
 one store task per active L2 adapter, and releases the lock when the task
-completes — the same flow as a write-through store. The task's mode is
+completes, the same flow as a write-through store. The task's mode is
 `StoreMode.COPY`, which differs from a plain store in two ways:
 
 1. It targets every active adapter without consulting `StorePolicy`, since
@@ -181,8 +181,8 @@ nothing regardless of the setting. Under the `default` store policy, every
 windowed chunk is already in L2 and a commit only re-writes the window, so
 the path is meant to pair with `defer_windowed`.
 
-There is no "off" policy. The one reason to want one — an L1 that never
-evicts — is a sizing fact a deployment can express as its own policy if the
+There is no "off" policy. The one reason to want one, an L1 that never
+evicts, is a sizing fact a deployment can express as its own policy if the
 extra L2 bytes matter. There is no per-request override either: L2 write
 volume is a property of the server, not of its callers.
 
@@ -200,8 +200,8 @@ Example with gpt-oss, which lists `<|return|>` (200002) and `<|call|>`
 | `200012` | commits tool calls only |
 | empty (default) | commits both |
 
-Both is the default because a tool result can take an hour to come back —
-a tool-call window cannot wait in L1 any more than an answer's can. Qwen
+Both is the default because a tool result can take an hour to come back.
+A tool-call window cannot wait in L1 any more than an answer's can. Qwen
 ends both kinds of turn on `<|im_end|>`; distinguishing them would require
 the serving frontend's finish reason, which the connector does not carry.
 
@@ -220,7 +220,7 @@ Per-turn latency is unchanged because the L1 copy stays.
 * **No L2 adapter / key already evicted / key write-locked.**
   The copy is dropped (with a warning for the no-adapter case). The window
   has no L2 copy. The next turn is still an L1 hit while the window is
-  resident; it pays a prefill only if L1 evicts the window before then —
+  resident; it pays a prefill only if L1 evicts the window before then,
   the same situation as without this design.
 * **Policy raises.** Logged and treated as "do not commit".
 * **Engine sends no `SessionEndInfo`.** `NO_SESSION_END_INFO` (all defaults)
