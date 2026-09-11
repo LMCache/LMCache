@@ -456,14 +456,24 @@ class DirectoryListResponse(BaseModel):
 class BlendLookupRequest(BaseModel):
     """Body of ``POST /directory/blend-lookup``.
 
-    Unlike ``/directory/lookup`` the query need not be a prefix.
+    Unlike ``/directory/lookup`` the query need not be a prefix. It
+    carries the same identity fields, but uses them to scope matches to
+    the caller's namespace rather than to build keys.
 
     Attributes:
         tokens_b64: The query tokens, packed via :func:`encode_tokens`
             (base64 little-endian ``uint32``).
+        model_name: Model the caller retrieves under; matches are
+            restricted to chunks stored for it.
+        world_size: The caller's world size (TP x PP), selecting its rank
+            fan-out.
+        cache_salt: The caller's per-tenant isolation salt.
     """
 
     tokens_b64: str = ""
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
+    cache_salt: str = ""
 
     @field_validator("tokens_b64")
     @classmethod
@@ -485,6 +495,21 @@ class BlendLookupRequest(BaseModel):
         """
         decode_tokens(value)
         return value
+
+    @model_validator(mode="after")
+    def _validate_namespace(self) -> "BlendLookupRequest":
+        """Enforce that the query names the namespace to scope it to.
+
+        Returns:
+            The unchanged request once a query sequence names a model.
+
+        Raises:
+            ValueError: If ``tokens_b64`` is supplied without
+                ``model_name``.
+        """
+        if self.tokens_b64 and not self.model_name:
+            raise ValueError("'model_name' is required with 'tokens_b64'")
+        return self
 
 
 class BlendMatchModel(BaseModel):

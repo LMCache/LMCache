@@ -26,6 +26,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
+from lmcache.v1.mp_coordinator.api import BlendNamespace
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -713,6 +714,9 @@ class LookupMixin:
     def _submit_coordinator_match(self, key: IPCCacheServerKey) -> bool:
         """Issue a fleet directory match query (best-effort).
 
+        The query carries this server's retrieval namespace, so the
+        coordinator returns only chunk hashes this server can expand.
+
         Returns:
             ``True`` if a query was submitted (the finalize step should poll),
             ``False`` when there is no coordinator or submission failed.
@@ -724,7 +728,15 @@ class LookupMixin:
             tokens = list(key.token_ids)
             if len(tokens) < self._ctx.chunk_size:
                 return False
-            coordinator.submit_match(key.request_id, tokens)
+            coordinator.submit_match(
+                key.request_id,
+                tokens,
+                BlendNamespace(
+                    model_name=key.model_name,
+                    cache_salt=key.cache_salt,
+                    world_size=key.world_size,
+                ),
+            )
             return True
         except Exception:
             logger.warning(
