@@ -68,13 +68,39 @@ Command Line Options
      - Service port (default: 8000)
    * - ``--host``
      - Bind host address (default: 0.0.0.0)
+   * - ``--coordinator-url``
+     - MP coordinator base URL to source fleet membership from
    * - ``--config``
-     - Path to configuration file
+     - Path to configuration file (fallback when no coordinator is set)
    * - ``--nodes``
-     - Direct node configuration (JSON string)
+     - Direct node configuration as a JSON string (fallback when no coordinator is set)
 
 
 After starting the service, access the dashboard at ``http://localhost:8080/``.
+
+
+Running Against the MP Coordinator
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The recommended setup sources fleet membership from the MP coordinator, which is
+the single source of truth for which MP servers are in the fleet. Start the
+coordinator, let the MP servers register with it, then point the frontend at it:
+
+.. code-block:: bash
+
+   # 1. Start the coordinator
+   lmcache coordinator --host 0.0.0.0 --port 9300
+
+   # 2. MP servers register themselves to the coordinator
+
+   # 3. Launch the frontend, reading membership from the coordinator
+   lmcache-frontend --port 8080 --coordinator-url http://localhost:9300
+
+The frontend periodically reads the coordinator's ``GET /instances`` and renders
+each registered MP server. ``--coordinator-url`` takes precedence over
+``--config`` / ``--nodes``; with none set, the frontend falls back to the bundled
+``config.json``. Membership is read-only in this mode since it is owned by the
+coordinator.
 
 
 Configuration

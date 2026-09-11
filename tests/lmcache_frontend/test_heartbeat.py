@@ -75,15 +75,8 @@ def test_send_heartbeat_builds_expected_params(patched_httpx):
         host="0.0.0.0",
         port=8085,
         target_nodes=[
-            {
-                "name": "proxy1",
-                "host": "127.0.0.1",
-                "port": "8001",
-                "nodes": [
-                    {"name": "n1", "host": "127.0.0.1", "port": "9001"},
-                    {"name": "n2", "host": "127.0.0.1", "port": "9002"},
-                ],
-            },
+            {"name": "n1", "host": "127.0.0.1", "port": "9001"},
+            {"name": "n2", "host": "127.0.0.1", "port": "9002"},
         ],
     )
 
@@ -94,7 +87,7 @@ def test_send_heartbeat_builds_expected_params(patched_httpx):
     assert params is not None
     assert params["api_address"] == "http://10.0.0.42:8085"
     assert params["pid"] > 0
-    # total children across proxies
+    # number of registered nodes
     other = json.loads(params["other_info"])
     assert other["nodes_count"] == 2
     # version fallback when /version returns empty body
@@ -119,14 +112,7 @@ def test_send_heartbeat_uses_version_from_target_nodes(patched_httpx):
         host="0.0.0.0",
         port=8085,
         target_nodes=[
-            {
-                "name": "proxy1",
-                "host": "127.0.0.1",
-                "port": "8001",
-                "nodes": [
-                    {"name": "n1", "host": "127.0.0.1", "port": "9001"},
-                ],
-            },
+            {"name": "n1", "host": "127.0.0.1", "port": "9001"},
         ],
     )
 
