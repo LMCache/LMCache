@@ -3187,3 +3187,159 @@ def test_tensor_from_musa_ptr_fails_without_external_storage(
 
     with pytest.raises(RuntimeError, match="failed to construct"):
         _py_ops._tensor_from_musa_ptr(0x1000, (2, 3), torch.float16, fake_device, 12)
+
+
+# ==========================================
+# Pointer-mode device resolution
+# ==========================================
+#
+# ``_normalize_lmcache_objects`` rebuilds raw LMCache-object pointers into
+# chunk tensors. Some callers hand it host memory -- the compiled path pins
+# CPU chunks first -- and some hand it device memory, because the
+# multiprocess server stages the transfer through GPU buffers. So the wrap
+# has to follow the pointer: a device pointer rebuilt as a CPU tensor only
+# survives while the slice the kernel takes stays contiguous, and skipping a
+# block prefix is enough to break that.
+
+_requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Requires a CUDA device"
+)
+
+_PTR_NUM_LAYERS = 2
+_PTR_NUM_BLOCKS = 8
+_PTR_BLOCK_SIZE = 4
+_PTR_NUM_HEADS = 2
+_PTR_HEAD_SIZE = 8
+_PTR_BLOCKS_PER_CHUNK = 4
+_PTR_CHUNK_TOKENS = _PTR_BLOCKS_PER_CHUNK * _PTR_BLOCK_SIZE
+_PTR_HIDDEN = _PTR_NUM_HEADS * _PTR_HEAD_SIZE
+_PTR_DTYPE = torch.float32
+_PTR_FORMAT = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+_PTR_CHUNK_SHAPE = (2, _PTR_NUM_LAYERS, _PTR_CHUNK_TOKENS, _PTR_HIDDEN)
+
+
+def _ptr_shape_desc() -> Any:
+    """Build the page-buffer descriptor for the pointer-mode fixtures."""
+    shape_desc = _py_ops.PageBufferShapeDesc()
+    shape_desc.kv_size = 2
+    shape_desc.nl = _PTR_NUM_LAYERS
+    shape_desc.nb = _PTR_NUM_BLOCKS
+    shape_desc.bs = _PTR_BLOCK_SIZE
+    shape_desc.nh = _PTR_NUM_HEADS
+    shape_desc.hs = _PTR_HEAD_SIZE
+    shape_desc.element_size = _PTR_DTYPE.itemsize
+    _py_ops.set_shape_desc_dtype(shape_desc, _PTR_DTYPE)
+    return shape_desc
+
+
+def _wrap_pointers(pointers: list[int]) -> list[torch.Tensor]:
+    """Run *pointers* through pointer-mode object normalization."""
+    return _py_ops._normalize_lmcache_objects(
+        pointers,
+        shape_desc=_ptr_shape_desc(),
+        lmcache_chunk_size=_PTR_CHUNK_TOKENS,
+        engine_kv_format=_PTR_FORMAT,
+        dtype=_PTR_DTYPE,
+    )
+
+
+@pytest.mark.cuda
+@_requires_cuda
+def test_normalize_lmcache_objects_follows_device_pointers() -> None:
+    """A device staging pointer is rebuilt on that device, not on the CPU."""
+    staging = torch.zeros(_PTR_CHUNK_SHAPE, dtype=_PTR_DTYPE, device="cuda")
+
+    wrapped = _wrap_pointers([staging.data_ptr()])
+
+    # Compare through a local: when the wrap is a CPU tensor over device
+    # memory, rendering it faults, and pytest renders the operands of the
+    # assertion that fails.
+    wrapped_chunk = wrapped[0]
+    wrapped_device = wrapped_chunk.device
+    assert wrapped_device == staging.device
+    assert wrapped_chunk.shape == staging.shape
+    assert wrapped_chunk.dtype == staging.dtype
+    # The wrap must be a view of the original allocation, not a copy of it.
+    wrapped_chunk.fill_(3)
+    device_sync("cuda")
+    assert torch.equal(staging, torch.full_like(staging, 3))
+
+
+@pytest.mark.cuda
+@_requires_cuda
+def test_normalize_lmcache_objects_keeps_host_pointers_on_cpu() -> None:
+    """Host staging stays on the CPU, and querying it leaves no CUDA error."""
+    pinned = torch.zeros(_PTR_CHUNK_SHAPE, dtype=_PTR_DTYPE).pin_memory()
+    plain = torch.zeros(_PTR_CHUNK_SHAPE, dtype=_PTR_DTYPE)
+
+    wrapped = _wrap_pointers([pinned.data_ptr(), plain.data_ptr()])
+
+    assert [tensor.device.type for tensor in wrapped] == ["cpu", "cpu"]
+    for tensor, original in zip(wrapped, (pinned, plain), strict=True):
+        tensor.fill_(5)
+        assert torch.equal(original, torch.full_like(original, 5))
+    # An unregistered pointer makes the runtime query fail on some versions;
+    # that error must not be left behind for the next CUDA call to trip on.
+    device_sync("cuda")
+    assert torch.ones(1, device="cuda").item() == 1.0
+
+
+@pytest.mark.cuda
+@_requires_cuda
+def test_multi_layer_block_kv_transfer_skips_prefix_with_device_objects() -> None:
+    """Device staging survives a transfer that skips a leading block.
+
+    The skipped prefix makes the object slice non-contiguous, so a CPU wrap of
+    a device pointer is dereferenced by host code here: before the pointer
+    residency was resolved this crashed the process instead of failing.
+    """
+    torch.manual_seed(123)
+    paged_shape = (
+        2,
+        _PTR_NUM_BLOCKS,
+        _PTR_BLOCK_SIZE,
+        _PTR_NUM_HEADS,
+        _PTR_HEAD_SIZE,
+    )
+    src = [
+        torch.randn(paged_shape, dtype=_PTR_DTYPE, device="cuda")
+        for _ in range(_PTR_NUM_LAYERS)
+    ]
+    dst = [torch.zeros_like(layer) for layer in src]
+    num_chunks = _PTR_NUM_BLOCKS // _PTR_BLOCKS_PER_CHUNK
+    staging = [
+        torch.zeros(_PTR_CHUNK_SHAPE, dtype=_PTR_DTYPE, device="cuda")
+        for _ in range(num_chunks)
+    ]
+    staging_ptrs = [chunk.data_ptr() for chunk in staging]
+    block_ids = torch.arange(_PTR_NUM_BLOCKS, dtype=torch.int64, device="cuda")
+    skip_prefix_n_blocks = 1
+
+    def _transfer(paged: list[torch.Tensor], direction: Any, skip_blocks: int) -> None:
+        _py_ops.multi_layer_block_kv_transfer(
+            torch.tensor(
+                [layer.data_ptr() for layer in paged],
+                dtype=torch.uint64,
+                device="cuda",
+            ),
+            staging_ptrs,
+            block_ids,
+            torch.device("cuda"),
+            direction,
+            _ptr_shape_desc(),
+            _PTR_CHUNK_TOKENS,
+            _PTR_FORMAT,
+            skip_blocks,
+        )
+
+    _transfer(src, lmcache_native.TransferDirection.D2H, 0)
+    device_sync("cuda")
+    _transfer(dst, lmcache_native.TransferDirection.H2D, skip_prefix_n_blocks)
+    device_sync("cuda")
+
+    for layer_src, layer_dst in zip(src, dst, strict=True):
+        assert torch.equal(
+            layer_src[:, skip_prefix_n_blocks:], layer_dst[:, skip_prefix_n_blocks:]
+        )
+        # The skipped blocks must be left untouched.
+        assert torch.count_nonzero(layer_dst[:, :skip_prefix_n_blocks]) == 0
