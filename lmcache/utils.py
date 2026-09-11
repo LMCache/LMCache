@@ -14,18 +14,45 @@ import threading
 import traceback
 import warnings
 
-try:
-    # Third Party
+def nvtx_annotate():
+    """
+    Return NVTX decorator.
+    If function or module do not exist, raises ImportError.
+    """
     from nvtx import annotate  # type: ignore
-except ImportError:
+    return annotate
 
+def roctx_annotate():
+    """
+    Return an adaptor of ROCTX RoctxRange decorator.
+    If type or module do not exist, raises ImportError.
+    """
+    import roctx  # type: ignore
+    from roctx.context_decorators import RoctxRange  # type: ignore
     def annotate(*args, **kwargs):
-        """Dummy decorator when nvtx is not available."""
+        return RoctxRange(kwargs['message'])
+    return annotate
 
-        def decorator(func):
-            return func
+def fallback_annotate(*args, **kwargs):
+    """
+    Fallback decorator that does nothing.
+    Used when no other decorators can be imported.
+    """
+    def dummy_decorator(func):
+        return func
+    return dummy_decorator
 
-        return decorator
+def lookup_annotate_function():
+    """
+    Look for a candidate decorator function or otherwise return a placeholder
+    """
+    for import_func in [nvtx_annotate, roctx_annotate]:
+        try:
+            return import_func()
+        except ImportError:
+            pass # Maybe print a warning message
+
+    return fallback_annotate
 
 
 # Third Party
@@ -664,7 +691,10 @@ def _get_color_for_nvtx(name):
 
 def _lmcache_nvtx_annotate(func, domain="lmcache"):
     """Decorator for applying nvtx annotations to methods in lmcache."""
-    return annotate(
+    if not hasattr(_lmcache_nvtx_annotate, 'func'):
+        _lmcache_nvtx_annotate.func = lookup_annotate_function()
+
+    return _lmcache_nvtx_annotate.func(
         message=func.__qualname__,
         color=_get_color_for_nvtx(func.__qualname__),
         domain=domain,
