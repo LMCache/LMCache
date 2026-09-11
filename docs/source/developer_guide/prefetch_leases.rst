@@ -37,7 +37,8 @@ locks in the controller.  A caller has two compatible choices:
 
 When a sparse prediction is no longer valid, call
 ``release_prefetch_task(handle)``.  It is idempotent and cancels the controller
-request with the handle's generation.  If the caller has already consumed the
+request with the handle's generation and waits for controller cleanup before
+releasing manager-owned L1 locks.  If the caller has already consumed the
 result bitmap through the legacy query API, it may pass the consumed keys to
 ``release_prefetch_task(handle, keys)`` so those locks are released as well.
 The existing ``PREFIX`` and ``WARM`` paths keep their historical cleanup

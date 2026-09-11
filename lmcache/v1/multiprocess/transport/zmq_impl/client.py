@@ -180,6 +180,100 @@ class ZmqMultiprocessClient(RequestClient):
         """Commit an engine-driven retrieve."""
         return self._call(RequestType.COMMIT_RETRIEVE, key, instance_id)
 
+    def sparse_prefetch(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[Any],
+    ) -> MessagingFuture[Any]:
+        """Submit a logical sparse prefetch lease."""
+        return self._call(
+            RequestType.SPARSE_PREFETCH,
+            instance_id,
+            request_id,
+            generation,
+            layer_id,
+            keys,
+        )
+
+    def sparse_query_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[Any]:
+        """Query a sparse prefetch without waiting for completion."""
+        return self._call(
+            RequestType.SPARSE_QUERY_PREFETCH,
+            instance_id,
+            request_id,
+            generation,
+            layer_id,
+        )
+
+    def sparse_wait_prefetch(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        timeout: float,
+    ) -> MessagingFuture[Any]:
+        """Wait for a sparse prefetch without consuming its lease."""
+        return self._call(
+            RequestType.SPARSE_WAIT_PREFETCH,
+            instance_id,
+            request_id,
+            generation,
+            layer_id,
+            timeout,
+        )
+
+    def sparse_retrieve(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[Any],
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[Any]:
+        """Retrieve the retained sparse objects into physical GPU pages."""
+        return self._call(
+            RequestType.SPARSE_RETRIEVE,
+            instance_id,
+            request_id,
+            generation,
+            layer_id,
+            keys,
+            block_ids,
+            event_ipc_handle,
+        )
+
+    def sparse_cancel_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[Any]:
+        """Cancel a sparse prefetch and release its lease."""
+        return self._call(
+            RequestType.SPARSE_CANCEL_PREFETCH,
+            instance_id,
+            request_id,
+            generation,
+            layer_id,
+        )
+
+    def sparse_release_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[Any]:
+        """Release a sparse prefetch lease after consumption."""
+        return self._call(
+            RequestType.SPARSE_RELEASE_PREFETCH,
+            instance_id,
+            request_id,
+            generation,
+            layer_id,
+        )
+
     def clear(self) -> MessagingFuture[Any]:
         """Clear all server caches."""
         return self._call(RequestType.CLEAR)

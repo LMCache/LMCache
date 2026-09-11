@@ -15,6 +15,7 @@ This module defines the protocol for:
 
 # First Party
 from lmcache.utils import EngineType
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -48,6 +49,12 @@ REQUEST_NAMES = [
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
+    "SPARSE_PREFETCH",
+    "SPARSE_QUERY_PREFETCH",
+    "SPARSE_WAIT_PREFETCH",
+    "SPARSE_RETRIEVE",
+    "SPARSE_CANCEL_PREFETCH",
+    "SPARSE_RELEASE_PREFETCH",
 ]
 
 # Type alias for cache keys
@@ -255,6 +262,56 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         "COMMIT_RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Submit a logical sparse prefetch. The registered GPU context supplies
+        # the memory layouts; physical destination pages are not part of this
+        # request and are sent only with SPARSE_RETRIEVE.
+        "SPARSE_PREFETCH": ProtocolDefinition(
+            payload_classes=[int, str, int, int, list[ObjectKey]],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Return the retained-key indices over the original sparse request.
+        "SPARSE_QUERY_PREFETCH": ProtocolDefinition(
+            payload_classes=[int, str, int, int],
+            response_class=list[int] | None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Block until the logical prefetch is complete, without consuming the
+        # retained-key lease.
+        "SPARSE_WAIT_PREFETCH": ProtocolDefinition(
+            payload_classes=[int, str, int, int, float],
+            response_class=list[int] | None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Read the retained logical objects into the supplied physical pages.
+        # The response is (device-event-ipc-handle, (success, found-indices)).
+        "SPARSE_RETRIEVE": ProtocolDefinition(
+            payload_classes=[
+                int,
+                str,
+                int,
+                int,
+                list[ObjectKey],
+                list[list[int]],
+                bytes,
+            ],
+            response_class=tuple[bytes, tuple[bool, list[int]]],
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Cancel a pending logical prefetch and release its lease.
+        "SPARSE_CANCEL_PREFETCH": ProtocolDefinition(
+            payload_classes=[int, str, int, int],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Explicitly release a completed or pending sparse lease. This is
+        # intentionally separate from cancellation for adapters that expose
+        # consume/release as distinct lifecycle operations.
+        "SPARSE_RELEASE_PREFETCH": ProtocolDefinition(
+            payload_classes=[int, str, int, int],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),

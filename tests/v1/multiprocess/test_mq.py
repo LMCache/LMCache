@@ -23,6 +23,9 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -73,6 +76,22 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
         RequestType.P2P_LOOKUP_AND_LOCK,
         RequestType.P2P_QUERY_LOOKUP_RESULTS,
         RequestType.P2P_UNLOCK_OBJECTS,
+    }
+
+
+def test_zmq_handler_specs_cover_sparse_prefetch_request_types() -> None:
+    """The LMCache transfer adapter exposes every sparse RPC handler."""
+    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+
+    request_types = {spec.request_type for spec in get_zmq_handler_specs(module)}
+
+    assert request_types >= {
+        RequestType.SPARSE_PREFETCH,
+        RequestType.SPARSE_QUERY_PREFETCH,
+        RequestType.SPARSE_WAIT_PREFETCH,
+        RequestType.SPARSE_RETRIEVE,
+        RequestType.SPARSE_CANCEL_PREFETCH,
+        RequestType.SPARSE_RELEASE_PREFETCH,
     }
 
 

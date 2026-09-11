@@ -2,7 +2,7 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, Generator, Sequence
 import threading
@@ -21,6 +21,9 @@ from lmcache.utils import (
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchHandle,
+    PrefetchRequestSpec,
+    TrimPolicy,
 )
 from lmcache.v1.gpu_connector.gpu_ops import (
     build_staging_copies,
@@ -249,6 +252,108 @@ def downsample_and_stage_block_ids(
     # Stage the cut block ids into GPU tensors
     block_ids_gpu = cache_context.stage_block_ids(block_ids)
     return block_ids_gpu
+
+
+def _stage_sparse_layer(
+    cache_context: BaseCacheContext,
+    memory_objs: Sequence[MemoryObj],
+    selected_block_ids: list[list[int]],
+    object_group_id: int,
+    layer_id: int,
+) -> None:
+    """Copy one logical layer from sparse objects into SGLang pages.
+
+    The regular object-group transfer is intentionally multi-layer: one
+    ``MemoryObj`` contains all layers in an object group.  A lookahead ticket
+    has a narrower contract, so using that helper here would transfer every
+    layer and make ``layer_id`` only bookkeeping.  The SGLang MP layout has
+    separate K/V page tensors and can use the existing single-layer device
+    primitive instead.
+
+    This first adapter is deliberately strict.  Other engine layouts keep the
+    normal sparse fallback until they provide an equivalent layer view.
+    """
+    manager = cache_context.kv_layer_groups_manager
+    object_group = manager.object_groups[object_group_id]
+    target_group_id = next(
+        (
+            kernel_group_id
+            for kernel_group_id in object_group.kernel_group_indices
+            if layer_id in manager.kernel_groups[kernel_group_id].layer_indices
+        ),
+        None,
+    )
+    if target_group_id is None:
+        raise ValueError(
+            f"layer {layer_id} is not part of object group {object_group_id}"
+        )
+
+    target_group = manager.kernel_groups[target_group_id]
+    group_position = object_group.kernel_group_indices.index(target_group_id)
+    local_layer_id = target_group.layer_indices.index(layer_id)
+    expected_format = lmcache_native.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS
+    if cache_context.get_engine_kv_format(target_group_id) != expected_format:
+        raise ValueError(
+            "sparse layer transfer currently requires the SGLang split-K/V "
+            f"layout, got {cache_context.get_engine_kv_format(target_group_id)}"
+        )
+
+    kv_tensors = cache_context.kv_tensors
+    if (
+        not isinstance(kv_tensors, list)
+        or len(kv_tensors) != 2
+        or not isinstance(kv_tensors[0], list)
+        or not isinstance(kv_tensors[1], list)
+    ):
+        raise ValueError("SGLang sparse layer transfer requires split K/V tensors")
+    key_cache = kv_tensors[0][layer_id]
+    value_cache = kv_tensors[1][layer_id]
+    blocks_per_key = cache_context.calculate_num_blocks(
+        cache_context.lmcache_tokens_per_chunk, target_group_id
+    )
+    block_size = target_group.shape_desc.bs
+    if block_size <= 0:
+        raise ValueError("sparse layer transfer requires a positive page size")
+
+    destination_blocks = selected_block_ids[target_group_id]
+    expected_blocks = len(memory_objs) * blocks_per_key
+    if len(destination_blocks) != expected_blocks:
+        raise ValueError(
+            "sparse layer transfer block mapping has wrong length: "
+            f"expected {expected_blocks}, got {len(destination_blocks)}"
+        )
+
+    offsets = torch.arange(block_size, dtype=torch.int64, device=key_cache.device)
+    for object_index, memory_obj in enumerate(memory_objs):
+        source_group = memory_obj.get_tensor(group_position)
+        if source_group is None:
+            raise ValueError("sparse layer transfer received a non-tensor object")
+        if source_group.ndim != 4 or source_group.shape[0] != 2:
+            raise ValueError(
+                "sparse layer transfer expected [2, layers, tokens, hidden] "
+                f"source, got {tuple(source_group.shape)}"
+            )
+        if local_layer_id >= source_group.shape[1]:
+            raise ValueError(
+                f"source object has {source_group.shape[1]} layers, "
+                f"cannot read local layer {local_layer_id}"
+            )
+        source_layer = source_group[:, local_layer_id]
+        start = object_index * blocks_per_key
+        blocks = torch.tensor(
+            destination_blocks[start : start + blocks_per_key],
+            dtype=torch.int64,
+            device=key_cache.device,
+        )
+        slot_mapping = (blocks[:, None] * block_size + offsets).reshape(-1)
+        device_ops.single_layer_kv_transfer_sgl(
+            source_layer,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            lmcache_native.TransferDirection.H2D,
+            token_major=False,
+        )
 
 
 def _recalculate_blocks_to_skip(
@@ -675,6 +780,32 @@ class ContextEntry:
     event_backend: EventIPCBackend | None = None
 
 
+@dataclass
+class _SparsePrefetchJob:
+    """Server-side state for one logical sparse prefetch lease."""
+
+    handle: PrefetchHandle
+    keys: tuple[ObjectKey, ...]
+    instance_id: int
+    request_id: str
+    generation: int
+    layer_id: int
+    condition: threading.Condition = field(
+        default_factory=threading.Condition, repr=False
+    )
+    found_indices: tuple[int, ...] | None = None
+    status_inflight: bool = False
+    retrieving: bool = False
+    completion_submitted: bool = False
+    completed: bool = False
+    copy_submitted: bool = False
+    copy_synchronized: bool = False
+    copy_sync_inflight: bool = False
+    copy_stream: Any = field(default=None, repr=False)
+    last_error: BaseException | None = field(default=None, repr=False)
+    cancel_requested: bool = False
+
+
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     """Handles LMCache-driven KV cache transfer operations.
 
@@ -694,6 +825,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
+        self._sparse_jobs: dict[tuple[int, str, int, int], _SparsePrefetchJob] = {}
+        self._sparse_jobs_lock = threading.Lock()
+        self._sparse_orphan_handles: dict[tuple[int, int], PrefetchHandle] = {}
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -707,6 +841,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             "finish_read_prefetched",
             self._ctx.storage_manager.finish_read_prefetched,
             payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.register(
+            "complete_sparse_prefetch",
+            self._complete_sparse_prefetch,
+            payload_type=tuple[int, str, int, int],
         )
         self._device_host_func_dispatcher.start()
 
@@ -832,7 +971,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             The instance IDs reaped this scan.
         """
         now = time.monotonic()
-        reaped: list[tuple[int, ContextEntry]] = []
+        stale_candidates: list[tuple[int, ContextEntry]] = []
         with self._lock:
             stale_ids = [
                 iid
@@ -845,10 +984,29 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 )
             ]
             for iid in stale_ids:
-                reaped.append((iid, self._cache_contexts.pop(iid)))
+                stale_candidates.append((iid, self._cache_contexts[iid]))
         reaped_ids: list[int] = []
         entries: list[ContextEntry] = []
-        for iid, e in reaped:
+        for iid, candidate in stale_candidates:
+            if not self._cleanup_sparse_instance(iid):
+                logger.error(
+                    "Keeping stale GPU instance %d registered because sparse "
+                    "prefetch cleanup did not complete",
+                    iid,
+                )
+                continue
+            with self._lock:
+                current = self._cache_contexts.get(iid)
+                if current is not candidate:
+                    continue
+                timeout = (
+                    reap_timeout_s
+                    if current.has_liveness_signal
+                    else registration_grace_s
+                )
+                if time.monotonic() - current.last_seen <= timeout:
+                    continue
+                e = self._cache_contexts.pop(iid)
             logger.warning(
                 "Reaped GPU instance %d: silent for %.1fs (pinged=%s)",
                 iid,
@@ -857,9 +1015,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             reaped_ids.append(iid)
             entries.append(e)
-        if reaped:
+        if entries:
             del e  # a bound name would pin the final entry (see _release_entries)
-            reaped.clear()
             self._release_entries(entries)
         return reaped_ids
 
@@ -909,10 +1066,559 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return {
             "registered_gpu_ids": registered_gpu_ids,
             "cache_context_meta": cache_context_meta,
+            "active_sparse_prefetches": self._active_sparse_count(),
         }
+
+    def _active_sparse_count(self) -> int:
+        with self._sparse_jobs_lock:
+            return len(self._sparse_jobs) + len(
+                getattr(self, "_sparse_orphan_handles", {})
+            )
+
+    def _sparse_job_key(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> tuple[int, str, int, int]:
+        return instance_id, request_id, generation, layer_id
+
+    def _get_sparse_job(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> _SparsePrefetchJob | None:
+        with self._sparse_jobs_lock:
+            return self._sparse_jobs.get(
+                self._sparse_job_key(instance_id, request_id, generation, layer_id)
+            )
+
+    def _remove_sparse_job(self, job: _SparsePrefetchJob) -> None:
+        key = self._sparse_job_key(
+            job.instance_id, job.request_id, job.generation, job.layer_id
+        )
+        with self._sparse_jobs_lock:
+            if self._sparse_jobs.get(key) is job:
+                self._sparse_jobs.pop(key, None)
+
+    def _remember_sparse_orphan_handle(
+        self, instance_id: int, handle: PrefetchHandle
+    ) -> None:
+        """Retain a losing storage handle when its first cleanup fails."""
+        with self._sparse_jobs_lock:
+            orphan_handles = getattr(self, "_sparse_orphan_handles", None)
+            if orphan_handles is None:
+                orphan_handles = {}
+                self._sparse_orphan_handles = orphan_handles
+            orphan_handles[(instance_id, id(handle))] = handle
+
+    def _cancel_or_remember_sparse_handle(
+        self, instance_id: int, handle: PrefetchHandle
+    ) -> bool:
+        """Cancel a handle, retaining it when success is not confirmed."""
+        try:
+            result = self._ctx.storage_manager.cancel_prefetch_task(handle)
+        except Exception:
+            self._remember_sparse_orphan_handle(instance_id, handle)
+            logger.exception("Failed to cancel a losing sparse prefetch handle")
+            return False
+        if result is False:
+            self._remember_sparse_orphan_handle(instance_id, handle)
+            logger.error("Sparse prefetch handle cancellation was not confirmed")
+            return False
+        return True
+
+    def _cleanup_sparse_orphan_handles(self, instance_id: int | None = None) -> bool:
+        """Retry cleanup for handles whose first cancellation was uncertain."""
+        with self._sparse_jobs_lock:
+            orphan_handles = {
+                key: handle
+                for key, handle in getattr(self, "_sparse_orphan_handles", {}).items()
+                if instance_id is None or key[0] == instance_id
+            }
+        all_clean = True
+        for handle_key, handle in orphan_handles.items():
+            if not self._cancel_or_remember_sparse_handle(handle_key[0], handle):
+                all_clean = False
+                continue
+            with self._sparse_jobs_lock:
+                current = getattr(self, "_sparse_orphan_handles", {}).get(handle_key)
+                if current is handle:
+                    self._sparse_orphan_handles.pop(handle_key, None)
+        return all_clean
+
+    def _finish_sparse_job(self, job: _SparsePrefetchJob) -> None:
+        with job.condition:
+            job.completed = True
+            job.retrieving = False
+            job.condition.notify_all()
+        self._remove_sparse_job(job)
+
+    def _complete_sparse_prefetch(self, payload: tuple[int, str, int, int]) -> None:
+        """Release a sparse lease after the GPU transfer stream completes."""
+        instance_id, request_id, generation, layer_id = payload
+        job = self._get_sparse_job(instance_id, request_id, generation, layer_id)
+        if job is None:
+            return
+        with job.condition:
+            found_indices = job.found_indices
+            retrieving = job.retrieving
+        if not retrieving or found_indices is None:
+            return
+        found_keys = [job.keys[index] for index in found_indices]
+        with job.condition:
+            # This callback runs on the copy stream, so all H2D work is
+            # complete before releasing the host read locks.
+            job.copy_synchronized = True
+            job.copy_sync_inflight = False
+            job.condition.notify_all()
+        try:
+            # The PrefetchHandle owns the storage-manager read lease. Release
+            # it only from this completion callback, after the copy stream has
+            # synchronized; releasing the same keys separately here would
+            # double-decrement the handle's read locks.
+            self._ctx.storage_manager.release_prefetch_task(job.handle, keys=found_keys)
+        except Exception:
+            logger.exception(
+                "Failed to release sparse prefetch lease after transfer: "
+                "request_id=%s generation=%d",
+                request_id,
+                generation,
+            )
+            with job.condition:
+                # The device callback already proves the copy is finished.
+                # Leave the job reachable, but allow an explicit cancel or
+                # release to retry the logical lease without waiting for a
+                # completion callback that will never run again.
+                job.retrieving = False
+                job.condition.notify_all()
+            return
+        self._finish_sparse_job(job)
+
+    def _cleanup_sparse_job(self, job: _SparsePrefetchJob) -> bool:
+        """Cancel/release one job, waiting for an in-flight GPU copy."""
+        deadline = time.monotonic() + 60.0
+        with job.condition:
+            if job.completed:
+                return True
+            job.cancel_requested = True
+            while job.retrieving and not job.completed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.error(
+                        "Timed out waiting for sparse prefetch transfer cleanup: "
+                        "request_id=%s generation=%d",
+                        job.request_id,
+                        job.generation,
+                    )
+                    return False
+                job.condition.wait(timeout=min(remaining, 0.5))
+            if job.completed:
+                return True
+
+        if not self._synchronize_sparse_copy(job):
+            logger.error(
+                "Cannot prove sparse retrieve copy completion; retaining "
+                "request resources: request_id=%s generation=%d",
+                job.request_id,
+                job.generation,
+            )
+            return False
+
+        try:
+            self._ctx.storage_manager.release_prefetch_task(job.handle)
+        except Exception:
+            logger.exception(
+                "Failed to release sparse prefetch job: request_id=%s generation=%d",
+                job.request_id,
+                job.generation,
+            )
+            return False
+        self._finish_sparse_job(job)
+        return True
+
+    def _synchronize_sparse_copy(self, job: _SparsePrefetchJob) -> bool:
+        """Synchronize a partially submitted copy before releasing its lease."""
+        with job.condition:
+            if not job.copy_submitted or job.copy_synchronized:
+                return True
+            while job.copy_sync_inflight:
+                job.condition.wait()
+                if job.copy_synchronized:
+                    return True
+            job.copy_sync_inflight = True
+            copy_stream = job.copy_stream
+
+        try:
+            synchronize = getattr(copy_stream, "synchronize", None)
+            if synchronize is None:
+                raise RuntimeError("sparse retrieve copy stream has no synchronize()")
+            synchronize()
+        except Exception as exc:
+            with job.condition:
+                job.copy_sync_inflight = False
+                job.last_error = exc
+                job.condition.notify_all()
+            logger.exception(
+                "Could not confirm sparse retrieve copy completion; "
+                "resources remain leased: request_id=%s generation=%d",
+                job.request_id,
+                job.generation,
+            )
+            return False
+
+        with job.condition:
+            job.copy_sync_inflight = False
+            job.copy_synchronized = True
+            job.condition.notify_all()
+        return True
+
+    def _cleanup_sparse_instance(self, instance_id: int) -> bool:
+        with self._sparse_jobs_lock:
+            jobs = [
+                job
+                for job in self._sparse_jobs.values()
+                if job.instance_id == instance_id
+            ]
+        all_clean = True
+        for job in jobs:
+            all_clean = self._cleanup_sparse_job(job) and all_clean
+        all_clean = self._cleanup_sparse_orphan_handles(instance_id) and all_clean
+        return all_clean
+
+    def _cleanup_all_sparse_jobs(self) -> bool:
+        with self._sparse_jobs_lock:
+            jobs = list(self._sparse_jobs.values())
+        all_clean = True
+        for job in jobs:
+            all_clean = self._cleanup_sparse_job(job) and all_clean
+        all_clean = self._cleanup_sparse_orphan_handles() and all_clean
+        return all_clean
+
+    def _resolve_sparse_status(
+        self, job: _SparsePrefetchJob, timeout: float | None
+    ) -> list[int] | None:
+        """Return a stable found-index list without consuming it twice."""
+        with job.condition:
+            if job.found_indices is not None:
+                return list(job.found_indices)
+            if job.status_inflight:
+                deadline = None if timeout is None else time.monotonic() + timeout
+                while job.status_inflight and job.found_indices is None:
+                    remaining = (
+                        None if deadline is None else deadline - time.monotonic()
+                    )
+                    if remaining is not None and remaining <= 0:
+                        return None
+                    job.condition.wait(timeout=remaining)
+                return None if job.found_indices is None else list(job.found_indices)
+            job.status_inflight = True
+
+        found = None
+        try:
+            if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+                return None
+            bitmap = self._ctx.storage_manager.query_prefetch_status(job.handle)
+            if bitmap is not None:
+                found = tuple(bitmap.get_indices_list())
+        finally:
+            with job.condition:
+                if found is not None:
+                    job.found_indices = found
+                job.status_inflight = False
+                job.condition.notify_all()
+        return None if found is None else list(found)
+
+    def sparse_prefetch(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[ObjectKey],
+    ) -> bool:
+        """Submit a logical SPARSE prefetch and retain its read lease."""
+        if generation < 0 or layer_id < 0 or not request_id:
+            return False
+        entry = self.get_and_touch_context_entry(instance_id)
+        if entry is None or not keys:
+            return False
+        if any(key.model_name != entry.model_name for key in keys):
+            logger.warning(
+                "Rejecting sparse prefetch with a mismatched model name: request_id=%s",
+                request_id,
+            )
+            return False
+        if any(key.object_group_id < 0 for key in keys):
+            return False
+        job_key = self._sparse_job_key(instance_id, request_id, generation, layer_id)
+        with self._sparse_jobs_lock:
+            existing = self._sparse_jobs.get(job_key)
+            if existing is not None:
+                return existing.keys == tuple(keys)
+            if any(
+                job.instance_id == instance_id
+                and job.request_id == request_id
+                and job.generation != generation
+                for job in self._sparse_jobs.values()
+            ):
+                # The caller must explicitly cancel the old generation before
+                # reusing a request id. This makes stale slot reuse visible
+                # instead of silently sharing a lease between generations.
+                return False
+
+        group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
+            entry.model_name, entry.world_size
+        )
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            entry.model_name, entry.world_size
+        )
+        if not group_layout_descs or attn_desc is None:
+            return False
+        if any(key.object_group_id >= attn_desc.num_object_groups for key in keys):
+            return False
+
+        handle = self._ctx.storage_manager.submit_prefetch_task(
+            PrefetchRequestSpec(
+                keys=list(keys),
+                group_layout_descs=group_layout_descs,
+                policy=TrimPolicy.SPARSE,
+                attn_desc=attn_desc,
+                generation=generation,
+            ),
+            external_request_id=f"{request_id}:{generation}:{layer_id}",
+        )
+        job = _SparsePrefetchJob(
+            handle=handle,
+            keys=tuple(keys),
+            instance_id=instance_id,
+            request_id=request_id,
+            generation=generation,
+            layer_id=layer_id,
+        )
+        duplicate = False
+        conflict = False
+        generation_conflict = False
+        with self._sparse_jobs_lock:
+            existing = self._sparse_jobs.get(job_key)
+            if existing is not None:
+                duplicate = existing.keys == job.keys
+                conflict = not duplicate
+            elif any(
+                other.instance_id == instance_id
+                and other.request_id == request_id
+                and other.generation != generation
+                for other in self._sparse_jobs.values()
+            ):
+                generation_conflict = True
+            else:
+                self._sparse_jobs[job_key] = job
+
+        if generation_conflict:
+            # The caller must explicitly cancel the old generation before
+            # reusing a request id. This makes stale slot reuse visible
+            # instead of silently sharing a lease between generations.
+            self._cancel_or_remember_sparse_handle(instance_id, handle)
+            return False
+
+        if duplicate or conflict:
+            # The first submitter owns the logical job. This caller still
+            # owns a real storage-manager handle, so release that losing
+            # handle before reporting a duplicate or conflicting submit.
+            self._cancel_or_remember_sparse_handle(instance_id, handle)
+            return duplicate
+        return True
+
+    def sparse_query_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> list[int] | None:
+        """Query a sparse prefetch without releasing its lease."""
+        job = self._get_sparse_job(instance_id, request_id, generation, layer_id)
+        if job is None:
+            return None
+        return self._resolve_sparse_status(job, timeout=0.0)
+
+    def sparse_wait_prefetch(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        timeout: float,
+    ) -> list[int] | None:
+        """Wait for a sparse prefetch without releasing its lease."""
+        if timeout < 0:
+            return None
+        job = self._get_sparse_job(instance_id, request_id, generation, layer_id)
+        if job is None:
+            return None
+        return self._resolve_sparse_status(job, timeout=timeout)
+
+    def sparse_retrieve(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[ObjectKey],
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, tuple[bool, list[int]]]:
+        """Copy retained sparse objects into the supplied GPU page mapping."""
+        entry = self.get_and_touch_context_entry(instance_id)
+        job = self._get_sparse_job(instance_id, request_id, generation, layer_id)
+        if entry is None or job is None or tuple(keys) != job.keys:
+            if job is not None:
+                self._cleanup_sparse_job(job)
+            return b"", (False, [])
+
+        found_indices = self._resolve_sparse_status(job, timeout=None)
+        if found_indices is None or not found_indices:
+            self._cleanup_sparse_job(job)
+            return b"", (False, [])
+
+        cache_context = entry.cache_context
+        event_backend = entry.event_backend
+        if event_backend is None:
+            self._cleanup_sparse_job(job)
+            return b"", (False, found_indices)
+        object_groups = cache_context.kv_layer_groups_manager.object_groups
+        group_ids = {key.object_group_id for key in keys}
+        if len(group_ids) != 1:
+            logger.warning(
+                "Sparse retrieve currently accepts one object group per request"
+            )
+            self._cleanup_sparse_job(job)
+            return b"", (False, found_indices)
+        object_group_id = next(iter(group_ids))
+        object_group = object_groups[object_group_id]
+        num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
+        if len(gpu_block_ids) != num_kernel_groups:
+            self._cleanup_sparse_job(job)
+            return b"", (False, found_indices)
+
+        blocks_per_chunk = {
+            kernel_group_id: cache_context.calculate_num_blocks(
+                self._ctx.chunk_size, kernel_group_id
+            )
+            for kernel_group_id in object_group.kernel_group_indices
+        }
+        for kernel_group_id, blocks_per_key in blocks_per_chunk.items():
+            if len(gpu_block_ids[kernel_group_id]) != len(keys) * blocks_per_key:
+                logger.warning(
+                    "Sparse retrieve block mapping has wrong length: "
+                    "request_id=%s group=%d",
+                    request_id,
+                    object_group_id,
+                )
+                self._cleanup_sparse_job(job)
+                return b"", (False, found_indices)
+
+        with job.condition:
+            if job.retrieving or job.completed or job.cancel_requested:
+                return b"", (False, found_indices)
+            job.retrieving = True
+            job.copy_stream = cache_context.stream
+
+        found_keys = [keys[index] for index in found_indices]
+        selected_block_ids: list[list[int]] = [[] for _ in range(num_kernel_groups)]
+        for kernel_group_id, blocks_per_key in blocks_per_chunk.items():
+            source_ids = gpu_block_ids[kernel_group_id]
+            selected_block_ids[kernel_group_id] = [
+                block_id
+                for index in found_indices
+                for block_id in source_ids[
+                    index * blocks_per_key : (index + 1) * blocks_per_key
+                ]
+            ]
+
+        try:
+            with (
+                torch_dev.device(cache_context.device),
+                torch_dev.stream(cache_context.stream),
+            ):
+                event = event_backend.create_event(cache_context.device)
+                producer_event = event_backend.import_event(
+                    event_ipc_handle, cache_context.device
+                )
+                event_backend.wait_event(producer_event, cache_context.stream)
+                stage_error: BaseException | None = None
+                with self._ctx.storage_manager.read_prefetched_results(
+                    found_keys, release_on_exit=False
+                ) as memory_objs:
+                    if memory_objs is None or len(memory_objs) != len(found_keys):
+                        raise RuntimeError(
+                            "Sparse retrieve found keys changed before read"
+                        )
+                    with job.condition:
+                        # Mark conservatively before entering the layer
+                        # transfer. A native call can enqueue an H2D copy and
+                        # then raise while processing a later object.
+                        job.copy_submitted = True
+                    try:
+                        _stage_sparse_layer(
+                            cache_context,
+                            memory_objs,
+                            selected_block_ids,
+                            object_group_id=object_group_id,
+                            layer_id=layer_id,
+                        )
+                    except BaseException as exc:
+                        # Keep the context manager on its normal-exit path so
+                        # deferred read locks are not released before the
+                        # partially submitted copy is synchronized below.
+                        stage_error = exc
+                if stage_error is not None:
+                    raise stage_error
+                submit_callback_to_stream(
+                    cache_context.cupy_stream,
+                    "complete_sparse_prefetch",
+                    (instance_id, request_id, generation, layer_id),
+                )
+                with job.condition:
+                    job.completion_submitted = True
+                    job.condition.notify_all()
+                event_backend.record_event(event, cache_context.stream)
+                return event_backend.export_event(event, cache_context.device), (
+                    True,
+                    found_indices,
+                )
+        except Exception:
+            logger.exception(
+                "Sparse retrieve failed: request_id=%s generation=%d",
+                request_id,
+                generation,
+            )
+            with job.condition:
+                if not job.completion_submitted:
+                    job.retrieving = False
+                job.condition.notify_all()
+            if not job.completion_submitted and self._synchronize_sparse_copy(job):
+                self._cleanup_sparse_job(job)
+            return b"", (False, found_indices)
+
+    def sparse_cancel_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> bool:
+        """Cancel one generation and release its logical cache lease."""
+        job = self._get_sparse_job(instance_id, request_id, generation, layer_id)
+        if job is None:
+            return False
+        return self._cleanup_sparse_job(job)
+
+    def sparse_release_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> bool:
+        """Release one generation after its destination pages are consumed."""
+        job = self._get_sparse_job(instance_id, request_id, generation, layer_id)
+        if job is None:
+            # The stream callback may already have performed the idempotent
+            # release; an absent exact-generation job is terminal success.
+            return True
+        return self._cleanup_sparse_job(job)
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
+        if not self._cleanup_all_sparse_jobs():
+            raise RuntimeError(
+                "Cannot close LMCache transfer module while sparse prefetch "
+                "resources are still in flight"
+            )
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -1018,6 +1724,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         Args:
             instance_id: The GPU instance ID (such as PID).
         """
+        if not self._cleanup_sparse_instance(instance_id):
+            raise RuntimeError(
+                "Cannot unregister GPU context while sparse prefetch resources "
+                "are still in flight"
+            )
         with self._lock:
             popped = [
                 e
@@ -1442,6 +2153,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
 
             prefetched_keys: list[ObjectKey] = []
+            read_locked_keys: list[ObjectKey] = []
             total_bytes = 0
             retrieve_succeeded = True
             try:
@@ -1451,7 +2163,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
                     with self._ctx.storage_manager.read_prefetched_results(
-                        in_window_keys
+                        in_window_keys, release_on_exit=False
                     ) as window_objs:
                         if not window_objs or len(window_objs) != len(in_window_keys):
                             logger.error("Some keys not found during retrieve!")
@@ -1467,6 +2179,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             window_objs
                         )
 
+                        # Keep these locks owned by this retrieve until the
+                        # stream copy is known to have completed.  If the
+                        # native transfer submits one object and fails on the
+                        # next, the deferred read context must not release
+                        # these keys before the failure cleanup synchronizes
+                        # the copy stream.
+                        read_locked_keys.extend(in_window_keys)
                         transfer_kv_per_object_group(
                             cache_context,
                             block_ids_per_group_gpu,
@@ -1477,21 +2196,30 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             direction=lmcache_native.TransferDirection.H2D,
                             transfer_key=transfer_key,
                         )
-                        # Extend only after the copy is enqueued: on exception,
-                        # read_prefetched_results releases this group's locks
-                        # itself, and a key must not be released twice.
-                        prefetched_keys.extend(in_window_keys)
+                    prefetched_keys.extend(in_window_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
                 event_backend.record_event(event, cache_context.stream)
-                if prefetched_keys:
+                if retrieve_succeeded and prefetched_keys:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_read_prefetched",
                         prefetched_keys,
                     )
+                elif read_locked_keys:
+                    try:
+                        cache_context.stream.synchronize()
+                    except Exception:
+                        logger.exception(
+                            "Cannot confirm failed retrieve copy completion; "
+                            "retaining read locks"
+                        )
+                    else:
+                        self._ctx.storage_manager.finish_read_prefetched(
+                            read_locked_keys
+                        )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
                     if len(prefetched_keys) == expected_retained
