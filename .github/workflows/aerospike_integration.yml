@@ -18,6 +18,7 @@ on:
     branches:
       - "dev"
       - "release-**"
+    types: [labeled]
     paths:
       - "csrc/storage_backends/aerospike/**"
       - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
@@ -38,6 +39,7 @@ env:
 
 jobs:
   aerospike-native-l2:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')
     name: Aerospike native L2
     runs-on: ubuntu-latest
     timeout-minutes: 30

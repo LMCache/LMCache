@@ -7,6 +7,7 @@ on:
     branches:
       - "dev"
       - "release-**"
+    types: [labeled]
 
 env:
   LC_ALL: en_US.UTF-8
@@ -26,6 +27,7 @@ permissions:
 
 jobs:
   changes:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')
     name: Detect changes
     runs-on: ubuntu-latest
     permissions:
@@ -62,7 +64,7 @@ jobs:
 
   test:
     needs: changes
-    if: needs.changes.outputs.lmcache == 'true'
+    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')) && needs.changes.outputs.lmcache == 'true'
     name: "test: ${{ matrix.python }} on ${{ matrix.platform }}"
     runs-on: "${{ matrix.platform }}"
     strategy:
@@ -117,7 +119,7 @@ jobs:
 
   raw-block-tests:
     needs: changes
-    if: needs.changes.outputs.raw_block == 'true'
+    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')) && needs.changes.outputs.raw_block == 'true'
     name: raw-block temp-file tests
     runs-on: ubuntu-latest
     env:

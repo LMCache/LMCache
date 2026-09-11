@@ -9,6 +9,7 @@ on:
     branches:
       - dev
       - "release-**"
+    types: [labeled]
 
 permissions:
   contents: read
@@ -20,6 +21,7 @@ defaults:
 
 jobs:
   changes:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')
     name: Detect changes
     runs-on: ubuntu-latest
     permissions:
@@ -43,7 +45,7 @@ jobs:
 
   ci:
     needs: changes
-    if: needs.changes.outputs.operator == 'true'
+    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')) && needs.changes.outputs.operator == 'true'
     name: Format, lint, and test
     runs-on: ubuntu-latest
     steps:

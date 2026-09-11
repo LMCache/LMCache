@@ -12,6 +12,7 @@ on:
     branches:
       - "dev"
       - "release-**"
+    types: [labeled]
     paths:
       - '.github/actions/*.ya?ml'
       - '.github/workflows/*.ya?ml'
@@ -29,6 +30,7 @@ permissions:
 
 jobs:
   actionlint:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')
     runs-on: ubuntu-latest
     steps:
       - name: "Harden Runner"

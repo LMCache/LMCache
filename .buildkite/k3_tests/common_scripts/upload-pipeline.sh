@@ -34,5 +34,7 @@ if should_skip_ci; then
     exit 0
 fi
 
+"${SCRIPT_DIR}/wait-for-required-checks.sh"
+
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"
 exec buildkite-agent pipeline upload "${PIPELINE_FILE}"

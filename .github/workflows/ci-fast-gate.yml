@@ -1,0 +1,148 @@
+name: CI Fast Gate
+
+# Code Quality is the only GitHub Actions workflow started directly by a PR.
+# This workflow waits for it and the external DCO check, then adds a temporary
+# label that admits the other PR workflows. It runs from the base repository and
+# never checks out or executes code from the pull request.
+on:
+  pull_request_target:
+    branches:
+      - dev
+      - "release-**"
+    types: [opened, synchronize, reopened]
+
+permissions:
+  checks: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+# A new push supersedes the previous gate. The final head-SHA check below
+# also protects against an older run finishing during cancellation.
+concurrency:
+  group: ci-fast-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Wait for Code Quality and DCO
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      READY_LABEL: ci-ready
+    steps:
+      - name: Wait for fast required checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          api_args=(
+            --fail
+            --silent
+            --show-error
+            --location
+            -H "Accept: application/vnd.github+json"
+            -H "Authorization: Bearer ${GH_TOKEN}"
+            -H "X-GitHub-Api-Version: 2022-11-28"
+          )
+
+          github_api() {
+            local path="${1}"
+            shift
+            curl "${api_args[@]}" "$@" "https://api.github.com${path}"
+          }
+
+          # A new commit invalidates the previous admission. Removing the
+          # label also prevents the old label from triggering downstream
+          # workflows while the new commit is still being checked.
+          label_status="$(curl --silent --show-error --location \
+            --output /dev/null --write-out '%{http_code}' \
+            "${api_args[@]}" --request DELETE \
+            "https://api.github.com/repos/${REPOSITORY}/issues/${PR_NUMBER}/labels/${READY_LABEL}" || true)"
+          if [[ "${label_status}" != "204" && "${label_status}" != "404" ]]; then
+            echo "Failed to remove ${READY_LABEL} from PR #${PR_NUMBER} (HTTP ${label_status})" >&2
+            exit 1
+          fi
+
+          timeout_seconds=1800
+          poll_seconds=10
+          deadline=$((SECONDS + timeout_seconds))
+
+          echo "Waiting for Check code quality and DCO on ${REPOSITORY}@${HEAD_SHA}"
+          while (( SECONDS < deadline )); do
+            checks_json="$(github_api "/repos/${REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100")"
+            code_quality="$(jq -r '[.check_runs[] | select(.name == "Check code quality")]
+              | sort_by(.id) | last.conclusion // empty' <<<"${checks_json}")"
+            dco="$(jq -r '[.check_runs[] | select(.name == "DCO")]
+              | sort_by(.id) | last.conclusion // empty' <<<"${checks_json}")"
+
+            if [[ -z "${dco}" ]]; then
+              statuses_json="$(github_api "/repos/${REPOSITORY}/commits/${HEAD_SHA}/status")"
+              dco="$(jq -r '[.statuses[] | select(.context == "DCO")]
+                | sort_by(.id) | last.state // empty' <<<"${statuses_json}")"
+            fi
+
+            echo "Check code quality: ${code_quality:-not reported}; DCO: ${dco:-not reported}"
+
+            case "${code_quality}" in
+              success|neutral|skipped) code_ready=1 ;;
+              failure|cancelled|timed_out|action_required|stale)
+                echo "Check code quality finished with ${code_quality}; refusing admission" >&2
+                exit 1
+                ;;
+              *) code_ready=0 ;;
+            esac
+
+            if [[ "${dco}" == "success" ]]; then
+              dco_ready=1
+            elif [[ "${dco}" == "failure" || "${dco}" == "error" ]]; then
+              echo "DCO finished with ${dco}; refusing admission" >&2
+              exit 1
+            else
+              dco_ready=0
+            fi
+
+            if (( code_ready == 1 && dco_ready == 1 )); then
+              break
+            fi
+
+            sleep "${poll_seconds}"
+            if (( poll_seconds < 60 )); then
+              poll_seconds=$((poll_seconds * 2))
+              if (( poll_seconds > 60 )); then
+                poll_seconds=60
+              fi
+            fi
+          done
+
+          if (( SECONDS >= deadline )); then
+            echo "Timed out waiting for Code Quality and DCO" >&2
+            exit 1
+          fi
+
+          current_head_sha="$(github_api "/repos/${REPOSITORY}/pulls/${PR_NUMBER}" | jq -r '.head.sha')"
+          if [[ "${current_head_sha}" != "${HEAD_SHA}" ]]; then
+            echo "PR head moved from ${HEAD_SHA} to ${current_head_sha}; refusing stale admission" >&2
+            exit 1
+          fi
+
+          # The label is created lazily so repository setup does not need a
+          # one-time manual label change. A 422 means another run created it.
+          create_status="$(curl --silent --show-error --location \
+            --output /dev/null --write-out '%{http_code}' \
+            "${api_args[@]}" --request POST \
+            --data '{"name":"ci-ready","color":"1d76db","description":"Fast required checks passed; admit downstream CI"}' \
+            "https://api.github.com/repos/${REPOSITORY}/labels" || true)"
+          if [[ "${create_status}" != "201" && "${create_status}" != "422" ]]; then
+            echo "Failed to create ${READY_LABEL} (HTTP ${create_status})" >&2
+            exit 1
+          fi
+
+          github_api "/repos/${REPOSITORY}/issues/${PR_NUMBER}/labels" \
+            --request POST \
+            --data '{"labels":["ci-ready"]}' >/dev/null
+          echo "${READY_LABEL} added; downstream PR workflows may now run"

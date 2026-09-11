@@ -20,6 +20,7 @@ on:
     branches:
       - "dev"
       - "release-**"
+    types: [labeled]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,6 +35,7 @@ defaults:
 
 jobs:
   changes:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')
     name: Detect changes
     runs-on: ubuntu-latest
     permissions:
@@ -79,7 +81,7 @@ jobs:
 
   cpu-device-test:
     needs: changes
-    if: needs.changes.outputs.lmcache == 'true'
+    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')) && needs.changes.outputs.lmcache == 'true'
     name: CPU device (${{ matrix.os }} / ${{ matrix.model.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
