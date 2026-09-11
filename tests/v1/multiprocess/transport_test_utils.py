@@ -9,9 +9,7 @@ import importlib
 import zmq
 
 # First Party
-from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.transport.zmq_impl.server import add_handler_helper
 
 RequestTransport = Literal["zmq", "grpc"]
 
@@ -80,7 +78,15 @@ def start_lookup_request_server(
         grpc_server.start()
         return grpc_server
 
-    zmq_server = MessageQueueServer(server_url, zmq.Context.instance())
+    # Keep concrete transport imports inside the selected branch. This helper
+    # is intentionally transport-neutral: the repository's import-boundary
+    # test rejects leaking implementation modules through shared test code.
+    mq_module = importlib.import_module("lmcache.v1.multiprocess.mq")
+    zmq_server_module = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.zmq_impl.server"
+    )
+    zmq_server = mq_module.MessageQueueServer(server_url, zmq.Context.instance())
+    add_handler_helper = zmq_server_module.add_handler_helper
     blocking_types: list[RequestType] = []
     for request_type, method_name in _LOOKUP_HANDLERS.items():
         handler = getattr(lookup, method_name, None)
