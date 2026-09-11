@@ -14,47 +14,6 @@ import threading
 import traceback
 import warnings
 
-def nvtx_annotate():
-    """
-    Return NVTX decorator.
-    If function or module do not exist, raises ImportError.
-    """
-    from nvtx import annotate  # type: ignore
-    return annotate
-
-def roctx_annotate():
-    """
-    Return an adaptor of ROCTX RoctxRange decorator.
-    If type or module do not exist, raises ImportError.
-    """
-    import roctx  # type: ignore
-    from roctx.context_decorators import RoctxRange  # type: ignore
-    def annotate(*args, **kwargs):
-        return RoctxRange(kwargs['message'])
-    return annotate
-
-def fallback_annotate(*args, **kwargs):
-    """
-    Fallback decorator that does nothing.
-    Used when no other decorators can be imported.
-    """
-    def dummy_decorator(func):
-        return func
-    return dummy_decorator
-
-def lookup_annotate_function():
-    """
-    Look for a candidate decorator function or otherwise return a placeholder
-    """
-    for import_func in [nvtx_annotate, roctx_annotate]:
-        try:
-            return import_func()
-        except ImportError:
-            pass # Maybe print a warning message
-
-    return fallback_annotate
-
-
 # Third Party
 from cachetools import TTLCache as _TTLCache  # type: ignore
 import torch
@@ -65,6 +24,57 @@ from lmcache.logging import init_logger
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.memory_management import MemoryFormat
+
+
+def nvtx_annotate():
+    """
+    Return NVTX decorator.
+    If function or module do not exist, raises ImportError.
+    """
+    from nvtx import annotate  # type: ignore
+
+    return annotate
+
+
+def roctx_annotate():
+    """
+    Return an adaptor of ROCTX RoctxRange decorator.
+    If type or module do not exist, raises ImportError.
+    """
+    from roctx.context_decorators import RoctxRange  # type: ignore
+
+    def annotate(*args, **kwargs):
+        return RoctxRange(kwargs["message"])
+
+    return annotate
+
+
+def fallback_annotate(*args, **kwargs):
+    """
+    Fallback decorator that does nothing.
+    Used when no other decorators can be imported.
+    """
+
+    def dummy_decorator(func):
+        return func
+
+    return dummy_decorator
+
+
+def lookup_annotate_function():
+    """
+    Look for a candidate decorator function or otherwise return a placeholder
+    """
+    for import_func in [nvtx_annotate, roctx_annotate]:
+        try:
+            return import_func()
+        except ImportError:
+            pass
+        except ModuleNotFoundError:
+            pass
+
+    return fallback_annotate
+
 
 logger = init_logger(__name__)
 
@@ -691,7 +701,7 @@ def _get_color_for_nvtx(name):
 
 def _lmcache_nvtx_annotate(func, domain="lmcache"):
     """Decorator for applying nvtx annotations to methods in lmcache."""
-    if not hasattr(_lmcache_nvtx_annotate, 'func'):
+    if not hasattr(_lmcache_nvtx_annotate, "func"):
         _lmcache_nvtx_annotate.func = lookup_annotate_function()
 
     return _lmcache_nvtx_annotate.func(
