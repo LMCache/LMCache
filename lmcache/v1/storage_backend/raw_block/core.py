@@ -2598,7 +2598,8 @@ class RawBlockCore:
 
         Splits the reads into ``iouring_queue_depth``-sized batches so a large
         checkpoint does not allocate one buffer for every entry at once, then
-        reads each batch and concatenates results in input order.
+        reads each batch and concatenates results in input order. Failed
+        completions are retried individually before returning their headers.
 
         Args:
             offsets: Device byte offsets for each slot header to read.
@@ -2633,10 +2634,9 @@ class RawBlockCore:
 
         Returns:
             Decoded (slot_identity, payload_len) per slot, or None on error.
-            A batched read fails as a whole even if only one slot errored and
-            does not report which; on any I/O exception this falls back to
-            per-slot reads so a single bad slot is isolated (only it becomes
-            None) instead of dropping every recovered entry in the batch.
+            Decode successful completions directly and reread only failed
+            slots. Submission errors or a completion-count mismatch require
+            rereading every slot because individual results are unavailable.
         """
         n = len(offsets)
         align = self.block_align
@@ -2653,18 +2653,22 @@ class RawBlockCore:
         try:
             raw_dev = self._rawdev()
             batch_id = raw_dev.batched_read(offsets, views, [hdr] * n)
-            raw_dev.wait_iouring(batch_id)
+            results = self._wait_iouring_results(
+                raw_dev, batch_id, n, "recovery header read"
+            )
         except Exception:
-            # TODO: when io_uring returns per-I/O completion results, use them
-            # to drop only the slot(s) that actually failed instead of
-            # re-reading every slot in this fallback.
-            return [self._read_slot_header(off) for off in offsets]
+            results = [False] * n
         finally:
             with self._lock:
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
 
-        return [self._decode_slot_header(bytes(v)) for v in views]
+        return [
+            self._decode_slot_header(bytes(view))
+            if success
+            else self._read_slot_header(offset)
+            for offset, view, success in zip(offsets, views, results, strict=True)
+        ]
 
     def _is_stale_header(
         self,

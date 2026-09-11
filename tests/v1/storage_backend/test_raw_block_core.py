@@ -1610,6 +1610,7 @@ def test_read_slot_headers_batched_reads_and_decodes_one_batch(
         return 77
 
     raw_dev.batched_read.side_effect = batched_read
+    raw_dev.wait_iouring.return_value = ([True, True], [])
     monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
 
     assert core._read_slot_headers_batched(offsets) == expected
@@ -1638,6 +1639,11 @@ def test_read_slot_headers_batched_splits_by_iouring_queue_depth(
         return len(seen_batches)
 
     raw_dev.batched_read.side_effect = batched_read
+    raw_dev.wait_iouring.side_effect = [
+        ([True, True], []),
+        ([True, True], []),
+        ([True], []),
+    ]
     monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
 
     assert core._read_slot_headers_batched(offsets) == [
@@ -1651,14 +1657,20 @@ def test_read_slot_headers_batched_splits_by_iouring_queue_depth(
     assert raw_dev.wait_iouring.call_count == 3
 
 
+@pytest.mark.parametrize("failure_kind", ["submission", "count"])
 def test_read_slot_headers_batched_falls_back_per_slot_on_batch_error(
     monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
 ) -> None:
     # White-box: per-slot fallback isolation has no public projection; the only
     # observable is the per-slot re-read pattern, so assert it directly.
     core = _make_iouring_header_core()
     raw_dev = Mock()
-    raw_dev.batched_read.side_effect = RuntimeError("read failed")
+    raw_dev.batched_read.return_value = 77
+    if failure_kind == "submission":
+        raw_dev.batched_read.side_effect = RuntimeError("read failed")
+    else:
+        raw_dev.wait_iouring.return_value = ([True], [])
     monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
     read_mock = Mock(side_effect=[(1, 64), None, (3, 64)])
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
@@ -1673,6 +1685,38 @@ def test_read_slot_headers_batched_falls_back_per_slot_on_batch_error(
         call(8192),
         call(12288),
     ]
+
+
+@pytest.mark.parametrize("retry_header", [(2, 64), None])
+def test_read_slot_headers_batched_retries_only_failed_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    retry_header: tuple[int, int] | None,
+) -> None:
+    """Retry a failed slot without rereading a successfully completed header."""
+    core = _make_iouring_header_core()
+    raw_dev = Mock()
+
+    def batched_read(
+        offsets: list[int],
+        buffers: list[memoryview],
+        total_lens: list[int],
+    ) -> int:
+        assert offsets == [4096, 8192]
+        assert total_lens == [core.header_bytes] * 2
+        buffers[0][:] = _slot_header(core, 1, 64)
+        # The failed read leaves its newly allocated buffer untouched.
+        assert bytes(buffers[1]) == bytes(core.header_bytes)
+        return 77
+
+    raw_dev.batched_read.side_effect = batched_read
+    raw_dev.wait_iouring.return_value = ([True, False], [(1, "transient read error")])
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    read_mock = Mock(return_value=retry_header)
+    monkeypatch.setattr(core, "_read_slot_header", read_mock)
+
+    assert core._read_slot_headers_batched([4096, 8192]) == [(1, 64), retry_header]
+    read_mock.assert_called_once_with(8192)
+    raw_dev.wait_iouring.assert_called_once_with(77)
 
 
 def test_validate_loaded_entries_iouring_multi_entry_uses_batched_reader(
