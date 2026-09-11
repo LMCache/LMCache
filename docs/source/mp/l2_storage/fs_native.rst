@@ -26,6 +26,17 @@ I/O queue depth on a single Python thread.
   for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
+- ``hash_subdir_levels`` (int, default ``0``): Number of hash-prefix
+  subdirectory levels. Allowed values are ``0``, ``1``, and ``2``. Each
+  level consumes two hexadecimal characters from the beginning of the
+  object's chunk hash directly; the connector does not hash the serialized
+  key or filename again. This produces these layouts:
+
+  - ``0``: ``<base_path>/<filename>``
+  - ``1``: ``<base_path>/<hash[:2]>/<filename>``
+  - ``2``: ``<base_path>/<hash[:2]>/<hash[2:4]>/<filename>``
+
+  Hash subdirectories are created on demand by store operations only.
 
 .. important::
 
@@ -55,6 +66,13 @@ I/O queue depth on a single Python thread.
    If unsure, start with ``use_odirect: false`` and confirm correctness
    before enabling ``O_DIRECT``.
 
+.. note::
+
+   ``hash_subdir_levels`` changes where files are located, and lookups do
+   not fall back to another layout. Changing it for an existing cache makes
+   files written with the previous value unreachable. Use a new empty cache
+   directory or clear the existing one before changing this setting.
+
 **Configuration examples:**
 
 .. code-block:: bash
@@ -67,6 +85,9 @@ I/O queue depth on a single Python thread.
 
     # O_DIRECT for real-disk benchmarking
     --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+    # Spread files across a two-level chunk-hash prefix tree
+    --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "hash_subdir_levels": 2}'
 
 **Buffer-only mode example.**  L1 acts as a pure write buffer that
 absorbs the peak burst of in-flight chunks while the C++ worker pool

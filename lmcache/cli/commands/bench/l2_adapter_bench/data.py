@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+import hashlib
 import select
 
 # Third Party
@@ -22,6 +23,7 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.platform import consume_fd
 
 _KB = 1024
+_CHUNK_HASH_BYTES = 16
 
 
 def make_aligned_tensor(num_bytes: int, align_bytes: int = 1) -> torch.Tensor:
@@ -64,6 +66,10 @@ def make_object_keys(
     ``ObjectKey`` is a frozen dataclass with field order:
     (chunk_hash, model_name, kv_rank).
 
+    Sequential indices are hashed so prefix-based storage layouts exercise
+    multiple buckets. The mapping is deterministic, allowing separate store
+    and load benchmark runs to address the same objects.
+
     Args:
         num_keys: Number of keys to generate.
         model_name: Model name embedded in each key.
@@ -72,8 +78,10 @@ def make_object_keys(
     keys: list[ObjectKey] = []
     for i in range(num_keys):
         idx = key_offset + i
-        # chunk_hash: 16 bytes derived from index to guarantee uniqueness
-        chunk_hash = idx.to_bytes(16, "big")
+        chunk_hash = hashlib.blake2b(
+            idx.to_bytes(_CHUNK_HASH_BYTES, "big"),
+            digest_size=_CHUNK_HASH_BYTES,
+        ).digest()
         keys.append(
             ObjectKey(
                 chunk_hash=chunk_hash,
