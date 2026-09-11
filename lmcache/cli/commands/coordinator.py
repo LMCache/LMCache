@@ -103,6 +103,17 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--target-watermark",
+            type=float,
+            default=None,
+            help=(
+                "Low watermark of the eviction hysteresis band. When above "
+                "0.0 and below --trigger-watermark, a firing sweep evicts "
+                "down to this fraction of the quota in one pass instead of "
+                "a fixed --eviction-ratio (default: 0.0, legacy behaviour)."
+            ),
+        )
+        parser.add_argument(
             "--chunk-size",
             type=int,
             default=None,
@@ -248,6 +259,7 @@ class CoordinatorCommand(BaseCommand):
                 ("eviction_check_interval", args.eviction_check_interval),
                 ("eviction_ratio", args.eviction_ratio),
                 ("trigger_watermark", args.trigger_watermark),
+                ("target_watermark", args.target_watermark),
                 ("chunk_size", args.chunk_size),
                 ("hash_algorithm", args.hash_algorithm),
                 ("enable_blend_lookup", args.enable_blend_lookup),

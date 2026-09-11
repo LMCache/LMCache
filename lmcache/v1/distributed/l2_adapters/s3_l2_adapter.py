@@ -16,11 +16,13 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 import asyncio
+import base64
 import ctypes
+import hashlib
 import threading
 import xml.etree.ElementTree as ET
 
@@ -188,6 +190,53 @@ def _object_key_to_string(key: ObjectKey) -> str:
     return base
 
 
+# S3 ``DeleteObjects`` (multi-object delete) caps each request at 1000 keys.
+DELETE_OBJECTS_MAX_KEYS = 1000
+
+
+def _build_delete_objects_body(key_strs: list[str]) -> bytes:
+    """Build the XML body for an S3 ``DeleteObjects`` (multi-delete) request.
+
+    Uses ``Quiet`` mode so the response only carries entries that *failed*
+    (successful deletes are omitted), keeping the parse cheap. ElementTree
+    handles XML-escaping of object keys.
+    """
+    root = ET.Element("Delete")
+    ET.SubElement(root, "Quiet").text = "true"
+    for key_str in key_strs:
+        obj = ET.SubElement(root, "Object")
+        ET.SubElement(obj, "Key").text = key_str
+    return ET.tostring(root, encoding="utf-8")
+
+
+def _parse_delete_objects_errors(body: bytes) -> set[str]:
+    """Parse a ``DeleteObjects`` (Quiet-mode) response into the set of keys
+    that failed to delete.
+
+    In Quiet mode the response contains only ``<Error>`` elements; an empty
+    or whitespace-only body means every key deleted. Returns the failed
+    ``<Key>`` strings so the caller can drop them from its success accounting.
+
+    Raises:
+        ValueError: the response body is present but not valid XML.
+    """
+    if not body or not body.strip():
+        return set()
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise ValueError(f"malformed DeleteObjects XML: {exc}") from None
+    errored: set[str] = set()
+    # Match by local tag name so the S3 default namespace doesn't matter.
+    for elem in root.iter():
+        if elem.tag.rsplit("}", 1)[-1] != "Error":
+            continue
+        for child in elem:
+            if child.tag.rsplit("}", 1)[-1] == "Key" and child.text:
+                errored.add(child.text)
+    return errored
+
+
 def _format_safe_path(key_str: str) -> str:
     """URL-encode the object name to form a safe HTTP path."""
     return "/" + url_quote(key_str)
@@ -340,6 +389,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
+        store_reject_watermark: float = 0.0,
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -350,6 +400,12 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.max_capacity_gb = max_capacity_gb
+        # Best-effort write ceiling: when usage_fraction reaches this, new stores
+        # are dropped (best-effort cache-miss) instead of written, so a write burst
+        # that outruns eviction can't push the tier far past the cap. 0.0
+        # disables (legacy: stores always accepted, tier can overshoot until
+        # eviction catches up).
+        self.store_reject_watermark = store_reject_watermark
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -383,6 +439,11 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         max_cap = d.get("max_capacity_gb", 0.0)
         if not isinstance(max_cap, (int, float)) or isinstance(max_cap, bool):
             raise ValueError("max_capacity_gb must be a number")
+        reject_wm = d.get("store_reject_watermark", 0.0)
+        if not isinstance(reject_wm, (int, float)) or isinstance(reject_wm, bool):
+            raise ValueError("store_reject_watermark must be a number")
+        if reject_wm < 0.0:
+            raise ValueError("store_reject_watermark must be >= 0.0")
 
         cfg = cls(
             s3_endpoint=endpoint,
@@ -394,6 +455,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             aws_access_key_id=_opt_str("aws_access_key_id"),
             aws_secret_access_key=_opt_str("aws_secret_access_key"),
             max_capacity_gb=float(max_cap),
+            store_reject_watermark=float(reject_wm),
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -513,6 +575,15 @@ class S3L2Adapter(L2AdapterInterface):
         # maintain a parallel total here.
         self._key_sizes: dict[ObjectKey, int] = {}
 
+        # Best-effort write ceiling (A1) + in-flight write coalescing (A4).
+        self._store_reject_watermark: float = config.store_reject_watermark
+        # Keys with an in-flight S3 PUT — used to single-flight concurrent stores
+        # of the same content-addressed chunk (the shared-prefix thundering herd).
+        self._in_flight_store_keys: set[ObjectKey] = set()
+        # Observability counters (surfaced via report_status / metrics).
+        self._store_rejected_chunks: int = 0
+        self._store_coalesced_chunks: int = 0
+
         # Cached HEAD-verified object sizes (keyed by S3 object name).
         self._object_size_cache: dict[str, int] = {}
 
@@ -571,16 +642,42 @@ class S3L2Adapter(L2AdapterInterface):
             self._next_task_id += 1
             if self._connection_disabled:
                 self._completed_store_tasks[task_id] = L2StoreResult(False, 0)
-                disabled = True
-            else:
-                disabled = False
+                self._store_efd.notify()
+                return task_id
 
-        if disabled:
-            self._store_efd.notify()
-            return task_id
+            # A1 best-effort write ceiling: when the tier is at/over the reject
+            # watermark, DROP the store instead of writing. A dropped chunk is a
+            # future cache-miss (recompute), never a block — so a write burst that
+            # outruns eviction can't push usage far past the cap (bounded overshoot).
+            if self._store_reject_watermark > 0.0:
+                usage = self.get_usage().usage_fraction
+                if usage >= self._store_reject_watermark:
+                    self._store_rejected_chunks += len(keys)
+                    self._completed_store_tasks[task_id] = L2StoreResult(False, 0)
+                    self._store_efd.notify()
+                    return task_id
+
+            # A4 single-flight: skip keys already mid-store (same content-addressed
+            # chunk in flight) so a shared-prefix thundering herd doesn't PUT the
+            # same object N times. Reserve the rest; _execute_store releases them.
+            filtered_keys: list[ObjectKey] = []
+            filtered_objects: list[MemoryObj] = []
+            for key, obj in zip(keys, objects, strict=True):
+                if key in self._in_flight_store_keys:
+                    self._store_coalesced_chunks += 1
+                    continue
+                self._in_flight_store_keys.add(key)
+                filtered_keys.append(key)
+                filtered_objects.append(obj)
+
+            if not filtered_keys:
+                # Everything coalesced into in-flight stores — nothing to write.
+                self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
+                self._store_efd.notify()
+                return task_id
 
         asyncio.run_coroutine_threadsafe(
-            self._execute_store(list(keys), list(objects), task_id),
+            self._execute_store(filtered_keys, filtered_objects, task_id),
             self._loop,
         )
         return task_id
@@ -763,7 +860,16 @@ class S3L2Adapter(L2AdapterInterface):
         with self._lock:
             failures = self._connection_failures
             disabled = self._connection_disabled
+            rejected = self._store_rejected_chunks
+            coalesced = self._store_coalesced_chunks
+            in_flight = len(self._in_flight_store_keys)
         usage = self.get_usage()
+        # Eviction lag: how far usage sits over the cap (1.0). >0 means the evictor
+        # is behind the write rate; sustained high values flag the imbalance before
+        # it would otherwise pin/overshoot the cap.
+        eviction_lag = (
+            max(0.0, usage.usage_fraction - 1.0) if usage.usage_fraction >= 0 else 0.0
+        )
         return {
             "is_healthy": self._loop_thread.is_alive() and not disabled,
             "type": "S3L2Adapter",
@@ -773,6 +879,11 @@ class S3L2Adapter(L2AdapterInterface):
             "connection_disabled": disabled,
             "current_size_bytes": usage.total_bytes_used,
             "max_capacity_bytes": usage.total_capacity_bytes,
+            # A5 observability: eviction lag + best-effort/coalescing activity.
+            "eviction_lag": eviction_lag,
+            "store_in_flight_chunks": in_flight,
+            "store_rejected_chunks": rejected,
+            "store_coalesced_chunks": coalesced,
         }
 
     def close(self) -> None:
@@ -924,32 +1035,62 @@ class S3L2Adapter(L2AdapterInterface):
         )
         return s3_req
 
-    def _delete_request(self, key_str: str):
-        req = self._make_request("DELETE", key_str)
-        captured = {"status": None}
+    def _delete_many_request(
+        self, key_strs: list[str]
+    ) -> tuple[s3.S3Request, list[bytes], dict[str, Optional[int]]]:
+        """Build a single S3 ``DeleteObjects`` (multi-delete) request for up to
+        ``DELETE_OBJECTS_MAX_KEYS`` keys — one round trip instead of one per key.
+
+        Returns ``(s3_req, body_chunks, captured)``; the caller awaits
+        ``s3_req.finished_future`` and passes ``body_chunks`` to
+        :func:`_parse_delete_objects_errors` to find any per-key failures.
+        """
+        body = _build_delete_objects_body(key_strs)
+        # S3 DeleteObjects requires a Content-MD5 of the body (integrity, not
+        # security — SigV4 already authenticates the request).
+        content_md5 = base64.b64encode(
+            hashlib.md5(body, usedforsecurity=False).digest()
+        ).decode("ascii")
+        headers = HttpHeaders()
+        headers.add("Host", self._endpoint)
+        headers.add("Content-MD5", content_md5)
+        headers.add("Content-Length", str(len(body)))
+        headers.add("Content-Type", "application/xml")
+        # The ``?delete`` subresource selects the multi-object delete operation.
+        req = HttpRequest(
+            "POST", "/?delete", headers, body_stream=MemoryViewStream(body)
+        )
+
+        body_chunks: list[bytes] = []
+        captured: dict[str, Optional[int]] = {"status": None}
+
+        def on_body(chunk, offset, **kwargs):
+            body_chunks.append(bytes(chunk))
 
         def on_headers(status_code, headers, **kwargs):
             captured["status"] = status_code
 
         def on_done(error=None, status_code=None, **kwargs):
             captured["status"] = status_code or captured["status"]
-            # 204 is standard for DeleteObject, 200 also tolerated.
-            if error or captured["status"] not in (200, 204):
+            # DeleteObjects returns 200 even when individual keys fail; per-key
+            # errors are reported in the body and handled by the caller.
+            if error or captured["status"] != 200:
                 raise RuntimeError(
-                    f"S3 DELETE failed for {key_str}: {error or captured['status']}"
+                    f"S3 DeleteObjects failed: {error or captured['status']}"
                 )
 
         s3_req = s3.S3Request(
             client=self._s3_client,
             type=s3.S3RequestType.DEFAULT,
             request=req,
-            operation_name="DeleteObject",
+            operation_name="DeleteObjects",
+            on_body=on_body,
             on_headers=on_headers,
             on_done=on_done,
             credential_provider=self._credentials_provider,
             region=self._region,
         )
-        return s3_req
+        return s3_req, body_chunks, captured
 
     def _list_request(
         self,
@@ -1042,72 +1183,86 @@ class S3L2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        futures: list[Optional[asyncio.Future]] = []
-        indexed: list[tuple[int, ObjectKey, MemoryObj, Optional[str]]] = []
-        for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
-            try:
-                key_str = _object_key_to_string(key)
-                s3_req = self._put_request(key_str, obj)
-                futures.append(asyncio.wrap_future(s3_req.finished_future))
-                indexed.append((i, key, obj, key_str))
-            except Exception:
-                logger.exception("S3L2Adapter failed to launch PUT")
-                indexed.append((i, key, obj, None))
-                futures.append(None)
-
-        # Await all non-None futures.
-        results: list = []
-        real_futures = [f for f in futures if f is not None]
-        real_results = await asyncio.gather(*real_futures, return_exceptions=True)
-        real_iter = iter(real_results)
-        for f in futures:
-            if f is None:
-                results.append(RuntimeError("failed to launch S3 PUT"))
-            else:
-                results.append(next(real_iter))
-
-        success = True
+        # Initialised before the try so the finally can ALWAYS run its
+        # cleanup, even if this coroutine is cancelled (shutdown/timeout) or
+        # raises before completing. Otherwise the keys would leak in
+        # ``_in_flight_store_keys`` (A4) and be coalesce-skipped forever.
+        success = False
+        bytes_transferred = 0
         # Track net-new keys for accounting notification. Same chunk_hash
         # re-stored is identical content (content-addressed), so skipping
-        # re-notify here prevents the base class from double-counting
-        # bytes for the same object.
+        # re-notify here prevents the base class from double-counting bytes
+        # for the same object.
         newly_stored_keys: list[ObjectKey] = []
         newly_stored_sizes: list[int] = []
-        last_error: Optional[str] = None
-        for indexed_entry, result in zip(indexed, results, strict=True):
-            i, key, obj, opt_key_str = indexed_entry
-            if isinstance(result, Exception):
-                success = False
-                last_error = str(result)
-                continue
-            # Use logical size (``get_size``) to match the number of
-            # bytes actually PUT to S3 via ``obj.byte_array`` — which
-            # excludes any alignment padding in the underlying buffer.
-            # ``get_physical_size`` would inflate ``total_bytes_used``
-            # relative to the on-wire payload and cause premature
-            # aggregate-watermark eviction. Matches the convention used
-            # by ``native_connector_l2_adapter`` and ``mock_l2_adapter``.
-            size = obj.get_size()
+        try:
+            futures: list[Optional[asyncio.Future]] = []
+            indexed: list[tuple[int, ObjectKey, MemoryObj, Optional[str]]] = []
+            for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
+                try:
+                    key_str = _object_key_to_string(key)
+                    s3_req = self._put_request(key_str, obj)
+                    futures.append(asyncio.wrap_future(s3_req.finished_future))
+                    indexed.append((i, key, obj, key_str))
+                except Exception:
+                    logger.exception("S3L2Adapter failed to launch PUT")
+                    indexed.append((i, key, obj, None))
+                    futures.append(None)
+
+            # Await all non-None futures.
+            results: list = []
+            real_futures = [f for f in futures if f is not None]
+            real_results = await asyncio.gather(*real_futures, return_exceptions=True)
+            real_iter = iter(real_results)
+            for f in futures:
+                if f is None:
+                    results.append(RuntimeError("failed to launch S3 PUT"))
+                else:
+                    results.append(next(real_iter))
+
+            success = True
+            last_error: Optional[str] = None
+            for indexed_entry, result in zip(indexed, results, strict=True):
+                i, key, obj, opt_key_str = indexed_entry
+                if isinstance(result, Exception):
+                    success = False
+                    last_error = str(result)
+                    continue
+                # Use logical size (``get_size``) to match the number of
+                # bytes actually PUT to S3 via ``obj.byte_array`` — which
+                # excludes any alignment padding in the underlying buffer.
+                # ``get_physical_size`` would inflate ``total_bytes_used``
+                # relative to the on-wire payload and cause premature
+                # aggregate-watermark eviction. Matches the convention used
+                # by ``native_connector_l2_adapter`` and ``mock_l2_adapter``.
+                size = obj.get_size()
+                with self._lock:
+                    is_new = key not in self._key_sizes
+                    self._key_sizes[key] = size
+                    if opt_key_str is not None:
+                        self._object_size_cache[opt_key_str] = size
+                if is_new:
+                    newly_stored_keys.append(key)
+                    newly_stored_sizes.append(size)
+
+            self._record_connection_outcome(last_error if not success else None)
+            bytes_transferred = sum(newly_stored_sizes)
+        except Exception:
+            logger.exception("S3L2Adapter unhandled exception in _execute_store")
+            success = False
+        finally:
             with self._lock:
-                is_new = key not in self._key_sizes
-                self._key_sizes[key] = size
-                if opt_key_str is not None:
-                    self._object_size_cache[opt_key_str] = size
-            if is_new:
-                newly_stored_keys.append(key)
-                newly_stored_sizes.append(size)
-
-        self._record_connection_outcome(last_error if not success else None)
-
-        bytes_transferred = sum(newly_stored_sizes)
-        with self._lock:
-            self._completed_store_tasks[task_id] = L2StoreResult(
-                success, bytes_transferred
-            )
-
-        if newly_stored_keys:
-            self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
-        self._store_efd.notify()
+                self._completed_store_tasks[task_id] = L2StoreResult(
+                    success, bytes_transferred
+                )
+                # ALWAYS release the in-flight reservations (A4) for every
+                # key this task owned, including launch-failed ones and on
+                # cancel/error, so a later store can retry them rather than
+                # coalesce-skip forever.
+                self._in_flight_store_keys.difference_update(keys)
+            if newly_stored_keys:
+                self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
+            self._store_efd.notify()
 
     async def _execute_lookup(
         self,
@@ -1243,38 +1398,61 @@ class S3L2Adapter(L2AdapterInterface):
     async def _execute_delete(
         self, keys: list[ObjectKey]
     ) -> tuple[list[ObjectKey], list[int]]:
-        """Run DELETE for each key and drop its size-tracking entry.
+        """Bulk-delete keys via S3 ``DeleteObjects`` (≤1000 keys/request) and
+        drop their size-tracking entries.
 
-        Returns parallel lists of successfully deleted keys and their
-        stored sizes, suitable for passing straight to
-        ``_notify_keys_deleted``. Keys whose size we never learned
-        (delete of an unknown key) are reported with size ``0`` so
-        listener fanout still fires while base-class byte accounting
-        stays balanced.
+        Batching into multi-object deletes means eviction issues one S3 round
+        trip per 1000 keys instead of one per key — so the evictor can keep up
+        with a high-concurrency write burst instead of falling behind (and
+        pinning usage at the cap). Returns parallel lists of successfully
+        deleted keys and their stored sizes, suitable for passing straight to
+        ``_notify_keys_deleted``. Keys whose size we never learned are reported
+        with size ``0`` so listener fanout still fires while base-class byte
+        accounting stays balanced.
         """
-        futures = []
-        indexed = []
-        for key in keys:
+        # Build one DeleteObjects request per batch of up to 1000 keys.
+        batches: list[tuple[list[ObjectKey], list[str], list[bytes]]] = []
+        futures: list["asyncio.Future[Any] | None"] = []
+        for i in range(0, len(keys), DELETE_OBJECTS_MAX_KEYS):
+            batch = keys[i : i + DELETE_OBJECTS_MAX_KEYS]
+            key_strs = [_object_key_to_string(k) for k in batch]
             try:
-                key_str = _object_key_to_string(key)
-                s3_req = self._delete_request(key_str)
+                s3_req, body_chunks, _captured = self._delete_many_request(key_strs)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
-                indexed.append((key, key_str))
+                batches.append((batch, key_strs, body_chunks))
             except Exception:
-                logger.exception("S3L2Adapter failed to launch DELETE")
+                logger.exception("S3L2Adapter failed to launch DeleteObjects")
+                futures.append(None)
+                batches.append((batch, key_strs, []))
 
-        results = await asyncio.gather(*futures, return_exceptions=True)
+        results = await asyncio.gather(
+            *[f for f in futures if f is not None], return_exceptions=True
+        )
+        result_iter = iter(results)
+
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
-        for (key, key_str), result in zip(indexed, results, strict=True):
-            if isinstance(result, Exception):
-                logger.warning("S3L2Adapter DELETE failed for %s: %s", key_str, result)
+        for (batch, key_strs, body_chunks), fut in zip(batches, futures, strict=True):
+            if fut is None:
                 continue
-            with self._lock:
-                sz = self._key_sizes.pop(key, None)
-                self._object_size_cache.pop(key_str, None)
-            deleted_keys.append(key)
-            deleted_sizes.append(sz if sz is not None else 0)
+            result = next(result_iter)
+            if isinstance(result, Exception):
+                logger.warning("S3L2Adapter DeleteObjects batch failed: %s", result)
+                continue
+            try:
+                errored = _parse_delete_objects_errors(b"".join(body_chunks))
+            except ValueError as e:
+                logger.warning("S3L2Adapter DeleteObjects response parse failed: %s", e)
+                continue
+            for key, key_str in zip(batch, key_strs, strict=True):
+                if key_str in errored:
+                    logger.warning("S3L2Adapter DELETE failed for %s", key_str)
+                    continue
+                with self._lock:
+                    sz = self._key_sizes.pop(key, None)
+                    self._object_size_cache.pop(key_str, None)
+                deleted_keys.append(key)
+                deleted_sizes.append(sz if sz is not None else 0)
         return deleted_keys, deleted_sizes
 
 

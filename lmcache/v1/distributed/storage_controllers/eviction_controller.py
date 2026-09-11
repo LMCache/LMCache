@@ -319,6 +319,7 @@ class L2EvictionController(StorageControllerInterface):
     def _check_and_evict_global(self, state: L2AdapterEvictionState):
         """Aggregate-usage eviction (``LRU`` / ``noop``)."""
         watermark = state.eviction_config.trigger_watermark
+        target = state.eviction_config.target_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
 
         # ``usage_fraction == -1`` means the adapter doesn't support
@@ -335,12 +336,26 @@ class L2EvictionController(StorageControllerInterface):
             )
             return
 
+        # Hysteresis: when a low (target) watermark is configured, evict down to
+        # it in one pass instead of a fixed ratio, so headroom always exists and
+        # eviction can't fall behind a sustained write burst (a single-watermark
+        # fixed-ratio sweep lets usage pin at the cap under load). KV chunks are
+        # ~uniform in size, so a count-ratio approximates a usage-fraction ratio.
+        if target > 0.0:
+            effective_ratio = max(
+                0.0, min(1.0, (current_usage - target) / current_usage)
+            )
+        else:
+            effective_ratio = eviction_ratio
+
         logger.info(
-            "L2 usage %.2f above watermark %.2f; triggering eviction.",
+            "L2 usage %.2f above watermark %.2f; evicting ratio=%.2f (target=%.2f).",
             current_usage,
             watermark,
+            effective_ratio,
+            target,
         )
-        actions = state.eviction_policy.get_eviction_actions(eviction_ratio)
+        actions = state.eviction_policy.get_eviction_actions(effective_ratio)
         for action in actions:
             self._execute_eviction_action(state.adapter, action)
 
@@ -363,6 +378,7 @@ class L2EvictionController(StorageControllerInterface):
         """
         assert self._quota_manager is not None
         watermark = state.eviction_config.trigger_watermark
+        target = state.eviction_config.target_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
         usage = state.adapter.get_usage()
 
@@ -379,9 +395,16 @@ class L2EvictionController(StorageControllerInterface):
             if user_bytes < watermark * limit:
                 continue
 
-            # Unregistered / zero-quota salts: wipe everything.
-            # Registered salts: evict the configured ratio of their list.
-            effective_ratio = 1.0 if limit == 0 else eviction_ratio
+            # Unregistered / zero-quota salts: wipe everything. Registered salts:
+            # with hysteresis (target_watermark>0) evict down to target*limit in
+            # one pass; otherwise evict the fixed configured ratio.
+            if limit == 0:
+                effective_ratio = 1.0
+            elif target > 0.0:
+                bytes_to_free = user_bytes - target * limit
+                effective_ratio = max(0.0, min(1.0, bytes_to_free / user_bytes))
+            else:
+                effective_ratio = eviction_ratio
             logger.info(
                 "cache_salt=%r over quota (bytes=%d, limit=%d, "
                 "watermark=%.2f); evicting ratio=%.2f.",
