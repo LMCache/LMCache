@@ -170,13 +170,13 @@ class StoreMode(enum.Enum):
     """Why a store task was submitted.
 
     ``STORE`` is the write-through path: an L1 write finished and the store
-    policy chose the adapters. ``FLUSH`` is an explicit request
-    (``submit_flush``) to copy keys to every active adapter: the policy is
+    policy chose the adapters. ``COPY`` is an explicit request
+    (``submit_copy``) to copy keys to every active adapter: the policy is
     not consulted, and the keys are never deleted from L1 on completion.
     """
 
     STORE = "store"
-    FLUSH = "flush"
+    COPY = "copy"
 
 
 @dataclass
@@ -271,10 +271,10 @@ class StoreController(StorageControllerInterface):
         self._l1_manager.register_listener(self._listener)
         self._event_bus = get_event_bus()
 
-        # Keys queued by ``submit_flush``; drained on the store loop thread
+        # Keys queued by ``submit_copy``; drained on the store loop thread
         # together with the listener's queue.
-        self._flush_lock = threading.Lock()
-        self._pending_flush_keys: list[ObjectKey] = []
+        self._copy_lock = threading.Lock()
+        self._pending_copy_keys: list[ObjectKey] = []
 
         # (adapter_index, task_id) -> InFlightStoreTask
         # Composite key is needed because task IDs are only unique
@@ -408,7 +408,7 @@ class StoreController(StorageControllerInterface):
         self._adapter_ctrl_efd.notify()
         return op.done
 
-    def submit_flush(self, keys: list[ObjectKey]) -> None:
+    def submit_copy(self, keys: list[ObjectKey]) -> None:
         """Copy ``keys`` from L1 to every active L2 adapter, keeping the L1 copy.
 
         Asynchronous and best effort: the store policy is not consulted, keys
@@ -421,15 +421,15 @@ class StoreController(StorageControllerInterface):
         """
         if not keys:
             return
-        with self._flush_lock:
-            self._pending_flush_keys.extend(keys)
+        with self._copy_lock:
+            self._pending_copy_keys.extend(keys)
         self._listener.notify()
 
-    def _pop_pending_flush_keys(self) -> list[ObjectKey]:
-        """Atomically drain the flush queue on the store loop thread."""
-        with self._flush_lock:
-            keys = self._pending_flush_keys
-            self._pending_flush_keys = []
+    def _pop_pending_copy_keys(self) -> list[ObjectKey]:
+        """Atomically drain the copy queue on the store loop thread."""
+        with self._copy_lock:
+            keys = self._pending_copy_keys
+            self._pending_copy_keys = []
         return keys
 
     def get_adapter_state_observations(
@@ -515,9 +515,9 @@ class StoreController(StorageControllerInterface):
                         keys = self._listener.pop_pending_keys()
                         if keys:
                             self._process_new_keys(keys)
-                        flush_keys = self._pop_pending_flush_keys()
-                        if flush_keys:
-                            self._process_new_keys(flush_keys, StoreMode.FLUSH)
+                        copy_keys = self._pop_pending_copy_keys()
+                        if copy_keys:
+                            self._process_new_keys(copy_keys, StoreMode.COPY)
                     else:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
                         if adapter_idx is not None:
@@ -609,7 +609,7 @@ class StoreController(StorageControllerInterface):
         Process a batch of keys to store.
 
         1. Ask the policy which adapters each key should go to (``STORE``),
-           or target every active adapter (``FLUSH``).
+           or target every active adapter (``COPY``).
         2. For each adapter target, reserve read access on L1 to get
            MemoryObj references (skip keys that fail — best-effort).
         3. Submit store tasks to L2 adapters.
@@ -617,7 +617,7 @@ class StoreController(StorageControllerInterface):
 
         Args:
             keys (list[ObjectKey]): Keys that finished writing to L1, or
-                keys handed to ``submit_flush``.
+                keys handed to ``submit_copy``.
             mode: Which path the keys came from.
         """
 
@@ -636,10 +636,10 @@ class StoreController(StorageControllerInterface):
             for adapter_id, desc in self._adapter_descriptors.items()
             if adapter_id not in self._draining
         ]
-        if mode is StoreMode.FLUSH:
+        if mode is StoreMode.COPY:
             if not routing_descriptors:
                 logger.warning(
-                    "L2 flush requested for %d key(s) but no active L2 "
+                    "L2 copy requested for %d key(s) but no active L2 "
                     "adapter is configured; dropping (keys stay in L1).",
                     len(keys),
                 )
@@ -692,7 +692,7 @@ class StoreController(StorageControllerInterface):
             # L1 read-failure anomaly reporting: on the write-through path
             # target_keys come from an L1_WRITE_FINISHED notification, so
             # failing to reserve_read them immediately after means an
-            # unexpected eviction or lock race. A flush key may have been
+            # unexpected eviction or lock race. A copied key may have been
             # evicted legitimately in the meantime, so it is not reported.
             if mode is StoreMode.STORE and not_found_keys:
                 self._event_bus.publish(

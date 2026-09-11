@@ -320,7 +320,7 @@ class SessionEndInfo:
     """What the engine knows about a finished request, sent with END_SESSION.
 
     The commit policy decides from these facts whether the request's final
-    sliding-window is worth committing to L2 (see
+    window is worth committing to L2 (see
     ``lmcache/v1/multiprocess/commit_policy.py``). They are raw observations,
     not a decision: the engine reports how the request ended and the policy
     owns the rule.

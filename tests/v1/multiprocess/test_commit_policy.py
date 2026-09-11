@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the sliding-window commit path.
+"""Tests for the window commit path.
 
 Three layers, all with fakes (no storage, no GPU):
 
@@ -8,7 +8,7 @@ Three layers, all with fakes (no storage, no GPU):
 * ``resolve_commit`` and ``resolve_anchor``, which take the policy's answer
   and turn the configured anchor into a chunk-aligned offset;
 * ``LookupModule.handle_end_session``, which turns a decision into the
-  sliding-window keys handed to ``StorageManager.flush_l1_keys_to_l2``.
+  windowed keys handed to ``StorageManager.copy_l1_keys_to_l2``.
 
 See ``lmcache/v1/multiprocess/commit_policy.py``.
 """
@@ -32,7 +32,7 @@ from lmcache.v1.multiprocess.commit_policy import (
     CommitContext,
     CommitPolicy,
     CommitPolicyConfig,
-    StopTokenCommitPolicy,
+    TurnEndCommitPolicy,
     create_commit_policy,
     resolve_anchor,
     resolve_commit,
@@ -56,7 +56,7 @@ OTHER_TOKEN = 99
 stop token for a stop on another id, and as the last generated token for a
 length cap, a repetition stop, an abort or an error."""
 
-# One sliding-window group of two chunks and one full-attention group, the
+# One windowed group of two chunks and one whole-prefix group, the
 # shape of a hybrid model served with --separate-object-groups.
 HYBRID_DESC = AttnWindowDesc(num_chunks_in_sw=[2, -1])
 
@@ -99,12 +99,12 @@ def make_context(
 # =============================================================================
 
 
-class TestStopTokenCommitPolicy:
+class TestTurnEndCommitPolicy:
     """Tests for the policy that commits on a chat turn boundary."""
 
     def test_commits_on_configured_boundary_token(self):
         """A turn that stopped on the boundary token earns a commit."""
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
+        policy = TurnEndCommitPolicy(frozenset({BOUNDARY_TOKEN}))
         ctx = make_context(
             SessionEndInfo(finish_reason="stop", stop_token_id=BOUNDARY_TOKEN),
             anchor=CommitAnchor.GENERATION_END,
@@ -114,7 +114,7 @@ class TestStopTokenCommitPolicy:
 
     def test_refuses_other_stop_token(self):
         """Stopping on some other token is not a turn boundary."""
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
+        policy = TurnEndCommitPolicy(frozenset({BOUNDARY_TOKEN}))
         ctx = make_context(
             SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN),
             anchor=CommitAnchor.GENERATION_END,
@@ -124,7 +124,7 @@ class TestStopTokenCommitPolicy:
 
     def test_accepts_any_stop_token_when_unconfigured(self):
         """With no boundary tokens configured, any clean stop counts."""
-        policy = StopTokenCommitPolicy()
+        policy = TurnEndCommitPolicy()
         ctx = make_context(
             SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN),
             anchor=CommitAnchor.GENERATION_END,
@@ -150,7 +150,7 @@ class TestStopTokenCommitPolicy:
         Args:
             end_info: How the engine reported the finish.
         """
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN, OTHER_TOKEN}))
+        policy = TurnEndCommitPolicy(frozenset({BOUNDARY_TOKEN, OTHER_TOKEN}))
 
         ctx = make_context(end_info, anchor=CommitAnchor.GENERATION_END)
         assert policy.should_commit(ctx) is False
@@ -173,7 +173,7 @@ class TestStopTokenCommitPolicy:
         Args:
             end_info: How the engine reported the finish.
         """
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
+        policy = TurnEndCommitPolicy(frozenset({BOUNDARY_TOKEN}))
         ctx = make_context(end_info, anchor=CommitAnchor.PROMPT_END)
 
         assert policy.should_commit(ctx) is True
@@ -195,7 +195,7 @@ class TestStopTokenCommitPolicy:
         Args:
             end_info: How the engine reported the finish.
         """
-        policy = StopTokenCommitPolicy()
+        policy = TurnEndCommitPolicy()
         ctx = make_context(end_info, anchor=CommitAnchor.PROMPT_END)
 
         assert policy.should_commit(ctx) is False
@@ -203,7 +203,7 @@ class TestStopTokenCommitPolicy:
     def test_prompt_end_ignores_boundary_token_set(self):
         """At prompt_end the boundary set is not consulted: a stop on a token
         outside the set still commits."""
-        policy = StopTokenCommitPolicy(frozenset({BOUNDARY_TOKEN}))
+        policy = TurnEndCommitPolicy(frozenset({BOUNDARY_TOKEN}))
         ctx = make_context(
             SessionEndInfo(finish_reason="stop", stop_token_id=OTHER_TOKEN),
             anchor=CommitAnchor.PROMPT_END,
@@ -215,10 +215,10 @@ class TestStopTokenCommitPolicy:
 class TestRegistry:
     """Tests for commit policy lookup by name."""
 
-    def test_create_passes_boundary_tokens_to_stop_token(self):
-        """``--commit-boundary-tokens`` reaches the policy it configures."""
+    def test_create_passes_boundary_tokens_to_turn_end(self):
+        """``--turn-boundary-token-ids`` reaches the policy it configures."""
         config = CommitPolicyConfig(
-            policy="stop_token", boundary_token_ids=frozenset({BOUNDARY_TOKEN})
+            policy="turn_end", turn_boundary_token_ids=frozenset({BOUNDARY_TOKEN})
         )
 
         policy = create_commit_policy(config)
@@ -316,7 +316,7 @@ def run_end_session(
     stop_token_id: int = BOUNDARY_TOKEN,
     attn_desc: AttnWindowDesc = HYBRID_DESC,
 ) -> tuple[MagicMock, list[list[ObjectKey]]]:
-    """Drive ``handle_end_session`` over a real session, capture the flush.
+    """Drive ``handle_end_session`` over a real session, capture the copy.
 
     The session is left in the state an ordinary chat turn leaves behind: it
     looked up ``lookup_chunks`` chunks of prompt and then generated up to
@@ -393,34 +393,34 @@ def run_end_session(
     return ctx, per_group
 
 
-def flushed_keys(ctx: MagicMock) -> list[ObjectKey]:
-    """Return the keys the commit handed to the flush, or an empty list.
+def copied_keys(ctx: MagicMock) -> list[ObjectKey]:
+    """Return the keys the commit handed to the copy, or an empty list.
 
     Args:
         ctx: The mock context ``run_end_session`` drove.
 
     Returns:
-        The single flush batch's keys; empty when no flush was issued.
+        The single copy batch's keys; empty when no copy was issued.
     """
-    calls = ctx.storage_manager.flush_l1_keys_to_l2.call_args_list
+    calls = ctx.storage_manager.copy_l1_keys_to_l2.call_args_list
     if not calls:
         return []
-    assert len(calls) == 1, "a commit should issue at most one flush batch"
+    assert len(calls) == 1, "a commit should issue at most one copy batch"
     return list(calls[0][0][0])
 
 
 class TestEndSessionCommit:
     """Tests for the keys a committed window actually names."""
 
-    def test_commits_the_trailing_window_of_the_sliding_group_only(self):
+    def test_commits_the_trailing_window_of_the_windowed_group_only(self):
         """Under the default config: two chunks of group 0, none of group 1."""
         ctx, per_group = run_end_session(
             CommitPolicyConfig(anchor=CommitAnchor.GENERATION_END), num_chunks=6
         )
 
-        assert flushed_keys(ctx) == per_group[0][4:6]
+        assert copied_keys(ctx) == per_group[0][4:6]
 
-    def test_each_sliding_group_takes_its_own_window(self):
+    def test_each_windowed_group_takes_its_own_window(self):
         """Groups with different ``w`` end at one anchor and start apart."""
         ctx, per_group = run_end_session(
             CommitPolicyConfig(anchor=CommitAnchor.GENERATION_END),
@@ -428,44 +428,44 @@ class TestEndSessionCommit:
             attn_desc=AttnWindowDesc([2, 4, -1]),
         )
 
-        assert flushed_keys(ctx) == per_group[0][4:6] + per_group[1][2:6]
+        assert copied_keys(ctx) == per_group[0][4:6] + per_group[1][2:6]
 
     def test_prompt_end_anchor_commits_an_earlier_window(self):
         """The window ends where the prompt did, not where generation did."""
-        config = CommitPolicyConfig(policy="stop_token", anchor=CommitAnchor.PROMPT_END)
+        config = CommitPolicyConfig(policy="turn_end", anchor=CommitAnchor.PROMPT_END)
 
         ctx, per_group = run_end_session(config, num_chunks=6, lookup_chunks=4)
 
-        assert flushed_keys(ctx) == per_group[0][2:4]
+        assert copied_keys(ctx) == per_group[0][2:4]
 
     def test_length_cap_commits_at_prompt_end_but_not_at_generation_end(self):
         """A length-capped answer is mid-turn, but its prompt is still re-sent."""
         at_prompt = CommitPolicyConfig(
-            policy="stop_token", anchor=CommitAnchor.PROMPT_END
+            policy="turn_end", anchor=CommitAnchor.PROMPT_END
         )
         at_generation = CommitPolicyConfig(
-            policy="stop_token", anchor=CommitAnchor.GENERATION_END
+            policy="turn_end", anchor=CommitAnchor.GENERATION_END
         )
 
         ctx, per_group = run_end_session(
             at_prompt, num_chunks=6, lookup_chunks=4, finish_reason="length"
         )
-        assert flushed_keys(ctx) == per_group[0][2:4]
+        assert copied_keys(ctx) == per_group[0][2:4]
 
         ctx, _ = run_end_session(
             at_generation, num_chunks=6, lookup_chunks=4, finish_reason="length"
         )
-        assert flushed_keys(ctx) == []
+        assert copied_keys(ctx) == []
 
     def test_abort_does_not_commit(self):
         """An aborted tail is re-rendered or never sent again."""
         config = CommitPolicyConfig(
-            policy="stop_token", anchor=CommitAnchor.GENERATION_END
+            policy="turn_end", anchor=CommitAnchor.GENERATION_END
         )
 
         ctx, _ = run_end_session(config, finish_reason="abort")
 
-        assert flushed_keys(ctx) == []
+        assert copied_keys(ctx) == []
 
     def test_session_without_a_full_chunk_commits_nothing(self):
         """A clean stop with nothing stored has no window to name."""
@@ -475,26 +475,26 @@ class TestEndSessionCommit:
             lookup_chunks=0,
         )
 
-        assert flushed_keys(ctx) == []
+        assert copied_keys(ctx) == []
 
-    def test_full_attention_only_model_commits_nothing(self):
-        """Without a sliding-window group there is no window to commit."""
+    def test_whole_prefix_only_model_commits_nothing(self):
+        """Without a windowed group there is no window to commit."""
         config = CommitPolicyConfig(
-            policy="stop_token", anchor=CommitAnchor.GENERATION_END
+            policy="turn_end", anchor=CommitAnchor.GENERATION_END
         )
 
         ctx, _ = run_end_session(config, attn_desc=AttnWindowDesc([-1]))
 
-        assert flushed_keys(ctx) == []
+        assert copied_keys(ctx) == []
 
     def test_window_wider_than_the_session_commits_what_exists(self):
         """A short conversation commits its whole prefix, not a negative range."""
         config = CommitPolicyConfig(
-            policy="stop_token", anchor=CommitAnchor.GENERATION_END
+            policy="turn_end", anchor=CommitAnchor.GENERATION_END
         )
 
         ctx, per_group = run_end_session(
             config, num_chunks=1, lookup_chunks=1, attn_desc=AttnWindowDesc([8, -1])
         )
 
-        assert flushed_keys(ctx) == per_group[0][0:1]
+        assert copied_keys(ctx) == per_group[0][0:1]

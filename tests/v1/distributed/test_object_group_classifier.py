@@ -20,7 +20,7 @@ from lmcache.v1.distributed.object_group_classifier import (
 # Helpers
 # =============================================================================
 
-# Group 0 is full attention, groups 1 and 2 are sliding windows.
+# Group 0 needs the whole prefix, groups 1 and 2 are windowed.
 HYBRID_DESC = AttnWindowDesc(num_chunks_in_sw=[-1, 4, 1])
 
 
@@ -46,24 +46,24 @@ def make_object_key(
 class TestClassify:
     """Test ObjectGroupClassifier.classify."""
 
-    def test_full_attention_group(self):
-        """A group with window -1 classifies as full attention."""
+    def test_whole_prefix_group(self):
+        """A group with window -1 classifies as whole prefix."""
         classifier = ObjectGroupClassifier()
         classifier.register("test_model", HYBRID_DESC)
 
         assert (
-            classifier.classify(make_object_key(0)) is ObjectGroupClass.FULL_ATTENTION
+            classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
         )
 
-    def test_sliding_window_groups(self):
-        """Groups with a bounded window classify as sliding window."""
+    def test_windowed_groups(self):
+        """Groups with a bounded window classify as windowed."""
         classifier = ObjectGroupClassifier()
         classifier.register("test_model", HYBRID_DESC)
 
         for group_id in (1, 2):
             assert (
                 classifier.classify(make_object_key(group_id))
-                is ObjectGroupClass.SLIDING_WINDOW
+                is ObjectGroupClass.WINDOWED
             )
 
     def test_unknown_model(self):
@@ -95,8 +95,8 @@ class TestClassify:
 
         hybrid_key = make_object_key(1, model_name="hybrid")
         dense_key = make_object_key(0, model_name="dense")
-        assert classifier.classify(hybrid_key) is ObjectGroupClass.SLIDING_WINDOW
-        assert classifier.classify(dense_key) is ObjectGroupClass.FULL_ATTENTION
+        assert classifier.classify(hybrid_key) is ObjectGroupClass.WINDOWED
+        assert classifier.classify(dense_key) is ObjectGroupClass.WHOLE_PREFIX
 
 
 # =============================================================================
@@ -123,7 +123,7 @@ class TestRegistrationLifetime:
 
         classifier.unregister("test_model")
         assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         )
 
         classifier.unregister("test_model")
@@ -137,7 +137,7 @@ class TestRegistrationLifetime:
         classifier.unregister("never_registered")
 
         assert (
-            classifier.classify(make_object_key(0)) is ObjectGroupClass.FULL_ATTENTION
+            classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
         )
 
     def test_re_register_after_unregister(self):
@@ -148,7 +148,7 @@ class TestRegistrationLifetime:
         classifier.register("test_model", AttnWindowDesc(num_chunks_in_sw=[2]))
 
         assert (
-            classifier.classify(make_object_key(0)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(0)) is ObjectGroupClass.WINDOWED
         )
 
 
@@ -172,7 +172,7 @@ class TestConflictingRegistration:
             classifier.register("test_model", AttnWindowDesc(num_chunks_in_sw=[-1]))
 
         assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         )
         classifier.unregister("test_model")
         assert classifier.classify(make_object_key(1)) is ObjectGroupClass.UNKNOWN
@@ -184,7 +184,7 @@ class TestConflictingRegistration:
         classifier.register("test_model", AttnWindowDesc([-1, 4, 1], world_size=8))
 
         assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         )
 
     def test_same_windows_different_group_kinds_accepted(self):
@@ -197,5 +197,5 @@ class TestConflictingRegistration:
         )
 
         assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         )

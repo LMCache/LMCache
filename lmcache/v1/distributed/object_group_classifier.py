@@ -2,10 +2,13 @@
 """
 Object-group classification for storage policies.
 
-Hybrid-attention models mix full-attention and sliding-window layer groups.
-When the server runs with ``--separate-object-groups`` each kind gets its own
-object group, and storage policies want to treat the two differently (see
-``docs/design/v1/distributed/storage_controllers/full_attention_only_store_policy.md``).
+Hybrid models mix layers that need the whole prefix with layers that need
+only a bounded number of trailing chunks -- sliding-window attention, and also
+align/all-mode Mamba and linear-attention layers, which behave like a window of
+one block. When the server runs with ``--separate-object-groups`` each kind
+gets its own object group, and storage policies want to treat the two
+differently (see
+``docs/design/v1/distributed/storage_controllers/defer_windowed_store_policy.md``).
 
 The attention layout is only known once a worker registers its KV cache, so
 this module keeps a small runtime registry that maps a model name to the
@@ -26,20 +29,24 @@ from lmcache.v1.distributed.api import AttnWindowDesc, ObjectKey
 
 
 class ObjectGroupClass(enum.Enum):
-    """Cross-chunk attention class of an object group.
+    """How much of the prefix an object group needs to serve a hit.
+
+    The class is derived from ``AttnWindowDesc.num_chunks_in_sw``, so it says
+    nothing about the layer's mechanism: a recurrent group with a one-block
+    window is :attr:`WINDOWED` exactly like a sliding-window attention group.
 
     ``UNKNOWN`` means the classifier cannot answer: the model was never
     registered (or is already unregistered), or the key names an object group
     outside the registered descriptor. Callers decide what to do with it;
-    storage policies treat it as full attention, because an extra L2 write is
-    cheaper than a lost sliding window.
+    storage policies treat it as whole-prefix, because an extra L2 write is
+    cheaper than a lost window.
     """
 
-    FULL_ATTENTION = enum.auto()
-    """The group attends to the whole prefix."""
+    WHOLE_PREFIX = enum.auto()
+    """The group needs every chunk of the prefix (``num_chunks_in_sw`` -1)."""
 
-    SLIDING_WINDOW = enum.auto()
-    """The group only attends to a bounded number of trailing chunks."""
+    WINDOWED = enum.auto()
+    """The group needs only a bounded number of trailing chunks (``w >= 1``)."""
 
     UNKNOWN = enum.auto()
     """No attention layout is known for this key."""
@@ -143,8 +150,8 @@ class ObjectGroupClassifier:
             key: The object key to classify.
 
         Returns:
-            :attr:`ObjectGroupClass.FULL_ATTENTION` or
-            :attr:`ObjectGroupClass.SLIDING_WINDOW` when the key's model is
+            :attr:`ObjectGroupClass.WHOLE_PREFIX` or
+            :attr:`ObjectGroupClass.WINDOWED` when the key's model is
             registered and its ``object_group_id`` is covered by the
             registered descriptor, otherwise
             :attr:`ObjectGroupClass.UNKNOWN`.
@@ -159,5 +166,5 @@ class ObjectGroupClassifier:
                 return ObjectGroupClass.UNKNOWN
 
             if attn_desc.is_full_attention(key.object_group_id):
-                return ObjectGroupClass.FULL_ATTENTION
-            return ObjectGroupClass.SLIDING_WINDOW
+                return ObjectGroupClass.WHOLE_PREFIX
+            return ObjectGroupClass.WINDOWED

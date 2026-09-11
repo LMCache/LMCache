@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the full_attention_only wiring on the multiprocess side.
+Tests for the defer_windowed wiring on the multiprocess side.
 
 Two things are covered:
 
 * the registration hook -- registering a KV cache through the MP layer feeds
   the storage manager's ObjectGroupClassifier, and the last unregistration
   clears it again;
-* the start-up validation that rejects ``--l2-store-policy full_attention_only``
+* the start-up validation that rejects ``--l2-store-policy defer_windowed``
   without ``--separate-object-groups``.
 
 The registration tests build a real MPCacheServerContext (and therefore a real
@@ -58,7 +58,7 @@ requires_torch_runtime = pytest.mark.skipif(
 
 MODEL_NAME = "hybrid_model"
 
-# Group 0 is full attention, group 1 is a 4-chunk sliding window.
+# Group 0 needs the whole prefix, group 1 is windowed with 4 chunks.
 HYBRID_DESC = AttnWindowDesc(num_chunks_in_sw=[-1, 4])
 
 
@@ -83,7 +83,7 @@ def make_layout() -> MemoryLayoutDesc:
 
 
 def make_storage_manager_config() -> StorageManagerConfig:
-    """Create a small full_attention_only storage manager config with no L2."""
+    """Create a small defer_windowed storage manager config with no L2."""
     return StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
@@ -94,13 +94,13 @@ def make_storage_manager_config() -> StorageManagerConfig:
             ),
         ),
         eviction_config=EvictionConfig(eviction_policy="noop"),
-        store_policy="full_attention_only",
+        store_policy="defer_windowed",
     )
 
 
 @pytest.fixture
 def server_context() -> Iterator[MPCacheServerContext]:
-    """A real MP cache server context using the full_attention_only store policy."""
+    """A real MP cache server context using the defer_windowed store policy."""
     ctx = MPCacheServerContext(
         storage_manager_config=make_storage_manager_config(),
         chunk_size=16,
@@ -131,10 +131,10 @@ class TestRegistrationHook:
         )
 
         assert (
-            classifier.classify(make_object_key(0)) is ObjectGroupClass.FULL_ATTENTION
+            classifier.classify(make_object_key(0)) is ObjectGroupClass.WHOLE_PREFIX
         )
         assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         )
 
     def test_last_unregister_clears_the_classifier(self, server_context):
@@ -146,7 +146,7 @@ class TestRegistrationHook:
 
         registry.unregister(MODEL_NAME, 1)
         assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         )
 
         registry.unregister(MODEL_NAME, 1)
@@ -161,7 +161,7 @@ class TestRegistrationHook:
 
         registry.unregister(MODEL_NAME, 8)
         assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         )
 
         registry.unregister(MODEL_NAME, 1)
@@ -208,7 +208,7 @@ class TestConflictingLayoutForwarding:
         assert registry.find_attn_desc(MODEL_NAME, 1).num_chunks_in_sw == [-1]
         # ...while the classifier kept the first one.
         assert (
-            classifier.classify(make_object_key(1)) is ObjectGroupClass.SLIDING_WINDOW
+            classifier.classify(make_object_key(1)) is ObjectGroupClass.WINDOWED
         )
 
     def test_rejected_registration_is_not_unregistered_twice(self):
@@ -246,11 +246,11 @@ def parse_server_args(argv: list[str]) -> argparse.Namespace:
 
 
 class TestStorePolicyValidation:
-    """Test validate_server_config for the full_attention_only store policy."""
+    """Test validate_server_config for the defer_windowed store policy."""
 
-    def test_full_attention_only_without_separate_object_groups_raises(self):
+    def test_defer_windowed_without_separate_object_groups_raises(self):
         """The error names both flags so the operator can fix the command."""
-        args = parse_server_args(["--l2-store-policy", "full_attention_only"])
+        args = parse_server_args(["--l2-store-policy", "defer_windowed"])
         mp_config = parse_args_to_mp_server_config(args)
         storage_manager_config = parse_args_to_config(args)
 
@@ -259,13 +259,13 @@ class TestStorePolicyValidation:
 
         message = str(excinfo.value)
         assert "--l2-store-policy" in message
-        assert "full_attention_only" in message
+        assert "defer_windowed" in message
         assert "--separate-object-groups" in message
 
-    def test_full_attention_only_with_separate_object_groups_is_accepted(self):
+    def test_defer_windowed_with_separate_object_groups_is_accepted(self):
         """The supported combination passes validation without raising."""
         args = parse_server_args(
-            ["--l2-store-policy", "full_attention_only", "--separate-object-groups"]
+            ["--l2-store-policy", "defer_windowed", "--separate-object-groups"]
         )
 
         validate_server_config(
@@ -273,7 +273,7 @@ class TestStorePolicyValidation:
         )
 
     def test_default_policy_needs_no_object_group_split(self):
-        """The check is specific to full_attention_only: the default policy
+        """The check is specific to defer_windowed: the default policy
         passes without --separate-object-groups."""
         args = parse_server_args([])
 
@@ -284,8 +284,8 @@ class TestStorePolicyValidation:
     def test_server_refuses_to_start_on_the_unsupported_combination(self):
         """The check is wired into start-up: run_cache_server itself raises
         before building anything, so a server cannot come up with
-        full_attention_only and no object-group split."""
-        args = parse_server_args(["--l2-store-policy", "full_attention_only"])
+        defer_windowed and no object-group split."""
+        args = parse_server_args(["--l2-store-policy", "defer_windowed"])
 
         with pytest.raises(ValueError, match="--separate-object-groups"):
             run_cache_server(
