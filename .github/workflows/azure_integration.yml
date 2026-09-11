@@ -20,6 +20,7 @@ on:
     branches:
       - "dev"
       - "release-**"
+    types: [labeled]
     paths:
       - "lmcache/v1/storage_backend/connector/azure_connector.py"
       - "tests/v1/storage_backend/test_azure_connector.py"
@@ -41,6 +42,7 @@ permissions:
 
 jobs:
   azure-blob-azurite:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci-ready')
     name: Azure connector (Azurite)
     runs-on: ubuntu-latest
     timeout-minutes: 20
