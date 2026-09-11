@@ -156,11 +156,11 @@ def test_estimate_serialized_size_rejects_invalid_kv_size() -> None:
     serializer = TurboQuantSerializer(cfg)
 
     layout = MemoryLayoutDesc(
-        shapes=[torch.Size([1, 3, 20, 512])],
+        shapes=[torch.Size([3, 3, 20, 512])],
         dtypes=[torch.bfloat16],
     )
 
-    with pytest.raises(ValueError, match="kv_size=2"):
+    with pytest.raises(ValueError, match="kv_size 1 \\(fused K/V\\) or 2"):
         serializer.estimate_serialized_size(layout)
 
 

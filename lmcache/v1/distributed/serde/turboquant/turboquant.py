@@ -11,7 +11,13 @@ Supported presets:
 - turboquant_k3v4_nc
 - turboquant_3bit_nc
 
-Input KV layout: [2, num_layers, num_tokens, hidden_dim]
+Input KV layout: [kv_size, num_layers, num_tokens, hidden_dim]
+
+* ``kv_size == 2``: split K/V layout, ``hidden_dim = num_heads * head_dim``.
+* ``kv_size == 1``: fused blocks-first K/V layout (vLLM >= 0.26 attention
+  backends), ``hidden_dim = num_heads * 2 * head_dim`` with the per-head
+  ``[K | V]`` pair packed in the trailing dimension.
+
 Serialized layout: [num_layers, num_blocks, block_size, num_heads, slot_size]
 """
 
@@ -163,20 +169,31 @@ def _validate_layout_shape(
 ) -> tuple[int, int, int, int]:
     """Validate LMCache KV layout and return L, T, H, D.
 
-    Expected input shape:
-        [2, num_layers, num_tokens, hidden_dim]
+    Accepted input shapes:
+
+    * Split K/V: ``[2, num_layers, num_tokens, num_heads * head_dim]``
+    * Fused K/V (vLLM >= 0.26 attention backends): ``[1, num_layers,
+      num_tokens, num_heads * 2 * head_dim]`` with the per-head ``[K | V]``
+      pair packed in the trailing dimension.
 
     Returns:
         num_layers, num_tokens, num_heads, head_dim
+
+    Raises:
+        ValueError: If the tensor is not 4D, if the first dimension is not
+            1 (fused) or 2 (split K/V), or if the hidden dimension is not
+            divisible by the expected per-head size.
     """
     if len(shape) != 4:
         raise ValueError(
             "TurboQuant serde expects 4D KV tensor "
-            f"[2, L, T, hidden_dim], got {tuple(shape)}"
+            f"[kv_size, L, T, hidden_dim], got {tuple(shape)}"
         )
-    if int(shape[0]) != 2:
+    kv_size = int(shape[0])
+    if kv_size not in (1, 2):
         raise ValueError(
-            f"TurboQuant serde expects first dim kv_size=2, got {int(shape[0])}"
+            "TurboQuant serde expects first dim kv_size 1 (fused K/V) "
+            f"or 2 (split K/V), got {kv_size}"
         )
 
     num_layers = int(shape[1])
@@ -184,12 +201,16 @@ def _validate_layout_shape(
     hidden_dim = int(shape[3])
     head_dim = cfg.head_dim
 
-    if hidden_dim % head_dim != 0:
+    # Fused K/V packs the per-head [K | V] pair in the trailing dimension,
+    # so the per-head element count is 2 * head_dim instead of head_dim.
+    per_head = 2 * head_dim if kv_size == 1 else head_dim
+    if hidden_dim % per_head != 0:
         raise ValueError(
-            f"hidden_dim={hidden_dim} must be divisible by head_dim={head_dim}"
+            f"hidden_dim={hidden_dim} must be divisible by "
+            f"per_head={per_head} (kv_size={kv_size}, head_dim={head_dim})"
         )
 
-    num_heads = hidden_dim // head_dim
+    num_heads = hidden_dim // per_head
     return num_layers, num_tokens, num_heads, head_dim
 
 
@@ -205,9 +226,9 @@ def _raw_group_nbytes(
     dtype: torch.dtype,
     num_layers: int,
 ) -> int:
-    _, _, num_tokens, hidden_dim = shape
+    kv_size, _, num_tokens, hidden_dim = shape
     return (
-        2
+        kv_size
         * num_layers
         * int(num_tokens)
         * int(hidden_dim)
@@ -532,7 +553,8 @@ class TurboQuantSerializer(Serializer):
 
         Args:
             src: Source memory object containing a KV tensor with shape
-                ``[2, num_layers, num_tokens, hidden_dim]``.
+                ``[kv_size, num_layers, num_tokens, hidden_dim]`` where
+                ``kv_size`` is 2 (split K/V) or 1 (fused K/V).
             dst: Destination memory object containing a ``torch.uint8`` tensor
                 used as the serialized byte buffer.
             key: Object key for this pair (unused: TurboQuant is
@@ -598,6 +620,7 @@ class TurboQuantSerializer(Serializer):
         num_layers, num_tokens, num_heads, head_dim = _validate_layout_shape(
             src_work.shape, cfg
         )
+        kv_size = int(src_work.shape[0])
         quant_start, quant_end = _layer_ranges(num_layers, cfg)
         quant_layers = quant_end - quant_start
         dst_flat = dst_work.flatten()[:n_bytes]
@@ -624,19 +647,28 @@ class TurboQuantSerializer(Serializer):
             )
             slot_mapping = _make_slot_mapping(num_tokens, cuda_device)
 
-            # LMCache layout: [2, L, T, hidden_dim]
+            # LMCache layout: [kv_size, L, T, hidden_dim]
             # Kernel input layout per layer: key/value [T, H, D]
             for compressed_idx, layer_idx in enumerate(range(quant_start, quant_end)):
-                k_tensor = (
-                    src_work[0, layer_idx]
-                    .view(num_tokens, num_heads, head_dim)
-                    .contiguous()
-                )
-                value = (
-                    src_work[1, layer_idx]
-                    .view(num_tokens, num_heads, head_dim)
-                    .contiguous()
-                )
+                if kv_size == 1:
+                    # Fused K/V: per-head [K | V] packed in the trailing
+                    # dimension, split here so K and V use their own quantizer.
+                    layer = src_work[0, layer_idx].view(
+                        num_tokens, num_heads, 2 * head_dim
+                    )
+                    k_tensor = layer[..., :head_dim].contiguous()
+                    value = layer[..., head_dim:].contiguous()
+                else:
+                    k_tensor = (
+                        src_work[0, layer_idx]
+                        .view(num_tokens, num_heads, head_dim)
+                        .contiguous()
+                    )
+                    value = (
+                        src_work[1, layer_idx]
+                        .view(num_tokens, num_heads, head_dim)
+                        .contiguous()
+                    )
                 pi_t, midpoints, _ = _make_tq_tensors_for_layer(
                     cfg, layer_idx, cuda_device
                 )
@@ -683,7 +715,8 @@ class TurboQuantDeserializer(Deserializer):
             src: Source memory object containing the serialized TurboQuant
                 byte buffer as a ``torch.uint8`` tensor.
             dst: Destination memory object containing the reconstructed KV
-                tensor with shape ``[2, num_layers, num_tokens, hidden_dim]``.
+                tensor with shape ``[kv_size, num_layers, num_tokens,
+                hidden_dim]`` matching the original (split or fused) layout.
             key: Object key for this pair (unused: TurboQuant is
                 content-agnostic).
 
@@ -749,7 +782,8 @@ class TurboQuantDeserializer(Deserializer):
         num_layers, num_tokens, num_heads, head_dim = _validate_layout_shape(
             dst_work.shape, cfg
         )
-        hidden_dim = num_heads * head_dim
+        kv_size = int(dst_work.shape[0])
+        hidden_dim = int(dst_work.shape[3])
         quant_start, quant_end = _layer_ranges(num_layers, cfg)
         quant_layers = quant_end - quant_start
         src_flat = src_work.flatten()[:n_bytes]
@@ -758,7 +792,7 @@ class TurboQuantDeserializer(Deserializer):
         first_raw_bytes = _raw_group_nbytes(dst_work.shape, dst_work.dtype, quant_start)
         if first_raw_bytes:
             raw = torch.empty(
-                (2, quant_start, num_tokens, hidden_dim),
+                (kv_size, quant_start, num_tokens, hidden_dim),
                 dtype=dst_work.dtype,
                 device=cuda_device,
             )
@@ -840,15 +874,33 @@ class TurboQuantDeserializer(Deserializer):
                     k_layer = torch.matmul(
                         k_layer.to(torch.float32), pi_t.T.contiguous()
                     ).to(k_out.dtype)
-                k_tensor = k_layer.contiguous().view(num_tokens, hidden_dim)
+                k_tensor = k_layer.contiguous().view(num_tokens, num_heads, head_dim)
                 value = (
                     v_out[0, :, :num_tokens, :]
                     .transpose(0, 1)
                     .contiguous()
-                    .view(num_tokens, hidden_dim)
+                    .view(num_tokens, num_heads, head_dim)
                 )
-                dst_work[0, layer_idx].copy_(k_tensor.to(dst_work.dtype))
-                dst_work[1, layer_idx].copy_(value.to(dst_work.dtype))
+                if kv_size == 2:
+                    dst_work[0, layer_idx].copy_(
+                        k_tensor.reshape(num_tokens, hidden_dim).to(dst_work.dtype)
+                    )
+                    dst_work[1, layer_idx].copy_(
+                        value.reshape(num_tokens, hidden_dim).to(dst_work.dtype)
+                    )
+                else:
+                    # Re-pack the per-head [K | V] pair to restore the
+                    # original fused layout exactly.
+                    fused_layer = torch.empty(
+                        (num_tokens, num_heads, 2 * head_dim),
+                        dtype=dst_work.dtype,
+                        device=cuda_device,
+                    )
+                    fused_layer[..., :head_dim].copy_(k_tensor.to(dst_work.dtype))
+                    fused_layer[..., head_dim:].copy_(value.to(dst_work.dtype))
+                    dst_work[0, layer_idx].copy_(
+                        fused_layer.reshape(num_tokens, hidden_dim)
+                    )
             offset += compressed_bytes
 
         last_raw_layers = num_layers - quant_end
@@ -857,7 +909,7 @@ class TurboQuantDeserializer(Deserializer):
                 dst_work.shape, dst_work.dtype, last_raw_layers
             )
             raw = torch.empty(
-                (2, last_raw_layers, num_tokens, hidden_dim),
+                (kv_size, last_raw_layers, num_tokens, hidden_dim),
                 dtype=dst_work.dtype,
                 device=cuda_device,
             )
