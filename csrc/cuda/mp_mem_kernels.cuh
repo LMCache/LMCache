@@ -3,6 +3,10 @@
 #pragma once
 
 #include <c10/cuda/CUDAGuard.h>
+#include <cstdint>
+#include <string>
+#include <tuple>
+#include <vector>
 
 #include "kv_transfer_plan_types.h"
 #include "mem_kernels.cuh"
@@ -38,12 +42,18 @@ struct MemoryObj4 {
  *                              (power of two)
  * @param kernel_group_specs   Per-kernel-group invariants
  * @param batch_steps          Ordered per-batch staging + launch work
+ * @param phase_timing_enabled Record gather/DMA CUDA event pairs for
+ *                             pop_completed_phase_timings(); the caller passes
+ *                             true only when observability consumes the samples
+ * @param session_id           Request the transfer serves; carried on every
+ *                             sample so tracing can attach it to the request
  */
 void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps);
+    const std::vector<BatchStep>& batch_steps,
+    bool phase_timing_enabled = false, const std::string& session_id = "");
 
 /**
  * Block-level multi-layer KV transfer between vLLM paged buffers and

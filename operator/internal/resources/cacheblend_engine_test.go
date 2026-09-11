@@ -424,6 +424,100 @@ func TestBuildCBConnectionConfigMap_PortMatchesEngineArgs(t *testing.T) {
 	}
 }
 
+func TestBuildCBConnectionConfigMap_PDPrefiller(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+	cm := BuildCBConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigPrefillerDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if config["kv_connector"] != "MultiConnector" {
+		t.Fatalf("expected kv_connector=MultiConnector, got %v", config["kv_connector"])
+	}
+	if config["kv_role"] != kvRoleProducer {
+		t.Fatalf("expected kv_role=kv_producer, got %v", config["kv_role"])
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	connectors := outer["connectors"].([]any)
+	if len(connectors) != 2 {
+		t.Fatalf("expected 2 inner connectors, got %d", len(connectors))
+	}
+
+	nixl := connectors[0].(map[string]any)
+	if nixl["kv_connector"] != nixlConnectorName {
+		t.Fatalf("first connector must be NixlConnector, got %v", nixl["kv_connector"])
+	}
+	if nixl["kv_role"] != kvRoleProducer {
+		t.Fatalf("NixlConnector role must be kv_producer, got %v", nixl["kv_role"])
+	}
+
+	cb := connectors[1].(map[string]any)
+	if cb["kv_connector"] != "CBKVConnector" {
+		t.Fatalf("second connector must be CBKVConnector, got %v", cb["kv_connector"])
+	}
+	if cb["kv_connector_module_path"] != "lmcache_cacheblend.connector" {
+		t.Fatalf("expected CBKVConnector module path, got %v", cb["kv_connector_module_path"])
+	}
+	if cb["kv_role"] != kvRoleBoth {
+		t.Fatalf("CBKVConnector role must be kv_both, got %v", cb["kv_role"])
+	}
+	cbExtra := cb["kv_connector_extra_config"].(map[string]any)
+	if cbExtra["cb.check_layer"] != float64(1) {
+		t.Fatalf("expected cb.check_layer=1 on the inner CBKVConnector, got %v", cbExtra["cb.check_layer"])
+	}
+	if cbExtra["lmcache.mp.port"] != "5555" {
+		t.Fatalf("expected lmcache.mp.port=5555, got %v", cbExtra["lmcache.mp.port"])
+	}
+}
+
+func TestBuildCBConnectionConfigMap_PDDecoderIsBareNixl(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+	cm := BuildCBConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigDecoderDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	// The decoder does not blend: it must be a bare NixlConnector, not a
+	// MultiConnector wrapping a CBKVConnector.
+	if config["kv_connector"] != nixlConnectorName {
+		t.Fatalf("expected kv_connector=NixlConnector, got %v", config["kv_connector"])
+	}
+	if config["kv_role"] != kvRoleConsumer {
+		t.Fatalf("expected kv_role=kv_consumer, got %v", config["kv_role"])
+	}
+	if config["kv_load_failure_policy"] != "fail" {
+		t.Fatalf("expected kv_load_failure_policy=fail, got %v", config["kv_load_failure_policy"])
+	}
+	if _, ok := config["kv_connector_module_path"]; ok {
+		t.Fatal("decoder config must not carry a connector module path")
+	}
+	if extra, ok := config["kv_connector_extra_config"].(map[string]any); ok {
+		if _, hasConnectors := extra["connectors"]; hasConnectors {
+			t.Fatal("decoder config must not nest inner connectors")
+		}
+	}
+}
+
+func TestBuildCBConnectionConfigMap_PDFallbackUnchanged(t *testing.T) {
+	engine := minimalCBEngine()
+	pdEngine := minimalCBEngine()
+	pdEngine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+
+	nonPD := BuildCBConnectionConfigMap(engine).Data["kv-transfer-config.json"]
+	fallback := BuildCBConnectionConfigMap(pdEngine).Data["kv-transfer-config.json"]
+
+	if nonPD != fallback {
+		t.Fatalf("PD fallback config must equal the non-PD config:\nnon-PD: %s\nfallback: %s", nonPD, fallback)
+	}
+}
+
 // TestBuildCBEngine_ChunkSizeConsistency asserts the engine's chunk-size is 256
 // (the only value CacheBlend supports), matching the locked CacheBlendChunkSize
 // constant.

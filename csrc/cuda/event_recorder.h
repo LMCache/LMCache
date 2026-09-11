@@ -59,6 +59,10 @@ class EventRecorder {
 // Free functions exposed via pybind11
 // ---------------------------------------------------------------------------
 
+// Monotonic wall-clock seconds on the same basis as every recorded event
+// timestamp (see event_recorder.cpp for why this is not system_clock).
+double lmcache_wall_clock_time();
+
 // Schedule an event recording on a CUDA stream.  The host callback stamps
 // the wall-clock time and pushes to the global EventRecorder.
 // Called WITHOUT the GIL (py::call_guard<py::gil_scoped_release>).
