@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compatibility exports for engine-driven business types.
 
-RPC message contracts live in ``rpc_messages.py`` and handler scheduling lives
-on ``@request_handler`` annotations.
+RPC message contracts live in the ``rpc_messages/`` domain modules and handler
+scheduling lives on ``@request_handler`` annotations.
 """
 
 # First Party

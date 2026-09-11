@@ -534,8 +534,8 @@ Adding a new request type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
-2. Add the transport-neutral Python request/response dataclasses to
-   ``rpc_messages.py`` and register the pair in ``RPC_MESSAGE_TYPES``.
+2. Add the transport-neutral Python request/response dataclasses and their
+   registration in the owning ``rpc_messages/`` domain module.
 3. Implement the handler on the appropriate ``EngineModule`` using those
    Python request/response types, then decorate it with ``@request_handler``.
    The annotation is the single source of scheduling and affinity metadata.
@@ -585,8 +585,9 @@ Key Source Files
        full server config serialized into environment variables
    * - ``lmcache/v1/multiprocess/protocols/base.py``
      - RequestType and HandlerType enums
-   * - ``lmcache/v1/multiprocess/rpc_messages.py``
-     - Transport-neutral Python request/response messages and RPC registry
+   * - ``lmcache/v1/multiprocess/rpc_messages/``
+     - Domain-local transport-neutral Python request/response messages and
+       their local registrations
    * - ``lmcache/v1/multiprocess/request_handler.py``
      - Common handler annotation, discovery, and scheduling metadata
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/method_registry.py``

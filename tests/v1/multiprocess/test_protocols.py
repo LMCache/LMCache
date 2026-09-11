@@ -11,6 +11,7 @@ from lmcache.v1.multiprocess.protocols.blend import (
     handshake_response,
 )
 from lmcache.v1.multiprocess.rpc_messages import RPC_MESSAGE_TYPES
+from lmcache.v1.multiprocess.rpc_messages.registry import iter_rpc_message_types
 
 # Frozen wire ids. RequestType values are exchanged between builds, so this
 # table is APPEND-ONLY: a new request type adds a row with a never-used value;
@@ -82,6 +83,16 @@ def test_wire_ids_are_unique() -> None:
 
 def test_every_request_type_has_a_message_pair() -> None:
     assert set(RPC_MESSAGE_TYPES) == {request_type.name for request_type in RequestType}
+
+
+def test_message_pairs_are_declared_in_domain_modules() -> None:
+    """Prevent new RPC contracts from returning to one shared definition file."""
+    for _, (request_class, response_class) in iter_rpc_message_types():
+        for message_class in (request_class, response_class):
+            assert message_class.__module__.startswith(
+                "lmcache.v1.multiprocess.rpc_messages."
+            )
+            assert not message_class.__module__.endswith(".__init__")
 
 
 def test_blend_requests_have_message_pairs() -> None:

@@ -4,8 +4,9 @@ Multiprocess requests have three independent pieces:
 
 - `RequestType` in `base.py` is the stable ZMQ wire identifier. Existing values
   must never be reordered or reused.
-- `rpc_messages.py` defines and registers the transport-neutral Python request
-  and response pair for every canonical `RequestType`.
+- The domain modules under `rpc_messages/` define and locally register the
+  transport-neutral Python request and response pair for every canonical
+  `RequestType`.
 - `@request_handler` on a business method declares its `RequestType`, scheduling
   mode, and optional client-affinity requirement.
 
@@ -16,9 +17,9 @@ Python message pair.
 ## Adding an RPC
 
 1. Append its stable identifier to `RequestType`.
-2. Add the Python request and response dataclasses to `rpc_messages.py` and
-   register the pair in `RPC_MESSAGE_TYPES`.
-3. Add or reuse the protobuf request/response messages and service method.
+2. Add the Python request and response dataclasses and register the pair beside
+   its domain message definitions under `rpc_messages/`.
+3. Add the route-only protobuf service method using `TransportPayload`.
 4. Annotate the business handler:
 
    ```python

@@ -83,6 +83,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
+    client_method_name,
     get_service_bindings,
     iter_methods,
 )
@@ -245,8 +246,8 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         server.close()
 
 
-def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
-    """Every generated RPC has one Python contract derived by convention."""
+def test_rpc_surface_is_derived_from_route_only_descriptors() -> None:
+    """Every gRPC route resolves to one locally declared Python contract."""
     bindings = get_service_bindings()
     assert {
         "LMCacheDrivenService",
@@ -266,17 +267,24 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert set(registry.by_full_name) == generated_methods
     for _, method in iter_methods():
         method_binding = registry.by_full_name[method.full_name]
-        assert method_binding.python_request_class.__name__ == method.input_type.name
-        assert method_binding.python_response_class.__name__ == method.output_type.name
+        assert method.input_type.full_name == "lmcache.mp.TransportPayload"
+        assert method.output_type.full_name == "lmcache.mp.TransportPayload"
+        assert not method.input_type.fields
+        assert not method.output_type.fields
+        assert (
+            method_binding.request_type.name == client_method_name(method.name).upper()
+        )
 
     lookup_binding = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
     assert lookup_binding.request_type is RequestType.LOOKUP
     assert lookup_binding.python_request_class is LookupRequest
     assert lookup_binding.python_response_class is LookupResponse
+    assert lookup_binding.python_request_class.__module__.endswith(".lookup")
 
     store_binding = registry.by_full_name["lmcache.mp.LMCacheDrivenService.Store"]
     assert store_binding.python_request_class is StoreRequest
     assert store_binding.python_response_class is StoreResponse
+    assert store_binding.python_request_class.__module__.endswith(".lmcache_driven")
 
     registration_binding = registry.by_full_name[
         "lmcache.mp.EngineDrivenService.RegisterKvCacheEngineDrivenContext"
