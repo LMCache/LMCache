@@ -664,6 +664,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_obj is not None or not eviction:
             return memory_obj
 
+        if not self.use_hot:
+            # No hot cache means no eviction mechanism is available.
+            # When local_cpu=False, the CPU pool serves only as a staging
+            # buffer for disk I/O — we cannot evict from it.  Returning
+            # None avoids an infinite busy-wait loop (issue #2942).
+            logger.warning(
+                "Local cpu memory is under pressure and use_hot=False. "
+                "No eviction mechanism available — returning None."
+            )
+            return None
+
         evict_keys_count = 0
         num_attempts = 0
         while True:
@@ -775,6 +786,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return memory_objs
 
         assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+
+        if not self.use_hot:
+            # No hot cache means no eviction mechanism is available.
+            # When local_cpu=False, the CPU pool serves only as a staging
+            # buffer for disk I/O — we cannot evict from it.  Returning
+            # None avoids an infinite busy-wait loop (issue #2942).
+            logger.warning(
+                "Local cpu memory is under pressure and use_hot=False. "
+                "No eviction mechanism available — returning None."
+            )
+            return None
 
         evict_keys_count = 0
         num_attempts = 0
