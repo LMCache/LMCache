@@ -298,43 +298,45 @@ class MessageQueueClient:
     def process_outbound_task(self):
         try:
             while wrapped_request := self.input_queue.get_nowait():
-                # wrapped_request = self.input_queue.get_nowait()
-
-                # Update the pending futures
                 request_uid = wrapped_request.request_uid
-                self.pending_futures[request_uid] = wrapped_request.future
+                try:
+                    b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
+                    b_request_type = msgspec_encode(
+                        wrapped_request.request_type, cls=RequestType
+                    )
+                    payload_classes = get_payload_classes(wrapped_request.request_type)
+                    if len(payload_classes) != len(wrapped_request.request_payloads):
+                        expected_classes = [cls.__name__ for cls in payload_classes]
+                        actual_classes = [
+                            type(payload).__name__
+                            for payload in wrapped_request.request_payloads
+                        ]
+                        raise ValueError(
+                            f"Payload count mismatch for request "
+                            f"{wrapped_request.request_type}: "
+                            f"expected {len(payload_classes)} payloads "
+                            f"{expected_classes}, "
+                            f"got {len(wrapped_request.request_payloads)} payloads "
+                            f"{actual_classes}. "
+                            f"This is likely caused by a version mismatch between "
+                            f"the lmcache client and lmcache server."
+                        )
 
-                # Send the request
-                b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
-                b_request_type = msgspec_encode(
-                    wrapped_request.request_type, cls=RequestType
-                )
-                payload_classes = get_payload_classes(wrapped_request.request_type)
-                if len(payload_classes) != len(wrapped_request.request_payloads):
-                    expected_classes = [cls.__name__ for cls in payload_classes]
-                    actual_classes = [
-                        type(p).__name__ for p in wrapped_request.request_payloads
+                    b_payloads = [
+                        msgspec_encode(payload, cls=cls)
+                        for payload, cls in zip(
+                            wrapped_request.request_payloads,
+                            payload_classes,
+                            strict=False,
+                        )
                     ]
-                    raise ValueError(
-                        f"Payload count mismatch for request "
-                        f"{wrapped_request.request_type}: "
-                        f"expected {len(payload_classes)} payloads "
-                        f"{expected_classes}, "
-                        f"got {len(wrapped_request.request_payloads)} payloads "
-                        f"{actual_classes}. "
-                        f"This is likely caused by a version mismatch between "
-                        f"the lmcache client and lmcache server."
+                    self.pending_futures[request_uid] = wrapped_request.future
+                    self.socket.send_multipart(
+                        [b_request_uid, b_request_type] + b_payloads
                     )
-
-                b_payloads = [
-                    msgspec_encode(payload, cls=cls)
-                    for payload, cls in zip(
-                        wrapped_request.request_payloads,
-                        payload_classes,
-                        strict=False,
-                    )
-                ]
-                self.socket.send_multipart([b_request_uid, b_request_type] + b_payloads)
+                except Exception as exc:
+                    self.pending_futures.pop(request_uid, None)
+                    wrapped_request.future.set_exception(exc)
         except queue.Empty:
             pass
 
