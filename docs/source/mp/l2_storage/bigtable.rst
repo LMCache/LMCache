@@ -29,8 +29,19 @@ Cloud Bigtable is an excellent choice as an L2 storage backend for enterprise-sc
 - ``exists_cache_ttl_seconds`` (float, default ``10.0``): TTL in seconds for the internal cache that shields Bigtable from redundant lookup requests.
 - ``bigtable_write_timeout_ms`` (float, default ``10000.0``): Maximum timeout for database writes.
 - ``bigtable_read_timeout_ms`` (float, default ``5000.0``): Maximum timeout for database reads.
+- ``breaker_initial_cooldown_s`` (float, default ``5.0``): How long the circuit breaker stays open after it trips, before the adapter probes Bigtable again. See `Circuit breaker`_.
+- ``breaker_max_cooldown_s`` (float, default ``300.0``): Upper bound for the doubled cooldown. Must be greater than or equal to the initial cooldown.
 
 **Environment variable fallbacks.** When the corresponding config value is empty, these environment variables are used: ``BT_PROJECT_ID``, ``BT_INSTANCE_ID``, ``BT_TABLE_NAME``.
+
+Circuit breaker
+---------------
+
+After three consecutive connection-class failures (``DeadlineExceeded``, ``ServiceUnavailable``, or a timeout/connection error) the adapter stops dialling Bigtable: stores, lookups and loads fail locally without a network round trip, keeping a KV cache miss cheap while the backend is unreachable.
+
+The breaker re-arms itself once ``breaker_initial_cooldown_s`` has elapsed, so a transient outage does not disable L2 for the lifetime of the process. The next request after the cooldown probes Bigtable; if it succeeds the adapter resumes normally, and if the backend is still broken the breaker re-trips with the cooldown doubled, up to ``breaker_max_cooldown_s``. Any successful request resets the cooldown to its initial value.
+
+``report_status()`` exposes ``connection_failures``, ``connection_disabled``, and ``breaker_retry_in_seconds`` -- the last being the time until the next probe, which distinguishes an adapter that is recovering on its own from one that is waiting out a long backoff.
 
 Tutorials & Configuration Examples
 ----------------------------------
