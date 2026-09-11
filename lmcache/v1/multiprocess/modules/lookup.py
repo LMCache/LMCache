@@ -24,6 +24,20 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    EndSessionRequest,
+    EndSessionResponse,
+    FreeLookupLocksRequest,
+    FreeLookupLocksResponse,
+    LookupRequest,
+    LookupResponse,
+    QueryPrefetchLookupHitsRequest,
+    QueryPrefetchLookupHitsResponse,
+    QueryPrefetchStatusRequest,
+    QueryPrefetchStatusResponse,
+    WaitPrefetchStatusRequest,
+    WaitPrefetchStatusResponse,
+)
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -146,6 +160,52 @@ class LookupModule:
     # -----------------------------------------------------------------
 
     @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
+    def handle_lookup(self, request: LookupRequest) -> LookupResponse:
+        """Handle a transport-neutral lookup request."""
+        self.lookup(request.key, request.tp_size)
+        return LookupResponse()
+
+    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
+    def handle_query_prefetch_lookup_hits(
+        self, request: QueryPrefetchLookupHitsRequest
+    ) -> QueryPrefetchLookupHitsResponse:
+        """Handle a transport-neutral lookup-hit query."""
+        return QueryPrefetchLookupHitsResponse(
+            chunk_count=self.query_prefetch_lookup_hits(request.request_id)
+        )
+
+    @request_handler(RequestType.QUERY_PREFETCH_STATUS, HandlerType.BLOCKING)
+    def handle_query_prefetch_status(
+        self, request: QueryPrefetchStatusRequest
+    ) -> QueryPrefetchStatusResponse:
+        """Handle a transport-neutral prefetch-status query."""
+        return QueryPrefetchStatusResponse(
+            chunk_count=self.query_prefetch_status(request.request_id)
+        )
+
+    @request_handler(RequestType.WAIT_PREFETCH_STATUS, HandlerType.BLOCKING)
+    def handle_wait_prefetch_status(
+        self, request: WaitPrefetchStatusRequest
+    ) -> WaitPrefetchStatusResponse:
+        """Handle a transport-neutral blocking prefetch-status query."""
+        return WaitPrefetchStatusResponse(
+            chunk_count=self.wait_prefetch_status(request.request_id, request.timeout)
+        )
+
+    @request_handler(RequestType.FREE_LOOKUP_LOCKS, HandlerType.BLOCKING)
+    def handle_free_lookup_locks(
+        self, request: FreeLookupLocksRequest
+    ) -> FreeLookupLocksResponse:
+        """Handle a transport-neutral lookup-lock release request."""
+        self.free_lookup_locks(request.key, request.tp_size)
+        return FreeLookupLocksResponse()
+
+    @request_handler(RequestType.END_SESSION, HandlerType.BLOCKING)
+    def handle_end_session(self, request: EndSessionRequest) -> EndSessionResponse:
+        """Handle a transport-neutral session completion request."""
+        self.end_session(request.request_id)
+        return EndSessionResponse()
+
     def lookup(
         self,
         key: IPCCacheServerKey,
@@ -315,7 +375,6 @@ class LookupModule:
             )
         )
 
-    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
     def query_prefetch_lookup_hits(
         self,
         request_id: str,
@@ -343,7 +402,6 @@ class LookupModule:
         # Result is already in chunk-level units (l1_hit_chunks + l2_hit_chunks).
         return self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
 
-    @request_handler(RequestType.QUERY_PREFETCH_STATUS, HandlerType.BLOCKING)
     def query_prefetch_status(
         self,
         request_id: str,
@@ -431,7 +489,6 @@ class LookupModule:
 
         return found_count
 
-    @request_handler(RequestType.WAIT_PREFETCH_STATUS, HandlerType.BLOCKING)
     def wait_prefetch_status(
         self,
         request_id: str,
@@ -465,7 +522,6 @@ class LookupModule:
             return None
         return self.query_prefetch_status(request_id)
 
-    @request_handler(RequestType.FREE_LOOKUP_LOCKS, HandlerType.BLOCKING)
     def free_lookup_locks(
         self,
         key: IPCCacheServerKey,
@@ -515,7 +571,6 @@ class LookupModule:
             obj_keys, read_locks=key.require_num_kv_readers()
         )
 
-    @request_handler(RequestType.END_SESSION, HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.
 

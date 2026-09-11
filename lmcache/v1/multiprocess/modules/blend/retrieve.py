@@ -44,6 +44,11 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    CbRetrievePreComputedRequest,
+    CbRetrievePreComputedResponse,
+    EventIpcHandleResult,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
@@ -538,6 +543,21 @@ class RetrieveMixin:
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
+    def handle_cb_retrieve_pre_computed(
+        self, request: CbRetrievePreComputedRequest
+    ) -> CbRetrievePreComputedResponse:
+        """Handle a transport-neutral CacheBlend retrieve request."""
+        event_ipc_handle, success = self.cb_retrieve_pre_computed(
+            request.key,
+            request.cb_match_result,
+            request.gpu_block_ids,
+            request.instance_id,
+            request.event_ipc_handle,
+        )
+        return CbRetrievePreComputedResponse(
+            EventIpcHandleResult(event_ipc_handle, success)
+        )
+
     def cb_retrieve_pre_computed(
         self,
         key: IPCCacheServerKey,

@@ -24,17 +24,14 @@ from lmcache.v1.multiprocess.futures import (
     MessagingFuture,
 )
 from lmcache.v1.multiprocess.protocol import (
-    HandlerType,
     RequestType,
     get_request_message_class,
     get_response_message_class,
 )
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.rpc_messages import (
     RpcRequest,
-    RpcResponse,
-    unwrap_request_message,
     unwrap_response_message,
-    wrap_response_message,
 )
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 
@@ -675,20 +672,18 @@ class MessageQueueServer:
         Args:
             request_type (RequestType): The type of the request to handle.
             handler_type: Scheduling policy for the request.
-            handler (callable): The handler function that takes the payloads
-                as arguments.
+            handler (callable): A function accepting the registered Python
+                request message and returning its Python response message.
+
+        Raises:
+            TypeError: If the handler does not use the registered Python
+                request and response message annotations.
         """
         if not self._inspect_handler_signature(request_type, handler):
-            compatibility_handler = handler
-
-            def handler(request: RpcRequest) -> RpcResponse:
-                result = compatibility_handler(*unwrap_request_message(request))
-                return wrap_response_message(request_type.name, result)
-
-            handler.__annotations__ = {
-                "request": get_request_message_class(request_type),
-                "return": get_response_message_class(request_type),
-            }
+            raise TypeError(
+                f"Handler for {request_type.name} must use its Python "
+                "request and response message types"
+            )
 
         request_cls = get_request_message_class(request_type)
         match handler_type:

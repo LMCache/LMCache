@@ -21,32 +21,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     message_class,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.message_conversion import (
-    ResponseDecoder,
-    ResponseEncoder,
-    build_request_conversion,
-    compile_response_decoder_for_type,
-    compile_response_encoder_for_type,
+    MessageToProto,
+    ProtoToMessage,
+    build_message_conversion,
 )
-
-RequestToProto = Callable[[Any], Any]
-ProtoToRequest = Callable[[Any], Any]
-
-
-def _build_request_boundary(
-    protobuf_class: type[Any], python_class: type[Any]
-) -> tuple[RequestToProto, ProtoToRequest]:
-    encode_call, decode_call = build_request_conversion(
-        protobuf_class,
-        (python_class,),
-    )
-
-    def request_to_proto(request: Any) -> Any:
-        return encode_call((request,), {})
-
-    def proto_to_request(request: Any) -> Any:
-        return decode_call(request)[0]
-
-    return request_to_proto, proto_to_request
 
 
 @dataclass(frozen=True)
@@ -59,10 +37,10 @@ class GrpcMethodBinding:
     response_message_class: type[Any]
     python_request_class: type[Any]
     python_response_class: type[Any]
-    request_to_proto: RequestToProto
-    proto_to_request: ProtoToRequest
-    response_to_proto: ResponseEncoder
-    proto_to_response: ResponseDecoder
+    request_to_proto: MessageToProto
+    proto_to_request: ProtoToMessage
+    response_to_proto: MessageToProto
+    proto_to_response: ProtoToMessage
 
     def validate_handler(self, handler: Callable[..., Any]) -> None:
         """Validate that a service handler implements the gRPC contract.
@@ -140,14 +118,11 @@ def get_method_registry() -> GrpcMethodRegistry:
         response_message_class = message_class(method.output_type)
         python_request_class = get_request_message_class(request_type)
         python_response_class = get_response_message_class(request_type)
-        request_to_proto, proto_to_request = _build_request_boundary(
+        request_to_proto, proto_to_request = build_message_conversion(
             request_message_class,
             python_request_class,
         )
-        response_to_proto = compile_response_encoder_for_type(
-            response_message_class, python_response_class
-        )
-        proto_to_response = compile_response_decoder_for_type(
+        response_to_proto, proto_to_response = build_message_conversion(
             response_message_class, python_response_class
         )
         adapter = GrpcMethodBinding(

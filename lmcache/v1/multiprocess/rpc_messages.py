@@ -7,7 +7,7 @@ only for adapting them to their wire representation.
 """
 
 # Standard
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 # First Party
@@ -21,9 +21,17 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     IPCCacheServerKey,
     KVCache,
+)
+from lmcache.v1.multiprocess.custom_types import (
     PrepareRetrieveResponse as LegacyPrepareRetrieveResponse,
+)
+from lmcache.v1.multiprocess.custom_types import (
     PrepareStoreResponse as LegacyPrepareStoreResponse,
+)
+from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
+)
+from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse as LegacyRegisterContextResponse,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -623,13 +631,6 @@ def make_request_message(request_name: str, *payloads: Any) -> RpcRequest:
     return request_class(*payloads)
 
 
-def unwrap_request_message(request: RpcRequest) -> tuple[Any, ...]:
-    """Return compatibility handler arguments represented by a request."""
-    if isinstance(request, RegisterKvCacheEngineDrivenContextRequest):
-        return (RegisterEngineDrivenContextPayload(**asdict(request)),)
-    return tuple(getattr(request, item.name) for item in fields(request))
-
-
 def unwrap_response_message(response: RpcResponse) -> Any:
     """Return the legacy client result represented by a Python RPC response."""
     if isinstance(
@@ -652,39 +653,6 @@ def unwrap_response_message(response: RpcResponse) -> Any:
         return None
     values = tuple(getattr(response, item.name) for item in response_fields)
     return values[0] if len(values) == 1 else values
-
-
-def wrap_response_message(request_name: str, result: Any) -> RpcResponse:
-    """Wrap a compatibility handler result in its Python RPC response."""
-    response_class = RPC_MESSAGE_TYPES[request_name][1]
-    if isinstance(result, response_class):
-        return result
-    response_fields = fields(response_class)
-    if not response_fields:
-        return response_class()
-    if response_class in (
-        StoreResponse,
-        RetrieveResponse,
-        CbRetrievePreComputedResponse,
-    ):
-        event_ipc_handle, success = result
-        return response_class(
-            EventIpcHandleResult(
-                event_ipc_handle=event_ipc_handle,
-                success=success,
-            )
-        )
-    if response_class is PrepareStoreResponse and isinstance(
-        result, LegacyPrepareStoreResponse
-    ):
-        return PrepareStoreResponse(context=result.context)
-    if len(response_fields) == 1:
-        return response_class(result)
-    if is_dataclass(result):
-        return response_class(**asdict(result))
-    if isinstance(result, tuple):
-        return response_class(*result)
-    raise TypeError(f"Cannot wrap {type(result).__name__} as {response_class.__name__}")
 
 
 __all__ = [name for name in globals() if name.endswith(("Request", "Response"))]

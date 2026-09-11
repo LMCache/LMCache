@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the multiprocess protocol registry (``RequestType`` + definitions)."""
+"""Tests for stable request IDs and transport-neutral message contracts."""
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.protocols import initialize_protocols
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.protocols.blend import (
     BLEND_PROTOCOL_VERSION,
     handshake_response,
 )
+from lmcache.v1.multiprocess.rpc_messages import RPC_MESSAGE_TYPES
 
 # Frozen wire ids. RequestType values are exchanged between builds, so this
 # table is APPEND-ONLY: a new request type adds a row with a never-used value;
@@ -80,15 +80,13 @@ def test_wire_ids_are_unique() -> None:
     assert len(values) == len(set(values))
 
 
-def test_every_request_type_has_a_definition() -> None:
-    definitions = initialize_protocols()
-    assert set(definitions) == set(RequestType)
+def test_every_request_type_has_a_message_pair() -> None:
+    assert set(RPC_MESSAGE_TYPES) == {request_type.name for request_type in RequestType}
 
 
-def test_blend_requests_are_registered() -> None:
-    definitions = initialize_protocols()
+def test_blend_requests_have_message_pairs() -> None:
     for name in CB_REQUESTS:
-        assert RequestType[name] in definitions
+        assert name in RPC_MESSAGE_TYPES
 
 
 @pytest.mark.parametrize(("alias", "canonical"), sorted(DEPRECATED_CB_ALIASES.items()))
@@ -102,8 +100,8 @@ def test_deprecated_cb_aliases_resolve_to_the_canonical_member(
 
 
 def test_deprecated_cb_aliases_are_not_separate_members() -> None:
-    # Enum aliases are excluded from iteration, so the registry validation
-    # (one definition per member) is unaffected by them.
+    # Enum aliases are excluded from iteration, so message-pair validation is
+    # unaffected by them.
     names = {member.name for member in RequestType}
     assert not names & set(DEPRECATED_CB_ALIASES)
 

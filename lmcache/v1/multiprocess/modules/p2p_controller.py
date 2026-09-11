@@ -33,6 +33,14 @@ from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    P2pLookupAndLockRequest,
+    P2pLookupAndLockResponse,
+    P2pQueryLookupResultsRequest,
+    P2pQueryLookupResultsResponse,
+    P2pUnlockObjectsRequest,
+    P2pUnlockObjectsResponse,
+)
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -202,6 +210,31 @@ class P2PController:
     # -----------------------------------------------------------------
 
     @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
+    def handle_p2p_lookup_and_lock(
+        self, request: P2pLookupAndLockRequest
+    ) -> P2pLookupAndLockResponse:
+        """Handle a transport-neutral P2P lookup request."""
+        return P2pLookupAndLockResponse(
+            task_id=self.p2p_lookup_and_lock(request.keys, request.group_layout_descs)
+        )
+
+    @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
+    def handle_p2p_query_lookup_results(
+        self, request: P2pQueryLookupResultsRequest
+    ) -> P2pQueryLookupResultsResponse:
+        """Handle a transport-neutral P2P result query."""
+        return P2pQueryLookupResultsResponse(
+            addresses=self.p2p_query_lookup_results(request.task_id)
+        )
+
+    @request_handler(RequestType.P2P_UNLOCK_OBJECTS, HandlerType.BLOCKING)
+    def handle_p2p_unlock_objects(
+        self, request: P2pUnlockObjectsRequest
+    ) -> P2pUnlockObjectsResponse:
+        """Handle a transport-neutral P2P unlock request."""
+        self.p2p_unlock_objects(request.keys)
+        return P2pUnlockObjectsResponse()
+
     def p2p_lookup_and_lock(
         self,
         keys: list[ObjectKey],
@@ -251,7 +284,6 @@ class P2PController:
         )
         return task_id
 
-    @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
     def p2p_query_lookup_results(
         self,
         task_id: int,
@@ -294,7 +326,6 @@ class P2PController:
             self._jobs.pop(task_id, None)
         return addresses
 
-    @request_handler(RequestType.P2P_UNLOCK_OBJECTS, HandlerType.BLOCKING)
     def p2p_unlock_objects(
         self,
         keys: list[ObjectKey],

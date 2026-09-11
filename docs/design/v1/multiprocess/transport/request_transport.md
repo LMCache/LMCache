@@ -64,16 +64,17 @@ Python representation is intentionally different from protobuf, such as
 `DeviceIPCWrapper` and `torch.Size`.
 
 Server-side binding and scheduling are separate from serialization. Business
-module methods use the transport-neutral `@request_handler` annotation to
-declare their `RequestType`, `HandlerType`, and client-affinity requirement.
-Both ZMQ and gRPC discover this metadata. A handler receives exactly one Python
-request message and returns exactly one Python response message. Server startup
-validates those annotations against the shared RPC message registry.
+module methods use the transport-neutral `@request_handler` annotation as the
+single source of truth for their `RequestType`, `HandlerType`, and
+client-affinity requirement. Both ZMQ and gRPC discover this metadata. A
+handler receives exactly one Python request message and returns exactly one
+Python response message. Server startup validates those annotations against
+the shared RPC message registry.
 
-Adding an RPC therefore requires a protobuf method, a matching `RequestType`
-and `ProtocolDefinition`, a Python request/response pair in `rpc_messages.py`,
-and an annotated business-module handler. No per-RPC serialization definition
-is required by either transport.
+Adding an RPC therefore requires a protobuf method, a matching `RequestType`,
+a Python request/response pair in `rpc_messages.py`, and an annotated business
+handler. No separate `ProtocolDefinition` or per-RPC serialization definition
+is required.
 
 ## Extending the transport
 

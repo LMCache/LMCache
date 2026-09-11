@@ -4,7 +4,6 @@ Base types and classes for the multiprocess protocol system.
 """
 
 # Standard
-from dataclasses import dataclass
 import enum
 
 
@@ -30,9 +29,9 @@ class RequestType(enum.Enum):
     1. Append the member at the END of the enum, before the deprecated
        aliases (values are auto-assigned in order; inserting mid-enum
        renumbers later wire values and the frozen-table test fails)
-    2. Add the protocol definition in the appropriate protocols/*.py file
-    3. Add the pinned value to the frozen table in test_protocols.py
-    4. The validation system will ensure definitions stay in sync
+    2. Add its Python request/response pair to rpc_messages.py
+    3. Annotate its EngineModule handler with @request_handler
+    4. Add the pinned value to the frozen table in test_protocols.py
 
     Organized by category:
     - Engine operations: Core KV cache operations
@@ -94,15 +93,3 @@ class RequestType(enum.Enum):
     CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
     CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE
     CB_RETRIEVE_PRE_COMPUTED_V3 = CB_RETRIEVE_PRE_COMPUTED
-
-
-@dataclass
-class ProtocolDefinition:
-    """
-    Defines the structure and behavior of a protocol request.
-
-    Attributes:
-        handler_type: How the handler should be executed (SYNC/BLOCKING/NON_BLOCKING)
-    """
-
-    handler_type: HandlerType
