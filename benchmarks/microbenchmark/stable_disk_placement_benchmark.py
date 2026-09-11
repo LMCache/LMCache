@@ -38,7 +38,7 @@ from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
-    rendezvous_adapter_indices_for_keys,
+    RendezvousHashRouter,
 )
 
 T = TypeVar("T")
@@ -84,10 +84,11 @@ def _modulo_owner_ids(
 def _rendezvous_owner_ids(
     keys: list[ObjectKey],
     adapters: list[AdapterDescriptor],
+    router: RendezvousHashRouter,
 ) -> list[str]:
     by_index = {adapter.index: adapter for adapter in adapters}
     owners: list[str] = []
-    for adapter_index in rendezvous_adapter_indices_for_keys(keys, adapters):
+    for adapter_index in router.select_adapters(keys):
         placement_id = by_index[adapter_index].placement_id
         assert placement_id is not None
         owners.append(placement_id)
@@ -141,15 +142,21 @@ def benchmark_placement(
     keys = _make_keys(key_count)
     before = _make_adapters(disk_count)
     after = _make_adapters(disk_count + 1)
+    before_router = RendezvousHashRouter()
+    before_router.update_adapters(before)
+    after_router = RendezvousHashRouter()
+    after_router.update_adapters(after)
 
     modulo_before = _modulo_owner_ids(keys, before)
     modulo_after = _modulo_owner_ids(keys, after)
-    rendezvous_before = _rendezvous_owner_ids(keys, before)
-    rendezvous_after = _rendezvous_owner_ids(keys, after)
+    rendezvous_before = _rendezvous_owner_ids(keys, before, before_router)
+    rendezvous_after = _rendezvous_owner_ids(keys, after, after_router)
 
     modulo_seconds = _best_seconds(lambda: _modulo_owner_ids(keys, before), repetitions)
+    # Adapter preparation is intentionally outside the timed region: the
+    # production policies update the router only when adapters attach or detach.
     rendezvous_seconds = _best_seconds(
-        lambda: _rendezvous_owner_ids(keys, before), repetitions
+        lambda: _rendezvous_owner_ids(keys, before, before_router), repetitions
     )
     return {
         "keys": key_count,

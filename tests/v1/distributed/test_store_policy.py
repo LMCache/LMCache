@@ -5,6 +5,9 @@ Unit tests for store policy interface and DefaultStorePolicy.
 Tests are written against the StorePolicy contract defined in store_policy.py.
 """
 
+# Standard
+from unittest.mock import patch
+
 # Third Party
 import pytest
 
@@ -137,11 +140,54 @@ class TestStripedStorePolicy:
         keys = [make_object_key(i) for i in range(1000)]
         adapters = [make_stable_descriptor(i, f"disk-{i}") for i in range(4)]
 
+        policy.validate_adapters(adapters)
         targets = policy.select_store_targets(keys, adapters)
         routed_keys = [key for values in targets.values() for key in values]
 
         assert set(routed_keys) == set(keys)
         assert len(routed_keys) == len(keys)
+
+    def test_data_path_reuses_prepared_adapter_set(self) -> None:
+        policy = StripedStorePolicy()
+        keys = [make_object_key(i) for i in range(16)]
+        adapters = [make_stable_descriptor(i, f"disk-{i}") for i in range(4)]
+        policy.validate_adapters(adapters)
+
+        with patch(
+            "lmcache.v1.distributed.storage_controllers.store_policy."
+            "_validate_stable_adapters",
+            side_effect=AssertionError("data path repeated adapter preparation"),
+        ):
+            targets = policy.select_store_targets(keys, adapters)
+
+        assert sum(len(adapter_keys) for adapter_keys in targets.values()) == len(keys)
+
+    def test_membership_change_refreshes_cached_router(self) -> None:
+        policy = StripedStorePolicy()
+        keys = [make_object_key(i) for i in range(1000)]
+        before = [make_stable_descriptor(i, f"disk-{i}") for i in range(4)]
+        after = before + [make_stable_descriptor(4, "disk-4")]
+
+        policy.validate_adapters(before)
+        before_targets = policy.select_store_targets(keys, before)
+        before_owners = {
+            key: adapter_index
+            for adapter_index, adapter_keys in before_targets.items()
+            for key in adapter_keys
+        }
+
+        policy.validate_adapters(after)
+        after_targets = policy.select_store_targets(keys, after)
+        after_owners = {
+            key: adapter_index
+            for adapter_index, adapter_keys in after_targets.items()
+            for key in adapter_keys
+        }
+
+        assert after_targets[4]
+        for key in keys:
+            if after_owners[key] != before_owners[key]:
+                assert after_owners[key] == 4
 
     def test_runtime_order_does_not_change_owner(self) -> None:
         keys = [make_object_key(i) for i in range(100)]

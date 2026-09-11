@@ -353,6 +353,8 @@ class StoreController(StorageControllerInterface):
         Raises:
             RuntimeError: If the background loop did not apply the op in
                 time (e.g. the loop is not running).
+            ValueError: If the resulting adapter set is invalid for the store
+                policy.
         """
         op = AddAdapterOp(
             adapter_id=adapter_id,
@@ -367,6 +369,8 @@ class StoreController(StorageControllerInterface):
             raise RuntimeError(
                 f"StoreController did not attach adapter {adapter_id} in time"
             )
+        if op.error is not None:
+            raise op.error
 
     def request_remove_adapter(self, adapter_id: int) -> threading.Event:
         """Non-blocking function to request the removal of a L2 adapter
@@ -509,6 +513,23 @@ class StoreController(StorageControllerInterface):
             self._pending_adapter_ops = []
         for op in ops:
             if isinstance(op, AddAdapterOp):
+                adapters = [
+                    descriptor
+                    for adapter_id, descriptor in self._adapter_descriptors.items()
+                    if adapter_id not in self._draining
+                ]
+                adapters.append(op.descriptor)
+                try:
+                    self._policy.validate_adapters(adapters)
+                except Exception as error:
+                    op.error = error
+                    logger.warning(
+                        "StoreController rejected adapter %d: %s",
+                        op.adapter_id,
+                        error,
+                    )
+                    op.done.set()
+                    continue
                 self._l2_adapters[op.adapter_id] = op.adapter
                 self._adapter_descriptors[op.adapter_id] = op.descriptor
                 efd = op.adapter.get_store_event_fd()
@@ -522,6 +543,12 @@ class StoreController(StorageControllerInterface):
                     # doesn't block.
                     op.done.set()
                     continue
+                adapters = [
+                    descriptor
+                    for adapter_id, descriptor in self._adapter_descriptors.items()
+                    if adapter_id != op.adapter_id and adapter_id not in self._draining
+                ]
+                self._policy.validate_adapters(adapters)
                 # Mark draining; routing skips it immediately. The adapter
                 # stays registered so in-flight completions still process.
                 self._draining[op.adapter_id] = op.done

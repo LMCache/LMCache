@@ -6,6 +6,9 @@ Tests are written against the PrefetchPolicy contract defined in
 prefetch_policy.py.
 """
 
+# Standard
+from unittest.mock import patch
+
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
@@ -334,12 +337,34 @@ class TestStripedPrefetchPolicy:
     def test_lookup_targets_match_store_targets(self) -> None:
         keys = [make_object_key(i) for i in range(100)]
         adapters = [make_stable_descriptor(i, f"disk-{i}") for i in range(4)]
-        stores = StripedStorePolicy().select_store_targets(keys, adapters)
-        lookups = StripedPrefetchPolicy().select_lookup_targets(keys, adapters)
+        store_policy = StripedStorePolicy()
+        prefetch_policy = StripedPrefetchPolicy()
+        store_policy.validate_adapters(adapters)
+        prefetch_policy.validate_adapters(adapters)
+        stores = store_policy.select_store_targets(keys, adapters)
+        lookups = prefetch_policy.select_lookup_targets(keys, adapters)
 
         assert lookups is not None
         for adapter_index, stored_keys in stores.items():
             assert [keys[index] for index in lookups[adapter_index]] == stored_keys
+
+    def test_lookup_path_reuses_prepared_adapter_set(self) -> None:
+        keys = [make_object_key(i) for i in range(16)]
+        adapters = [make_stable_descriptor(i, f"disk-{i}") for i in range(4)]
+        policy = StripedPrefetchPolicy()
+        policy.validate_adapters(adapters)
+
+        with patch(
+            "lmcache.v1.distributed.storage_controllers.store_policy."
+            "_validate_stable_adapters",
+            side_effect=AssertionError("data path repeated adapter preparation"),
+        ):
+            targets = policy.select_lookup_targets(keys, adapters)
+
+        assert targets is not None
+        assert sorted(
+            key_index for key_indices in targets.values() for key_index in key_indices
+        ) == list(range(len(keys)))
 
     def test_targeted_bitmap_is_remapped_to_global_positions(self) -> None:
         subset = make_bitmap(3, [0, 2])

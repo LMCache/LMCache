@@ -70,10 +70,11 @@ class StorePolicy(ABC):
     """
 
     def validate_adapters(self, adapters: list[AdapterDescriptor]) -> None:
-        """Validate an adapter set before the controller starts.
+        """Validate and prepare an adapter set before it is used for routing.
 
         Args:
-            adapters: Configured L2 adapter descriptors.
+            adapters: Active L2 adapter descriptors. The controller calls this
+                before startup and whenever the active adapter set changes.
         """
         return None
 
@@ -201,6 +202,65 @@ def _validate_stable_adapters(
     return stable_adapters
 
 
+class RendezvousHashRouter:
+    """Route keys over a validated, restart-stable adapter set.
+
+    Adapter sorting, duplicate detection, and placement-id encoding happen only
+    when :meth:`update_adapters` is called. Store and prefetch policies can then
+    reuse the cached representation on every request in the data path.
+    """
+
+    def __init__(self) -> None:
+        self._stable_adapters: list[tuple[int, str, bytes]] = []
+        self._adapter_indices: tuple[int, ...] = ()
+
+    def update_adapters(self, adapters: list[AdapterDescriptor]) -> None:
+        """Validate and cache a complete adapter set.
+
+        The existing cache is preserved when validation fails.
+
+        Args:
+            adapters: Active adapters with unique stable placement identifiers.
+
+        Raises:
+            ValueError: If a placement identifier is missing or duplicated.
+        """
+        stable_adapters = _validate_stable_adapters(adapters)
+        adapter_indices = tuple(adapter[0] for adapter in stable_adapters)
+        self._stable_adapters = stable_adapters
+        self._adapter_indices = adapter_indices
+
+    @property
+    def adapter_indices(self) -> tuple[int, ...]:
+        """Return cached runtime indices in stable placement order."""
+        return self._adapter_indices
+
+    def select_adapter(self, key: ObjectKey) -> int:
+        """Return the rendezvous owner for one key.
+
+        Args:
+            key: Object key to route.
+
+        Returns:
+            Runtime index of the selected adapter.
+
+        Raises:
+            ValueError: If the router has no active adapters.
+        """
+        if not self._stable_adapters:
+            raise ValueError("rendezvous hashing requires at least one adapter")
+        return _rendezvous_adapter_index_for_key(key, self._stable_adapters)
+
+    def select_adapters(self, keys: list[ObjectKey]) -> list[int]:
+        """Return rendezvous owners for a batch of keys."""
+        if not self._stable_adapters:
+            raise ValueError("rendezvous hashing requires at least one adapter")
+        return [
+            _rendezvous_adapter_index_for_key(key, self._stable_adapters)
+            for key in keys
+        ]
+
+
 def rendezvous_adapter_index_for_key(
     key: ObjectKey,
     adapters: list[AdapterDescriptor],
@@ -219,11 +279,9 @@ def rendezvous_adapter_index_for_key(
         ValueError: If no adapters are supplied or placement identifiers are
             missing or duplicated.
     """
-    stable_adapters = _validate_stable_adapters(adapters)
-    if not stable_adapters:
-        raise ValueError("rendezvous hashing requires at least one adapter")
-
-    return _rendezvous_adapter_index_for_key(key, stable_adapters)
+    router = RendezvousHashRouter()
+    router.update_adapters(adapters)
+    return router.select_adapter(key)
 
 
 def rendezvous_adapter_indices_for_keys(
@@ -242,10 +300,9 @@ def rendezvous_adapter_indices_for_keys(
     Raises:
         ValueError: If the adapter set is empty or lacks unique stable ids.
     """
-    stable_adapters = _validate_stable_adapters(adapters)
-    if not stable_adapters:
-        raise ValueError("rendezvous hashing requires at least one adapter")
-    return [_rendezvous_adapter_index_for_key(key, stable_adapters) for key in keys]
+    router = RendezvousHashRouter()
+    router.update_adapters(adapters)
+    return router.select_adapters(keys)
 
 
 def _rendezvous_adapter_index_for_key(
@@ -344,13 +401,16 @@ class StripedStorePolicy(StorePolicy):
     single-copy capacity and bandwidth benefits of striping.
     """
 
+    def __init__(self) -> None:
+        self._router = RendezvousHashRouter()
+
     def validate_adapters(self, adapters: list[AdapterDescriptor]) -> None:
-        """Require unique, persistent placement identifiers.
+        """Validate and cache unique, persistent placement identifiers.
 
         Args:
             adapters: Configured L2 adapter descriptors.
         """
-        _validate_stable_adapters(adapters)
+        self._router.update_adapters(adapters)
 
     def select_store_targets(
         self,
@@ -369,15 +429,11 @@ class StripedStorePolicy(StorePolicy):
         """
         if not adapters:
             return {}
-        stable_adapters = _validate_stable_adapters(adapters)
         targets: dict[int, list[ObjectKey]] = {
-            adapter_index: []
-            for adapter_index, _placement_id, _bytes in stable_adapters
+            adapter_index: [] for adapter_index in self._router.adapter_indices
         }
-        adapter_indices = [
-            _rendezvous_adapter_index_for_key(key, stable_adapters) for key in keys
-        ]
-        for key, adapter_index in zip(keys, adapter_indices, strict=True):
+        for key in keys:
+            adapter_index = self._router.select_adapter(key)
             targets[adapter_index].append(key)
         return targets
 

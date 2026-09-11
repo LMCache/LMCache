@@ -15,7 +15,7 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
-    rendezvous_adapter_indices_for_keys,
+    RendezvousHashRouter,
 )
 
 
@@ -29,10 +29,11 @@ class PrefetchPolicy(ABC):
     """
 
     def validate_adapters(self, adapters: list[AdapterDescriptor]) -> None:
-        """Validate an adapter set before the controller starts.
+        """Validate and prepare an adapter set before it is used for routing.
 
         Args:
-            adapters: Configured L2 adapter descriptors.
+            adapters: Active L2 adapter descriptors. The controller calls this
+                before startup and whenever the active adapter set changes.
         """
         return None
 
@@ -218,14 +219,16 @@ class RetainPrefetchPolicy(DefaultPrefetchPolicy):
 class StripedPrefetchPolicy(DefaultPrefetchPolicy):
     """Query only the stable rendezvous owner of each striped key."""
 
+    def __init__(self) -> None:
+        self._router = RendezvousHashRouter()
+
     def validate_adapters(self, adapters: list[AdapterDescriptor]) -> None:
-        """Require adapters accepted by rendezvous placement.
+        """Validate and cache adapters accepted by rendezvous placement.
 
         Args:
             adapters: Configured L2 adapter descriptors.
         """
-        if adapters:
-            rendezvous_adapter_indices_for_keys([], adapters)
+        self._router.update_adapters(adapters)
 
     def select_lookup_targets(
         self,
@@ -246,9 +249,10 @@ class StripedPrefetchPolicy(DefaultPrefetchPolicy):
         if not adapters:
             return None
 
-        targets: dict[int, list[int]] = {adapter.index: [] for adapter in adapters}
-        adapter_indices = rendezvous_adapter_indices_for_keys(keys, adapters)
-        for key_index, adapter_index in enumerate(adapter_indices):
+        targets: dict[int, list[int]] = {
+            adapter_index: [] for adapter_index in self._router.adapter_indices
+        }
+        for key_index, adapter_index in enumerate(self._router.select_adapters(keys)):
             targets[adapter_index].append(key_index)
         return targets
 

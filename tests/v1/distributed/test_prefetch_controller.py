@@ -530,7 +530,9 @@ class TestMultiAdapterPrefetch:
         descriptors = [make_stable_descriptor(i) for i in range(3)]
         layout = make_layout()
         keys = [make_object_key(i) for i in range(12)]
-        store_targets = StripedStorePolicy().select_store_targets(keys, descriptors)
+        store_policy = StripedStorePolicy()
+        store_policy.validate_adapters(descriptors)
+        store_targets = store_policy.select_store_targets(keys, descriptors)
 
         for adapter_index, adapter_keys in store_targets.items():
             store_keys_in_l2(adapters[adapter_index], adapter_keys, layout)
