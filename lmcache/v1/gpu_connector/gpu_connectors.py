@@ -30,6 +30,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_tokens_per_layer,
     normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
+    resolve_block_stride_and_log_layout,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
@@ -262,6 +263,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.block_size = get_block_size(kv_caches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
         self.head_size = get_head_size(kv_caches, self.engine_kv_format)
+        self.block_stride_elems = (
+            resolve_block_stride_and_log_layout(
+                kv_caches, self.engine_kv_format, layer_idx=0, group_idx=0
+            )
+            or 0
+        )
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -327,6 +334,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.engine_kv_format,
             block_size=self.block_size,
             head_size=self.head_size,
+            block_stride_elems=self.block_stride_elems,
             skip_prefix_n_tokens=skip_prefix_n_tokens,
         )
 
@@ -375,6 +383,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.engine_kv_format,
                     block_size=self.block_size,
                     head_size=self.head_size,
+                    block_stride_elems=self.block_stride_elems,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -390,6 +399,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.engine_kv_format,
                     block_size=self.block_size,
                     head_size=self.head_size,
+                    block_stride_elems=self.block_stride_elems,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -474,6 +484,12 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.block_size = get_block_size(self.kvcaches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
         self.head_size = get_head_size(self.kvcaches, self.engine_kv_format)
+        self.block_stride_elems = (
+            resolve_block_stride_and_log_layout(
+                self.kvcaches, self.engine_kv_format, layer_idx=0, group_idx=0
+            )
+            or 0
+        )
 
         if self.metadata.kv_layer_groups_manager is None:
             self.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
@@ -565,6 +581,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 self.engine_kv_format,
                 block_size=self.block_size,
                 head_size=self.head_size,
+                block_stride_elems=self.block_stride_elems,
                 skip_prefix_n_tokens=skip_prefix_n_tokens,
             )
 
@@ -596,6 +613,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         self.engine_kv_format,
                         block_size=self.block_size,
                         head_size=self.head_size,
+                        block_stride_elems=self.block_stride_elems,
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -614,6 +632,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         self.engine_kv_format,
                         block_size=self.block_size,
                         head_size=self.head_size,
+                        block_stride_elems=self.block_stride_elems,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None

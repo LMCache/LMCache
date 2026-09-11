@@ -46,17 +46,11 @@ class TestBlendTracingSubscriber:
         subs = subscriber.get_subscriptions()
         assert EventType.CB_REQUEST_START in subs
         assert EventType.CB_REQUEST_END in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_SUBMITTED in subs
         assert EventType.CB_RETRIEVE_SUBMITTED in subs
-        assert EventType.CB_STORE_FINAL_SUBMITTED in subs
         assert EventType.CB_LOOKUP_START in subs
         assert EventType.CB_LOOKUP_END in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_START in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_END in subs
         assert EventType.CB_RETRIEVE_START in subs
         assert EventType.CB_RETRIEVE_END in subs
-        assert EventType.CB_STORE_FINAL_START in subs
-        assert EventType.CB_STORE_FINAL_END in subs
         assert EventType.CB_FINGERPRINTS_REGISTERED in subs
         assert EventType.CB_CHUNKS_EVICTED in subs
 
@@ -129,70 +123,6 @@ class TestBlendTracingSubscriber:
         assert len(subscriber._pending) == 0
 
     # ------------------------------------------------------------------
-    # Deferred close: SESSION_END races GPU store_pre_computed
-    # ------------------------------------------------------------------
-
-    def test_session_end_deferred_until_store_pre_computed_finishes(
-        self, bus, registry, subscriber
-    ):
-        bus.start()
-        now = time.time()
-        sid = "req-deferred-store-pre"
-
-        bus.publish(
-            Event(
-                event_type=EventType.CB_REQUEST_START,
-                session_id=sid,
-                timestamp=now,
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_SUBMITTED,
-                session_id=sid,
-                timestamp=now + 0.001,
-                metadata={"instance_id": 0},
-            )
-        )
-        # SESSION_END arrives before GPU store completes
-        bus.publish(
-            Event(
-                event_type=EventType.CB_REQUEST_END,
-                session_id=sid,
-                timestamp=now + 0.005,
-            )
-        )
-        time.sleep(0.15)
-
-        # Root should still be open
-        assert registry.get(sid, "cb.request") is not None
-        assert sid in subscriber._deferred_session_end_ts
-
-        # GPU store completes
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
-                session_id=sid,
-                timestamp=now + 0.010,
-                metadata={"instance_id": 0, "num_tokens": 64},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
-                session_id=sid,
-                timestamp=now + 0.050,
-                metadata={"instance_id": 0, "stored_chunks": 4, "success": True},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-        assert registry.get(sid, "cb.request") is None
-        assert sid not in subscriber._deferred_session_end_ts
-        assert sid not in subscriber._pending_gpu_ops
-
-    # ------------------------------------------------------------------
     # Deferred close: SESSION_END races GPU retrieve
     # ------------------------------------------------------------------
 
@@ -254,154 +184,6 @@ class TestBlendTracingSubscriber:
         assert sid not in subscriber._pending_gpu_ops
 
     # ------------------------------------------------------------------
-    # Deferred close: SESSION_END races GPU store_final
-    # ------------------------------------------------------------------
-
-    def test_session_end_deferred_until_store_final_finishes(
-        self, bus, registry, subscriber
-    ):
-        bus.start()
-        now = time.time()
-        sid = "req-deferred-store-final"
-
-        bus.publish(
-            Event(
-                event_type=EventType.CB_REQUEST_START,
-                session_id=sid,
-                timestamp=now,
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_SUBMITTED,
-                session_id=sid,
-                timestamp=now + 0.001,
-                metadata={"instance_id": 2},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_REQUEST_END,
-                session_id=sid,
-                timestamp=now + 0.005,
-            )
-        )
-        time.sleep(0.15)
-
-        assert registry.get(sid, "cb.request") is not None
-        assert sid in subscriber._deferred_session_end_ts
-
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_START,
-                session_id=sid,
-                timestamp=now + 0.010,
-                metadata={"instance_id": 2, "num_tokens": 256},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_END,
-                session_id=sid,
-                timestamp=now + 0.060,
-                metadata={"instance_id": 2, "stored_chunks": 16, "success": True},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-        assert registry.get(sid, "cb.request") is None
-        assert sid not in subscriber._deferred_session_end_ts
-        assert sid not in subscriber._pending_gpu_ops
-
-    # ------------------------------------------------------------------
-    # Multiple GPU ops: all must finish before root closes
-    # ------------------------------------------------------------------
-
-    def test_multiple_gpu_ops_all_must_finish(self, bus, registry, subscriber):
-        bus.start()
-        now = time.time()
-        sid = "req-multi-gpu-ops"
-
-        bus.publish(
-            Event(
-                event_type=EventType.CB_REQUEST_START,
-                session_id=sid,
-                timestamp=now,
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_SUBMITTED,
-                session_id=sid,
-                timestamp=now + 0.001,
-                metadata={"instance_id": 0},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_SUBMITTED,
-                session_id=sid,
-                timestamp=now + 0.002,
-                metadata={"instance_id": 0},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_REQUEST_END,
-                session_id=sid,
-                timestamp=now + 0.005,
-            )
-        )
-        time.sleep(0.15)
-
-        # Both in flight — root still open
-        assert registry.get(sid, "cb.request") is not None
-
-        # Store finishes first — retrieve still pending, root stays open
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
-                session_id=sid,
-                timestamp=now + 0.010,
-                metadata={"instance_id": 0, "num_tokens": 64},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
-                session_id=sid,
-                timestamp=now + 0.030,
-                metadata={"instance_id": 0, "stored_chunks": 4, "success": True},
-            )
-        )
-        time.sleep(0.15)
-        assert registry.get(sid, "cb.request") is not None
-
-        # Retrieve finishes — all done, root closes
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_START,
-                session_id=sid,
-                timestamp=now + 0.040,
-                metadata={"instance_id": 0, "num_chunks": 4},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_RETRIEVE_END,
-                session_id=sid,
-                timestamp=now + 0.060,
-                metadata={"instance_id": 0, "num_chunks": 4, "success": True},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-        assert registry.get(sid, "cb.request") is None
-        assert sid not in subscriber._deferred_session_end_ts
-
-    # ------------------------------------------------------------------
     # Child span lifecycles
     # ------------------------------------------------------------------
 
@@ -431,26 +213,6 @@ class TestBlendTracingSubscriber:
         bus.stop()
         assert len(subscriber._pending) == 0
 
-    def test_store_pre_computed_span_lifecycle(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
-                session_id="req-sp",
-                metadata={"instance_id": 0, "num_tokens": 64},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
-                session_id="req-sp",
-                metadata={"instance_id": 0, "stored_chunks": 4, "success": True},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-        assert len(subscriber._pending) == 0
-
     def test_retrieve_span_lifecycle(self, bus, subscriber):
         bus.start()
         bus.publish(
@@ -465,26 +227,6 @@ class TestBlendTracingSubscriber:
                 event_type=EventType.CB_RETRIEVE_END,
                 session_id="req-ret",
                 metadata={"instance_id": 1, "num_chunks": 3, "success": True},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-        assert len(subscriber._pending) == 0
-
-    def test_store_final_span_lifecycle(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_START,
-                session_id="req-sf",
-                metadata={"instance_id": 2, "num_tokens": 512},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_END,
-                session_id="req-sf",
-                metadata={"instance_id": 2, "stored_chunks": 32, "success": True},
             )
         )
         time.sleep(0.15)
@@ -527,9 +269,9 @@ class TestBlendTracingSubscriber:
         bus.start()
         bus.publish(
             Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
+                event_type=EventType.CB_RETRIEVE_END,
                 session_id="orphan",
-                metadata={"stored_chunks": 2, "success": True},
+                metadata={"instance_id": 0, "num_chunks": 2, "success": True},
             )
         )
         time.sleep(0.15)
@@ -540,9 +282,9 @@ class TestBlendTracingSubscriber:
         bus.start()
         bus.publish(
             Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
+                event_type=EventType.CB_RETRIEVE_START,
                 session_id="leaked",
-                metadata={"instance_id": 0, "num_tokens": 64},
+                metadata={"instance_id": 0, "num_chunks": 4},
             )
         )
         time.sleep(0.15)
@@ -869,7 +611,7 @@ class TestCBHitRateAttributes:
         assert root.attributes["prefix_hits"] == 0
 
     def test_hit_rate_includes_prefix_and_non_prefix(self, exporter):
-        """V3 hit_rate numerator = prefix_hit_tokens + non_prefix_hit_tokens;
+        """Blend hit_rate numerator = prefix_hit_tokens + non_prefix_hit_tokens;
         both are also recorded as separate attributes on the root span."""
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
         bus.register_subscriber(BlendTracingSubscriber(SpanRegistry()))
@@ -895,7 +637,7 @@ class TestCBHitRateAttributes:
                 metadata={
                     "prefix_hit_tokens": 256,
                     "non_prefix_hit_tokens": 256,
-                    "hit_tokens": 512,  # = prefix + non_prefix (set by blend_v3)
+                    "hit_tokens": 512,  # = prefix + non_prefix
                     "requested_tokens": 1024,
                 },
             )
@@ -919,7 +661,7 @@ class TestCBHitRateAttributes:
 
 
 class TestCBLookupSubspans:
-    """V3 lookup sub-spans (cb.fingerprint_match / cb.prefix_lookup /
+    """Blend lookup sub-spans (cb.fingerprint_match / cb.prefix_lookup /
     cb.sparse_prefetch) nest under cb.lookup, not the cb.request root."""
 
     @pytest.fixture
@@ -1077,9 +819,10 @@ class TestCBLookupSubspans:
         assert spans["cb.scatter"].attributes.get("dropped") == "0"
 
 
-class TestCBV3RootSpanClose:
-    """V3 publishes CB_RETRIEVE_SUBMITTED but never a store_final, so the root
-    close must be gated on in-flight GPU ops alone."""
+class TestCBRootSpanClose:
+    """The blend module publishes CB_RETRIEVE_SUBMITTED and ends the request on
+    the last CB_RETRIEVE_END, so the root close is gated on in-flight GPU ops
+    alone."""
 
     @pytest.fixture
     def exporter(self):
@@ -1113,65 +856,10 @@ class TestCBV3RootSpanClose:
             bus.publish(Event(event_type=event_type, session_id=sid, metadata=metadata))
         time.sleep(0.3)
 
-    def test_v3_root_closes_without_store_final(self, exporter):
-        """``expects_store_final=False`` keeps the store-final bridge empty, so
-        CB_REQUEST_END after the retrieve closes the root."""
+    def test_root_closes_after_retrieve_end(self, exporter):
+        """CB_REQUEST_END after the retrieve has ended closes the root."""
         bus = self._start_bus()
-        sid = "cb-v3-close"
-        self._drain(
-            bus,
-            sid,
-            [
-                (EventType.CB_REQUEST_START, {}),
-                (
-                    EventType.CB_RETRIEVE_SUBMITTED,
-                    {"instance_id": 0, "expects_store_final": False},
-                ),
-                (EventType.CB_RETRIEVE_START, {"num_chunks": 2}),
-                (EventType.CB_RETRIEVE_END, {"success": True}),
-                (EventType.CB_REQUEST_END, {}),
-            ],
-        )
-        bus.stop()
-
-        assert self._root(exporter, sid) is not None, (
-            "cb.request never closed; the V2 store-final bridge leaked into V3"
-        )
-
-    def test_v3_submitted_defers_close_until_retrieve_end(self, exporter):
-        """At TP>1 a no-op retrieve on one worker publishes CB_REQUEST_END on the
-        CPU while another worker's scatter is still on the stream — the root must
-        wait for CB_RETRIEVE_END."""
-        bus = self._start_bus()
-        sid = "cb-v3-defer"
-        self._drain(
-            bus,
-            sid,
-            [
-                (EventType.CB_REQUEST_START, {}),
-                (
-                    EventType.CB_RETRIEVE_SUBMITTED,
-                    {"instance_id": 0, "expects_store_final": False},
-                ),
-                (EventType.CB_RETRIEVE_START, {"num_chunks": 2}),
-                # The other worker's no-op retrieve ends the request early.
-                (EventType.CB_REQUEST_END, {}),
-            ],
-        )
-
-        assert self._root(exporter, sid) is None, (
-            "root closed while a retrieve was live"
-        )
-
-        self._drain(bus, sid, [(EventType.CB_RETRIEVE_END, {"success": True})])
-        bus.stop()
-
-        assert self._root(exporter, sid) is not None
-
-    def test_v2_submitted_still_waits_for_store_final(self, exporter):
-        """Without the flag (V2), the store-final bridge is unchanged."""
-        bus = self._start_bus()
-        sid = "cb-v2-bridge"
+        sid = "cb-close"
         self._drain(
             bus,
             sid,
@@ -1183,23 +871,33 @@ class TestCBV3RootSpanClose:
                 (EventType.CB_REQUEST_END, {}),
             ],
         )
+        bus.stop()
 
-        assert self._root(exporter, sid) is None, (
-            "root closed before the expected store_final"
-        )
+        assert self._root(exporter, sid) is not None, "cb.request never closed"
 
+    def test_submitted_defers_close_until_retrieve_end(self, exporter):
+        """At TP>1 a no-op retrieve on one worker publishes CB_REQUEST_END on the
+        CPU while another worker's scatter is still on the stream — the root must
+        wait for CB_RETRIEVE_END."""
+        bus = self._start_bus()
+        sid = "cb-defer"
         self._drain(
             bus,
             sid,
             [
-                (EventType.CB_STORE_FINAL_SUBMITTED, {"instance_id": 0}),
-                (EventType.CB_STORE_FINAL_START, {"instance_id": 0, "num_tokens": 128}),
-                (
-                    EventType.CB_STORE_FINAL_END,
-                    {"instance_id": 0, "stored_chunks": 1, "success": True},
-                ),
+                (EventType.CB_REQUEST_START, {}),
+                (EventType.CB_RETRIEVE_SUBMITTED, {"instance_id": 0}),
+                (EventType.CB_RETRIEVE_START, {"num_chunks": 2}),
+                # The other worker's no-op retrieve ends the request early.
+                (EventType.CB_REQUEST_END, {}),
             ],
         )
+
+        assert self._root(exporter, sid) is None, (
+            "root closed while a retrieve was live"
+        )
+
+        self._drain(bus, sid, [(EventType.CB_RETRIEVE_END, {"success": True})])
         bus.stop()
 
         assert self._root(exporter, sid) is not None

@@ -374,17 +374,9 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
 
 
 class _MambaUnifiedViewEdit(KVCacheGroupEdit):
-    """Re-view mamba's unified state as a single attention tensor
+    """Re-view mamba's unified state as a per-token paged tensor.
 
-    This is for vLLM >= 0.26.0, where the unified KV cache layout is implemented.
-
-    In this case, Mamba's KV layer will be a single tensor with the shape of:
-    - [num_blocks, 1, 1, context_size]
-    Where the context size equals to vllm_block_size * ``head_size''
-
-
-    What we do here is to convert the shape to
-    - [num_blocks, 1, vllm_block_size, head_size]
+    For vLLM >= 0.26.0, where the unified KV cache layout is implemented.
     """
 
     name = "mamba-unified-view"
@@ -405,23 +397,65 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         kv_cache: RegisteredKVCache,
         layout_hints: LayoutHints,
     ) -> torch.Tensor:
-        """
-        Convert [num_blocks, 1, 1, context_size] to
-        [num_blocks, 1, vllm_block_size, head_size] for HND layout, or
-        [num_blocks, vllm_block_size, 1, head_size] for NHD layout.
+        """Re-view the per-block state row as block_size tokens.
+
+        Input: [num_blocks, 1, 1, row] with strides (S, row, row, 1),
+        where the row is this layer's state and S >= row (the page
+        padding, and any sibling layers on a shared pool, live between
+        row and S).
+
+        Output for NHD: [num_blocks, block_size, 1, head_size] with
+        strides (S, head_size, head_size, 1). HND swaps dims 1 and 2:
+        [num_blocks, 1, block_size, head_size] with strides
+        (S, block_size * head_size, head_size, 1).
+
+        head_size = ceil(row / block_size), rounded up to the kernels'
+        vector alignment, and block_size * head_size may exceed the row
+        by at most this layer's own page padding
+        (spec.page_size_bytes), never reaching sibling bytes.
         """
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
         )
         kv_layout = layout_hints.get("kv_layout", "none")
-        if kv_layout == "NHD":
-            return kv_cache.view(kv_cache.shape[0], spec.block_size, 1, -1)
-        elif kv_layout == "HND":
-            return kv_cache.view(kv_cache.shape[0], 1, spec.block_size, -1)
-        else:
+        if kv_layout not in ("NHD", "HND"):
             raise ValueError(
                 f"Unsupported kv_layout: {kv_layout}. Only NHD and HND are supported."
             )
+        num_blocks = kv_cache.shape[0]
+        row = kv_cache[0].numel()
+        block_size = spec.block_size
+        elem = kv_cache.element_size()
+        block_step = kv_cache.stride(0)
+        base = -(-row // block_size)
+        # The transfer kernels vectorize by token width, so round it up to
+        # the widest alignment that divides the block step. The spill must
+        # stay inside this layer's own padded page -- on a shared pool
+        # stride(0) spans sibling layers, so it is not the bound.
+        page_bytes = spec.page_size_bytes
+        head_size = 0
+        for align_bytes in (16, 8, 4, 2):
+            if align_bytes % elem != 0 or (block_step * elem) % align_bytes != 0:
+                continue
+            step = align_bytes // elem
+            candidate = -(-base // step) * step
+            if candidate * block_size * elem <= page_bytes:
+                head_size = candidate
+                break
+        if head_size == 0:
+            raise ValueError(
+                f"cannot tile a {row}-element state row into {block_size} "
+                f"aligned tokens within the {page_bytes}-byte page"
+            )
+        if kv_layout == "NHD":
+            inner = (block_size, 1, head_size)
+            inner_strides = (head_size, head_size, 1)
+        else:
+            inner = (1, block_size, head_size)
+            inner_strides = (block_size * head_size, head_size, 1)
+        return kv_cache.as_strided(
+            (num_blocks, *inner), (kv_cache.stride(0), *inner_strides)
+        )
 
 
 class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):

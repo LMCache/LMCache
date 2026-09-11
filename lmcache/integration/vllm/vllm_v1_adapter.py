@@ -34,6 +34,7 @@ from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
+    extract_request_configs_from_sampling_params,
     lmcache_get_or_create_config,
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
@@ -96,15 +97,7 @@ tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
 def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
-    request_configs = None
-    if sampling_params and sampling_params.extra_args is not None:
-        if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
-            for k, v in kv_transfer_params.items():
-                if k.startswith("lmcache."):
-                    if request_configs is None:
-                        request_configs = {}
-                    request_configs[k] = v
-    return request_configs
+    return extract_request_configs_from_sampling_params(sampling_params)
 
 
 @dataclass

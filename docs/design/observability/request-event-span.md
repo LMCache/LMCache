@@ -58,17 +58,29 @@ closes the root span before the retrieve child span ends.
 
 ## Root Span Attributes
 
-In addition to `session_id`, the root `"request"` span carries three hit rate
-attributes that are set when `MP_LOOKUP_PREFETCH_END` is processed:
+In addition to `session_id`, the root `"request"` span carries eight hit rate
+and outcome attributes that are set when `MP_LOOKUP_PREFETCH_END` is processed:
 
 | Attribute | OTel type | Value |
 |-----------|-----------|-------|
 | `hit_tokens` | `int` | tokens found in L1+L2 (numerator) |
 | `requested_tokens` | `int` | chunk-aligned tokens submitted for lookup (denominator) |
 | `hit_rate` | `float` | `hit_tokens / requested_tokens`; `0.0` when denominator is zero |
+| `l1_hit_tokens` | `int` | tokens in the prefix L1 alone could serve |
+| `l2_hit_tokens` | `int` | tokens by which L2 extended that prefix |
+| `l1_hit_rate` | `float` | `l1_hit_tokens / requested_tokens`; `0.0` when denominator is zero |
+| `l2_hit_rate` | `float` | `l2_hit_tokens / requested_tokens`; `0.0` when denominator is zero |
+| `early_exit_reason` | `str` | branch of `lookup()` that returned before submitting a prefetch; `""` on the normal path |
 
 `hit_rate` is stored as a precomputed float because trace UIs (Tempo, Jaeger)
-cannot derive it from two integer attributes at query time.
+cannot derive it from two integer attributes at query time; the same reasoning
+applies to `l1_hit_rate` and `l2_hit_rate`.
+
+`l1_hit_tokens + l2_hit_tokens == hit_tokens` exactly — `l2` is the remainder
+of `found_count` after the L1-servable prefix, not an independent count.  The
+two rates therefore sum to `hit_rate` up to float rounding, not bit-for-bit.
+See [EVENTS.md](../v1/mp_observability/EVENTS.md) for the derivation and for
+the `early_exit_reason` vocabulary.
 
 **Invariant:** these attributes are set at `MP_LOOKUP_PREFETCH_END` time, while
 the root span is still open.  `LP_END` always precedes `MP_REQUEST_END` in the
@@ -80,64 +92,28 @@ attributes are written.
 
 ### CB path — `cb.request` span
 
-The same three attributes appear on the `"cb.request"` root span and are set
-when `CB_LOOKUP_END` is processed by `BlendTracingSubscriber`.
+The `hit_tokens` / `requested_tokens` / `hit_rate` trio also appears on the
+`"cb.request"` root span, set when `CB_LOOKUP_END` is processed by
+`BlendTracingSubscriber`.  The per-tier split and `early_exit_reason` are
+specific to the MP path and are not set on `"cb.request"`.
 
-`CB_LOOKUP_END` carries `hit_tokens` and `requested_tokens` in its metadata,
-computed at the emit site in `lmcache/v1/multiprocess/modules/blend.py`:
+`CB_LOOKUP_END` carries the hit accounting in its metadata, computed at the
+emit site in `lmcache/v1/multiprocess/modules/blend.py`
+(`BlendModule.cb_unified_lookup`):
 
 | Field | Value |
 |-------|-------|
-| `hit_tokens` | `storage_hits * chunk_size` |
+| `prefix_hit_tokens` | tokens covered by the prefix leg (L1+L2) |
+| `segmented_prefix_hit_tokens` | tokens retained past a mid-prefix gap (`--enable-segmented-prefix`) |
+| `non_prefix_hit_tokens` | tokens served by shifted (fingerprint-matched) chunks |
+| `hit_tokens` | `prefix_hit_tokens + segmented_prefix_hit_tokens + non_prefix_hit_tokens` (disjoint ranges) |
 | `requested_tokens` | `(num_tokens // chunk_size) * chunk_size` (chunk-aligned) |
+| `prefix_hits` | chunks found by the prefix leg (not fingerprint matching) |
 
-All three `CB_LOOKUP_END` emit sites (no-fingerprint-match, no-GPU-context,
-happy path) populate these fields, so `hit_rate` is always present on the
-`cb.request` span.
-
-A fourth attribute is also set on `"cb.request"` at `CB_LOOKUP_END` time:
-
-| Attribute | OTel type | Value |
-|-----------|-----------|-------|
-| `prefix_hits` | `int` | chunks found via the prefix probe (not fingerprint matching) |
-
-#### Prefix probe
-
-`cb_lookup_pre_computed` has two lookup paths:
-
-1. **Fingerprint path** — `BlendTokenRangeMatcher.match_sub_sequence` finds
-   sub-sequence matches using polynomial rolling hashes.  Covers arbitrary
-   (non-prefix) positions in the token sequence.
-2. **Prefix probe** — a fallback that runs after the fingerprint path and fills
-   in chunks at contiguous prefix positions not already covered by fingerprint
-   results.  It calls `token_hasher.compute_chunk_hashes(token_ids)` to derive
-   the same storage keys used by `cb_store_final` and `cb_store_pre_computed`,
-   then creates `CBMatchResult(old_st==cur_st)` candidates for uncovered slots.
-   These candidates flow through the same prefetch/poll/evict machinery as
-   fingerprint results.
-
-The prefix probe closes the gap between the MP and CB storage paths: chunks
-written by `cb_store_final` (which only registers fingerprints when
-`worker_id in [0, None]`) and chunks written via the MP `store()` path (which
-uses block hashes incompatible with fingerprint matching) are both visible to
-`cb_lookup_pre_computed` through the prefix probe.
-
-#### Lazy registration
-
-When `cb_lookup_pre_computed` returns results that came *entirely* from the
-prefix probe (i.e. `fingerprint_results` is empty) and the calling worker is
-rank 0 or the driver (`worker_id in [0, None]`), the found prefix chunks are
-registered into `BlendTokenRangeMatcher` so that future lookups can find them
-via the faster fingerprint path.  Registration is guarded by
-`BlendTokenRangeMatcher.has_chunk(token_hash)` to prevent overwriting existing
-compact-ID assignments when the range matcher already has entries for the same
-token sequence.
-
-`prefix_hits` counts the chunks found exclusively through the prefix probe
-(after deduplication against fingerprint results).  When `fingerprint_results`
-is non-empty and prefix candidates fill in additional positions,
-`prefix_hits` reflects only the prefix-probe portion of the total
-`storage_hits`.
+The subscriber stamps `hit_tokens`, `requested_tokens`, `hit_rate`, the three
+per-component token counts and rates, and `prefix_hits` onto `"cb.request"`.
+Every `CB_LOOKUP_END` emit site populates these fields, so `hit_rate` is always
+present on the span.
 
 ## Request Scenarios
 
@@ -270,9 +246,8 @@ root "request"  [═════════════════════
 | `lmcache/v1/mp_observability/subscribers/tracing/mp_server.py` | Root span logic: `_pending_store_count`, `_pending_retrieve_count`, `_deferred_session_end_ts`; handlers `_on_request_start`, `_on_store_submitted`, `_on_retrieve_submitted`, `_on_session_end`; helpers `_get_or_create_request_span`, `_close_request_span` |
 | `lmcache/v1/mp_observability/subscribers/tracing/span_registry.py` | `SpanRegistry`: shared dict of open spans keyed by `(session_id, span_name)` for cross-subscriber parent lookup |
 | `tests/v1/mp_observability/subscribers/tracing/test_mp_server.py` | Tests for all scenarios including retrieve deferral |
-| `lmcache/v1/multiprocess/modules/blend.py` | Prefix probe in `cb_lookup_pre_computed`; lazy registration; `has_chunk` on `BlendTokenRangeMatcher`; `prefix_hits` in `CB_LOOKUP_END` metadata |
-| `lmcache/v1/mp_observability/subscribers/tracing/cb_server.py` | Stamp `prefix_hits` on `"cb.request"` root span from `CB_LOOKUP_END` |
-| `tests/v1/multiprocess/test_blend_server_v2.py` | `has_chunk` unit tests |
+| `lmcache/v1/multiprocess/modules/blend.py` | `prefix_hits` and per-component hit tokens in `CB_LOOKUP_END` metadata |
+| `lmcache/v1/mp_observability/subscribers/tracing/cb_server.py` | Stamp `prefix_hits` and hit rates on `"cb.request"` root span from `CB_LOOKUP_END` |
 | `tests/v1/mp_observability/subscribers/tracing/test_cb_server.py` | `prefix_hits` attribute tests |
 
 ---
@@ -373,3 +348,88 @@ The `"retrieve"` entry is live in the registry from `MP_RETRIEVE_START` to
 ```
 
 This produces a three-level trace: `request → mp.retrieve → l2.disk_load`.
+
+---
+
+### Example 3 — attaching work that finishes after the parent ended
+
+GPU-clocked samples (`MP_TRANSFER_PHASE_SAMPLES`) are popped when a transfer's
+`MP_*_END` is dispatched -- after `mp.store` / `mp.retrieve` has ended and been
+popped from the registry, and possibly across several pops when other
+transfers end in between. `TransferPhaseTracingSubscriber`
+therefore captures the parent context on `MP_*_START` and keeps it (bounded by
+a TTL) and accumulates the transfer's samples. One request stores several
+chunks, so a session id maps to *several* same-direction transfers. Each
+transfer therefore mints its own `transfer_key` at the call site, echoed on
+both `MP_*_START` and `MP_*_END` and carried down into the native call, and
+the subscriber keys its table by that rather than by `(session_id,
+direction)`. One slot per session drops all but one of a five-chunk request's
+phase span pairs; matching them FIFO instead is not enough either, because
+`pop_completed_phase_timings()` is a process-global pop, so a single samples
+batch can carry several transfers' sections in arbitrary order. In the sample
+tuple the key travels in the `session_id` slot -- the native layer has no
+separate field for it -- so that value is a transfer key, not a session id.
+The direction is still checked against the key's transfer, or a mislabelled
+sample would hang a retrieve phase under a store span. `MP_*_END` is published on the
+transfer stream, so any samples event queued after it was popped after the
+last section finished: at the first samples event after END the subscriber
+starts one child per phase with
+explicit `start_time` / `end_time` against the retained context. OTel accepts children of an ended parent as long as the
+timestamps are supplied. The children are stacked back to back (each as long
+as its phase's total elapsed) rather than placed at their real, interleaved
+intervals, so the bars read as a breakdown.
+
+```python
+    def _on_transfer_start(self, event: Event) -> None:
+        parent = _PARENT_BY_EVENT[event.event_type]
+        ctx = self._registry.get_context(event.session_id, parent)
+        self._transfers[str(event.metadata["transfer_key"])] = _TransferTotals(
+            session_id=event.session_id, parent=parent, parent_ctx=ctx,
+            captured_at=time.monotonic())
+
+    def _flush(self) -> None:
+        cursor_s = transfer_first_start_s
+        for phase, totals in phases_in_execution_order:
+            span = _tracer.start_span(name_of(phase), context=parent_ctx,
+                                      start_time=int(cursor_s * 1e9))
+            span.set_attribute("elapsed_seconds", totals.elapsed_s)
+            cursor_s += totals.elapsed_s
+            span.end(end_time=int(cursor_s * 1e9))
+```
+
+This produces `request → mp.store → transfer.kernel_interval / transfer.staging`
+(one child per phase, stacked, each as long as that phase's total elapsed).
+
+### Reading the phase bars
+
+A bar's length is the interval between two CUDA events on the transfer stream,
+which is not the time that phase's work spent running.  A stream's ordering
+guarantee says op N+1 starts after op N, not that the device served this
+stream in between.  The two phases sit on opposite sides of that distinction:
+the staging copy is DMA on a copy engine, hardware the co-resident inference
+engine never asks for, so its bar is the transfer; the gather/scatter kernel
+needs SMs, which the engine holds, so its bar is mostly the wait for the
+engine's kernels to retire.
+
+A trace shows this against itself.  At a 2048-token chunked-prefill budget a
+9984-token prompt stores five chunks, and the fifth is issued after prefill
+has finished, onto an empty stream.  In one such trace the first four kernel
+bars read ~10.0 ms for 117 MB (11.7 GB/s) and the fifth read 0.18 ms for
+102 MB (571 GB/s) -- same code, a payload within 12%, 56x apart.  Across 15
+traces the medians were 11.4 GB/s for non-final chunks against 571.0 GB/s for
+final ones, while staging held at 18.1 GB/s throughout.  The empty-stream
+figure is the real one: profiling both processes on the same box put the d2h
+kernel at 21 us / 636 GB/s while its section read ~1280 us, the 1104 us gap
+ahead of it being the engine's own kernels.
+
+So a long kernel bar reads as *this transfer met a busy engine*, not *this
+copy was slow*, and dividing its `nbytes` by its duration is meaningless --
+`METRICS.md` ships no kernel throughput metric for that reason.  The bar is
+kept because that distinction, met-a-busy-engine versus slow-link, is worth
+seeing per transfer, and staging's bar beside it is the one that answers the
+link question.
+
+The wait is also not a cost the request pays.  The store bars in that trace
+sit ~170 ms apart -- the chunked-prefill cadence -- so each one overlaps the
+prefill step that is delaying it, and the 21.5 ms bars do not lengthen the
+859 ms request.

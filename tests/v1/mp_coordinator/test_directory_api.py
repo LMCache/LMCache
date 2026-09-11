@@ -6,6 +6,7 @@ ingestion, placement lookup, and stats)."""
 from fastapi.testclient import TestClient
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.schemas import encode_tokens
@@ -27,11 +28,28 @@ def _blend_client() -> TestClient:
     return TestClient(create_app(config))
 
 
-def _key(h: str = "aa", model: str = "m", rank: int = 0, salt: str = "") -> dict:
+MODEL = "m"
+WORLD_SIZE = 1
+
+
+def _key(
+    h: str = "aa",
+    model: str = MODEL,
+    rank: int = 0,
+    salt: str = "",
+    world_size: int = WORLD_SIZE,
+) -> dict:
+    """A key shaped the way a server emits one: ``kv_rank`` packs the
+    parallel setup the blend namespace is derived from."""
     return {
         "chunk_hash_hex": h,
         "model_name": model,
-        "kv_rank": rank,
+        "kv_rank": ObjectKey.ComputeKVRank(
+            world_size=world_size,
+            global_rank=rank,
+            local_world_size=world_size,
+            local_rank=rank,
+        ),
         "cache_salt": salt,
     }
 
@@ -228,9 +246,21 @@ def _chunk_tokens(first: int, count: int) -> list[int]:
     return list(range(first, first + count))
 
 
-def _blend_lookup(client: TestClient, tokens: list[int]) -> dict:
+def _blend_lookup(
+    client: TestClient,
+    tokens: list[int],
+    model: str = MODEL,
+    salt: str = "",
+    world_size: int = WORLD_SIZE,
+) -> dict:
     resp = client.post(
-        "/directory/blend-lookup", json={"tokens_b64": encode_tokens(tokens)}
+        "/directory/blend-lookup",
+        json={
+            "tokens_b64": encode_tokens(tokens),
+            "model_name": model,
+            "cache_salt": salt,
+            "world_size": world_size,
+        },
     )
     assert resp.status_code == 200
     return resp.json()
@@ -264,8 +294,39 @@ def test_blend_lookup_without_a_match_is_empty():
 
 def test_blend_lookup_rejects_a_malformed_token_buffer():
     with _blend_client() as client:
-        resp = client.post("/directory/blend-lookup", json={"tokens_b64": "not!b64"})
+        resp = client.post(
+            "/directory/blend-lookup",
+            json={"tokens_b64": "not!b64", "model_name": MODEL},
+        )
         assert resp.status_code == 422
+
+
+def test_blend_lookup_rejects_a_query_missing_its_namespace():
+    """Without a model there is no namespace to scope matches to."""
+    with _blend_client() as client:
+        resp = client.post(
+            "/directory/blend-lookup",
+            json={"tokens_b64": encode_tokens([1, 2, 3])},
+        )
+        assert resp.status_code == 422
+
+
+def test_blend_lookup_does_not_match_across_namespaces():
+    """The chunk was stored by another model, so its hash expands into keys
+    this caller has nothing under."""
+    chunk_size = MPCoordinatorConfig().chunk_size
+    content = _chunk_tokens(1000, chunk_size)
+    with _blend_client() as client:
+        entry = {
+            "key": _key(model="other"),
+            "size_bytes": 1024,
+            "token_ids": content,
+            "token_offset": 0,
+        }
+        _post_events(client, [_batch(entries=[entry])])
+
+        assert _blend_lookup(client, content)["matches"] == []
+        assert _blend_lookup(client, content, model="other")["matches"]
 
 
 def test_blend_lookup_stops_matching_a_deleted_chunk():
@@ -343,6 +404,36 @@ def test_lookup_keys_form_returns_placements_and_tokens():
         assert results[1]["placements"] == []
 
 
+def test_lookup_and_listing_report_access_counts():
+    def _access(seq: int) -> dict:
+        return _batch(
+            seq=seq, event_type="access", backend="", entries=[{"key": _key(h="aa")}]
+        )
+
+    with _client() as client:
+        _post_events(
+            client,
+            [
+                _batch(
+                    seq=1,
+                    entries=[
+                        {"key": _key(h="aa"), "size_bytes": 1},
+                        {"key": _key(h="bb"), "size_bytes": 1},
+                    ],
+                ),
+                _access(seq=2),
+                _access(seq=3),
+            ],
+        )
+
+        results = _lookup(client, [_key(h="aa"), _key(h="bb"), _key(h="ff")])["results"]
+        assert [r["access_count"] for r in results] == [2, 0, 0]
+
+        listed = client.get("/directory/keys").json()["keys"]
+        by_hash = {row["key"]["chunk_hash_hex"]: row["access_count"] for row in listed}
+        assert by_hash == {"aa": 2, "bb": 0}
+
+
 def test_lookup_malformed_key_is_rejected():
     with _client() as client:
         resp = client.post("/directory/lookup", json={"keys": [_key(h="zz")]})
@@ -395,6 +486,8 @@ def test_stats_reports_blend_index_counts():
         assert client.get("/directory/stats").json()["blend"] == {
             "num_contents": 0,
             "num_chunks": 0,
+            "num_claims": 0,
+            "num_namespaces": 0,
             "table_size": 1024,
         }
 
@@ -409,3 +502,5 @@ def test_stats_reports_blend_index_counts():
         data = client.get("/directory/stats").json()["blend"]
         assert data["num_contents"] == 1
         assert data["num_chunks"] == 1
+        assert data["num_claims"] == 1
+        assert data["num_namespaces"] == 1

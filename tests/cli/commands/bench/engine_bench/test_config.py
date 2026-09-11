@@ -11,6 +11,7 @@ import pytest
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
+    WarmupPolicy,
     _find_model_meta,
     auto_detect_model,
     parse_args_to_config,
@@ -73,6 +74,13 @@ class TestEngineBenchConfig:
     def test_ignore_eos_defaults_false_and_overridable(self) -> None:
         assert self._make_config().ignore_eos is False
         assert self._make_config(ignore_eos=True).ignore_eos is True
+
+    def test_warmup_policy_defaults_to_run_and_overridable(self) -> None:
+        assert self._make_config().warmup_policy is WarmupPolicy.RUN
+        assert (
+            self._make_config(warmup_policy=WarmupPolicy.SKIP).warmup_policy
+            is WarmupPolicy.SKIP
+        )
 
     def test_empty_engine_url(self) -> None:
         with pytest.raises(ValueError, match="engine_url must be non-empty"):
@@ -186,6 +194,23 @@ class TestParseArgsToConfig:
         cfg = parse_args_to_config(base_namespace)
         assert cfg.export_csv is False
         assert cfg.export_json is True
+
+    def test_warmup_runs_by_default(self, base_namespace) -> None:
+        # Namespaces built before --no-warmup existed (saved configs, older
+        # callers) must still resolve to a warmed run.
+        assert not hasattr(base_namespace, "no_warmup")
+        cfg = parse_args_to_config(base_namespace)
+        assert cfg.warmup_policy is WarmupPolicy.RUN
+
+    def test_no_warmup_selects_skip_policy(self, base_namespace) -> None:
+        base_namespace.no_warmup = True
+        cfg = parse_args_to_config(base_namespace)
+        assert cfg.warmup_policy is WarmupPolicy.SKIP
+
+    def test_no_warmup_false_selects_run_policy(self, base_namespace) -> None:
+        base_namespace.no_warmup = False
+        cfg = parse_args_to_config(base_namespace)
+        assert cfg.warmup_policy is WarmupPolicy.RUN
 
 
 # ---------------------------------------------------------------------------

@@ -7,10 +7,26 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # Pin to a released vLLM ROCm image so LMCache regressions can be separated
 # from upstream image changes. Override via VLLM_ROCM_IMAGE for explicit bumps.
 VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:v0.26.0}"
-CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}"
+MODE="${1:-}"
+SERIALIZE_ENV=()
 DOCKER=(docker)
 
+case "${MODE}" in
+    serialized)
+        SERIALIZE_ENV=(--env "AMD_SERIALIZE_KERNEL=1")
+        ;;
+    unserialized)
+        ;;
+    *)
+        echo "Usage: $0 <serialized|unserialized>" >&2
+        exit 2
+        ;;
+esac
+
+CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}-${MODE}"
+
 cd "${REPO_ROOT}"
+echo "AMD kernel mode: ${MODE}"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required to run the latest official vLLM ROCm image"
@@ -102,12 +118,14 @@ echo "Pulling ${VLLM_ROCM_IMAGE}"
     --env "GPU_FOR_VLLM=${GPU_FOR_VLLM}" \
     --env "GPU_FOR_BASELINE=${GPU_FOR_BASELINE}" \
     --env "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx942}" \
+    --env "AMD_KERNEL_MODE=${MODE}" \
+    "${SERIALIZE_ENV[@]}" \
     --env ATTENTION_BACKEND=auto \
     --env BATCH_INVARIANT=0 \
     --env "MAX_SLOWDOWN_PERCENT=${MAX_SLOWDOWN_PERCENT:-10}" \
     --env "VLLM_DISABLE_PREFIX_CACHING=${VLLM_DISABLE_PREFIX_CACHING:-true}" \
     --env LMCACHE_TRACK_USAGE=false \
-    --env RESULTS_DIR=/workspace/LMCache/amd-vllm-bench-results \
+    --env "RESULTS_DIR=/workspace/LMCache/amd-vllm-bench-results/${MODE}" \
     --entrypoint bash \
     "${VLLM_ROCM_IMAGE}" \
     .buildkite/scripts/amd-vllm-bench-container.sh

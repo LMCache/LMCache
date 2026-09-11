@@ -15,6 +15,13 @@ steps:
   - label: ":jigsaw: CacheBlend plugin compat (Llama-8B)"
     command: .buildkite/k3_tests/blend/run.sh
     timeout_in_minutes: 30
+    # A loaded self-hosted GPU can occasionally time out one OpenAI request
+    # after the stack is healthy. Retry once in a fresh pod; deterministic
+    # LMCache/plugin incompatibilities still fail the second attempt.
+    retry:
+      automatic:
+        - exit_status: 1
+          limit: 1
     agents: { queue: "k8s" }
     plugins:
       - kubernetes:

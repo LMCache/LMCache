@@ -28,9 +28,12 @@ class RequestType(enum.Enum):
     Enum of all available request types in the protocol system.
 
     When adding a new request type:
-    1. Add the enum member here
+    1. Append the member at the END of the enum, before the deprecated
+       aliases (values are auto-assigned in order; inserting mid-enum
+       renumbers later wire values and the frozen-table test fails)
     2. Add the protocol definition in the appropriate protocols/*.py file
-    3. The validation system will ensure they stay in sync
+    3. Add the pinned value to the frozen table in test_protocols.py
+    4. The validation system will ensure definitions stay in sync
 
     Organized by category:
     - Engine operations: Core KV cache operations
@@ -70,22 +73,12 @@ class RequestType(enum.Enum):
     # Debug operations
     NOOP = enum.auto()
 
-    # Blend operations
-    CB_REGISTER_KV_CACHE = enum.auto()
-    CB_UNREGISTER_KV_CACHE = enum.auto()
-    CB_STORE_PRE_COMPUTED = enum.auto()
-    CB_LOOKUP_PRE_COMPUTED = enum.auto()
+    # Blend operations (paged-aware; KV cache registration rides the
+    # standard REGISTER_KV_CACHE). A payload-shape change means a new request
+    # name -- the blend plugin dispatches on these.
+    CB_REGISTER_ROPE = enum.auto()
+    CB_UNREGISTER_ROPE = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED = enum.auto()
-    CB_STORE_FINAL = enum.auto()
-
-    # Blend V2 operations (use CBMatchResult instead of list[tuple[int, int]])
-    CB_LOOKUP_PRE_COMPUTED_V2 = enum.auto()
-    CB_RETRIEVE_PRE_COMPUTED_V2 = enum.auto()
-
-    # Blend V3 — paged-aware CB.
-    CB_REGISTER_ROPE_V3 = enum.auto()
-    CB_UNREGISTER_ROPE_V3 = enum.auto()
-    CB_RETRIEVE_PRE_COMPUTED_V3 = enum.auto()
     CB_UNIFIED_LOOKUP = enum.auto()
 
     # P2P operations
@@ -95,6 +88,13 @@ class RequestType(enum.Enum):
 
     # Experimental transfer intermediate tensor
     GET_EXPERIMENTAL = enum.auto()
+
+    CB_PROTOCOL_HANDSHAKE = enum.auto()
+
+    # Deprecated aliases.
+    CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
+    CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE
+    CB_RETRIEVE_PRE_COMPUTED_V3 = CB_RETRIEVE_PRE_COMPUTED
 
 
 @dataclass
