@@ -104,18 +104,6 @@ def get_method_registry() -> GrpcMethodRegistry:
 
         python_request_class = get_request_message_class(request_type)
         python_response_class = get_response_message_class(request_type)
-        if method.input_type.name != python_request_class.__name__:
-            raise RuntimeError(
-                f"{method.full_name} declares protobuf request "
-                f"{method.input_type.name}, but its Python request is "
-                f"{python_request_class.__name__}"
-            )
-        if method.output_type.name != python_response_class.__name__:
-            raise RuntimeError(
-                f"{method.full_name} declares protobuf response "
-                f"{method.output_type.name}, but its Python response is "
-                f"{python_response_class.__name__}"
-            )
         adapter = GrpcMethodBinding(
             full_name=method.full_name,
             method_path=(f"/{method.containing_service.full_name}/{method.name}"),

@@ -1,17 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-//
-// DebugService wire contract for LMCache mp-mode gRPC.
-
 syntax = "proto3";
 
 package lmcache.mp;
 
-message NoopRequest {}
-
-message NoopResponse {
-  string message = 1;
-}
+import "common.proto";
 
 service DebugService {
-  rpc Noop(NoopRequest) returns (NoopResponse);
+  rpc Noop(TransportPayload) returns (TransportPayload);
 }

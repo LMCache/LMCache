@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-//
-// Experimental QStore wire contract for LMCache mp-mode gRPC.
-
 syntax = "proto3";
 
 package lmcache.mp;
 
-import "lmcache_driven_service.proto";
+import "common.proto";
 
 service QStoreService {
-  rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
-  rpc UnregisterQCache(UnregisterKvCacheRequest)
-      returns (UnregisterKvCacheResponse);
-  rpc StoreQ(StoreRequest) returns (StoreResponse);
+  rpc RegisterQCache(TransportPayload) returns (TransportPayload);
+  rpc UnregisterQCache(TransportPayload) returns (TransportPayload);
+  rpc StoreQ(TransportPayload) returns (TransportPayload);
 }

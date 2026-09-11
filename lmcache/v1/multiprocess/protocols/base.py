@@ -29,7 +29,8 @@ class RequestType(enum.Enum):
     1. Append the member at the END of the enum, before the deprecated
        aliases (values are auto-assigned in order; inserting mid-enum
        renumbers later wire values and the frozen-table test fails)
-    2. Add its Python request/response pair to rpc_messages.py
+    2. Add its Python request/response pair to the matching rpc_messages/
+       domain module, where it is locally registered
     3. Annotate its EngineModule handler with @request_handler
     4. Add the pinned value to the frozen table in test_protocols.py
 
