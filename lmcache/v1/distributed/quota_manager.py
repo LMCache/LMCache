@@ -42,7 +42,13 @@ class QuotaManager:
     cycle (no restart needed).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, section_name: str = "quotas") -> None:
+        """Args:
+        section_name: Name of this registry's section in a durable
+            document. A coordinator holds one registry per enforced
+            tier, and two sections cannot share a name.
+        """
+        self._section_name = section_name
         self._lock = threading.Lock()
         # cache_salt -> limit in bytes
         self._limits: dict[str, int] = {}
@@ -147,7 +153,7 @@ class QuotaManager:
     @property
     def name(self) -> str:
         """Name of this registry's section in a durable document."""
-        return "quotas"
+        return self._section_name
 
     def capture(self) -> Mapping[str, object]:
         """Return the limits in durable form.
