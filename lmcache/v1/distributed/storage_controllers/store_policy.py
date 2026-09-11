@@ -142,7 +142,7 @@ def register_store_policy_factory(
     receives the classifier owned by the storage manager.
 
     Args:
-        name: Policy name (e.g. "full_attention_only").
+        name: Policy name (e.g. "defer_windowed").
         factory: Callable building a StorePolicy from a classifier.
 
     Raises:

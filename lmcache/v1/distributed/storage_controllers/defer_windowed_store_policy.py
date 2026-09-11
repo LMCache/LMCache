@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-``full_attention_only`` store policy for hybrid-attention models.
+``defer_windowed`` store policy for hybrid models.
 
-Full-attention object groups are written through to L2 exactly like the
-``default`` policy and keep their clean copy in L1. Sliding-window object
-groups are never written to L2 by the store path: their chunks stay in L1 and
-reach L2 only when eviction writes them back (a later change; see
-``docs/design/v1/distributed/storage_controllers/full_attention_only_store_policy.md``).
+Whole-prefix object groups are written through to L2 exactly like the
+``default`` policy and keep their clean copy in L1. Windowed object groups --
+those whose reuse needs only a bounded number of trailing chunks, which covers
+sliding-window attention as well as align/all-mode Mamba and linear-attention
+groups -- are never written to L2 by the store path: their chunks stay in L1,
+and the only way one reaches L2 is the commit path at a turn boundary (see
+``docs/design/v1/distributed/storage_controllers/defer_windowed_store_policy.md``).
 
-Requires the server to run with ``--separate-object-groups`` so that
-sliding-window layers actually have object groups of their own; the MP server
-config validation enforces that.
+Requires the server to run with ``--separate-object-groups`` so that windowed
+layers actually have object groups of their own; the MP server config
+validation enforces that.
 """
 
 # First Party
@@ -29,18 +31,18 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 logger = init_logger(__name__)
 
 
-class FullAttentionOnlyStorePolicy(StorePolicy):
-    """Store full-attention keys to L2 and keep sliding-window keys in L1.
+class DeferWindowedStorePolicy(StorePolicy):
+    """Store whole-prefix keys to L2 and keep windowed keys in L1.
 
-    The sliding-window/full-attention split comes from the attention layout the
+    The windowed/whole-prefix split comes from the attention layout the
     workers register at KV-cache registration time, not from configuration, so
     one server can serve several models with different layouts.
 
     Keys whose class is :attr:`ObjectGroupClass.UNKNOWN` (model not registered,
     or an object group outside the registered descriptor) are stored like
-    full-attention keys on purpose: an extra L2 write is far cheaper than
-    losing a sliding window that no other tier holds. Each such key is logged
-    at debug level.
+    whole-prefix keys on purpose: an extra L2 write is far cheaper than losing
+    a window that no other tier holds. Each such key is logged at debug
+    level.
 
     Thread safety: the policy holds no mutable state. It is called from the
     store controller thread and delegates classification to
@@ -48,7 +50,7 @@ class FullAttentionOnlyStorePolicy(StorePolicy):
 
     Args:
         classifier: Registry that maps a key's model and object group to its
-            cross-chunk attention class.
+            cross-chunk reuse class.
     """
 
     def __init__(self, classifier: ObjectGroupClassifier) -> None:
@@ -60,7 +62,7 @@ class FullAttentionOnlyStorePolicy(StorePolicy):
         adapters: list[AdapterDescriptor],
     ) -> dict[int, list[ObjectKey]]:
         """
-        Store every non sliding-window key to every adapter.
+        Store every key that is not windowed to every adapter.
 
         Args:
             keys: Keys that were just written to L1.
@@ -68,19 +70,19 @@ class FullAttentionOnlyStorePolicy(StorePolicy):
 
         Returns:
             Mapping from every adapter index to the keys classified
-            ``FULL_ATTENTION`` or ``UNKNOWN``, in the order they appear in
-            ``keys``. Sliding-window keys appear in no list and are therefore
+            ``WHOLE_PREFIX`` or ``UNKNOWN``, in the order they appear in
+            ``keys``. Windowed keys appear in no list and are therefore
             not stored to L2.
         """
         selected: list[ObjectKey] = []
         for key in keys:
             group_class = self._classifier.classify(key)
-            if group_class is ObjectGroupClass.SLIDING_WINDOW:
+            if group_class is ObjectGroupClass.WINDOWED:
                 continue
             if group_class is ObjectGroupClass.UNKNOWN:
                 logger.debug(
-                    "full_attention_only: no attention layout for model %r "
-                    "object group %d; storing to L2 as full attention",
+                    "defer_windowed: no attention layout for model %r "
+                    "object group %d; storing to L2 as whole prefix",
                     key.model_name,
                     key.object_group_id,
                 )
@@ -95,7 +97,7 @@ class FullAttentionOnlyStorePolicy(StorePolicy):
         """
         Never delete from L1.
 
-        Full-attention chunks keep their clean copy in L1 after the L2 write,
+        Whole-prefix chunks keep their clean copy in L1 after the L2 write,
         so a later read is an L1 hit and eviction can discard them for free.
 
         Args:
@@ -107,4 +109,4 @@ class FullAttentionOnlyStorePolicy(StorePolicy):
         return []
 
 
-register_store_policy_factory("full_attention_only", FullAttentionOnlyStorePolicy)
+register_store_policy_factory("defer_windowed", DeferWindowedStorePolicy)

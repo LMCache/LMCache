@@ -797,15 +797,15 @@ class TestBufferOnlyMode:
 
 
 # =============================================================================
-# Flush Tests
+# Copy Tests
 # =============================================================================
 
 
 class _StoreNothingDeleteEverythingPolicy(StorePolicy):
     """Write-through stores nothing; would delete every stored key from L1.
 
-    Makes both bypasses of the flush path observable: a key that reaches L2
-    can only have come from the flush, and a key that stays in L1 proves the
+    Makes both bypasses of the copy path observable: a key that reaches L2
+    can only have come from the copy, and a key that stays in L1 proves the
     policy's deletions were not applied to it.
     """
 
@@ -816,11 +816,11 @@ class _StoreNothingDeleteEverythingPolicy(StorePolicy):
         return list(keys)
 
 
-class TestStoreControllerFlush:
-    """Tests for ``StoreController.submit_flush``."""
+class TestStoreControllerCopy:
+    """Tests for ``StoreController.submit_copy``."""
 
-    def test_flush_stores_to_l2_and_keeps_l1(self, l1_manager):
-        """A flush reaches every adapter without the policy and keeps L1."""
+    def test_copy_stores_to_l2_and_keeps_l1(self, l1_manager):
+        """A copy reaches every adapter without the policy and keeps L1."""
         adapters = [make_adapter(), make_adapter()]
         ctrl = StoreController(
             l1_manager=l1_manager,
@@ -835,13 +835,13 @@ class TestStoreControllerFlush:
         written = write_keys_to_l1(l1_manager, keys, layout)
         assert written == keys
 
-        ctrl.submit_flush(written)
+        ctrl.submit_copy(written)
 
         ok = wait_for_condition(
             lambda: all(a.debug_has_key(k) for a in adapters for k in keys),
             timeout=5.0,
         )
-        assert ok, "flush should store every key to every adapter"
+        assert ok, "a copy should store every key to every adapter"
         ok = wait_for_condition(
             lambda: ctrl.report_status()["in_flight_task_count"] == 0,
             timeout=5.0,
@@ -849,7 +849,7 @@ class TestStoreControllerFlush:
         assert ok
         for key in keys:
             assert l1_manager.get_object_state(key) is not None, (
-                "a flush must not delete the key from L1"
+                "a copy must not delete the key from L1"
             )
         # Read locks are released: the keys are updatable again.
         results = l1_manager.reserve_write(
@@ -864,8 +864,8 @@ class TestStoreControllerFlush:
         for adapter in adapters:
             adapter.close()
 
-    def test_flush_without_adapters_keeps_keys(self, l1_manager):
-        """With no L2 adapter a flush is dropped and leaves L1 untouched."""
+    def test_copy_without_adapters_keeps_keys(self, l1_manager):
+        """With no L2 adapter a copy is dropped and leaves L1 untouched."""
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=[],
@@ -878,7 +878,7 @@ class TestStoreControllerFlush:
         keys = [make_object_key(0)]
         write_keys_to_l1(l1_manager, keys, layout)
 
-        ctrl.submit_flush(keys)
+        ctrl.submit_copy(keys)
 
         ok = wait_for_condition(
             lambda: (
@@ -892,7 +892,7 @@ class TestStoreControllerFlush:
             ),
             timeout=5.0,
         )
-        assert ok, "a dropped flush must not leave a read lock behind"
+        assert ok, "a dropped copy must not leave a read lock behind"
         assert l1_manager.get_object_state(keys[0]) is not None
 
         ctrl.stop()

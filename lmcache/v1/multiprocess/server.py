@@ -331,7 +331,7 @@ def run_cache_server(
     set_isolated_ipc(mp_config.isolated_ipc)
 
     # Reject option combinations that only one of the two configs can see
-    # (e.g. full_attention_only without separate object groups) before anything is
+    # (e.g. defer_windowed without separate object groups) before anything is
     # started.
     validate_server_config(mp_config, storage_manager_config)
 
@@ -388,9 +388,9 @@ def run_cache_server(
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
         commit_config=CommitPolicyConfig(
-            policy=mp_config.commit_policy,
-            anchor=CommitAnchor(mp_config.commit_anchor),
-            boundary_token_ids=frozenset(mp_config.commit_boundary_token_ids),
+            policy=mp_config.window_commit_policy,
+            anchor=CommitAnchor(mp_config.window_commit_anchor),
+            turn_boundary_token_ids=frozenset(mp_config.turn_boundary_token_ids),
         ),
     )
 

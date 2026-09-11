@@ -77,7 +77,7 @@ class LayoutDescRegistry:
     ``(model_name, world_size)`` and lets a re-registration replace the
     windows. A registration the classifier rejects is therefore logged and
     dropped instead of propagated: the model keeps the layout it was first
-    registered with, or classifies as ``UNKNOWN``, and ``full_attention_only``
+    registered with, or classifies as ``UNKNOWN``, and ``defer_windowed``
     falls back to writing everything through — the safe direction. The
     forwarded registrations are counted in ``self._classifier_refs`` so that
     a rejected one is not unregistered later.
@@ -284,10 +284,10 @@ class MPCacheServerContext:
             group per sliding-window size at KV-cache registration. Default
             False.
         commit_config: How the ``END_SESSION`` handler decides whether a
-            finished request's final sliding window is copied to L2 right
-            away. Defaults to ``stop_token`` accepting any stop token. A
-            model without sliding-window object groups never has anything to
-            commit, whatever the policy.
+            finished request's final window is copied to L2 right away.
+            Defaults to ``turn_end`` accepting any stop token. A model
+            without windowed object groups never has anything to commit,
+            whatever the policy.
     """
 
     def __init__(
@@ -349,7 +349,7 @@ class MPCacheServerContext:
 
     @property
     def commit_config(self) -> CommitPolicyConfig:
-        """How this server decides and places sliding-window commits."""
+        """How this server decides and places window commits."""
         return self._commit_config
 
     @property
