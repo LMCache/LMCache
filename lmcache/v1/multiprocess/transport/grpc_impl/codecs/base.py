@@ -3,14 +3,20 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Generic, TypeVar
 
-MessageWriter = Callable[[Any, Any], None]
-MessageReader = Callable[[Any], Any]
+# Third Party
+from google.protobuf.message import Message
+
+ProtoMessageT = TypeVar("ProtoMessageT", bound=Message)
+PythonValueT = TypeVar("PythonValueT")
+
+MessageWriter = Callable[[ProtoMessageT, PythonValueT], None]
+MessageReader = Callable[[ProtoMessageT], PythonValueT]
 
 
 @dataclass(frozen=True)
-class RegisteredMessageCodec:
+class RegisteredMessageCodec(Generic[ProtoMessageT, PythonValueT]):
     """Convert one Python type to and from one protobuf message type.
 
     Args:
@@ -22,9 +28,9 @@ class RegisteredMessageCodec:
     """
 
     protobuf_type: str
-    python_type: type[Any]
-    writer: MessageWriter
-    reader: MessageReader
+    python_type: type[PythonValueT]
+    writer: MessageWriter[ProtoMessageT, PythonValueT]
+    reader: MessageReader[ProtoMessageT, PythonValueT]
     include_subclasses: bool = False
 
     def matches(self, descriptor: Any, python_type: Any) -> bool:
@@ -51,7 +57,7 @@ class RegisteredMessageCodec:
 class MessageCodecRegistry:
     """Immutable collection of explicitly registered message codecs."""
 
-    def __init__(self, codecs: tuple[RegisteredMessageCodec, ...]) -> None:
+    def __init__(self, codecs: tuple[RegisteredMessageCodec[Any, Any], ...]) -> None:
         keys: set[tuple[str, type[Any]]] = set()
         for codec in codecs:
             key = (codec.protobuf_type, codec.python_type)
@@ -63,7 +69,9 @@ class MessageCodecRegistry:
             keys.add(key)
         self._codecs = codecs
 
-    def find(self, descriptor: Any, python_type: Any) -> RegisteredMessageCodec | None:
+    def find(
+        self, descriptor: Any, python_type: Any
+    ) -> RegisteredMessageCodec[Any, Any] | None:
         """Return the unique codec for a descriptor/type pair.
 
         Args:

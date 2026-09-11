@@ -48,7 +48,7 @@ def _patch_generated_file(path: Path) -> None:
     prefix = ""
     if not text.startswith(SPDX_HEADER):
         prefix += SPDX_HEADER
-    if MYPY_IGNORE not in text.splitlines()[:5]:
+    if path.suffix == ".py" and MYPY_IGNORE not in text.splitlines()[:5]:
         prefix += MYPY_IGNORE
     path.write_text(prefix + text)
 
