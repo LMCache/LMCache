@@ -1097,9 +1097,12 @@ pinned keys from quota-based eviction. L2 pins are fleet-wide (per
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. It also requires the MP servers to be
-launched with ``--no-separate-object-groups`` (the coordinator resolves keys in
-a single object group).
+stored and the pin protects nothing. It also requires the MP servers **not** to
+be launched with ``--separate-object-groups`` — the coordinator resolves keys
+in a single object group, so any server running with separated object groups
+would produce different keys. Object-group separation is off by default (see
+:doc:`/mp/configuration`), so passing no flag is fine; deployments that pin
+must simply avoid enabling ``--separate-object-groups``.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
