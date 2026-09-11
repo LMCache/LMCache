@@ -147,6 +147,13 @@
         "num_key_value_heads": 8,
         "head_dim": 128
     },
+    "Qwen/Qwen3-Coder-480B-A35B-Instruct": {
+        "hidden_size": 6144,
+        "num_attention_heads": 96,
+        "num_hidden_layers": 62,
+        "num_key_value_heads": 8,
+        "head_dim": 128
+    },
     "meta-llama/Llama-3.1-405B": {
         "hidden_size": 16384,
         "num_attention_heads": 128,
