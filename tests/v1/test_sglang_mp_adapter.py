@@ -69,6 +69,7 @@ def _make_connector(healthy: bool = True) -> Any:
         conn._health_event.set()
     conn._lmcache_chunk_size = _CHUNK_SIZE
     conn._mq_timeout = 5.0
+    conn._event_backend = _FakeEventBackend()
     return conn
 
 
@@ -100,13 +101,33 @@ class _SpyFuture(MessagingFuture):
         super().retain_reference(value)
 
 
+class _TimeoutFuture(MessagingFuture):
+    """Future that records blocking and then raises a timeout."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.result_called = False
+
+    def result(self, timeout=None):
+        self.result_called = True
+        raise TimeoutError
+
+
 class _FakeRaw:
     """Stand-in returning a preset platform-aware completion future."""
 
     def __init__(self, future: MessagingFuture) -> None:
         self._future = future
+        self.retained_references: list[object] = []
 
-    def to_device_future(self, device=None) -> MessagingFuture:
+    def retain_reference(self, value: object) -> None:
+        self.retained_references.append(value)
+
+    def to_device_future(
+        self,
+        device=None,
+        event_backend=None,
+    ) -> MessagingFuture:
         return self._future
 
 
@@ -119,6 +140,17 @@ class _FakeEvent:
 
     def ipc_handle(self) -> bytes:
         return b"fake-ipc-handle"
+
+
+class _FakeEventBackend:
+    def create_event(self, device: object) -> _FakeEvent:
+        return _FakeEvent()
+
+    def record_event(self, event: _FakeEvent, stream: object) -> None:
+        event.record(stream)
+
+    def export_event(self, event: _FakeEvent, device: object) -> bytes:
+        return event.ipc_handle()
 
 
 class _FakeTorchDev:
@@ -341,10 +373,38 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
     # It returns the daemon's own future, and must NOT have blocked on it.
     assert future is sentinel
     assert sentinel.result_called is False
-    # The exporting device event must be pinned to the future so it isn't
-    # garbage-collected before the daemon waits on its IPC handle.
-    assert len(sentinel.retained_references) == 1
-    assert isinstance(sentinel.retained_references[0], _FakeEvent)
+    # The exporting device event must be pinned to the raw future so timeout
+    # callers cannot drop it before the daemon waits on its IPC handle.
+    assert len(conn.req_client.store.return_value.retained_references) == 1
+    assert isinstance(
+        conn.req_client.store.return_value.retained_references[0], _FakeEvent
+    )
+    assert sentinel.retained_references == []
+
+
+def test_store_kv_timeout_retains_exported_event_on_raw_future(
+    monkeypatch,
+) -> None:
+    """Timeouts must not drop the exported event before daemon import."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    conn = _make_connector(healthy=True)
+    conn.req_client = MagicMock(name="rpc_client")
+    conn.instance_id = 123
+    conn.device = "cpu"
+    conn._slot_mapping_to_block_ids = lambda kv_indices: [0, 1]  # type: ignore[method-assign,assignment]
+    conn._create_key = lambda *args, **kwargs: "fake-key"  # type: ignore[method-assign,assignment]
+
+    timeout_future = _TimeoutFuture()
+    raw = _FakeRaw(timeout_future)
+    monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
+    conn.req_client.store.return_value = raw
+
+    with pytest.raises(TimeoutError):
+        conn.store_kv(_store_metadata(num_tokens=4 * _CHUNK_SIZE))
+
+    assert timeout_future.result_called is True
+    assert len(raw.retained_references) == 1
+    assert isinstance(raw.retained_references[0], _FakeEvent)
 
 
 def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
@@ -372,8 +432,9 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
 
     assert raw_future is raw
     assert future is sentinel
-    assert len(sentinel.retained_references) == 1
-    assert isinstance(sentinel.retained_references[0], _FakeEvent)
+    assert len(raw.retained_references) == 1
+    assert isinstance(raw.retained_references[0], _FakeEvent)
+    assert sentinel.retained_references == []
 
 
 @pytest.mark.parametrize(

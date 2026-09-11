@@ -30,9 +30,9 @@ supported.
 Slots are assigned per recording stream, so each slot's values are
 stream-ordered and monotonic, keeping the GEQ wait race-free.
 
-Only events from this backend's ``create_event`` can be exported; call
-sites constructing ``torch_dev.Event(interprocess=True)`` directly must be
-migrated before binding this backend to the device spec. See
+Only events from this backend's ``create_event`` can be exported; callers must
+use the platform event helpers rather than constructing backend events
+directly. See
 ``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``.
 """
 
