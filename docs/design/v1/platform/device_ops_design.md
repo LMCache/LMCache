@@ -57,7 +57,7 @@ Note: LMCache DeviceOps is currently stateless and follows a strict one-device-p
 
 ### 3.2 Base class — contract + torch baseline
 
-`lmcache/v1/platform/base_device_ops.py`:
+`lmcache/v1/platform/base/device_ops.py`:
 
 ```python
 from __future__ import annotations
@@ -266,14 +266,14 @@ class HpuDeviceOps(DeviceOps):
 ### 5.1 `DeviceSpec.ops_cls` and `DeviceSpec.get_ops()`
 
 ```python
-# platform/base_device_spec.py
+# platform/base/device_spec.py
 class DeviceSpec:
     _ops_cache: DeviceOps | None = None
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
         """Lazy import to avoid pulling torch_ops into the import graph."""
-        from lmcache.v1.platform.base_device_ops import DeviceOps
+        from lmcache.v1.platform.base.device_ops import DeviceOps
         return DeviceOps
 
     def get_ops(self) -> DeviceOps:
@@ -327,7 +327,7 @@ back. The CPU path resolves through `CpuDeviceSpec -> CpuDeviceOps`; only `""`
 `_device_detect.py` exists as a separate module to break an import cycle:
 
 ```
-platform/__init__.py → base_device_ops → torch_ops → needs get_torch_device()
+platform/__init__.py → base/device_ops → torch_ops → needs get_torch_device()
 ```
 
 If `get_torch_device()` and `current_device_spec()` lived in
@@ -340,17 +340,17 @@ circular import. `_device_detect.py` sits outside that chain.
 lmcache/v1/platform/
   __init__.py                 # resolve_device_ops, _resolve_device_spec
   _device_detect.py           # get_torch_device, current_device_spec, registry
-  base_device_ops.py          # DeviceOps base + bind_native
-  base_device_spec.py         # DeviceSpec + ops_cls + get_ops
   torch_ops.py                # migrated torch/CPU impl (was python_ops_fallback)
   ops_types.py                # TransferDirection, EngineKVFormat, etc.
-  base_cache_context.py       # (unchanged) sibling abstractions
-  base_ipc_wrapper.py
-  base_pin_memory.py
   cache_context.py
-  device_ext.py
   event_notifier.py
-  _registry.py
+  base/
+    __init__.py               # re-exports base classes for the sub-package
+    device_ops.py             # DeviceOps base + bind_native
+    device_spec.py            # DeviceSpec + ops_cls + get_ops
+    cache_context.py          # (unchanged) sibling abstractions
+    ipc_wrapper.py
+    pin_memory.py
   cpu/
     __init__.py               # CpuDeviceSpec.ops_cls -> CpuDeviceOps
     device_ops.py             # CpuDeviceOps (no overrides = base)
