@@ -370,7 +370,8 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
         "lmcache.skip_save": True
     }
     assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
-    assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
+    tracked_future, tracked_blocks, _submitted_at = adapter.retrieve_futures["req-1"]
+    assert (tracked_future, tracked_blocks) == (fake_future, [0])
 
 
 @pytest.mark.parametrize(
@@ -611,7 +612,11 @@ def test_failed_retrieve_marks_blocks_for_recompute(
     retrieve_future = MagicMock(name="retrieve_future")
     retrieve_future.query.return_value = True
     retrieve_future.result.return_value = False
-    adapter.retrieve_futures["req-1"] = (retrieve_future, [7, 8])
+    adapter.retrieve_futures["req-1"] = (
+        retrieve_future,
+        [7, 8],
+        time.monotonic(),
+    )
 
     if lazy_offload:
         finished_stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
@@ -1094,3 +1099,88 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_timed_out_retrieve_is_reported_and_recomputed(
+    fake_adapter,
+    lazy_offload: bool,
+) -> None:
+    """A retrieve future that never resolves must not hang the request in
+    WAITING_FOR_REMOTE_KVS forever: past ``retrieve_timeout`` it is reported
+    finished exactly once and its blocks are marked for recompute."""
+    adapter, _send_mock, _future = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    adapter._retrieve_timeout = 30.0
+    stuck_future = MagicMock(name="stuck_future")
+    stuck_future.query.return_value = False
+    # Submitted 31s ago: past the 30s timeout.
+    adapter.retrieve_futures["req-stuck"] = (
+        stuck_future,
+        [7, 8],
+        time.monotonic() - 31.0,
+    )
+    adapter.retrieve_events["req-stuck"] = MagicMock()
+
+    if lazy_offload:
+        _stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+    else:
+        _stores, finished_retrieves = adapter.get_finished(set())
+
+    assert finished_retrieves == {"req-stuck"}
+    assert adapter.get_block_ids_with_load_errors() == {7, 8}
+    assert "req-stuck" not in adapter.retrieve_futures
+    assert "req-stuck" not in adapter.retrieve_events
+
+    # Reported exactly once: the next pass returns nothing for it.
+    if lazy_offload:
+        _s2, second = adapter.get_finished_with_lazy_offload()
+    else:
+        _s2, second = adapter.get_finished(set())
+    assert not second
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_pending_retrieve_within_timeout_is_left_alone(
+    fake_adapter,
+    lazy_offload: bool,
+) -> None:
+    """A retrieve younger than ``retrieve_timeout`` keeps waiting normally."""
+    adapter, _send_mock, _future = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    adapter._retrieve_timeout = 30.0
+    pending = MagicMock(name="pending_future")
+    pending.query.return_value = False
+    adapter.retrieve_futures["req-wait"] = (
+        pending,
+        [9],
+        time.monotonic(),
+    )
+
+    if lazy_offload:
+        _s, finished_retrieves = adapter.get_finished_with_lazy_offload()
+    else:
+        _s, finished_retrieves = adapter.get_finished(set())
+
+    assert not finished_retrieves
+    assert "req-wait" in adapter.retrieve_futures
+    assert adapter.get_block_ids_with_load_errors() == set()
+
+
+def test_retrieve_timeout_extra_config_wiring(fake_adapter, monkeypatch):
+    """``lmcache.mp.retrieve_timeout`` overrides the default; 0 disables."""
+    adapter, _send_mock, _future = fake_adapter
+    adapter._retrieve_timeout = 0.0
+    stuck_future = MagicMock(name="stuck_future")
+    stuck_future.query.return_value = False
+    adapter.retrieve_futures["req-forever"] = (
+        stuck_future,
+        [3],
+        time.monotonic() - 3600.0,
+    )
+
+    _stores, finished_retrieves = adapter.get_finished(set())
+
+    # Disabled timeout: even a 1h-old pending retrieve is left alone.
+    assert not finished_retrieves
+    assert "req-forever" in adapter.retrieve_futures
