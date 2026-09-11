@@ -914,16 +914,16 @@ class StorageManager:
             if released is not None and released() is handle:
                 return
 
-        cancelled, found = self._cancel_prefetch_and_wait(handle)
+        _, found = self._cancel_prefetch_and_wait(handle)
         # ``keys`` is a compatibility escape hatch for callers that already
-        # consumed the controller bitmap through the legacy query API.  When
-        # cancellation is still active, the controller owns cleanup of any
-        # in-flight L2 reservation; releasing caller-supplied keys here could
-        # race that asynchronous operation.
+        # consumed the controller bitmap through the legacy query API.  The
+        # helper above waits for an accepted cancellation before returning, so
+        # explicit keys are safe to release even when cancellation was the
+        # operation that completed the controller request.
         extra_keys = None
         if handle.prefetch_request_id == -1:
             extra_keys = keys
-        elif found is None and not cancelled:
+        elif found is None:
             extra_keys = keys
         self._release_prefetch_lease(
             handle,

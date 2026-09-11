@@ -1220,8 +1220,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             return False
 
+        with job.condition:
+            found_indices = job.found_indices
+        found_keys = (
+            None
+            if found_indices is None
+            else [job.keys[index] for index in found_indices]
+        )
         try:
-            self._ctx.storage_manager.release_prefetch_task(job.handle)
+            # A sparse retrieve may have acquired an L2 read lease after the
+            # initial prefetch response.  Pass the resolved keys through so
+            # cleanup releases both the original L1 lease and those L2 locks.
+            self._ctx.storage_manager.release_prefetch_task(job.handle, keys=found_keys)
         except Exception:
             logger.exception(
                 "Failed to release sparse prefetch job: request_id=%s generation=%d",
@@ -1598,7 +1608,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """Cancel one generation and release its logical cache lease."""
         job = self._get_sparse_job(instance_id, request_id, generation, layer_id)
         if job is None:
-            return False
+            # Cancellation is an idempotent cleanup operation.  The stream
+            # completion callback or an earlier cancel may already have
+            # removed this exact-generation job.
+            return True
         return self._cleanup_sparse_job(job)
 
     def sparse_release_prefetch(

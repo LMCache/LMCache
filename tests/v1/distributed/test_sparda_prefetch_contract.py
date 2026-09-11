@@ -227,6 +227,34 @@ def test_release_waits_for_controller_cleanup_before_releasing_l1_lock():
     storage.finish_read_prefetched.assert_called_once_with([key], read_locks=1)
 
 
+def test_release_keeps_explicit_keys_after_controller_result_was_consumed():
+    storage = StorageManager.__new__(StorageManager)
+    storage._prefetch_release_lock = threading.Lock()
+    storage._released_prefetch_handles = {}
+    storage._prefetch_handle_metadata = {}
+    storage._prefetch_controller = Mock()
+    storage._prefetch_controller.cancel_prefetch_request.return_value = True
+    storage.wait_prefetch_status = Mock(return_value=True)
+    storage.query_prefetch_status = Mock(return_value=None)
+    storage.finish_read_prefetched = Mock()
+
+    key = _key(b"consumed-result")
+    handle = PrefetchHandle(
+        prefetch_request_id=10,
+        external_request_id="request",
+        l1_found_indices=(),
+        l1_hit_chunks=0,
+        total_requested_keys=1,
+        submit_time=0.0,
+        generation=14,
+    )
+    storage._remember_prefetch_handle(handle, [key], 1)
+
+    storage.release_prefetch_task(handle, [key])
+
+    storage.finish_read_prefetched.assert_called_once_with([key], read_locks=1)
+
+
 def test_release_failure_keeps_lease_metadata_for_retry():
     storage = StorageManager.__new__(StorageManager)
     storage._prefetch_release_lock = threading.Lock()
@@ -534,6 +562,44 @@ def test_sparse_copy_sync_failure_retains_job_and_lease():
     assert isinstance(job.last_error, RuntimeError)
 
 
+def test_sparse_cleanup_releases_all_retrieved_keys_after_copy_sync():
+    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    module._sparse_jobs = {}
+    module._sparse_jobs_lock = threading.Lock()
+    keys = (_key(b"miss"), _key(b"hit"))
+    handle = PrefetchHandle(
+        prefetch_request_id=16,
+        external_request_id="request:0:1",
+        l1_found_indices=(),
+        l1_hit_chunks=0,
+        total_requested_keys=2,
+        submit_time=0.0,
+        generation=0,
+    )
+    job = _SparsePrefetchJob(
+        handle=handle,
+        keys=keys,
+        instance_id=0,
+        request_id="request",
+        generation=0,
+        layer_id=1,
+        found_indices=(1,),
+        copy_submitted=True,
+        copy_synchronized=True,
+    )
+    module._sparse_jobs[(0, "request", 0, 1)] = job
+    module._ctx = SimpleNamespace(
+        storage_manager=SimpleNamespace(release_prefetch_task=Mock())
+    )
+
+    assert module._cleanup_sparse_job(job) is True
+
+    module._ctx.storage_manager.release_prefetch_task.assert_called_once_with(
+        handle, keys=[keys[1]]
+    )
+    assert module._sparse_jobs == {}
+
+
 def test_sparse_cancel_marks_job_before_releasing_lease():
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
@@ -659,6 +725,14 @@ def test_sparse_retrieve_rejects_job_marked_for_cancel(monkeypatch):
 
     assert result == (False, [0])
     stage.assert_not_called()
+
+
+def test_sparse_cancel_missing_job_is_idempotent():
+    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    module._sparse_jobs = {}
+    module._sparse_jobs_lock = threading.Lock()
+
+    assert module.sparse_cancel_prefetch(0, "missing", 0, 1) is True
 
 
 def test_sparse_completion_release_failure_leaves_job_retryable():
