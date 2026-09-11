@@ -230,6 +230,58 @@ class BaseCacheContext(ABC):
         transfer."""
         return self.kv_layer_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
 
+    def get_kernel_group_kv_pointer_list(self, kernel_group_idx: int) -> list[int]:
+        """Returns the host-side list of paged KV pointers of a kernel group.
+
+        Same pointers and order as :meth:`get_kernel_group_kv_pointers`
+        (per layer; K layers then V layers for the SGLang two-list formats; a
+        single base for cross-layer formats), as Python ints for host-side
+        address arithmetic. This default reads the device tensor back, which
+        synchronizes the current stream; subclasses cache the list.
+
+        Args:
+            kernel_group_idx: Index of the kernel group.
+
+        Returns:
+            The paged buffer data pointers of the group, in kernel order.
+        """
+        return self.get_kernel_group_kv_pointers(kernel_group_idx).tolist()
+
+    def get_kernel_group_offset_in_object(
+        self, object_group_idx: int, kernel_group_idx: int
+    ) -> int:
+        """Returns the byte offset of a kernel group's region inside one
+        memory object of ``object_group_idx``.
+
+        A memory object concatenates the ``[kv_size, num_layers, slots,
+        hidden]`` regions of its kernel groups in the object group's declared
+        order (the layout of :func:`get_layout_desc` and of the temp staging
+        buffer), each sized for one LMCache chunk.
+
+        Args:
+            object_group_idx: Index of the object group.
+            kernel_group_idx: Index of a kernel group that belongs to it.
+
+        Returns:
+            Byte offset of the kernel group's region from the object start.
+
+        Raises:
+            ValueError: If the kernel group is not part of the object group.
+        """
+        object_group = self.kv_layer_groups_manager.object_groups[object_group_idx]
+        offset = 0
+        for member_idx in object_group.kernel_group_indices:
+            if member_idx == kernel_group_idx:
+                return offset
+            shape, dtype = self.get_kernel_group_shape_dtype(
+                self.lmcache_tokens_per_chunk, member_idx
+            )
+            offset += shape.numel() * dtype.itemsize
+        raise ValueError(
+            f"kernel group {kernel_group_idx} is not part of object group "
+            f"{object_group_idx} (members: {object_group.kernel_group_indices})"
+        )
+
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0
     ) -> torch.Size:

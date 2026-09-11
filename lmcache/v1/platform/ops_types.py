@@ -3,9 +3,10 @@
 
 ``PageBufferShapeDesc`` and ``KernelGroupSpec`` are defined in
 ``lmcache.lmcache_native`` and re-exported here for callers that want the
-platform-owned import path. ``StagingCopy`` / ``LaunchVar`` / ``BatchStep``
-still only exist natively in the compiled ``cuda_ops`` extension, so this
-module keeps placeholder stubs for those names.
+platform-owned import path. ``StagingCopy`` / ``LaunchVar`` / ``BatchStep`` /
+``DirectCopyGroupSpec`` / ``DirectCopyObject`` still only exist natively in
+the compiled ``cuda_ops`` extension, so this module keeps placeholder stubs
+for those names.
 """
 
 # Future
@@ -63,3 +64,11 @@ class LaunchVar(_NativePlanType):
 
 class BatchStep(_NativePlanType):
     """Fallback stub for the native ``BatchStep`` plan type."""
+
+
+class DirectCopyGroupSpec(_NativePlanType):
+    """Fallback stub for the native ``DirectCopyGroupSpec`` plan type."""
+
+
+class DirectCopyObject(_NativePlanType):
+    """Fallback stub for the native ``DirectCopyObject`` plan type."""

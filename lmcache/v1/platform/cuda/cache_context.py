@@ -429,10 +429,12 @@ class GPUCacheContext(BaseCacheContext):
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
+        self._group_kv_pointer_lists: list[list[int]] = []
         for idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
             ptrs = get_group_data_ptrs(
                 self.kv_caches_, self.get_engine_kv_format(idx), group.layer_indices
             )
+            self._group_kv_pointer_lists.append(list(ptrs))
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
@@ -508,6 +510,13 @@ class GPUCacheContext(BaseCacheContext):
         given kernel group index.
         """
         return self.group_kv_pointers_[kernel_group_idx]
+
+    def get_kernel_group_kv_pointer_list(self, kernel_group_idx: int) -> list[int]:
+        """Returns the host-side KV cache pointers of a kernel group, in the
+        same order as :meth:`get_kernel_group_kv_pointers`, without touching
+        the device.
+        """
+        return self._group_kv_pointer_lists[kernel_group_idx]
 
     def get_temp_kernel_group_buffer(
         self, batch_idx: int, kernel_group_idx: int

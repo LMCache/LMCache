@@ -80,6 +80,16 @@ Validated models
          lmcache server --chunk-size 944 --separate-object-groups \
              --l1-size-gb 100 --eviction-policy LRU
 
+      .. tip::
+
+         With ``N``-token MLA pages each (layer, block) of a chunk is a
+         contiguous ~1 MB run, so the server can move chunks with the GPU copy
+         engine instead of the block transfer kernel. On CUDA >= 12.8 add
+         ``--transfer-copy-mode direct`` (or ``auto``, which applies the path
+         only to layouts with blocks of at least ``--direct-copy-min-block-bytes``);
+         it cut a 128k-token store by about a quarter on H200. Small-page
+         layouts should stay on the default ``kernel`` path.
+
       |
 
       Start vLLM with the LMCache MP connector

@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 from itertools import islice
 from typing import Any, Generator, Sequence
 import threading
@@ -36,6 +37,10 @@ from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
     is_observability_enabled,
 )
+from lmcache.v1.multiprocess.config import (
+    DEFAULT_TRANSFER_COPY_POLICY,
+    TransferCopyPolicy,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
@@ -61,6 +66,109 @@ _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
 _HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timings")
+_HAS_NATIVE_DIRECT_COPY: bool = hasattr(device_ops, "execute_direct_copy_transfer")
+# Fallback reasons already reported, so a misconfigured server logs each once
+# instead of once per request.
+_direct_copy_fallback_logged: set[str] = set()
+
+
+class TransferCopyPath(Enum):
+    """Which mechanism moves one object group between host and device."""
+
+    KERNEL = "kernel"
+    """Stage through the GPU temp buffer and run the block transfer kernel."""
+
+    DIRECT = "direct"
+    """One ``cudaMemcpyBatchAsync`` per chunk straight between the pinned host
+    object and the paged buffers."""
+
+
+def _warn_direct_copy_fallback_once(reason: str) -> None:
+    """Log a direct-copy fallback reason the first time it is seen."""
+    if reason in _direct_copy_fallback_logged:
+        return
+    _direct_copy_fallback_logged.add(reason)
+    logger.warning(
+        "Direct copy path requested but unavailable, using the kernel path: %s",
+        reason,
+    )
+
+
+def select_transfer_copy_path(
+    cache_context: BaseCacheContext,
+    object_group_id: int,
+    memory_objs: Sequence[MemoryObj | None],
+    block_ids_host: Sequence[Sequence[int]],
+    copy_policy: TransferCopyPolicy,
+) -> TransferCopyPath:
+    """Decide how one object group's transfer is executed.
+
+    The direct path (see :class:`TransferCopyPolicy`) is chosen only when
+    every precondition holds: the policy allows it, the native extension
+    exposes ``execute_direct_copy_transfer`` and ``cudaMemcpyBatchAsync`` is
+    usable on this driver, host block ids are available, no object is
+    GDS-backed, and every kernel group of the object group has a token-major
+    layout eligible for direct block copies. In ``auto`` mode every eligible
+    group's tight block (``bs * nh * hs * element_size``) must also reach the
+    policy's ``direct_min_block_bytes``.
+
+    Unavailability of the native support is logged once as a warning when the
+    policy asked for the direct path; layout- and size-based decisions are
+    logged at debug level.
+
+    Args:
+        cache_context: The cache context of the registered KV cache.
+        object_group_id: Index of the object group being transferred.
+        memory_objs: The objects of the transfer (None entries allowed).
+        block_ids_host: Downsampled host block ids, indexed by kernel group;
+            empty when the caller only has device tensors.
+        copy_policy: The server's transfer copy policy.
+
+    Returns:
+        The copy path to use for this object group.
+    """
+    if copy_policy.mode == "kernel":
+        return TransferCopyPath.KERNEL
+    if not _HAS_NATIVE_DIRECT_COPY or not device_ops.batch_memcpy_supported():
+        _warn_direct_copy_fallback_once(
+            "cudaMemcpyBatchAsync is unavailable (requires lmcache.cuda_ops built "
+            "against CUDA >= 12.8 and a >= 12.8 runtime/driver)"
+        )
+        return TransferCopyPath.KERNEL
+    if not block_ids_host:
+        _warn_direct_copy_fallback_once("no host block ids were provided")
+        return TransferCopyPath.KERNEL
+    if any(isinstance(mo, GDSMemoryObject) for mo in memory_objs):
+        logger.debug(
+            "Object group %d has GDS-backed objects; using the kernel path",
+            object_group_id,
+        )
+        return TransferCopyPath.KERNEL
+
+    object_group = cache_context.kv_layer_groups_manager.object_groups[object_group_id]
+    for kernel_group_id in object_group.kernel_group_indices:
+        engine_kv_format = cache_context.get_engine_kv_format(kernel_group_id)
+        if not device_ops.direct_copy_format_supported(engine_kv_format):
+            _warn_direct_copy_fallback_once(
+                f"object group {object_group_id}: layout {engine_kv_format!s} of "
+                f"kernel group {kernel_group_id} is not eligible (only token-major "
+                "layouts whose paged block is one contiguous run qualify)"
+            )
+            return TransferCopyPath.KERNEL
+        if copy_policy.mode == "auto":
+            sd = cache_context.get_shape_desc(kernel_group_id)
+            block_bytes = sd.bs * sd.nh * sd.hs * sd.element_size
+            if block_bytes < copy_policy.direct_min_block_bytes:
+                logger.debug(
+                    "Object group %d: kernel group %d block is %d bytes, below the "
+                    "%d-byte direct copy threshold; using the kernel path",
+                    object_group_id,
+                    kernel_group_id,
+                    block_bytes,
+                    copy_policy.direct_min_block_bytes,
+                )
+                return TransferCopyPath.KERNEL
+    return TransferCopyPath.DIRECT
 
 
 def get_layout_desc(
@@ -471,6 +579,137 @@ def _run_object_group_transfer_plan(
     )
 
 
+def _run_direct_copy_plan(
+    cache_context: BaseCacheContext,
+    block_ids_host: Sequence[Sequence[int]],
+    memory_objs: Sequence[MemoryObj | None],
+    object_group_id: int,
+    skip_first_n_tokens: int,
+    direction: "lmcache_native.TransferDirection",
+) -> None:
+    """Plan and execute one object group's transfer through the copy engine.
+
+    Direct-copy counterpart of :func:`_run_object_group_transfer_plan`: the
+    same window skip / ``skip_first_n_tokens`` logic, but instead of staging
+    each chunk through the GPU temp buffer and launching the block transfer
+    kernel, every (kv plane, layer, block) of a chunk becomes one entry of a
+    ``cudaMemcpyBatchAsync`` call between the pinned host object and the paged
+    buffer (``execute_direct_copy_transfer``, one call per chunk, single GIL
+    release for the whole group).
+
+    The caller must have checked eligibility with
+    :func:`select_transfer_copy_path`.
+
+    Args:
+        cache_context: The GPU cache context containing the KV cache information.
+        block_ids_host: Downsampled host block ids, indexed by kernel group,
+            ``blocks_per_window`` entries per chunk.
+        memory_objs: The MemoryObj instances to copy. None entries are only
+            valid for D2H (the chunk is skipped); H2D raises.
+        object_group_id: Index of the object group being copied.
+        skip_first_n_tokens: Tokens to skip writing at the start of the range.
+        direction: H2D (retrieve) or D2H (store).
+
+    Raises:
+        ValueError: If a None entry is found in memory_objs when direction is
+            H2D, or if an object has not been allocated.
+    """
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    object_group = kv_groups_manager.object_groups[object_group_id]
+    kernel_group_ids = object_group.kernel_group_indices
+    is_h2d = direction == lmcache_native.TransferDirection.H2D
+
+    group_specs: list[Any] = []
+    blocks_per_chunk_by_kg: list[int] = []
+    blocks_per_window_by_kg: list[int] = []
+    for kernel_group_id in kernel_group_ids:
+        blocks_per_chunk = cache_context.calculate_num_blocks(
+            lmcache_chunk_size, kernel_group_id
+        )
+        tokens_per_window = min(
+            lmcache_chunk_size,
+            kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+        )
+        blocks_per_window = cache_context.calculate_num_blocks(
+            tokens_per_window, kernel_group_id
+        )
+        blocks_per_chunk_by_kg.append(blocks_per_chunk)
+        blocks_per_window_by_kg.append(blocks_per_window)
+        group_specs.append(
+            device_ops.DirectCopyGroupSpec(
+                cache_context.get_kernel_group_kv_pointer_list(kernel_group_id),
+                cache_context.get_shape_desc(kernel_group_id),
+                cache_context.get_engine_kv_format(kernel_group_id),
+                cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
+                cache_context.get_kernel_group_offset_in_object(
+                    object_group_id, kernel_group_id
+                ),
+                list(block_ids_host[kernel_group_id]),
+            )
+        )
+
+    attn_desc = kv_groups_manager.get_attn_desc()
+    num_objects_to_skip = 0
+    if not attn_desc.is_full_attention(object_group_id) and is_h2d:
+        sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
+        num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
+
+    objects: list[Any] = []
+    for chunk_idx in range(num_objects_to_skip, len(memory_objs)):
+        memory_obj = memory_objs[chunk_idx]
+        if memory_obj is None:
+            if is_h2d:
+                raise ValueError(
+                    f"MemoryObj is None for chunk {chunk_idx}, cannot perform H2D copy"
+                )
+            continue
+        if memory_obj.raw_tensor is None:
+            raise ValueError(
+                "memory_obj.raw_tensor is None; ensure the MemoryObj has been "
+                "allocated."
+            )
+        chunk_start_token = chunk_idx * lmcache_chunk_size
+        chunk_end_token = chunk_start_token + lmcache_chunk_size
+        effective_start = max(chunk_start_token, skip_first_n_tokens)
+        if effective_start >= chunk_end_token:
+            continue
+        skip_tokens_in_chunk = effective_start - chunk_start_token
+
+        skip_blocks: list[int] = []
+        for position, kernel_group_id in enumerate(kernel_group_ids):
+            orig_skip_blocks = cache_context.calculate_num_blocks(
+                skip_tokens_in_chunk, kernel_group_id
+            )
+            skip_blocks.append(
+                _recalculate_blocks_to_skip(
+                    blocks_per_chunk_by_kg[position],
+                    blocks_per_window_by_kg[position],
+                    orig_skip_blocks,
+                )
+            )
+        objects.append(
+            device_ops.DirectCopyObject(
+                memory_obj.data_ptr,
+                memory_obj.meta.address,
+                memory_obj.get_size(),
+                chunk_idx,
+                skip_blocks,
+            )
+        )
+
+    if not objects:
+        return
+
+    device_ops.execute_direct_copy_transfer(
+        direction,
+        cache_context.device,
+        LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        group_specs,
+        objects,
+    )
+
+
 def transfer_kv_per_object_group(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -481,6 +720,8 @@ def transfer_kv_per_object_group(
     direction: "lmcache_native.TransferDirection",
     *,
     transfer_key: str,
+    block_ids_host: Sequence[Sequence[int]] = (),
+    copy_policy: TransferCopyPolicy = DEFAULT_TRANSFER_COPY_POLICY,
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -503,6 +744,11 @@ def transfer_kv_per_object_group(
         direction: The transfer direction, H2D (retrieve) or D2H (store).
         transfer_key: Identity of this store/retrieve operation, echoed back on
             every phase-timing sample; see _run_object_group_transfer_plan.
+        block_ids_host: The same downsampled block ids as ``block_ids_gpu``,
+            as host lists indexed by kernel group. Required for the direct
+            copy path (:class:`TransferCopyPolicy`); leave empty to force the
+            kernel path.
+        copy_policy: Which copy path to use; the default is the kernel path.
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
@@ -510,6 +756,20 @@ def transfer_kv_per_object_group(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
+    copy_path = select_transfer_copy_path(
+        cache_context, object_group_id, memory_objs, block_ids_host, copy_policy
+    )
+    if copy_path is TransferCopyPath.DIRECT:
+        _run_direct_copy_plan(
+            cache_context,
+            block_ids_host,
+            memory_objs,
+            object_group_id,
+            skip_first_n_tokens,
+            direction,
+        )
+        return
+
     if _HAS_NATIVE_OBJECT_GROUP_TRANSFER and not any(
         isinstance(mo, GDSMemoryObject) for mo in memory_objs
     ):
@@ -1235,6 +1495,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
                         transfer_key=transfer_key,
+                        block_ids_host=gpu_block_ids,
+                        copy_policy=self._ctx.transfer_copy_policy,
                     )
 
                 store_succeeded = True
@@ -1476,6 +1738,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmcache_native.TransferDirection.H2D,
                             transfer_key=transfer_key,
+                            block_ids_host=gpu_block_ids,
+                            copy_policy=self._ctx.transfer_copy_policy,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
