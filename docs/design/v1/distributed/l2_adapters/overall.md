@@ -251,16 +251,24 @@ StorageManager.close()
 
 ```python
 # Called from the serving thread
-request_id = controller.submit_prefetch_request(keys, layout_desc)
+request_id = controller.submit_prefetch_request(spec)
+# spec: PrefetchRequestSpec(keys, layout_desc, extra_count=0,
+#                          policy=TrimPolicy.PREFIX,
+#                          attn_desc=DEFAULT_ATTN_WINDOW_DESC,
+#                          mode=PrefetchMode.LOOKUP)
 
 # Polled by the serving thread
-result = controller.query_prefetch_result(request_id)  # int | None
+result = controller.query_prefetch_result(request_id)  # Bitmap | None
 ```
 
-- `submit_prefetch_request` enqueues the request and signals the background thread
-  via an eventfd. Returns immediately.
-- `query_prefetch_result` returns `None` while in-progress, then the **prefix hit
-  count** exactly once (pop semantics).
+- `submit_prefetch_request` takes a `PrefetchRequestSpec`
+  (`lmcache/v1/distributed/api.py`) that bundles the six L2-fetch inputs
+  (`keys`, `layout_desc`, `extra_count`, `policy`, `attn_desc`, `mode`) and
+  returns immediately after enqueueing the request and signalling the
+  background thread via an eventfd.
+- `query_prefetch_result` returns `None` while in-progress, then the retained
+  found-key bitmap exactly once (pop semantics); derive the prefix hit count
+  with `count_leading_ones`.
 
 ### Prefix-Only Loading
 
@@ -300,13 +308,13 @@ LOOKUP ────────────────────────�
 ### Data Flow
 
 ```
-submit_prefetch_request(keys, layout_desc)
+submit_prefetch_request(spec)  # PrefetchRequestSpec
   │
   ▼ (cross-thread: submission queue + eventfd signal)
 _drain_submission_queue → _pending_queue
   │
   ▼ (if below max_in_flight)
-_start_lookup_phase(request_id, keys, layout_desc)
+_start_lookup_phase(request_id, spec)
   │
   ├─ Submit lookup_and_lock_task(keys) to EVERY adapter
   │
@@ -427,13 +435,15 @@ everything together.
 
 ```python
 # 1. Submit: check L1 first, then delegate remainder to L2
-handle = sm.submit_prefetch_task(keys, layout_desc)
+spec = PrefetchRequestSpec(keys=keys, layout_desc=layout_desc)
+handle = sm.submit_prefetch_task(spec, external_request_id="")
 
 # 2. Poll: busy-wait for completion
 while True:
-    found_count = sm.query_prefetch_status(handle)
-    if found_count is not None:
+    found_bitmap = sm.query_prefetch_status(handle)
+    if found_bitmap is not None:
         break
+found_count = found_bitmap.count_leading_ones()
 
 # 3. Read: access the prefetched data (holds read locks)
 with sm.read_prefetched_results(keys[:found_count]) as objs:
@@ -449,18 +459,22 @@ sm.finish_read_prefetched(keys[:found_count])
 ```python
 @dataclass(frozen=True)
 class PrefetchHandle:
-    request_id: int          # -1 if no L2 request needed
-    l1_prefix_hit_count: int # leading keys already in L1
+    prefetch_request_id: int         # -1 if no L2 request needed
+    external_request_id: str         # caller id for end-to-end tracing
+    l1_found_indices: tuple[int, ...] # original-key indices already read-locked in L1
     total_requested_keys: int
-    submit_time: float       # for latency logging
+    submit_time: float               # for latency logging
 ```
 
-`submit_prefetch_task` first checks L1 for a contiguous prefix of hits:
-- If all keys hit L1: returns handle with `request_id=-1` (no L2 work).
+`submit_prefetch_task` takes a `PrefetchRequestSpec` (plus the two
+StorageManager-only knobs `external_request_id` and `skip_l2`) and first
+checks L1 for a contiguous prefix of hits:
+- If all keys hit L1: returns handle with `prefetch_request_id=-1` (no L2 work).
 - If some keys miss: submits the **remaining** keys to PrefetchController.
 
-`query_prefetch_status` combines L1 hits with L2 results:
-`total_hits = l1_prefix_hit_count + l2_prefix_hits`.
+`query_prefetch_status` returns the retained found-key bitmap once ready, and
+`StorageManager` combines L1 hits with L2 results before returning it:
+`total_hits = len(handle.l1_found_indices) + l2_prefix_hits`.
 
 ## Assumptions and Invariants Summary
 
