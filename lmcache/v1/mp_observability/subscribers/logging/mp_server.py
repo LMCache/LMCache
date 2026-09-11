@@ -11,6 +11,9 @@ is installed, ``init_logger`` automatically attaches an OTel
 # Future
 from __future__ import annotations
 
+# Standard
+import time
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -21,6 +24,16 @@ logger = init_logger(__name__)
 
 class MPServerLoggingSubscriber(EventSubscriber):
     """Logs MP server store/retrieve/lookup events at debug level."""
+
+    #: Minimum seconds between two hit-rate summary lines.
+    HIT_RATE_LOG_INTERVAL_S = 30.0
+
+    def __init__(self) -> None:
+        # Token-weighted hit-rate accumulators, reset at each summary line.
+        self._requested = 0
+        self._hit = 0
+        self._lookups = 0
+        self._next_log = 0.0
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
@@ -75,6 +88,22 @@ class MPServerLoggingSubscriber(EventSubscriber):
             event.session_id,
             event.metadata.get("found_count"),
         )
+        requested = int(event.metadata.get("requested_tokens") or 0)
+        if requested <= 0:
+            return  # early-exit lookup: nothing was actually looked up
+        self._requested += requested
+        self._hit += int(event.metadata.get("hit_tokens") or 0)
+        self._lookups += 1
+        now = time.monotonic()
+        if now < self._next_log:
+            return
+        self._next_log = now + self.HIT_RATE_LOG_INTERVAL_S
+        logger.info(
+            "lookup hit rate (over %d lookup(s)): prefix=%.1f%%",
+            self._lookups,
+            100.0 * self._hit / self._requested,
+        )
+        self._requested = self._hit = self._lookups = 0
 
     def _on_block_allocation(self, event: Event) -> None:
         records = event.metadata.get("records", [])

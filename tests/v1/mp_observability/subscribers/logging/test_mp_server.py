@@ -129,3 +129,38 @@ class TestMPServerLoggingSubscriber:
             )
         time.sleep(0.15)
         bus.stop()
+
+
+class TestLookupHitRateSummary:
+    """MP_LOOKUP_PREFETCH_END feeds a throttled token-weighted summary that
+    resets at each line (rate over the lookups since the previous line)."""
+
+    def _end(self, requested, hit):
+        return Event(
+            event_type=EventType.MP_LOOKUP_PREFETCH_END,
+            session_id="req-1",
+            metadata={"requested_tokens": requested, "hit_tokens": hit},
+        )
+
+    def test_first_lookup_logs_and_resets(self, subscriber, caplog):
+        with caplog.at_level("INFO"):
+            subscriber._on_lookup_prefetch_end(self._end(1024, 768))
+        assert "lookup hit rate (over 1 lookup(s)): prefix=75.0%" in caplog.text
+        assert subscriber._requested == 0
+
+    def test_throttled_then_token_weighted_aggregate(self, subscriber, caplog):
+        subscriber._on_lookup_prefetch_end(self._end(1024, 768))  # logs + resets
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            subscriber._on_lookup_prefetch_end(self._end(100, 0))
+            subscriber._on_lookup_prefetch_end(self._end(100, 100))
+            assert "hit rate" not in caplog.text  # within the interval
+            subscriber._next_log = 0.0
+            subscriber._on_lookup_prefetch_end(self._end(200, 100))
+        assert "lookup hit rate (over 3 lookup(s)): prefix=50.0%" in caplog.text
+
+    def test_early_exit_is_not_counted(self, subscriber, caplog):
+        with caplog.at_level("INFO"):
+            subscriber._on_lookup_prefetch_end(self._end(0, 0))
+        assert "hit rate" not in caplog.text
+        assert subscriber._lookups == 0

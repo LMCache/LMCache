@@ -147,3 +147,35 @@ class TestBlendLoggingSubscriber:
             )
         time.sleep(0.15)
         bus.stop()
+
+
+class TestLookupHitRateSummary:
+    """CB_LOOKUP_END feeds a throttled prefix + non-prefix summary."""
+
+    def _end(self, requested, prefix, seg_tail, non_prefix):
+        return Event(
+            event_type=EventType.CB_LOOKUP_END,
+            session_id="req-1",
+            metadata={
+                "requested_tokens": requested,
+                "prefix_hit_tokens": prefix,
+                "segmented_prefix_hit_tokens": seg_tail,
+                "non_prefix_hit_tokens": non_prefix,
+            },
+        )
+
+    def test_both_planes_with_segmented_tail_as_prefix(self, subscriber, caplog):
+        with caplog.at_level("INFO"):
+            subscriber._on_lookup_end(self._end(1024, 512, 256, 256))
+        assert (
+            "lookup hit rate (over 1 lookup(s)): prefix=75.0% non_prefix=25.0%"
+            in caplog.text
+        )
+
+    def test_miss_counts_zero(self, subscriber, caplog):
+        with caplog.at_level("INFO"):
+            subscriber._on_lookup_end(self._end(512, 0, 0, 0))
+        assert (
+            "lookup hit rate (over 1 lookup(s)): prefix=0.0% non_prefix=0.0%"
+            in caplog.text
+        )
