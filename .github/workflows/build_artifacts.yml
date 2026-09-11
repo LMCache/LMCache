@@ -118,6 +118,13 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
       - id: build
         uses: ./.github/actions/build-artifacts
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          MUSA_IMAGE: ${{ vars.MUSA_IMAGE }}
+          MUSA_IMAGE_DIGEST: ${{ vars.MUSA_IMAGE_DIGEST }}
+          MUSA_HOME: ${{ vars.MUSA_HOME }}
+          TORCH_MUSA_PACKAGES: ${{ vars.TORCH_MUSA_PACKAGES }}
+          TORCH_MUSA_INDEX: ${{ vars.TORCH_MUSA_INDEX }}
         with:
           target: ${{ matrix.target }}
           dev_version: ${{ inputs.dev_version || 'false' }}

@@ -44,12 +44,12 @@ runs:
       run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
     - name: Login to DockerHub
-      if: (inputs.target == 'cu129' || inputs.target == 'rocm' || inputs.target == 'xpu' || inputs.target == 'rocm-torch210') && vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+      if: (inputs.target == 'cu129' || inputs.target == 'rocm' || inputs.target == 'xpu' || inputs.target == 'rocm-torch210') && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
       env:
         DOCKERHUB_TOKEN: ${{ inputs.dockerhub_token }}
       uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
       with:
-        username: ${{ vars.DOCKERHUB_USERNAME }}
+        username: ${{ env.DOCKERHUB_USERNAME }}
         password: ${{ inputs.dockerhub_token }}
 
     - name: Free disk space
@@ -193,11 +193,11 @@ runs:
     - name: Build MUSA artifact
       if: inputs.target == 'musa'
       env:
-        MUSA_IMAGE: ${{ vars.MUSA_IMAGE || 'registry.mthreads.com/mcconline/musa-pytorch-release-public:rc5.1.0-v2.9.1-S5000-py310_tef' }}
-        MUSA_IMAGE_DIGEST: ${{ vars.MUSA_IMAGE_DIGEST || '' }}
-        MUSA_HOME: ${{ vars.MUSA_HOME || '/usr/local/musa' }}
-        TORCH_MUSA_PACKAGES: ${{ vars.TORCH_MUSA_PACKAGES || '' }}
-        TORCH_MUSA_INDEX: ${{ vars.TORCH_MUSA_INDEX || '' }}
+        MUSA_IMAGE: ${{ env.MUSA_IMAGE || 'registry.mthreads.com/mcconline/musa-pytorch-release-public:rc5.1.0-v2.9.1-S5000-py310_tef' }}
+        MUSA_IMAGE_DIGEST: ${{ env.MUSA_IMAGE_DIGEST || '' }}
+        MUSA_HOME: ${{ env.MUSA_HOME || '/usr/local/musa' }}
+        TORCH_MUSA_PACKAGES: ${{ env.TORCH_MUSA_PACKAGES || '' }}
+        TORCH_MUSA_INDEX: ${{ env.TORCH_MUSA_INDEX || '' }}
         MUSA_MANYLINUX_PLATFORM: manylinux_2_35_x86_64
         MUSA_LOCAL_VERSION: musa
         SKIP_AUDITWHEEL_REPAIR: '0'
