@@ -8,7 +8,9 @@ Formatters are attached to handlers, separating rendering from destination.
 # Standard
 from typing import Any
 import abc
+import csv
 import inspect
+import io
 import json
 
 # First Party
@@ -239,3 +241,81 @@ class JsonFormatter(MetricsFormatter):
             sections_to_dict(title, sections),
             indent=self._indent,
         )
+
+
+def _locate_section(
+    section: Section,
+    group_counts: dict[str, int],
+) -> tuple[str, str]:
+    """Return the ``(section, index)`` cells for *section*.
+
+    Advances *group_counts* in place so each section in a list group is
+    assigned the next index (0, 1, ...).
+
+    Args:
+        section: The section being rendered.
+        group_counts: Mutable map of list-group name to the next index to
+            assign; updated as a side effect for list-group sections.
+
+    Returns:
+        A ``(section_name, index)`` pair of CSV cells. Both are empty for
+        the unnamed top-level section; ``index`` is empty for named
+        non-list sections.
+    """
+    if section.key is None:
+        return "", ""
+    if section.list_group is not None:
+        index = group_counts.get(section.list_group, 0)
+        group_counts[section.list_group] = index + 1
+        return section.list_group, str(index)
+    return section.key, ""
+
+
+@register_formatter("csv")
+class CsvFormatter(MetricsFormatter):
+    """Renders metrics as a CSV in long tidy form.
+
+    Emits a header row followed by one row per metric, using a fixed
+    five-column schema:
+    * ``section`` — machine key of the owning section, or empty for
+      top-level (flat) metrics.
+    * ``index`` — zero-based position of the section within its list
+      group (e.g. ``models`` 0, 1, ...), or empty for non-list sections.
+      This keeps otherwise-identical repeated sections distinguishable.
+    * ``key`` / ``label`` — the metric's machine key and human label.
+    * ``value`` — the raw value; ``None`` renders as an empty field.
+
+    Every metric becomes one flat row regardless of how deeply the source
+    sections are nested, so the output loads directly into spreadsheets
+    or a dataframe. The ``title`` argument is accepted only to satisfy the
+    ``MetricsFormatter`` interface; it is not rendered, since CSV models a
+    single flat table with no natural slot for a presentational header.
+    """
+
+    _HEADER = ("section", "index", "key", "label", "value")
+
+    def format(self, title: str, sections: list[Section]) -> str:
+        """Render metrics as long-form CSV.
+
+        Args:
+            title: The report title. Unused — see the class docstring for
+                why the title is not part of the tabular output.
+            sections: Ordered list of ``Section`` objects.
+
+        Returns:
+            CSV text: a header row followed by one row per metric. Rows
+            are ``\\n``-terminated with no trailing newline, matching the
+            other formatters.
+        """
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerow(self._HEADER)
+
+        group_counts: dict[str, int] = {}
+        for section in sections:
+            location = _locate_section(section, group_counts)
+            for key, label, value in section.entries:
+                cell = "" if value is None else value
+                writer.writerow([*location, key, label, cell])
+
+        return buffer.getvalue().rstrip("\n")
