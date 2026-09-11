@@ -10,10 +10,12 @@ import unittest
 import torch
 
 # First Party
-from lmcache.integration.sglang.unified_lmcache_mp_connector import (
+from lmcache.integration.sglang.lmcache_mp_metadata import (
     LMCacheLoadOperation,
     LMCacheLookupOperation,
     SGLangKVComponentGroup,
+)
+from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     UnifiedLMCacheMPConnector,
 )
 from lmcache.utils import EngineType

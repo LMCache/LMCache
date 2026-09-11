@@ -11,8 +11,8 @@ by SGLang; LMCache accesses them through device-memory and event IPC handles.
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from typing import Any, Optional
+import hashlib
 import logging
 import threading
 import uuid
@@ -20,6 +20,14 @@ import uuid
 # Third Party
 import torch
 import torch.distributed as dist
+
+# First Party
+from lmcache.integration.sglang.lmcache_mp_metadata import (
+    LMCacheLoadOperation,
+    LMCacheLookupOperation,
+    LMCacheStoreOperation,
+    SGLangKVComponentGroup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,74 +59,6 @@ class _ImmediateFuture:
         del value
 
 
-@dataclass
-class LMCacheLookupOperation:
-    request_id: str
-    token_ids: list[int]
-    local_hit_tokens: int
-    cache_salt: str
-    submission_future: Any = None
-    completion_future: Any = None
-    total_hit_tokens: Optional[int] = None
-    locks_held: bool = False
-    lock_start: int = 0
-
-
-@dataclass(frozen=True)
-class SGLangKVComponentGroup:
-    """One SGLang KV address space exposed as one LMCache engine group.
-
-    ``kv_tensors`` are registered as independent, single-plane byte-equivalent
-    views.  This keeps SGLang's separately allocated K and V buffers zero-copy
-    while giving every component a stable per-group block-id namespace.
-    """
-
-    name: str
-    kv_tensors: tuple[torch.Tensor, ...]
-    sliding_window_size: int = -1
-    # Logical tokens covered by one engine block id. Attention groups use the
-    # SGLang page size; a recurrent/Mamba group uses its checkpoint grid.
-    tokens_per_block: int = 0
-    # SGLang allocator slots covered by one block id. This is page_size for
-    # attention and 1 for a Mamba checkpoint slot. Attention and MLA preserve
-    # this as the explicit BS axis; recurrent state uses an opaque view.
-    slots_per_block: int = 0
-    # Number of source tensor rows making up one block, one value per tensor.
-    # Usually this equals slots_per_block. Page-native sidecars such as the DSA
-    # indexer and DeepSeek V4 compressed/state pools already store one complete
-    # logical page in each row and therefore use 1.
-    tensor_rows_per_block: tuple[int, ...] = ()
-    recurrent_state: bool = False
-
-
-@dataclass
-class LMCacheLoadOperation:
-    request_id: str
-    token_ids: list[int]
-    start: int
-    end: int
-    local_hit_tokens: int
-    device_indices: torch.Tensor
-    future: Any
-    lookup: LMCacheLookupOperation
-    result: Optional[bool] = None
-
-    def query(self) -> bool:
-        return self.result is not None or bool(self.future.query())
-
-
-@dataclass
-class LMCacheStoreOperation:
-    request_id: str
-    start: int
-    end: int
-    future: Any
-    result: Optional[bool] = None
-
-    def query(self) -> bool:
-        return self.result is not None or bool(self.future.query())
-
-
 class UnifiedLMCacheMPConnector:
     """Asynchronous, CUDA-IPC connector to a standalone LMCache server."""
 
@@ -126,7 +66,7 @@ class UnifiedLMCacheMPConnector:
         self,
         *,
         config_file: Optional[str],
-        model_name: str,
+        model_config: Any,
         tp_size: int,
         tp_rank: int,
         tp_group: Optional[dist.ProcessGroup],
@@ -134,8 +74,11 @@ class UnifiedLMCacheMPConnector:
         pp_rank: int = 0,
         pp_group: Optional[dist.ProcessGroup] = None,
         page_size: int,
-        kv_groups: list[SGLangKVComponentGroup],
-        mla_enabled: bool = False,
+        token_to_kv_pool_allocator: Any,
+        req_to_token_pool: Any,
+        tree_components: tuple[Any, ...],
+        mamba_component: Any,
+        sliding_window_size: Optional[int],
     ) -> None:
         try:
             # First Party
@@ -148,6 +91,22 @@ class UnifiedLMCacheMPConnector:
                 "LMCacheUnifiedRadixCache requires the `lmcache` package and "
                 "a running LMCache multiprocess server."
             ) from exc
+
+        # First Party
+        from lmcache.integration.sglang.unified_kv_adapter import (
+            SGLangUnifiedKVAdapter,
+        )
+
+        self._sglang_kv_adapter = SGLangUnifiedKVAdapter(
+            token_to_kv_pool_allocator=token_to_kv_pool_allocator,
+            req_to_token_pool=req_to_token_pool,
+            tree_components=tree_components,
+            mamba_component=mamba_component,
+            page_size=page_size,
+            sliding_window_size=sliding_window_size,
+        )
+        kv_groups = self._sglang_kv_adapter.resolve_registered_groups()
+        mla_enabled = self._sglang_kv_adapter.is_mla_enabled(model_config)
 
         if not kv_groups or any(not group.kv_tensors for group in kv_groups):
             raise ValueError("LMCache KV group registration cannot be empty")
@@ -288,7 +247,7 @@ class UnifiedLMCacheMPConnector:
                 "server to be started with --separate-object-groups."
             )
 
-        self.model_name = model_name
+        self.model_name = model_config.model_path
         # Match vLLM's MLA-only parallel strategy. Replicated MLA collapses
         # the LMCache object identity across TP while retaining one distinct
         # piece per PP stage. The general path keeps one piece per TP x PP rank.
@@ -487,6 +446,48 @@ class UnifiedLMCacheMPConnector:
     @property
     def operation_timeout(self) -> float:
         return self._mq_timeout
+
+    @staticmethod
+    def build_cache_salt(cache_salt: Optional[str], extra_key: Optional[str]) -> str:
+        """Combine SGLang's salt and extra key into one LMCache namespace."""
+        if not extra_key:
+            return cache_salt or ""
+        payload = f"{cache_salt or ''}\0{extra_key}".encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    def aligned_swa_window_size(self) -> int:
+        return self._sglang_kv_adapter.aligned_swa_window_size()
+
+    def reset_mamba_checkpoint_metadata(self, indices: torch.Tensor) -> None:
+        self._sglang_kv_adapter.reset_mamba_checkpoint_metadata(indices)
+
+    def device_indices_by_group(
+        self,
+        full_indices: torch.Tensor,
+        *,
+        mamba_value: Optional[torch.Tensor] = None,
+        mamba_transfer_tokens: Optional[int] = None,
+    ) -> list[torch.Tensor]:
+        return self._sglang_kv_adapter.device_indices_by_group(
+            full_indices,
+            mamba_value=mamba_value,
+            mamba_transfer_tokens=mamba_transfer_tokens,
+        )
+
+    def parallel_all_reduce(self, tensor: torch.Tensor, op: dist.ReduceOp) -> None:
+        """Synchronize a tensor across the connector's TP and PP ranks."""
+        self._parallel_all_reduce(tensor, op)
+
+    def ready_prefix_count(self, operations) -> int:
+        """Return the cross-rank count of ready leading operations."""
+        count = 0
+        for operation in operations:
+            if not operation.query():
+                break
+            count += 1
+        tensor = torch.tensor([count], dtype=torch.int64, device="cpu")
+        self._parallel_all_reduce(tensor, dist.ReduceOp.MIN)
+        return int(tensor.item())
 
     def _sync_leader_int(self, value: int) -> int:
         tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
