@@ -65,20 +65,22 @@ If your operation fits an existing category (engine / controller / debug / blend
      ]
      ```
 
-3. **Add the protocol definition** in `get_protocol_definitions()`:
+3. **Add the scheduling definition** in `get_protocol_definitions()`:
    ```python
    def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
        return {
            # ... existing definitions ...
            "YOUR_NEW_OP": ProtocolDefinition(
-               payload_classes=[int, str],  # Your payload types
-               response_class=bool,          # Your response type
                handler_type=HandlerType.SYNC,  # or BLOCKING
            ),
        }
    ```
 
-4. **Done!** The validation system will verify everything matches on import.
+4. **Add Python messages** in `rpc_messages.py` and register the pair in
+   `RPC_MESSAGE_TYPES`. The request and response classes are shared by ZMQ,
+   gRPC, and the business handler.
+
+5. **Done!** The validation system will verify everything matches on import.
 
 ### Option 2: Create New Protocol Module
 
@@ -99,11 +101,12 @@ If you're adding a new category of operations:
    # SPDX-License-Identifier: Apache-2.0
    """
    Monitoring protocol definitions.
-   
+
    This module defines protocols for:
    - HEALTH_CHECK: Check server health status
    - GET_STATS: Get cache statistics
    """
+
    from lmcache.v1.multiprocess.protocols.base import ProtocolDefinition, HandlerType
 
    REQUEST_NAMES = [
@@ -111,16 +114,13 @@ If you're adding a new category of operations:
        "GET_STATS",
    ]
 
+
    def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
        return {
            "HEALTH_CHECK": ProtocolDefinition(
-               payload_classes=[],
-               response_class=dict,
                handler_type=HandlerType.SYNC,
            ),
            "GET_STATS": ProtocolDefinition(
-               payload_classes=[],
-               response_class=dict,
                handler_type=HandlerType.SYNC,
            ),
        }
@@ -154,8 +154,8 @@ From any module in the codebase:
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     HandlerType,
-    get_payload_classes,
-    get_response_class,
+    get_request_message_class,
+    get_response_message_class,
     get_handler_type,
 )
 
@@ -163,8 +163,8 @@ from lmcache.v1.multiprocess.protocol import (
 req_type = RequestType.STORE
 
 # Get protocol information
-payloads = get_payload_classes(req_type)
-response = get_response_class(req_type)
+request = get_request_message_class(req_type)
+response = get_response_message_class(req_type)
 handler = get_handler_type(req_type)
 ```
 

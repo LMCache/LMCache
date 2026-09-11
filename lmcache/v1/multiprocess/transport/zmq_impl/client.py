@@ -9,17 +9,16 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
-    get_response_class,
 )
+from lmcache.v1.multiprocess.rpc_messages import make_request_message
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
 class ZmqMultiprocessClient(RequestClient):
     """Expose named multiprocess RPC methods over the existing ZMQ client.
 
-    The wrapper changes only the Python call surface. Every method delegates to
-    :class:`MessageQueueClient` with the existing ``RequestType`` and positional
-    payload list, so the ZMQ wire protocol and server remain unchanged.
+    Every named method builds one transport-neutral Python request message and
+    delegates it to :class:`MessageQueueClient` for ZMQ serialization.
 
     Args:
         message_queue_client: Existing ZMQ message queue client to wrap.
@@ -294,6 +293,5 @@ class ZmqMultiprocessClient(RequestClient):
     ) -> MessagingFuture[Any]:
         return self._message_queue_client.submit_request(
             request_type,
-            list(request_payloads),
-            get_response_class(request_type),
+            make_request_message(request_type.name, *request_payloads),
         )

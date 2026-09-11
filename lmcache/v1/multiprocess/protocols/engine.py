@@ -14,17 +14,12 @@ This module defines the protocol for:
 """
 
 # First Party
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
-    KVCache,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
-    RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -53,6 +48,14 @@ REQUEST_NAMES = [
 # Type alias for cache keys
 KeyType = IPCCacheServerKey
 
+__all__ = [
+    "KeyType",
+    "PrepareRetrieveResponse",
+    "PrepareStoreResponse",
+    "RegisterEngineDrivenContextResponse",
+    "get_protocol_definitions",
+]
+
 
 def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     """
@@ -75,16 +78,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #     group metadata (msgspec-encoded by the message queue).
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[
-                int,
-                KVCache,
-                str,
-                int,
-                EngineType,
-                LayoutHints,
-                list[EngineGroupInfo],
-            ],
-            response_class=None,
             handler_type=HandlerType.SYNC,
         ),
         # Unregister KV Cache
@@ -92,8 +85,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - instance_id: int - Unique identifier for the vLLM instance
         # Returns: None
         "UNREGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int],
-            response_class=None,
             handler_type=HandlerType.SYNC,
         ),
         # Register QRingBuffer.
@@ -102,32 +93,18 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # STORE can serve it via the existing transfer path with no separate
         # instance id.
         "REGISTER_Q_CACHE": ProtocolDefinition(
-            payload_classes=[
-                int,
-                KVCache,
-                str,
-                int,
-                EngineType,
-                LayoutHints,
-                list[EngineGroupInfo],
-            ],
-            response_class=None,
             handler_type=HandlerType.SYNC,
         ),
         # Unregister the paged Q ring buffer.
         # Same as UNREGISTER_KV_CACHE.
         # Returns: None
         "UNREGISTER_Q_CACHE": ProtocolDefinition(
-            payload_classes=[int],
-            response_class=None,
             handler_type=HandlerType.SYNC,
         ),
         # Store paged Q ring blocks (served by QStoreModule).
         # Same as STORE.
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "STORE_Q": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes],
-            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Store KV cache blocks
@@ -140,8 +117,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: tuple[bytes, bool] - (device event handle, success flag).
         #   The handle is empty when the server submitted no device work.
         "STORE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes],
-            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Retrieve KV cache blocks
@@ -156,8 +131,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: tuple[bytes, bool] - (device event handle, success flag).
         #   The handle is empty when the server submitted no device work.
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes, int],
-            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Submit a prefix lookup; job is tracked server-side by request_id
@@ -167,8 +140,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #       MLA multi-reader locking
         # Returns: None
         "LOOKUP": ProtocolDefinition(
-            payload_classes=[KeyType, int],
-            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Query the status of a prefetch job by request_id
@@ -176,8 +147,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - request_id: str - The external request ID passed in the lookup key
         # Returns: int | None - Chunk count when done, None if still in progress
         "QUERY_PREFETCH_STATUS": ProtocolDefinition(
-            payload_classes=[str],
-            response_class=int | None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Block until a prefetch job completes, then return its result
@@ -186,8 +155,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - timeout: float - Max seconds to wait for the prefetch to finish
         # Returns: int | None - Chunk count when done, None if the wait timed out
         "WAIT_PREFETCH_STATUS": ProtocolDefinition(
-            payload_classes=[str, float],
-            response_class=int | None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Query the lookup hit chunks before the prefetch is done
@@ -195,8 +162,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - request_id: str - The external request ID passed in the lookup key
         # Returns: int | None - Chunk count if lookup is done, None if still in progress
         "QUERY_PREFETCH_LOOKUP_HITS": ProtocolDefinition(
-            payload_classes=[str],
-            response_class=int | None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Free locks (release read locks without a full RETRIEVE)
@@ -207,8 +172,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #       MLA multi-reader locking
         # Returns: None
         "FREE_LOOKUP_LOCKS": ProtocolDefinition(
-            payload_classes=[KeyType, int],
-            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
         # End session
@@ -216,8 +179,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - request_id: str - Request ID of the session to end
         # Returns: None
         "END_SESSION": ProtocolDefinition(
-            payload_classes=[str],
-            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Unregister non-GPU KV cache context
@@ -225,8 +186,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - instance_id: int - Unique identifier for the vLLM instance
         # Returns: None
         "UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT": ProtocolDefinition(
-            payload_classes=[int],
-            response_class=None,
             handler_type=HandlerType.SYNC,
         ),
         # Register non-GPU KV cache context
@@ -234,28 +193,18 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - RegisterEngineDrivenContextPayload - all metadata fields in one struct
         # Returns: RegisterEngineDrivenContextResponse
         "REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT": ProtocolDefinition(
-            payload_classes=[RegisterEngineDrivenContextPayload],
-            response_class=RegisterEngineDrivenContextResponse,
             handler_type=HandlerType.SYNC,
         ),
         "PREPARE_STORE": ProtocolDefinition(
-            payload_classes=[KeyType, int],
-            response_class=PrepareStoreResponse,
             handler_type=HandlerType.BLOCKING,
         ),
         "COMMIT_STORE": ProtocolDefinition(
-            payload_classes=[KeyType, int, bytes],
-            response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),
         "PREPARE_RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int],
-            response_class=PrepareRetrieveResponse,
             handler_type=HandlerType.BLOCKING,
         ),
         "COMMIT_RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int],
-            response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),
     }

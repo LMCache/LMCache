@@ -29,10 +29,18 @@ from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
-    get_payload_classes,
-    get_response_class,
+    get_request_message_class,
+    get_response_message_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.rpc_messages import (
+    P2pLookupAndLockRequest,
+    P2pLookupAndLockResponse,
+    P2pQueryLookupResultsRequest,
+    P2pQueryLookupResultsResponse,
+    P2pUnlockObjectsRequest,
+    P2pUnlockObjectsResponse,
+)
 
 
 def _make_key(i: int) -> ObjectKey:
@@ -69,19 +77,27 @@ def test_p2p_request_types_registered():
 def test_p2p_lookup_and_lock_protocol():
     """P2P_LOOKUP_AND_LOCK payload is [list[ObjectKey],
     dict[int, MemoryLayoutDesc]], returns int, and is BLOCKING."""
-    payload_classes = get_payload_classes(RequestType.P2P_LOOKUP_AND_LOCK)
-    assert payload_classes == [list[ObjectKey], dict[int, MemoryLayoutDesc]]
-    assert get_response_class(RequestType.P2P_LOOKUP_AND_LOCK) is int
+    assert (
+        get_request_message_class(RequestType.P2P_LOOKUP_AND_LOCK)
+        is P2pLookupAndLockRequest
+    )
+    assert (
+        get_response_message_class(RequestType.P2P_LOOKUP_AND_LOCK)
+        is P2pLookupAndLockResponse
+    )
     assert get_handler_type(RequestType.P2P_LOOKUP_AND_LOCK) == HandlerType.BLOCKING
 
 
 def test_p2p_query_lookup_results_protocol():
     """P2P_QUERY_LOOKUP_RESULTS payload is [int], returns the optional address
     list, and is BLOCKING."""
-    assert get_payload_classes(RequestType.P2P_QUERY_LOOKUP_RESULTS) == [int]
     assert (
-        get_response_class(RequestType.P2P_QUERY_LOOKUP_RESULTS)
-        == list[TransferChannelAddress] | None
+        get_request_message_class(RequestType.P2P_QUERY_LOOKUP_RESULTS)
+        is P2pQueryLookupResultsRequest
+    )
+    assert (
+        get_response_message_class(RequestType.P2P_QUERY_LOOKUP_RESULTS)
+        is P2pQueryLookupResultsResponse
     )
     assert (
         get_handler_type(RequestType.P2P_QUERY_LOOKUP_RESULTS) == HandlerType.BLOCKING
@@ -90,8 +106,14 @@ def test_p2p_query_lookup_results_protocol():
 
 def test_p2p_unlock_objects_protocol():
     """P2P_UNLOCK_OBJECTS payload is [list[ObjectKey]], returns None, BLOCKING."""
-    assert get_payload_classes(RequestType.P2P_UNLOCK_OBJECTS) == [list[ObjectKey]]
-    assert get_response_class(RequestType.P2P_UNLOCK_OBJECTS) is None
+    assert (
+        get_request_message_class(RequestType.P2P_UNLOCK_OBJECTS)
+        is P2pUnlockObjectsRequest
+    )
+    assert (
+        get_response_message_class(RequestType.P2P_UNLOCK_OBJECTS)
+        is P2pUnlockObjectsResponse
+    )
     assert get_handler_type(RequestType.P2P_UNLOCK_OBJECTS) == HandlerType.BLOCKING
 
 

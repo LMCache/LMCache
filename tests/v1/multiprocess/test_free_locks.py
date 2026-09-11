@@ -17,11 +17,15 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
-    get_payload_classes,
-    get_response_class,
+    get_request_message_class,
+    get_response_message_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    FreeLookupLocksRequest,
+    FreeLookupLocksResponse,
+)
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
@@ -47,18 +51,20 @@ def test_free_locks_in_request_type():
     assert isinstance(RequestType.FREE_LOOKUP_LOCKS, RequestType)
 
 
-def test_free_locks_payload_classes():
-    """FREE_LOOKUP_LOCKS payload should be [IPCCacheServerKey, int]."""
-    payload_classes = get_payload_classes(RequestType.FREE_LOOKUP_LOCKS)
-    assert len(payload_classes) == 2
-    assert payload_classes[0] is IPCCacheServerKey
-    assert payload_classes[1] is int
+def test_free_locks_request_message_class():
+    """FREE_LOOKUP_LOCKS should use its Python request message."""
+    assert (
+        get_request_message_class(RequestType.FREE_LOOKUP_LOCKS)
+        is FreeLookupLocksRequest
+    )
 
 
-def test_free_locks_response_class():
-    """FREE_LOOKUP_LOCKS should have no response (None)."""
-    response_class = get_response_class(RequestType.FREE_LOOKUP_LOCKS)
-    assert response_class is None
+def test_free_locks_response_message_class():
+    """FREE_LOOKUP_LOCKS should use its Python response message."""
+    assert (
+        get_response_message_class(RequestType.FREE_LOOKUP_LOCKS)
+        is FreeLookupLocksResponse
+    )
 
 
 def test_free_locks_handler_type():

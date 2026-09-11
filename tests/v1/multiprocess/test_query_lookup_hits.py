@@ -23,11 +23,15 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
-    get_payload_classes,
-    get_response_class,
+    get_request_message_class,
+    get_response_message_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    QueryPrefetchLookupHitsRequest,
+    QueryPrefetchLookupHitsResponse,
+)
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
@@ -49,17 +53,20 @@ def test_query_prefetch_lookup_hits_in_request_type():
     assert isinstance(RequestType.QUERY_PREFETCH_LOOKUP_HITS, RequestType)
 
 
-def test_query_prefetch_lookup_hits_payload_classes():
-    """QUERY_PREFETCH_LOOKUP_HITS payload should be [str]."""
-    payload_classes = get_payload_classes(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
-    assert len(payload_classes) == 1
-    assert payload_classes[0] is str
+def test_query_prefetch_lookup_hits_request_message_class():
+    """QUERY_PREFETCH_LOOKUP_HITS should use its Python request message."""
+    assert (
+        get_request_message_class(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+        is QueryPrefetchLookupHitsRequest
+    )
 
 
-def test_query_prefetch_lookup_hits_response_class():
-    """QUERY_PREFETCH_LOOKUP_HITS response should be int | None."""
-    response_class = get_response_class(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
-    assert response_class == int | None
+def test_query_prefetch_lookup_hits_response_message_class():
+    """QUERY_PREFETCH_LOOKUP_HITS should use its Python response message."""
+    assert (
+        get_response_message_class(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+        is QueryPrefetchLookupHitsResponse
+    )
 
 
 def test_query_prefetch_lookup_hits_handler_type():

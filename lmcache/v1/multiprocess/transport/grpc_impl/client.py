@@ -15,14 +15,18 @@ import grpc
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.rpc_messages import (
+    make_request_message,
+    unwrap_response_message,
+)
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
-    GrpcMethodCodec,
-    get_method_codec_registry,
+    GrpcMethodBinding,
+    get_method_registry,
 )
 
 _GRPC_OPTIONS = (
@@ -65,7 +69,7 @@ def parse_grpc_target(server_url: str) -> str:
 @dataclass(frozen=True)
 class _ClientRpc:
     stub_method: Any
-    codec: GrpcMethodCodec
+    binding: GrpcMethodBinding
 
 
 ClientRpcCallable = Callable[..., MessagingFuture[Any]]
@@ -80,7 +84,7 @@ class GrpcMultiprocessClient(RequestClient):
         )
         stubs: dict[str, Any] = {}
         self._rpc_methods: dict[str, _ClientRpc] = {}
-        codec_registry = get_method_codec_registry()
+        method_registry = get_method_registry()
         for binding, method in iter_methods():
             service_name = binding.descriptor.name
             stub = stubs.get(service_name)
@@ -93,7 +97,7 @@ class GrpcMultiprocessClient(RequestClient):
                 raise RuntimeError(f"Duplicate gRPC client method: {name}")
             self._rpc_methods[name] = _ClientRpc(
                 stub_method=getattr(stub, method.name),
-                codec=codec_registry.by_full_name[method.full_name],
+                binding=method_registry.by_full_name[method.full_name],
             )
         self._metadata = ((_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
 
@@ -138,7 +142,13 @@ class GrpcMultiprocessClient(RequestClient):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> MessagingFuture[Any]:
-        request = rpc.codec.request_encoder(args, kwargs)
+        request_class = rpc.binding.python_request_class
+        python_request = (
+            request_class(**kwargs)
+            if kwargs
+            else make_request_message(rpc.binding.request_type.name, *args)
+        )
+        request = rpc.binding.request_to_proto(python_request)
         future: MessagingFuture[Any] = MessagingFuture()
         call = rpc.stub_method.future(
             request,
@@ -148,7 +158,8 @@ class GrpcMultiprocessClient(RequestClient):
 
         def on_done(grpc_future: grpc.Future[Any]) -> None:
             try:
-                result = rpc.codec.response_decoder(grpc_future.result())
+                response = rpc.binding.proto_to_response(grpc_future.result())
+                result = unwrap_response_message(response)
             except BaseException as exc:
                 future.set_exception(exc)
             else:

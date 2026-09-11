@@ -44,18 +44,26 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
+from lmcache.v1.multiprocess.rpc_messages import (
+    LookupRequest,
+    LookupResponse,
+    RegisterKvCacheEngineDrivenContextRequest,
+    RegisterKvCacheEngineDrivenContextResponse,
+    StoreRequest,
+    StoreResponse,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
-    get_message_codec_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     get_service_bindings,
     iter_methods,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.message_adapters import (
+    get_message_adapter_registry,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
-    get_method_codec_registry,
+    get_method_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
@@ -70,7 +78,7 @@ class _Calls:
 
 
 class _TestDeviceIPCWrapper(DeviceIPCWrapper):
-    """Pickle-safe test wrapper for the shared custom codec."""
+    """Pickle-safe test wrapper for the shared custom adapter."""
 
     def __init__(self) -> None:
         self.handle = b"handle"
@@ -81,7 +89,7 @@ class _TestDeviceIPCWrapper(DeviceIPCWrapper):
         self.device_uuid = "test-device"
 
     def to_tensor(self) -> torch.Tensor:
-        """The codec test does not reconstruct a device tensor."""
+        """The adapter test does not reconstruct a device tensor."""
         raise NotImplementedError
 
 
@@ -213,7 +221,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
 
 
 def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
-    """Every generated RPC has one codec derived from its gRPC service."""
+    """Every generated RPC has one adapter derived from its gRPC service."""
     bindings = get_service_bindings()
     assert {
         "LMCacheDrivenService",
@@ -228,53 +236,42 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         "Lookup",
         "StoreQ",
     }
-    registry = get_method_codec_registry()
+    registry = get_method_registry()
     generated_methods = {method.full_name for _, method in iter_methods()}
     assert set(registry.by_full_name) == generated_methods
+    for _, method in iter_methods():
+        method_binding = registry.by_full_name[method.full_name]
+        assert method_binding.python_request_class.__name__ == method.input_type.name
+        assert method_binding.python_response_class.__name__ == method.output_type.name
 
-    lookup_codec = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
-    assert lookup_codec.request_type is RequestType.LOOKUP
-    assert lookup_codec.payload_types == (IPCCacheServerKey, int)
-    assert lookup_codec.response_type is type(None)
+    lookup_binding = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
+    assert lookup_binding.request_type is RequestType.LOOKUP
+    assert lookup_binding.python_request_class is LookupRequest
+    assert lookup_binding.python_response_class is LookupResponse
 
-    store_codec = registry.by_full_name["lmcache.mp.LMCacheDrivenService.Store"]
-    assert store_codec.payload_types == (
-        IPCCacheServerKey,
-        int,
-        list[list[int]],
-        bytes,
-    )
-    assert store_codec.response_type == tuple[bytes, bool]
+    store_binding = registry.by_full_name["lmcache.mp.LMCacheDrivenService.Store"]
+    assert store_binding.python_request_class is StoreRequest
+    assert store_binding.python_response_class is StoreResponse
 
-    registration_codec = registry.by_full_name[
+    registration_binding = registry.by_full_name[
         "lmcache.mp.EngineDrivenService.RegisterKvCacheEngineDrivenContext"
     ]
-    registration_request = registration_codec.request_encoder(
-        (),
-        {
-            "instance_id": 7,
-            "model_name": "model",
-            "world_size": 2,
-            "block_size": 16,
-            "num_layers": 32,
-            "hidden_dim_size": 128,
-            "dtype_str": "float16",
-            "use_mla": False,
-            "num_physical_slots": 32,
-        },
+    python_request = RegisterKvCacheEngineDrivenContextRequest(
+        instance_id=7,
+        model_name="model",
+        world_size=2,
+        block_size=16,
+        num_layers=32,
+        hidden_dim_size=128,
+        dtype_str="float16",
+        use_mla=False,
+        num_physical_slots=32,
     )
-    assert registration_codec.request_decoder(registration_request) == (
-        RegisterEngineDrivenContextPayload(
-            instance_id=7,
-            model_name="model",
-            world_size=2,
-            block_size=16,
-            num_layers=32,
-            hidden_dim_size=128,
-            dtype_str="float16",
-            use_mla=False,
-            num_physical_slots=32,
-        ),
+    registration_request = registration_binding.request_to_proto(python_request)
+    assert registration_binding.proto_to_request(registration_request) == python_request
+    assert (
+        registration_binding.python_response_class
+        is RegisterKvCacheEngineDrivenContextResponse
     )
 
 
@@ -294,12 +291,12 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         for module_type in module_types
         for registered in iter_request_handlers(module_type)
     }
-    registry = get_method_codec_registry()
-    codecs = tuple(registry.by_full_name.values())
+    registry = get_method_registry()
+    adapters = tuple(registry.by_full_name.values())
 
-    assert set(handlers) == {codec.request_type for codec in codecs}
-    for codec in codecs:
-        codec.validate_handler(handlers[codec.request_type])
+    assert set(handlers) == {adapter.request_type for adapter in adapters}
+    for adapter in adapters:
+        adapter.validate_handler(handlers[adapter.request_type])
 
 
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:
@@ -372,9 +369,9 @@ def test_generated_protobuf_type_stubs_are_available() -> None:
         assert module_path.with_suffix(".pyi").is_file()
 
 
-def test_service_message_codec_registry_round_trips_custom_types() -> None:
-    """Service-owned codecs handle only their registered protobuf types."""
-    registry = get_message_codec_registry()
+def test_service_message_method_registry_round_trips_custom_types() -> None:
+    """Service-owned adapters handle only their registered protobuf types."""
+    registry = get_message_adapter_registry()
     common_pb2 = importlib.import_module(
         "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2"
     )
@@ -384,19 +381,19 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
 
     wrapper = _TestDeviceIPCWrapper()
     wrapper_message = common_pb2.DeviceIpcWrapper()
-    wrapper_codec = registry.find(wrapper_message.DESCRIPTOR, type(wrapper))
-    assert wrapper_codec is not None
-    wrapper_codec.writer(wrapper_message, wrapper)
-    decoded_wrapper = wrapper_codec.reader(wrapper_message)
+    wrapper_adapter = registry.find(wrapper_message.DESCRIPTOR, type(wrapper))
+    assert wrapper_adapter is not None
+    wrapper_adapter.writer(wrapper_message, wrapper)
+    decoded_wrapper = wrapper_adapter.reader(wrapper_message)
     assert type(decoded_wrapper) is _TestDeviceIPCWrapper
     assert decoded_wrapper == wrapper
 
     shape = torch.Size([2, 4])
     shape_message = p2p_service_pb2.TensorShape()
-    shape_codec = registry.find(shape_message.DESCRIPTOR, torch.Size)
-    assert shape_codec is not None
-    shape_codec.writer(shape_message, shape)
-    assert shape_codec.reader(shape_message) == shape
+    shape_adapter = registry.find(shape_message.DESCRIPTOR, torch.Size)
+    assert shape_adapter is not None
+    shape_adapter.writer(shape_message, shape)
+    assert shape_adapter.reader(shape_message) == shape
 
 
 def test_generated_grpc_services_communicate_end_to_end(

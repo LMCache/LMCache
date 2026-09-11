@@ -25,14 +25,20 @@ from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
     MessageQueueServer,
+    msgspec_encode,
 )
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
-    get_payload_classes,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.rpc_messages import (
+    GetChunkSizeRequest,
+    GetChunkSizeResponse,
+    NoopRequest,
+    make_request_message,
+)
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
     get_zmq_handler_specs,
@@ -112,9 +118,8 @@ def _server_process(
     # Register all handlers
     blocking_types: list[RequestType] = []
     for request_type, handler in request_handlers.items():
-        payload_classes = get_payload_classes(request_type)
         handler_type = get_handler_type(request_type)
-        server.add_handler(request_type, payload_classes, handler_type, handler)
+        server.add_handler(request_type, handler_type, handler)
         if handler_type == HandlerType.BLOCKING:
             blocking_types.append(request_type)
 
@@ -174,7 +179,10 @@ def _run_client_test(
         futures = []
         # Submit requests
         for _ in range(num_requests):
-            future = client.submit_request(request_type, payloads)  # type: ignore
+            future: MessagingFuture[Any] = client.submit_request(
+                request_type,
+                make_request_message(request_type.name, *payloads),
+            )
             futures.append(future)
 
         # Validate responses
@@ -704,8 +712,12 @@ def test_shared_loop_dispatch():
         assert loop._ref_count == 2
 
         # Both clients submit requests concurrently
-        futures_a = [client_a.submit_request(RequestType.NOOP, []) for _ in range(5)]
-        futures_b = [client_b.submit_request(RequestType.NOOP, []) for _ in range(5)]
+        futures_a = [
+            client_a.submit_request(RequestType.NOOP, NoopRequest()) for _ in range(5)
+        ]
+        futures_b = [
+            client_b.submit_request(RequestType.NOOP, NoopRequest()) for _ in range(5)
+        ]
 
         # All futures should resolve with the correct response
         for future in futures_a:
@@ -731,11 +743,14 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
     client = MessageQueueClient(server_url, context)
     try:
         invalid: MessagingFuture[int] = client.submit_request(
-            RequestType.GET_CHUNK_SIZE, [123]
+            RequestType.GET_CHUNK_SIZE,
+            123,  # type: ignore[arg-type]
         )
-        healthy: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+        healthy: MessagingFuture[str] = client.submit_request(
+            RequestType.NOOP, NoopRequest()
+        )
 
-        with pytest.raises(ValueError, match="Payload count mismatch"):
+        with pytest.raises(TypeError, match="GetChunkSizeRequest"):
             invalid.result(timeout=5)
         assert healthy.result(timeout=5) == "NOOP_OK"
     finally:
@@ -773,7 +788,15 @@ def test_client_survives_undecodable_response() -> None:
 
         identity, b_uid, b_type, *_ = router.recv_multipart()
         router.send_multipart(
-            [identity, b_uid, b_type, msgspec.msgpack.encode(chunk_size)]
+            [
+                identity,
+                b_uid,
+                b_type,
+                msgspec_encode(
+                    GetChunkSizeResponse(chunk_size),
+                    GetChunkSizeResponse,
+                ),
+            ]
         )
 
     threading.Thread(target=serve, daemon=True).start()
@@ -785,7 +808,7 @@ def test_client_survives_undecodable_response() -> None:
         # request_type there is no way to match it to its future, so it times
         # out. That much is expected -- what matters is what happens after.
         poisoned: MessagingFuture[int] = client.submit_request(
-            RequestType.GET_CHUNK_SIZE, []
+            RequestType.GET_CHUNK_SIZE, GetChunkSizeRequest()
         )
         with pytest.raises(TimeoutError):
             poisoned.result(timeout=1)
@@ -793,7 +816,7 @@ def test_client_survives_undecodable_response() -> None:
         # A later, well-formed request must still be served. If the bad
         # response tore down the shared polling loop, this times out too.
         healthy: MessagingFuture[int] = client.submit_request(
-            RequestType.GET_CHUNK_SIZE, []
+            RequestType.GET_CHUNK_SIZE, GetChunkSizeRequest()
         )
         assert healthy.result(timeout=5) == chunk_size
 

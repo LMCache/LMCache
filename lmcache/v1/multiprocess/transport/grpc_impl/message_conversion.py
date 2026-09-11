@@ -2,8 +2,8 @@
 """Compile protobuf/Python value converters for the gRPC transport.
 
 This module contains only structural conversion rules. RPC ownership and
-Python request/response types are supplied by the method codec registry, while
-non-structural message conversions are supplied by service codec modules.
+Python request/response types are supplied by the method adapter registry, while
+non-structural message conversions are supplied by service adapter modules.
 """
 
 # Standard
@@ -26,8 +26,8 @@ import msgspec
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
-    get_message_codec_registry,
+from lmcache.v1.multiprocess.transport.grpc_impl.message_adapters import (
+    get_message_adapter_registry,
 )
 
 _NONE_TYPE = type(None)
@@ -122,7 +122,7 @@ def _identity(value: Any) -> Any:
     return value
 
 
-def _compile_scalar_codec(
+def _build_scalar_adapter(
     field: Any, py_type: Any
 ) -> tuple[ValueEncoder, ValueDecoder]:
     if field.type == field.TYPE_BYTES:
@@ -159,11 +159,11 @@ def _compile_map_field(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRead
     key_type, value_type = args if len(args) == 2 else (Any, Any)
     key_field = field.message_type.fields_by_name["key"]
     value_field = field.message_type.fields_by_name["value"]
-    encode_key, decode_key = _compile_scalar_codec(key_field, key_type)
+    encode_key, decode_key = _build_scalar_adapter(key_field, key_type)
     field_name = field.name
 
     if value_field.message_type is None:
-        encode_value, decode_value = _compile_scalar_codec(value_field, value_type)
+        encode_value, decode_value = _build_scalar_adapter(value_field, value_type)
 
         def write_map(message: Any, value: Any) -> None:
             container = getattr(message, field_name)
@@ -178,7 +178,7 @@ def _compile_map_field(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRead
 
         return write_map, read_map
 
-    write_value, read_value = _compile_message_codec(
+    write_value, read_value = _build_message_adapter(
         value_field.message_type, value_type
     )
 
@@ -196,7 +196,7 @@ def _compile_map_field(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRead
     return write_message_map, read_message_map
 
 
-def _compile_field_codec(field: Any, py_type: Any) -> tuple[FieldWriter, FieldReader]:
+def _build_field_adapter(field: Any, py_type: Any) -> tuple[FieldWriter, FieldReader]:
     py_type, optional = _unwrap_optional(py_type)
     if optional and (field.is_repeated or not field.has_presence):
         raise TypeError(
@@ -215,7 +215,7 @@ def _compile_field_codec(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRe
         item_type, as_tuple = sequence
         field_name = field.name
         if field.message_type is None:
-            encode_item, decode_item = _compile_scalar_codec(field, item_type)
+            encode_item, decode_item = _build_scalar_adapter(field, item_type)
 
             def write_repeated(message: Any, value: Any) -> None:
                 getattr(message, field_name).extend(encode_item(item) for item in value)
@@ -226,7 +226,7 @@ def _compile_field_codec(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRe
 
             writer, reader = write_repeated, read_repeated
         else:
-            write_item, read_item = _compile_message_codec(
+            write_item, read_item = _build_message_adapter(
                 field.message_type, item_type
             )
 
@@ -241,7 +241,7 @@ def _compile_field_codec(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRe
 
             writer, reader = write_repeated_message, read_repeated_message
     elif field.message_type is not None:
-        write_child, read_child = _compile_message_codec(field.message_type, py_type)
+        write_child, read_child = _build_message_adapter(field.message_type, py_type)
         field_name = field.name
 
         def write_message(message: Any, value: Any) -> None:
@@ -254,7 +254,7 @@ def _compile_field_codec(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRe
 
         writer, reader = write_message, read_message
     else:
-        encode_value, decode_value = _compile_scalar_codec(field, py_type)
+        encode_value, decode_value = _build_scalar_adapter(field, py_type)
         field_name = field.name
 
         def write_scalar(message: Any, value: Any) -> None:
@@ -282,19 +282,19 @@ def _compile_field_codec(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRe
     return write_optional, read_optional
 
 
-def _compile_message_codec(
+def _build_message_adapter(
     descriptor: Any, py_type: Any
 ) -> tuple[FieldWriter, FieldReader]:
     py_type, _ = _unwrap_optional(py_type)
     proto_fields = tuple(descriptor.fields)
 
-    registered = get_message_codec_registry().find(descriptor, py_type)
+    registered = get_message_adapter_registry().find(descriptor, py_type)
     if registered is not None:
         return registered.writer, registered.reader
 
     sequence = _sequence_type(py_type)
     if sequence is not None and len(proto_fields) == 1:
-        return _compile_field_codec(proto_fields[0], py_type)
+        return _build_field_adapter(proto_fields[0], py_type)
 
     tuple_types = _fixed_tuple_types(py_type)
     if tuple_types is not None:
@@ -303,42 +303,42 @@ def _compile_message_codec(
                 f"{py_type!r} has {len(tuple_types)} values but "
                 f"{descriptor.full_name} has {len(proto_fields)} fields"
             )
-        tuple_codecs = tuple(
-            _compile_field_codec(field, item_type)
+        tuple_adapters = tuple(
+            _build_field_adapter(field, item_type)
             for field, item_type in zip(proto_fields, tuple_types, strict=True)
         )
 
         def write_tuple(message: Any, value: Any) -> None:
-            for item, (writer, _) in zip(value, tuple_codecs, strict=True):
+            for item, (writer, _) in zip(value, tuple_adapters, strict=True):
                 writer(message, item)
 
         def read_tuple(message: Any) -> tuple[Any, ...]:
-            return tuple(reader(message) for _, reader in tuple_codecs)
+            return tuple(reader(message) for _, reader in tuple_adapters)
 
         return write_tuple, read_tuple
 
     py_fields = _structured_fields(py_type)
     if py_fields is None or len(py_fields) != len(proto_fields):
         raise TypeError(
-            f"no structural codec from {py_type!r} to {descriptor.full_name}"
+            f"no structural adapter from {py_type!r} to {descriptor.full_name}"
         )
 
-    struct_codecs: list[tuple[str, FieldWriter, FieldReader]] = []
+    struct_adapters: list[tuple[str, FieldWriter, FieldReader]] = []
     for (name, field_type), field in zip(py_fields, proto_fields, strict=True):
         if field.name not in (name, f"encoded_{name}"):
             raise TypeError(
                 f"{py_type.__name__}.{name} does not match "
                 f"{descriptor.full_name}.{field.name}"
             )
-        writer, reader = _compile_field_codec(field, field_type)
-        struct_codecs.append((name, writer, reader))
+        writer, reader = _build_field_adapter(field, field_type)
+        struct_adapters.append((name, writer, reader))
 
     def write_struct(message: Any, value: Any) -> None:
-        for name, writer, _ in struct_codecs:
+        for name, writer, _ in struct_adapters:
             writer(message, getattr(value, name))
 
     def read_struct(message: Any) -> Any:
-        return py_type(**{name: reader(message) for name, _, reader in struct_codecs})
+        return py_type(**{name: reader(message) for name, _, reader in struct_adapters})
 
     return write_struct, read_struct
 
@@ -347,11 +347,11 @@ def _proto_has_same_descriptor(value: Any, descriptor: Any) -> bool:
     return hasattr(value, "DESCRIPTOR") and value.DESCRIPTOR is descriptor
 
 
-def compile_request_codec_for_types(
+def build_request_conversion(
     message_cls: Any,
     payload_types: tuple[Any, ...],
 ) -> tuple[RequestEncoder, RequestDecoder]:
-    """Compile one request codec from gRPC service payload types.
+    """Compile one request adapter from gRPC service payload types.
 
     Args:
         message_cls: Generated protobuf request class.
@@ -364,13 +364,16 @@ def compile_request_codec_for_types(
         TypeError: If the protobuf request cannot represent the payload types.
     """
     proto_fields = tuple(message_cls.DESCRIPTOR.fields)
-    if len(payload_types) == len(proto_fields):
-        codecs = tuple(
-            _compile_field_codec(field, py_type)
+    if len(payload_types) == len(proto_fields) and not (
+        len(payload_types) == 1 and _structured_fields(payload_types[0]) is not None
+    ):
+        adapters = tuple(
+            _build_field_adapter(field, py_type)
             for field, py_type in zip(proto_fields, payload_types, strict=True)
         )
-        codecs_by_name = {
-            field.name: codec for field, codec in zip(proto_fields, codecs, strict=True)
+        adapters_by_name = {
+            field.name: adapter
+            for field, adapter in zip(proto_fields, adapters, strict=True)
         }
 
         def encode_fields(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
@@ -387,39 +390,39 @@ def compile_request_codec_for_types(
             message = message_cls()
             if kwargs:
                 for name, value in kwargs.items():
-                    codec = codecs_by_name.get(name)
-                    if codec is None:
+                    adapter = adapters_by_name.get(name)
+                    if adapter is None:
                         raise TypeError(
                             f"{message_cls.DESCRIPTOR.full_name} has no field {name!r}"
                         )
-                    codec[0](message, value)
+                    adapter[0](message, value)
                 return message
-            if len(args) > len(codecs):
+            if len(args) > len(adapters):
                 raise TypeError(
                     f"{message_cls.DESCRIPTOR.full_name} accepts at most "
-                    f"{len(codecs)} positional values, got {len(args)}"
+                    f"{len(adapters)} positional values, got {len(args)}"
                 )
-            for value, (writer, _) in zip(args, codecs, strict=False):
+            for value, (writer, _) in zip(args, adapters, strict=False):
                 writer(message, value)
             return message
 
         def decode_fields(message: Any) -> tuple[Any, ...]:
-            return tuple(reader(message) for _, reader in codecs)
+            return tuple(reader(message) for _, reader in adapters)
 
         return encode_fields, decode_fields
 
     if len(payload_types) == 1:
-        write_message, read_message = _compile_message_codec(
+        write_message, read_message = _build_message_adapter(
             message_cls.DESCRIPTOR, payload_types[0]
         )
         py_fields = _structured_fields(payload_types[0])
         if py_fields is None or len(py_fields) != len(proto_fields):
             raise TypeError(
-                f"no keyword request codec from {payload_types[0]!r} to "
+                f"no keyword request adapter from {payload_types[0]!r} to "
                 f"{message_cls.DESCRIPTOR.full_name}"
             )
-        keyword_codecs = {
-            field.name: _compile_field_codec(field, field_type)
+        keyword_adapters = {
+            field.name: _build_field_adapter(field, field_type)
             for (_name, field_type), field in zip(py_fields, proto_fields, strict=True)
         }
 
@@ -437,12 +440,12 @@ def compile_request_codec_for_types(
             message = message_cls()
             if kwargs:
                 for name, value in kwargs.items():
-                    codec = keyword_codecs.get(name)
-                    if codec is None:
+                    adapter = keyword_adapters.get(name)
+                    if adapter is None:
                         raise TypeError(
                             f"{message_cls.DESCRIPTOR.full_name} has no field {name!r}"
                         )
-                    codec[0](message, value)
+                    adapter[0](message, value)
                 return message
             if len(args) > 1:
                 raise TypeError(
@@ -509,11 +512,11 @@ def compile_request_decoder(
         return (lambda _message: ()), payload_types
 
     if len(params) == len(proto_fields) or len(params) == 1:
-        _encoder, decoder = compile_request_codec_for_types(message_cls, payload_types)
+        _encoder, decoder = build_request_conversion(message_cls, payload_types)
         return decoder, payload_types
 
     fields_by_name = message_cls.DESCRIPTOR.fields_by_name
-    selected_codecs: list[tuple[Any, FieldReader]] = []
+    selected_adapters: list[tuple[Any, FieldReader]] = []
     for param, py_type in zip(params, payload_types, strict=True):
         field = fields_by_name.get(param.name)
         if field is None:
@@ -523,11 +526,11 @@ def compile_request_decoder(
                 f"{message_cls.DESCRIPTOR.full_name} has no field matching "
                 f"handler parameter {param.name!r}"
             )
-        _writer, reader = _compile_field_codec(field, py_type)
-        selected_codecs.append((field, reader))
+        _writer, reader = _build_field_adapter(field, py_type)
+        selected_adapters.append((field, reader))
 
     def decode_subset(message: Any) -> tuple[Any, ...]:
-        return tuple(reader(message) for _field, reader in selected_codecs)
+        return tuple(reader(message) for _field, reader in selected_adapters)
 
     return decode_subset, payload_types
 
@@ -597,7 +600,7 @@ def _write_response_value(
 
     py_fields = _structured_fields(response_type)
     if py_fields is not None and len(py_fields) == len(proto_fields):
-        writer, _reader = _compile_message_codec(message.DESCRIPTOR, response_type)
+        writer, _reader = _build_message_adapter(message.DESCRIPTOR, response_type)
         writer(message, result)
         return
 
@@ -606,17 +609,17 @@ def _write_response_value(
         for field, item_type, item in zip(
             proto_fields, tuple_types, result, strict=True
         ):
-            writer, _reader = _compile_field_codec(field, item_type)
+            writer, _reader = _build_field_adapter(field, item_type)
             writer(message, item)
         return
 
     if len(proto_fields) == 1:
-        writer, _reader = _compile_field_codec(proto_fields[0], response_type)
+        writer, _reader = _build_field_adapter(proto_fields[0], response_type)
         writer(message, result)
         return
 
     raise TypeError(
-        f"no response codec from {response_type!r} to {message.DESCRIPTOR.full_name}"
+        f"no response adapter from {response_type!r} to {message.DESCRIPTOR.full_name}"
     )
 
 
@@ -650,7 +653,7 @@ def compile_response_decoder_for_type(
                 f"{message_cls.DESCRIPTOR.full_name} cannot represent an "
                 "optional response"
             )
-        _writer, reader = _compile_field_codec(fields[0], response_type)
+        _writer, reader = _build_field_adapter(fields[0], response_type)
 
         def decode_optional(message: Any) -> Any:
             if not message.HasField(fields[0].name):
@@ -661,14 +664,14 @@ def compile_response_decoder_for_type(
 
     py_fields = _structured_fields(response_type)
     if py_fields is not None and len(py_fields) == len(fields):
-        _writer, reader = _compile_message_codec(message_cls.DESCRIPTOR, response_type)
+        _writer, reader = _build_message_adapter(message_cls.DESCRIPTOR, response_type)
         return reader
 
     if len(fields) == 1:
-        _writer, reader = _compile_field_codec(fields[0], response_type)
+        _writer, reader = _build_field_adapter(fields[0], response_type)
         return reader
 
-    _writer, reader = _compile_message_codec(message_cls.DESCRIPTOR, response_type)
+    _writer, reader = _build_message_adapter(message_cls.DESCRIPTOR, response_type)
     return reader
 
 
@@ -687,7 +690,7 @@ def decode_response_to_type(response: Any, response_type: Any) -> Any:
 
 
 __all__ = [
-    "compile_request_codec_for_types",
+    "build_request_conversion",
     "compile_request_decoder",
     "compile_response_decoder_for_type",
     "compile_response_encoder",

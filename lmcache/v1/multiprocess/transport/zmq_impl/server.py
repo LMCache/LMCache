@@ -16,7 +16,6 @@ from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
-    get_payload_classes,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
@@ -76,7 +75,6 @@ def add_handler_helper(
     """
     server.add_handler(
         request_type,
-        get_payload_classes(request_type),
         handler_type or get_handler_type(request_type),
         handler_function,
     )

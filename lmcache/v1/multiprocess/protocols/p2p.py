@@ -9,8 +9,6 @@ This module defines the protocol for:
 """
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -37,8 +35,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #     of the objects, per object group
         # Returns: int - Task id for querying the lookup status later
         "P2P_LOOKUP_AND_LOCK": ProtocolDefinition(
-            payload_classes=[list[ObjectKey], dict[int, MemoryLayoutDesc]],
-            response_class=int,
             handler_type=HandlerType.BLOCKING,
         ),
         # Query the transfer addresses for a lookup task
@@ -47,8 +43,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: list[TransferChannelAddress] | None - Addresses when the
         #   lookup is complete, None if still in progress or already consumed
         "P2P_QUERY_LOOKUP_RESULTS": ProtocolDefinition(
-            payload_classes=[int],
-            response_class=list[TransferChannelAddress] | None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Release the read locks held on the given keys
@@ -56,8 +50,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - keys: list[ObjectKey] - Object keys to unlock
         # Returns: None
         "P2P_UNLOCK_OBJECTS": ProtocolDefinition(
-            payload_classes=[list[ObjectKey]],
-            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
     }
