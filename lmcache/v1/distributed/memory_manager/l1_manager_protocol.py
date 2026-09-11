@@ -2,7 +2,11 @@
 """Structural interface shared by the L1 memory manager tiers."""
 
 # Standard
-from typing import Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
 
 # First Party
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
@@ -42,6 +46,13 @@ class L1ManagerProtocol(Protocol):
         """Describe the underlying L1 buffer for L2-adapter registration.
 
         Returns ``None`` for tiers with no registerable L1 buffer (e.g. GDS).
+        """
+        ...
+
+    def warm_up(self, device: "int | torch.device") -> None:
+        """Start deferred initialization (e.g. host pinning) for ``device``.
+
+        No-op for tiers without deferred initialization.
         """
         ...
 
