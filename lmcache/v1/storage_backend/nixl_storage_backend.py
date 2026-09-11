@@ -153,7 +153,7 @@ class NixlStorageConfig:
     @staticmethod
     def validate_nixl_backend(backend: str, device: str) -> bool:
         device = device.split(":", 1)[0]
-        if backend in ("GDS", "GDS_MT", "OBJ"):
+        if backend in ("GDS", "GDS_MT", "OBJ", "INFINIA"):
             return device == "cpu" or device == "cuda"
         elif backend in ("POSIX", "HF3FS", "AZURE_BLOB", "DOCA_MEMOS"):
             return device == "cpu"
@@ -507,12 +507,16 @@ class NixlStorageAgent(ABC):
         self.init_mem_handlers(device, buffer_ptr, buffer_size, page_size, device_id)
 
     def init_mem_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
-        # Break the registration into page size chunks to ensure the maximum buffer size
-        # of the underlying plugin is not exceeded
-        reg_list = [
-            (base_addr, page_size, device_id, "")
-            for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size)
-        ]
+        if self.backend != "INFINIA":
+            # Break the registration into page size chunks to ensure the
+            # maximum buffer size of the underlying plugin is not exceeded
+            reg_list = [
+                (base_addr, page_size, device_id, "")
+                for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size)
+            ]
+        else:
+            # register the whole memory by one registerMem call for INFINIA
+            reg_list = [(buffer_ptr, buffer_size, device_id, "")]
         xfer_desc = [
             (base_addr, page_size, device_id)
             for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size)
@@ -673,7 +677,7 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             allocator, device, backend, backend_params, enable_prog_thread, sync_mode
         )
 
-        if backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS"):
+        if backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS", "INFINIA"):
             self.mem_type = "OBJ"
         else:
             self.mem_type = "FILE"
@@ -1141,7 +1145,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
                 create_dirs=True,
             )
             return NixlFilePool(size, sharder, use_direct_io)
-        elif backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS"):
+        elif backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS", "INFINIA"):
             return NixlObjectPool(size, b128=(backend == "DOCA_MEMOS"))
         else:
             raise ValueError(f"Unsupported NIXL backend: {backend}")

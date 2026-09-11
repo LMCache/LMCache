@@ -54,7 +54,7 @@ Key settings:
 
 - ``nixl_path``: directory (or list of directories) under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file. When using a list of paths with ``path_sharding``, paths will be selected based on the sharding strategy.
 
-- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu". In CPU mode, NIXL shares ``LocalCPUBackend``'s pinned buffer; ``LocalCPUBackend`` is always created when ``nixl_buffer_device: cpu``, regardless of the ``local_cpu`` setting. ``local_cpu: false`` still suppresses hot-cache promotions — the backend acts as a staging buffer only, mirroring how ``local_disk`` already uses ``LocalCPUBackend``.
+- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", "OBJ" and "INFINIA" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu". In CPU mode, NIXL shares ``LocalCPUBackend``'s pinned buffer; ``LocalCPUBackend`` is always created when ``nixl_buffer_device: cpu``, regardless of the ``local_cpu`` setting. ``local_cpu: false`` still suppresses hot-cache promotions — the backend acts as a staging buffer only, mirroring how ``local_disk`` already uses ``LocalCPUBackend``.
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
@@ -79,7 +79,7 @@ Key settings:
 
 .. note::
 
-    Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AZURE_BLOB", "DOCA_MEMOS"].
+    Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AZURE_BLOB", "DOCA_MEMOS", "INFINIA"].
 
     Backend specific params should be provided via ``extra_config.nixl_backend_params``. Please refer to NIXL documentation for specifics.
 
@@ -155,6 +155,24 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using Azure Bl
         account_url: https://<your_azure_storage_account_name>.blob.core.windows.net
         container_name: <your_container_name>
 
+Example ``lmcache-config.yaml`` for INFINIA backend to offload using DDN's Infinia Storage API:
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
+    extra_config:
+      enable_nixl_storage: true
+      nixl_backend: AZURE_BLOB
+      nixl_pool_size: 64
+      nixl_path: /mnt/nixl/cache/
+      nixl_backend_params:
+        cluster: <your_cluster_name>
+        tenant: <your_tenant_name>
+        subtenant: <your_subtenant_name>
+        dataset: <your_dataset_name>
+
 Per-Worker Endpoint Distribution
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -199,7 +217,7 @@ In order to use dynamic mode, extra_config.nixl_pool_size should be set to 0.
 Restrictions
 ^^^^^^^^^^^^
 
-- Dynamic mode is supported for object backends ("OBJ", "AZURE_BLOB", "DOCA_MEMOS") and file backends ("POSIX", "GDS", "GDS_MT", "HF3FS").
+- Dynamic mode is supported for object backends ("OBJ", "AZURE_BLOB", "DOCA_MEMOS", "INFINIA") and file backends ("POSIX", "GDS", "GDS_MT", "HF3FS").
 - save_unfull_chunk must be set to False.
 
 Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:
@@ -273,3 +291,22 @@ model/chunk debug information) and uniqueness is probabilistic at 128 bits.
       nixl_pool_size: 64
       nixl_backend_params:
         # refer to NIXL DOCA_MEMOS plugin docs for connection params
+
+Example ``lmcache-config.yaml`` for INFINIA backend to offload using DDN's Infinia Storage API:
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
+    extra_config:
+      enable_nixl_storage: true
+      nixl_backend: AZURE_BLOB
+      nixl_pool_size: 0
+      nixl_path: /mnt/nixl/cache/
+      nixl_backend_params:
+        cluster: <your_cluster_name>
+        tenant: <your_tenant_name>
+        subtenant: <your_subtenant_name>
+        dataset: <your_dataset_name>
+
