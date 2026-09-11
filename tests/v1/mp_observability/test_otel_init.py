@@ -12,6 +12,10 @@ from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     init_observability,
 )
+from lmcache.v1.mp_observability.event_bus import (
+    EventBusConfig,
+    init_event_bus,
+)
 from lmcache.v1.mp_observability.otel_init import init_otel_metrics
 
 
@@ -57,7 +61,9 @@ def test_init_observability_propagates_flag_false():
     ``init_otel_metrics``."""
     cfg = ObservabilityConfig(enabled=True, metrics_enabled=True, logging_enabled=False)
     with patch("lmcache.v1.mp_observability.otel_init.init_otel_metrics") as mock_init:
-        init_observability(cfg, start_prometheus_http_server=False)
+        bus = init_observability(cfg, start_prometheus_http_server=False)
+    bus.stop()
+    init_event_bus(EventBusConfig(enabled=False))
     mock_init.assert_called_once()
     assert mock_init.call_args.kwargs["start_http_server"] is False
 
@@ -65,6 +71,8 @@ def test_init_observability_propagates_flag_false():
 def test_init_observability_propagates_flag_true_by_default():
     cfg = ObservabilityConfig(enabled=True, metrics_enabled=True, logging_enabled=False)
     with patch("lmcache.v1.mp_observability.otel_init.init_otel_metrics") as mock_init:
-        init_observability(cfg)
+        bus = init_observability(cfg)
+    bus.stop()
+    init_event_bus(EventBusConfig(enabled=False))
     mock_init.assert_called_once()
     assert mock_init.call_args.kwargs["start_http_server"] is True
