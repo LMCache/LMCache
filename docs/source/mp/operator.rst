@@ -1260,7 +1260,8 @@ Adding a ``pd`` block to an ``LMCacheEngine`` spec switches the engine's
 connection ConfigMap to include ``MultiConnector`` configs (``NixlConnector`` +
 ``LMCacheMPConnector``) alongside the standard bare connector, and tells the
 webhook to inject the NIXL side-channel environment variables into opted-in
-vLLM pods automatically.
+vLLM pods automatically.  ``CacheBlendEngine`` accepts the same block with an
+asymmetric connector topology — see `CacheBlend PD`_ below.
 
 See :ref:`mp_disaggregated_prefill` for background on what PD disaggregation is
 and how the pieces fit together.
@@ -1399,6 +1400,9 @@ yourself.
 Pods without a ``lmcache.ai/pd-role`` annotation that are bound to a PD engine
 fall back to the bare ``LMCacheMPConnector`` config (no NIXL) -- they still
 benefit from the LMCache KV cache without participating in disaggregation.
+A pod whose annotation carries any **other** value (e.g. a typo like
+``prefill``) is skipped entirely and stamped with the ``unknown-pd-role``
+skip reason, rather than silently receiving the non-PD config.
 
 Router
 ~~~~~~
@@ -1424,6 +1428,45 @@ A ready-to-edit manifest is at
    ``<SERVICE_NAME>_*`` env vars into every pod in the namespace; a ``vllm-``
    prefix generates ``VLLM_*`` vars that vLLM's env-var validator flags as
    unknown.
+
+CacheBlend PD
+~~~~~~~~~~~~~
+
+``CacheBlendEngine`` accepts the same ``pd`` block, but the two roles are
+**asymmetric** because blending is a prefill-time operation:
+
+- **prefiller** -- ``MultiConnector`` with ``kv_role=kv_producer``, wrapping
+  ``NixlConnector`` and ``CBKVConnector``: the prefiller blends cached KV,
+  then pushes the result to the decoder over NIXL.
+- **decoder** -- a **bare** ``NixlConnector`` with ``kv_role=kv_consumer``:
+  the decoder only receives KV from the prefiller and does not blend, so it
+  carries no CacheBlend connector at all.
+- Pods without a ``pd-role`` annotation fall back to the bare
+  ``CBKVConnector`` config, as for a non-PD ``CacheBlendEngine``.
+
+The webhook mutation is asymmetric to match: **decoder pods receive only**
+``--kv-transfer-config`` and the NIXL env vars -- no CacheBlend payload
+staging, no ``PYTHONPATH``, none of the CacheBlend vLLM flags
+(``--enforce-eager`` would needlessly disable CUDA graphs on the decode
+role), and no engine ``/dev/shm`` wiring.  ``injection.payloadImage`` is
+therefore not required for a decoder-only engine.
+
+Opt pods in with the CacheBlend label/annotation pair plus the same
+``lmcache.ai/pd-role`` annotation:
+
+.. code-block:: yaml
+
+    metadata:
+      labels:
+        lmcache.ai/cacheblend-inject: "true"
+      annotations:
+        lmcache.ai/cacheblend-engine: "my-cacheblend-pd"
+        lmcache.ai/pd-role: "prefiller"   # or "decoder"
+
+A ready-to-edit engine manifest is at
+``operator/config/samples/lmcache_v1alpha1_cacheblendengine_pd.yaml``.
+Everything else (NIXL env vars, side-channel port, RDMA/hostNetwork caveats,
+router) works exactly as described above for ``LMCacheEngine``.
 
 LMCacheCoordinator
 ------------------

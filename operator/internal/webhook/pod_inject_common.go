@@ -72,6 +72,10 @@ const (
 	// SkipReasonTargetContainerNotFound is stamped when the requested target
 	// container names a container that does not exist on the pod.
 	SkipReasonTargetContainerNotFound = "target-container-not-found"
+
+	// SkipReasonUnknownPDRole is stamped when the pod's pd-role annotation is
+	// set to a value other than "prefiller" or "decoder".
+	SkipReasonUnknownPDRole = "unknown-pd-role"
 )
 
 // injectionKeys is one injector's annotation key set. It mirrors the same four
@@ -125,7 +129,8 @@ func (k injectionKeys) gate(
 //
 // pdRole must be lmcachev1alpha1.PDRolePrefiller or PDRoleDecoder when the engine
 // is in PD mode, and empty for non-PD engines. It selects the appropriate
-// kv-transfer-config key from the connection ConfigMap.
+// kv-transfer-config key from the connection ConfigMap; any other non-empty
+// value skips the injection with SkipReasonUnknownPDRole.
 //
 // Parameters:
 //   - specDefault: the engine's default target container name (nil = first); the
@@ -159,8 +164,12 @@ func prepareInjection(
 		kvJSON = connCM.Data[resources.KVTransferConfigPrefillerDataKey]
 	case lmcachev1alpha1.PDRoleDecoder:
 		kvJSON = connCM.Data[resources.KVTransferConfigDecoderDataKey]
-	default:
+	case "":
 		kvJSON = connCM.Data[kvTransferConfigDataKey]
+	default:
+		log.Info("Skipped injection: unknown pd-role annotation value",
+			"engine", engineName, "pdRole", pdRole)
+		return "", 0, keys.skip(req, pod, SkipReasonUnknownPDRole), false
 	}
 
 	idx, found := resolveTargetContainer(pod, specDefault, pod.Annotations[keys.container])

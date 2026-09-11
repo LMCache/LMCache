@@ -484,6 +484,22 @@ The `<name>-connection` ConfigMap carries the **`CBKVConnector`**
 }
 ```
 
+With `spec.pd` set, the ConfigMap instead carries three role-keyed configs
+(same key names as the `LMCacheEngine` PD ConfigMap, selected by the webhook
+from the pod's `lmcache.ai/pd-role` annotation):
+
+| key | config |
+|---|---|
+| `kv-transfer-config.json` | bare `CBKVConnector` (fallback, identical to the non-PD JSON above) |
+| `kv-transfer-config-prefiller.json` | `MultiConnector` (`kv_producer`) wrapping `NixlConnector` + the `CBKVConnector` above |
+| `kv-transfer-config-decoder.json` | bare `NixlConnector` (`kv_consumer`) |
+
+The roles are asymmetric — unlike `LMCacheEngine`, where both roles get a
+MultiConnector — because blending is a prefill-time operation: the prefiller
+blends cached KV and pushes the result to the decoder over NIXL, while the
+decoder only receives KV and has no use for a CacheBlend connector (or the
+engine) at all.
+
 Co-location works exactly like `LMCacheEngine`: one engine per GPU node
 (DaemonSet), and the node-local Service (`internalTrafficPolicy: Local`) routes a
 vLLM pod to the same-node engine. The control-plane RPC is TCP via that Service;
@@ -511,12 +527,29 @@ target container overrides `command` (a `sh -c` wrapper — appended args wouldn
 reach `vllm serve`); the user already supplies `--kv-transfer-config` (not
 clobbered); the named engine's connection ConfigMap doesn't exist; the engine's
 `injection.payloadImage` resolves to an empty reference (`payload-image-unset`);
+the pod's `lmcache.ai/pd-role` annotation carries a value other than
+`prefiller`/`decoder` (`unknown-pd-role` — a typo'd role must not silently
+receive the non-PD fallback config; shared with the `LMCacheEngine` injector);
 or the requested `targetContainer`/`cacheblend-container` annotation names a
 container that does not exist on the pod (`target-container-not-found`). It does
 **not** gate on engine readiness — like `LMCacheEngine`, the connector connects
 when the engine comes up. Args are emitted in two-token form
 (`--pipeline-parallel-size 1`); the replace-not-duplicate dedup still recognizes
 a user-supplied `--flag=value`.
+
+**PD roles.** With `spec.pd` set, the pod's `lmcache.ai/pd-role` annotation
+selects the kv-transfer-config (see the ConfigMap contract above). Prefiller
+pods receive the full mutation table; **decoder pods receive only**
+`--kv-transfer-config` and the NIXL side-channel env vars
+(`VLLM_NIXL_SIDE_CHANNEL_HOST` from `status.podIP`,
+`VLLM_NIXL_SIDE_CHANNEL_PORT` from `spec.pd.nixlSideChannelPort`). A decoder
+runs a bare `NixlConnector` and never loads the CacheBlend plugin, so payload
+staging would be dead weight, the CacheBlend vLLM flags would be harmful
+(`--enforce-eager` disables CUDA graphs on the decode role — the exact role
+PD exists to optimize), and there is no CUDA IPC connection to the engine to
+wire `/dev/shm` for. Consequently the `payload-image-unset` skip does not
+apply to decoder pods, and `injection.payloadImage` is not required for
+decoder-only engines.
 
 > **Shared with the LMCache injector.** The emptyDir + payload init container +
 > readOnly mount + `PYTHONPATH` staging (rows 2–3 above) is generic — the standard
