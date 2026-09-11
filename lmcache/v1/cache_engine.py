@@ -482,12 +482,14 @@ class LMCacheEngine:
 
         with store_stats.profile_process_tokens():
             prev_key = 0
-            for start, end, key in self.token_database.process_tokens(
-                tokens,
-                hashes,
-                offsets,
-                mask,
-                request_configs=request_configs,
+            for chunk_idx, (start, end, key) in enumerate(
+                self.token_database.process_tokens(
+                    tokens,
+                    hashes,
+                    offsets,
+                    mask,
+                    request_configs=request_configs,
+                )
             ):
                 assert isinstance(key, CacheEngineKey)
                 # Allocate the memory object
@@ -535,12 +537,12 @@ class LMCacheEngine:
                         stored_event.token_ids = convert_tokens_to_list(
                             tokens,
                             start,
-                            end,
+                            end - 1,
                         )
                         if isinstance(tokens, torch.Tensor):
                             stored_event.medium = tokens.device
                     elif hashes is not None:
-                        stored_event.token_ids = hashes[start : end + 1]
+                        stored_event.token_ids = hashes[chunk_idx : chunk_idx + 1]
                     logger.debug(
                         (
                             "Added kv cache event '%s' to kv cache events queue"
@@ -718,7 +720,7 @@ class LMCacheEngine:
                     stored_event.token_ids = convert_tokens_to_list(
                         tokens,
                         start,
-                        end,
+                        end - 1,
                     )
                     if isinstance(tokens, torch.Tensor):
                         stored_event.medium = tokens.device
