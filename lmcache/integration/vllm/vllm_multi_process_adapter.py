@@ -76,6 +76,8 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Opt in only when lookup callbacks run frequently enough to observe replies.
+    nonblocking_lookup_status = False
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
     # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
@@ -646,10 +648,16 @@ class LMCacheMPSchedulerAdapter:
             url: RequestClientFactory.create(url, context=context)
             for url in self._server_urls
         }
+        self._nonblocking_lookup_status = (
+            ExtraConfigDefault.nonblocking_lookup_status.default
+        )
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            self._nonblocking_lookup_status = cfg[
+                ExtraConfigDefault.nonblocking_lookup_status.name
+            ]
         self._mq_timeout = mq_timeout
 
         # Lookup state tracking:
@@ -874,10 +882,12 @@ class LMCacheMPSchedulerAdapter:
 
         First polls, without blocking, whether every server has acknowledged
         the LOOKUP sent by ``maybe_submit_lookup_request``; while any ack is
-        outstanding this returns None. Once all servers have acked, polls one
-        outstanding QUERY_PREFETCH_STATUS future per unresolved server without
-        waiting for a network response. Returns the matched token count when
-        the prefetch is complete, or None if still in progress.
+        outstanding this returns None. Once all servers have acked, waits for
+        QUERY_PREFETCH_STATUS replies by default. Setting
+        ``lmcache.mp.nonblocking_lookup_status`` to True instead polls one
+        outstanding future per unresolved server without waiting. Returns the
+        matched token count when the prefetch is complete, or None if still
+        in progress.
 
         A LOOKUP that is not acknowledged within the MQ timeout marks that
         server unhealthy and makes this return 0, matching the behaviour of
@@ -941,14 +951,16 @@ class LMCacheMPSchedulerAdapter:
                 )
 
         for url, (fut, submitted_at) in list(futures.items()):
-            if not fut.query():
+            if self._nonblocking_lookup_status and not fut.query():
                 if time.monotonic() - submitted_at >= self._mq_timeout:
                     self._mark_lookup_timed_out(url)
                     return 0
                 continue
             del futures[url]
             try:
-                r = fut.result(timeout=0)
+                r = fut.result(
+                    timeout=0 if self._nonblocking_lookup_status else self._mq_timeout
+                )
             except TimeoutError:
                 logger.warning(
                     "QUERY_PREFETCH_STATUS to %s timed out. Marking unhealthy.",

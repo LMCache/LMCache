@@ -748,6 +748,13 @@ All connector-level options are passed through
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.nonblocking_lookup_status``
+     - ``false``
+     - Poll lookup-status replies without blocking the scheduler. Enable only
+       when scheduler callbacks run frequently; long prefill steps can delay
+       observation of an already-ready reply. The default waits for each
+       status RPC reply in the current callback. LOOKUP acknowledgement polling
+       remains asynchronous. Available with the current ``LMCacheMPConnector``.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,

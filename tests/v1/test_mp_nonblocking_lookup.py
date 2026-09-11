@@ -102,7 +102,7 @@ def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
     context = zmq.Context()
 
     def create(
-        count: int = 1, timeout: float = 5
+        count: int = 1, timeout: float = 5, nonblocking: bool | str | None = True
     ) -> tuple[LMCacheMPSchedulerAdapter, list[Client]]:
         """Return a scheduler and its per-server RPC stubs."""
         clients = [Client() for _ in range(count)]
@@ -119,6 +119,12 @@ def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
             16,
             ParallelStrategy(False, count, 0, count, 1, count),
             mq_timeout=timeout,
+            extra_config=None
+            if nonblocking is None
+            else {
+                "lmcache.mp.nonblocking_lookup_status": nonblocking,
+                "lmcache.mp.mq_timeout": timeout,
+            },
         )
         adapters.append(adapter)
         return adapter, clients
@@ -145,6 +151,95 @@ def resolved(adapter: LMCacheMPSchedulerAdapter) -> int:
         if result is not None:
             return result
     raise AssertionError("completed status did not become observable")
+
+
+@pytest.mark.parametrize("setting", [None, False, "false"])
+def test_default_status_reply_is_consumed_in_the_same_callback(
+    make_adapter: AdapterFactory, setting: bool | str | None
+) -> None:
+    adapter, (client,) = make_adapter(nonblocking=setting)
+    submit(adapter, [client])
+    waiting = threading.Event()
+    done = threading.Event()
+    results: list[int | None] = []
+    errors: list[BaseException] = []
+
+    class StatusFuture(MessagingFuture[Any]):
+        def wait(self, timeout: float | None = None) -> bool:
+            """Signal that the callback waits for this actual RPC future."""
+            assert timeout == 5
+            waiting.set()
+            return super().wait(timeout)
+
+    status = StatusFuture()
+    client.replies = deque([status])
+
+    def check() -> None:
+        try:
+            results.append(adapter.check_lookup_result("r"))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=check)
+    thread.start()
+    try:
+        assert waiting.wait(1)
+        assert not done.is_set()
+        status.set_result(2)
+        assert done.wait(1)
+        assert not errors and results == [128]
+        assert client.queries == ["r"]
+    finally:
+        status.set_result(2)
+        thread.join(timeout=6)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("setting", [True, "true"])
+def test_nonblocking_status_requires_explicit_opt_in(
+    make_adapter: AdapterFactory, setting: bool | str
+) -> None:
+    adapter, (client,) = make_adapter(nonblocking=setting)
+    submit(adapter, [client])
+    assert adapter.check_lookup_result("r") is None
+    assert client.queries == ["r"]
+    client.status.set_result(2)
+    assert adapter.check_lookup_result("r") == 128
+    assert client.queries == ["r"]
+
+
+def test_blocking_status_none_defers_and_zero_is_cached(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, (client,) = make_adapter(nonblocking=None)
+    submit(adapter, [client])
+    client.replies = deque([ready(None), ready(0)])
+    assert adapter.check_lookup_result("r") is None
+    assert client.queries == ["r"]
+    assert adapter.check_lookup_result("r") == 0
+    assert adapter.check_lookup_result("r") == 0
+    assert client.queries == ["r", "r"]
+
+
+def test_blocking_mode_preserves_nonblocking_lookup_ack(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, (client,) = make_adapter(nonblocking=None)
+    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    assert adapter.check_lookup_result("r") is None
+    assert not client.queries
+
+
+def test_blocking_status_timeout_preserves_unhealthy_result(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, (client,) = make_adapter(nonblocking=False, timeout=0)
+    submit(adapter, [client])
+    client.replies = deque([MessagingFuture()])
+    assert adapter.check_lookup_result("r") == 0
+    assert not adapter.is_healthy
 
 
 def test_ack_ordering_and_one_status_in_flight_per_server(
