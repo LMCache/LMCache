@@ -31,6 +31,7 @@ def nvtx_annotate():
     Return NVTX decorator.
     If function or module do not exist, raises ImportError.
     """
+    # Third Party
     from nvtx import annotate  # type: ignore
 
     return annotate
@@ -41,6 +42,7 @@ def roctx_annotate():
     Return an adaptor of ROCTX RoctxRange decorator.
     If type or module do not exist, raises ImportError.
     """
+    # Third Party
     from roctx.context_decorators import RoctxRange  # type: ignore
 
     def annotate(*args, **kwargs):
