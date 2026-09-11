@@ -69,6 +69,23 @@ To bypass the skip and force a full run, add the **`force-ci`** label to the
 PR on GitHub. Buildkite picks up PR labels automatically; when the filter
 sees `force-ci` it runs the full pipeline regardless of which files changed.
 
+### Fast required-check gate
+
+For a non-trivial pull request, `upload-pipeline.sh` waits for the GitHub
+`Check code quality` and `DCO` checks before uploading the test-specific
+`pipeline.yml`. This keeps the required, short checks ahead of GPU and
+integration work while preserving one shared gate for every K3 lane. The
+initial Buildkite upload step is expected to be scheduled by the webhook; only
+the expensive downstream steps are held back.
+
+The gate reads the PR head SHA from GitHub, so it also handles a Buildkite
+checkout that is a merge commit. It uses unauthenticated GitHub API requests
+for this public repository; set `GITHUB_TOKEN` in the Buildkite pipeline when
+an authenticated API budget is preferred. `BUILDKITE_REQUIRED_CHECKS_TIMEOUT_SECONDS`
+and `BUILDKITE_REQUIRED_CHECKS_POLL_SECONDS` can override the 30-minute timeout
+and initial 10-second polling interval when diagnosing CI infrastructure. The
+polling interval backs off to one minute to stay within GitHub API limits.
+
 
 ### Trigger strategy
 
