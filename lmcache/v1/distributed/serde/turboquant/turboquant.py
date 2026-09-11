@@ -553,6 +553,9 @@ class TurboQuantSerializer(Serializer):
         if src_tensor is None or dst_tensor is None:
             raise ValueError("TurboQuant serde requires src and dst to have tensors")
 
+        # vLLM fp8 arrives as uint8 -- need bitcast not numeric .to()
+        key_already_fp8 = self._cfg.key_fp8 and src_tensor.dtype == torch.uint8
+
         n_bytes = _serialized_nbytes_for_shape(
             src_tensor.shape, src_tensor.dtype, self._cfg
         )
@@ -651,6 +654,7 @@ class TurboQuantSerializer(Serializer):
                     key_packed_size=cfg.key_packed_size,
                     value_quant_bits=cfg.value_quant_bits,
                     key_fp8=cfg.key_fp8,
+                    key_already_fp8=key_already_fp8,
                 )
             offset += compressed_bytes
 
@@ -766,6 +770,9 @@ class TurboQuantDeserializer(Deserializer):
             dst_work[:, :quant_start].copy_(raw)
             offset = first_raw_bytes
 
+        # if caller expects uint8 back, skip key dequant
+        key_passthrough_fp8 = cfg.key_fp8 and dst_tensor.dtype == torch.uint8
+
         if quant_layers:
             # First Party
             from lmcache.v1.distributed.serde.turboquant.decode_kernel import (
@@ -790,12 +797,17 @@ class TurboQuantDeserializer(Deserializer):
                 if not cfg.key_fp8
                 else head_dim
             )
+            # v_out must stay fp16 -- do not derive from k_out
             k_out = torch.empty(
+                (1, num_heads, alloc_len, head_dim),
+                dtype=torch.uint8 if key_passthrough_fp8 else torch.float16,
+                device=cuda_device,
+            )
+            v_out = torch.empty(
                 (1, num_heads, alloc_len, head_dim),
                 dtype=torch.float16,
                 device=cuda_device,
             )
-            v_out = torch.empty_like(k_out)
 
             for compressed_idx, layer_idx in enumerate(range(quant_start, quant_end)):
                 kv_cache_layer = src_view[compressed_idx]
@@ -831,6 +843,7 @@ class TurboQuantDeserializer(Deserializer):
                     BLOCK_D=block_d,
                     NORM_CORRECTION=1 if cfg.norm_correction else 0,
                     FP8_E4B15=_use_fp8_e4b15(cuda_device.index or 0),
+                    KEY_PASSTHROUGH_FP8=1 if key_passthrough_fp8 else 0,
                     num_warps=4,
                 )
 
