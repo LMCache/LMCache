@@ -1182,6 +1182,35 @@ class TestFinishWriteAndReserveRead:
 
 
 # =============================================================================
+# Tests for L1Manager.finish_write_and_delete()
+# =============================================================================
+
+
+class TestFinishWriteAndDelete:
+    """Tests for L1Manager.finish_write_and_delete()."""
+
+    def test_deletes_write_locked_keys_only(self, basic_l1_config, basic_layout):
+        """Write-locked keys are deleted; other states error out intact."""
+        manager = L1Manager(basic_l1_config)
+        locked_key = make_object_key(1)
+        ready_key = make_object_key(2)
+        missing_key = make_object_key(3)
+
+        manager.reserve_write([locked_key, ready_key], [False, False], basic_layout)
+        manager.finish_write([ready_key])
+
+        result = manager.finish_write_and_delete([locked_key, ready_key, missing_key])
+
+        assert result[locked_key] == L1Error.SUCCESS
+        assert manager.get_object_state(locked_key) is None
+        assert result[ready_key] == L1Error.KEY_IN_WRONG_STATE
+        assert manager.get_object_state(ready_key) is not None
+        assert result[missing_key] == L1Error.KEY_NOT_EXIST
+
+        manager.close()
+
+
+# =============================================================================
 # Tests for L1Manager.delete()
 # =============================================================================
 

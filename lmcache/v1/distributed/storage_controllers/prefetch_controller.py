@@ -1352,8 +1352,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Clean up failed keys
         if failed_keys:
-            l1_mgr.finish_write(failed_keys)
-            l1_mgr.delete(failed_keys)
+            l1_mgr.finish_write_and_delete(failed_keys)
 
         self._event_bus.publish(
             Event(
@@ -1478,8 +1477,7 @@ class PrefetchController(StorageControllerInterface):
         for request in self._in_flight_requests.values():
             if request.phase == PrefetchPhase.PLAN_AND_LOAD:
                 if request.write_reserved_keys:
-                    l1_mgr.finish_write(request.write_reserved_keys)
-                    l1_mgr.delete(request.write_reserved_keys)
+                    l1_mgr.finish_write_and_delete(request.write_reserved_keys)
             self._release_l2_locks(request, keep={})
             if request.l1_readlocks.popcount() > 0:
                 l1_mgr.finish_read(
