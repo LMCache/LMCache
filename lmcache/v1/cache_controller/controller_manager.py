@@ -62,6 +62,37 @@ logger = init_logger(__name__)
 # a control message.
 
 
+def parse_router_frames(frames: list[bytes]) -> tuple[bytes, bytes]:
+    """Split a ROUTER multipart message into ``(identity, payload)``.
+
+    A ROUTER socket prepends exactly one identity frame to whatever the peer
+    sent. The worker is a ``zmq.DEALER`` that sends ``[empty_delimiter,
+    payload]``, so the controller normally receives
+    ``[identity, empty_delimiter, payload]``. The payload is therefore always
+    the *last* frame -- which is exactly how the worker decodes replies
+    (``frames[-1]``). Relying on a fixed ``frames[2]`` index instead breaks
+    whenever the empty delimiter is absent (e.g. a ``[identity, payload]``
+    layout), surfacing as ``msgspec.ValidationError: Expected object, got int``
+    from decoding the wrong frame.
+
+    Args:
+        frames: The frames returned by ``recv_multipart`` on a ROUTER socket.
+
+    Returns:
+        A ``(identity, payload)`` tuple, where ``identity`` is the first frame
+        and ``payload`` is the last frame.
+
+    Raises:
+        ValueError: If fewer than 2 frames are present (a valid ROUTER message
+            needs at least an identity frame and a payload frame).
+    """
+    if len(frames) < 2:
+        raise ValueError(
+            f"Invalid ROUTER message format, expected >= 2 frames, got {len(frames)}"
+        )
+    return frames[0], frames[-1]
+
+
 class LMCacheControllerManager:
     def __init__(
         self,
@@ -367,26 +398,16 @@ class LMCacheControllerManager:
     async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
         """Handle requests on ROUTER socket.
 
-        ROUTER socket receives multi-part messages:
-        [identity, empty_frame, payload]
-        and must reply with the same identity frame.
+        ROUTER socket receives multi-part messages of the form
+        ``[identity, (empty_frame,) payload]`` (the empty delimiter is
+        optional) and must reply with the same identity frame.
         """
         while True:
             frames = await socket.recv_multipart()
             with SocketMetricsContext(self, SocketType.REPLY):
                 identity = None
                 try:
-                    # ROUTER socket: [identity, empty_frame, payload]
-                    if len(frames) < 3:
-                        logger.error(
-                            "Invalid ROUTER message format, expected >= 3 frames, "
-                            "got %d",
-                            len(frames),
-                        )
-                        continue
-                    identity = frames[0]
-                    # frames[1] is empty delimiter
-                    part = frames[2]
+                    identity, part = parse_router_frames(frames)
 
                     # Parse message based on format
                     if part.startswith(b"{"):
@@ -414,6 +435,7 @@ class LMCacheControllerManager:
                     msgspec.DecodeError,
                     msgspec.ValidationError,
                     zmq.ZMQError,
+                    ValueError,
                 ) as e:
                     logger.error("Error handling request message: %s", e, exc_info=True)
                     err_msg = ErrorMsg(error=str(e))
@@ -429,8 +451,9 @@ class LMCacheControllerManager:
         This runs on a separate socket to ensure heartbeats are processed
         without being blocked by other requests.
 
-        ROUTER socket receives multi-part messages:
-        [identity, empty_frame, payload]
+        ROUTER socket receives multi-part messages of the form
+        ``[identity, (empty_frame,) payload]`` (the empty delimiter is
+        optional).
         """
         logger.info("Heartbeat handler task started, waiting for heartbeat requests...")
         while True:
@@ -439,16 +462,7 @@ class LMCacheControllerManager:
             with SocketMetricsContext(self, SocketType.REPLY):
                 identity = None
                 try:
-                    # ROUTER socket: [identity, empty_frame, payload]
-                    if len(frames) < 3:
-                        logger.error(
-                            "Invalid heartbeat ROUTER message format, "
-                            "expected >= 3 frames, got %d",
-                            len(frames),
-                        )
-                        continue
-                    identity = frames[0]
-                    part = frames[2]
+                    identity, part = parse_router_frames(frames)
 
                     if part.startswith(b"{"):
                         msg_dict = json.loads(part)
@@ -477,6 +491,7 @@ class LMCacheControllerManager:
                     msgspec.DecodeError,
                     msgspec.ValidationError,
                     zmq.ZMQError,
+                    ValueError,
                 ) as e:
                     logger.error(
                         "Error handling heartbeat request: %s", e, exc_info=True
