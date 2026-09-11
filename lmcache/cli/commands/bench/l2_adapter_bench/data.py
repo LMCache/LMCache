@@ -128,7 +128,7 @@ def make_memory_objects(
         metadata = MemoryObjMetadata(
             shape=torch.Size([data_size]),
             dtype=torch.uint8,
-            address=raw_tensor.data_ptr(),
+            address=start,
             phy_size=data_size * raw_tensor.element_size(),
             fmt=MemoryFormat.KV_2LTD,
             ref_count=1,
