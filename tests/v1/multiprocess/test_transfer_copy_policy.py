@@ -176,6 +176,7 @@ def test_transfer_dispatches_to_direct_plan(monkeypatch, native):
         batch_size=1,
         skip_first_n_tokens=0,
         direction=mod.lmcache_native.TransferDirection.D2H,
+        transfer_key="test",
         block_ids_host=[[1, 2]],
         copy_policy=TransferCopyPolicy(mode="direct"),
     )

@@ -177,7 +177,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should still be open (store in flight)
         assert registry.get(sid, "request") is not None
-        assert sid in subscriber._deferred_session_end_ts
+        assert sid in subscriber._deferred_session_ends
 
         # Now GPU store completes
         bus.publish(
@@ -201,7 +201,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should now be closed
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
         assert sid not in subscriber._pending_store_count
 
     # ------------------------------------------------------------------
@@ -375,7 +375,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should still be open (retrieve in flight)
         assert registry.get(sid, "request") is not None
-        assert sid in subscriber._deferred_session_end_ts
+        assert sid in subscriber._deferred_session_ends
 
         # Now GPU retrieve completes
         bus.publish(
@@ -399,7 +399,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should now be closed
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
         assert sid not in subscriber._pending_retrieve_count
 
     def test_session_end_deferred_until_both_store_and_retrieve_finish(
@@ -484,7 +484,7 @@ class TestMPServerTracingSubscriber:
         bus.stop()
 
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
 
     # ------------------------------------------------------------------
     # Child spans registered in shared registry for sub-span parenting

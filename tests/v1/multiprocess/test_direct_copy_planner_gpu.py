@@ -157,6 +157,7 @@ def _run(
             batch_size=batch_size,
             skip_first_n_tokens=skip_first_n_tokens,
             direction=direction,
+            transfer_key=f"test-{mode}",
             block_ids_host=host_ids,
             copy_policy=policy,
         )
