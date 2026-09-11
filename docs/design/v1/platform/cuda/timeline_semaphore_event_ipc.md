@@ -163,9 +163,8 @@ that bypass the backend break under isolated IPC:
   producer events; CacheBlend and qstore server modules return raw
   `event.ipc_handle()` bytes instead of `export_event(...)` (already
   outside the event-IPC abstraction, see `event_ipc_abstraction.md`
-  non-goals); the deprecated `_0180`/`_0201` connector twins are
-  intentionally left unmigrated pending removal. Once these route through
-  the backend, the default flips to on.
+  non-goals). Once these remaining call sites route through the backend,
+  the default flips to on.
 
 ## Status
 

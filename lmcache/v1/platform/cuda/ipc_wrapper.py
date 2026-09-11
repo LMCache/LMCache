@@ -39,7 +39,11 @@ import torch
 from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.cuda.utils import _cuda
+from lmcache.v1.platform.cuda.utils import (
+    _cuda,
+    cuda_ipc_handle_from_bytes,
+    cuda_ipc_handle_to_bytes,
+)
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc
 
 logger = init_logger(__name__)
@@ -309,7 +313,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
         # Store only what's needed for reconstruction. The handle maps
         # the whole allocation; the offset locates the tensor within it.
-        self._ipc_handle_reserved = bytes(ipc_handle.reserved)
+        self._ipc_handle_reserved = cuda_ipc_handle_to_bytes(ipc_handle)
         self._alloc_offset = data_ptr - int(
             alloc_base
         )  # offset in bytes not the same as storage offset
@@ -350,8 +354,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         with _MAPPINGS_LOCK:
             entry = _MAPPED_ALLOCATIONS.get(self._ipc_handle_reserved)
             if entry is None:
-                handle = _cuda.runtime.cudaIpcMemHandle_t()
-                handle.reserved = self._ipc_handle_reserved
+                handle = cuda_ipc_handle_from_bytes(self._ipc_handle_reserved)
                 with torch.cuda.device(device_index):
                     err, ptr = _cuda.runtime.cudaIpcOpenMemHandle(
                         handle, _cuda.runtime.cudaIpcMemLazyEnablePeerAccess

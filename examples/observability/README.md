@@ -73,13 +73,32 @@ per-request cache hit rate attributes:
 | `hit_rate` | float | `hit_tokens / requested_tokens` (0.0 on a total miss) |
 
 ```
-request  [══════════════════════════════════════]  hit_rate=0.75
-  mp.lookup_prefetch  [════]
-  mp.retrieve               [════════]
-  mp.store                            [══════]
+request                       [═════════════════════════════]  hit_rate=0.75
+  mp.lookup_prefetch          [════]
+  mp.retrieve                       [══════════]
+    transfer.kernel_interval        [═════]
+    transfer.staging                       [═══]
+  mp.store                                         [════════]
+    transfer.kernel_interval                       [════]
+    transfer.staging                                     [══]
 ```
 
 Store-only requests (no lookup phase) do not carry these attributes.
+
+A build with phase timing splits each transfer into its two GPU phases. Read
+them differently: **`transfer.staging` is transfer time** -- DMA on the copy
+engine, which does not compete with the inference engine -- while
+**`transfer.kernel_interval` is a stream interval, not execution time**. The
+gather/scatter kernel needs SMs, and it queues behind the co-resident engine's
+compute, so most of that bar is the wait. A long kernel bar means the transfer
+met a busy engine, not that the copy was slow, and its bytes divided by its
+duration is not a transfer rate; each span says so in its `elapsed_meaning`
+attribute. `docs/design/observability/request-event-span.md` ("Reading the
+phase bars") has the measurements.
+
+The two children are drawn back to back, each as long as its phase's total,
+rather than at their real interleaved intervals -- they are a breakdown of the
+parent, not a timeline.
 
 The pre-provisioned **LMCache** dashboard under **Dashboards** shows cache hit
 rate, StorageManager read/write rates, and the live trace panel. The collapsed

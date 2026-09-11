@@ -22,14 +22,10 @@ from lmcache.utils import (
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
@@ -38,7 +34,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
@@ -190,31 +185,6 @@ class QStoreModule(InstanceLivenessTarget):
         if ipc_collect is not None:
             # Non-CUDA device modules (xpu / musa) do not expose ipc_collect.
             ipc_collect()
-
-    def get_handlers(self) -> list[HandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            A list of HandlerSpec entries mapping request types to
-            their handler callables and thread pool assignments.
-        """
-        return [
-            HandlerSpec(
-                RequestType.REGISTER_Q_CACHE,
-                self.register_q_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.UNREGISTER_Q_CACHE,
-                self.unregister_q_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.STORE_Q,
-                self.store_q,
-                ThreadPoolType.AFFINITY,
-            ),
-        ]
 
     def report_status(self) -> dict:
         """Return Q transfer module status information.
@@ -458,12 +428,14 @@ class QStoreModule(InstanceLivenessTarget):
                 )
             )
 
+            transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=key.request_id,
                     metadata={
+                        "transfer_key": transfer_key,
                         "device": str(cache_context.device),
                         "engine_id": instance_id,
                         "model_name": model_name,
@@ -507,6 +479,7 @@ class QStoreModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
+                        transfer_key=transfer_key,
                     )
 
                 store_succeeded = True
@@ -532,6 +505,7 @@ class QStoreModule(InstanceLivenessTarget):
                         event_type=EventType.MP_STORE_END,
                         session_id=key.request_id,
                         metadata={
+                            "transfer_key": transfer_key,
                             "stored_count": stored_count,
                             "device": str(cache_context.device),
                             "engine_id": instance_id,
