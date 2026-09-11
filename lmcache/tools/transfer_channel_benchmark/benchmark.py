@@ -146,6 +146,7 @@ def server_main(cfg: BenchmarkConfig) -> None:
             listen_url=cfg.url,
             advertise_url=cfg.url,
             backends=[cfg.nixl_backend],
+            mr_slice_bytes=cfg.mr_slice_bytes,
         )
         try:
             _serve_catalog(cfg, catalog)
@@ -243,6 +244,7 @@ def client_main(cfg: BenchmarkConfig) -> bool:
             listen_url=cfg.listen_url,
             advertise_url=cfg.listen_url,
             backends=[cfg.nixl_backend],
+            mr_slice_bytes=cfg.mr_slice_bytes,
         )
         try:
             local_addrs = ctx.get_transfer_channel_address(

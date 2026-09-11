@@ -18,10 +18,13 @@ import pytest
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
     MPServerConfig,
+    P2PConfig,
     add_coordinator_args,
     add_mp_server_args,
+    add_p2p_args,
     parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
+    parse_args_to_p2p_config,
 )
 
 _COORD_ENV = (
@@ -283,3 +286,28 @@ def test_deprecated_flags_log_warning():
 def test_deprecated_flush_interval_flag_rejects_nonpositive():
     with pytest.raises(ValueError):
         _parse(["--coordinator-l2-event-flush-interval", "0"])
+
+
+# ---------------------------------------------------------------------------
+# P2P args (MR-slice size)
+# ---------------------------------------------------------------------------
+def _parse_p2p(argv: list[str]) -> P2PConfig:
+    parser = argparse.ArgumentParser()
+    add_p2p_args(parser)
+    return parse_args_to_p2p_config(parser.parse_args(argv))
+
+
+def test_p2p_nixl_mr_slice_defaults_to_3_5_gib():
+    config = _parse_p2p([])
+    assert config.nixl_mr_slice_bytes == 3_758_096_384
+    assert config.nixl_mr_slice_bytes == P2PConfig().nixl_mr_slice_bytes
+
+
+def test_p2p_nixl_mr_slice_flag_is_parsed():
+    config = _parse_p2p(["--p2p-nixl-mr-slice-bytes", "1073741824"])
+    assert config.nixl_mr_slice_bytes == 1073741824
+
+
+def test_p2p_nixl_mr_slice_zero_disables_slicing():
+    config = _parse_p2p(["--p2p-nixl-mr-slice-bytes", "0"])
+    assert config.nixl_mr_slice_bytes == 0

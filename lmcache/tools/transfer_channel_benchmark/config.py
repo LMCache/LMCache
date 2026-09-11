@@ -72,6 +72,8 @@ class BenchmarkConfig:
         num_objects: Number of objects transferred per read.
         num_source_objects: Number of source objects the server allocates. The
             client reads a random ``num_objects``-sized subset of these.
+        mr_slice_bytes: Maximum bytes per transfer-channel memory-registration
+            slice; 0 registers the L1 buffer as a single region.
         use_lazy: Whether the L1 memory manager uses lazy allocation.
         iters: Number of measured read iterations.
         warmup: Number of warmup read iterations (not measured).
@@ -91,6 +93,7 @@ class BenchmarkConfig:
     object_size: int = DEFAULT_OBJECT_SIZE
     num_objects: int = 100
     num_source_objects: int = 0
+    mr_slice_bytes: int = 0
     use_lazy: bool = False
     iters: int = 5
     warmup: int = 1
@@ -198,6 +201,13 @@ def add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
         help="server source pool size; 0 means 5 * --num-objects.",
     )
     parser.add_argument(
+        "--mr-slice-bytes",
+        type=parse_size,
+        default=0,
+        help="maximum bytes per memory-registration slice (e.g. 3.5GB); "
+        "0 registers the L1 buffer as a single region.",
+    )
+    parser.add_argument(
         "--use-lazy",
         action="store_true",
         help="use the lazy L1 allocator (experimental for registration).",
@@ -243,6 +253,7 @@ def build_config(args: argparse.Namespace) -> BenchmarkConfig:
         object_size=args.object_size,
         num_objects=args.num_objects,
         num_source_objects=args.num_source_objects,
+        mr_slice_bytes=args.mr_slice_bytes,
         use_lazy=args.use_lazy,
         iters=args.iters,
         warmup=args.warmup,
