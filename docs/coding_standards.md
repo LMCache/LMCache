@@ -254,6 +254,12 @@ C++/CUDA files use clang-format (Google style, 80-col). Rust code uses `cargo fm
 - Use the project's `init_logger(__name__)` from `lmcache.logging`, not bare `logging.getLogger()`.
 - Operational logs (store/retrieve activity, background task progress) should be at `DEBUG` level, not `INFO`.
 - Log levels must be appropriate: do not use `WARNING` for conditions that are expected during normal concurrent operation (e.g., a key not found due to a benign race condition).
+- Use lazy `%`-formatting, not f-strings, in log calls so interpolation only runs when the record is emitted: `logger.info("instance %s", instance_id)`, not `logger.info(f"instance {instance_id}")`.
+- Pick the format specifier from the variable's **type annotation**, not from neighboring log calls:
+  - `int` (counts, numeric IDs) → `%d`
+  - everything else (`str`, `bool`, objects, exceptions) → `%s`
+  - floats use `%f` / `%.2f` as appropriate
+  - Watch ambiguous names: `instance_id` is a `str` in most modules (e.g. `cache_engine.py`, `config_base.py`) but an `int` GPU index in some multiprocess modules — check the annotation before choosing `%s` vs `%d`. Bools print as `1`/`0` under `%d`, so use `%s` when you want `True`/`False`.
 
 ### 7.5 Error Handling
 
