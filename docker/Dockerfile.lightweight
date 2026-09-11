@@ -2,7 +2,10 @@
 # Note: You will not be able to run Prefill-Decode Disaggregation (PD) with this image because NIXL is not installed.
 FROM vllm/vllm-openai:latest
 
-RUN uv pip install --system --no-cache lmcache
+ARG LMCACHE_VERSION=""
+
+RUN VER=$(echo "${LMCACHE_VERSION}" | sed 's/^v//') && \
+    uv pip install --system --no-cache "lmcache${VER:+==${VER}}"
 
 
 # Build: 
