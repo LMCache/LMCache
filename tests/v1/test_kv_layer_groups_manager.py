@@ -512,7 +512,7 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].sw_size_chunks >= 1
         assert attn_desc.num_chunks_in_sw[1] == manager.object_groups[1].sw_size_chunks
 
-    def test_object_group_separation_standalone_group_buckets_alone(self):
+    def test_object_group_separation_aux_group_buckets_alone(self):
         # A tagged extra group (connector-private pool) buckets alone even
         # though its window (-1) matches the full-attention bucket. The rest
         # bucket as usual, ordered by first kernel group index, so a client
@@ -536,7 +536,7 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].sw_size_chunks >= 1
         assert manager.object_groups[2].kernel_group_indices == [2]
         assert manager.object_groups[2].sw_size_chunks == -1
-        assert manager.object_groups[2].standalone
+        assert manager.object_groups[2].aux
 
     def test_extra_groups_sort_last_regardless_of_registration_order(self):
         # The shared (regular) group ids must not shift when a connector
@@ -556,13 +556,13 @@ class TestKernelAndObjectGroups:
         assert manager.num_object_groups == 3
         # Regular groups first, in kernel order — same ids as pool-less.
         assert manager.object_groups[0].kernel_group_indices == [1]
-        assert not manager.object_groups[0].standalone
+        assert not manager.object_groups[0].aux
         assert manager.object_groups[1].kernel_group_indices == [2]
-        assert not manager.object_groups[1].standalone
+        assert not manager.object_groups[1].aux
         # The extra pool lands last despite registering first.
         assert manager.object_groups[2].kernel_group_indices == [0]
-        assert manager.object_groups[2].standalone
-        assert manager.get_attn_desc().group_kinds[2] == "standalone"
+        assert manager.object_groups[2].aux
+        assert manager.get_attn_desc().group_kinds[2] == "aux"
 
     def test_extra_groups_sharing_a_tag_share_an_object_group(self):
         # Two kernel groups carrying the same extra tag (e.g. same-block-size
@@ -587,7 +587,7 @@ class TestKernelAndObjectGroups:
         assert manager.num_object_groups == 2
         assert manager.object_groups[0].kernel_group_indices == [0]
         assert manager.object_groups[1].kernel_group_indices == [1, 2]
-        assert manager.object_groups[1].standalone
+        assert manager.object_groups[1].aux
 
     def test_full_sw_kv_exempts_recurrent_groups(self):
         # Blend-mode full-window forcing widens sliding-window ATTENTION
@@ -612,7 +612,7 @@ class TestKernelAndObjectGroups:
         assert attn_desc.num_chunks_in_sw[2] >= 1
         assert attn_desc.group_kinds == ("attention", "attention", "recurrent")
 
-    def test_object_group_separation_disabled_ignores_standalone_flag(self):
+    def test_object_group_separation_disabled_ignores_aux_flag(self):
         # With separation off, the extra-group tag has no effect: everything
         # still collapses into the single fused object group.
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]

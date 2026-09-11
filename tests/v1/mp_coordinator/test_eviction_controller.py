@@ -23,6 +23,7 @@ from lmcache.v1.mp_coordinator.controllers import build_controllers
 from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
+    PinnedKey,
 )
 from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.mp_coordinator.views.instance_registry import (
@@ -585,6 +586,58 @@ def test_drop_pins_unknown_key_is_noop():
     """drop_pins on a never-pinned key does not raise."""
     ctrl, _, kd = _setup()
     ctrl.drop_pins([_make_key("a", h="ff")])  # no error
+
+
+def test_list_pins_reports_counts_in_first_pinned_order():
+    """list_pins returns every pinned key with its count, oldest pin first."""
+    ctrl, _, _ = _setup()
+    k1 = _make_key("a", h="01")
+    k2 = _make_key("a", h="02")
+    ctrl.pin([k2])
+    ctrl.pin([k1, k2])
+
+    total, page = ctrl.list_pins("", "", 0, 10)
+    assert total == 2
+    assert page == [PinnedKey(k2, 2), PinnedKey(k1, 1)]
+
+
+def test_list_pins_filters_by_salt_and_model():
+    """Salt and model filters narrow both the total and the page."""
+    ctrl, _, _ = _setup()
+    ka = _make_key("a", h="01")
+    kb = _make_key("b", h="02")
+    kn = _make_key("a", model="n", h="03")
+    ctrl.pin([ka, kb, kn])
+
+    assert ctrl.list_pins("a", "", 0, 10) == (2, [PinnedKey(ka, 1), PinnedKey(kn, 1)])
+    assert ctrl.list_pins("", "n", 0, 10) == (1, [PinnedKey(kn, 1)])
+    assert ctrl.list_pins("b", "n", 0, 10) == (0, [])
+
+
+def test_list_pins_pages_with_offset_and_limit():
+    """total counts the filtered set; offset and limit slice the page."""
+    ctrl, _, _ = _setup()
+    keys = [_make_key("a", h=f"{i:02x}") for i in range(5)]
+    ctrl.pin(keys)
+
+    total, page = ctrl.list_pins("", "", 2, 2)
+    assert total == 5
+    assert [p.key for p in page] == keys[2:4]
+    assert ctrl.list_pins("", "", 5, 2) == (5, [])
+
+
+def test_list_pins_reflects_unpin_and_drop():
+    """A fully unpinned or dropped key leaves the listing."""
+    ctrl, _, _ = _setup()
+    k1 = _make_key("a", h="01")
+    k2 = _make_key("a", h="02")
+    ctrl.pin([k1, k1, k2])
+
+    ctrl.unpin([k1])
+    assert ctrl.list_pins("", "", 0, 10) == (2, [PinnedKey(k1, 1), PinnedKey(k2, 1)])
+    ctrl.unpin([k1])
+    ctrl.drop_pins([k2])
+    assert ctrl.list_pins("", "", 0, 10) == (0, [])
 
 
 # =============================================================================
