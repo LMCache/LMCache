@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Callable
@@ -49,6 +50,10 @@ class _FakeStoreContext:
         self, _key: object, _instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
         return bool(self.commit_impl(chunks))
+
+    @contextmanager
+    def transfer_guard(self) -> Iterator[None]:
+        yield
 
     def close(self) -> None:
         return None
