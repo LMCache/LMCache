@@ -7,7 +7,10 @@ import threading
 from lmcache import torch_dev
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
-from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
 
 T = TypeVar("T")
 
@@ -78,9 +81,9 @@ class MessagingFuture(Generic[T]):
         """Set a request exception and mark this future as complete.
 
         Note:
-            The current ZMQ transport does not call this method; only unit tests
-            exercise it in this change. It is part of the shared future interface
-            for asynchronous transports such as gRPC to propagate RPC failures.
+            The ZMQ client uses this method for local outbound failures before a
+            request reaches the server. Asynchronous transports such as gRPC can
+            also use it to propagate RPC failures.
 
         Args:
             exception: Failure raised while processing the request.
@@ -99,21 +102,37 @@ class MessagingFuture(Generic[T]):
         """
         self._retained_references.append(value)
 
+    def release_references(self) -> None:
+        """Drop resources previously retained on this future.
+
+        Callers that synchronously wait for completion can use this once the
+        remote side has definitively finished with the exported resources.
+        """
+        self._retained_references.clear()
+
     def to_device_future(
         self,
         device: Any | None = None,
+        event_backend: EventIPCBackend | None = None,
     ) -> "DeviceMessagingFuture":
         """Wrap this future in a device-aware future.
 
         Args:
             device: The device whose event backend orders completion. Defaults
                 to the active device.
+            event_backend: Backend already selected and validated by the
+                caller during initialization. When omitted, it is resolved for
+                backward compatibility.
 
         Returns:
             A DeviceMessagingFuture pending on both this future and the event.
         """
         # TODO: need extra type checking for the future type
-        return DeviceMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
+        return DeviceMessagingFuture.FromMessagingFuture(
+            self,  # type: ignore[arg-type]
+            device,
+            event_backend,
+        )
 
     @lmcache_deprecate("Use to_device_future() instead")
     def to_cuda_future(
@@ -146,6 +165,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self,
         raw_future: MessagingFuture[tuple[bytes, T]],
         device: Any | None = None,
+        event_backend: EventIPCBackend | None = None,
     ) -> None:
         super().__init__()
         self.raw_future_ = raw_future
@@ -153,8 +173,10 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.result_: T | None = None
         self._raw_response_processed = False
         self.device_ = device if device is not None else torch_dev.current_device()
-        self._event_backend = get_event_ipc_backend(self.device_)
-        self._event_backend.check_event_support(self.device_)
+        if event_backend is None:
+            event_backend = get_event_ipc_backend(self.device_)
+            event_backend.check_event_support(self.device_)
+        self._event_backend = event_backend
 
     def _on_raw_future_complete(self) -> None:
         """
@@ -258,8 +280,9 @@ class DeviceMessagingFuture(MessagingFuture[T]):
     def FromMessagingFuture(
         raw_future: MessagingFuture[tuple[bytes, T]],
         device: Any | None = None,
+        event_backend: EventIPCBackend | None = None,
     ) -> "DeviceMessagingFuture[T]":
-        return DeviceMessagingFuture(raw_future, device)
+        return DeviceMessagingFuture(raw_future, device, event_backend)
 
 
 # Backward-compatible alias for existing imports.

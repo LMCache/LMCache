@@ -540,6 +540,10 @@ class L1Manager:
     ) -> dict[ObjectKey, L1Error]:
         """Finish write access for the given keys.
 
+        Temporary objects are unlocked normally but do not emit write-finished
+        notifications because they are internal staging buffers that must not
+        be routed to L2 storage.
+
         Args:
             keys: The list of object keys to finish write access for.
 
@@ -552,8 +556,8 @@ class L1Manager:
                 which means the writer may have caused inconsistent data.
         """
         ret: dict[ObjectKey, L1Error] = {}
-        successful_keys: list[ObjectKey] = []
-        successful_keys_meta: list[L1ObjectMeta] = []
+        notification_keys: list[ObjectKey] = []
+        notification_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -581,17 +585,22 @@ class L1Manager:
 
             entry.write_lock.unlock()
             ret[key] = L1Error.SUCCESS
-            successful_keys.append(key)
-            successful_keys_meta.append(self._object_meta(entry.memory_obj))
+            if not entry.is_temporary:
+                notification_keys.append(key)
+                notification_keys_meta.append(self._object_meta(entry.memory_obj))
 
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(successful_keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_WRITE_FINISHED,
-                metadata={"keys": successful_keys, "meta": successful_keys_meta},
+        if notification_keys:
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_write_finished(notification_keys)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_WRITE_FINISHED,
+                    metadata={
+                        "keys": notification_keys,
+                        "meta": notification_keys_meta,
+                    },
+                )
             )
-        )
         return ret
 
     @l1_mgr_synchronized

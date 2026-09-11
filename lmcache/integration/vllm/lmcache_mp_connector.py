@@ -1103,7 +1103,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker = self._get_or_create_request_tracker(request)
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=list(request.all_token_ids),
+            token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
         )
@@ -1315,6 +1315,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             New KV cache events since the last call.
         """
         return ()
+
+    def has_pending_push_work(self) -> bool:
+        """Return whether vLLM should keep stepping for pending push work.
+
+        Returns:
+            True when scheduler-side lazy offload has submitted stores waiting
+            for worker completion. Queued stores are intentionally excluded:
+            they require a model-token step for submission and cannot progress
+            during a connector-only step. Non-lazy mode uses vLLM's normal
+            delayed-free path and does not need this keepalive.
+        """
+        if self.role != KVConnectorRole.SCHEDULER or not self.lazy_offload:
+            return False
+
+        pending_store = getattr(self, "_pending_store", None)
+        return pending_store is not None and pending_store.has_inflight_store_work()
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

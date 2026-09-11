@@ -27,6 +27,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.platform.cuda.vmm_ipc import is_use_vmm_api, set_use_vmm_api
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 
 
@@ -434,6 +435,59 @@ def test_isolated_ipc_untouched_without_extra_config(
     set_isolated_ipc(True)
     _make_worker_adapter(extra_config=None)
     assert is_isolated_ipc() is True
+
+
+def test_isolated_ipc_is_set_before_transfer_context_creation(
+    fake_adapter, restore_isolated_ipc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backend selection sees isolated IPC before transfer registration."""
+    calls: list[tuple[str, bool]] = []
+    original_set_isolated_ipc = adapter_mod.set_isolated_ipc
+
+    def record_isolated_ipc(enabled: bool) -> None:
+        original_set_isolated_ipc(enabled)
+        calls.append(("set_isolated_ipc", is_isolated_ipc()))
+
+    transfer_ctx = MagicMock(name="transfer_ctx")
+
+    def create_context(
+        _kv_caches: dict[str, torch.Tensor], mode: str | None
+    ) -> MagicMock:
+        calls.append(("create_transfer_context", is_isolated_ipc()))
+        return transfer_ctx
+
+    monkeypatch.setattr(adapter_mod, "set_isolated_ipc", record_isolated_ipc)
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", create_context)
+
+    adapter = _make_worker_adapter(extra_config={"lmcache.mp.isolated_ipc": True})
+    adapter.register_kv_caches({"layer.0": torch.zeros(1)})
+
+    assert calls == [
+        ("set_isolated_ipc", True),
+        ("create_transfer_context", True),
+    ]
+    transfer_ctx.register.assert_called_once()
+
+
+@pytest.fixture
+def restore_use_vmm_api():
+    """Restore the process-global VMM-API switch after the test."""
+    previous = is_use_vmm_api()
+    yield
+    set_use_vmm_api(previous)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(False, False), (True, True), ("false", False), ("true", True)],
+)
+def test_use_vmm_api_extra_config_sets_process_switch(
+    fake_adapter, restore_use_vmm_api, raw, expected
+):
+    """The lmcache.mp.use_vmm_api key drives the process-global switch,
+    accepting both JSON booleans and their string spellings."""
+    _make_worker_adapter(extra_config={"lmcache.mp.use_vmm_api": raw})
+    assert is_use_vmm_api() is expected
 
 
 def test_create_recorded_event_delegates_to_transfer_context(fake_adapter, monkeypatch):

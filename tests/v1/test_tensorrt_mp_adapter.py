@@ -14,8 +14,8 @@ import pytest
 
 def _make_worker(
     trt_mp_module: Any, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Any, MagicMock]:
-    """Construct a worker with a stub for the public request-client contract."""
+) -> tuple[Any, MagicMock, MagicMock, MagicMock]:
+    """Register a worker through public APIs with stubbed device IPC."""
     module = trt_mp_module
     monkeypatch.setenv("LMCACHE_MQ_TIMEOUT", "5")
     monkeypatch.setattr(
@@ -36,7 +36,31 @@ def _make_worker(
         model="test-model",
     )
     worker = module.LMCacheMPKvConnectorWorker(llm_args)
-    return worker, req_client
+    # Third Party
+    from transformers import AutoConfig
+
+    monkeypatch.setattr(
+        AutoConfig,
+        "from_pretrained",
+        MagicMock(
+            return_value=SimpleNamespace(
+                hidden_size=128,
+                num_attention_heads=8,
+                num_key_value_heads=8,
+            )
+        ),
+    )
+    monkeypatch.setattr(module, "RawCudaIPCWrapper", MagicMock())
+    event = MagicMock(name="event")
+    event_backend = MagicMock(spec=module.EventIPCBackend)
+    event_backend.create_event.return_value = event
+    event_backend.export_event.return_value = b"producer-event"
+    monkeypatch.setattr(
+        module, "get_event_ipc_backend", MagicMock(return_value=event_backend)
+    )
+    kv_cache = module.torch.empty((8, 1, 2, 4096), device="cpu")
+    worker.register_kv_caches(kv_cache)
+    return worker, req_client, event_backend, event
 
 
 def _successful_transfer_future(name: str) -> MagicMock:
@@ -101,7 +125,7 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
 ) -> None:
     """A False device transfer result cannot be treated as a loaded KV hit."""
     module = trt_mp_module
-    worker, req_client = _make_worker(module, monkeypatch)
+    worker, req_client, event_backend, event = _make_worker(module, monkeypatch)
     worker.bind_connector_meta(
         module.LMCacheMPConnectorMetadata(
             loads={
@@ -109,11 +133,6 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
             }
         )
     )
-
-    event = MagicMock(name="event")
-    event.ipc_handle.return_value = b"producer-event"
-    monkeypatch.setattr(module, "check_interprocess_event_support", MagicMock())
-    monkeypatch.setattr(module.torch_dev, "Event", MagicMock(return_value=event))
 
     device_future = MagicMock(name="device_future")
     device_future.result.return_value = False
@@ -124,7 +143,42 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     with pytest.raises(RuntimeError, match="refusing to use unloaded KV blocks"):
         worker.start_load_kv(MagicMock(name="stream"))
 
-    raw_future.to_device_future.assert_called_once_with()
+    raw_future.to_device_future.assert_called_once_with(
+        device=module.torch.device("cpu"),
+        event_backend=event_backend,
+    )
+    raw_future.retain_reference.assert_called_once_with(event)
+    device_future.result.assert_called_once_with(timeout=5.0)
+
+
+def test_store_wait_retains_event_on_raw_future(
+    trt_mp_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed store keeps its exported event alive on the raw future."""
+    module = trt_mp_module
+    worker, req_client, event_backend, event = _make_worker(module, monkeypatch)
+    worker.bind_connector_meta(
+        module.LMCacheMPConnectorMetadata(
+            saves={
+                7: SimpleNamespace(tokens=list(range(256)), block_ids=list(range(8)))
+            }
+        )
+    )
+
+    device_future = MagicMock(name="device_future")
+    device_future.result.return_value = True
+    raw_future = MagicMock(name="raw_future")
+    raw_future.to_device_future.return_value = device_future
+    req_client.store.return_value = raw_future
+
+    worker.wait_for_save(MagicMock(name="stream"))
+
+    raw_future.to_device_future.assert_called_once_with(
+        device=module.torch.device("cpu"),
+        event_backend=event_backend,
+    )
+    raw_future.retain_reference.assert_called_once_with(event)
     device_future.result.assert_called_once_with(timeout=5.0)
 
 
@@ -149,7 +203,7 @@ def test_transfer_block_ids_match_key_range(
 ) -> None:
     """STORE and RETRIEVE use whole key chunks without mutating metadata."""
     module = trt_mp_module
-    worker, req_client = _make_worker(trt_mp_module, monkeypatch)
+    worker, req_client, event_backend, event = _make_worker(module, monkeypatch)
     tokens = list(range(token_count))
     # Physical pages need not be contiguous or ordered by their IDs.
     original_block_ids = [3 * i + 1 for i in reversed(range(block_count))]
@@ -162,10 +216,6 @@ def test_transfer_block_ids_match_key_range(
         )
     )
 
-    event = MagicMock(name="event")
-    event.ipc_handle.return_value = b"producer-event"
-    monkeypatch.setattr(module, "check_interprocess_event_support", MagicMock())
-    monkeypatch.setattr(module.torch_dev, "Event", MagicMock(return_value=event))
     req_client.retrieve.return_value = _successful_transfer_future("retrieve")
     req_client.store.return_value = _successful_transfer_future("store")
 
@@ -190,3 +240,9 @@ def test_transfer_block_ids_match_key_range(
     assert store_payload[0].start == 0
     assert store_payload[0].end == expected_end
     assert store_payload[2] == [original_block_ids[:expected_block_count]]
+    for raw_future in (req_client.retrieve.return_value, req_client.store.return_value):
+        raw_future.retain_reference.assert_called_once_with(event)
+        raw_future.to_device_future.assert_called_once_with(
+            device=module.torch.device("cpu"),
+            event_backend=event_backend,
+        )

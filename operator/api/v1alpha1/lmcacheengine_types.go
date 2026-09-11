@@ -379,12 +379,14 @@ type CoordinatorConnectionSpec struct {
 }
 
 // PDSpec configures PD (Prefill-Decode) disaggregation for a vLLM engine.
-// When set, the engine's connection ConfigMap emits two MultiConnector configs —
-// one for the prefiller role (kv_producer) and one for the decoder role
-// (kv_consumer). The webhook selects the correct config based on the
-// lmcache.ai/pd-role annotation on each vLLM pod, so a single LMCacheEngine
-// DaemonSet instance serves both prefiller and decoder vLLM pods on a node.
-// The webhook also injects VLLM_NIXL_SIDE_CHANNEL_HOST (status.podIP) and
+// When set, the engine's connection ConfigMap emits per-role kv-transfer
+// configs alongside the non-PD fallback, and the webhook selects among them
+// via the lmcache.ai/pd-role annotation on each vLLM pod, so a single engine
+// DaemonSet instance serves prefiller, decoder, and plain vLLM pods on a
+// node. The role topologies are engine-specific — see the pd field docs on
+// LMCacheEngineSpec (MultiConnector for both roles) and CacheBlendEngineSpec
+// (prefiller MultiConnector, bare decoder NixlConnector). The webhook also
+// injects VLLM_NIXL_SIDE_CHANNEL_HOST (status.podIP) and
 // VLLM_NIXL_SIDE_CHANNEL_PORT into opted-in pods.
 type PDSpec struct {
 	// nixlSideChannelPort is the port the NIXL agent advertises for
