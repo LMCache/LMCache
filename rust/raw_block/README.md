@@ -104,7 +104,7 @@ No fixed numbers are included here because results are host/device/workload depe
   buffer.
 - `write_uring` and `batched_write` take a logical payload length alongside the
   physical transfer length (`payload_lens` defaults to `total_lens`). They read
-  the source only up to the payload length, never modify it, and always write
+  only within the source buffer bounds, never modify it, and always write
   the padding region as zeroes. A bounce buffer is used when the source is
   shorter than the transfer length or its padding tail is not already zero,
   so a caller buffer whose tail is zero keeps the fixed-buffer zero-copy path.

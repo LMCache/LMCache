@@ -748,7 +748,7 @@ fn buffer_range_is_zero(ptr_addr: usize, offset: usize, len: usize) -> bool {
 }
 
 // Prepare one regular io_uring write so that `total_len` bytes can be submitted
-// while the source is only read up to `payload_len`.
+// while reading only within the source buffer bounds.
 //
 // The padding region [payload_len, total_len) is always written as zeroes. The
 // caller buffer is submitted directly when it can already satisfy that, which
@@ -2265,7 +2265,7 @@ impl RawBlockDevice {
     /// `total_lens` gives the physical transfer length of each write and
     /// `payload_lens` the logical length of the source data; omitting
     /// `payload_lens` makes it equal to `total_lens`. Each source buffer is
-    /// read only up to its `payload_len` and is never modified, and the
+    /// read only within its bounds and is never modified, and the
     /// padding region `[payload_len, total_len)` is always written as zeroes.
     ///
     /// Returns a batch ID that must be passed to `wait_iouring()` to wait for
@@ -2770,8 +2770,8 @@ impl RawBlockDevice {
 
     /// Synchronous write using io_uring.
     ///
-    /// `total_len` defaults to `payload_len`. The source buffer is read only up
-    /// to `payload_len` and is never modified, and the padding region
+    /// `total_len` defaults to `payload_len`. The source buffer is read only
+    /// within its bounds and is never modified, and the padding region
     /// `[payload_len, total_len)` is always written as zeroes.
     #[pyo3(signature = (offset, data, payload_len, total_len = None, placement_id = None))]
     fn write_uring(
