@@ -216,6 +216,7 @@ def _has_real_names(params):
 _EXCLUDED_FUNCS: set[str] = {
     "execute_object_group_transfer",
     "execute_cb_retrieve_plan_flat",
+    "execute_direct_copy_transfer",
 }
 
 # CUDA-only plan descriptors intentionally remain native-only. Descriptor
@@ -225,6 +226,8 @@ _EXCLUDED_DESCS: set[str] = {
     "LaunchVar",
     "BatchStep",
     "CBGroupSpec",
+    "DirectCopyGroupSpec",
+    "DirectCopyObject",
 }
 
 _fallback_callables = _public_callables(fallback)
