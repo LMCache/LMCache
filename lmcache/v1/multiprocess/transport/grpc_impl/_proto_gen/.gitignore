@@ -1,3 +1,4 @@
 # Generated from ../protos/*.proto during build/test; never tracked.
 *_pb2.py
+*_pb2.pyi
 *_pb2_grpc.py

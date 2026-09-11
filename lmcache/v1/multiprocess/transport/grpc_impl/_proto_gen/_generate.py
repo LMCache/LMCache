@@ -24,8 +24,12 @@ FLAT_PB2_IMPORT_RE = re.compile(
 
 
 def _generated_files(directory: Path) -> tuple[Path, ...]:
-    """Return generated protobuf and gRPC modules in ``directory``."""
-    return tuple(directory.glob("*_pb2.py")) + tuple(directory.glob("*_pb2_grpc.py"))
+    """Return generated protobuf modules, stubs, and gRPC modules."""
+    return (
+        tuple(directory.glob("*_pb2.py"))
+        + tuple(directory.glob("*_pb2.pyi"))
+        + tuple(directory.glob("*_pb2_grpc.py"))
+    )
 
 
 def _cleanup_generated_files() -> None:
@@ -44,7 +48,7 @@ def _patch_generated_file(path: Path) -> None:
     prefix = ""
     if not text.startswith(SPDX_HEADER):
         prefix += SPDX_HEADER
-    if MYPY_IGNORE not in text.splitlines()[:5]:
+    if path.suffix == ".py" and MYPY_IGNORE not in text.splitlines()[:5]:
         prefix += MYPY_IGNORE
     path.write_text(prefix + text)
 
@@ -69,6 +73,7 @@ def generate() -> None:
             "grpc_tools.protoc",
             f"-I{PROTO_DIR}",
             f"--python_out={GENERATED_DIR}",
+            f"--pyi_out={GENERATED_DIR}",
             f"--grpc_python_out={GENERATED_DIR}",
             *(str(path) for path in proto_files),
         ]
@@ -81,7 +86,9 @@ def generate() -> None:
         _patch_generated_file(path)
 
     modules = "; ".join(
-        f"import {GENERATED_PACKAGE}.{path.stem}" for path in generated_files
+        f"import {GENERATED_PACKAGE}.{path.stem}"
+        for path in generated_files
+        if path.suffix == ".py"
     )
     result = subprocess.call(
         [sys.executable, "-c", modules],
