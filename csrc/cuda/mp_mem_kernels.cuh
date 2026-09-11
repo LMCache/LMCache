@@ -45,6 +45,60 @@ void execute_object_group_transfer(
     const std::vector<KernelGroupSpec>& kernel_group_specs,
     const std::vector<BatchStep>& batch_steps);
 
+// ---------------------------------------------------------------------------
+// Direct copy-engine transfer (cudaMemcpyBatchAsync).
+//
+// Alternative to the staged plan above for layouts whose paged block is one
+// contiguous run identical to LMCache's [bs, nh*hs] rows: every (kv, layer,
+// block) of an object becomes one batch entry between the pinned host object
+// and the paged buffer, so no staging buffer and no SM kernel are involved.
+// One cudaMemcpyBatchAsync call is issued per object; the batch is stream
+// ordered as a whole. Requires CUDA runtime and driver >= 12.8 (no HIP).
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether cudaMemcpyBatchAsync can be used in this process.
+ *
+ * True when the extension was compiled against CUDA >= 12.8 and both the
+ * runtime and the driver report >= 12.8. Cached after the first call.
+ */
+bool batch_memcpy_supported();
+
+/**
+ * Whether the direct copy path can address blocks of `engine_kv_format`.
+ *
+ * True for token-major formats whose paged block is one contiguous
+ * [bs, nh, hs] run (the affine formats of resolve_block_addressing). HND,
+ * blocked-scale and per-layer (K, V)-tuple layouts return false.
+ */
+bool direct_copy_format_supported(EngineKVFormat engine_kv_format);
+
+/**
+ * Execute one object group's transfer through the copy engine.
+ *
+ * For each object, expands every (kv plane, layer, block >= skip) of every
+ * group into a (host, device, tight block bytes) entry, splits entries at
+ * `host_buffer_alignment` boundaries of the allocator's virtual offset (a
+ * copy may not span two cudaHostRegister regions), and issues one
+ * cudaMemcpyBatchAsync on the current stream of `device`.
+ *
+ * @param direction             H2D (retrieve) or D2H (store)
+ * @param device                CUDA device of the paged buffers
+ * @param host_buffer_alignment Pin-chunk granularity of the host allocator
+ *                              (power of two)
+ * @param group_specs           Per-kernel-group invariants
+ * @param objects               Memory objects to copy, in stream order
+ *
+ * @throws c10::Error if batch_memcpy_supported() is false, a format is not
+ *         eligible, a block id or host range is out of bounds, or the CUDA
+ *         call fails.
+ */
+void execute_direct_copy_transfer(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<DirectCopyGroupSpec>& group_specs,
+    const std::vector<DirectCopyObject>& objects);
+
 /**
  * Block-level multi-layer KV transfer between vLLM paged buffers and
  * LMCache contiguous memory objects.

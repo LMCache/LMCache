@@ -430,6 +430,28 @@ def free_pinned_ptr(ptr: int) -> None:
     _tensor_registry.pop(ptr, None)
 
 
+def batch_memcpy_supported() -> bool:
+    """Whether the copy-engine direct transfer (``cudaMemcpyBatchAsync``) is
+    available. The torch baseline has no copy engine, so this is always False;
+    the CUDA extension answers from the runtime and driver versions."""
+    return False
+
+
+def direct_copy_format_supported(engine_kv_format: EngineKVFormat) -> bool:
+    """Whether the direct copy path can address blocks of ``engine_kv_format``.
+
+    The torch baseline never runs the direct path (no ``cudaMemcpyBatchAsync``),
+    so no layout is eligible here; the CUDA extension answers per format.
+
+    Args:
+        engine_kv_format: The paged KV layout to check.
+
+    Returns:
+        Always False on the torch baseline.
+    """
+    return False
+
+
 def batched_memcpy(src_ptrs: list[int], dst_ptrs: list[int], sizes: list[int]) -> None:
     """Non-CUDA equivalent of the native batched memcpy helper."""
 

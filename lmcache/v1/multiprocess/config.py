@@ -19,6 +19,66 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+TransferCopyMode = Literal["kernel", "direct", "auto"]
+"""How the LMCache-driven path moves KV between pinned host objects and the
+engine's paged buffers. See :class:`TransferCopyPolicy`."""
+
+
+@dataclass(frozen=True)
+class TransferCopyPolicy:
+    """Selects the copy path of the LMCache-driven STORE/RETRIEVE transfer.
+
+    ``kernel`` (default) stages each chunk through a GPU buffer with
+    ``cudaMemcpyAsync`` and scatters/gathers it with the block transfer
+    kernel; it supports every KV layout.
+
+    ``direct`` copies every (kv plane, layer, block) of a chunk straight
+    between the pinned host object and the paged buffer with one
+    ``cudaMemcpyBatchAsync`` call per chunk -- no staging buffer, no SM
+    kernel. Only token-major layouts whose paged block is one contiguous run
+    qualify (vLLM NHD flash-attention / FlashInfer / MLA, SGLang MHA / MLA,
+    cross-layer NHD, fused-KV NHD); other layouts, GDS-backed objects, and
+    builds or drivers without ``cudaMemcpyBatchAsync`` (CUDA < 12.8, HIP)
+    fall back to ``kernel`` with a one-time warning. Each batch entry costs
+    about 0.6 us of CPU, so this path only pays off for large blocks
+    (>= ~128 KB per block, e.g. Kimi Linear's 1024-token MLA pages).
+
+    ``auto`` uses ``direct`` for an object group only when every eligible
+    kernel group's block is at least :attr:`direct_min_block_bytes`, and
+    ``kernel`` otherwise.
+    """
+
+    mode: TransferCopyMode = "kernel"
+    """Copy path: ``kernel``, ``direct`` or ``auto``."""
+
+    direct_min_block_bytes: int = 128 * 1024
+    """``auto`` only: smallest tight block size (``bs * nh * hs *
+    element_size``) for which the direct path is chosen. Measured break-even
+    on H200 is about 34 KB per entry; the default keeps a margin so small-page
+    layouts stay on the kernel path."""
+
+    def __post_init__(self) -> None:
+        """Validate the mode and the block-size threshold.
+
+        Raises:
+            ValueError: If ``mode`` is not one of the three literals or the
+                threshold is negative.
+        """
+        if self.mode not in ("kernel", "direct", "auto"):
+            raise ValueError(
+                "transfer copy mode must be 'kernel', 'direct' or 'auto'; "
+                f"got {self.mode!r}"
+            )
+        if self.direct_min_block_bytes < 0:
+            raise ValueError(
+                "direct copy min block bytes must be >= 0; got "
+                f"{self.direct_min_block_bytes}"
+            )
+
+
+DEFAULT_TRANSFER_COPY_POLICY = TransferCopyPolicy()
+
+
 @dataclass
 class MPServerConfig:
     """Configuration for the ZMQ-based multiprocess cache server."""
@@ -115,6 +175,13 @@ class MPServerConfig:
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
+
+    transfer_copy_policy: TransferCopyPolicy = field(
+        default_factory=lambda: TransferCopyPolicy()
+    )
+    """Copy path of the LMCache-driven transfer (kernel / direct / auto);
+    see :class:`TransferCopyPolicy`. Set via ``--transfer-copy-mode`` and
+    ``--direct-copy-min-block-bytes``."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -432,6 +499,27 @@ def add_mp_server_args(
         "Options: transfer_query (see lmcache.v1.multiprocess.modules."
         "experimental.__init___.py).",
     )
+    mp_group.add_argument(
+        "--transfer-copy-mode",
+        type=str,
+        choices=["kernel", "direct", "auto"],
+        default="kernel",
+        help="Copy path of the LMCache-driven STORE/RETRIEVE transfer. "
+        "'kernel' (default) stages through a GPU buffer and runs the block "
+        "transfer kernel; 'direct' scatters/gathers each chunk straight "
+        "between pinned host memory and the paged KV buffers with "
+        "cudaMemcpyBatchAsync (token-major layouts, CUDA >= 12.8 only; "
+        "others fall back to 'kernel'); 'auto' picks 'direct' only for "
+        "layouts whose block is at least --direct-copy-min-block-bytes.",
+    )
+    mp_group.add_argument(
+        "--direct-copy-min-block-bytes",
+        type=int,
+        default=128 * 1024,
+        help="--transfer-copy-mode auto only: smallest paged block size "
+        "(bytes) for which the direct copy path is chosen. Default is "
+        "131072 (128 KB).",
+    )
     return parser
 
 
@@ -479,6 +567,10 @@ def parse_args_to_mp_server_config(
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
+        transfer_copy_policy=TransferCopyPolicy(
+            mode=args.transfer_copy_mode,
+            direct_min_block_bytes=args.direct_copy_min_block_bytes,
+        ),
     )
 
 

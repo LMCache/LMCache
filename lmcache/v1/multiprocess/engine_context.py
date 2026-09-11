@@ -22,6 +22,10 @@ from lmcache.v1.gpu_connector.gds_context import (
     initialize_gds_context,
 )
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
+from lmcache.v1.multiprocess.config import (
+    DEFAULT_TRANSFER_COPY_POLICY,
+    TransferCopyPolicy,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -197,6 +201,10 @@ class MPCacheServerContext:
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             False.
+        full_sw_kv: Whether sliding-window groups cache the full per-chunk
+            KV instead of only the window suffix. Default False.
+        transfer_copy_policy: Copy path of the LMCache-driven transfer
+            (kernel / direct / auto). Default: the kernel path.
     """
 
     def __init__(
@@ -206,10 +214,12 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        transfer_copy_policy: TransferCopyPolicy = DEFAULT_TRANSFER_COPY_POLICY,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._transfer_copy_policy = transfer_copy_policy
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -250,6 +260,11 @@ class MPCacheServerContext:
     def full_sw_kv(self) -> bool:
         """Whether sliding-window groups cache full per-chunk KV (no window cutting)."""
         return self._full_sw_kv
+
+    @property
+    def transfer_copy_policy(self) -> TransferCopyPolicy:
+        """Copy path of the LMCache-driven transfer (kernel / direct / auto)."""
+        return self._transfer_copy_policy
 
     @property
     def storage_manager(self) -> StorageManager:
