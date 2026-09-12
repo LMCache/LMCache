@@ -3,7 +3,9 @@
 """Tests for EventBus, EventSubscriber, and singleton management."""
 
 # Standard
+from collections import deque
 from unittest.mock import MagicMock, patch
+import threading
 import time
 
 # Third Party
@@ -308,6 +310,69 @@ class TestBackpressure:
 
         assert len(b._queue) == 5
         assert b._discard_count == 5
+
+    def test_concurrent_publishers_preserve_queue_bound(self):
+        class _CoordinatedDeque(deque[Event]):
+            def __init__(self) -> None:
+                super().__init__()
+                self.first_len = threading.Event()
+                self.second_len = threading.Event()
+
+            def __len__(self) -> int:
+                observed = super().__len__()
+                if not self.first_len.is_set():
+                    self.first_len.set()
+                    self.second_len.wait(timeout=0.25)
+                else:
+                    self.second_len.set()
+                return observed
+
+        b = EventBus(EventBusConfig(enabled=True, max_queue_size=1))
+        b._queue = _CoordinatedDeque()
+        start = threading.Barrier(3)
+
+        def publish() -> None:
+            start.wait()
+            b.publish(_make_event())
+
+        publishers = [threading.Thread(target=publish) for _ in range(2)]
+        for publisher in publishers:
+            publisher.start()
+        start.wait()
+        for publisher in publishers:
+            publisher.join(timeout=1.0)
+
+        assert all(not publisher.is_alive() for publisher in publishers)
+        assert len(b._queue) == 1
+        assert b.dropped_events_count() == 1
+
+    def test_native_ingress_shares_queue_bound_and_drop_count(self):
+        b = EventBus(EventBusConfig(enabled=True, max_queue_size=2))
+        received: list[Event] = []
+        b.subscribe(EventType.L1_READ_FINISHED, received.append)
+        b.publish(_make_event(session_id="python"))
+
+        native_ops = MagicMock()
+        native_ops.drain_recorded_events.return_value = [
+            (
+                EventType.L1_READ_FINISHED.value,
+                f"native-{index}",
+                float(index + 1),
+                {},
+                {},
+            )
+            for index in range(3)
+        ]
+
+        with (
+            patch.object(_bus_module, "_has_native_recorder", True),
+            patch.object(_bus_module, "_device_ops", native_ops, create=True),
+        ):
+            b.stop()
+
+        assert [event.session_id for event in received] == ["python", "native-0"]
+        assert received[1].timestamp == 1.0
+        assert b.dropped_events_count() == 2
 
 
 # ---------------------------------------------------------------------------
