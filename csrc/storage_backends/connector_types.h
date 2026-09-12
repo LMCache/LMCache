@@ -38,16 +38,20 @@ tiling refers to dividing work for batched operations between threads
 beforehand.
 */
 struct BatchState {
+  static constexpr uint8_t RESULT_UNKNOWN = 2;
+
   std::atomic<uint32_t> remaining_tiles{0};
   std::atomic<bool> any_failed{false};
 
   std::mutex err_mu;
   std::string first_error;
 
-  // Per-key success/failure results used by both EXISTS and GET.
+  // Per-key success/failure results used by EXISTS, GET, SET, and DELETE.
   // For EXISTS: 1 = key found, 0 = not found.
-  // For GET: 1 = read succeeded, 0 = read failed (e.g. file
-  //   not found).  This enables per-key error tolerance on loads.
+  // For GET/SET: 1 = transfer succeeded, 0 = transfer failed.
+  // RESULT_UNKNOWN is used only while a SET tile is in flight so an older
+  // derived connector that overrides do_batch_set() without recording
+  // per-key results can retain its batch-level behavior.
   // IMPORTANT: not vector<bool> due to concurrent write data race
   std::vector<uint8_t> per_key_results;
 
@@ -92,9 +96,8 @@ struct Completion {
 
   bool ok = true;
 
-  // for EXISTS operations, store boolean results as
-  // bytes (0/1). Single EXISTS will have 1 element, batch EXISTS will have N
-  // elements. No result in the completion for SET and GET.
+  // Per-key boolean results as bytes (0/1) for EXISTS, GET, SET, and DELETE.
+  // A batch operation returns one element per requested key.
   std::vector<uint8_t> result_bytes;
 
   std::string error;

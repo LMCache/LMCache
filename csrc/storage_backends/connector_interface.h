@@ -57,6 +57,8 @@ class IStorageConnector {
 
   returns:
     uint64_t: future id for tracking this batch operation
+    completion will contain result_bytes vector with 0/1 for each key
+    (1 = stored, 0 = failed)
   */
   virtual uint64_t submit_batch_set(const std::vector<std::string>& keys,
                                     const std::vector<void*>& bufs,

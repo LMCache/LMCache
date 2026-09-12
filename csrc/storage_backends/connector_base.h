@@ -111,6 +111,10 @@ class ConnectorBase : public IStorageConnector {
     auto [batch_future_id, batch_state, num_tiles, tile_size] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_SET);
 
+    // RESULT_UNKNOWN preserves compatibility with derived connectors that
+    // override do_batch_set() but predate per-key completion results.
+    batch_state->per_key_results.assign(num_items, BatchState::RESULT_UNKNOWN);
+
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
       auto tile_req = create_tile_request(
@@ -327,9 +331,25 @@ class ConnectorBase : public IStorageConnector {
     }
   }
   virtual void do_batch_set(ConnectionType& conn, const Request& req) {
+    bool any_failed = false;
+    std::string first_error;
     for (size_t i = 0; i < req.keys.size(); ++i) {
-      do_single_set(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
-                    req.batch_chunk_num_bytes);
+      try {
+        do_single_set(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
+                      req.batch_chunk_num_bytes);
+        req.batch->per_key_results[req.start_idx + i] = 1;
+      } catch (const std::exception& e) {
+        req.batch->per_key_results[req.start_idx + i] = 0;
+        if (!any_failed) {
+          any_failed = true;
+          first_error = e.what();
+        }
+        fprintf(stderr, "[LMCache SET] key %s failed: %s\n",
+                req.keys[i].c_str(), e.what());
+      }
+    }
+    if (any_failed) {
+      throw std::runtime_error("batch set partially failed: " + first_error);
     }
   }
   virtual void do_batch_exists(ConnectionType& conn, const Request& req) {
@@ -590,6 +610,20 @@ class ConnectorBase : public IStorageConnector {
   }
 
   void handle_tile_completion(const Request& req, const Completion& comp) {
+    // Preserve existing batch semantics for external derived connectors that
+    // override do_batch_set() without populating per-key results. A successful
+    // tile means every unreported key succeeded; a failed tile is
+    // conservatively reported as failed. In-tree implementations replace every
+    // sentinel.
+    if (req.batch->batch_op == Op::BATCH_TILE_SET) {
+      for (size_t i = 0; i < req.keys.size(); ++i) {
+        uint8_t& result = req.batch->per_key_results[req.start_idx + i];
+        if (result == BatchState::RESULT_UNKNOWN) {
+          result = comp.ok ? 1 : 0;
+        }
+      }
+    }
+
     // record failure if any
     if (!comp.ok) {
       req.batch->any_failed.store(true, std::memory_order_relaxed);
@@ -612,9 +646,10 @@ class ConnectorBase : public IStorageConnector {
         std::lock_guard<std::mutex> lk(req.batch->err_mu);
         batch_comp.error = req.batch->first_error;
       }
-      // for batch exists and batch get, move per-key results
+      // Move per-key results for every operation that records them.
       if (req.batch->batch_op == Op::BATCH_TILE_EXISTS ||
           req.batch->batch_op == Op::BATCH_TILE_GET ||
+          req.batch->batch_op == Op::BATCH_TILE_SET ||
           req.batch->batch_op == Op::BATCH_TILE_DELETE) {
         batch_comp.result_bytes = std::move(req.batch->per_key_results);
       }

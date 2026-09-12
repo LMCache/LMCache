@@ -8,6 +8,7 @@ exposes them through ``get_usage()``. Adapters drive accounting by passing
 """
 
 # Standard
+from unittest.mock import Mock
 import threading
 
 # Third Party
@@ -272,6 +273,48 @@ class TestBaseAccounting:
         assert a.get_usage().total_bytes_used == n_threads * per_thread * 10
 
 
+class TestStoreReservations:
+    def test_reservation_includes_used_and_inflight_bytes(self):
+        adapter = _StubAdapter(max_capacity_bytes=300)
+        key = _make_key(1, salt="alice")
+        adapter._notify_keys_stored([key], [100])
+
+        assert adapter._try_reserve_store_bytes(200) is True
+        assert adapter._try_reserve_store_bytes(1) is False
+        assert adapter.get_reserved_store_bytes() == 200
+
+    def test_settle_atomically_releases_and_accounts_partial_result(self):
+        adapter = _StubAdapter(max_capacity_bytes=300)
+        key = _make_key(1, salt="alice")
+        assert adapter._try_reserve_store_bytes(300) is True
+
+        adapter._settle_store_reservation(300, [key], [100])
+
+        assert adapter.get_reserved_store_bytes() == 0
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 100
+        assert usage.bytes_by_cache_salt == {"alice": 100}
+
+    def test_release_returns_capacity_without_accounting(self):
+        adapter = _StubAdapter(max_capacity_bytes=100)
+        assert adapter._try_reserve_store_bytes(100) is True
+
+        adapter._release_store_reservation(100)
+
+        assert adapter.get_reserved_store_bytes() == 0
+        assert adapter.get_usage().total_bytes_used == 0
+        assert adapter._try_reserve_store_bytes(100) is True
+
+    def test_invalid_reservations_fail_closed(self):
+        adapter = _StubAdapter(max_capacity_bytes=100)
+        with pytest.raises(ValueError, match="non-negative"):
+            adapter._try_reserve_store_bytes(-1)
+        with pytest.raises(ValueError, match="non-negative"):
+            adapter._release_store_reservation(-1)
+        with pytest.raises(RuntimeError, match="underflow"):
+            adapter._release_store_reservation(1)
+
+
 # ---------------------------------------------------------------------------
 # Listener notifications still fire (regression guard for the refactor)
 # ---------------------------------------------------------------------------
@@ -304,6 +347,15 @@ class TestListenersStillFire:
         k = _make_key(1, salt="alice")
         a._notify_keys_stored([k], [100])
         assert lst.stored == [[k]]
+
+    def test_store_notify_still_publishes_observability_event(self):
+        adapter = _StubAdapter(max_capacity_bytes=1000)
+        adapter._event_bus = Mock()
+        key = _make_key(1, salt="alice")
+
+        adapter._notify_keys_stored([key], [100])
+
+        adapter._event_bus.publish.assert_called_once()
 
     def test_delete_notify_fires_listener(self):
         a = _StubAdapter(max_capacity_bytes=1000)
