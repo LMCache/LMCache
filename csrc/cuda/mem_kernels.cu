@@ -294,19 +294,20 @@ page_buffer_offset(const int k_or_v, const int token_idx,
            head_offset;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
-    const int hs2 = 2 * head_size;  // packed K+V width per head (xword units)
+    // Fused format specs report the packed K/V content width as head_size.
+    const int packed_head_size = head_size;
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
-    const int head_idx = scalar_offset / hs2;
-    const int head_offset = scalar_offset % hs2;
-    const int num_heads = scalars_per_token / hs2;
+    const int head_idx = scalar_offset / packed_head_size;
+    const int head_offset = scalar_offset % packed_head_size;
+    const int num_heads = scalars_per_token / packed_head_size;
     // vLLM blocks-first pools pass the real per-block step; 0 means tight.
     const int64_t block_step =
         block_stride_xwords > 0
             ? block_stride_xwords
-            : static_cast<int64_t>(num_heads) * block_size * hs2;
-    return block_idx * block_step + head_idx * block_size * hs2 +
-           block_offset * hs2 + head_offset;
+            : static_cast<int64_t>(num_heads) * block_size * packed_head_size;
+    return block_idx * block_step + head_idx * block_size * packed_head_size +
+           block_offset * packed_head_size + head_offset;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     const int block_idx = token_idx / block_size;
