@@ -47,7 +47,7 @@ def _public_callables(module):
         and callable(obj)
         and not inspect.isclass(obj)  # classes tested by descriptor/enum tests
         and not hasattr(obj, "__members__")  # exclude pybind11 enums
-        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
+        and getattr(obj, "__module__", "").startswith("lmcache.v1.platform.torch_ops")
     }
 
 
