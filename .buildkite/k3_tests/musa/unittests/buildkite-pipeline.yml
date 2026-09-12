@@ -7,4 +7,4 @@ agents:
 
 steps:
   - label: ":pipeline: Upload pipeline"
-    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/musa/unit-pipeline.yml
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/musa/unittests/pipeline.yml
