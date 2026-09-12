@@ -13,7 +13,7 @@ msgspec
 numpy<=2.2.6
 numba
 nvtx
-opentelemetry-api >= 1.20.0, <= 1.40.0
+opentelemetry-api <= 1.42.1, >= 1.42.1
 opentelemetry-sdk >= 1.20.0
 opentelemetry-exporter-otlp >= 1.20.0
 opentelemetry-exporter-prometheus >= 0.50b0, <= 0.61b0
