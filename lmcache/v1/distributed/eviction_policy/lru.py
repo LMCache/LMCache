@@ -16,6 +16,9 @@ from lmcache.v1.distributed.internal_api import (
     EvictionDestination,
 )
 
+# Local
+from ._selection import ChunkFamilyTopology, select_chunk_coherent_victims
+
 
 class LRUEvictionPolicy(EvictionPolicy):
     """
@@ -51,6 +54,7 @@ class LRUEvictionPolicy(EvictionPolicy):
 
         # OrderedDict to maintain LRU order - keys at the beginning are oldest
         self._order: OrderedDict[ObjectKey, None] = OrderedDict()
+        self._family_topology = ChunkFamilyTopology()
 
         # List of registered eviction destinations
         self._destinations: list[EvictionDestination] = []
@@ -90,6 +94,7 @@ class LRUEvictionPolicy(EvictionPolicy):
                 else:
                     # Add new key at the end (most recently used)
                     self._order[key] = None
+            self._family_topology.observe(keys)
 
     def on_keys_touched(self, keys: list[ObjectKey]):
         """
@@ -174,18 +179,16 @@ class LRUEvictionPolicy(EvictionPolicy):
             if target_count == 0:
                 return []
 
-            # Get keys in LRU order (from beginning - least recently used),
-            # skipping keys that fail the filter (e.g. locked keys).
-            keys_to_evict: list[ObjectKey] = []
-
-            for key in self._order:
-                if key_eligible_filter is not None and not key_eligible_filter(key):
-                    # Skip keys that are not eligible for eviction
-                    # (e.g. currently locked by read/write operations)
-                    continue
-                keys_to_evict.append(key)
-                if len(keys_to_evict) >= target_count:
-                    break
+            # Keep every distributed rank/object-group member of a logical
+            # chunk on the same side of the eviction boundary. Otherwise an
+            # L2 lookup can find only part of a hybrid chunk and the load must
+            # discard the entire apparent hit.
+            keys_to_evict = select_chunk_coherent_victims(
+                self._order,
+                target_count,
+                self._family_topology,
+                key_eligible_filter,
+            )
 
             if not keys_to_evict:
                 return []
