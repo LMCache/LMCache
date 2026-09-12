@@ -59,6 +59,9 @@ from lmcache.v1.mp_observability.config import (
     init_observability,
 )
 from lmcache.v1.mp_observability.trace import codecs
+from lmcache.v1.mp_observability.trace.format import (
+    REPLAYABLE_TRACE_SCHEMA_VERSIONS,
+)
 from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import safe_storage_config_dict
 
@@ -158,6 +161,11 @@ class StorageReplayDriver:
                 installs this config as the global singleton via
                 :func:`init_observability` and stops the resulting
                 bus on :meth:`close`.
+
+        Raises:
+            ValueError: If the trace schema does not preserve enough
+                information for faithful replay.  Schema version 1 may have
+                omitted ``ObjectKey.cache_salt`` and is inspection-only.
         """
         self._sm_config = sm_config
         self._trace_path = trace_path
@@ -174,6 +182,16 @@ class StorageReplayDriver:
         bus: EventBus | None = None
         try:
             reader = TraceReader(trace_path)
+            schema_version = reader.header.trace_schema_version
+            if schema_version not in REPLAYABLE_TRACE_SCHEMA_VERSIONS:
+                replayable_versions = ", ".join(
+                    str(version) for version in sorted(REPLAYABLE_TRACE_SCHEMA_VERSIONS)
+                )
+                raise ValueError(
+                    f"trace_schema_version {schema_version} is not replay-safe: "
+                    "schema version 1 may have omitted ObjectKey.cache_salt; "
+                    f"replayable versions: {replayable_versions}"
+                )
             bus = init_observability(obs_config)
             self._sm = StorageManager(sm_config)
         except BaseException:

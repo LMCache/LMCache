@@ -36,13 +36,24 @@ MAGIC: bytes = b"LMCT"
 FORMAT_VERSION: int = 1
 
 #: Bumped whenever the captured API surface changes in a way that makes
-#: older traces undecodable or incorrect to replay — e.g. a traced
-#: StorageManager method gains/loses an argument, an argument type's
-#: codec wire form changes, or a new codec tag is introduced.  Owned by
-#: the trace subsystem, independent of the LMCache package version,
-#: because ``lmcache.__version__`` bumps cover many changes irrelevant
-#: to the trace contract.
-TRACE_SCHEMA_VERSION: int = 1
+#: older readers misread new traces, or makes older traces unsafe to
+#: replay — e.g. a traced StorageManager method gains/loses an argument,
+#: an argument type's codec wire form changes, or a new codec tag is
+#: introduced.  Owned by the trace subsystem, independent of the LMCache
+#: package version, because ``lmcache.__version__`` bumps cover many
+#: changes irrelevant to the trace contract.  Version 2 adds
+#: ``ObjectKey.cache_salt``.
+TRACE_SCHEMA_VERSION: int = 2
+
+#: Schema versions this build can inspect structurally.  Version 1 remains
+#: readable because codecs provide defaults for fields absent from legacy
+#: payloads, but its recorder may have omitted ``ObjectKey.cache_salt``.
+READABLE_TRACE_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
+
+#: Schema versions whose records preserve enough information for faithful
+#: replay.  Version 1 is excluded because a salted key was recorded without
+#: its ``cache_salt`` and cannot be reconstructed from the trace.
+REPLAYABLE_TRACE_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
 
 
 class Header(msgspec.Struct, tag="header", omit_defaults=True):
@@ -59,9 +70,9 @@ class Header(msgspec.Struct, tag="header", omit_defaults=True):
     ``"gpu"``) will share this format."""
 
     trace_schema_version: int
-    """:data:`TRACE_SCHEMA_VERSION` at record time.  Replay drivers may
-    refuse mismatched schemas rather than silently misinterpreting old
-    traces."""
+    """:data:`TRACE_SCHEMA_VERSION` at record time.  Readers may inspect
+    explicitly supported legacy versions, while replay drivers accept only
+    versions whose records preserve replay semantics."""
 
     t_mono_start: float
     """``time.monotonic()`` at recorder construction.  Record

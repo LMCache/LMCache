@@ -51,6 +51,56 @@ class TestObjectKey:
         out = _roundtrip(k)
         assert out == k
 
+    def test_cache_salt_roundtrip(self) -> None:
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02",
+            model_name="m",
+            kv_rank=42,
+            cache_salt="tenant-a",
+        )
+
+        out = _roundtrip(key)
+
+        assert out == key
+        assert out.cache_salt == "tenant-a"
+
+    def test_different_cache_salts_remain_distinct(self) -> None:
+        tenant_a = ObjectKey(
+            chunk_hash=b"\x00\x01\x02",
+            model_name="m",
+            kv_rank=42,
+            cache_salt="tenant-a",
+        )
+        tenant_b = ObjectKey(
+            chunk_hash=b"\x00\x01\x02",
+            model_name="m",
+            kv_rank=42,
+            cache_salt="tenant-b",
+        )
+
+        assert _roundtrip(tenant_a) != _roundtrip(tenant_b)
+
+    def test_legacy_payload_without_cache_salt(self) -> None:
+        encoded = {
+            "__t__": "ObjectKey",
+            "v": {
+                "chunk_hash": b"\x00\x01\x02",
+                "model_name": "m",
+                "kv_rank": 42,
+                "object_group_id": 7,
+            },
+        }
+
+        out = codecs.decode_value(encoded)
+
+        assert out == ObjectKey(
+            chunk_hash=b"\x00\x01\x02",
+            model_name="m",
+            kv_rank=42,
+            object_group_id=7,
+        )
+        assert out.cache_salt == ""
+
     def test_object_group_id_roundtrip(self):
         k = ObjectKey(
             chunk_hash=b"\x00\x01\x02",

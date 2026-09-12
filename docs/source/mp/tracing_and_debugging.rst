@@ -91,7 +91,7 @@ Before replaying, ``lmcache trace info`` prints a one-screen summary:
     Trace file: /tmp/run.lct
       level:                storage
       format_version:       1
-      trace_schema_version: 1
+      trace_schema_version: 2
       duration:             226.691s
       sm_config_digest:     0f685d8a...
       total_records:        1318
@@ -105,6 +105,13 @@ Before replaying, ``lmcache trace info`` prints a one-screen summary:
 
 Use this to sanity-check that the trace you intend to replay covers
 the expected operation mix and duration.
+
+.. warning::
+
+    Schema-version-1 traces can be inspected with ``lmcache trace info`` but
+    cannot be replayed. Their recorder could receive salted ``ObjectKey``
+    values without writing ``cache_salt``, so the original key identity cannot
+    be reconstructed. Record a new schema-version-2 trace for replay.
 
 Replaying a Trace
 -----------------
