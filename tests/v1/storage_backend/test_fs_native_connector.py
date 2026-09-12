@@ -130,3 +130,24 @@ def test_odirect_fails_for_misaligned_buffer(tmp_path) -> None:
         assert "O_DIRECT buffer address is not aligned" in store[2]
     finally:
         client.close()
+
+
+def test_salted_object_group_key_roundtrip(tmp_path) -> None:
+    """Native FS must accept the distributed adapter's five-field key."""
+    LMCacheFSClient = _import_fs_client()
+    key = "test_model@00000000@2@0123456789abcdef@tenant"
+    source = memoryview(bytearray(b"checkpoint"))
+    dest = memoryview(bytearray(len(source)))
+
+    client = LMCacheFSClient(str(tmp_path), 1, "", False, 0)
+    try:
+        store = _submit_and_wait(client, "submit_batch_set", key, source)
+        assert store[1], store[2]
+        load = _submit_and_wait(client, "submit_batch_get", key, dest)
+        assert load[1], load[2]
+        assert bytes(dest) == bytes(source)
+        assert (
+            tmp_path / "test_model@0x00000000@2@0123456789abcdef@tenant.data"
+        ).is_file()
+    finally:
+        client.close()
