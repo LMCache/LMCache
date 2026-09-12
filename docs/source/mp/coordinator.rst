@@ -225,9 +225,10 @@ Connecting MP servers
 An MP server (``lmcache server``) joins the coordinator when you point it at one
 with ``--coordinator-url``. It registers on startup, heartbeats while running,
 and deregisters on shutdown -- all on the server's own event loop. This is
-opt-in: with no URL set, the server runs exactly as before. Each flag falls back
-to a matching ``LMCACHE_COORDINATOR_*`` environment variable (handy for the
-Kubernetes downward API); an explicit flag wins over the env var.
+opt-in: with no URL set, the server runs exactly as before. The registration
+flags fall back to matching ``LMCACHE_COORDINATOR_*`` environment variables
+(handy for the Kubernetes downward API), and an explicit flag wins over the env
+var; the fleet-CacheBlend client flags below have no env fallback.
 
 .. list-table::
    :header-rows: 1
@@ -257,6 +258,15 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
        ``1``).
+   * - ``--coordinator-blend-timeout``
+     - --
+     - Seconds a fleet CacheBlend lookup to the coordinator may take, used as
+       both the HTTP timeout and the per-lookup match budget (must be ``> 0``,
+       default ``1.0``).
+   * - ``--coordinator-blend-match-concurrency``
+     - --
+     - Max fleet CacheBlend match round-trips in flight at once (must be
+       ``>= 1``, default ``8``).
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
