@@ -390,19 +390,43 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed store events.
 
-    Each worker reports {req_id: 1} for newly completed stores.
-    ``aggregate()`` sums counts across workers within a step.
-    The scheduler-side manager accumulates across steps and processes
-    a store completion only when count reaches ``world_size``.
+    Attributes:
+        completed_store_requests: Newly completed stores of this worker, as
+            ``{request_id: 1}``. ``aggregate()`` sums the counts across the
+            workers of one step; the scheduler-side manager accumulates
+            across steps and settles a store only once its count reaches
+            ``world_size``.
+        failed_store_requests: Requests whose store did not succeed on this
+            worker, either with a failed result or dropped while unhealthy.
+            Their completion receipts are still counted -- the pinned blocks
+            must be unpinned either way -- but the scheduler additionally
+            breaks the request's stored-prefix chain so later chunks are not
+            stored unreachable. ``aggregate()`` unions the sets: one rank's
+            failure breaks the chain even when the other ranks succeeded.
     """
 
     completed_store_requests: dict[str, int]
+    failed_store_requests: set[str] = field(default_factory=set)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
+        """Merge another worker's report of the same step into this one.
+
+        Args:
+            other: The report of another rank, for the same scheduler step.
+
+        Returns:
+            A new metadata whose completion counts are summed per request
+            and whose failed-request sets are unioned.
+        """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
-        return LMCacheMPWorkerMetadata(completed_store_requests=merged)
+        return LMCacheMPWorkerMetadata(
+            completed_store_requests=merged,
+            failed_store_requests=(
+                self.failed_store_requests | other.failed_store_requests
+            ),
+        )
