@@ -5,7 +5,8 @@ LMCache multi-process (mp) cache servers running across nodes as a fleet. This
 document describes the backbone: the REST API, the instance registry, the
 health-check and eviction loops, and the four domain capabilities that hang off
 it (fleet membership, quota + fleet-wide L2 eviction, cache control including
-warm prefetch / pin / delete, and fleet-wide CacheBlend fragment lookup).
+warm prefetch / pin / delete / move, and fleet-wide CacheBlend fragment
+lookup).
 
 Code: `lmcache/v1/mp_coordinator/`.
 
@@ -42,6 +43,8 @@ shape.
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
 | `GET /cache/pins` | operator/tools | paginated listing of pinned keys with their pin counts, filterable by `cache_salt` / `model_name` |
 | `POST /cache/delete` | operator | delete cached objects on a named server |
+| `POST /cache/moves` | operator/scheduler | move a token sequence's chunks from one server's L1 to another's (target pulls, then source deletes) |
+| `GET /cache/moves/{move_id}` | operator/scheduler | poll a move |
 | `GET /instances/usage` | operator/scheduler | fleet memory view: per-server, per-module usage vs declared capacity |
 | `GET /instances/{instance_id}/usage` | operator/scheduler | one server's memory compartments |
 
@@ -82,6 +85,7 @@ lmcache/v1/mp_coordinator/
     base.py             # Controller: construction + run(); views only
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
     prefetch_manager.py # dispatches warm prefetch to a named MP server
+    move_controller.py  # drives a cross-server move: target warm prefetch, then source delete
   http_routes.py        # HttpRoutes: a controller registering its own endpoints
   http_apis/
     __init__.py
@@ -89,7 +93,7 @@ lmcache/v1/mp_coordinator/
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
     quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
-    cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
+    cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete, /cache/moves
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
     instances_usage_api.py  # /instances/usage, /instances/{id}/usage
@@ -225,10 +229,18 @@ Where the coordinator's fleet-level *doing* lives — the counterpart to
 - `prefetch_manager.py` — implements `POST /cache/prefetches` dispatch to a
   named mp server and proxies status polls. A request-scoped proxy with no
   loop and no state of its own, so it stays a *manager*, not a controller.
+- `move_controller.py` — `MoveController`, behind `POST /cache/moves`:
+  submits a warm prefetch on the target, polls it to completion, and
+  deletes from the source's L1 only the keys the target reports it loaded.
+  It holds the in-flight table, runs a sweeper, and drives each move as a
+  task — state and a loop, so a *controller* by the distinction above.
+  Unlike prefetch, the coordinator, not the client, observes completion:
+  the source delete is the coordinator's own action. See
+  [cache_move.md](cache_move.md).
 
 Eviction is a sibling of cache control, not part of it: `/cache/*` is
 imperative and externally directed (prefetch this, pin this, delete
-this), while eviction is autonomous and policy-driven — nobody asks for
+this, move this), while eviction is autonomous and policy-driven — nobody asks for
 it. The one coupling is pins, and it runs the way you'd want: a pin's
 entire meaning is "exempt from eviction", so the pin set is eviction
 state that the cache-control endpoints write, not the reverse.

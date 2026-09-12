@@ -277,7 +277,7 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
-  named server (warm prefetch, pin/unpin, and delete, with more to come).
+  named server (warm prefetch, pin/unpin, delete, and move).
 - **Fleet memory** -- the ``/instances/usage`` endpoints: how full each
   server's memory compartments are, joining event-derived usage against the
   capacity each server declares on the same event stream. Read-only.
@@ -939,12 +939,13 @@ of ``access`` events applied to the key, ``0`` for unknown keys.
       -H 'Content-Type: application/json' \
       -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
 
+.. _mp_coordinator_cache_control:
+
 Cache control
 -------------
 
 The ``/cache`` group dispatches cache operations to a named MP server. It covers
-**warm prefetch**, **pin/unpin**, and **delete**; further cache-control
-operations will be documented as endpoints here as they land.
+**warm prefetch**, **pin/unpin**, **delete**, and **move**.
 
 **Warm prefetch (pre-loading L1 from L2).** Pre-warm one MP server's L1 with the
 KV for a known prompt **before** the requests arrive, so the first request hits
@@ -1301,6 +1302,223 @@ sequence returns ``status`` ``"noop"``.
             "force": false
         }'
     # -> {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
+
+**Move (best-effort relocation between servers).** Move a token sequence's cache
+from one named server's L1 to another's. An MP server never writes into a
+peer, so the coordinator drives the move from the **target**: it resolves the
+tokens to keys locally (like delete), submits a warm prefetch on the target --
+which pulls the chunks from wherever its L2 adapters find them: the source's
+L1 over :doc:`P2P <p2p>`, or a shared L2 -- and polls that prefetch itself.
+Once the target reports which keys it loaded, the coordinator deletes those
+keys, and only those, from the source's L1 (never forced); with
+``keep_source`` set it deletes nothing. The source is addressed by id: its
+address is looked up when the delete is sent, so it must still be registered
+then. A key the target could not load is
+never deleted from the source. A move that fails before the delete begins
+deletes nothing; once a delete request has been sent, ``deleted`` counts the
+removals the source acknowledged, and a batch whose reply was lost may have
+been applied. Nothing is rolled back.
+
+The submit returns a ``move_id``; poll the status endpoint until
+``completed`` or ``failed``. Unlike warm prefetch, the coordinator observes
+the target's completion on its own -- the source delete is its action and
+must not depend on whether anyone polls.
+
+.. note::
+
+   **Requirements and limits.**
+
+   - The target must be able to read the source: P2P enabled on both, or a
+     shared L2 holding the chunks. Otherwise the move completes with every
+     key ``missing`` and nothing deleted.
+   - MP servers must report per-key prefetch outcome
+     (``missing_key_indices`` on ``GET /cache/prefetches/{request_id}``); a
+     move to an older server fails without deleting.
+   - Only ``l1`` -> ``l1``. Single-node scope, like warm prefetch: for a
+     model sharded across nodes, move each node's instance.
+   - **Not a drain protocol.** A completed move does not guarantee an empty
+     source or a retained target copy. Callers must coordinate overlapping
+     moves and explicit deletes on the same keys and instances, including
+     reverse moves; the coordinator does not serialize them.
+   - **Not atomic.** The target may evict a chunk after reporting it and
+     before the source delete lands, and nothing holds the target's L1 for a
+     move: ``/cache/pins`` protects L2 eviction only. Leave headroom in the
+     target's L1 for what you move, or submit with ``keep_source`` and delete
+     the source with ``POST /cache/delete`` once the target has served the
+     prefix. Serving it once does not guarantee retention until deletion;
+     this sequence is not a lossless drain either. L2 pins are untouched.
+   - **A move that fails after the target loaded** is not rolled back. If
+     it failed before any delete was sent, this move has not requested
+     source deletion; other operations may still have changed the source.
+     If it failed once a delete was sent,
+     ``deleted`` counts what the source acknowledged and the batch whose
+     reply never came may have been applied -- treat the source as
+     unknown, not intact. ``phase`` says which half it failed in: ``load``
+     (the source untouched) or ``delete`` (a delete may have been sent).
+     Re-submitting does not guarantee source cleanup. Keys still present
+     on the target count as ``missing`` and are left on the source. Check
+     the target before deciding whether to use ``POST /cache/delete``
+     (``tier: l1``) explicitly. Nothing holds the target's copy meanwhile.
+   - A target status other than ``pending`` or ``completed`` is a protocol
+     error and fails the move before source deletion. The target removes
+     its prefetch job when a poll first observes completion. If that reply
+     is lost in transit, the coordinator's next poll receives a 404 even
+     though the prefetch completed. A 404 does not prove that no keys were
+     loaded.
+
+``POST /cache/moves``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Submit a move of a token sequence from one named server to another.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 16 66
+
+   * - Field
+     - Type
+     - Description
+   * - ``source_instance_id``
+     - string
+     - Server whose L1 holds the chunks; must be registered.
+   * - ``target_instance_id``
+     - string
+     - Server to move them to; must be registered and differ from the source.
+   * - ``model_name``
+     - string
+     - Model whose layout sizes the target's L1 buffers.
+   * - ``world_size``
+     - int
+     - World size (``>= 1``) selecting the KV layout and the per-rank fan-out.
+   * - ``token_ids``
+     - list[int]
+     - Prompt tokens whose complete ``chunk_size`` chunks move; must match
+       what was stored. A sub-chunk sequence is a ``noop``.
+   * - ``cache_salt``
+     - string
+     - Optional (default ``""``). Per-tenant isolation salt.
+   * - ``source_tier`` / ``target_tier``
+     - string
+     - Optional (default ``l1``). Only ``l1`` -> ``l1`` is accepted today.
+   * - ``keep_source``
+     - bool
+     - Optional (default ``false``). ``true`` leaves the source's chunks in
+       place: a copy, not a move.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"move_id": "abc123", "source_instance_id": "server-1", "target_instance_id": "server-2", "requested": 12, "status": "submitted"}
+
+When the sequence is shorter than one chunk, nothing is submitted and
+``move_id`` is empty:
+
+.. code-block:: json
+
+    {"move_id": "", "source_instance_id": "server-1", "target_instance_id": "server-2", "requested": 0, "status": "noop"}
+
+**HTTP status codes:**
+
+- ``200``: submitted (or a ``noop`` as above).
+- ``400``: source and target are the same server; a tier other than
+  ``l1`` -> ``l1``; ``token_ids`` exceeds the per-request cap; or
+  ``cache_salt`` violates its invariants.
+- ``404``: ``source_instance_id`` or ``target_instance_id`` is not registered.
+- ``422``: request body fails field-level validation, or carries a field
+  the request does not define (a misspelt ``keep_source`` would otherwise
+  silently become a move).
+- ``502``: the target was unreachable, rejected the prefetch submit, or
+  gave it nothing to drive: an unusable reply, or a ``noop`` for a sequence
+  the coordinator resolved to whole chunks (a ``--chunk-size`` mismatch).
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:9300/cache/moves \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "source_instance_id": "server-1",
+            "target_instance_id": "server-2",
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a"
+        }'
+    # -> {"move_id": "abc123", "source_instance_id": "server-1", "target_instance_id": "server-2", "requested": 12, "status": "submitted"}
+
+``GET /cache/moves/{move_id}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Poll a submitted move. A terminal state (``completed`` or ``failed``) stays
+readable for ``move_result_ttl_s`` (default 600 s; polling does not extend
+it) and at most ``move_result_limit`` (default 1000) settled moves are kept,
+oldest dropped first; after that the id returns ``404``.
+
+**Response** (``200 OK``) while the move runs; ``phase`` says which half it
+is in -- ``load`` until the target reports, ``delete`` from then on:
+
+.. code-block:: json
+
+    {"move_id": "abc123", "source_instance_id": "server-1", "target_instance_id": "server-2", "status": "pending", "phase": "load", "requested": 12, "loaded": 0, "missing": 0, "deleted": 0, "skipped": 0, "error": ""}
+
+…and once done:
+
+.. code-block:: json
+
+    {"move_id": "abc123", "source_instance_id": "server-1", "target_instance_id": "server-2", "status": "completed", "phase": "delete", "requested": 12, "loaded": 12, "missing": 0, "deleted": 12, "skipped": 0, "error": ""}
+
+``requested`` counts chunks; the other counts are per-rank keys (chunks times
+the fan-out), like ``affected`` on delete. ``loaded`` is what the target
+reported loading; ``missing`` is what it could not load -- not found on any
+source it can read, or already resident there -- and is never deleted from
+the source; ``deleted`` / ``skipped`` are what the source acknowledged
+(``skipped`` = locked keys it refused; both ``0`` for a copy). ``loaded``
+reports what the prefetch loaded, not that the keys are still resident. A
+``failed`` move keeps the ``phase`` it failed in -- ``load``: nothing was
+deleted; ``delete``: a delete may have been sent -- and the reason, for a
+human, in ``error``; ``deleted`` still reports what the source acknowledged
+before the failure, and a delete whose reply was lost may have removed more.
+
+**HTTP status codes:**
+
+- ``200``: status reported.
+- ``404``: unknown ``move_id`` (never submitted, expired, or evicted).
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/cache/moves/abc123
+    # -> {"move_id": "abc123", "source_instance_id": "server-1", "target_instance_id": "server-2", "status": "completed", "phase": "delete", "requested": 12, "loaded": 12, "missing": 0, "deleted": 12, "skipped": 0, "error": ""}
+
+.. important::
+
+   Matching key resolution and model layouts across the coordinator and MP
+   servers are deployment prerequisites. The report checks compare counts
+   and positions, not key identities: equal counts do not detect different
+   hashes or object-group layouts. A configuration mismatch is not guaranteed
+   to fail without source deletion.
+
+**Tuning.** The coordinator polls the target every ``move_poll_interval_s``
+seconds (default ``0.5``) and gives up -- deleting nothing -- after
+``move_completion_timeout_s`` seconds (default ``600``). The deadline bounds
+the coordinator's wait for the target's report -- the status requests, their
+replies and the sleeps between them -- under a cancellable timeout: a poll
+that fails to reach the target is retried within it, and a completion first
+seen after it is not honored (the target keeps what it loaded; the source is
+untouched). It does not cover the submit or the source delete, and it does
+not cancel the load the target already started. Settled moves stay readable
+for ``move_result_ttl_s`` seconds (default ``600``), at most
+``move_result_limit`` of them (default ``1000``). All four are
+``--extra-config`` keys:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{"move_poll_interval_s": 1.0, "move_completion_timeout_s": 1800, "move_result_ttl_s": 3600, "move_result_limit": 500}'
 
 Fleet memory
 ------------

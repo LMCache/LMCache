@@ -71,6 +71,7 @@ class TestWhatIsFound:
 
         assert {type(c).__name__ for c in built} == {
             "FleetEvictionController",
+            "MoveController",
             "PrefetchManager",
         }
 
