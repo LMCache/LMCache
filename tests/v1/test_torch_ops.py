@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Union
+from typing import Any, Union, cast
 import ctypes
 import os
 import time
@@ -3187,3 +3187,109 @@ def test_tensor_from_musa_ptr_fails_without_external_storage(
 
     with pytest.raises(RuntimeError, match="failed to construct"):
         _py_ops._tensor_from_musa_ptr(0x1000, (2, 3), torch.float16, fake_device, 12)
+
+
+class _FakeRuntime:
+    """Stand-in for a loaded runtime whose exported symbols are fixed.
+
+    ``ctypes.CDLL`` resolves an attribute per exported symbol and raises
+    ``AttributeError`` for anything else, which is what this mimics.
+    """
+
+    def __init__(self, name: str, symbols: dict[str, object]) -> None:
+        self._name = name
+        for symbol_name, symbol in symbols.items():
+            setattr(self, symbol_name, symbol)
+
+    def __getattr__(self, symbol_name: str) -> Any:
+        """Fail the way ctypes does for a symbol the library does not export."""
+        raise AttributeError(symbol_name)
+
+
+def _install_fake_runtimes(
+    monkeypatch: pytest.MonkeyPatch, available: dict[str, _FakeRuntime]
+) -> None:
+    """Present *available* as the only loadable runtimes, by soname.
+
+    Args:
+        monkeypatch: Fixture used to restore ``ctypes`` afterwards.
+        available: Maps the ``find_library`` name to the runtime it resolves to.
+            Names absent from the mapping fail to load, as they do on a host
+            without that runtime installed.
+    """
+    monkeypatch.setattr(_py_ops, "_copy_lib", _py_ops._copy_lib_NOT_LOADED)
+
+    def fake_find_library(name: str) -> Union[str, None]:
+        return f"lib{name}.so.fake" if name in available else None
+
+    def fake_cdll(path: str) -> _FakeRuntime:
+        for name, runtime in available.items():
+            if path == f"lib{name}.so.fake":
+                return runtime
+        raise OSError(f"{path}: cannot open shared object file")
+
+    monkeypatch.setattr(_py_ops.ctypes.util, "find_library", fake_find_library)
+    monkeypatch.setattr(_py_ops.ctypes, "CDLL", fake_cdll)
+
+
+def test_get_copy_lib_exposes_the_cuda_spelling_on_rocm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A HIP runtime must answer to the name its callers resolve on it.
+
+    HIP exports ``hipMemcpy``, never ``cudaMemcpy``. Callers here resolve the
+    CUDA spelling, so before aliasing, a ROCm host loaded the HIP runtime and
+    then found no usable copy entry point on it: ``lmcache_memcpy_async`` fell
+    through to the CPU byte copy for device pointers, and ``_tensor_from_ptr``
+    raised AttributeError instead of its documented RuntimeError.
+    """
+    hip_memcpy = object()
+    _install_fake_runtimes(
+        monkeypatch, {"amdhip64": _FakeRuntime("hip", {"hipMemcpy": hip_memcpy})}
+    )
+
+    lib = _py_ops._get_copy_lib()
+
+    assert lib is not None
+    assert lib.cudaMemcpy is hip_memcpy
+
+
+def test_get_copy_lib_prefers_the_cuda_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With both runtimes present, CUDA wins and is handed back untouched."""
+    cuda_memcpy = object()
+    hip_memcpy = object()
+    _install_fake_runtimes(
+        monkeypatch,
+        {
+            "cudart": _FakeRuntime("cuda", {"cudaMemcpy": cuda_memcpy}),
+            "amdhip64": _FakeRuntime("hip", {"hipMemcpy": hip_memcpy}),
+        },
+    )
+
+    lib = _py_ops._get_copy_lib()
+
+    assert lib is not None
+    assert lib.cudaMemcpy is cuda_memcpy
+
+
+def test_get_copy_lib_returns_none_without_a_gpu_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No runtime at all still selects the CPU fallback rather than raising."""
+    _install_fake_runtimes(monkeypatch, {})
+
+    assert _py_ops._get_copy_lib() is None
+
+
+def test_alias_hip_symbols_keeps_an_existing_cuda_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aliasing never overwrites a symbol the runtime already exports."""
+    cuda_memcpy = object()
+    runtime = _FakeRuntime("hip", {"cudaMemcpy": cuda_memcpy, "hipMemcpy": object()})
+
+    _py_ops._alias_hip_symbols(cast("ctypes.CDLL", runtime))
+
+    assert runtime.cudaMemcpy is cuda_memcpy
