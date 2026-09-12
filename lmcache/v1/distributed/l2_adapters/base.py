@@ -380,20 +380,54 @@ class L2AdapterInterface(ABC):
         self._backend_name = name
         self._shared = shared
 
-    def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
-        """Update byte accounting and notify listeners that ``keys`` were
-        stored. ``sizes[i]`` is the byte size of ``keys[i]``.
+    def _notify_keys_stored(
+        self,
+        keys: list[ObjectKey],
+        sizes: list[int],
+        *,
+        accounting_sizes: list[int] | None = None,
+    ) -> None:
+        """Account for and publish a successful store notification.
 
-        Accounting is held under ``_usage_lock``; listener callbacks fire
-        outside the lock so a slow listener cannot stall further notifies.
+        ``sizes[i]`` is the full byte size of ``keys[i]`` and is forwarded
+        unchanged to listeners and cache events. ``accounting_sizes[i]`` is
+        the additive change to this adapter's process-local usage. It defaults
+        to ``sizes``; adapters that overwrite an already-accounted key may pass
+        zero for that key without erasing its full size from notifications.
+
+        All three lists must have equal lengths. They are validated before
+        counters, listeners, or events are touched. Accounting is held under
+        ``_usage_lock``; listener callbacks fire outside the lock so a slow
+        listener cannot stall further notifies.
+
+        Args:
+            keys: Successfully stored object keys.
+            sizes: Full stored-object sizes, in bytes.
+            accounting_sizes: Optional additive local-accounting changes.
+
+        Raises:
+            ValueError: If the input list lengths differ.
         """
+        if len(keys) != len(sizes):
+            raise ValueError(
+                "_notify_keys_stored: keys and sizes length mismatch "
+                f"({len(keys)} vs {len(sizes)})"
+            )
+        if accounting_sizes is None:
+            accounting_sizes = sizes
+        elif len(keys) != len(accounting_sizes):
+            raise ValueError(
+                "_notify_keys_stored: keys and accounting_sizes length mismatch "
+                f"({len(keys)} vs {len(accounting_sizes)})"
+            )
+
         # Aggregate per-salt deltas before touching
         # ``_bytes_by_cache_salt`` — one dict read/write per unique
         # salt instead of one per key. This matters when the registry is
         # large (10k+ salts) and keys/sizes are bulky.
         delta: dict[str, int] = {}
         total_delta = 0
-        for key, size in zip(keys, sizes, strict=True):
+        for key, size in zip(keys, accounting_sizes, strict=True):
             delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
             total_delta += size
 

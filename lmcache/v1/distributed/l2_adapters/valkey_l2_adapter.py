@@ -530,7 +530,8 @@ class ValkeyL2Adapter(L2AdapterInterface):
         worker pool. When the final per-key future completes, the
         adapter publishes an ``L2StoreResult`` whose
         ``bytes_transferred`` reflects only the keys that actually
-        wrote (partial failures are accounted correctly).
+        wrote. A failed batch still exposes zero transferred bytes through
+        ``L2StoreResult`` while successful keys are accounted and published.
 
         If the adapter is closed, or the pool rejects a dispatch, the
         task completes immediately as a failure rather than hanging.
@@ -638,6 +639,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+        accounting_sizes: list[int] = []
         bytes_transferred = 0
         with self._lock:
             for k, sz, ok in zip(
@@ -646,18 +648,23 @@ class ValkeyL2Adapter(L2AdapterInterface):
                 if not ok:
                     continue
                 stored_keys.append(k)
+                stored_sizes.append(sz)
+                bytes_transferred += sz
                 if k in self._key_sizes:
-                    stored_sizes.append(0)
+                    accounting_sizes.append(0)
                 else:
                     self._key_sizes[k] = sz
-                    stored_sizes.append(sz)
-                    bytes_transferred += sz
+                    accounting_sizes.append(sz)
             self._completed_stores[batch.task_id] = L2StoreResult(
                 all_ok, bytes_transferred
             )
 
         if stored_keys:
-            self._notify_keys_stored(stored_keys, stored_sizes)
+            self._notify_keys_stored(
+                stored_keys,
+                stored_sizes,
+                accounting_sizes=accounting_sizes,
+            )
         self._store_efd.notify()
 
     def pop_completed_store_tasks(

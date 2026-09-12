@@ -92,6 +92,11 @@ construction fails with::
   **not** combine with ``max_capacity_gb > 0`` (a warning is logged;
   server-side expiry is not reported back to LMCache's byte accounting).
 
+Successful repeated writes of the same key count once toward the adapter's
+logical capacity. Each write still reports the object's full size to the MP
+coordinator, so fleet usage and per-``cache_salt`` quota enforcement retain
+the placement's byte size.
+
 **Configuration examples:**
 
 .. code-block:: bash

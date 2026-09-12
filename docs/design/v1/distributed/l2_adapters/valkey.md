@@ -134,6 +134,14 @@ Byte accounting is finer-grained. `_notify_keys_stored` is fired with
 into per-`cache_salt` and aggregate totals — so `get_usage()` stays
 accurate even when the task as a whole is marked failed.
 
+The adapter keeps three byte measurements distinct. A successful task's
+`L2StoreResult` reports bytes written on the wire. Process-local usage counts
+each tracked key once, so overwriting a key does not consume capacity twice.
+Store listener and cache-event payloads always carry the object's full size,
+including on an overwrite, because coordinator consumers treat STORE sizes as
+absolute placement values. This also lets a fresh coordinator reconstruct a
+placement from any later successful store event.
+
 ## Cluster vs standalone
 
 | Mode         | glide class            | `database_id` | startup nodes used |
@@ -249,6 +257,10 @@ Custom-certificate setups are a planned follow-up (exposing glide's
 - Per-`cache_salt` quotas operate regardless of `max_capacity_gb` —
   the base class tracks per-salt totals from `_notify_keys_stored` /
   `_notify_keys_deleted` for any quota policy.
+- Repeated writes of the same key retain one object's process-local usage and
+  publish its full size to coordinator-managed accounting. They do not
+  artificially grow local capacity or replace a fleet placement with zero
+  bytes.
 
 `delete(keys)` is synchronous: it submits one DEL per key to the pool,
 waits for each completion (up to `request_timeout`), and fires
