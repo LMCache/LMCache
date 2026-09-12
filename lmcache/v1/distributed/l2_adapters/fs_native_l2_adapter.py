@@ -45,6 +45,12 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     - use_odirect: bypass page cache via O_DIRECT.
     - read_ahead_size: trigger filesystem readahead by
       reading this many bytes first (optional).
+    - max_capacity_gb: declared L2 capacity in GB, used for usage
+      accounting. ``0`` (default) disables it. A value ``> 0`` does
+      **not** bound disk usage on its own -- eviction runs only when
+      the adapter spec also carries an ``eviction`` block, e.g.
+      ``{"eviction": {"eviction_policy": "LRU"}}``. Without one,
+      files accumulate past the declared capacity.
     """
 
     def __init__(
@@ -89,6 +95,16 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb = d.get("max_capacity_gb", 0)
         if not isinstance(max_capacity_gb, (int, float)) or max_capacity_gb < 0:
             raise ValueError("max_capacity_gb must be a non-negative number")
+        if max_capacity_gb > 0 and d.get("eviction") is None:
+            logger.warning(
+                "fs_native: max_capacity_gb=%s is declared for %s but no "
+                "'eviction' block is configured, so it is used for usage "
+                "accounting only and will NOT bound disk usage. Add an "
+                "eviction block to enforce it, e.g. "
+                '"eviction": {"eviction_policy": "LRU"}.',
+                max_capacity_gb,
+                base_path,
+            )
 
         return cls(
             base_path=base_path,
@@ -114,9 +130,10 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "- read_ahead_size (int): trigger fs "
             "readahead by reading this many bytes "
             "first (optional)\n"
-            "- max_capacity_gb (float): max L2 capacity "
-            "in GB for usage tracking / eviction "
-            "(default 0 = disabled)"
+            "- max_capacity_gb (float): declared L2 capacity in GB "
+            "for usage accounting (default 0 = disabled). Does not "
+            "bound disk usage by itself; add an 'eviction' block "
+            "to enforce it"
         )
 
 
