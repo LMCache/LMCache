@@ -29,23 +29,33 @@ LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=1 vllm serve mistralai/Mis
 ```  
 Wait until both of the engines are ready.
 
-3.  Send one request to the engine at port 8000,
+3.  Send one request to the engine at port 8000.
+    Repeat the sentence so the prompt exceeds ``chunk_size`` (256 in
+    `example.yaml`). A one-sentence prompt is only ~12 tokens and is
+    not stored unless ``save_unfull_chunk: true`` is set, so the second
+    engine would miss.
+
+    The ``model`` field must match the served model.
 ```bash
 curl -X POST http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-    "prompt": "Explain the significance of KV cache in language models.",
-    "max_tokens": 10
-  }'
+  -d "{
+    \"model\": \"mistralai/Mistral-7B-Instruct-v0.2\",
+    \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+    \"max_tokens\": 10
+  }"
 ```
 4. Send the same request to the engine at port 8001,
 ```bash
 curl -X POST http://localhost:8001/v1/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-    "prompt": "Explain the significance of KV cache in language models.",
-    "max_tokens": 10
-  }'
+  -d "{
+    \"model\": \"mistralai/Mistral-7B-Instruct-v0.2\",
+    \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+    \"max_tokens\": 10
+  }"
 ```
+
+The second engine should log a non-zero ``LMCache hit tokens`` value.
+If you see ``LMCache hit tokens: 0``, the prompt did not fill a chunk
+or ``PYTHONHASHSEED`` differs across processes.
