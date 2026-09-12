@@ -207,7 +207,7 @@ def _create_mooncake_store_l2_adapter(
         config.per_op_workers,
         l1_registration.enabled and l1_registration.size > 0,
     )
-    return NativeConnectorL2Adapter(native_client)
+    return NativeConnectorL2Adapter(native_client, type_name="mooncake_store")
 
 
 # Self-register config type and adapter factory

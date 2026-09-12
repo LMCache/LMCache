@@ -23,6 +23,7 @@ from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -488,6 +489,86 @@ class TestStoreInterface:
 
         completed = adapter.pop_completed_store_tasks()
         assert completed[task_id].is_successful()
+
+
+# =============================================================================
+# Uniform-Size Store Sub-Batching Tests
+# =============================================================================
+
+
+class _RecordingConnector(MockNativeConnector):
+    """Mock that records submit_batch_set calls and enforces the native
+    uniform-size contract (mixed sizes fail the whole batch, mirroring
+    csrc/storage_backends/connector_pybind_utils.h)."""
+
+    def __init__(self, fail_sizes: set | None = None):
+        super().__init__()
+        self.set_call_sizes: list[list[int]] = []
+        self._fail_sizes = fail_sizes or set()
+
+    def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
+        sizes = [mv.nbytes for mv in memoryviews]
+        self.set_call_sizes.append(sizes)
+        if len(set(sizes)) > 1 or (sizes and sizes[0] in self._fail_sizes):
+            with self._lock:
+                fid = self._next_id
+                self._next_id += 1
+            self._push_completion(fid, False, "buffer size mismatch", None)
+            return fid
+        return super().submit_batch_set(keys, memoryviews)
+
+
+class TestUniformSizeSubBatching:
+    def _run_store(self, client, keys, objs):
+        adapter = NativeConnectorL2Adapter(client)
+        try:
+            store_fd = adapter.get_store_event_fd()
+            task_id = adapter.submit_store_task(keys, objs)
+            completed = {}
+            while task_id not in completed:
+                assert wait_for_event_fd(store_fd, timeout=5.0)
+                completed.update(adapter.pop_completed_store_tasks())
+            return completed[task_id]
+        finally:
+            adapter.close()
+
+    def test_mixed_size_batch_splits_into_uniform_sub_batches(self):
+        client = _RecordingConnector()
+        keys = [create_object_key(i) for i in range(4)]
+        objs = [
+            create_memory_obj(size=1024),
+            create_memory_obj(size=256),
+            create_memory_obj(size=1024),
+            create_memory_obj(size=256),
+        ]
+        result = self._run_store(client, keys, objs)
+        assert result.is_successful()
+        # One native call per distinct buffer size, each uniform.
+        assert len(client.set_call_sizes) == 2
+        for sizes in client.set_call_sizes:
+            assert len(set(sizes)) == 1
+        # Every key landed despite the mixed input batch.
+        for key in keys:
+            assert _object_key_to_string(key) in client._store
+
+    def test_uniform_batch_stays_single_native_call(self):
+        client = _RecordingConnector()
+        keys = [create_object_key(i) for i in range(3)]
+        objs = [create_memory_obj(size=512) for _ in range(3)]
+        result = self._run_store(client, keys, objs)
+        assert result.is_successful()
+        assert len(client.set_call_sizes) == 1
+
+    def test_failed_sub_batch_marks_task_failed(self):
+        failing_nbytes = 256 * 4  # float32 elements -> bytes
+        client = _RecordingConnector(fail_sizes={failing_nbytes})
+        keys = [create_object_key(i) for i in range(2)]
+        objs = [create_memory_obj(size=1024), create_memory_obj(size=256)]
+        result = self._run_store(client, keys, objs)
+        assert not result.is_successful()
+        # The healthy sub-batch still landed.
+        assert _object_key_to_string(keys[0]) in client._store
+        assert _object_key_to_string(keys[1]) not in client._store
 
 
 # =============================================================================
@@ -1358,3 +1439,119 @@ class TestUsageTracking:
         usage = adp.get_usage()
         assert usage.usage_fraction == pytest.approx(0.2)
         assert usage.total_bytes_used == 400
+
+
+# =============================================================================
+# Pending-Entries Gauge Tests
+# =============================================================================
+
+
+class StalledStoreConnector(MockNativeConnector):
+    """Mock whose store submissions stay pending until ``release()``.
+
+    Lets tests observe non-zero pending-map counts deterministically:
+    the base mock pushes its completion inside ``submit_batch_set``, so
+    the demux thread drains it before the test can look.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._held_fids: list[int] = []
+
+    def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+            self._held_fids.append(fid)
+        return fid
+
+    def release(self) -> None:
+        """Push a success completion for every held store submission."""
+        with self._lock:
+            held = list(self._held_fids)
+            self._held_fids.clear()
+        for fid in held:
+            self._push_completion(fid, True, "", None)
+
+
+class TestPendingEntriesGauge:
+    def test_counts_rise_and_drain_to_zero(self):
+        client = StalledStoreConnector()
+        adp = NativeConnectorL2Adapter(client, type_name="stalled")
+        try:
+            keys = [create_object_key(i) for i in range(2)]
+            objs: list[MemoryObj] = [create_memory_obj(size=64) for _ in range(2)]
+            adp.submit_store_task(keys, objs)
+
+            # One uniform-size sub-batch in flight: one entry per map.
+            assert adp.get_pending_entry_counts() == {
+                "pending_ops": 1,
+                "pending_store_tasks": 1,
+                "pending_store_sizes": 1,
+            }
+
+            client.release()
+            assert wait_for_event_fd(adp.get_store_event_fd(), timeout=5.0)
+
+            # Zero counts are still reported so a drain is observable.
+            assert adp.get_pending_entry_counts() == {
+                "pending_ops": 0,
+                "pending_store_tasks": 0,
+                "pending_store_sizes": 0,
+            }
+        finally:
+            adp.close()
+
+    def test_mixed_sizes_count_one_entry_per_sub_batch(self):
+        client = StalledStoreConnector()
+        adp = NativeConnectorL2Adapter(client, type_name="stalled")
+        try:
+            keys = [create_object_key(i) for i in range(3)]
+            objs: list[MemoryObj] = [
+                create_memory_obj(size=64),
+                create_memory_obj(size=64),
+                create_memory_obj(size=16),
+            ]
+            adp.submit_store_task(keys, objs)
+
+            # Two buffer sizes -> two native sub-batches under one task.
+            assert adp.get_pending_entry_counts() == {
+                "pending_ops": 2,
+                "pending_store_tasks": 1,
+                "pending_store_sizes": 2,
+            }
+        finally:
+            adp.close()
+
+    def test_aggregation_sums_same_type_and_skips_closed(self):
+        client_a = StalledStoreConnector()
+        client_b = StalledStoreConnector()
+        adp_a = NativeConnectorL2Adapter(client_a, type_name="stalled")
+        adp_b = NativeConnectorL2Adapter(client_b, type_name="stalled")
+        b_closed = False
+
+        def stalled_totals() -> dict[str, int | float]:
+            return {
+                str(attrs["map"]): count
+                for count, attrs in (
+                    NativeConnectorL2Adapter.collect_pending_entries_observations()
+                )
+                if attrs["l2_name"] == "stalled"
+            }
+
+        try:
+            for adp in (adp_a, adp_b):
+                adp.submit_store_task(
+                    [create_object_key(1)], [create_memory_obj(size=64)]
+                )
+
+            assert stalled_totals()["pending_ops"] == 2
+            assert stalled_totals()["pending_store_tasks"] == 2
+
+            adp_b.close()
+            b_closed = True
+            assert stalled_totals()["pending_ops"] == 1
+        finally:
+            adp_a.close()
+            if not b_closed:
+                adp_b.close()
