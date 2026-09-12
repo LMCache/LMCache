@@ -22,8 +22,8 @@ x-flaky-retry: &flaky-retry
 x-pod-1gpu: &pod-1gpu
   containers:
     - name: container-0
-      image: lmcacheci/lmcache-ci-base:latest
-      imagePullPolicy: Always
+      image: lmcache/ci-base:latest
+      imagePullPolicy: Never
       resources: { limits: { "nvidia.com/gpu": "1" } }
       volumeMounts:
         - { name: hf-cache, mountPath: /root/.cache/huggingface }
@@ -65,8 +65,8 @@ steps:
               podSpec:
                 containers:
                   - name: container-0
-                    image: lmcacheci/lmcache-ci-base:latest
-                    imagePullPolicy: Always
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "4" } }
                     volumeMounts:
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
@@ -90,8 +90,8 @@ steps:
               podSpec: &pod-2gpu
                 containers:
                   - name: container-0
-                    image: lmcacheci/lmcache-ci-base:latest
-                    imagePullPolicy: Always
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "2" } }
                     volumeMounts: &vol-mounts
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
@@ -179,8 +179,8 @@ steps:
               podSpec: &pod-1gpu-dshm
                 containers:
                   - name: container-0
-                    image: lmcacheci/lmcache-ci-base:latest
-                    imagePullPolicy: Always
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts:
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
@@ -269,8 +269,8 @@ steps:
               podSpec:
                 containers:
                   - name: container-0
-                    image: lmcacheci/lmcache-ci-base:latest
-                    imagePullPolicy: Always
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts:
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
@@ -314,8 +314,8 @@ steps:
               podSpec:
                 containers:
                   - name: container-0
-                    image: lmcacheci/lmcache-ci-base:latest
-                    imagePullPolicy: Always
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
                     resources:
                       requests:
                         cpu: "8"
@@ -348,8 +348,8 @@ steps:
           podSpec:
             containers:
               - name: container-0
-                image: lmcacheci/lmcache-ci-base:latest
-                imagePullPolicy: Always
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
                 resources: { limits: { "nvidia.com/gpu": "2" } }
                 env:
                   - name: GITHUB_TOKEN
