@@ -61,6 +61,11 @@ Commonly used flags include:
      - L1 fill ratio at which eviction begins.
    * - ``--eviction-ratio RATIO``
      - Fraction of L1 cleared per eviction cycle.
+   * - ``--l2-prefetch-load-admission-wait-seconds SECONDS``
+     - Maximum interval without a successful byte-aware L2-to-L1 load
+       admission before blocked prefetches fall back to L1-only results.
+       Plans larger than total L1 capacity skip waiting. The default ``0``
+       disables admission waiting.
    * - ``--max-workers N``
      - Number of server worker processes.
    * - ``--coordinator-url URL``

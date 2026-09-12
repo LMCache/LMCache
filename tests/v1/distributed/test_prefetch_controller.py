@@ -28,8 +28,13 @@ from lmcache.v1.distributed.api import (
     PrefetchRequestSpec,
     TrimPolicy,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    parse_args,
+)
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
@@ -77,6 +82,30 @@ def make_layout() -> MemoryLayoutDesc:
     return MemoryLayoutDesc(
         shapes=[torch.Size([100, 2, 512])],
         dtypes=[torch.bfloat16],
+    )
+
+
+def make_large_layout() -> MemoryLayoutDesc:
+    """Create a 4 MiB layout for capacity-admission tests."""
+    return MemoryLayoutDesc(
+        shapes=[torch.Size([2 * 1024 * 1024])],
+        dtypes=[torch.bfloat16],
+    )
+
+
+def make_l1_manager(size_bytes: int) -> L1Manager:
+    """Create a fixed-size L1 manager for capacity-admission tests."""
+    return L1Manager(
+        L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=size_bytes,
+                use_lazy=False,
+                init_size_in_bytes=size_bytes,
+                align_bytes=0x1000,
+            ),
+            write_ttl_seconds=600,
+            read_ttl_seconds=300,
+        )
     )
 
 
@@ -565,6 +594,477 @@ class TestNoHits:
         assert result == 0, f"Expected 0 prefix hits, got {result}"
 
         ctrl.stop()
+
+
+class TestLoadAdmission:
+    """Byte-aware admission should serialize loads under transient pressure."""
+
+    def test_disabled_admission_does_not_observe_l1_capacity(self):
+        """The default path does not add L1 calls or change lock timing."""
+        l1_manager = make_l1_manager(4 * 1024 * 1024)
+        layout = make_large_layout()
+        adapter = make_adapter()
+        key = make_object_key(9_000)
+        store_keys_in_l2(adapter, [key], layout)
+
+        class CapacityRejectingL1:
+            def __init__(self, inner: L1Manager) -> None:
+                self.inner = inner
+
+            def get_l1_memory_desc(self) -> None:
+                raise AssertionError("disabled admission inspected L1 layout")
+
+            def get_memory_usage(self) -> tuple[int, int]:
+                raise AssertionError("disabled admission inspected L1 capacity")
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self.inner, name)
+
+        ctrl = PrefetchController(
+            l1_manager=CapacityRejectingL1(l1_manager),  # type: ignore[arg-type]
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+        request_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([key], {0: layout})
+        )
+
+        result = wait_for_prefetch_result_bitmap(ctrl, request_id)
+        assert result is not None
+        assert result.get_indices_list() == [0]
+        l1_manager.finish_read([key])
+
+        ctrl.stop()
+        adapter.close()
+        l1_manager.close()
+
+    def test_config_parsing_and_validation(self):
+        config = parse_args(
+            [
+                "--l1-size-gb",
+                "1",
+                "--eviction-policy",
+                "noop",
+                "--l2-prefetch-load-admission-wait-seconds",
+                "0.25",
+            ]
+        )
+        assert config.prefetch_load_admission_wait_seconds == 0.25
+
+        for invalid in ("-1", "nan", "inf"):
+            with pytest.raises(ValueError, match="finite and non-negative"):
+                parse_args(
+                    [
+                        "--l1-size-gb",
+                        "1",
+                        "--eviction-policy",
+                        "noop",
+                        "--l2-prefetch-load-admission-wait-seconds",
+                        invalid,
+                    ]
+                )
+
+    def test_waiting_load_starts_after_capacity_is_released(self):
+        """A second hit waits for the first reader instead of failing L1 OOM."""
+        layout = make_large_layout()
+        l1_manager = make_l1_manager(4 * 1024 * 1024)
+        adapter = make_adapter()
+        keys = [make_object_key(10_000), make_object_key(10_001)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=2.0,
+        )
+        ctrl.start()
+
+        first = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([keys[0]], {0: layout})
+        )
+        second = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([keys[1]], {0: layout})
+        )
+
+        first_result = wait_for_prefetch_result_bitmap(ctrl, first)
+        assert first_result is not None
+        assert first_result.get_indices_list() == [0]
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["wait_load_phase_count"] == 1
+        )
+
+        l1_manager.finish_read([keys[0]])
+        second_result = wait_for_prefetch_result_bitmap(ctrl, second)
+        assert second_result is not None
+        assert second_result.get_indices_list() == [0]
+        l1_manager.finish_read([keys[1]])
+
+        assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+        ctrl.stop()
+        adapter.close()
+        l1_manager.close()
+
+    def test_wait_timeout_falls_back_without_leaking_locks(self):
+        """Permanent pressure cannot leave a prefetch waiting indefinitely."""
+        layout = make_large_layout()
+        l1_manager = make_l1_manager(4 * 1024 * 1024)
+        blocker = make_object_key(20_000)
+        reserve = l1_manager.reserve_write(
+            [blocker], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert reserve[blocker][0] == L1Error.SUCCESS
+        l1_manager.finish_write([blocker])
+
+        adapter = make_adapter()
+        key = make_object_key(20_001)
+        store_keys_in_l2(adapter, [key], layout)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=0.1,
+        )
+        ctrl.start()
+
+        request_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([key], {0: layout})
+        )
+        started = time.monotonic()
+        result = wait_for_prefetch_result_bitmap(ctrl, request_id, timeout=2.0)
+        elapsed = time.monotonic() - started
+
+        assert result is not None
+        assert result.get_indices_list() == []
+        assert elapsed >= 0.08
+        assert elapsed < 1.0
+        assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+        assert ctrl.report_status()["wait_load_phase_count"] == 0
+
+        ctrl.stop()
+        adapter.close()
+        l1_manager.delete([blocker])
+        l1_manager.close()
+
+    def test_oversized_load_skips_admission_wait(self):
+        """A load larger than total L1 capacity cannot benefit from waiting."""
+        layout = make_large_layout()
+        l1_manager = make_l1_manager(2 * 1024 * 1024)
+        adapter = make_adapter()
+        key = make_object_key(25_000)
+        store_keys_in_l2(adapter, [key], layout)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=0.1,
+        )
+        ctrl.start()
+
+        request_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([key], {0: layout})
+        )
+        started = time.monotonic()
+        result = wait_for_prefetch_result_bitmap(ctrl, request_id, timeout=2.0)
+        elapsed = time.monotonic() - started
+
+        assert result is not None
+        assert result.get_indices_list() == []
+        assert elapsed < 0.08
+        assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+
+        ctrl.stop()
+        adapter.close()
+        l1_manager.close()
+
+    def test_load_waits_for_lazy_l1_final_capacity(self):
+        """A load that fits final lazy capacity is not treated as oversized."""
+        layout = make_large_layout()
+        l1_manager = make_l1_manager(4 * 1024 * 1024)
+
+        class ExpandingCapacityL1:
+            def __init__(self, inner: L1Manager) -> None:
+                self.inner = inner
+                self.current_total = 2 * 1024 * 1024
+
+            def get_memory_usage(self) -> tuple[int, int]:
+                used, _ = self.inner.get_memory_usage()
+                return used, self.current_total
+
+            def get_l1_memory_desc(self) -> L1MemoryDesc | None:
+                return self.inner.get_l1_memory_desc()
+
+            def expand(self) -> None:
+                self.current_total = 4 * 1024 * 1024
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self.inner, name)
+
+        expanding_l1 = ExpandingCapacityL1(l1_manager)
+        adapter = make_adapter()
+        key = make_object_key(26_000)
+        store_keys_in_l2(adapter, [key], layout)
+        ctrl = PrefetchController(
+            l1_manager=expanding_l1,  # type: ignore[arg-type]
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=2.0,
+        )
+        ctrl.start()
+
+        request_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([key], {0: layout})
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["wait_load_phase_count"] == 1
+        )
+
+        expanding_l1.expand()
+        result = wait_for_prefetch_result_bitmap(ctrl, request_id, timeout=2.0)
+        assert result is not None
+        assert result.get_indices_list() == [0]
+        l1_manager.finish_read([key])
+
+        ctrl.stop()
+        adapter.close()
+        l1_manager.close()
+
+    def test_no_progress_timeout_finishes_blocked_requests_together(self):
+        """Permanent pressure costs one timeout, not one timeout per request."""
+        layout = make_large_layout()
+        l1_manager = make_l1_manager(4 * 1024 * 1024)
+        blocker = make_object_key(27_000)
+        reserve = l1_manager.reserve_write(
+            [blocker], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert reserve[blocker][0] == L1Error.SUCCESS
+        l1_manager.finish_write([blocker])
+
+        adapter = make_adapter()
+        keys = [make_object_key(27_001), make_object_key(27_002)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=0.1,
+        )
+        ctrl.start()
+
+        first = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([keys[0]], {0: layout})
+        )
+        second = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([keys[1]], {0: layout})
+        )
+        started = time.monotonic()
+        first_result = wait_for_prefetch_result_bitmap(ctrl, first, timeout=2.0)
+        first_elapsed = time.monotonic() - started
+        second_result = wait_for_prefetch_result_bitmap(ctrl, second, timeout=2.0)
+        second_elapsed = time.monotonic() - started
+
+        assert first_result is not None
+        assert first_result.get_indices_list() == []
+        assert second_result is not None
+        assert second_result.get_indices_list() == []
+        assert first_elapsed >= 0.08
+        assert second_elapsed - first_elapsed < 0.08
+        assert second_elapsed < 0.3
+        assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+
+        ctrl.stop()
+        adapter.close()
+        l1_manager.delete([blocker])
+        l1_manager.close()
+
+    def test_successful_admission_restarts_no_progress_timeout(self):
+        """A successful admission gives the remaining queue a fresh window."""
+        layout = make_large_layout()
+        l1_manager = make_l1_manager(4 * 1024 * 1024)
+        blocker = make_object_key(28_000)
+        reserve = l1_manager.reserve_write(
+            [blocker], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert reserve[blocker][0] == L1Error.SUCCESS
+        l1_manager.finish_write([blocker])
+
+        adapter = make_adapter()
+        keys = [make_object_key(28_001), make_object_key(28_002)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=0.2,
+        )
+        ctrl.start()
+
+        first = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([keys[0]], {0: layout})
+        )
+        second = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([keys[1]], {0: layout})
+        )
+        started = time.monotonic()
+        time.sleep(0.1)
+        l1_manager.delete([blocker])
+
+        first_result = wait_for_prefetch_result_bitmap(ctrl, first, timeout=2.0)
+        first_elapsed = time.monotonic() - started
+        second_result = wait_for_prefetch_result_bitmap(ctrl, second, timeout=2.0)
+        second_elapsed = time.monotonic() - started
+
+        assert first_result is not None
+        assert first_result.get_indices_list() == [0]
+        assert first_elapsed < 0.25
+        assert second_result is not None
+        assert second_result.get_indices_list() == []
+        assert second_elapsed >= 0.24
+        assert second_elapsed < 0.6
+        l1_manager.finish_read([keys[0]])
+        assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+
+        ctrl.stop()
+        adapter.close()
+        l1_manager.close()
+
+    def test_smaller_waiting_load_is_admitted_first(self):
+        """A small load proceeds when a prior large load still cannot fit."""
+        small_layout = make_large_layout()
+        large_layout = MemoryLayoutDesc(
+            shapes=[torch.Size([4 * 1024 * 1024])],
+            dtypes=[torch.bfloat16],
+        )
+        l1_manager = make_l1_manager(8 * 1024 * 1024)
+        blocker = make_object_key(30_000)
+        reserve = l1_manager.reserve_write(
+            [blocker], is_temporary=[False], layout_desc=large_layout, mode="new"
+        )
+        assert reserve[blocker][0] == L1Error.SUCCESS
+        l1_manager.finish_write([blocker])
+
+        adapter_config = MockL2AdapterConfig(max_size_gb=0.02, mock_bandwidth_gb=10.0)
+        adapter = MockL2Adapter(adapter_config)
+        large_key = make_object_key(30_001)
+        small_key = make_object_key(30_002)
+        store_keys_in_l2(adapter, [large_key], large_layout)
+        store_keys_in_l2(adapter, [small_key], small_layout)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[AdapterDescriptor(index=0, config=adapter_config)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=2.0,
+        )
+        ctrl.start()
+
+        large = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([large_key], {0: large_layout})
+        )
+        small = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([small_key], {0: small_layout})
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["wait_load_phase_count"] == 2
+        )
+
+        l1_manager.delete([blocker])
+        small_result = wait_for_prefetch_result_bitmap(ctrl, small)
+        assert small_result is not None
+        assert small_result.get_indices_list() == [0]
+        assert ctrl.query_prefetch_result(large) is None
+
+        l1_manager.finish_read([small_key])
+        large_result = wait_for_prefetch_result_bitmap(ctrl, large)
+        assert large_result is not None
+        assert large_result.get_indices_list() == [0]
+        l1_manager.finish_read([large_key])
+
+        assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+        ctrl.stop()
+        adapter.close()
+        l1_manager.close()
+
+    def test_aged_large_load_precedes_a_new_small_load(self):
+        """An aged request gets priority instead of starving behind new work."""
+        small_layout = make_large_layout()
+        large_layout = MemoryLayoutDesc(
+            shapes=[torch.Size([4 * 1024 * 1024])],
+            dtypes=[torch.bfloat16],
+        )
+        l1_manager = make_l1_manager(8 * 1024 * 1024)
+        blocker = make_object_key(31_000)
+        reserve = l1_manager.reserve_write(
+            [blocker], is_temporary=[False], layout_desc=large_layout, mode="new"
+        )
+        assert reserve[blocker][0] == L1Error.SUCCESS
+        l1_manager.finish_write([blocker])
+
+        adapter_config = MockL2AdapterConfig(max_size_gb=0.03, mock_bandwidth_gb=10.0)
+        adapter = MockL2Adapter(adapter_config)
+        large_key = make_object_key(31_001)
+        first_small_key = make_object_key(31_002)
+        late_small_key = make_object_key(31_003)
+        store_keys_in_l2(adapter, [large_key], large_layout)
+        store_keys_in_l2(adapter, [first_small_key, late_small_key], small_layout)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[AdapterDescriptor(index=0, config=adapter_config)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=0.6,
+        )
+        ctrl.start()
+
+        large = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([large_key], {0: large_layout})
+        )
+        first_small = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([first_small_key], {0: small_layout})
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["wait_load_phase_count"] == 2
+        )
+        both_queued_at = time.monotonic()
+
+        time.sleep(max(0.0, both_queued_at + 0.3 - time.monotonic()))
+        l1_manager.delete([blocker])
+        first_small_result = wait_for_prefetch_result_bitmap(ctrl, first_small)
+        assert first_small_result is not None
+        assert first_small_result.get_indices_list() == [0]
+
+        time.sleep(max(0.0, both_queued_at + 0.65 - time.monotonic()))
+        late_small = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([late_small_key], {0: small_layout})
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["wait_load_phase_count"] == 2
+        )
+        assert ctrl.query_prefetch_result(late_small) is None
+
+        l1_manager.finish_read([first_small_key])
+        large_result = wait_for_prefetch_result_bitmap(ctrl, large)
+        assert large_result is not None
+        assert large_result.get_indices_list() == [0]
+        assert ctrl.query_prefetch_result(late_small) is None
+
+        l1_manager.finish_read([large_key])
+        late_small_result = wait_for_prefetch_result_bitmap(ctrl, late_small)
+        assert late_small_result is not None
+        assert late_small_result.get_indices_list() == [0]
+        l1_manager.finish_read([late_small_key])
+
+        assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+        ctrl.stop()
+        adapter.close()
+        l1_manager.close()
 
 
 # =============================================================================

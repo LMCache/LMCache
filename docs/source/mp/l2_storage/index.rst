@@ -135,6 +135,26 @@ increases L1 memory pressure from in-flight data.
    * - ``--l2-prefetch-max-in-flight``
      - ``8``
      - Maximum number of concurrent prefetch requests.
+   * - ``--l2-prefetch-load-admission-wait-seconds``
+     - ``0``
+     - Maximum interval without a successful byte-aware load admission before
+       blocked prefetches fall back to their L1-only results. A positive value
+       avoids transient L1 out-of-memory misses under concurrent,
+       variable-sized loads; ``0`` disables admission waiting.
+
+Admission waiting orders ready requests by planned L1 bytes, allowing a small
+prefetch to use capacity that is insufficient for an earlier large prefetch.
+Plans larger than total L1 capacity skip the queue because waiting cannot make
+them fit. This preserves the existing immediate fallback for such plans.
+Requests that have waited for the configured interval receive FIFO priority
+over new small requests. Each successful admission restarts the no-progress
+timer; if no waiting load can be admitted for the full interval, blocked
+requests fall back without attempting allocations that cannot fit. The value
+is therefore an idle-progress timeout, not a per-request latency bound: a
+request can wait longer while the queue continues making progress. For
+example, to tolerate 100 ms gaps between capacity releases::
+
+    --l2-prefetch-load-admission-wait-seconds 0.1
 
 Buffer-Only Mode
 ~~~~~~~~~~~~~~~~~

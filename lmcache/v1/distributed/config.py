@@ -8,6 +8,7 @@ Configuration for distributed storage manager
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 import argparse
+import math
 import os
 
 # First Party
@@ -310,6 +311,9 @@ class StorageManagerConfig:
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
 
+    prefetch_load_admission_wait_seconds: float = 0.0
+    """ Maximum interval without a successful L1 load admission. """
+
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
 
@@ -353,6 +357,14 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
     """
+    if (
+        not math.isfinite(config.prefetch_load_admission_wait_seconds)
+        or config.prefetch_load_admission_wait_seconds < 0
+    ):
+        raise ValueError(
+            "prefetch load admission wait seconds must be finite and non-negative"
+        )
+
     if (
         config.l1_manager_config.gds_l1_config is not None
         and config.l1_manager_config.memory_config.devdax_path
@@ -581,6 +593,17 @@ def add_storage_manager_args(
         help="Maximum number of concurrent prefetch requests. Default is 8.",
     )
     policy_group.add_argument(
+        "--l2-prefetch-load-admission-wait-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum seconds without a successful byte-aware L2-to-L1 load "
+            "admission before blocked prefetches fall back to L1-only results. "
+            "Plans larger than total L1 capacity skip waiting. "
+            "0 disables byte-aware admission. Default is 0."
+        ),
+    )
+    policy_group.add_argument(
         "--periodic-notifier-interval-ms",
         type=int,
         default=5,
@@ -675,6 +698,9 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        prefetch_load_admission_wait_seconds=(
+            args.l2_prefetch_load_admission_wait_seconds
+        ),
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config
