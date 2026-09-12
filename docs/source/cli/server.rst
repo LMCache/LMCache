@@ -79,6 +79,14 @@ Commonly used flags include:
        and eviction, and the blend index behind fleet CacheBlend matching.
    * - ``--coordinator-event-flush-interval SECONDS``
      - Seconds between cache-event batch flushes (``> 0``, default ``1``).
+   * - ``--coordinator-blend-timeout SECONDS``
+     - Fleet CacheBlend lookup timeout, also used as the per-lookup match
+       budget (``> 0``, default ``1``). Only relevant for
+       ``--engine-type blend`` when a coordinator URL is set.
+   * - ``--coordinator-blend-match-concurrency N``
+     - Max fleet CacheBlend match round-trips in flight at once
+       (``>= 1``, default ``8``). Only relevant for ``--engine-type blend``
+       when a coordinator URL is set.
    * - ``--p2p-advertise-url HOST:PORT``
      - Enable P2P KV cache sharing and advertise this server's
        transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it
