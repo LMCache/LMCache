@@ -16,7 +16,7 @@ lmcache
 ├── coordinator                     # Launch the mp coordinator (HTTP)
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
-├── query    {kvcache,engine}       # Single-shot query with metrics
+├── query    {kvcache,engine,coordinator}  # Single-shot query with metrics
 ├── bench    {engine,server,l2}    # Sustained performance benchmarking
 └── kvcache  {clear,end-session}    # KV cache management actions
 ```
@@ -176,6 +176,28 @@ Store latency (ms):                      1.23
 Retrieve latency (ms):                   0.87
 Checksum:                                OK
 ============================================
+```
+
+**`query coordinator`** -- read one of the MP coordinator's read-only HTTP
+APIs (`usage`, `instances`, `health`, `directory`, `keys`, `quota`,
+`quota-config`, `prefetch`, `metrics`) and render it as an aligned metrics
+report. Pick the API with `--api`; everything else is optional. Only reads
+are exposed -- mutating routes belong to the command that owns the action
+(e.g. `lmcache quota` for quota writes). See
+[../../source/cli/query.rst](../../source/cli/query.rst) for the full flag
+matrix and per-API examples.
+
+```bash
+$ lmcache query coordinator --api usage
+
+============== Coordinator: usage ==============
+instance        compartment      used  capacity    ratio
+--------------------------------------------------------
+mp-gpu7         l1/dram      48.00 GB  64.00 GB    75.0%
+mp-gpu8         l1/dram       2.00 GB  64.00 GB     3.1%
+mp-gpu7         l2/fs        12.00 GB        --  unknown
+(fleet-shared)  l2/s3         7.00 GB        --  unknown
+================================================
 ```
 
 ### `lmcache bench`
@@ -345,9 +367,11 @@ lmcache/cli/
 │   ├── ping.py          # lmcache ping {kvcache,engine}
 │   ├── kvcache.py       # lmcache kvcache {clear,end-session}
 │   ├── query/           # lmcache query (CompositeCommand)
-│   │   ├── __init__.py          # QueryCommand(CompositeCommand)
-│   │   ├── engine_command.py    # Auto-discovered: lmcache query engine
-│   │   └── kvcache_command.py   # Auto-discovered: lmcache query kvcache
+│   │   ├── __init__.py             # QueryCommand(CompositeCommand)
+│   │   ├── _coordinator.py         # Coordinator API bindings + render helpers
+│   │   ├── coordinator_command.py  # Auto-discovered: lmcache query coordinator
+│   │   ├── engine_command.py       # Auto-discovered: lmcache query engine
+│   │   └── kvcache_command.py      # Auto-discovered: lmcache query kvcache
 │   ├── bench/           # lmcache bench (CompositeCommand)
 │   │   ├── __init__.py          # BenchCommand(CompositeCommand)
 │   │   ├── engine_bench/        # Auto-discovered: lmcache bench engine
