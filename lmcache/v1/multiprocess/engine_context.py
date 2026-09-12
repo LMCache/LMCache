@@ -304,7 +304,28 @@ class MPCacheServerContext:
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
+        _res = ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
+        # report chunk positions to the eviction policy. This is the last point
+        # that knows them; downstream only sees an unordered key list.
+        try:
+            _base = key.start // self.token_hasher.chunk_size
+            # Each group's list is chunk-major / rank-minor: one key per
+            # (chunk, kv_rank). Divide out the rank factor or positions are
+            # inflated by world_size and run detection breaks at TP > 1.
+            # The rank-minor layout is read off ipc_key_to_object_keys; this
+            # has only been exercised at world_size 1, not on a live TP > 1
+            # engine.
+            _nranks = max(1, len(_res[0]) // max(1, len(chunk_hashes))) if _res else 1
+            _l1 = self.storage_manager._l1_manager
+            for _lst in _l1._registered_listeners:
+                _fn = getattr(_lst, "note_key_positions", None)
+                if _fn is None:
+                    continue
+                for _gk in _res:
+                    _fn(list(_gk), [_base + _i // _nranks for _i in range(len(_gk))])
+        except Exception:
+            pass
+        return _res
 
     @staticmethod
     def _compute_shm_pool_info(
