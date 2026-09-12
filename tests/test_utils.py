@@ -525,9 +525,6 @@ class TestCacheKeyParsing:
         assert isinstance(parsed, CacheEngineKey)
         assert parsed == key
 
-    @pytest.mark.xfail(
-        reason="parse_cache_key bug: cannot parse LayerCacheEngineKey with dtype"
-    )
     def test_parse_layer_cache_engine_key(self):
         key = LayerCacheEngineKey(
             model_name="m",
