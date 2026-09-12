@@ -252,6 +252,12 @@ def _weak_completions_error(msg: str) -> bool:
     )
 
 
+def _missing_completions_endpoint(exc: BaseException) -> bool:
+    """Return whether *exc* indicates that completions are unsupported."""
+    msg = str(exc).lower()
+    return "(http 404)" in msg or "(http 405)" in msg
+
+
 class Request:
     """Build and send one query request against an OpenAI-compatible endpoint."""
 
@@ -330,6 +336,11 @@ class Request:
                     "chat API failed (no chat template); retrying with /v1/completions"
                 )
                 return self._query(request_data, chat=False)
+            if not (
+                _weak_completions_error(str(first_err))
+                or _missing_completions_endpoint(first_err)
+            ):
+                raise
             _info("/v1/completions failed; retrying with /v1/chat/completions")
             try:
                 return self._query(request_data, chat=True)
