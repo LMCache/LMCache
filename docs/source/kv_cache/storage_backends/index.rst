@@ -14,6 +14,7 @@ Supported Backends
 .. toctree::
    :maxdepth: 1
 
+   blkio
    azure
    cpu_ram
    custom_backend

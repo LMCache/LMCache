@@ -319,7 +319,48 @@ class RustRawBlockBackend(StoragePluginInterface):
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
             use_uring_cmd=use_uring_cmd,
+            blkio_driver=str(extra.get("rust_raw_block.blkio_driver", ""))
+            or None,
         )
+
+    def _build_direct_odirect_view(
+        self,
+        memory_obj: MemoryObj,
+        payload_len: int,
+        total_len: int,
+        buffer_len: int,
+        *,
+        zero_tail: bool,
+    ) -> Optional[memoryview]:
+        """Build direct physical-memory view for O_DIRECT without staging copy."""
+        if not self.use_odirect or not self.enable_zero_copy:
+            return None
+
+        ptr_val = getattr(memory_obj, "data_ptr", None)
+        if callable(ptr_val):
+            try:
+                ptr_val = ptr_val()
+            except Exception:
+                ptr_val = None
+        if ptr_val is None:
+            return None
+
+        if buffer_len <= 0:
+            return None
+
+        try:
+            ptr = int(ptr_val)
+        except Exception:
+            return None
+
+        if ptr <= 0 or ptr % self.block_align != 0:
+            return None
+        if buffer_len < payload_len:
+            return None
+
+        view_len = min(buffer_len, total_len)
+        if view_len < payload_len:
+            return None
 
     def _warn_if_loaded_metadata_looks_cross_rank(self) -> None:
         if self.metadata is None:
