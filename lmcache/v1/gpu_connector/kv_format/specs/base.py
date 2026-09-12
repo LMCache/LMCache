@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-format geometry interface for GPU KV caches.
 
-Each :class:`KVFormatSpec` owns everything that is true of one
-``EngineKVFormat``: the geometry accessors (methods that read shape off a
-normalized ``kv_caches``) plus the static layout facts (``is_mla``, ``is_hnd``,
-the structural shape, ...) as class attributes. The facts are mirrored for the
-device kernels in ``csrc/engine_kv_format.h``; Python call sites read them from
-the spec via ``get_spec_class`` instead of re-listing formats inline, and
+Each :class:`KVFormatSpec` owns everything that is true of one KV layout: the
+geometry accessors (methods that read shape off a normalized ``kv_caches``)
+plus the static layout facts (``is_mla``, ``is_hnd``, the structural shape,
+...) as class attributes. The facts are mirrored for the device kernels in
+``csrc/engine_kv_format.h``; Python call sites read them from the spec via
+``get_spec_class`` instead of re-listing layouts inline, and
 ``tests/v1/gpu_connector/test_kv_format_classification.py`` pins the two sides
-together. The enum is the single source of truth for which formats exist;
-engine identity lives only in detection. The format -> spec table is in
-``registry.py``.
+together. Engine identity lives only in detection. The layout -> spec table is
+in ``registry.py``.
 """
 
 # Standard
@@ -25,7 +24,7 @@ import torch
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 import lmcache.lmcache_native as lmcache_native
 
-# A format's enum name *is* its shape: ``_``-joined tokens, with ``X`` marking a
+# A layout's name *is* its shape: ``_``-joined tokens, with ``X`` marking a
 # list level. ``TWO_X_NL_X_NBBS_NH_HS`` reads as ``2 x NL x [PBS, NH, HS]``.
 # describe_shape and concrete_shape both render from it, so they can never drift.
 _LABELS = {

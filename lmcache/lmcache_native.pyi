@@ -3,34 +3,62 @@
 
 """Native operations for LMCache (device-independent)."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 from collections.abc import Sequence
 from enum import IntEnum
-from typing import Any, Set, overload
+from typing import Any, ClassVar, Set, TypeAlias, overload
 
-class EngineKVFormat(IntEnum):
-    """Enumeration of different engine KV cache memory layouts."""
+class KVLayout(int):
+    """Object describing one engine KV cache memory layout."""
 
-    NB_NL_TWO_BS_NH_HS = 0
-    NL_X_TWO_NB_BS_NH_HS = 1
-    NL_X_NB_TWO_BS_NH_HS = 2
-    NL_X_NB_BS_HS = 3
-    TWO_X_NL_X_NBBS_NH_HS = 4
-    NL_X_NBBS_ONE_HS = 5
-    NL_X_TWO_NB_NH_BS_HS = 6
-    NL_X_NB_TWO_NH_BS_HS = 7
-    NB_NL_TWO_NH_BS_HS = 8
-    TWO_X_NL_X_NB_BS_NH_HS = 9
-    NL_X_NB_NH_BS_TWO_HS = 10
-    NL_X_NB_BS_NH_TWO_HS = 11
-    NL_X_NB_NH_BS_CS = 12
-    NL_X_NB_BS_NH_CS = 13
-    NL_X_NB_BSV_BSS = 14
-    NL_X_TWO_NB_NH_ONE_BS_HS = 15
-    NL_X_TWO_X_NB_BS_NH_HS = 16
+    name: str
+    code: int
+    value: int
+    is_cross_layer: bool
+    is_kv_list: bool
+    is_layer_list: bool
+    is_mla: bool
+    is_hnd: bool
+    is_fused_packed: bool
+    is_two_major: bool
+    is_pbs_fused: bool
+    is_kv_second_tuple: bool
+
+    NB_NL_TWO_BS_NH_HS: ClassVar[KVLayout]
+    NL_X_TWO_NB_BS_NH_HS: ClassVar[KVLayout]
+    NL_X_NB_TWO_BS_NH_HS: ClassVar[KVLayout]
+    NL_X_NB_BS_HS: ClassVar[KVLayout]
+    TWO_X_NL_X_NBBS_NH_HS: ClassVar[KVLayout]
+    NL_X_NBBS_ONE_HS: ClassVar[KVLayout]
+    NL_X_TWO_NB_NH_BS_HS: ClassVar[KVLayout]
+    NL_X_NB_TWO_NH_BS_HS: ClassVar[KVLayout]
+    NB_NL_TWO_NH_BS_HS: ClassVar[KVLayout]
+    TWO_X_NL_X_NB_BS_NH_HS: ClassVar[KVLayout]
+    NL_X_NB_NH_BS_TWO_HS: ClassVar[KVLayout]
+    NL_X_NB_BS_NH_TWO_HS: ClassVar[KVLayout]
+    NL_X_NB_NH_BS_CS: ClassVar[KVLayout]
+    NL_X_NB_BS_NH_CS: ClassVar[KVLayout]
+    NL_X_NB_BSV_BSS: ClassVar[KVLayout]
+    NL_X_TWO_NB_NH_ONE_BS_HS: ClassVar[KVLayout]
+    NL_X_TWO_X_NB_BS_NH_HS: ClassVar[KVLayout]
+
+    @classmethod
+    def all(cls) -> tuple[KVLayout, ...]: ...
+    @classmethod
+    def from_code(cls, code: int) -> KVLayout: ...
+    @classmethod
+    def from_name(cls, name: str) -> KVLayout: ...
+    def spec_class(self) -> type[Any]: ...
+    def spec(self, kv_caches: Any) -> Any: ...
+    def describe_shape(self) -> str: ...
+
+EngineKVFormat: TypeAlias = KVLayout
 
 # Backward-compat alias for EngineKVFormat.
-GPUKVFormat = EngineKVFormat
+GPUKVFormat: TypeAlias = KVLayout
 
 class TransferDirection(IntEnum):
     """Specifies the direction of a memory transfer."""
@@ -67,19 +95,19 @@ class KernelGroupSpec:
         block_ids_capacity: int,
     ) -> None: ...
 
-def is_kv_list(format: EngineKVFormat) -> bool:
+def is_kv_list(format: KVLayout | int) -> bool:
     """Return whether the format stores KV as a list of per-token KV tensors."""
 
-def is_layer_list(format: EngineKVFormat) -> bool:
+def is_layer_list(format: KVLayout | int) -> bool:
     """Return whether the format stores one list entry per layer."""
 
-def is_cross_layer(format: EngineKVFormat) -> bool:
+def is_cross_layer(format: KVLayout | int) -> bool:
     """Return whether the format stacks KV from different layers into one tensor."""
 
-def is_mla(format: EngineKVFormat) -> bool:
+def is_mla(format: KVLayout | int) -> bool:
     """Return whether the format is an MLA variant (single latent KV head)."""
 
-def is_kv_second_tuple(format: EngineKVFormat) -> bool:
+def is_kv_second_tuple(format: KVLayout | int) -> bool:
     """Return whether each per-layer list entry is a (K, V) tuple of paged tensors."""
 
 class TTLLock:
