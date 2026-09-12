@@ -34,6 +34,9 @@ target.
    * - :doc:`S3 <s3>`
      - ``s3``
      - Remote & Distributed
+   * - :doc:`MinIO <minio>`
+     - ``s3`` (S3-compatible)
+     - Remote & Distributed
    * - :doc:`HF Bucket <hfbucket>`
      - ``hfbucket``
      - Remote & Distributed
