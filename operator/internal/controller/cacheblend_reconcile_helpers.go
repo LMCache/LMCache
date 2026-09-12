@@ -208,6 +208,9 @@ func (r *CacheBlendEngineReconciler) reconcileServiceMonitor(ctx context.Context
 			}
 			return err
 		}
+		if !metav1.IsControlledBy(existing, engine) {
+			return nil
+		}
 		log.Info("Deleting ServiceMonitor", "name", engine.Name)
 		return r.Delete(ctx, existing)
 	}
