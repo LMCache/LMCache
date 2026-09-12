@@ -147,6 +147,7 @@ class LMCacheRequestStream:
         self.done: bool = False
         self._decoded: int = 0
         self._text_parts: list[str] = []
+        self._output_tokens: list[int] = []
         self._request_stream_id: str = str(uuid.uuid4())
         self._suffix_tokens: list[int] = []
 
@@ -173,7 +174,7 @@ class LMCacheRequestStream:
     @property
     def output_tokens(self) -> list[int]:
         """Return the concatenated generated tokens across all segments."""
-        return self.tokens
+        return self._output_tokens
 
     @property
     def is_done(self) -> bool:
@@ -222,6 +223,7 @@ class LMCacheRequestStream:
         finally:
             self._decoded += len(gen_tokens)
             self._text_parts.extend(gen_texts)
+            self._output_tokens.extend(gen_tokens)
             self.tokens.extend(gen_tokens)
 
         # produces less than max_tokens --> EOS
