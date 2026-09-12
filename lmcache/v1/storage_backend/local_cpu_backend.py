@@ -268,7 +268,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if key not in self.hot_cache:
                 return False
             memory_obj = self.hot_cache[key]
-            memory_obj.unpin()
+            if memory_obj.is_pinned:
+                memory_obj.unpin()
             return True
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
