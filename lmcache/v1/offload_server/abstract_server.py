@@ -27,7 +27,9 @@ class OffloadServerInterface(metaclass=abc.ABCMeta):
             offsets: Number of tokens in each block.
 
         Returns:
-            Whether the offload was successful.
+            Whether the offload request was processed successfully. This does
+            not guarantee that data was persisted; storage may be skipped or
+            completed asynchronously.
         """
         raise NotImplementedError
 
