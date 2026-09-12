@@ -8,8 +8,8 @@ model.
 
 `raw_block` is a persistent MP L2 adapter backed by a raw block device or a
 dedicated file. It is designed to keep the MP request flow unchanged while
-reusing the existing raw-block on-device metadata format and the low-level Rust
-raw-device I/O path.
+reusing the existing mirrored checkpoint model and the low-level Rust raw-device
+I/O path.
 
 ```text
 StoreController / PrefetchController
@@ -137,7 +137,41 @@ Rules:
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
 
-The on-device format is intentionally unchanged by the MP adapter work.
+Checkpoint payloads written by current versions use state format v2. The
+mirrored metadata-container sequence and CRC protocol are unchanged. Instead
+of repeating every key and tensor metadata field in the central JSON payload,
+v2 stores a base64-encoded fixed-width manifest containing one `(slot,
+full_key_fingerprint)` record per committed slot. Manifest version 2 uses a
+64-bit BLAKE2b digest of the complete UTF-8 encoded key, including legacy layer
+IDs and tags. The legacy base-header identity contains only the chunk hash, so
+it cannot distinguish two layers of the same chunk. Comparing the complete-key
+fingerprint prevents a replacement layer's header from being recovered against
+an older checkpoint. Each manifest record still occupies 12 raw bytes.
+
+The remaining bytes in each configured slot header carry a versioned,
+CRC-protected recovery record. Record version 2 contains the encoded key, key
+namespace, payload length, shape, dtype, memory format, and cached-position
+metadata. The slot offset is derived from the manifest slot number. The payload
+length is duplicated in the existing 24-byte base header and must match the
+checksummed copy before rebuilding an index entry. Recovery validates the
+complete-key fingerprint, base-header identity, and protected length even when
+`meta_verify_on_load` is disabled. Invalid records, identity mismatches, and
+duplicate manifest slots are not accepted.
+
+If a recovery record does not fit in the configured header, the entry is kept
+in the v2 payload's legacy full-entry fallback map. This covers custom small
+headers, unusually long keys, and metadata that cannot be encoded in the
+header. State format v1 full-entry checkpoints remain readable. New slot
+writes keep the configured header write size unchanged, and no new runtime or
+user configuration option is required.
+
+The earlier, unreleased compact manifest and recovery record versions are
+rejected: their chunk-only identities and unprotected payload lengths cannot
+provide these recovery guarantees. This does not affect legacy state v1
+checkpoints, which retain full keys and payload lengths in the central CRC.
+
+Apart from the checkpoint and slot-header recovery records described above, the
+on-device format is unchanged by the MP adapter work.
 
 Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
 so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
