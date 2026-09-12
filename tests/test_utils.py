@@ -700,3 +700,61 @@ class TestCacheKeyParsing:
         assert isinstance(parsed, LayerCacheEngineKey)
         assert parsed == original
         assert parsed.layer_id == 3
+
+
+# ============================================================
+# CacheEngineKey tag delimiter safety
+# ============================================================
+
+
+class TestCacheEngineKeyTagDelimiters:
+    """Tags must not contain the delimiters the serialized key is built from.
+
+    ``to_string`` joins tags as ``f"{name}%{value}"`` separated by ``"@"`` and
+    ``to_dict`` uses the same ``%`` join, neither of which escapes. Without
+    validation two different keys can serialize to the same string.
+    """
+
+    @staticmethod
+    def _key(request_configs):
+        return CacheEngineKey(
+            model_name="mistral",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=255,
+            dtype=torch.bfloat16,
+            request_configs=request_configs,
+        )
+
+    def test_percent_in_tag_name_is_rejected(self):
+        """The collision case: ``{"a%b": "c"}`` and ``{"a": "b%c"}`` both
+        serialize to ``...@a%b%c``, so one request would read the other's
+        cached KV."""
+        with pytest.raises(ValueError, match="cannot contain"):
+            self._key({"lmcache.tag.a%b": "c"})
+
+    def test_at_sign_in_tag_name_is_rejected(self):
+        with pytest.raises(ValueError, match="cannot contain"):
+            self._key({"lmcache.tag.a@b": "c"})
+
+    def test_at_sign_in_tag_value_is_rejected(self):
+        with pytest.raises(ValueError, match="cannot contain"):
+            self._key({"lmcache.tag.env": "prod@us"})
+
+    def test_percent_in_tag_value_is_allowed_and_round_trips(self):
+        """``%`` in a value is safe because the parsers split with
+        ``maxsplit=1``, so it must keep working."""
+        key = self._key({"lmcache.tag.env": "a%b"})
+        assert CacheEngineKey.from_string(key.to_string()) == key
+        assert CacheEngineKey.from_dict(key.to_dict()) == key
+
+    def test_non_tag_request_configs_are_not_validated(self):
+        """Only ``lmcache.tag.*`` entries reach the serialized key, so other
+        config must not be constrained."""
+        key = self._key({"lmcache.other@thing": "a%b@c"})
+        assert key.tags is None
+
+    def test_ordinary_tags_still_round_trip(self):
+        key = self._key({"lmcache.tag.env": "prod", "lmcache.tag.team": "search"})
+        assert CacheEngineKey.from_string(key.to_string()) == key
+        assert CacheEngineKey.from_dict(key.to_dict()) == key
