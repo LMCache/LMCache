@@ -1755,7 +1755,13 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         :param ends: The ending indices of the KV cache in the corresponding
             token sequence.
 
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
+        :param kwargs: Must contain 'slot_mapping' and 'sync'. May contain
+            'offset', the number of leading tokens of the request that are
+            absent from 'slot_mapping'; ``starts``/``ends`` are absolute token
+            indices, so the slot of token ``i`` is ``slot_mapping[i - offset]``.
+
+        :raises ValueError: If 'slot_mapping' or 'sync' is not provided in
+            kwargs, or if a chunk starts before 'offset'.
         """
 
         self.initialize_kvcaches_ptr(**kwargs)
@@ -1770,12 +1776,24 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             raise ValueError("'sync' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+        # The SGLang load path hands us a partial slot mapping: its element 0
+        # is token `token_offset`, not token 0 (LMCacheConnector.load_kv
+        # enforces len(token_ids) - offset == len(slot_mapping)).
+        token_offset: int = kwargs.get("offset", 0)
 
         self._lazy_initialize_buffer(self.kvcaches)
 
+        if starts and starts[0] < token_offset:
+            raise ValueError(
+                f"chunk start ({starts[0]}) must not precede the SGLang "
+                f"slot-map offset ({token_offset})"
+            )
+
         slot_mapping_chunks = []
         for start, end in zip(starts, ends, strict=False):
-            slot_mapping_chunks.append(slot_mapping[start:end])
+            slot_mapping_chunks.append(
+                slot_mapping[start - token_offset : end - token_offset]
+            )
 
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
@@ -1795,7 +1813,9 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             )
             assert tmp_gpu_buffer_obj.tensor is not None
 
-        offset = starts[0]
+        # Base for indexing into the staging buffer, which is packed per
+        # request. Distinct from `token_offset`, which rebases the slot map.
+        buffer_base = starts[0]
 
         for layer_id in range(self.num_layers):
             memory_objs_layer = yield
@@ -1808,15 +1828,15 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             ):
                 assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
                 if self.use_gpu:
-                    tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
-                        memory_obj.tensor, non_blocking=True
-                    )
+                    tmp_gpu_buffer_obj.tensor[
+                        start - buffer_base : end - buffer_base
+                    ].copy_(memory_obj.tensor, non_blocking=True)
                 else:
                     device_ops.single_layer_kv_transfer_sgl(
                         memory_obj.tensor,
                         self.kvcaches[0][layer_id],
                         self.kvcaches[1][layer_id],
-                        slot_mapping[start:end],
+                        slot_mapping[start - token_offset : end - token_offset],
                         lmcache_native.TransferDirection.H2D,
                         token_major=True,
                     )
