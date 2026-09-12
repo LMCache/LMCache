@@ -9,16 +9,25 @@ LMCache-specific configuration that diverges from defaults.
 
 Multimodal models run a separate encoder (vision/audio) whose output
 embeddings are injected into the decoder at placeholder token positions; the
-decoder itself uses the ordinary paged KV cache, so LMCache caches multimodal
-requests through the same KV pathway as text-only models.
+decoder usually uses the ordinary paged KV cache, so LMCache caches most
+multimodal requests through the same KV pathway as text-only models. Decoder
+layouts with different lifetime rules, such as R-SWA, require the
+model-specific policy documented in their recipe.
 
 The one multimodal-specific concern is **cache keying**: vLLM emits identical
 placeholder token ids for every image, so raw token ids cannot distinguish
-images. LMCache handles this automatically by overwriting each placeholder
-span with a per-position value sequence derived from the image's full content
-hash (``mm_hash``) before key hashing -- same text with different images gets
-distinct cache entries, and no configuration is required. This applies to
-both the in-process connector and MP mode.
+images. When vLLM supplies a stable content hash (``mm_hash``), LMCache
+overwrites each placeholder span with a value sequence derived from that hash
+before key hashing. The same text with different images then gets distinct
+cache entries, while repeating the same image and prompt can hit the cache.
+Both the in-process connector and MP mode incorporate this hash when their
+model and connector combination is supported.
+
+.. important::
+
+   Follow each model recipe's cache settings. In particular, R-SWA models
+   such as Unlimited-OCR require the prompt-only MP policy and a positive
+   multimodal processor-cache budget; see :doc:`unlimited_ocr`.
 
 Vision-encoder outputs are a separate, optional cache -- see
 :doc:`../non_kv_cache/encoder_cache` (in-process mode only; not yet available
@@ -63,6 +72,12 @@ Supported architectures
      - —
      - —
      - :doc:`qwen2_5_vl`
+   * - Unlimited-OCR
+     - ``baidu/Unlimited-OCR``
+     - ✓
+     - —
+     - —
+     - :doc:`unlimited_ocr`
 
 Legend: ``✓`` validated, ``—`` not validated. The **Model** column is the model
 family; each recipe page lists the exact vLLM architecture class it covers.
@@ -87,3 +102,4 @@ To add a new multimodal architecture:
    :maxdepth: 1
 
    qwen2_5_vl
+   unlimited_ocr

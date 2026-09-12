@@ -44,8 +44,14 @@ class LMCacheMPRequestState(enum.Enum):
 
 @dataclass
 class LMCacheMPRequestTracker:
-    # NOTE: this class used vLLM data structures, should be part of
-    # vLLM integration code
+    """Track the LMCache-visible prefix of one vLLM request.
+
+    Args:
+        request: The vLLM request to track.
+        prompt_only: Restrict cache operations to the request's immutable
+            initial prompt. Resumable requests are not cached in this mode
+            because vLLM can extend their prompt between turns.
+    """
 
     request_id: str
 
@@ -77,7 +83,15 @@ class LMCacheMPRequestTracker:
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
-    def __init__(self, request: "Request"):
+    # Exclusive upper bound for LMCache-visible tokens. ``None`` preserves
+    # the ordinary append-only request behavior.
+    cache_token_limit: int | None = None
+
+    def __init__(
+        self,
+        request: "Request",
+        prompt_only: bool = False,
+    ) -> None:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = extract_request_configs_from_request(request)
@@ -88,6 +102,21 @@ class LMCacheMPRequestTracker:
         self.num_lmcache_hit_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
         self.mm_adjusted_prompt_ids = []
+        self.cache_token_limit = None
+        if prompt_only:
+            # Streaming requests mutate num_prompt_tokens between turns. A
+            # tracker created for the first turn cannot safely infer the next
+            # immutable prefix, so keep the request out of LMCache entirely.
+            if getattr(request, "resumable", False):
+                self.cache_token_limit = 0
+            else:
+                num_prompt_tokens = getattr(request, "num_prompt_tokens", None)
+                if not isinstance(num_prompt_tokens, int):
+                    prompt_token_ids = getattr(request, "prompt_token_ids", None)
+                    num_prompt_tokens = (
+                        len(prompt_token_ids) if prompt_token_ids is not None else 0
+                    )
+                self.cache_token_limit = max(0, num_prompt_tokens)
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
             prompt_ids = torch.tensor(request.prompt_token_ids)
@@ -149,13 +178,47 @@ class LMCacheMPRequestTracker:
         }
 
     def get_token_ids(self) -> list[int]:
-        """Return the token ids to use for LMCache key derivation."""
+        """Return all logical token ids, including multimodal substitutions.
+
+        Returns:
+            A mutable copy of the complete request token sequence. Decode
+            tokens are retained even when LMCache uses a prompt-only policy so
+            allocation telemetry can still describe reused tail blocks.
+        """
         if not self.mm_adjusted_prompt_ids:
             return list(self.all_token_ids)
         num_prompt_tokens = len(self.mm_adjusted_prompt_ids)
         return self.mm_adjusted_prompt_ids + list(
             self.all_token_ids[num_prompt_tokens:]
         )
+
+    def get_cache_token_ids(self) -> list[int]:
+        """Return the prefix permitted in LMCache cache operations.
+
+        Returns:
+            Multimodal-adjusted token ids truncated to ``cache_token_limit``
+            when prompt-only caching is active, otherwise the full sequence.
+
+        Notes:
+            Lookup, store, retrieve, and lookup-lock release must all use this
+            same sequence so they derive identical cache keys.
+        """
+        token_ids = self.get_token_ids()
+        if self.cache_token_limit is not None:
+            del token_ids[self.cache_token_limit :]
+        return token_ids
+
+    @property
+    def num_cache_tokens(self) -> int:
+        """Return the current number of tokens visible to cache operations.
+
+        Returns:
+            The full sequence length for ordinary requests, or the length
+            capped by the request's cache policy.
+        """
+        if self.cache_token_limit is None:
+            return len(self.all_token_ids)
+        return min(len(self.all_token_ids), self.cache_token_limit)
 
     ####
     # For debugging
@@ -164,6 +227,7 @@ class LMCacheMPRequestTracker:
         return (
             f"LMCacheMPRequestTracker(request_id={self.request_id}, "
             f"num_tokens={len(self.all_token_ids)}, "
+            f"num_cache_tokens={self.num_cache_tokens}, "
             f"num_allocated_blocks="
             f"{self.num_allocated_blocks()}, "
             f"num_stored_tokens={self.num_stored_tokens}, "
@@ -241,7 +305,7 @@ class LMCacheMPRequestMetadata:
             else 0
         )
         min_available_tokens = min(
-            len(tracker.all_token_ids),
+            tracker.num_cache_tokens,
             allocated_tokens,
             computed_tokens,
         )
@@ -257,7 +321,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = tracker.get_token_ids()
+            token_ids = tracker.get_cache_token_ids()
             op = LoadStoreOp(
                 token_ids=token_ids,
                 block_ids=block_ids,
@@ -314,7 +378,7 @@ class LMCacheMPRequestMetadata:
             "The number of LMCache hit tokens should be a multiple of the "
             "LMCache chunk size. "
         )
-        assert len(tracker.all_token_ids) >= end_token_idx, (
+        assert tracker.num_cache_tokens >= end_token_idx, (
             "The number of tokens should be greater than or equal to the "
             "number of LMCache hit tokens. "
         )
@@ -325,7 +389,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = tracker.get_token_ids()
+            token_ids = tracker.get_cache_token_ids()
 
             # Compute how many tokens at the start of the retrieve range
             # overlap with APC-shared blocks. The server must skip writing
