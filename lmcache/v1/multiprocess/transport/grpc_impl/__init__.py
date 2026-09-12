@@ -35,6 +35,3 @@ def create_request_client(
 
     # Descriptor-derived methods are installed on the class at import time.
     return GrpcMultiprocessClient(server_url)  # type: ignore[abstract]
-
-
-__all__ = ["create_request_client"]

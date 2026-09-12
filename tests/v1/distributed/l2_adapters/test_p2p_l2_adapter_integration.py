@@ -31,8 +31,6 @@ if not torch_dev.is_available():
     )
 
 nixl = pytest.importorskip("nixl")
-# Third Party
-import zmq  # noqa: E402
 
 # First Party
 from lmcache.v1.distributed.api import (  # noqa: E402
@@ -65,24 +63,20 @@ from lmcache.v1.memory_management import (  # noqa: E402
 )
 from lmcache.v1.multiprocess.config import (  # noqa: E402
     CoordinatorConfig,
+    MPServerConfig,
     P2PConfig,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext  # noqa: E402
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
-from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
-from lmcache.v1.multiprocess.transport.grpc_impl.server import (  # noqa: E402
-    GrpcMultiprocessServer,
-)
-from lmcache.v1.multiprocess.transport.zmq_impl.server import (  # noqa: E402
-    add_handler_helper,
-    get_zmq_handler_specs,
+from lmcache.v1.multiprocess.transport.base import RequestServer  # noqa: E402
+from lmcache.v1.multiprocess.transport.server_factory import (  # noqa: E402
+    create_request_server,
 )
 
 _PAGE = 4096
 _NUM_KEYS = 3
 _port_counter = itertools.count(18300)
 RequestTransport = Literal["zmq", "grpc"]
-RequestServer = MessageQueueServer | GrpcMultiprocessServer
 
 
 def _next_url() -> str:
@@ -103,26 +97,18 @@ def _start_p2p_request_server(
         The client URL and the started request server.
     """
     target = _next_url()
-    if transport == "grpc":
-        grpc_server = GrpcMultiprocessServer(
-            bind_url=f"grpc://{target}",
-            max_cpu_workers=4,
-            max_gpu_workers=4,
-        )
-        grpc_server.add_modules([controller])
-        grpc_server.start()
-        return f"grpc://{target}", grpc_server
-
-    zmq_server = MessageQueueServer(f"tcp://{target}", zmq.Context.instance())
-    specs = get_zmq_handler_specs(controller)
-    for spec in specs:
-        add_handler_helper(zmq_server, spec.request_type, spec.handler)
-    zmq_server.add_normal_thread_pool(
-        [spec.request_type for spec in specs],
-        max_workers=4,
+    host, port_str = target.rsplit(":", maxsplit=1)
+    mp_config = MPServerConfig(
+        transport=transport,
+        host=host,
+        port=int(port_str),
+        max_cpu_workers=4,
+        max_gpu_workers=4,
     )
-    zmq_server.start()
-    return f"tcp://{target}", zmq_server
+    request_server = create_request_server([controller], mp_config)
+    request_server.start()
+    scheme = "tcp" if transport == "zmq" else "grpc"
+    return f"{scheme}://{target}", request_server
 
 
 def _local_memory_obj(buffer: torch.Tensor, offset: int) -> MemoryObj:

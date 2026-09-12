@@ -5,7 +5,7 @@
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 import importlib
 import subprocess
 import sys
@@ -17,6 +17,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
@@ -44,6 +45,7 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl import server as grpc_server_module
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
@@ -59,6 +61,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
+    build_grpc_request_server,
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
@@ -199,6 +202,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         "grpc://127.0.0.1:0",
         max_cpu_workers=2,
         max_gpu_workers=1,
+        grpc_server_workers=4,
     )
     server.add_modules([modules])
     server.start()
@@ -370,6 +374,51 @@ def test_generated_protobuf_type_stubs_are_available() -> None:
         assert module.__file__ is not None
         module_path = Path(module.__file__)
         assert module_path.with_suffix(".pyi").is_file()
+
+
+def test_build_grpc_request_server_uses_configured_server_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gRPC server builder should not rely on constructor defaults."""
+    modules: Any = [object()]
+
+    class FakeGrpcServer:
+        def __init__(
+            self,
+            bind_url: str,
+            max_cpu_workers: int,
+            max_gpu_workers: int,
+            grpc_server_workers: int,
+        ) -> None:
+            self.args = (
+                bind_url,
+                max_cpu_workers,
+                max_gpu_workers,
+                grpc_server_workers,
+            )
+            self.modules: Any = None
+
+        def add_modules(self, modules: Any) -> None:
+            self.modules = modules
+
+    monkeypatch.setattr(
+        grpc_server_module,
+        "GrpcMultiprocessServer",
+        FakeGrpcServer,
+    )
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=6000,
+        max_cpu_workers=2,
+        max_gpu_workers=3,
+        grpc_server_workers=7,
+    )
+
+    server = cast(Any, build_grpc_request_server(modules, config))
+
+    assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
+    assert server.modules is modules
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:

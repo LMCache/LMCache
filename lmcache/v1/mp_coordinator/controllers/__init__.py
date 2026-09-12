@@ -93,6 +93,3 @@ def _named_packages(extra_config: Mapping[str, object]) -> Sequence[str]:
                 f"got {type(name).__name__}"
             )
     return tuple(named)
-
-
-__all__ = ["Controller", "build_controllers"]

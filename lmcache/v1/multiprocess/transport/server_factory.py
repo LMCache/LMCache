@@ -11,16 +11,13 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.config import MPServerConfig
     from lmcache.v1.multiprocess.engine_module import EngineModule
-    from lmcache.v1.multiprocess.mq import MessageQueueServer
-    from lmcache.v1.multiprocess.transport.grpc_impl.server import (
-        GrpcMultiprocessServer,
-    )
+    from lmcache.v1.multiprocess.transport.base import RequestServer
 
 
 def create_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
-) -> GrpcMultiprocessServer | MessageQueueServer:
+) -> RequestServer:
     """Create a configured request server for the selected transport.
 
     Args:
@@ -32,7 +29,7 @@ def create_request_server(
     """
     if mp_config.transport == "grpc":
         # First Party
-        from lmcache.v1.multiprocess.transport.grpc_impl.factory import (
+        from lmcache.v1.multiprocess.transport.grpc_impl.server import (
             build_grpc_request_server,
         )
 
@@ -44,6 +41,3 @@ def create_request_server(
     )
 
     return build_zmq_request_server(modules, mp_config)
-
-
-__all__ = ["create_request_server"]

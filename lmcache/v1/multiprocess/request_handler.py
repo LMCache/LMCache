@@ -133,12 +133,3 @@ def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
         seen.add(options.request_type)
         handlers.append(BoundRequestHandler(handler=handler, options=options))
     return tuple(handlers)
-
-
-__all__ = [
-    "BoundRequestHandler",
-    "RequestHandlerOptions",
-    "get_request_handler_options",
-    "iter_request_handlers",
-    "request_handler",
-]

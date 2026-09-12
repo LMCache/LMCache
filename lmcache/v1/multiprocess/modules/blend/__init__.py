@@ -17,7 +17,7 @@ from lmcache.v1.multiprocess.modules.blend.matcher import (
 from lmcache.v1.multiprocess.modules.blend.matcher import (
     _unique_token_coverage as _unique_token_coverage,
 )
-from lmcache.v1.multiprocess.modules.blend.module import BlendModule
+from lmcache.v1.multiprocess.modules.blend.module import BlendModule as BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups as _BlendReadGroups,
 )
@@ -37,5 +37,3 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
     _cb_group_rope_geometry as _cb_group_rope_geometry,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState as _CBRopeState
-
-__all__ = ["BlendModule"]

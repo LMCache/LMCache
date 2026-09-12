@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Multiprocess server driven by generated gRPC service descriptors."""
+"""gRPC request server construction for multiprocess requests."""
 
 # Standard
 from collections.abc import Sequence
@@ -14,11 +14,14 @@ import grpc
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     iter_request_handlers,
 )
+from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     ServiceBinding,
@@ -125,7 +128,7 @@ class _GeneratedServicer:
         return hash(context.peer())
 
 
-class GrpcMultiprocessServer:
+class GrpcMultiprocessServer(RequestServer):
     """Register transport-neutral modules against generated gRPC services."""
 
     def __init__(
@@ -133,7 +136,7 @@ class GrpcMultiprocessServer:
         bind_url: str,
         max_cpu_workers: int,
         max_gpu_workers: int,
-        grpc_workers: int = 32,
+        grpc_server_workers: int,
     ) -> None:
         self._bind_url = bind_url
         self._handlers: dict[str, _GrpcRequestHandler] = {}
@@ -147,7 +150,7 @@ class GrpcMultiprocessServer:
         )
         self._affinity_submit_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
-            max_workers=grpc_workers,
+            max_workers=grpc_server_workers,
             thread_name_prefix="grpc-server",
         )
         self._server = grpc.server(self._executor, options=_GRPC_OPTIONS)
@@ -241,3 +244,26 @@ class GrpcMultiprocessServer:
         self._normal_pool.shutdown(wait=False)
         self._affinity_pool.shutdown(wait=False)
         self._executor.shutdown(wait=False)
+
+
+def build_grpc_request_server(
+    modules: list[EngineModule],
+    mp_config: MPServerConfig,
+) -> GrpcMultiprocessServer:
+    """Build a gRPC request server for the supplied business modules.
+
+    Args:
+        modules: Ordered business modules composing the cache server.
+        mp_config: Multiprocess server configuration.
+
+    Returns:
+        Configured, but not yet started, gRPC request server.
+    """
+    server = GrpcMultiprocessServer(
+        bind_url=f"grpc://{mp_config.host}:{mp_config.port}",
+        max_gpu_workers=mp_config.max_gpu_workers,
+        max_cpu_workers=mp_config.max_cpu_workers,
+        grpc_server_workers=mp_config.grpc_server_workers,
+    )
+    server.add_modules(modules)
+    return server

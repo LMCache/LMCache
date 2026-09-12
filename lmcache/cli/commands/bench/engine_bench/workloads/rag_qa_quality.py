@@ -553,11 +553,3 @@ class RagQaQualityWorkload(BaseWorkload):
             f.write("\n")
         logger.info("Wrote quality results to %s", self._config.output_path)
         print(f"Quality results written to {self._config.output_path}")
-
-
-__all__ = [
-    "DEFAULT_DOC_ALIGN_TOKENS",
-    "RagQaQualityConfig",
-    "RagQaQualityWorkload",
-    "parse_template_kwargs",
-]

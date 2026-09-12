@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
     get_response_class,
 )
+from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
@@ -502,8 +503,8 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
     pass
 
 
-class MessageQueueServer:
-    def __init__(self, bind_url: str, context: zmq.Context):
+class MessageQueueServer(RequestServer):
+    def __init__(self, bind_url: str, context: zmq.Context) -> None:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
@@ -870,7 +871,7 @@ class MessageQueueServer:
             [rt.name for rt in request_types],
         )
 
-    def start(self):
+    def start(self) -> None:
         # Validate all blocking handlers have an executor assigned
         for rt, handler in self.handlers.items():
             if isinstance(handler, BlockingRequestHandler) and handler.executor is None:

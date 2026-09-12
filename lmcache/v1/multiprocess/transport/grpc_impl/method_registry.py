@@ -152,10 +152,3 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
     return GrpcMethodCodecRegistry(
         by_full_name=MappingProxyType(by_full_name),
     )
-
-
-__all__ = [
-    "GrpcMethodCodec",
-    "GrpcMethodCodecRegistry",
-    "get_method_codec_registry",
-]

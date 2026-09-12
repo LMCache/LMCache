@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING
 import argparse
 import shutil
 import signal
@@ -58,16 +57,10 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.multiprocess.mq import MessageQueueServer
-    from lmcache.v1.multiprocess.transport.grpc_impl.server import (
-        GrpcMultiprocessServer,
-    )
 
 logger = init_logger(__name__)
 
@@ -306,7 +299,7 @@ def run_cache_server(
     return_engine: bool = False,
     start_prometheus_http_server: bool = True,
     coordinator_config: CoordinatorConfig = DEFAULT_COORDINATOR_CONFIG,
-) -> tuple[GrpcMultiprocessServer | MessageQueueServer, MPCacheServer] | None:
+) -> tuple[RequestServer, MPCacheServer] | None:
     """Run the LMCache cache server with the selected request transport.
 
     Args:
@@ -393,9 +386,7 @@ def run_cache_server(
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
     transport = mp_config.transport
-    server: GrpcMultiprocessServer | MessageQueueServer = create_request_server(
-        modules, mp_config
-    )
+    server: RequestServer = create_request_server(modules, mp_config)
 
     logger.info(
         "LMCache %s cache server is running on %s:%d",
