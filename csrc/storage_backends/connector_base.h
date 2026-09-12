@@ -9,7 +9,10 @@
 #include <atomic>
 #include <cerrno>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -18,6 +21,7 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace lmcache {
@@ -27,6 +31,29 @@ struct WorkerPoolConfig {
   // Maps lane key (e.g. "lookup", "retrieve", "store") to worker count.
   // Lane keys not present in this map use the shared num_workers_ pool.
   std::unordered_map<std::string, int> per_op_workers;
+};
+
+// How many reads a connector keeps outstanding against its backing store.
+//
+// By default a batch tile is read one object at a time on the worker
+// thread that owns it, so reads in flight equal the worker count: a
+// CPU-sizing figure, not a storage queue depth, and nothing makes the two
+// equal.  See
+// docs/design/v1/distributed/l2_adapters/native-connector-read-depth.md.
+struct ReadPoolConfig {
+  // Reader threads, and so the maximum reads in flight.  Zero keeps the
+  // legacy path.  Each thread holds its own connection from
+  // create_connection() for the connector's lifetime, so this is also
+  // that many extra connections, and executes the backend's unmodified
+  // do_single_get().
+  int depth = 0;
+
+  // Bytes the connector may keep outstanding across all its workers, a
+  // second bound on top of `depth`.  Throughput is set by bytes in flight
+  // rather than by object count, and object size varies by orders of
+  // magnitude between deployments.  Zero lets `depth` alone cap the
+  // group; a backend that has measured a figure supplies it here.
+  size_t max_bytes_in_flight = 0;
 };
 
 /*
@@ -50,9 +77,19 @@ class ConnectorBase : public IStorageConnector {
       : ConnectorBase(num_workers, WorkerPoolConfig{}) {}
 
   ConnectorBase(int num_workers, WorkerPoolConfig worker_pool_config)
-      : num_workers_(num_workers), worker_pool_config_(worker_pool_config) {
+      : ConnectorBase(num_workers, std::move(worker_pool_config),
+                      ReadPoolConfig{}) {}
+
+  ConnectorBase(int num_workers, WorkerPoolConfig worker_pool_config,
+                ReadPoolConfig read_pool_config)
+      : num_workers_(num_workers),
+        worker_pool_config_(std::move(worker_pool_config)),
+        read_pool_config_(read_pool_config) {
     if (num_workers_ <= 0) {
       throw std::runtime_error("num_workers must be > 0");
+    }
+    if (read_pool_config_.depth < 0) {
+      throw std::runtime_error("read pool depth must be >= 0");
     }
     for (auto& [key, count] : worker_pool_config_.per_op_workers) {
       if (count <= 0) {
@@ -241,6 +278,9 @@ class ConnectorBase : public IStorageConnector {
       join_lane_workers(*lane);
     }
 
+    // Only now: a worker joined above may have been waiting on a group.
+    stop_read_pool();
+
     // Derived cleanup that must only run after workers have stopped.
     on_workers_stopped();
 
@@ -267,9 +307,21 @@ class ConnectorBase : public IStorageConnector {
     }
   }
 
+  // Bytes this connector allows outstanding against its store.
+  //
+  // Returns the configured byte budget, or 0 when none is in force: no
+  // read pool, or a pool bounded only by its thread count.  Exposed so a
+  // caller can report it alongside its other storage statistics.
+  size_t read_budget_bytes() const {
+    return read_threads_.empty() ? 0 : read_pool_config_.max_bytes_in_flight;
+  }
+
  protected:
   // call this at the END of your derived class constructor
   void start_workers() {
+    // Readers first: a worker must never find the pool half-built.
+    start_read_pool();
+
     // Start dedicated per-op lanes for configured keys.
     for (auto& [key, count] : worker_pool_config_.per_op_workers) {
       auto& lane_ptr = lanes_[key];
@@ -313,7 +365,15 @@ class ConnectorBase : public IStorageConnector {
   virtual size_t choose_num_tiles(Op op, size_t num_items) const {
     return std::min<size_t>(worker_count_for_op(op), num_items);
   }
+  // Read one tile of a batch: serially here, or through the read pool when
+  // one is configured.  Per-key error tolerance is the same either way, a
+  // key whose do_single_get() throws is marked 0 in per_key_results and
+  // the rest of the tile still completes.
   virtual void do_batch_get(ConnectionType& conn, const Request& req) {
+    if (!read_threads_.empty()) {
+      do_batch_get_pooled(req);
+      return;
+    }
     for (size_t i = 0; i < req.keys.size(); ++i) {
       try {
         do_single_get(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
@@ -324,6 +384,61 @@ class ConnectorBase : public IStorageConnector {
         fprintf(stderr, "[LMCache GET] key %s failed: %s\n",
                 req.keys[i].c_str(), e.what());
       }
+    }
+  }
+
+  // Hand a tile's objects to the reader threads, a group at a time, and
+  // wait for each group.  Reads run on the pool's own connections, so the
+  // calling worker's is idle for the duration.
+  void do_batch_get_pooled(const Request& req) {
+    const size_t num_keys = req.keys.size();
+
+    // A group is bounded twice: by the reader-thread count, and by the
+    // byte budget when one is configured.  Whichever binds first wins, so
+    // bytes in flight can never exceed depth * object_size however large
+    // the budget is.
+    const size_t max_count = static_cast<size_t>(read_pool_config_.depth);
+    const size_t budget = worker_read_budget_bytes();
+
+    for (size_t base = 0; base < num_keys;) {
+      size_t end = base;
+      size_t group_bytes = 0;
+      while (end < num_keys && end - base < max_count) {
+        const size_t len = req.buf_lens[end];
+        // Always take the first object: one larger than the whole budget
+        // must still be read, or the batch could never make progress.
+        if (end > base && group_bytes + len > budget) {
+          break;
+        }
+        group_bytes += len;
+        ++end;
+      }
+      const size_t count = end - base;
+
+      ReadGroup group;
+      group.ok.assign(count, 1);
+      group.remaining = count;
+
+      // Built off to the side: allocating here can throw, and a group
+      // half-published to the readers would be referenced after this
+      // stack frame unwound.  Splicing it in cannot throw.
+      std::list<ReadTask> pending;
+      for (size_t local = 0; local < count; ++local) {
+        pending.push_back(ReadTask{&req, base + local, local, &group});
+      }
+
+      {
+        std::unique_lock<std::mutex> lk(read_mu_);
+        read_queue_.splice(read_queue_.end(), pending);
+        read_cv_.notify_all();
+        read_done_cv_.wait(lk, [&group] { return group.remaining == 0; });
+      }
+
+      for (size_t local = 0; local < count; ++local) {
+        req.batch->per_key_results[req.start_idx + base + local] =
+            group.ok[local];
+      }
+      base = end;
     }
   }
   virtual void do_batch_set(ConnectionType& conn, const Request& req) {
@@ -371,6 +486,118 @@ class ConnectorBase : public IStorageConnector {
     std::queue<Request> requests;
     std::vector<std::thread> workers;
   };
+
+  // Completion state for the objects of one group, living on the stack of
+  // the worker thread that is waiting for them.  Both fields are guarded
+  // by read_mu_, which is also what keeps the group alive long enough:
+  // the waiter can only return, and so destroy it, while holding that
+  // lock, and a reader only touches it while holding the same lock.
+  struct ReadGroup {
+    std::vector<uint8_t> ok;  // one flag per object of the group
+    size_t remaining = 0;
+  };
+
+  // One object to read.  `req` outlives the task: the worker that owns the
+  // request blocks until every task referring to it has finished.
+  struct ReadTask {
+    const Request* req = nullptr;
+    size_t index = 0;  // index into req->keys
+    size_t local = 0;  // index into group->ok
+    ReadGroup* group = nullptr;
+  };
+
+  // Per-worker share of the byte budget, or no bound when none is set.
+  size_t worker_read_budget_bytes() const {
+    const size_t total = read_pool_config_.max_bytes_in_flight;
+    if (total == 0) {
+      return std::numeric_limits<size_t>::max();
+    }
+    const size_t workers =
+        static_cast<size_t>(worker_count_for_op(Op::BATCH_TILE_GET));
+    return std::max<size_t>(1, total / workers);
+  }
+
+  // Build the reader threads' connections on the caller's thread, so a
+  // backend that cannot open `depth` of them fails construction rather
+  // than losing a reader thread and hanging the first group that waits on
+  // it.  Called from start_workers(), which derived classes invoke at the
+  // end of their constructor, so create_connection() is safe to call.
+  void start_read_pool() {
+    if (read_pool_config_.depth <= 0) {
+      return;
+    }
+    const size_t depth = static_cast<size_t>(read_pool_config_.depth);
+    read_conns_.reserve(depth);
+    for (size_t i = 0; i < depth; ++i) {
+      read_conns_.push_back(create_connection());
+    }
+    read_threads_.reserve(depth);
+    for (size_t i = 0; i < depth; ++i) {
+      read_threads_.emplace_back(
+          [this, i] { this->read_thread_main(read_conns_[i]); });
+    }
+  }
+
+  // Must run only after the worker threads have been joined: a worker may
+  // be blocked waiting for a group, and only these threads can finish it.
+  void stop_read_pool() {
+    {
+      std::lock_guard<std::mutex> lk(read_mu_);
+      read_stop_ = true;
+    }
+    read_cv_.notify_all();
+    for (auto& t : read_threads_) {
+      if (t.joinable()) {
+        t.join();
+      }
+    }
+    read_threads_.clear();
+    read_conns_.clear();
+  }
+
+  void read_thread_main(ConnectionType& conn) {
+    for (;;) {
+      ReadTask task;
+      {
+        std::unique_lock<std::mutex> lk(read_mu_);
+        read_cv_.wait(lk,
+                      [this] { return read_stop_ || !read_queue_.empty(); });
+        if (read_queue_.empty()) {
+          if (read_stop_) {
+            return;
+          }
+          continue;
+        }
+        task = read_queue_.front();
+        read_queue_.pop_front();
+      }
+
+      uint8_t ok = 1;
+      const std::string& key = task.req->keys[task.index];
+      try {
+        do_single_get(conn, key, task.req->buf_ptrs[task.index],
+                      task.req->buf_lens[task.index],
+                      task.req->batch_chunk_num_bytes);
+      } catch (const std::exception& e) {
+        ok = 0;
+        fprintf(stderr, "[LMCache GET] key %s failed: %s\n", key.c_str(),
+                e.what());
+      } catch (...) {
+        ok = 0;
+        fprintf(stderr, "[LMCache GET] key %s failed: unknown exception\n",
+                key.c_str());
+      }
+
+      {
+        std::lock_guard<std::mutex> lk(read_mu_);
+        ReadGroup& group = *task.group;
+        group.ok[task.local] = ok;
+        if (--group.remaining == 0) {
+          read_done_cv_.notify_all();
+        }
+      }
+    }
+  }
 
   void validate_batch_inputs(const std::vector<std::string>& keys,
                              const std::vector<void*>& bufs,
@@ -625,6 +852,7 @@ class ConnectorBase : public IStorageConnector {
  protected:
   int num_workers_;
   WorkerPoolConfig worker_pool_config_;
+  ReadPoolConfig read_pool_config_;
 
   std::atomic<bool> stop_{false};
   std::atomic<bool> closed_{false};
@@ -648,6 +876,18 @@ class ConnectorBase : public IStorageConnector {
   std::queue<Completion> completions_;
 
   std::vector<std::thread> workers_;
+
+  // Read pool.  read_conns_ is sized once in start_read_pool() and never
+  // resized, so each reader thread's reference stays valid; read_threads_
+  // being empty is the test for "no pool".
+  std::vector<ConnectionType> read_conns_;
+  std::vector<std::thread> read_threads_;
+  std::mutex read_mu_;
+  std::condition_variable read_cv_;       // a task is available
+  std::condition_variable read_done_cv_;  // some group finished
+  std::list<ReadTask> read_queue_;
+  bool read_stop_ = false;  // guarded by read_mu_
+
   // Populated only during start_workers() (single-threaded construction).
   // All subsequent accesses are reads — no lock needed in enqueue_request.
   std::unordered_map<std::string, std::unique_ptr<WorkerLane>> lanes_;

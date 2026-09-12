@@ -13,9 +13,11 @@ I/O queue depth on a single Python thread.
 **Optional fields:**
 
 - ``num_workers`` (int, default ``4``, > 0): Number of C++ worker threads
-  inside the connector.  This is the real I/O queue depth -- raise to
-  push throughput on filesystems whose aggregate BW exceeds per-stream
-  BW.
+  inside the connector.  Each one orchestrates whole batches: opening
+  files, attributing results and completing futures.  With
+  ``read_io_depth`` left at ``0`` this is also the read queue depth
+  against the device, because each worker reads one object at a time and
+  blocks; see ``read_io_depth`` for why that is usually too shallow.
 - ``relative_tmp_dir`` (str, default ``""``): Relative sub-directory for
   temporary files during writes (atomic rename on completion).
 - ``use_odirect`` (bool, default ``false``): Bypass the page cache via
@@ -26,6 +28,31 @@ I/O queue depth on a single Python thread.
   for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
+- ``read_io_depth`` (int, default ``0``): Number of threads dedicated to
+  executing reads, and so the maximum reads in flight.  ``0`` keeps the
+  legacy path, where reads run on the worker threads themselves and the
+  depth against the device therefore equals ``num_workers``, which on an
+  array of several devices is far below what its read bandwidth needs.
+  Each reader thread holds one connection for the connector's lifetime
+  and one open file at a time, so this is the ceiling on both.  Bytes in
+  flight can never exceed ``read_io_depth`` x object size however large
+  ``read_max_bytes_in_flight`` is: size it so the byte budget is the
+  constraint that binds.
+- ``read_max_bytes_in_flight`` (int, default ``0``): When
+  ``read_io_depth`` is positive, the bytes this connector may keep
+  outstanding against the device, shared across its workers.  Throughput
+  is set by bytes in flight rather than by object count -- and object
+  size here is ``chunk_size`` x bytes-per-token-per-rank, so a depth
+  expressed in objects means something different at every ``chunk_size``.
+  The right figure is a property of the storage, and the default ``0``
+  selects **1536 MiB**, chosen for its worst case rather than its best:
+  a smaller budget collapses on network-latency storage (at 32 ms per
+  read, 768 MiB delivers 58% of what 1536 MiB does), while an oversized
+  one costs at most 11% anywhere measured.  A deployment that knows its
+  storage can do better by setting its own value; a single slow device
+  is the case that gives up the most at the default, reading 89% of what
+  it would at 96 MiB.  Only reachable if ``read_io_depth`` is large
+  enough; see above.
 
 .. important::
 

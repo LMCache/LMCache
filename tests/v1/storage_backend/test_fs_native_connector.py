@@ -130,3 +130,173 @@ def test_odirect_fails_for_misaligned_buffer(tmp_path) -> None:
         assert "O_DIRECT buffer address is not aligned" in store[2]
     finally:
         client.close()
+
+
+def _write_corpus(
+    client: Any,
+    keys: list[str],
+    views: list[memoryview],
+) -> None:
+    """Store every key with the connector, failing the test on error."""
+    future_id = client.submit_batch_set(keys, views)
+    completion = _wait_for_completion(client, future_id)
+    assert completion[1], completion[2]
+
+
+def _aligned_pairs(
+    count: int,
+    size: int,
+    block_size: int,
+) -> tuple[list[memoryview], list[memoryview], list[bytearray]]:
+    """Build `count` source/destination pairs, each source filled distinctly.
+
+    The third return value owns the backing allocations and must stay
+    referenced for as long as the views are used.
+    """
+    sources: list[memoryview] = []
+    dests: list[memoryview] = []
+    keep: list[bytearray] = []
+    for index in range(count):
+        source_raw, source = _aligned_memoryview(size, block_size)
+        dest_raw, dest = _aligned_memoryview(size, block_size)
+        keep.extend((source_raw, dest_raw))
+        source[:] = bytes((i + index) % 251 for i in range(size))
+        sources.append(source)
+        dests.append(dest)
+    return sources, dests, keep
+
+
+@pytest.mark.parametrize(
+    "read_io_depth,read_max_bytes_in_flight",
+    [
+        (0, 0),  # legacy path: one blocking read per object on the worker
+        (1, 0),  # a pool of one, so every read still queues behind the last
+        (4, 0),  # several reads of one batch in flight at once
+        (8, 1),  # budget below one object: the group must still take one
+        (8, 4096),  # a few objects per group
+        (8, 1 << 30),  # larger than the whole batch: one group
+    ],
+)
+def test_reads_return_identical_bytes(
+    tmp_path,
+    read_io_depth: int,
+    read_max_bytes_in_flight: int,
+) -> None:
+    """Neither the pool nor the byte budget may change the bytes returned.
+
+    They decide who issues a read and how many are outstanding, nothing
+    else, so the destination buffer must be indistinguishable from the
+    legacy path's.  A budget below one object size is the interesting
+    case: the group must still take that object, or a batch containing it
+    could never complete.
+    """
+    LMCacheFSClient = _import_fs_client()
+    block_size = os.statvfs(tmp_path).f_bsize
+    if block_size <= 0:
+        pytest.skip("filesystem block size is unavailable")
+
+    # An odd number of blocks, so an object is never a round power of two.
+    size = block_size * 7
+    keys = [f"test_model@00000000@{i:016x}" for i in range(6)]
+    sources, dests, _keep = _aligned_pairs(len(keys), size, block_size)
+
+    writer = LMCacheFSClient(str(tmp_path), 2, "", True, 0)
+    try:
+        _write_corpus(writer, keys, sources)
+    finally:
+        writer.close()
+
+    reader = LMCacheFSClient(
+        str(tmp_path), 2, "", True, 0, read_io_depth, read_max_bytes_in_flight
+    )
+    try:
+        if read_max_bytes_in_flight:
+            assert reader.read_budget_bytes() == read_max_bytes_in_flight
+        future_id = reader.submit_batch_get(keys, dests)
+        completion = _wait_for_completion(reader, future_id)
+        assert completion[1], completion[2]
+        per_key = completion[3]
+        assert per_key is not None
+        assert list(per_key) == [True] * len(keys)
+        for index, dest in enumerate(dests):
+            assert bytes(dest) == bytes(sources[index]), f"object {index} differs"
+    finally:
+        reader.close()
+
+
+def test_pooled_read_tolerates_one_missing_object(tmp_path) -> None:
+    """A missing object fails alone; its batch-mates still load."""
+    LMCacheFSClient = _import_fs_client()
+    block_size = os.statvfs(tmp_path).f_bsize
+    if block_size <= 0:
+        pytest.skip("filesystem block size is unavailable")
+
+    size = block_size * 4
+    present = "test_model@00000000@aaaaaaaaaaaaaaaa"
+    absent = "test_model@00000000@bbbbbbbbbbbbbbbb"
+    _source_raw, source = _aligned_memoryview(size, block_size)
+    _first_raw, first = _aligned_memoryview(size, block_size)
+    _second_raw, second = _aligned_memoryview(size, block_size)
+    # A third buffer, so no two keys of the batch share a destination:
+    # concurrent reads into one buffer would be a data race even when the
+    # bytes happen to match.
+    _third_raw, third = _aligned_memoryview(size, block_size)
+    _fill(source)
+
+    writer = LMCacheFSClient(str(tmp_path), 1, "", True, 0)
+    try:
+        _write_corpus(writer, [present], [source])
+    finally:
+        writer.close()
+
+    reader = LMCacheFSClient(str(tmp_path), 2, "", True, 0, 4)
+    try:
+        future_id = reader.submit_batch_get(
+            [present, absent, present], [first, second, third]
+        )
+        completion = _wait_for_completion(reader, future_id)
+        per_key = completion[3]
+        assert per_key is not None
+        assert list(per_key) == [True, False, True]
+        assert bytes(first) == bytes(source)
+        assert bytes(third) == bytes(source)
+    finally:
+        reader.close()
+
+
+def test_the_default_budget_is_used_when_none_is_configured(tmp_path) -> None:
+    """Zero selects the documented default rather than "no budget".
+
+    Reads in flight is what sets throughput, and inheriting the base
+    class's behaviour leaves it equal to num_workers objects, which is
+    far below what an array needs.  A caller that turns on read_io_depth
+    and says nothing about bytes should get a working figure.
+    """
+    LMCacheFSClient = _import_fs_client()
+    reader = LMCacheFSClient(str(tmp_path), 2, "", False, 0, 8)
+    try:
+        assert reader.read_budget_bytes() == 1536 << 20
+    finally:
+        reader.close()
+
+    # The legacy path has no budget at all.
+    legacy = LMCacheFSClient(str(tmp_path), 2)
+    try:
+        assert legacy.read_budget_bytes() == 0
+    finally:
+        legacy.close()
+
+    # A budget configured without read_io_depth throttles nothing, so it
+    # must not be reported as if it did.
+    unused = LMCacheFSClient(str(tmp_path), 2, "", False, 0, 0, 1 << 20)
+    try:
+        assert unused.read_budget_bytes() == 0
+    finally:
+        unused.close()
+
+
+def test_negative_read_io_depth_is_rejected(tmp_path) -> None:
+    """A negative depth is a configuration error, not a silent fallback."""
+    LMCacheFSClient = _import_fs_client()
+    with pytest.raises(RuntimeError, match="depth must be >= 0"):
+        LMCacheFSClient(str(tmp_path), 1, "", False, 0, -1)

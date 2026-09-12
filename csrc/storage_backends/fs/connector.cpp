@@ -146,10 +146,23 @@ static bool try_enable_odirect(int& flags, const void* buf, size_t len,
 // FSConnector
 // ---------------------------------------------------------------
 
+// Zero means "the measured default" only when a pool is actually running;
+// with no pool there is nothing to bound, so the budget stays 0.
+static ReadPoolConfig make_read_pool_config(int depth, size_t budget) {
+  if (depth <= 0) {
+    return ReadPoolConfig{depth, 0};
+  }
+  return ReadPoolConfig{depth,
+                        budget == 0 ? kDefaultReadMaxBytesInFlight : budget};
+}
+
 FSConnector::FSConnector(std::string base_path, int num_workers,
                          std::string relative_tmp_dir, bool use_odirect,
-                         size_t read_ahead_size)
-    : ConnectorBase(num_workers),
+                         size_t read_ahead_size, int read_io_depth,
+                         size_t read_max_bytes_in_flight)
+    : ConnectorBase(
+          num_workers, WorkerPoolConfig{},
+          make_read_pool_config(read_io_depth, read_max_bytes_in_flight)),
       base_path_(std::move(base_path)),
       relative_tmp_dir_(std::move(relative_tmp_dir)),
       use_odirect_(use_odirect),
