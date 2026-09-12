@@ -40,6 +40,11 @@ T = TypeVar("T")
 # Internal type used for the client-server communication
 RequestUID = int
 
+# Bound each client's turn in the shared polling loop.  A producer may keep
+# adding work while its queue is being drained, so draining to empty can
+# otherwise prevent every later client (and inbound responses) from running.
+_OUTBOUND_BATCH_SIZE = 64
+
 
 # Helper functions
 def encode_request_uid(uid: RequestUID) -> bytes:
@@ -243,8 +248,19 @@ class ClientPollingLoop:
             # all clients' output queues.
             if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
                 self._notifier.consume()
+                has_more_outbound = False
                 for client in self._socket_to_client.values():
-                    client.process_outbound_task()
+                    try:
+                        has_more_outbound |= client.process_outbound_task(
+                            max_batch=_OUTBOUND_BATCH_SIZE
+                        )
+                    except Exception:
+                        logger.exception(
+                            "process_outbound_task failed; continuing the shared "
+                            "polling loop"
+                        )
+                if has_more_outbound:
+                    self._notifier.notify()
 
             # Inbound: dispatch each ready DEALER socket to its client.
             for sock, event in socks.items():
@@ -295,50 +311,67 @@ class MessageQueueClient:
         self._polling_loop = ClientPollingLoop.get_instance()
         self._polling_loop.register(self)
 
-    def process_outbound_task(self):
-        try:
-            while wrapped_request := self.input_queue.get_nowait():
-                request_uid = wrapped_request.request_uid
-                try:
-                    b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
-                    b_request_type = msgspec_encode(
-                        wrapped_request.request_type, cls=RequestType
-                    )
-                    payload_classes = get_payload_classes(wrapped_request.request_type)
-                    if len(payload_classes) != len(wrapped_request.request_payloads):
-                        expected_classes = [cls.__name__ for cls in payload_classes]
-                        actual_classes = [
-                            type(payload).__name__
-                            for payload in wrapped_request.request_payloads
-                        ]
-                        raise ValueError(
-                            f"Payload count mismatch for request "
-                            f"{wrapped_request.request_type}: "
-                            f"expected {len(payload_classes)} payloads "
-                            f"{expected_classes}, "
-                            f"got {len(wrapped_request.request_payloads)} payloads "
-                            f"{actual_classes}. "
-                            f"This is likely caused by a version mismatch between "
-                            f"the lmcache client and lmcache server."
-                        )
+    def process_outbound_task(self, max_batch: int = _OUTBOUND_BATCH_SIZE) -> bool:
+        """Send at most ``max_batch`` queued requests in FIFO order.
 
-                    b_payloads = [
-                        msgspec_encode(payload, cls=cls)
-                        for payload, cls in zip(
-                            wrapped_request.request_payloads,
-                            payload_classes,
-                            strict=False,
-                        )
+        Args:
+            max_batch: Positive maximum number of requests to send in this
+                polling-loop turn.
+
+        Returns:
+            Whether the queue still contains work after this turn.
+
+        Raises:
+            ValueError: If ``max_batch`` is not positive.
+        """
+        if max_batch <= 0:
+            raise ValueError("max_batch must be positive")
+
+        for _ in range(max_batch):
+            try:
+                wrapped_request = self.input_queue.get_nowait()
+            except queue.Empty:
+                return False
+
+            request_uid = wrapped_request.request_uid
+            try:
+                b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
+                b_request_type = msgspec_encode(
+                    wrapped_request.request_type, cls=RequestType
+                )
+                payload_classes = get_payload_classes(wrapped_request.request_type)
+                if len(payload_classes) != len(wrapped_request.request_payloads):
+                    expected_classes = [cls.__name__ for cls in payload_classes]
+                    actual_classes = [
+                        type(payload).__name__
+                        for payload in wrapped_request.request_payloads
                     ]
-                    self.pending_futures[request_uid] = wrapped_request.future
-                    self.socket.send_multipart(
-                        [b_request_uid, b_request_type] + b_payloads
+                    raise ValueError(
+                        f"Payload count mismatch for request "
+                        f"{wrapped_request.request_type}: "
+                        f"expected {len(payload_classes)} payloads "
+                        f"{expected_classes}, "
+                        f"got {len(wrapped_request.request_payloads)} payloads "
+                        f"{actual_classes}. "
+                        f"This is likely caused by a version mismatch between "
+                        f"the lmcache client and lmcache server."
                     )
-                except Exception as exc:
-                    self.pending_futures.pop(request_uid, None)
-                    wrapped_request.future.set_exception(exc)
-        except queue.Empty:
-            pass
+
+                b_payloads = [
+                    msgspec_encode(payload, cls=cls)
+                    for payload, cls in zip(
+                        wrapped_request.request_payloads,
+                        payload_classes,
+                        strict=False,
+                    )
+                ]
+                self.pending_futures[request_uid] = wrapped_request.future
+                self.socket.send_multipart([b_request_uid, b_request_type] + b_payloads)
+            except Exception as exc:
+                self.pending_futures.pop(request_uid, None)
+                wrapped_request.future.set_exception(exc)
+
+        return not self.input_queue.empty()
 
     def process_inbound(self) -> None:
         """Process one inbound response from the server.
