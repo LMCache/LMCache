@@ -174,6 +174,22 @@ logical-block granularity. See
 limits (notably: edited groups are byte-opaque — no content-aware processing,
 no cross-backend cache sharing).
 
+### MTP and the last prompt block
+
+With MTP, vLLM's scheduler runs the prompt's last full block and its tail in
+one prefill step, so no Mamba state is ever written for that block's
+boundary. In vLLM's own block list that position becomes the null block
+(id 0), and the speculative block that used to sit there is moved to the
+end. The connector only receives the blocks added at the end, so the tracker
+would still show the moved block at its old position and store it as the
+chunk's Mamba state, which no kernel ever wrote.
+
+A block is never listed twice for one request, so when a reported id is
+already in the tracker's list, `append_block_ids` sets the old position to 0.
+The server then sees an all-zero chunk for the Mamba group and skips it, and
+the next hit ends one chunk earlier. Needs `--separate-object-groups` and
+chunk size equal to the Mamba block size.
+
 ## Code map
 
 | Area | File |

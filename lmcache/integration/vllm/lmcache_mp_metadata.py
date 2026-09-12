@@ -132,15 +132,27 @@ class LMCacheMPRequestTracker:
     def append_block_ids(
         self,
         new_block_ids: tuple[list[int], ...],
-    ):
-        """Update the block ids for the current request
-        This function will be called when processing the cached requests.
+    ) -> None:
+        """Append the block ids vLLM reported for this request in one step.
+
+        vLLM never lists the same block at two slots of a request. An id that
+        is already in the list therefore means vLLM took it out of its old
+        slot (relocated an align-mode Mamba speculative block, or freed and
+        reallocated it) and wrote the null block there without reporting it.
+        Do the same here.
+
+        Args:
+            new_block_ids: Block ids appended this step, one list per engine
+                group.
         """
         for engine_group_idx, group_block_ids in enumerate(new_block_ids):
-            if group_block_ids:
-                self.allocated_block_ids.setdefault(engine_group_idx, []).extend(
-                    group_block_ids
-                )
+            if not group_block_ids:
+                continue
+            block_ids = self.allocated_block_ids.setdefault(engine_group_idx, [])
+            for block_id in group_block_ids:
+                if block_id != 0 and block_id in block_ids:
+                    block_ids[block_ids.index(block_id)] = 0
+                block_ids.append(block_id)
 
     def num_allocated_blocks(self) -> dict[int, int]:
         return {
