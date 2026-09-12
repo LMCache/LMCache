@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Literal
 # Third Party
 import torch
 
-BackendName = Literal["auto", "cufile", "hipfile", "ugds", "phx"]
+BackendName = Literal["auto", "cufile", "hipfile", "mufile", "ugds", "phx"]
 _backend: ModuleType
 _selected_backend: str
 _selection_finalized = False
@@ -63,6 +63,11 @@ def _load_backend(name: BackendName) -> tuple[str, ModuleType]:
         from lmcache.v1.gpu_connector import _hipfile_async
 
         backend = _hipfile_async
+    elif selected == "mufile":
+        # First Party
+        from lmcache.v1.gpu_connector import _mufile_async
+
+        backend = _mufile_async
     elif selected == "ugds":
         # First Party
         from lmcache.v1.gpu_connector import _ugds_async
@@ -91,12 +96,25 @@ def _validate_backend_platform(selected: str) -> None:
             raise ValueError("hipfile requires a ROCm PyTorch build")
     elif selected == "cufile" and torch.version.cuda is None:
         raise ValueError(f"{selected} requires a CUDA PyTorch build")
+    elif selected == "mufile" and _torch_device_type() != "musa":
+        raise ValueError(f"{selected} requires a MUSA PyTorch build")
     elif (
         selected == "ugds" and torch.version.hip is None and torch.version.cuda is None
     ):
         raise ValueError(f"{selected} requires a ROCm or CUDA PyTorch build")
     elif selected == "phx" and torch.version.hip is None and torch.version.cuda is None:
         raise ValueError(f"{selected} requires a ROCm or CUDA PyTorch build")
+
+
+def _torch_device_type() -> str:
+    """Return the LMCache platform device type without importing lmcache."""
+    # Imported lazily: the platform detection runs before this shim is used,
+    # and a local import keeps this module importable in CPU-only contexts
+    # (e.g. tests) where the detection stubs the device to ``cpu``.
+    # First Party
+    from lmcache.v1.platform import torch_device_type
+
+    return torch_device_type
 
 
 if TYPE_CHECKING:
@@ -177,3 +195,29 @@ def get_ugds_device_capacity(fd: int, handle: int) -> int:
             "get_ugds_device_capacity requires the selected GDS backend to be 'ugds'"
         )
     return _backend.get_device_capacity(fd, handle)
+
+
+def get_max_registered_region_bytes() -> int:
+    """Return the selected backend's per-registration byte cap.
+
+    GDS buffer registrations (and therefore single DMAs) are capped per
+    backend: 16 MiB for cuFile, hipFile, and muFile alike. GDSContext uses
+    this to split staging buffers and transfers into legal segments.
+
+    Returns:
+        Maximum bytes per buffer registration for the selected backend.
+    """
+    return 16 * 1024 * 1024
+
+
+def get_io_alignment() -> int:
+    """Return the selected backend's async I/O alignment requirement.
+
+    4 KiB for all file-backed backends (cuFile, hipFile, muFile, phx); uGDS
+    does not go through the page cache so it has no alignment requirement
+    beyond the slab's own 4 KiB allocation grid.
+
+    Returns:
+        Alignment in bytes for the selected backend.
+    """
+    return 4096
