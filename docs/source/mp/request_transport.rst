@@ -31,18 +31,14 @@ gRPC schema development
 -----------------------
 
 The protobuf schemas for the planned gRPC transport live under
-``lmcache/v1/multiprocess/transport/grpc_impl/protos``. Package builds generate
-their Python bindings under the sibling ``_proto_gen`` package. Landing these
-schemas and the build-time generator does not enable the gRPC client or server;
-``grpc://`` endpoints remain unavailable until the runtime implementation
-lands.
+``lmcache/v1/multiprocess/transport/grpc_impl/protos``. Landing these schemas
+and the manual generator does not add gRPC runtime dependencies, generate
+bindings during package builds, or enable the gRPC client or server. ``grpc://``
+endpoints remain unavailable until the runtime implementation lands.
 
-After changing a schema, regenerate and validate all bindings with:
-
-.. code-block:: bash
-
-   pip install -r requirements/proto.txt
-   python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
+For local schema development, the manual generator remains available under the
+``_proto_gen`` package, but default installs, tests, and package builds do not
+invoke it.
 
 For a single vLLM connector, set the scheme in ``lmcache.mp.host`` and keep the
 port in ``lmcache.mp.port``. The current ZMQ configuration is:

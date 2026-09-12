@@ -54,15 +54,12 @@ The planned gRPC transport keeps its wire contracts under
 `grpc_impl/protos/`. These `.proto` files are the source of truth for request
 and response messages; they do not enable the gRPC runtime by themselves.
 
-Python protobuf modules are generated into `grpc_impl/_proto_gen/` during a
-package build. Most generated files remain ignored, while the type stubs used
-by handwritten adapters are tracked so static analysis also works from a
-source checkout. Regenerate the bindings after changing a schema with:
-
-```bash
-pip install -r requirements/proto.txt
-python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
-```
+Package builds do not generate Python protobuf modules or add gRPC runtime
+dependencies while the transport remains disabled. Most generated files remain
+ignored, while the type stubs used by handwritten adapters are tracked so
+static analysis also works from a source checkout. For local schema
+development, the manual generator remains available under `_proto_gen`, but
+default installs, tests, and package builds do not invoke it.
 
 The generator cleans stale outputs, compiles every schema, rewrites generated
 imports to use the package-qualified path, and verifies that all generated

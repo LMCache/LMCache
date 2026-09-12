@@ -23,8 +23,5 @@ ${PIP_BIN} install -r requirements/common.txt
 ${PIP_BIN} install -r requirements/cli.txt
 ${PIP_BIN} install -e . --no-deps --no-build-isolation
 
-echo "Generating LMCache gRPC bindings"
-python lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py
-
 python -c "import lmcache, vllm; \
 print('lmcache:', lmcache.__version__, 'vllm:', vllm.__version__)"

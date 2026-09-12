@@ -570,7 +570,7 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/protos/``
      - Protobuf wire contracts for the planned gRPC request transport
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
-     - Build-time protobuf generator and generated Python package
+     - Manual protobuf generator for local schema development
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
