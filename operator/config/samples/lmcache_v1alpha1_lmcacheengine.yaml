@@ -121,13 +121,26 @@ spec:
   # affinity: {}
   # tolerations: []
 
+  # -- IPC mode --
+  # isolatedIPC (unset = auto: true on nvidia, false on amd) runs the engine
+  # with --isolated-ipc: KV caches and completion events travel over
+  # driver-level CUDA IPC, no hostIPC and no /dev/shm sharing needed. When it
+  # resolves to true it overrides hostIPC. Set to false for older LMCache
+  # images (no --isolated-ipc flag) or for CUDA-VMM-backed allocators (vLLM
+  # sleep mode / expandable segments), which driver-level CUDA IPC cannot
+  # share; hostIPC then applies again.
+  # isolatedIPC: true
+  # hostIPC: false
+
   # -- Pod overrides --
-  # WARNING: Do NOT mount an emptyDir (or any volume) at /dev/shm. The operator
-  # sets hostIPC: true so the container shares the host's /dev/shm. Mounting an
-  # emptyDir would shadow the host's /dev/shm with a private tmpfs, breaking
-  # CUDA IPC between LMCache and vLLM pods (cudaIpcOpenMemHandle fails because
-  # IPC handles from one pod become invisible to the other). The same applies
-  # to vLLM pods that connect to this LMCache instance.
+  # WARNING: With isolatedIPC: false, do NOT mount an emptyDir (or any volume)
+  # at /dev/shm: in that legacy mode the engine and vLLM pods must share the
+  # host's /dev/shm (hostPath mount, or hostIPC: true), and an emptyDir would
+  # shadow it with a private tmpfs, breaking CUDA IPC between LMCache and vLLM
+  # pods (cudaIpcOpenMemHandle fails because IPC handles from one pod become
+  # invisible to the other). The same applies to vLLM pods that connect to
+  # this LMCache instance. Under the default isolated IPC this constraint
+  # disappears.
   # env: []
   # volumes: []
   # volumeMounts: []

@@ -56,12 +56,31 @@ func BuildDevShmVolume() corev1.Volume {
 	}
 }
 
-// BuildDevShmVolumeMount returns the container mount for BuildDevShmVolume,
-// mounting the host's /dev/shm at /dev/shm.
+// BuildDevShmVolumeMount returns the container mount for BuildDevShmVolume
+// (and BuildPrivateDevShmVolume), mounting the volume at /dev/shm.
 func BuildDevShmVolumeMount() corev1.VolumeMount {
 	return corev1.VolumeMount{
 		Name:      devShmVolumeName,
 		MountPath: devShmPath,
+	}
+}
+
+// BuildPrivateDevShmVolume returns a pod-private memory-backed /dev/shm
+// (emptyDir, medium Memory). Under isolated IPC no /dev/shm is shared with
+// the engine, but vLLM's own workers still exchange tensors through their
+// pod's /dev/shm, and Kubernetes' default 64Mi shm is too small for that —
+// so the injection webhook mounts this instead of the host tmpfs. No
+// sizeLimit is set: usage is bounded by the pod's memory limit. Shares
+// devShmVolumeName with BuildDevShmVolume so the HasDevShm* guards cover
+// both.
+func BuildPrivateDevShmVolume() corev1.Volume {
+	return corev1.Volume{
+		Name: devShmVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium: corev1.StorageMediumMemory,
+			},
+		},
 	}
 }
 
