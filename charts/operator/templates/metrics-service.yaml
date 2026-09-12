@@ -1,0 +1,17 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-metrics-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+spec:
+  ports:
+  - name: https
+    port: {{ .Values.metrics.servicePort }}
+    protocol: TCP
+    targetPort: metrics
+  selector:
+    {{- include "lmcache-operator.selectorLabels" . | nindent 4 }}
+{{- end }}

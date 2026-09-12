@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-manager-rolebinding
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-manager-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: {{ .Release.Namespace }}
