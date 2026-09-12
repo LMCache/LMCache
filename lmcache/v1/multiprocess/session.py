@@ -59,7 +59,7 @@ class Session:
             full_token_ids: Complete token sequence.
         """
         with self._lock:
-            self.token_ids = full_token_ids
+            self.token_ids = list(full_token_ids)
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
