@@ -210,6 +210,7 @@ def _enc_prefetch_handle(h: PrefetchHandle) -> dict[str, Any]:
         "total_requested_keys": h.total_requested_keys,
         "submit_time": h.submit_time,
         "l2_orig_indices": list(h.l2_orig_indices),
+        "generation": h.generation,
     }
 
 
@@ -222,6 +223,7 @@ def _dec_prefetch_handle(d: dict[str, Any]) -> PrefetchHandle:
         total_requested_keys=d["total_requested_keys"],
         submit_time=d["submit_time"],
         l2_orig_indices=tuple(d.get("l2_orig_indices", ())),
+        generation=d.get("generation", 0),
     )
 
 
@@ -285,6 +287,7 @@ def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
             str(gid): encode_value(ld) for gid, ld in s.group_layout_descs.items()
         },
         "mode": encode_value(s.mode),
+        "generation": s.generation,
     }
 
 
@@ -311,6 +314,7 @@ def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
         policy=decode_value(d["policy"]),
         attn_desc=decode_value(d["attn_desc"]),
         mode=decode_value(d["mode"]),
+        generation=d.get("generation", 0),
     )
 
 

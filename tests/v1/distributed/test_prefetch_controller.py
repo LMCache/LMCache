@@ -241,6 +241,60 @@ class TestPrefetchControllerLifecycle:
         ctrl.start()
         ctrl.stop()
 
+    def test_cancel_queued_request_publishes_empty_result(self, l1_manager):
+        """A queued generation can be cancelled before any adapter work starts."""
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=DefaultPrefetchPolicy(),
+            max_in_flight=0,
+        )
+        ctrl.start()
+
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                PrefetchRequestSpec(keys, {0: layout}, generation=7)
+            )
+            assert not ctrl.cancel_prefetch_request(req_id, generation=8)
+            assert ctrl.cancel_prefetch_request(req_id, generation=7)
+            result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+            assert result is not None
+            assert result.popcount() == 0
+            assert not ctrl.cancel_prefetch_request(req_id, generation=7)
+        finally:
+            ctrl.stop()
+
+    def test_forget_cancelled_result_does_not_retain_completion(self, l1_manager):
+        """A released cancellation suppresses its eventual result bitmap."""
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=DefaultPrefetchPolicy(),
+            max_in_flight=0,
+        )
+        ctrl.start()
+
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                PrefetchRequestSpec(keys, {0: layout}, generation=7)
+            )
+            assert ctrl.cancel_prefetch_request(req_id, generation=7)
+            assert ctrl.forget_prefetch_result(req_id)
+            assert wait_for_condition(
+                lambda: req_id not in ctrl._request_generations,
+            )
+            assert ctrl.query_prefetch_result(req_id) is None
+            assert ctrl.query_lookup_result(req_id) is None
+            assert not ctrl.forget_prefetch_result(req_id)
+        finally:
+            ctrl.stop()
+
 
 # =============================================================================
 # Single Adapter Prefetch
