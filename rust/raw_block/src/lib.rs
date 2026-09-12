@@ -1407,17 +1407,19 @@ impl RawBlockDevice {
                 }
             }
 
-            // Helper function to build and submit an SQE for a submission
-            fn build_and_submit_sqe(
+            enum PreparedSqe {
+                Standard(SqueueEntry),
+                Big(Entry128),
+            }
+
+            fn build_sqe(
                 ring: &IoUringWrapper,
                 sub: &IoSubmission,
                 user_data: u64,
-            ) -> Result<(), PyErr> {
+            ) -> Result<PreparedSqe, PyErr> {
                 let ptr = sub.ptr_addr as *mut u8;
 
-                // Check if this is an io_uring_cmd submission
                 if let Some(nvme_data) = &sub.nvme_cmd_data {
-                    // Prepare NVMe uring command
                     let mut nvme_cmd: NvmeUringCmd = unsafe { std::mem::zeroed() };
                     nvme_uring_cmd_prep(
                         &mut nvme_cmd,
@@ -1431,81 +1433,122 @@ impl RawBlockDevice {
                         nvme_data.dspec,
                     )?;
 
-                    // Convert NvmeUringCmd to byte array for UringCmd80
                     let cmd_bytes: [u8; 80] = unsafe { std::mem::transmute_copy(&nvme_cmd) };
-
-                    // Build UringCmd80 with big SQE entry
                     let mut uring_cmd =
                         opcode::UringCmd80::new(Fd(sub.fd), NVME_URING_CMD_IO).cmd(cmd_bytes);
-
-                    // Set buf_index if using fixed buffers
                     if let Some(idx) = sub.fixed_buffer_idx {
                         uring_cmd = uring_cmd.buf_index(Some(idx));
                     }
 
-                    let sqe128 = uring_cmd.build().user_data(user_data);
+                    return match ring {
+                        IoUringWrapper::Big(_) => {
+                            Ok(PreparedSqe::Big(uring_cmd.build().user_data(user_data)))
+                        }
+                        IoUringWrapper::Standard(_) => Err(PyRuntimeError::new_err(
+                            "io_uring_cmd requires big entries (kernel 5.19+)",
+                        )),
+                    };
+                }
 
-                    // Push the big SQE entry (128 bytes)
-                    match ring {
-                        IoUringWrapper::Big(ring) => {
-                            let mut ring = ring.lock().unwrap();
-                            unsafe {
-                                ring.submission()
-                                    .push(&sqe128)
-                                    .expect("failed to push sqe128");
-                            }
-                        }
-                        IoUringWrapper::Standard(_) => {
-                            return Err(PyRuntimeError::new_err(
-                                "io_uring_cmd requires big entries (kernel 5.19+)",
-                            ));
-                        }
-                    }
-                } else {
-                    // Regular read/write operations
-                    let sqe = if sub.is_write {
-                        if let Some(idx) = sub.fixed_buffer_idx {
-                            opcode::WriteFixed::new(
-                                Fd(sub.fd),
-                                ptr as *const u8,
-                                sub.len as u32,
-                                idx,
-                            )
-                            .offset(sub.offset)
-                            .build()
-                        } else {
-                            opcode::Write::new(Fd(sub.fd), ptr as *const u8, sub.len as u32)
-                                .offset(sub.offset)
-                                .build()
-                        }
-                    } else if let Some(idx) = sub.fixed_buffer_idx {
-                        opcode::ReadFixed::new(Fd(sub.fd), ptr, sub.len as u32, idx)
+                let sqe = if sub.is_write {
+                    if let Some(idx) = sub.fixed_buffer_idx {
+                        opcode::WriteFixed::new(Fd(sub.fd), ptr as *const u8, sub.len as u32, idx)
                             .offset(sub.offset)
                             .build()
                     } else {
-                        opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
+                        opcode::Write::new(Fd(sub.fd), ptr as *const u8, sub.len as u32)
                             .offset(sub.offset)
                             .build()
-                    };
-                    let sqe = sqe.user_data(user_data);
-                    // Convert to appropriate entry type based on ring type
-                    match ring {
-                        IoUringWrapper::Big(ring) => {
-                            let mut ring = ring.lock().unwrap();
-                            let sqe128: Entry128 = sqe.into();
-                            unsafe {
-                                ring.submission().push(&sqe128).expect("failed to push sqe");
-                            }
+                    }
+                } else if let Some(idx) = sub.fixed_buffer_idx {
+                    opcode::ReadFixed::new(Fd(sub.fd), ptr, sub.len as u32, idx)
+                        .offset(sub.offset)
+                        .build()
+                } else {
+                    opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
+                        .offset(sub.offset)
+                        .build()
+                }
+                .user_data(user_data);
+
+                Ok(match ring {
+                    IoUringWrapper::Standard(_) => PreparedSqe::Standard(sqe),
+                    IoUringWrapper::Big(_) => PreparedSqe::Big(sqe.into()),
+                })
+            }
+
+            fn push_prepared_sqe(ring: &IoUringWrapper, sqe: &PreparedSqe) -> Result<(), PyErr> {
+                match (ring, sqe) {
+                    (IoUringWrapper::Standard(ring), PreparedSqe::Standard(sqe)) => {
+                        let mut ring = ring.lock().unwrap();
+                        unsafe {
+                            ring.submission().push(sqe).map_err(|_| {
+                                PyRuntimeError::new_err("failed to push io_uring SQE")
+                            })?;
                         }
-                        IoUringWrapper::Standard(ring) => {
-                            let mut ring = ring.lock().unwrap();
-                            unsafe {
-                                ring.submission().push(&sqe).expect("failed to push sqe");
-                            }
+                    }
+                    (IoUringWrapper::Big(ring), PreparedSqe::Big(sqe)) => {
+                        let mut ring = ring.lock().unwrap();
+                        unsafe {
+                            ring.submission().push(sqe).map_err(|_| {
+                                PyRuntimeError::new_err("failed to push io_uring SQE")
+                            })?;
                         }
+                    }
+                    _ => {
+                        return Err(PyRuntimeError::new_err(
+                            "io_uring SQE type does not match ring type",
+                        ));
                     }
                 }
                 Ok(())
+            }
+
+            fn push_batch_and_submit(
+                ring: &IoUringWrapper,
+                sqes: &[PreparedSqe],
+            ) -> io::Result<usize> {
+                match ring {
+                    IoUringWrapper::Standard(ring) => {
+                        let mut ring = ring.lock().unwrap();
+                        {
+                            let mut submission = ring.submission();
+                            for sqe in sqes {
+                                let PreparedSqe::Standard(sqe) = sqe else {
+                                    unreachable!("standard ring received a big SQE");
+                                };
+                                unsafe {
+                                    submission.push(sqe).expect("failed to push io_uring SQE");
+                                }
+                            }
+                        }
+                        ring.submitter().submit()
+                    }
+                    IoUringWrapper::Big(ring) => {
+                        let mut ring = ring.lock().unwrap();
+                        {
+                            let mut submission = ring.submission();
+                            for sqe in sqes {
+                                let PreparedSqe::Big(sqe) = sqe else {
+                                    unreachable!("big ring received a standard SQE");
+                                };
+                                unsafe {
+                                    submission.push(sqe).expect("failed to push io_uring SQE");
+                                }
+                            }
+                        }
+                        ring.submitter().submit()
+                    }
+                }
+            }
+
+            fn build_and_submit_sqe(
+                ring: &IoUringWrapper,
+                sub: &IoSubmission,
+                user_data: u64,
+            ) -> Result<(), PyErr> {
+                let sqe = build_sqe(ring, sub, user_data)?;
+                push_prepared_sqe(ring, &sqe)
             }
 
             // Worker thread that handles io_uring submissions and completions.
@@ -1753,13 +1796,16 @@ impl RawBlockDevice {
                             let mut user_data_list: Vec<u64> = Vec::with_capacity(to_submit_count);
                             let mut built_submissions: Vec<IoSubmission> =
                                 Vec::with_capacity(to_submit_count);
+                            let mut prepared_sqes: Vec<PreparedSqe> =
+                                Vec::with_capacity(to_submit_count);
                             for sub in batch.iter().take(to_submit_count) {
                                 let user_data = next_user_data;
                                 next_user_data = next_user_data.wrapping_add(1);
-                                match build_and_submit_sqe(&ring_clone, sub, user_data) {
-                                    Ok(()) => {
+                                match build_sqe(&ring_clone, sub, user_data) {
+                                    Ok(sqe) => {
                                         user_data_list.push(user_data);
                                         built_submissions.push(sub.clone());
+                                        prepared_sqes.push(sqe);
                                         in_flight.insert(user_data, sub.clone());
                                     }
                                     Err(e) => {
@@ -1775,16 +1821,7 @@ impl RawBlockDevice {
                             }
 
                             let built_count = built_submissions.len();
-                            let submit_result = match &ring_clone {
-                                IoUringWrapper::Standard(ring) => {
-                                    let ring = ring.lock().unwrap();
-                                    ring.submitter().submit()
-                                }
-                                IoUringWrapper::Big(ring) => {
-                                    let ring = ring.lock().unwrap();
-                                    ring.submitter().submit()
-                                }
-                            };
+                            let submit_result = push_batch_and_submit(&ring_clone, &prepared_sqes);
                             // Handle EAGAIN (ring full) and EINTR (interrupted syscall)
                             match submit_result {
                                 Ok(submitted) => {
@@ -2375,31 +2412,30 @@ impl RawBlockDevice {
                 submissions.push((sub, comp));
             }
 
-            // Queue all submissions atomically. At this point no further errors can
-            // occur during queuing.
-            for (sub, comp) in submissions {
-                in_flight_count.fetch_add(1, Ordering::Relaxed);
-
-                // Increment per-batch in-flight count
-                {
-                    let batch_map = batch_in_flight.lock().unwrap();
-                    if let Some((batch_count, _)) = batch_map.get(&batch_id) {
-                        batch_count.fetch_add(1, Ordering::Relaxed);
-                    }
+            // Publish the complete batch before waking the worker so it can drain
+            // all requests under one queue lock and submit their SQEs together.
+            let submission_count = submissions.len() as u64;
+            in_flight_count.fetch_add(submission_count, Ordering::Relaxed);
+            {
+                let batch_map = batch_in_flight.lock().unwrap();
+                if let Some((batch_count, _)) = batch_map.get(&batch_id) {
+                    batch_count.fetch_add(submission_count, Ordering::Relaxed);
                 }
-                {
-                    let mut q = queue.lock().unwrap();
+            }
+
+            let mut batch_completions = Vec::with_capacity(submissions.len());
+            {
+                let mut q = queue.lock().unwrap();
+                for (sub, comp) in submissions {
                     q.push(sub);
-                }
-                batch_ready.signal_producer();
-
-                // Store completion for error checking in wait_iouring
-                {
-                    let mut completions = batched_completions.lock().unwrap();
-                    let batch_completions = completions.entry(batch_id).or_default();
                     batch_completions.push(comp);
                 }
             }
+            {
+                let mut completions = batched_completions.lock().unwrap();
+                completions.insert(batch_id, batch_completions);
+            }
+            batch_ready.signal_producer();
             Ok::<(), PyErr>(())
         });
 
@@ -2970,32 +3006,30 @@ impl RawBlockDevice {
                 submissions.push((sub, comp));
             }
 
-            // Queue all submissions atomically. At this point no further errors can
-            // occur during queuing.
-            for (sub, comp) in submissions {
-                in_flight_count.fetch_add(1, Ordering::Relaxed);
-
-                // Increment per-batch in-flight count
-                {
-                    let batch_map = batch_in_flight.lock().unwrap();
-                    if let Some((batch_count, _)) = batch_map.get(&batch_id) {
-                        batch_count.fetch_add(1, Ordering::Relaxed);
-                    }
+            // Publish the complete batch before waking the worker so it can drain
+            // all requests under one queue lock and submit their SQEs together.
+            let submission_count = submissions.len() as u64;
+            in_flight_count.fetch_add(submission_count, Ordering::Relaxed);
+            {
+                let batch_map = batch_in_flight.lock().unwrap();
+                if let Some((batch_count, _)) = batch_map.get(&batch_id) {
+                    batch_count.fetch_add(submission_count, Ordering::Relaxed);
                 }
+            }
 
-                {
-                    let mut q = queue.lock().unwrap();
+            let mut batch_completions = Vec::with_capacity(submissions.len());
+            {
+                let mut q = queue.lock().unwrap();
+                for (sub, comp) in submissions {
                     q.push(sub);
-                }
-                batch_ready.signal_producer();
-
-                // Store completion for error checking in wait_iouring
-                {
-                    let mut completions = batched_completions.lock().unwrap();
-                    let batch_completions = completions.entry(batch_id).or_default();
                     batch_completions.push(comp);
                 }
             }
+            {
+                let mut completions = batched_completions.lock().unwrap();
+                completions.insert(batch_id, batch_completions);
+            }
+            batch_ready.signal_producer();
             Ok::<(), PyErr>(())
         });
 
