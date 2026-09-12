@@ -5,9 +5,18 @@
 The default `CudaIPCWrapper` in `platform/cuda/ipc_wrapper.py` calls
 `tensor.untyped_storage()._share_cuda_()` to publish the storage over
 CUDA IPC. That path only works when the storage is owned by PyTorch's
-caching allocator. TRT-LLM's KV pool is published via
-`at::for_blob(...)` over a raw `cudaMalloc`, which means
-`_share_cuda_()` raises and the `vLLM`-style wrapper cannot be used.
+caching allocator, *and* it requires both processes to share a
+`/dev/shm` tmpfs because torch keeps its IPC reference-counter file
+there. Two call sites cannot use it:
+
+- TRT-LLM's KV pool is published via `at::for_blob(...)` over a raw
+  `cudaMalloc`, so `_share_cuda_()` raises and the vLLM-style wrapper
+  cannot be used at all.
+- Under isolated-IPC deployments (`--isolated-ipc` on the LMCache
+  server + matching `lmcache.mp.isolated_ipc` on the worker), producer
+  and consumer containers share no host IPC namespace and no common
+  `/dev/shm` — even a torch-owned KV pool is unshareable through
+  `_share_cuda_()` there.
 
 `RawCudaIPCWrapper` bypasses PyTorch's IPC layer:
 
@@ -51,25 +60,39 @@ concrete wrappers, and `to_tensor()` does the right thing.
 
 ## Sender-side validation
 
-`RawCudaIPCWrapper.__init__` calls `assert_contiguous` (from
-`gpu_connector/utils.py`) instead of permuting. TRT-LLM allocates the
-pool contiguously, so the only valid recovery from a non-contiguous
+`RawCudaIPCWrapper.__init__` first runs
+`attempt_permute_to_contiguous_view` (matching `CudaIPCWrapper`) and
+then rejects anything still non-contiguous. TRT-LLM allocates its
+pool contiguously and the vLLM MP path likewise ships contiguous
+per-layer views, so the only valid recovery from a non-contiguous
 input is "the sender did something wrong" — surface it loudly rather
 than silently `.contiguous()`-ing and copying GBs of KV cache.
 
 ## Reconstruction lifetime
 
 `UnownedMemory` takes `owner=self`, so the wrapper instance pins the
-mapping for the tensor's lifetime. The mapping is dropped when the
-wrapper is GC'd; the underlying TRT-LLM allocation outlives the
-wrapper. There is no symmetric `cudaIpcCloseMemHandle` call — torch
-controls the lifetime through DLPack reference counting plus
-CuPy/MemoryPointer's owner field.
+mapping for the tensor's lifetime. The underlying producer-side
+allocation (TRT-LLM's `cudaMalloc` pool, or the vLLM caching-allocator
+pool under isolated IPC) outlives the wrapper.
+`cudaIpcCloseMemHandle` is called on last-use through a process-wide
+open registry: the driver returns one mapping per (process,
+allocation) no matter how many wrappers open it, and one close unmaps
+it for every user, so opens are refcounted and only the final wrapper
+closes the mapping. Closing matters — an open mapping pins the
+*exporting* process's device memory even after the exporter dies,
+which would otherwise leak a full KV pool per worker restart. See
+[`../../platform/cuda/ipc_wrapper.md`](../../platform/cuda/ipc_wrapper.md)
+for the driver-level constraints (VMM incompatibility, PID-collision
+requirement, exporter-liveness rule).
 
 ## Why no `_share_cuda_` fallback
 
 The wrapper does not try `_share_cuda_()` first. That would couple the
 two codepaths, and the failure mode is silent corruption (PyTorch
 returns a handle for a different region of memory than what the
-caller intended). Keeping `RawCudaIPCWrapper` as its own concrete
-sibling of `CudaIPCWrapper` keeps the choice at the call site.
+caller intended). `RawCudaIPCWrapper` stays a concrete sibling of
+`CudaIPCWrapper`, and the choice between them is made outside the
+wrapper: `CudaDeviceSpec.ipc_wrapper_cls` returns `RawCudaIPCWrapper`
+when `is_isolated_ipc()` is true and `CudaIPCWrapper` otherwise, while
+the TRT-LLM adapter continues to instantiate `RawCudaIPCWrapper`
+directly regardless of the switch.
