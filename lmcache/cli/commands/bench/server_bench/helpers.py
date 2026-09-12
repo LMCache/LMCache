@@ -47,7 +47,7 @@ try:
         KVLayerGroupInfo,
     )
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-    from lmcache.v1.multiprocess.futures import MessagingFuture
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
     from lmcache.v1.multiprocess.transport.base import RequestClient
 except ImportError as _exc:
     _IMPORT_ERROR = _exc
@@ -116,16 +116,29 @@ _TIMEOUT = object()
 def _wait_for_result(
     future: MessagingFuture[Any],
     timeout_s: float = _DEFAULT_RPC_TIMEOUT_S,
+    retain_refs: tuple[object, ...] = (),
 ) -> Any:
     """Wait for an RPC future and convert a timeout to ``_TIMEOUT``.
 
     Returns the decoded response (possibly ``None`` for void replies)
-    on success, or the sentinel ``_TIMEOUT`` on RPC timeout.
+    on success, or the sentinel ``_TIMEOUT`` on RPC timeout. Objects in
+    ``retain_refs`` stay owned by the raw future until the transport
+    finishes with the request, including timeout paths where the reply may
+    still arrive later.
     """
+    # The transport owns the raw future, not the temporary device wrapper.
+    # Retain producer events there so they also survive a caller timeout.
+    owner = future.raw_future_ if isinstance(future, DeviceMessagingFuture) else future
+    for ref in retain_refs:
+        owner.retain_reference(ref)
     try:
-        return future.result(timeout=timeout_s)
+        result = future.result(timeout=timeout_s)
     except TimeoutError:
         return _TIMEOUT
+    release_references = getattr(owner, "release_references", None)
+    if callable(release_references):
+        release_references()
+    return result
 
 
 # ------------------------------------------------------------------ #

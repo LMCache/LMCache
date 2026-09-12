@@ -323,8 +323,9 @@ class ServerBenchClient:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
-            _DEFAULT_RPC_TIMEOUT_S,
+            _TIMEOUT,
             _make_key,
+            _wait_for_result,
         )
 
         attempted: list[int] = []
@@ -360,16 +361,13 @@ class ServerBenchClient:
                 event,
                 self._blocks_in_chunk,
             )
-            if event is not None:
-                future.retain_reference(event)
-            try:
-                worker_status = (
-                    "stored"
-                    if future.result(timeout=_DEFAULT_RPC_TIMEOUT_S)
-                    else "store_failed"
-                )
-            except TimeoutError:
+            reply = _wait_for_result(
+                future, retain_refs=(event,) if event is not None else ()
+            )
+            if reply is _TIMEOUT:
                 worker_status = "timeout"
+            else:
+                worker_status = "stored" if reply else "store_failed"
             if worker_status == "stored":
                 successful.append(worker.spec.rank)
             else:
@@ -425,8 +423,9 @@ class ServerBenchClient:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
-            _DEFAULT_RPC_TIMEOUT_S,
+            _TIMEOUT,
             _make_key,
+            _wait_for_result,
         )
 
         attempted: list[int] = []
@@ -463,16 +462,13 @@ class ServerBenchClient:
                 self._blocks_in_chunk,
                 skip_first_n_tokens=0,
             )
-            if event is not None:
-                future.retain_reference(event)
-            try:
-                worker_status = (
-                    "retrieved"
-                    if future.result(timeout=_DEFAULT_RPC_TIMEOUT_S)
-                    else "retrieve_failed"
-                )
-            except TimeoutError:
+            reply = _wait_for_result(
+                future, retain_refs=(event,) if event is not None else ()
+            )
+            if reply is _TIMEOUT:
                 worker_status = "timeout"
+            else:
+                worker_status = "retrieved" if reply else "retrieve_failed"
             if worker_status == "retrieved":
                 successful.append(worker.spec.rank)
             else:

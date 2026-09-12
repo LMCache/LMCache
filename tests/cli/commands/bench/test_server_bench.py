@@ -11,9 +11,12 @@ Covers:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 import argparse
+import gc
 import json
 import threading
+import weakref
 
 # Third Party
 import msgspec
@@ -31,6 +34,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _query_checksum,
     _send_lookup,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -1154,3 +1158,126 @@ class TestClientMultiWorker:
             "LOOKUP payload tp_size must equal simulated tp "
             "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])
         )
+
+
+class _ExportedEvent:
+    pass
+
+
+@pytest.mark.parametrize("operation", ["store", "retrieve"])
+@pytest.mark.parametrize("times_out", [False, True])
+def test_handle_mode_preserves_event_lifetime_through_transfer_context(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    times_out: bool,
+) -> None:
+    """Keep producer events on the transport future across caller timeouts.
+
+    Exercise the public bench API with the real LMCache-driven context and
+    device future, replacing only transport and platform event operations.
+    """
+    # First Party
+    from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+    from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
+    from lmcache.cli.commands.bench.server_bench.config import BenchConfig
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+
+    event_ref: weakref.ReferenceType[_ExportedEvent] | None = None
+    backend_calls: list[str] = []
+
+    def create_event(device: torch.device) -> _ExportedEvent:
+        nonlocal event_ref
+        assert device.type == "cpu"
+        event = _ExportedEvent()
+        event_ref = weakref.ref(event)
+        backend_calls.append("create")
+        return event
+
+    def record_event(event: object, stream: object) -> None:
+        assert event_ref is not None and event_ref() is event
+        backend_calls.append("record")
+
+    def export_event(event: object, device: torch.device) -> bytes:
+        assert event_ref is not None and event_ref() is event
+        backend_calls.append("export")
+        return b"producer-handle"
+
+    def synchronize_event(event: object, device: torch.device) -> None:
+        assert event_ref is not None and event_ref() is not None
+        backend_calls.append("synchronize")
+
+    backend = SimpleNamespace(
+        check_event_support=lambda device: None,
+        create_event=create_event,
+        record_event=record_event,
+        export_event=export_event,
+        import_event=lambda handle, device: handle,
+        synchronize_event=synchronize_event,
+    )
+
+    class ObservedFuture(MessagingFuture[tuple[bytes, bool]]):
+        def wait(self, timeout: float | None = None) -> bool:
+            assert event_ref is not None and event_ref() is not None
+            backend_calls.append("wait")
+            return super().wait(timeout=0)
+
+    raw_future = ObservedFuture()
+    if not times_out:
+        raw_future.set_result((b"completion-handle", True))
+    ready: MessagingFuture[None] = MessagingFuture()
+    ready.set_result(None)
+    transport = MagicMock()
+    transport.register_kv_cache.return_value = ready
+    transport.unregister_kv_cache.return_value = ready
+    transport.store.return_value = raw_future
+    transport.retrieve.return_value = raw_future
+    monkeypatch.setattr(zmq, "Context", MagicMock)
+    monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
+    monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
+    monkeypatch.setattr(
+        worker_transfer, "get_event_ipc_backend", lambda device: backend
+    )
+    monkeypatch.setattr(
+        worker_transfer, "wrap_kv_caches", lambda caches: list(caches.values())
+    )
+    monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: None)
+    bench = ServerBenchClient(
+        BenchConfig(
+            rpc_url="ipc:///tmp/test-bench-event-lifetime",
+            http_url="",
+            mode="cpu",
+            transfer_mode="lmcache_driven",
+            tp_size=1,
+            use_mla=False,
+            num_tokens=3,
+            kvcache_shape_spec="(2,8,2,1,4):float16:1",
+            num_blocks=8,
+            block_size=2,
+        ),
+        lambda message: None,
+    )
+    bench.start()
+    try:
+        request = bench.create_request(0, "req-event", "test")
+        assert request is not None
+        result = getattr(bench, operation)(request, start_token=0, token_count=4)
+        assert result is not None
+        assert result.successful_worker_ranks == (() if times_out else (0,))
+        assert result.failed_worker_ranks == ((0,) if times_out else ())
+        call = getattr(transport, operation)
+        call.assert_called_once()
+        assert call.call_args.args[1:4] == (1000, [[0, 1]], b"producer-handle")
+        assert backend_calls[:3] == ["create", "record", "export"]
+        assert "wait" in backend_calls
+        assert ("synchronize" in backend_calls) is not times_out
+        assert event_ref is not None
+        gc.collect()
+        if times_out:
+            # The device wrapper has gone out of scope; only transport remains.
+            assert event_ref() is not None
+            raw_future.set_result((b"", True))
+            raw_future.release_references()
+            gc.collect()
+        assert event_ref() is None
+    finally:
+        bench.close()

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Configuration for the multiprocess (ZMQ) server and HTTP frontend.
+Configuration for the multiprocess server and HTTP frontend.
 """
 
 # Standard
@@ -21,13 +21,17 @@ logger = init_logger(__name__)
 
 @dataclass
 class MPServerConfig:
-    """Configuration for the ZMQ-based multiprocess cache server."""
+    """Configuration for the multiprocess cache server."""
+
+    transport: Literal["zmq", "grpc"] = "zmq"
+    """Request transport. gRPC is configurable for forward-compatible test
+    plumbing, but its runtime server is not available yet."""
 
     host: str = "localhost"
-    """ZMQ server host."""
+    """Request server host."""
 
     port: int = 5555
-    """ZMQ server port."""
+    """Request server port."""
 
     chunk_size: int = 256
     """Chunk size for KV cache operations."""
@@ -263,7 +267,7 @@ def add_mp_server_args(
         The same parser with MP server arguments added.
     """
     mp_group = parser.add_argument_group(
-        "MP Server", "Configuration for the ZMQ multiprocess cache server"
+        "MP Server", "Configuration for the multiprocess cache server"
     )
     mp_group.add_argument(
         "--instance-id",
@@ -275,10 +279,18 @@ def add_mp_server_args(
         "minted at startup.",
     )
     mp_group.add_argument(
+        "--transport",
+        type=str,
+        choices=["zmq", "grpc"],
+        default="zmq",
+        help="Request transport. gRPC is reserved for the upcoming runtime "
+        "implementation. Default is zmq.",
+    )
+    mp_group.add_argument(
         "--host",
         type=str,
         default="localhost",
-        help="Host to bind the ZMQ server. Default is localhost.",
+        help="Host to bind the request server. Default is localhost.",
     )
     mp_group.add_argument(
         "--port",
@@ -456,6 +468,7 @@ def parse_args_to_mp_server_config(
         raise ValueError("--runtime-plugin-config is not valid JSON: %s" % exc) from exc
     return MPServerConfig(
         instance_id=args.instance_id or str(uuid.uuid4()),
+        transport=args.transport,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,

@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// ControllerService wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+message ClearRequest {}
+
+message ClearResponse {}
+
+message GetChunkSizeRequest {}
+
+message GetChunkSizeResponse {
+  int64 chunk_size = 1;
+}
+
+message GetExperimentalRequest {}
+
+message GetExperimentalResponse {
+  repeated string names = 1;
+}
+
+message PingRequest {
+  optional int64 instance_id = 1;
+}
+
+message PingResponse {
+  bool ok = 1;
+}
+
+service ControllerService {
+  rpc Clear(ClearRequest) returns (ClearResponse);
+  rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
+  rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
+  rpc Ping(PingRequest) returns (PingResponse);
+}

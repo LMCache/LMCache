@@ -151,21 +151,26 @@ when the failure is on the server).
 device event; this backend only exports its own event objects. Call sites
 that bypass the backend break under isolated IPC:
 
-- **Migrated**: the vLLM MP connector (`lmcache_mp_connector.py`) creates
-  producer events via `LMCacheMPWorkerAdapter.create_recorded_event`,
-  which routes `create_event` / `record_event` through the resolved
-  backend. The event objects satisfy the `IPCEvent` duck protocol, so
+- **Migrated**: the vLLM MP connectors (`main`, `_0180`, `_0201`) now call
+  `LMCacheMPWorkerAdapter.create_recorded_event()` after mode and config
+  selection. That delegates to `transfer_ctx.create_recorded_event()`, so
+  LMCache-driven transfers use the cached platform event backend, async
+  engine-driven transfers keep a local ordering event, and synchronous
+  engine-driven or unhealthy-drop paths can return `None`. The returned
+  event objects still satisfy the existing `IPCEvent` duck protocol, so
   `event.wait(stream)` call sites keep working. Server
   (`lmcache_driven_transfer.py`) and worker futures (`futures.py`) were
   already fully backend-routed.
-- **Not migrated** (the reason the switch defaults to off): SGLang and
-  TRT-LLM adapters create raw `torch_dev.Event(interprocess=True)`
-  producer events; CacheBlend and qstore server modules return raw
-  `event.ipc_handle()` bytes instead of `export_event(...)` (already
-  outside the event-IPC abstraction, see `event_ipc_abstraction.md`
-  non-goals); the deprecated `_0180`/`_0201` connector twins are
-  intentionally left unmigrated pending removal. Once these route through
-  the backend, the default flips to on.
+- **Migrated**: SGLang and TRT-LLM adapters resolve and validate their event
+  backend during initialization or KV registration, route producer-event
+  creation through its `create_event` / `record_event` methods, and retain
+  exported events on the raw request future until the daemon replies.
+- **Migrated for event handles**: CacheBlend and qstore server modules now
+  return `export_event(...)` on the registration-cached backend instead of raw
+  `event.ipc_handle()` bytes. The switch still defaults to off because the
+  raw KV-wrapper work (already outside the event-IPC abstraction; see
+  `event_ipc_abstraction.md` non-goals) remains before hostIPC-free
+  deployment is complete.
 
 ## Status
 

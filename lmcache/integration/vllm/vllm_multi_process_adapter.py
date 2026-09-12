@@ -39,6 +39,7 @@ from lmcache.v1.multiprocess.transfer_context import (
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform.cuda.vmm_ipc import set_use_vmm_api
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 if TYPE_CHECKING:
@@ -51,9 +52,22 @@ logger = init_logger(__name__)
 class ExtraConfigDefault(enum.Enum):
     """Centralized default values for extra_config keys.
 
-    Each member's *name* is the key used in the extra_config dict,
-    and its *value* is the default.
+    Each member's *name* is the key used in the extra_config dict, and
+    its ``default`` attribute is the default value. Defaults live in an
+    attribute rather than the enum value because equal enum values
+    silently alias members (two ``False`` defaults would collapse into
+    one member); each member's ``_value_`` is a unique ordinal instead.
     """
+
+    #: The default value for this key (annotation only -- enum members
+    #: are created from the assigned literals below, not from this).
+    default: Any
+
+    def __new__(cls, default: Any) -> "ExtraConfigDefault":
+        obj = object.__new__(cls)
+        obj._value_ = len(cls.__members__)
+        obj.default = default
+        return obj
 
     # Timeout (seconds) for blocking MQ requests: initial
     # chunk-size query, KV cache registration/unregistration,
@@ -62,6 +76,8 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Poll status replies without blocking the scheduler by default.
+    nonblocking_lookup_status = True
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
     # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
@@ -75,12 +91,17 @@ class ExtraConfigDefault(enum.Enum):
     # lmcache/v1/platform/isolated_ipc.py. Must match the LMCache server's
     # ``--isolated-ipc`` setting.
     isolated_ipc = False
+    # Whether the engine allocates its KV cache through the CUDA VMM API
+    # (vLLM's ``--enable-cumem-allocator``), so KV registration must use
+    # VMM IPC instead of legacy CUDA IPC handles; see
+    # lmcache/v1/platform/cuda/vmm_ipc.py.
+    use_vmm_api = False
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
 # entry point, which still passes these as positional/keyword args.
-DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.value
-DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.value
+DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.default
+DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.default
 
 _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
 
@@ -140,7 +161,7 @@ def _resolve_extra_config(
 
     resolved: dict[str, Any] = {}
     for item in ExtraConfigDefault:
-        default = item.value
+        default = item.default
         raw = stripped.get(item.name)
         value = _coerce_extra_config_value(default, raw) if raw is not None else default
         if value != default:
@@ -627,10 +648,16 @@ class LMCacheMPSchedulerAdapter:
             url: RequestClientFactory.create(url, context=context)
             for url in self._server_urls
         }
+        self._nonblocking_lookup_status = (
+            ExtraConfigDefault.nonblocking_lookup_status.default
+        )
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            self._nonblocking_lookup_status = cfg[
+                ExtraConfigDefault.nonblocking_lookup_status.name
+            ]
         self._mq_timeout = mq_timeout
 
         # Lookup state tracking:
@@ -647,6 +674,10 @@ class LMCacheMPSchedulerAdapter:
         self._unacked_lookups: dict[str, _LookupAck] = {}
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
+        # request_id -> server URL -> (in-flight status future, submission time).
+        self._lookup_status: dict[
+            str, dict[str, tuple[MessagingFuture[Any], float]]
+        ] = {}
         self._lookup_params: dict[
             str, tuple[list[int], str, dict[str, Any] | None]
         ] = {}
@@ -851,10 +882,12 @@ class LMCacheMPSchedulerAdapter:
 
         First polls, without blocking, whether every server has acknowledged
         the LOOKUP sent by ``maybe_submit_lookup_request``; while any ack is
-        outstanding this returns None.  Once all servers have acked, sends a
-        QUERY_PREFETCH_STATUS request to the servers and blocks until the
-        server responds.  Returns the matched token count when the prefetch
-        is complete, or None if still in progress.
+        outstanding this returns None. Once all servers have acked, polls one
+        outstanding QUERY_PREFETCH_STATUS future per unresolved server without
+        waiting by default. Setting ``lmcache.mp.nonblocking_lookup_status`` to
+        False instead waits for each reply in the current callback. Returns the
+        matched token count when the prefetch is complete, or None if still
+        in progress.
 
         A LOOKUP that is not acknowledged within the MQ timeout marks that
         server unhealthy and makes this return 0, matching the behaviour of
@@ -908,14 +941,26 @@ class LMCacheMPSchedulerAdapter:
         per_server = self._per_server_hits.setdefault(request_id, {})
         unresolved_urls = [u for u in self._server_urls if u not in per_server]
 
-        futures: dict[str, MessagingFuture[Any]] = {
-            url: self.req_clients[url].query_prefetch_status(request_id)
-            for url in unresolved_urls
-        }
+        futures = self._lookup_status.setdefault(request_id, {})
+        for url in unresolved_urls:
+            # Keep the same future until its reply arrives; never restart a poll.
+            if url not in futures:
+                futures[url] = (
+                    self.req_clients[url].query_prefetch_status(request_id),
+                    time.monotonic(),
+                )
 
-        for url, fut in futures.items():
+        for url, (fut, submitted_at) in list(futures.items()):
+            if self._nonblocking_lookup_status and not fut.query():
+                if time.monotonic() - submitted_at >= self._mq_timeout:
+                    self._mark_lookup_timed_out(url)
+                    return 0
+                continue
+            del futures[url]
             try:
-                r = fut.result(timeout=self._mq_timeout)
+                r = fut.result(
+                    timeout=0 if self._nonblocking_lookup_status else self._mq_timeout
+                )
             except TimeoutError:
                 logger.warning(
                     "QUERY_PREFETCH_STATUS to %s timed out. Marking unhealthy.",
@@ -961,6 +1006,7 @@ class LMCacheMPSchedulerAdapter:
         """
         self._pending_lookups.discard(request_id)
         self._unacked_lookups.pop(request_id, None)
+        self._lookup_status.pop(request_id, None)
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
         self._lookup_params.pop(request_id, None)
@@ -1024,7 +1070,8 @@ class LMCacheMPSchedulerAdapter:
         Notify LMCache server to remove the session for a finished request.
 
         For unacked lookup results, this function will block waiting until
-        they are acked.
+        they are acked. Already-submitted status requests are also drained
+        before END_SESSION so their handlers cannot recreate the session.
 
         Args:
             request_id: The ID of the finished request.
@@ -1043,6 +1090,16 @@ class LMCacheMPSchedulerAdapter:
                 except TimeoutError:
                     self._mark_lookup_timed_out(url)
                     return
+
+        # Status polling used to complete inside check_lookup_result(). Keep
+        # its ordering before END_SESSION when a request finishes early.
+        for url, (future, submitted_at) in self._lookup_status.pop(
+            request_id, {}
+        ).items():
+            remaining = max(0.0, self._mq_timeout - (time.monotonic() - submitted_at))
+            if not future.wait(timeout=remaining):
+                self._mark_lookup_timed_out(url)
+                return
 
         for url in self._server_urls:
             self.req_clients[url].end_session(request_id)
@@ -1195,6 +1252,7 @@ class LMCacheMPWorkerAdapter:
             else:
                 self._mp_transfer_mode = None
             set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
+            set_use_vmm_api(cfg[ExtraConfigDefault.use_vmm_api.name])
         else:
             self._mp_transfer_mode = None
         self.req_client = RequestClientFactory.create(server_url, context=context)
