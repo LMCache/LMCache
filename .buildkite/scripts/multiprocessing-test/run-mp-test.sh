@@ -15,6 +15,17 @@ export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILD_ID:-local_$$}"
+export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+    zmq) export LMCACHE_REQUEST_SCHEME="tcp" ;;
+    grpc) export LMCACHE_REQUEST_SCHEME="grpc" ;;
+    *)
+        echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'"
+        echo "Valid values: zmq, grpc"
+        exit 1
+        ;;
+esac
 
 # Track the overall test result
 TEST_RESULT=0
@@ -39,6 +50,7 @@ echo "LMCache container: $LMCACHE_CONTAINER_NAME"
 echo "vLLM container: $VLLM_CONTAINER_NAME"
 echo "vLLM baseline container: $VLLM_BASELINE_CONTAINER_NAME"
 echo "LMCache port: $LMCACHE_PORT"
+echo "Request transport: $LMCACHE_REQUEST_TRANSPORT"
 echo "vLLM port: $VLLM_PORT"
 echo "vLLM baseline port: $VLLM_BASELINE_PORT"
 echo ""
@@ -125,4 +137,3 @@ echo "=== ✅ All tests passed! ==="
 echo "============================================"
 
 # Step 8: Cleanup runs automatically via trap
-
