@@ -293,6 +293,24 @@ class TestExceptionIsolation:
 
         assert good_sub.shutdown_called
 
+    def test_malformed_native_event_does_not_block_valid_event(self, bus):
+        received: list[Event] = []
+        bus.subscribe(EventType.L1_READ_FINISHED, received.append)
+        native_ops = MagicMock()
+        native_ops.drain_recorded_events.return_value = [
+            ("unknown.event", "bad", 1.0, {}, {}),
+            (EventType.L1_READ_FINISHED.value, "good", 2.0, {}, {}),
+        ]
+
+        with (
+            patch.object(_bus_module, "_has_native_recorder", True),
+            patch.object(_bus_module, "_device_ops", native_ops, create=True),
+        ):
+            bus._drain_all()
+
+        assert [event.session_id for event in received] == ["good"]
+        assert bus.malformed_native_events_count() == 1
+
 
 # ---------------------------------------------------------------------------
 # Backpressure
