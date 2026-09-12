@@ -308,6 +308,38 @@ def test_conversion_mixed_kv_and_mla_groups():
     assert [group.tokens_per_block for group in spec] == [16, 128]
 
 
+def _indexer_caches(names: list[str]) -> dict[str, torch.Tensor]:
+    """DSA indexer k-caches as vLLM registers them: uint8 [NB, BS, 132]."""
+    return {n: torch.zeros(32, 16, 132, dtype=torch.uint8) for n in names}
+
+
+def test_conversion_uniform_group_splits_dsa_indexer_from_mla():
+    """GLM-5.3 / DeepSeek-V3.2: fp8 MLA caches and uint8 [NB, BS, 132] indexer
+    k-caches arrive in ONE ``UniformTypeKVCacheSpecs`` group with identical rank
+    and block size. They must still land in two LMCache groups sharing one
+    block-id space, or the indexer would be transferred with the MLA layout."""
+    caches = {
+        "attn.0": torch.zeros(32, 16, 576, dtype=torch.float8_e4m3fn),
+        "attn.1": torch.zeros(32, 16, 576, dtype=torch.float8_e4m3fn),
+        **_indexer_caches(["idx.0", "idx.1"]),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={name: MLAAttentionSpec(block_size=16) for name in caches},
+    )
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[MockKVCacheGroup(list(caches), uniform_spec)]
+        ),
+        caches,
+    )
+
+    assert num_engine_groups(spec) == 1
+    assert [group.engine_group_id for group in spec] == [0, 0]
+    assert [group.layer_indices for group in spec] == [(0, 1), (2, 3)]
+    assert [group.tokens_per_block for group in spec] == [16, 16]
+
+
 def test_conversion_uniform_group_mixes_kv_and_mla_layouts():
     """vLLM can coalesce a rank-5 K+V group and a rank-3 key-only indexer group
     into ONE ``UniformTypeKVCacheSpecs`` group, not two. Detection must split it

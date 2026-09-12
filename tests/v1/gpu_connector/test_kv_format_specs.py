@@ -13,12 +13,16 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import (
     describe_shape,
+    find_indexer_caches,
     get_spec,
     get_spec_class,
 )
 import lmcache.lmcache_native as lmcache_native
+
+F = lmcache_native.EngineKVFormat
 
 # Distinct dims so a wrong axis surfaces as a wrong number.
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -360,3 +364,45 @@ def test_facade_diagnostic_labels(case):
     # get_attention_backend is a diagnostic-only representative label.
     label = utils.get_attention_backend(fmt)
     assert isinstance(label, str) and not label.startswith("Unknown"), name
+
+
+# ── Indexer-cache fact ──────────────────────────────────────────────────────
+# vLLM's DSA indexer k-cache: uint8 [NB, BS, 132] (128 fp8 values + a 4-byte
+# fp32 scale per token), registered per sparse layer beside the MLA cache.
+INDEXER_HS = 132
+
+
+def _indexer_layer() -> torch.Tensor:
+    return torch.zeros(NB, BS, INDEXER_HS, dtype=torch.uint8)
+
+
+def test_is_indexer_fact_pinned():
+    # Only the DSA indexer k-cache is an indexer; every other format is
+    # attention K/V. A new indexer format must be declared here deliberately.
+    formats = [f for f in vars(F).values() if isinstance(f, F)]
+    indexer = {f for f in formats if get_spec_class(f).is_indexer}
+    assert indexer == {F.NL_X_NB_BSV_BSS}
+
+
+def test_find_indexer_caches_names_only_the_indexer_layers():
+    # A DSA registration: one MLA cache per layer plus an indexer k-cache on
+    # the sparse layers, interleaved in one dict as vLLM hands it over.
+    kv = {}
+    for i in range(NL):
+        kv[f"model.layers.{i}.self_attn.attn"] = _t(NB, BS, HS)
+        if i % 2 == 0:
+            kv[f"model.layers.{i}.self_attn.indexer.k_cache"] = _indexer_layer()
+    found = find_indexer_caches(kv, EngineType.VLLM)
+    assert found == [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (0, 2, 4)]
+
+
+def test_find_indexer_caches_ignores_every_attention_format():
+    kv = {
+        "mha": _t(2, NB, BS, NH, HS),
+        "mla": _t(NB, BS, HS),
+        # The indexer's trailing dim in a real dtype is still MLA.
+        "mla132": _t(NB, BS, INDEXER_HS),
+        # A strided view detection rejects is not classified as an indexer.
+        "strided": torch.zeros(NB, 2 * BS, HS, dtype=DT)[:, ::2, :],
+    }
+    assert find_indexer_caches(kv, EngineType.VLLM) == []
