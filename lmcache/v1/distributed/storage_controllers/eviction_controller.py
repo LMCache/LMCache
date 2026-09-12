@@ -102,6 +102,19 @@ class L1EvictionController(EvictionController):
         super().__init__()
         self._eviction_config = eviction_config
         self._eviction_policy = CreateEvictionPolicy(eviction_config)
+        # Isolation-only policies (e.g. IsolatedLRU) require per-cache_salt
+        # scoping driven by a QuotaManager, which only the L2 tier provides.
+        # Without this guard the misconfiguration surfaces as a ValueError
+        # on the first over-watermark cycle, permanently killing the
+        # eviction thread while the server keeps serving.
+        if self._eviction_policy.support_isolation:
+            raise ValueError(
+                f"Eviction policy {eviction_config.eviction_policy!r} is "
+                "per-cache_salt (isolation-only) and is not supported for "
+                "the L1 tier, which has no quota manager. Use 'LRU' or "
+                "'noop' for --eviction-policy; isolated policies are "
+                "configured per L2 adapter."
+            )
         self._l1_manager = l1_manager
         self._listener = L1EvictionPolicy(self._eviction_policy)
         self._l1_manager.register_listener(self._listener)
@@ -163,31 +176,43 @@ class L1EvictionController(EvictionController):
 
         while not self._stop_flag.is_set():
             time.sleep(1)
-            used_bytes, total_bytes = self._l1_manager.get_memory_usage()
-            if self._eviction_config.extra_logging_enabled:
-                self._maybe_log_memory_usage(used_bytes, total_bytes)
-            usage = 0 if total_bytes == 0 else used_bytes / total_bytes
-            if usage < watermark:
-                logger.debug(
-                    "L1 memory usage %.2f below watermark %.2f; skipping eviction.",
-                    usage,
-                    watermark,
+            # A failure in one cycle must not kill the eviction thread:
+            # the thread is the only thing standing between L1 and a
+            # permanently full cache (allocation does not evict).
+            try:
+                self._eviction_cycle(watermark, eviction_ratio)
+            except Exception:
+                logger.exception(
+                    "L1 eviction cycle failed; retrying next cycle. "
+                    "L1 eviction is degraded until this stops recurring."
                 )
-                self._publish_skipped(usage, watermark)
-                continue
 
-            logger.info(
-                "L1 memory usage %.2f above watermark %.2f; triggering eviction.",
+    def _eviction_cycle(self, watermark: float, eviction_ratio: float):
+        used_bytes, total_bytes = self._l1_manager.get_memory_usage()
+        if self._eviction_config.extra_logging_enabled:
+            self._maybe_log_memory_usage(used_bytes, total_bytes)
+        usage = 0 if total_bytes == 0 else used_bytes / total_bytes
+        if usage < watermark:
+            logger.debug(
+                "L1 memory usage %.2f below watermark %.2f; skipping eviction.",
                 usage,
                 watermark,
             )
-            actions = self._eviction_policy.get_eviction_actions(
-                eviction_ratio,
-                key_eligible_filter=self._l1_manager.is_key_evictable,
-            )
-            for action in actions:
-                self.execute_eviction_action(action)
-            self._publish_triggered(usage, watermark)
+            self._publish_skipped(usage, watermark)
+            return
+
+        logger.info(
+            "L1 memory usage %.2f above watermark %.2f; triggering eviction.",
+            usage,
+            watermark,
+        )
+        actions = self._eviction_policy.get_eviction_actions(
+            eviction_ratio,
+            key_eligible_filter=self._l1_manager.is_key_evictable,
+        )
+        for action in actions:
+            self.execute_eviction_action(action)
+        self._publish_triggered(usage, watermark)
 
     def execute_eviction_action(self, action: EvictionAction):
         if action.destination == EvictionDestination.DISCARD:
@@ -308,7 +333,15 @@ class L2EvictionController(StorageControllerInterface):
             # calling into it.
             with self._states_lock:
                 for state in self._adapter_states:
-                    self._check_and_evict(state)
+                    # One adapter's failure (network, fs, backend) must not
+                    # kill the shared eviction thread for every adapter.
+                    try:
+                        self._check_and_evict(state)
+                    except Exception:
+                        logger.exception(
+                            "L2 eviction failed for adapter %d; retrying next cycle.",
+                            state.adapter_id,
+                        )
 
     def _check_and_evict(self, state: L2AdapterEvictionState):
         if state.eviction_policy.support_isolation and self._quota_manager is not None:
