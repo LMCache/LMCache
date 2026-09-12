@@ -378,11 +378,14 @@ def get_event_bus() -> EventBus:
 
 
 def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
-    """Replace the global singleton with a new EventBus built from *config*.
+    """Replace and stop the global EventBus, then return its replacement.
 
-    Returns the newly created bus.
+    The replacement is published before the previous bus is stopped so new
+    callers cannot enqueue work on the bus being drained.
     """
     global _global_bus, _observability_enabled
+    previous_bus = _global_bus
     _global_bus = EventBus(config)
     _observability_enabled = config.enabled if config else True
+    previous_bus.stop()
     return _global_bus
