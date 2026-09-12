@@ -282,6 +282,10 @@ class MessageQueueClient:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
+        # ZMQ sockets default to IPv4-only. Enable IPv6 so endpoints can be
+        # IPv6 literals (tcp://[::1]:6555) or hostnames resolving to IPv6.
+        # Additive for IPv4 users.
+        self.socket.setsockopt(zmq.IPV6, 1)
         self.socket.connect(server_url)
 
         # Input queue
@@ -507,6 +511,10 @@ class MessageQueueServer:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
+        # ZMQ sockets default to IPv4-only. Enable IPv6 so endpoints can be
+        # IPv6 literals (tcp://[::1]:6555) or hostnames resolving to IPv6.
+        # Additive for IPv4 users.
+        self.socket.setsockopt(zmq.IPV6, 1)
         self.socket.bind(bind_url)
         # Use a cross-platform Notifier instead of zmq PUSH/PULL sockets
         # because blocking handler callbacks run on ThreadPoolExecutor
