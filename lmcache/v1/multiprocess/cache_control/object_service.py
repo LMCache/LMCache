@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Node-local cache object operations (adapter listing, object listing, delete).
+"""Node-local cache object operations (download, listing, and deletion).
 
 :class:`ObjectService` wraps the storage manager's L2 adapters and exposes
-adapter resolution, paginated listing, and key-addressed deletion. It performs
-its own validation and raises transport-agnostic domain errors (see
-:mod:`cache_control.errors`); the HTTP layer maps those to status codes.
-Blocking adapter I/O is off-loaded to a worker thread so callers can ``await``.
+adapter resolution, paginated listing, key-addressed deletion, and local L1
+snapshots. It performs its own validation and raises transport-agnostic domain
+errors (see :mod:`cache_control.errors`); the HTTP layer maps those to status
+codes. Blocking storage I/O is off-loaded to a worker thread so callers can
+``await``.
 """
 
 # Standard
@@ -13,12 +14,18 @@ from typing import Any
 import asyncio
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, L1ObjectSnapshot, Tier
+from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.multiprocess.cache_control.errors import (
+    Conflict,
+    Disabled,
     InvalidRequest,
     NotFound,
+    TooLarge,
     Unavailable,
+    Unsupported,
 )
+from lmcache.v1.multiprocess.config import HTTPFrontendConfig
 
 # Hard cap on how many keys a single delete request may target. Keeps the
 # request body bounded and prevents one call from monopolizing the adapter's
@@ -30,15 +37,88 @@ _SUPPORTED_TIER = Tier.L2
 
 
 class ObjectService:
-    """Adapter-listing, object-listing, and key-addressed deletion on one node.
+    """Download, list, and delete cache objects on one node.
 
     Args:
-        engine: The node's cache engine; its ``storage_manager`` owns the L2
-            adapters.
+        engine: The node's cache engine; its ``storage_manager`` owns L1 and
+            the L2 adapters.
+        http_config: Download opt-in and resource limits.
     """
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: Any, http_config: HTTPFrontendConfig) -> None:
         self._engine = engine
+        self._download_enabled = http_config.enable_l1_cache_download
+        self._download_max_size = http_config.l1_cache_download_max_size_bytes
+        self._download_slots = asyncio.Semaphore(
+            http_config.l1_cache_download_max_concurrency
+        )
+
+    async def download_object(self, encoded_key: EncodedObjectKey) -> L1ObjectSnapshot:
+        """Return an independent snapshot of one object in this node's L1.
+
+        Args:
+            encoded_key: JSON-safe exact object key supplied by the caller.
+
+        Returns:
+            An immutable snapshot containing raw logical bytes and layout
+            metadata. The source object's read protection has been released.
+
+        Raises:
+            Disabled: Raw KV download has not been explicitly enabled.
+            TooLarge: The object's logical bytes exceed the configured limit.
+            InvalidRequest: The encoded key violates an ``ObjectKey`` invariant.
+            NotFound: The object is not resident in local L1.
+            Conflict: The object is unreadable, was removed or replaced during
+                copying, or its inspection read could not be released.
+            Unsupported: The object uses an L1 backend without CPU snapshot
+                support, currently GDS.
+            Unavailable: The storage manager returns an unexpected failure.
+        """
+        if not self._download_enabled:
+            raise Disabled(
+                "L1 cache download is disabled; enable-l1-cache-download required"
+            )
+        try:
+            key = encoded_key.to_object_key()
+        except ValueError as exc:
+            raise InvalidRequest(f"key: {exc}") from None
+
+        await self._download_slots.acquire()
+        # Copy runs in a worker thread, but tobytes() may hold the GIL throughout
+        # the copy. This is not equivalent to fully non-blocking I/O.
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                self._engine.storage_manager.snapshot_l1_object,
+                key,
+                max_size_bytes=self._download_max_size,
+            )
+        )
+        try:
+            error, snapshot = await asyncio.shield(worker)
+            if error == L1Error.SUCCESS:
+                assert snapshot is not None
+                return snapshot
+            if error == L1Error.KEY_NOT_EXIST:
+                raise NotFound("object not found in local L1")
+            if error == L1Error.KEY_NOT_READABLE:
+                raise Conflict("object is temporarily unreadable in local L1")
+            if error == L1Error.OBJECT_TOO_LARGE:
+                raise TooLarge("L1 object exceeds the configured download size limit")
+            if error == L1Error.UNSUPPORTED_BACKEND:
+                raise Unsupported("L1 object backend does not support CPU download")
+            raise Unavailable(f"failed to snapshot local L1 object: {strerror(error)}")
+        finally:
+            if worker.done():
+                self._download_slots.release()
+            else:
+                # Cancelling the request cannot stop the thread. Keep its slot
+                # until it finishes and consume any otherwise unhandled error.
+                def release_when_done(task: asyncio.Task[Any]) -> None:
+                    if not task.cancelled():
+                        task.exception()
+                    self._download_slots.release()
+
+                worker.add_done_callback(release_when_done)
 
     @staticmethod
     def _require_supported_tier(tier: Tier) -> None:
@@ -152,17 +232,17 @@ class ObjectService:
         pure ``l1`` delete works on an L1-only server.
 
         Returns:
-            ``{"deleted", "skipped", "ok"[, "error"]}``: ``deleted`` is the total
-            keys removed across the requested tiers (L1 removals plus the L2 batch
+            ``{"deleted", "skipped", "ok"}``: ``deleted`` is the total keys
+            removed across the requested tiers (L1 removals plus the L2 batch
             size); ``skipped`` is the L1 keys refused because they were locked
-            (non-force only); ``ok`` is ``False`` with ``error`` set when the L2
-            adapter raised (a structured failure, not a crash).
+            (non-force only).
 
         Raises:
             InvalidRequest: batch too large, or an ``ObjectKey`` invariant
                 violation.
             Unavailable / NotFound: L2 adapter resolution (only when ``tier``
                 includes L2).
+            Exception: An unexpected L2 adapter failure is propagated.
         """
         if len(keys) > MAX_DELETE_BATCH:
             raise InvalidRequest(
@@ -178,8 +258,6 @@ class ObjectService:
 
         deleted = 0
         skipped = 0
-        ok = True
-        error: str | None = None
 
         if tier in (Tier.L1, Tier.ALL):
             l1_deleted, l1_skipped = self._engine.storage_manager.delete_l1_keys(
@@ -190,14 +268,7 @@ class ObjectService:
 
         if tier in (Tier.L2, Tier.ALL):
             _, adapter = self._resolve_adapter(adapter_selector)
-            try:
-                await asyncio.to_thread(adapter.delete, parsed)
-                deleted += len(parsed)
-            except Exception as exc:  # noqa: BLE001 - structured result, not a crash
-                ok = False
-                error = str(exc)
+            await asyncio.to_thread(adapter.delete, parsed)
+            deleted += len(parsed)
 
-        result: dict[str, object] = {"deleted": deleted, "skipped": skipped, "ok": ok}
-        if error is not None:
-            result["error"] = error
-        return result
+        return {"deleted": deleted, "skipped": skipped, "ok": True}

@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.config import HTTPFrontendConfig
 from lmcache.v1.multiprocess.http_apis.config_api import router as config_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 
@@ -158,7 +159,7 @@ def _make_adapters_app(sm) -> FastAPI:
     app = FastAPI()
     app.include_router(config_router)
     if sm is not None:
-        app.state.context = build_context(_FakeEngine(sm))
+        app.state.context = build_context(_FakeEngine(sm), HTTPFrontendConfig())
     return app
 
 
