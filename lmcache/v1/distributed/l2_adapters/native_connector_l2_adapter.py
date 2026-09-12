@@ -12,9 +12,11 @@ Architecture:
     background demux thread that routes native completions to the right
     category based on a future_id → op_type mapping.
   - ObjectKey serialization and MemoryObj buffer extraction happen at the
-    submit call boundary.
-  - Locking is client-side (refcount dict) since remote backends don't have
-    our eviction concept.
+    submit call boundary, except for store batches deferred behind an
+    overlapping delete, which are serialized when that delete completes.
+  - Locking is client-side (refcount dicts) since remote backends don't have
+    our eviction concept: one tracks locks held by a completed lookup, three
+    more order store, lookup and delete submissions per key.
 """
 
 # Future
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 import select
 import threading
@@ -46,6 +49,17 @@ logger = init_logger(__name__)
 # and ``@`` in ``cache_salt`` are rejected by ObjectKey.__post_init__
 # so splitting on ``@`` is unambiguous.
 _KEY_SEP = "@"
+_DELETE_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class _DeferredStoreTask:
+    """Store task retained until overlapping native deletes finish."""
+
+    task_id: L2TaskId
+    keys: list[ObjectKey]
+    objects: list[MemoryObj]
+    sizes: list[int]
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
@@ -122,12 +136,18 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._load_efd = create_event_notifier()
 
         # Pending ops: native future_id →
-        #   (op_type, task_id, num_keys, keys_for_locking)
-        # keys_for_locking is only set for lookup ops so
-        # we can apply locks
+        #   (op_type, task_id, result_size, op_keys, result_indices)
+        # result_indices maps lookup results back to the original batch when
+        # keys overlapping an earlier delete are omitted from the native call.
         self._pending_ops: dict[
             int,
-            tuple[str, L2TaskId, int, list[ObjectKey] | None],
+            tuple[
+                str,
+                L2TaskId,
+                int,
+                list[ObjectKey] | None,
+                list[int] | None,
+            ],
         ] = {}
 
         # Completed results (same pattern as MockL2Adapter)
@@ -137,12 +157,32 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # Client-side lock tracking (refcount per key)
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
+        # Store submissions that have not reached native completion. Delete
+        # skips these keys so it cannot remove a value being written.
+        self._pending_store_keys: dict[ObjectKey, int] = defaultdict(int)
+        # Whole store batches waiting for every overlapping delete to finish.
+        # Keeping MemoryObj references here preserves their buffers until the
+        # native connector accepts the task or a delete timeout fails it.
+        self._deferred_stores: dict[L2TaskId, _DeferredStoreTask] = {}
+        # Lookup submissions that have not reached the demux completion path.
+        # Delete checks this separately from completed lookup locks so a key
+        # stays protected across the entire submit-to-completion window.
+        self._pending_lookup_keys: dict[ObjectKey, int] = defaultdict(int)
 
         # Delete capability detection
         self._has_delete = callable(getattr(native_client, "submit_batch_delete", None))
 
         # Pending delete events for synchronous delete() calls
         self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
+        # Delete submissions that have not reached the demux completion path.
+        # A later lookup reports these keys as misses so it cannot acquire a
+        # stale lock before an earlier backend delete finishes.
+        self._pending_delete_keys: dict[ObjectKey, int] = defaultdict(int)
+        # Keys whose native delete exceeded the synchronous wait timeout. New
+        # stores for these keys fail until the required late completion arrives.
+        # Pending-delete tracking continues to quarantine these keys from
+        # lookups and deletes, while unrelated operations continue normally.
+        self._timed_out_delete_keys: set[ObjectKey] = set()
 
         # Per-key size tracking. ``_key_sizes`` lets us look up byte sizes
         # at delete time (the native completion only carries booleans, not
@@ -191,23 +231,58 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
-        memviews = [_obj_to_memoryview(obj) for obj in objects]
-        per_key_sizes = [obj.get_size() for obj in objects]
+        """Submit a store task without racing an earlier delete.
 
-        # Register pending op BEFORE submit to avoid race
-        # with demux thread. The native submit is
-        # non-blocking so holding the lock is brief.
+        The entire batch is deferred when any key overlaps a pending delete.
+        Its object buffers remain referenced until all overlaps finish and the
+        native connector accepts the batch. If an overlapping delete has timed
+        out, the task completes immediately with failure so its buffers are not
+        retained indefinitely.
+
+        Args:
+            keys: Object keys to store.
+            objects: Source memory objects corresponding positionally to
+                ``keys``.
+
+        Returns:
+            The task ID used to retrieve the eventual store result.
+
+        Raises:
+            Exception: Propagates errors raised by an immediate native store
+                submission. A deferred submission error is reported through a
+                failed store completion because the submit call has returned.
+        """
+        store_keys = list(keys)
+        store_objects = list(objects)
+        store_sizes = [obj.get_size() for obj in store_objects]
+
         with self._lock:
             task_id = self._get_next_task_id()
-            future_id = int(self._client.submit_batch_set(key_strings, memviews))
-            self._pending_ops[future_id] = (
-                self._OP_STORE,
+            if any(key in self._timed_out_delete_keys for key in store_keys):
+                self._complete_store_failure_locked(task_id)
+                return task_id
+
+            store_task = _DeferredStoreTask(
                 task_id,
-                len(keys),
-                None,
+                store_keys,
+                store_objects,
+                store_sizes,
             )
-            self._pending_store_sizes[future_id] = (list(keys), per_key_sizes)
+            for key in store_task.keys:
+                self._pending_store_keys[key] += 1
+
+            if any(
+                self._pending_delete_keys.get(key, 0) > 0 for key in store_task.keys
+            ):
+                self._deferred_stores[task_id] = store_task
+                return task_id
+
+            try:
+                self._submit_native_store_locked(store_task)
+            except Exception:
+                for key in store_task.keys:
+                    self._release_pending_store_key(key)
+                raise
 
         return task_id
 
@@ -228,16 +303,49 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
+        """Submit an existence lookup and lock keys reported as present.
+
+        Keys covered by an earlier in-flight delete are resolved as misses
+        without querying the backend. Other keys in the same batch are still
+        queried and mapped to their original bitmap positions.
+
+        Args:
+            keys: Object keys to look up and lock.
+            group_layout_descs: Per-object-group layout hints. Native
+                connectors currently ignore these hints.
+
+        Returns:
+            The task ID used to query the eventual lookup bitmap.
+
+        Raises:
+            Exception: Propagates errors raised when the native connector
+                rejects the lookup submission.
+        """
+        lookup_keys = list(keys)
 
         with self._lock:
             task_id = self._get_next_task_id()
+            result_indices = [
+                i
+                for i, key in enumerate(lookup_keys)
+                if self._pending_delete_keys.get(key, 0) == 0
+            ]
+            submitted_keys = [lookup_keys[i] for i in result_indices]
+            if not submitted_keys:
+                self._completed_lookups[task_id] = Bitmap(len(lookup_keys))
+                self._lookup_efd.notify()
+                return task_id
+
+            key_strings = [_object_key_to_string(k) for k in submitted_keys]
             future_id = int(self._client.submit_batch_exists(key_strings))
+            for key in submitted_keys:
+                self._pending_lookup_keys[key] += 1
             self._pending_ops[future_id] = (
                 self._OP_LOOKUP,
                 task_id,
-                len(keys),
-                list(keys),
+                len(lookup_keys),
+                submitted_keys,
+                result_indices,
             )
 
         return task_id
@@ -276,6 +384,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 task_id,
                 len(keys),
                 list(keys),
+                None,
             )
 
         return task_id
@@ -291,46 +400,83 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of keys from the remote backend.
 
-        Submits a batch delete to the native connector and blocks
-        until the demux thread signals completion (up to 30s timeout).
-        Fires ``_notify_keys_deleted`` on success so eviction policy
-        tracking stays in sync.
+        Keys with a pending store, pending lookup, completed lookup lock, or
+        earlier pending delete are skipped. Protecting both store/delete
+        directions prevents an older delete from removing a replacement and
+        prevents a newer delete from overtaking an in-flight store. A later
+        lookup treats keys submitted for deletion as misses until completion.
 
-        No-op if the connector does not expose ``submit_batch_delete``
-        or if the key list is empty.
+        Submits a batch delete for the remaining keys to the native
+        connector and blocks until the demux thread signals completion
+        (up to 30s timeout). Fires ``_notify_keys_deleted`` on success so
+        eviction policy tracking stays in sync.
+
+        Args:
+            keys: Object keys requested for deletion.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates errors raised when the native connector
+                rejects the delete submission.
+
+        Note:
+            A request that exceeds the caller's 30-second wait remains tracked
+            until its required native completion arrives. Until then, later
+            deletes skip its keys, lookups for its keys report misses, and
+            stores for its keys fail instead of waiting indefinitely. Store,
+            lookup, load, and delete submissions for unrelated keys continue.
+
+        No-op if the connector does not expose ``submit_batch_delete``, if the
+        key list is empty, or if every key is protected by an overlapping
+        store, lookup, or delete.
         """
         if not keys or not self._has_delete:
             return
 
-        key_strings = [_object_key_to_string(k) for k in keys]
-        done_event = threading.Event()
-
         with self._lock:
+            deletable = [
+                key
+                for key in keys
+                if self._pending_store_keys.get(key, 0) == 0
+                and self._pending_lookup_keys.get(key, 0) == 0
+                and self._locked_keys.get(key, 0) == 0
+                and self._pending_delete_keys.get(key, 0) == 0
+            ]
+            if not deletable:
+                return
+            done_event = threading.Event()
+            key_strings = [_object_key_to_string(k) for k in deletable]
             task_id = self._get_next_task_id()
             future_id = int(self._client.submit_batch_delete(key_strings))
+            for key in deletable:
+                self._pending_delete_keys[key] += 1
             self._pending_ops[future_id] = (
                 self._OP_DELETE,
                 task_id,
-                len(keys),
-                list(keys),
+                len(deletable),
+                deletable,
+                None,
             )
             self._pending_delete_events[task_id] = done_event
 
         # Block until demux thread signals completion
-        if not done_event.wait(timeout=30.0):
+        if not done_event.wait(timeout=_DELETE_TIMEOUT_SECONDS):
             with self._lock:
+                # The demux thread removes the future before firing listener
+                # callbacks and waking the waiter. If it already consumed this
+                # future, a timeout here is only a notification race.
+                if future_id not in self._pending_ops:
+                    return
+                error = (
+                    "Native connector delete timed out after "
+                    f"{_DELETE_TIMEOUT_SECONDS:g}s for {len(deletable)} keys"
+                )
                 self._pending_delete_events.pop(task_id, None)
-                # Note: _pending_ops entry may already be consumed
-                # by the demux thread; pop is safe either way.
-                for fid, entry in list(self._pending_ops.items()):
-                    if entry[1] == task_id:
-                        self._pending_ops.pop(fid, None)
-                        break
-            logger.warning(
-                "delete() timed out after 30s for %d keys",
-                len(keys),
-            )
-            return
+                self._timed_out_delete_keys.update(deletable)
+                self._fail_deferred_stores_for_keys_locked(deletable)
+            logger.error(error)
 
         # ``_notify_keys_deleted`` is fired by the demux thread (with
         # accurate per-key sizes drawn from ``_key_sizes``) when the
@@ -389,6 +535,83 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._next_task_id += 1
         return task_id
 
+    def _submit_native_store_locked(self, task: _DeferredStoreTask) -> None:
+        """Submit one store task while holding ``self._lock``."""
+        key_strings = [_object_key_to_string(key) for key in task.keys]
+        memviews = [_obj_to_memoryview(obj) for obj in task.objects]
+        future_id = int(self._client.submit_batch_set(key_strings, memviews))
+        self._pending_ops[future_id] = (
+            self._OP_STORE,
+            task.task_id,
+            len(task.keys),
+            task.keys,
+            None,
+        )
+        self._pending_store_sizes[future_id] = (task.keys, task.sizes)
+
+    def _submit_ready_deferred_stores_locked(self) -> None:
+        """Submit deferred batches whose delete overlaps are all complete."""
+        ready_task_ids = [
+            task_id
+            for task_id, task in self._deferred_stores.items()
+            if all(self._pending_delete_keys.get(key, 0) == 0 for key in task.keys)
+        ]
+        for task_id in ready_task_ids:
+            task = self._deferred_stores.pop(task_id)
+            try:
+                self._submit_native_store_locked(task)
+            except Exception:
+                logger.exception(
+                    "Deferred native store submission failed for task_id=%d",
+                    task.task_id,
+                )
+                for key in task.keys:
+                    self._release_pending_store_key(key)
+                self._complete_store_failure_locked(task.task_id)
+
+    def _complete_store_failure_locked(self, task_id: L2TaskId) -> None:
+        """Publish a failed store completion while holding ``self._lock``."""
+        self._completed_stores[task_id] = L2StoreResult(False, 0)
+        self._store_efd.notify()
+
+    def _fail_deferred_stores_for_keys_locked(self, keys: list[ObjectKey]) -> None:
+        """Fail deferred batches overlapping timed-out deletes."""
+        timed_out_keys = set(keys)
+        failed_task_ids = [
+            task_id
+            for task_id, task in self._deferred_stores.items()
+            if any(key in timed_out_keys for key in task.keys)
+        ]
+        for task_id in failed_task_ids:
+            task = self._deferred_stores.pop(task_id)
+            for key in task.keys:
+                self._release_pending_store_key(key)
+            self._complete_store_failure_locked(task.task_id)
+
+    def _release_pending_store_key(self, key: ObjectKey) -> None:
+        """Release one pending store refcount while holding ``self._lock``."""
+        count = self._pending_store_keys.get(key, 0)
+        if count <= 1:
+            self._pending_store_keys.pop(key, None)
+        else:
+            self._pending_store_keys[key] = count - 1
+
+    def _release_pending_lookup_key(self, key: ObjectKey) -> None:
+        """Release one pending lookup refcount while holding ``self._lock``."""
+        count = self._pending_lookup_keys.get(key, 0)
+        if count <= 1:
+            self._pending_lookup_keys.pop(key, None)
+        else:
+            self._pending_lookup_keys[key] = count - 1
+
+    def _release_pending_delete_key(self, key: ObjectKey) -> None:
+        """Release one pending delete refcount while holding ``self._lock``."""
+        count = self._pending_delete_keys.get(key, 0)
+        if count <= 1:
+            self._pending_delete_keys.pop(key, None)
+        else:
+            self._pending_delete_keys[key] = count - 1
+
     def _demux_loop(self) -> None:
         """Background thread that polls the native
         connector's eventfd, drains completions, and
@@ -446,10 +669,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         op_type,
                         task_id,
                         num_keys,
-                        lookup_keys,
+                        op_keys,
+                        result_indices,
                     ) = entry
 
                     if op_type == self._OP_STORE:
+                        if op_keys is not None:
+                            for key in op_keys:
+                                self._release_pending_store_key(key)
                         store_info = self._pending_store_sizes.pop(fid, None)
                         task_bytes = 0
                         if ok and store_info is not None:
@@ -475,12 +702,20 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     elif op_type == self._OP_LOOKUP:
                         bitmap = Bitmap(num_keys)
-                        if ok and result_bools is not None:
-                            for i, found in enumerate(result_bools):
+                        if op_keys is not None and result_indices is not None:
+                            for i, (result_index, key) in enumerate(
+                                zip(result_indices, op_keys, strict=True)
+                            ):
+                                self._release_pending_lookup_key(key)
+                                found = (
+                                    ok
+                                    and result_bools is not None
+                                    and i < len(result_bools)
+                                    and result_bools[i]
+                                )
                                 if found:
-                                    bitmap.set(i)
-                                    if lookup_keys is not None:
-                                        self._locked_keys[lookup_keys[i]] += 1
+                                    bitmap.set(result_index)
+                                    self._locked_keys[key] += 1
                         self._completed_lookups[task_id] = bitmap
                         self._lookup_efd.notify()
 
@@ -491,25 +726,30 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                             for i, loaded in enumerate(result_bools):
                                 if loaded:
                                     bitmap.set(i)
-                                    if lookup_keys is not None:
-                                        loaded_keys.append(lookup_keys[i])
+                                    if op_keys is not None:
+                                        loaded_keys.append(op_keys[i])
                         elif ok:
                             # Fallback for connectors that
                             # do not report per-key results
                             for i in range(num_keys):
                                 bitmap.set(i)
-                            if lookup_keys is not None:
-                                loaded_keys.extend(lookup_keys)
+                            if op_keys is not None:
+                                loaded_keys.extend(op_keys)
                         keys_accessed.extend(loaded_keys)
                         self._completed_loads[task_id] = bitmap
                         self._load_efd.notify()
 
                     elif op_type == self._OP_DELETE:
-                        if result_bools is not None and lookup_keys is not None:
-                            for i, deleted in enumerate(result_bools):
+                        if op_keys is not None:
+                            for key in op_keys:
+                                self._release_pending_delete_key(key)
+                                self._timed_out_delete_keys.discard(key)
+                        if result_bools is not None and op_keys is not None:
+                            for key, deleted in zip(
+                                op_keys, result_bools, strict=False
+                            ):
                                 if not deleted:
                                     continue
-                                key = lookup_keys[i]
                                 # Only notify (with size) for keys we've
                                 # actually accounted for via a prior store.
                                 if key in self._key_sizes:
@@ -518,6 +758,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
                             delete_done_events.append(evt)
+                        self._submit_ready_deferred_stores_locked()
 
             # Fire listener notifications outside the lock so a slow
             # listener cannot stall further demux iterations.
