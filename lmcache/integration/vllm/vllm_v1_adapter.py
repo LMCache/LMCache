@@ -1331,6 +1331,24 @@ class LMCacheConnectorV1Impl:
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        # Unpin KV caches for finished/aborted requests in sync mode.
+        #
+        # In sync mode, lookup(pin=True) pins KV caches in the Worker's
+        # LocalCPUBackend. Normally unpin happens in wait_for_save(), but
+        # aborted requests may skip wait_for_save() entirely, leaving the
+        # pin count unbalanced and leaking pinned memory.
+        #
+        # The Scheduler-side request_finished() calls
+        # storage_manager.cancel_request(), but LocalCPUBackend does not
+        # override cancel_request() (it is a no-op), so the Scheduler
+        # cannot release Worker-side pins across processes.
+        #
+        # Guard with `not self.async_loading` because async mode handles
+        # abort cleanup via lookup_client.cancel_lookup() on the
+        # Scheduler side, which triggers Worker-side cleanup_memory_objs().
+        if self.lmcache_engine is not None and not self.async_loading:
+            for req_id in finished_req_ids:
+                self.lmcache_engine.lookup_unpin(req_id)
         return None, None
 
     def get_block_ids_with_load_errors(self) -> set[int]:
