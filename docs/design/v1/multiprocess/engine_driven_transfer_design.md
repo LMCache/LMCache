@@ -127,6 +127,12 @@ four lifecycle and transfer operations.
 and block-id flattening), then submits all three phases to a background
 `ThreadPoolExecutor` (`commit_executor`) and returns an unresolved
 `MessagingFuture`
+- **pinned SHM staging**: gather targets the worker's reusable pinned CPU arena.
+  The worker future resolves after the GPU-to-pinned transfer completes,
+  allowing the engine to release source KV blocks. LMCache then copies the
+  contiguous staged chunk views to SHM and commits the store without exposing
+  a second completion to the engine. Each async executor worker owns one arena;
+  an arena grows to its worker's largest observed store and then is reused.
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
 During `register`, worker receives `RegisterEngineDrivenContextResponse(shm_name, pool_size)`

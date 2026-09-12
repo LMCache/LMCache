@@ -3,6 +3,7 @@
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any
 import threading
 
@@ -14,6 +15,7 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
+from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     IPCEvent,
@@ -22,10 +24,44 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
 
 logger = init_logger(__name__)
 
-# Number of background threads used to run commit (CPU->server) work for the
-# async engine-driven store path. >1 so that a slow gather for one store does
-# not block the commit of another store whose gather already finished.
-DEFAULT_ENGINE_DRIVEN_COMMIT_WORKERS = 4
+
+@dataclass
+class _WorkerStagingArena:
+    """Pinned staging slabs owned exclusively by one executor worker."""
+
+    slabs: dict[tuple[tuple[int, ...], torch.dtype], torch.Tensor] = field(
+        default_factory=dict
+    )
+
+    def views(
+        self, shape: torch.Size, dtype: torch.dtype, count: int
+    ) -> list[torch.Tensor] | None:
+        """Return contiguous pinned chunk views, or ``None`` on allocation failure."""
+        key = (tuple(shape), dtype)
+        slab = self.slabs.get(key)
+        if slab is None or slab.shape[0] < count:
+            try:
+                slab = torch.empty(
+                    (count, *shape), dtype=dtype, device="cpu", pin_memory=True
+                )
+            except RuntimeError:
+                logger.warning(
+                    "Failed to allocate pinned CPU staging slab "
+                    "(shape=%s, dtype=%s, chunks=%d)",
+                    tuple(shape),
+                    dtype,
+                    count,
+                )
+                return None
+            self.slabs[key] = slab
+        return [slab[chunk_idx] for chunk_idx in range(count)]
+
+
+class _WorkerStagingState(threading.local):
+    """Thread-local binding between an executor thread and its staging arena."""
+
+    def __init__(self) -> None:
+        self.arena: _WorkerStagingArena | None = None
 
 
 # TODO: async retrieve path TBD, but benefit might be very limited
@@ -33,10 +69,12 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     """Fully async engine-driven data transfer context (store-only async).
 
     "Store-only async" means ``submit_store`` returns an *unresolved* future
-    that resolves only after the deferred gather (GPU->CPU copy) and commit
-    (CPU->server) both complete off the forward thread, while
-    ``submit_retrieve`` stays synchronous and returns an already-resolved
-    future exactly as on the base context.
+    while the deferred gather runs off the forward thread. For unpinned SHM
+    transfers, the future resolves after GPU-to-staging completion so the
+    engine can release source blocks while LMCache finishes the staging-to-SHM
+    copy and commit internally.
+    ``submit_retrieve`` stays synchronous and returns an already-resolved future
+    exactly as on the base context.
 
     Inherits :class:`EngineDrivenTransferContext` and reuses its
     ``register()`` (layout / SHM registration, no stream dependency) and
@@ -48,9 +86,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     1. prepare: call prepare_store() to negotiate buffers with the server
        (the costliest step in pickle mode due to the synchronous RPC round-trip).
     2. gather: wait for the forward event on the copy stream, then enqueue
-       GPU->CPU copies. When SHM buffers are available, gather writes directly
-       into SHM views (matching the synchronous path). Otherwise, gather
-       targets pinned staging buffers.
+       GPU->CPU copies. Unpinned SHM uses worker-owned pinned staging buffers;
+       pickle lets the gather helper allocate its returned CPU chunks.
     3. commit: wait for gather completion (via a recorded CUDA event), then
        perform commit_store() and resolve the returned future.
 
@@ -64,20 +101,25 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     there is no ``self._async_capable`` flag.
     """
 
-    def __init__(
-        self,
-        commit_workers: int = DEFAULT_ENGINE_DRIVEN_COMMIT_WORKERS,
-    ) -> None:
+    def __init__(self, commit_workers: int = 2) -> None:
         """Initialize the async context and create its async resources.
 
         Args:
-            commit_workers: Number of background threads used to run commit
-                (CPU->server) work. >1 so a slow gather for one store does not
-                block the commit of another whose gather is already done.
+            commit_workers: Retained for call compatibility. It is currently
+                ignored and the context always uses two workers.
+
+        TODO: Honor ``commit_workers`` if workload data establishes a need for
+        a user-facing tuning knob.
         """
         super().__init__()
-        self._commit_workers = max(1, int(commit_workers))
+        del commit_workers
+        self._commit_workers = 2
+        logger.info(
+            "Initializing async engine-driven store context with %d workers",
+            self._commit_workers,
+        )
         self._copy_stream: Any = torch_dev.Stream()
+        self._worker_staging_state = _WorkerStagingState()
         self._commit_executor: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=self._commit_workers,
             thread_name_prefix="lmcache_engine_driven_commit",
@@ -91,65 +133,40 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         # in-flight gather has had a chance to record its CUDA event.
         self._pending_stores: set[threading.Event] = set()
         # Serializes commit_store calls across worker threads, since the
-        # underlying ZMQ socket is not thread-safe and commit_workers defaults
-        # to >1.
+        # underlying ZMQ socket is not thread-safe and there are two workers.
         self._commit_lock = threading.Lock()
-        self._staging_pool: dict[
-            tuple[tuple[int, ...], torch.dtype], list[torch.Tensor]
-        ] = {}
         self._is_closing = False
 
     def _alloc_pinned_staging(
         self, shape: torch.Size, dtype: torch.dtype, count: int
-    ) -> list[torch.Tensor]:
-        """Allocate pinned (page-locked) staging tensors for GPU->CPU copies.
+    ) -> list[torch.Tensor] | None:
+        """Allocate contiguous staging views from the current worker's arena.
 
-        Tensors are reused from the pool when available to avoid repeated
-        allocations on the hot path.
+        Each executor thread creates its arena on first use. An arena grows
+        only when its worker encounters a larger store, then reuses its
+        contiguous slab for later stores.
 
         Args:
-            shape: Tensor shape to allocate.
-            dtype: Tensor dtype to allocate.
+            shape: Shape of one KV chunk.
+            dtype: Data type of one KV chunk.
             count: Number of tensors needed.
 
         Returns:
-            List of ``count`` pinned CPU tensors.
+            Contiguous chunk views backed by the worker's staging slab, or
+            ``None`` when pinned allocation fails.
         """
-        key = (tuple(shape), dtype)
-        with self._inflight_lock:
-            pooled = self._staging_pool.setdefault(key, [])
-            staged = [pooled.pop() for _ in range(min(len(pooled), count))]
-        if len(staged) == count:
-            return staged
+        arena = self._worker_staging_state.arena
+        if arena is None:
+            arena = _WorkerStagingArena()
+            self._worker_staging_state.arena = arena
+        return arena.views(shape, dtype, count)
 
-        missing = count - len(staged)
-        for _ in range(missing):
-            try:
-                staged.append(
-                    torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
-                )
-            except RuntimeError:
-                # Graceful fallback for CPU-only / pin-memory-disabled setups.
-                logger.warning(
-                    "Falling back to non-pinned CPU staging buffer "
-                    "(shape=%s, dtype=%s)",
-                    tuple(shape),
-                    dtype,
-                )
-                staged.append(torch.empty(shape, dtype=dtype, device="cpu"))
-        return staged
+    def _release_staging(self, _chunks: list[torch.Tensor]) -> None:
+        """Release staging chunks after a store completes.
 
-    def _release_staging(self, chunks: list[torch.Tensor]) -> None:
-        """Return staging tensors to the pool for reuse.
-
-        Args:
-            chunks: Tensors previously obtained from :meth:`_alloc_pinned_staging`.
+        Worker-owned arenas retain their slabs for reuse, so no per-store
+        action is needed.
         """
-        if not chunks:
-            return
-        key = (tuple(chunks[0].shape), chunks[0].dtype)
-        with self._inflight_lock:
-            self._staging_pool.setdefault(key, []).extend(chunks)
 
     def create_recorded_event(self) -> IPCEvent:
         """Create a local event that orders compute before the copy stream.
@@ -185,8 +202,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         Performs only O(1) work on the forward thread (registration check and
         block-id flattening), then submits all three phases — prepare_store,
         gather (GPU->CPU), and commit — to the background ``commit_executor``.
-        Returns an unresolved future that resolves only after all three phases
-        complete.
+        Returns an unresolved future. Pickle transfers resolve after all three
+        phases complete. Unpinned SHM transfers using staging resolve after the
+        gather event; the staging-to-SHM copy and commit remain owned by the
+        background executor and are drained by :meth:`close`.
 
         Args:
             _request_id: External request identifier (used for logging).
@@ -232,9 +251,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             def _prepare_gather_and_commit() -> None:
                 gather_done: Any | None = None
                 ok = False
-                # Whether we gathered directly into SHM views (True) or into
-                # pinned staging buffers that need to be released later (False).
-                used_shm_direct = False
+                release_before_commit = False
+                copy_staging_to_shm = False
+                staging_destinations: list[torch.Tensor] = []
                 staged_chunks: list[torch.Tensor] = []
                 try:
                     # --- Phase 1: prepare_store ---
@@ -250,40 +269,44 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         ok = True
                         return
 
-                    num_chunks = (
-                        len(chunk_indices)
-                        if chunk_indices is not None
-                        else len(full_block_ids) // blocks_in_chunk
-                    )
-
                     # Determine gather target:
-                    # - SHM path (out_buffers available): gather into SHM views
-                    # - Pickle path (no out_buffers): gather into pinned staging
-                    if out_buffers is not None:
-                        gather_target = out_buffers
-                        used_shm_direct = True
-                    else:
-                        layout_desc = engine_driven_context.layout_desc
-                        if not layout_desc.shapes:
-                            raise RuntimeError(
-                                "engine-driven layout_desc.shapes is empty"
+                    # - Pinned SHM path: gather directly into SHM views
+                    # - Unpinned SHM path: gather into pinned staging then copy
+                    # - Pickle path (no out_buffers): let gather allocate chunks
+                    gather_target = out_buffers
+                    if out_buffers is not None and not (
+                        isinstance(engine_driven_context, EngineDrivenContextShm)
+                        and engine_driven_context.is_pinned
+                    ):
+                        release_before_commit = True
+                        first_buffer = out_buffers[0]
+                        if any(
+                            buffer.shape != first_buffer.shape
+                            or buffer.dtype != first_buffer.dtype
+                            for buffer in out_buffers
+                        ):
+                            raise ValueError(
+                                "Pinned SHM staging requires uniform chunk "
+                                "shapes and dtypes"
                             )
-                        if not layout_desc.dtypes:
-                            raise RuntimeError(
-                                "engine-driven layout_desc.dtypes is empty"
-                            )
-                        staged_chunks = self._alloc_pinned_staging(
-                            layout_desc.shapes[0],
-                            layout_desc.dtypes[0],
-                            num_chunks,
+                        allocated_chunks = self._alloc_pinned_staging(
+                            first_buffer.shape,
+                            first_buffer.dtype,
+                            len(out_buffers),
                         )
-                        gather_target = staged_chunks
+                        if allocated_chunks is None:
+                            gather_target = out_buffers
+                        else:
+                            staged_chunks = allocated_chunks
+                            gather_target = staged_chunks
+                            staging_destinations = out_buffers
+                            copy_staging_to_shm = True
 
                     # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
                     with torch.inference_mode(), torch_dev.stream(self._copy_stream):
                         _event.wait(stream=self._copy_stream)
 
-                        gather_paged_kv_to_cpu(
+                        gathered_chunks = gather_paged_kv_to_cpu(
                             kv_caches,
                             full_block_ids,
                             blocks_in_chunk,
@@ -293,6 +316,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             chunk_indices=chunk_indices,
                         )
 
+                        if gather_target is None:
+                            gather_target = gathered_chunks
                         gather_done = torch_dev.Event()
                         gather_done.record(self._copy_stream)
 
@@ -305,12 +330,24 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     if gather_done is not None:
                         gather_done.synchronize()
 
+                    if release_before_commit:
+                        # The source GPU KV is no longer needed. Let vLLM
+                        # release its blocks while LMCache finishes the CPU-only
+                        # work and commit in this executor task.
+                        completion.set_result(True)
+                    if copy_staging_to_shm:
+                        for dst, src in zip(
+                            staging_destinations, staged_chunks, strict=True
+                        ):
+                            dst.copy_(src)
+                        gather_target = staging_destinations
                     # --- Phase 3: commit ---
                     with self._commit_lock:
                         ok = engine_driven_context.commit_store(
-                            key, instance_id, gather_target
+                            key,
+                            instance_id,
+                            gather_target,
                         )
-
                     if not ok:
                         logger.error(
                             "Async engine-driven commit_store failed for request_id=%s",
@@ -323,19 +360,19 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     )
                     ok = False
                 finally:
-                    if not used_shm_direct:
-                        self._release_staging(staged_chunks)
+                    self._release_staging(staged_chunks)
                     with self._inflight_lock:
                         if gather_done is not None:
                             self._inflight_gather_events.discard(gather_done)
                         self._pending_stores.discard(gather_launched)
                     gather_launched.set()
-                    completion.set_result(ok)
+                    if not completion.query():
+                        completion.set_result(ok)
 
             # Submitting the task is the ownership-transfer point: once it
-            # succeeds, the closure is solely responsible for releasing staging
-            # buffers and resolving the future. The except below therefore only
-            # handles failures that occur *before* this submit.
+            # succeeds, the closure is solely responsible for resolving the
+            # future. The except below therefore only handles failures that
+            # occur before this submit.
             commit_executor.submit(_prepare_gather_and_commit)
         except Exception:
             logger.exception("Failed to submit async engine-driven store")
