@@ -195,13 +195,32 @@ compatibility with the vLLM-embedded API server.
      - Path
      - Purpose
    * - GET
-     - ``/reconfigure/{backend}/status``
+     - ``/reconfigure/{backend}/l2/status``
      - Report runtime-manageable L2 adapters for one backend type. (To discover
        reconfigurable backends, use ``GET /config/adapters`` and read the
        ``reconfigurable`` flag.)
    * - POST
-     - ``/reconfigure/{backend}/{operation}``
+     - ``/reconfigure/{backend}/l2/{operation}``
      - Apply one runtime reconfiguration operation to a backend adapter.
+
+**Runtime L1 reconfiguration (Device-DAX)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 35 55
+
+   * - Method
+     - Path
+     - Purpose
+   * - GET
+     - ``/reconfigure/dax/l1/status``
+     - Report every Device-DAX L1 arena with usage and lifecycle state.
+   * - POST
+     - ``/reconfigure/dax/l1/add``
+     - Map an additional Device-DAX device.
+   * - POST
+     - ``/reconfigure/dax/l1/remove``
+     - Remove one mapped Device-DAX L1 device (currently drain mode only).
 
 **Observability**
 
@@ -487,7 +506,7 @@ This is the single live adapter listing; it supersedes the old
 ``primary`` is ``true`` only on the first entry. ``reconfigurable`` is
 ``true`` for adapters that accept ``/reconfigure`` operations — pass that
 adapter's ``type_name`` as the ``{backend}`` path parameter to
-``GET /reconfigure/{backend}/status`` and the reconfigure operations. An
+``GET /reconfigure/{backend}/l2/status`` and the reconfigure operations. An
 engine that has no L2 backends returns ``{"adapters": []}`` (still ``200`` —
 the engine is initialized, it just has no L2 storage).
 
@@ -1170,6 +1189,12 @@ writable by the server. The endpoint routes ``backend``, ``operation``, and the
 JSON request body into the generic L2 adapter reconfiguration API, while
 backend-specific validation and migration semantics stay inside the adapter.
 
+**Changed:** the reconfigure family is backend-first and tier-scoped -- these
+endpoints moved from ``/reconfigure/{backend}/status`` and
+``/reconfigure/{backend}/{operation}`` to ``/reconfigure/{backend}/l2/status``
+and ``/reconfigure/{backend}/l2/{operation}``; the unscoped form was removed
+(it now returns ``404``).
+
 ``backend`` and ``operation`` path segments are normalized (stripped and
 lower-cased). Within a request body, ``adapter_index`` (default ``0``) is
 **backend-local** — it indexes only the adapters of that backend, not the
@@ -1182,8 +1207,8 @@ string is still the configured L2 adapter type, not the serde wrapper type.
    ``GET /config/adapters``: each adapter whose ``reconfigurable`` flag is
    ``true`` can be addressed by its ``type_name``.
 
-``GET /reconfigure/{backend}/status``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``GET /reconfigure/{backend}/l2/status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Report the runtime-manageable adapters for one backend type. Each adapter
 entry's ``adapter_index`` is rewritten to its **backend-local** 0-based index
@@ -1218,10 +1243,10 @@ An unknown or empty backend returns ``enabled=false``, ``num_adapters=0``,
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/reconfigure/dax/status | jq
+    curl -s http://localhost:8080/reconfigure/dax/l2/status | jq
 
-``POST /reconfigure/{backend}/{operation}``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``POST /reconfigure/{backend}/l2/{operation}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Apply one reconfiguration operation to a backend adapter. The request body is
 a JSON object whose accepted fields depend on the backend and operation. The
@@ -1289,12 +1314,99 @@ dict). A successful DAX ``add`` looks like:
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/reconfigure/dax/add \
+    curl -s -X POST http://localhost:8080/reconfigure/dax/l2/add \
         -H 'Content-Type: application/json' \
         -d '{"device_path": "/dev/dax0.0", "size": "100GiB"}'
 
 See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
 mode semantics, and validation guidance.
+
+Runtime L1 Reconfiguration (Device-DAX)
+---------------------------------------
+
+These routes manage the Device-DAX L1 arena pool configured with
+``--l1-devdax-path``. Devices must already be provisioned, and requests do not
+use ``adapter_index``.
+
+``GET /reconfigure/dax/l1/status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "arenas": [
+        {
+          "device_path": "/dev/dax1.1",
+          "size_in_bytes": 17179869184,
+          "used_bytes": 4294967296,
+          "free_bytes": 12884901888,
+          "active_allocations": 2048,
+          "state": "active",
+          "is_primary": false
+        }
+      ]
+    }
+
+``POST /reconfigure/dax/l1/add``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Request body:** ``device_path`` (string) and ``size`` (integer byte count or a
+string such as ``"16GiB"``).
+
+**Response** (``200 OK``): ``{"added": <arena>}``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:8080/reconfigure/dax/l1/add \
+        -H 'Content-Type: application/json' \
+        -d '{"device_path": "/dev/dax1.2", "size": "16GiB"}'
+
+``POST /reconfigure/dax/l1/remove``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Only drain mode is supported. A draining arena accepts no new allocations and
+is unmapped after its live allocations are freed. The primary arena cannot be
+removed.
+
+**Request body:** ``device_path`` (string) and optional ``mode`` (``drain``;
+default ``drain``).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "removed": {
+        "device_path": "/dev/dax1.2",
+        "arenas": [
+          {
+            "device_path": "/dev/dax1.2",
+            "state": "draining",
+            "active_allocations": 3,
+            "size_in_bytes": 17179869184,
+            "used_bytes": 6291456,
+            "free_bytes": 17173577728,
+            "is_primary": false
+          }
+        ]
+      }
+    }
+
+**HTTP status codes:**
+
+- ``200``: success.
+- ``400``: invalid ``size``.
+- ``404``: device is not mapped.
+- ``409``: incompatible L1 or device state, or mapping validation failure.
+- ``422``: invalid request body.
+- ``500``: synchronization or cleanup failure after draining starts.
+- ``503``: engine not initialized.
+
+See :doc:`coordinator` for capacity reporting.
 
 Observability
 -------------
