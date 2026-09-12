@@ -228,8 +228,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         meta_checkpoint_interval_sec: int = 60,
         meta_idle_quiet_ms: int = 100,
         meta_enable_periodic: bool = True,
-        load_checkpoint_on_init: bool = True,
         meta_verify_on_load: bool = True,
+        load_checkpoint_on_init: bool = True,
+        blkdiscard_on_init: bool = False,
         enable_zero_copy: bool = True,
         io_engine: str = "posix",
         iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH,
@@ -259,8 +260,11 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_checkpoint_interval_sec: Periodic checkpoint interval.
             meta_idle_quiet_ms: Quiet period before periodic checkpoints.
             meta_enable_periodic: Whether to run the checkpoint thread.
-            load_checkpoint_on_init: Whether to load existing checkpoint metadata.
             meta_verify_on_load: Whether recovery verifies slot headers.
+            load_checkpoint_on_init: Whether to load existing checkpoint metadata.
+            blkdiscard_on_init: Issue a BLKDISCARD ioctl to zero/trim the full
+                device range on startup.  Only valid when
+                ``load_checkpoint_on_init=False``.
             enable_zero_copy: Whether to use aligned direct-buffer I/O.
             io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
             iouring_queue_depth: Queue depth for the Rust io_uring engine.
@@ -300,8 +304,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.meta_checkpoint_interval_sec = int(meta_checkpoint_interval_sec)
         self.meta_idle_quiet_ms = int(meta_idle_quiet_ms)
         self.meta_enable_periodic = bool(meta_enable_periodic)
-        self.load_checkpoint_on_init = bool(load_checkpoint_on_init)
         self.meta_verify_on_load = bool(meta_verify_on_load)
+        self.load_checkpoint_on_init = bool(load_checkpoint_on_init)
+        self.blkdiscard_on_init = bool(blkdiscard_on_init)
         self.enable_zero_copy = bool(enable_zero_copy)
         self.io_engine = normalize_raw_block_io_engine(io_engine)
         self.iouring_queue_depth = int(iouring_queue_depth)
@@ -446,8 +451,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_checkpoint_interval_sec=int(d.get("meta_checkpoint_interval_sec", 60)),
             meta_idle_quiet_ms=int(d.get("meta_idle_quiet_ms", 100)),
             meta_enable_periodic=bool(d.get("meta_enable_periodic", True)),
-            load_checkpoint_on_init=bool(d.get("load_checkpoint_on_init", True)),
             meta_verify_on_load=bool(d.get("meta_verify_on_load", True)),
+            load_checkpoint_on_init=bool(d.get("load_checkpoint_on_init", True)),
+            blkdiscard_on_init=bool(d.get("blkdiscard_on_init", False)),
             enable_zero_copy=bool(d.get("enable_zero_copy", True)),
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
@@ -486,10 +492,13 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- meta_idle_quiet_ms (int): quiet period before checkpoint (default 100)\n"
             "- meta_enable_periodic (bool): enable periodic checkpointing "
             "(default true)\n"
-            "- load_checkpoint_on_init (bool): load existing metadata checkpoint "
-            "on startup (default true)\n"
             "- meta_verify_on_load (bool): validate slot headers on recovery "
             "(default true)\n"
+            "- load_checkpoint_on_init (bool): load existing metadata checkpoint "
+            "on startup (default true)\n"
+            "- blkdiscard_on_init (bool): issue BLKDISCARD to zero/trim the full "
+            "device on startup; requires load_checkpoint_on_init=false "
+            "(default false)\n"
             "- enable_zero_copy (bool): use aligned direct buffers when possible "
             "(default true)\n"
             "- io_engine (str): posix or io_uring (default posix)\n"
@@ -535,8 +544,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_checkpoint_interval_sec=self.meta_checkpoint_interval_sec,
             meta_idle_quiet_ms=self.meta_idle_quiet_ms,
             meta_enable_periodic=self.meta_enable_periodic,
-            load_checkpoint_on_init=self.load_checkpoint_on_init,
             meta_verify_on_load=self.meta_verify_on_load,
+            load_checkpoint_on_init=self.load_checkpoint_on_init,
+            blkdiscard_on_init=self.blkdiscard_on_init,
             io_engine=self.io_engine,
             iouring_queue_depth=self.iouring_queue_depth,
             use_uring_cmd=self.use_uring_cmd,
