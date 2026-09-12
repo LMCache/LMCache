@@ -85,3 +85,62 @@ def test_hipify_wrapper_copies_headers_into_the_output_tree(
     rocm._hipify_wrapper(["ac_dec.cu"])
 
     assert (hipify_sandbox / "csrc_hip" / "cuda" / "utils.h").is_file()
+
+
+def _install_hipify_stub_skipping(
+    monkeypatch: pytest.MonkeyPatch, skipped: set[str]
+) -> None:
+    """Stub hipify so it yields no entry for the base names in ``skipped``.
+
+    Models hipify declining to process a file: the real one omits a source from
+    its result rather than reporting an error.
+    """
+
+    def fake_hipify(
+        project_directory: str,
+        output_directory: str,
+        extra_files: list[str],
+        **kwargs: object,
+    ) -> dict[str, _HipifyResult]:
+        result: dict[str, _HipifyResult] = {}
+        for abs_path in extra_files:
+            if os.path.basename(abs_path) in skipped:
+                continue
+            root, ext = os.path.splitext(abs_path)
+            hipified = root + ".hip" if ext == ".cu" else abs_path
+            result[abs_path] = _HipifyResult(hipified_path=hipified)
+        return result
+
+    stub = ModuleType("torch.utils.hipify.hipify_python")
+    stub.hipify = fake_hipify  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch.utils.hipify.hipify_python", stub)
+
+
+def test_hipify_wrapper_rejects_a_source_hipify_did_not_process(
+    hipify_sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source hipify skipped must fail the build, not fall back to the CUDA path.
+
+    Falling back hands setuptools the original ``.cu``, so the ROCm build
+    compiles CUDA sources under hipcc. The count check this replaces could not
+    catch it: the result list gained exactly one entry per requested source, so
+    its length always matched and the guard was unreachable.
+    """
+    _install_hipify_stub_skipping(monkeypatch, {"ac_dec.cu"})
+
+    with pytest.raises(RuntimeError, match="ac_dec.cu"):
+        rocm._hipify_wrapper(["ac_dec.cu", "pybind.cpp"])
+
+
+def test_hipify_wrapper_names_every_unhipified_source(
+    hipify_sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error names all of them, so one build reports the whole problem."""
+    _install_hipify_stub_skipping(monkeypatch, {"ac_dec.cu", "pybind.cpp"})
+
+    with pytest.raises(RuntimeError) as excinfo:
+        rocm._hipify_wrapper(["ac_dec.cu", "pybind.cpp"])
+
+    message = str(excinfo.value)
+    assert "ac_dec.cu" in message
+    assert "pybind.cpp" in message
