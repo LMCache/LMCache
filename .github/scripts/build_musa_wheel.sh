@@ -86,7 +86,16 @@ fi
 "${MUSA_PYTHON}" -c 'import torch; print("BUILD TORCH:", torch.__version__)'
 
 "${MUSA_PYTHON}" -m pip install --no-cache-dir \
-    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm grpcio==1.78.0 grpcio-tools==1.78.0 wheel pybind11 auditwheel patchelf
+    ninja \
+    "packaging>=24.2" \
+    "setuptools>=77.0.3,<81.0.0" \
+    setuptools_scm \
+    grpcio==1.78.0 \
+    grpcio-tools==1.78.0 \
+    wheel \
+    pybind11 \
+    auditwheel \
+    patchelf
 
 cd "${PROJECT_DIR}"
 rm -rf build dist dist_musa
@@ -140,6 +149,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+from packaging.version import Version
+
 wheel, destination, expected_version, expected_platform = sys.argv[1:]
 with zipfile.ZipFile(wheel) as archive:
     archive.extractall(destination)
@@ -149,7 +160,7 @@ version_line = next(
     line for line in metadata.read_text().splitlines() if line.startswith("Version: ")
 )
 actual_version = version_line.partition(": ")[2]
-if actual_version != expected_version:
+if Version(actual_version) != Version(expected_version):
     raise SystemExit(
         f"wheel version mismatch: expected {expected_version!r}, got {actual_version!r}"
     )
