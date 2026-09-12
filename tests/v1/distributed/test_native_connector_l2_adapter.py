@@ -155,6 +155,18 @@ class MockNativeConnector:
             pass
 
 
+class FailingStoreCompletionConnector(MockNativeConnector):
+    """Mock connector that accepts stores but completes them as failed."""
+
+    def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+
+        self._push_completion(fid, False, "forced store failure", None)
+        return fid
+
+
 # =============================================================================
 # Test Fixtures
 # =============================================================================
@@ -488,6 +500,28 @@ class TestStoreInterface:
 
         completed = adapter.pop_completed_store_tasks()
         assert completed[task_id].is_successful()
+
+    def test_failed_store_completion_clears_pending_state(self):
+        mock_client = FailingStoreCompletionConnector()
+        adp = NativeConnectorL2Adapter(mock_client)
+        try:
+            key = create_object_key(1)
+            obj = create_memory_obj()
+            store_fd = adp.get_store_event_fd()
+
+            task_id = adp.submit_store_task([key], [obj])
+            assert wait_for_event_fd(store_fd, timeout=5.0)
+
+            completed = adp.pop_completed_store_tasks()
+            assert task_id in completed
+            assert not completed[task_id].is_successful()
+            assert completed[task_id].bytes_transferred() == 0
+
+            with adp._lock:
+                assert adp._pending_ops == {}
+                assert adp._pending_store_sizes == {}
+        finally:
+            adp.close()
 
 
 # =============================================================================

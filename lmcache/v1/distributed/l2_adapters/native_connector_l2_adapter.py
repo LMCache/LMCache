@@ -449,6 +449,17 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         lookup_keys,
                     ) = entry
 
+                    if not ok:
+                        logger.warning(
+                            "Native connector task failed: type=%s "
+                            "future_id=%d task_id=%d op=%s error=%s",
+                            self._type_name,
+                            fid,
+                            task_id,
+                            op_type,
+                            error,
+                        )
+
                     if op_type == self._OP_STORE:
                         store_info = self._pending_store_sizes.pop(fid, None)
                         task_bytes = 0
