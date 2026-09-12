@@ -1,11 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "connector.h"
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+
+namespace {
+std::atomic<uint64_t> next_temp_file_id{0};
+
+void remove_temp_file(const std::filesystem::path& tmp_path) {
+  std::error_code remove_ec;
+  std::filesystem::remove(tmp_path, remove_ec);
+  if (remove_ec) {
+    fprintf(stderr, "[LMCache SET] temporary file cleanup failed: %s: %s\n",
+            tmp_path.c_str(), remove_ec.message().c_str());
+  }
+}
+}  // namespace
 
 namespace lmcache {
 namespace connector {
@@ -128,8 +142,7 @@ static bool try_enable_odirect(int& flags, const void* buf, size_t len,
   }
   auto addr = reinterpret_cast<std::uintptr_t>(buf);
   if (addr % disk_block_size != 0) {
-    throw std::runtime_error(
-        "O_DIRECT buffer address is not aligned to filesystem block size");
+    return false;
   }
   flags |= O_DIRECT;
   return true;
@@ -247,46 +260,60 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
     return;
   }
 
-  // Determine temp file path
+  const auto tmp_dir =
+      conn.tmp_dir.empty() ? file_path.parent_path() : conn.tmp_dir;
   std::filesystem::path tmp_path;
-  if (!conn.tmp_dir.empty()) {
-    tmp_path = conn.tmp_dir / filename;
-  } else {
-    tmp_path = file_path;
-    tmp_path.replace_extension(TMP_EXT);
-  }
-
-  int flags = O_CREAT | O_WRONLY | O_TRUNC;
+  int flags = O_CREAT | O_EXCL | O_WRONLY;
   if (conn.use_odirect) {
     try_enable_odirect(flags, buf, len, conn.disk_block_size);
   }
 
-  int fd = ::open(tmp_path.c_str(), flags, 0644);
+  int fd = -1;
+  for (size_t attempt = 0; attempt < 1024; ++attempt) {
+    const uint64_t id =
+        next_temp_file_id.fetch_add(1, std::memory_order_relaxed);
+    tmp_path = tmp_dir / (filename + TMP_EXT + "." +
+                          std::to_string(static_cast<uint64_t>(::getpid())) +
+                          "." + std::to_string(id));
+    fd = ::open(tmp_path.c_str(), flags, 0644);
+    if (fd >= 0) break;
+    if (errno != EEXIST) {
+      throw std::runtime_error("open for write failed: " + tmp_path.string() +
+                               ": " + strerror(errno));
+    }
+  }
   if (fd < 0) {
-    throw std::runtime_error("open for write failed: " + tmp_path.string() +
-                             ": " + strerror(errno));
+    throw std::runtime_error("failed to allocate a unique temporary file for " +
+                             file_path.string());
   }
 
   try {
     write_all(fd, buf, len);
+    if (::close(fd) != 0) {
+      const int close_errno = errno;
+      fd = -1;
+      throw std::runtime_error("close after write failed: " +
+                               std::string(strerror(close_errno)));
+    }
+    fd = -1;
   } catch (...) {
-    ::close(fd);
-    // Clean up temp file on failure
-    std::filesystem::remove(tmp_path);
+    if (fd >= 0) ::close(fd);
+    remove_temp_file(tmp_path);
     throw;
   }
-  ::close(fd);
 
-  // Atomic rename: tmp -> final
-  std::error_code ec;
-  std::filesystem::rename(tmp_path, file_path, ec);
-  if (ec) {
-    // Try to clean up, but prioritize reporting the original error.
-    std::error_code remove_ec;
-    std::filesystem::remove(tmp_path, remove_ec);
-    throw std::runtime_error("rename failed: " + tmp_path.string() + " -> " +
-                             file_path.string() + ": " + ec.message());
+  // Publish the completed writer-owned inode without replacing an established
+  // value. Concurrent and cross-process duplicate writers therefore never
+  // share writable storage, and readers only observe a complete object.
+  if (::link(tmp_path.c_str(), file_path.c_str()) != 0) {
+    const int link_errno = errno;
+    remove_temp_file(tmp_path);
+    if (link_errno == EEXIST) return;
+    throw std::runtime_error("publish failed: " + tmp_path.string() + " -> " +
+                             file_path.string() + ": " + strerror(link_errno));
   }
+
+  remove_temp_file(tmp_path);
 }
 
 bool FSConnector::do_single_exists(WorkerFSConn& conn, const std::string& key) {
