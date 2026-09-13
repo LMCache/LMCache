@@ -79,7 +79,7 @@ def test_pickle_store_syncs_before_commit_serializes() -> None:
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
     order: list[str] = []
-    ctx = worker_transfer.EngineDrivenTransferContext()
+    ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
     ctx._engine_driven_context = MagicMock()
     ctx._engine_driven_context.prepare_store.return_value = None  # pickle mode
 
@@ -103,7 +103,6 @@ def test_pickle_store_syncs_before_commit_serializes() -> None:
         ctx.submit_store(
             "req",
             MagicMock(),  # key
-            1,  # instance_id
             {"layer_0": torch.zeros(2, 4, 4, 2, 8)},
             [[0, 1, 2, 3]],
             MagicMock(),  # event (unused on this transport)
