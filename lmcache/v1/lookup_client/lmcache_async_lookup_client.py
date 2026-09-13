@@ -171,9 +171,18 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 self.first_lookup_time[lookup_id] = time.time()
             elif req_status is None:
                 time.sleep(self.lookup_backoff_time)
-                if (
-                    time.time() - self.first_lookup_time[lookup_id]
-                ) * 1000 > self.config.lookup_timeout_ms:
+                start_time = self.first_lookup_time.get(lookup_id)
+                if start_time is None:
+                    # This lookup already timed out and was cancelled on an
+                    # earlier call (first_lookup_time was popped while its
+                    # abort is still pending cleanup). Keep telling vLLM to
+                    # recompute instead of dereferencing the missing key,
+                    # which previously raised KeyError and crashed the
+                    # EngineCore (issue #3685). reqs_status[lookup_id] is left
+                    # as None on purpose so the id is not re-registered as a
+                    # fresh lookup while the aborted task may still complete.
+                    return 0
+                if (time.time() - start_time) * 1000 > self.config.lookup_timeout_ms:
                     logger.warning(
                         (
                             "Request %s is still waiting for async lookup "
