@@ -14,6 +14,9 @@ set -euo pipefail
 #######################################
 : "${BUILD_ID:?BUILD_ID must be set}"
 
+source .buildkite/k3_tests/common_scripts/helpers.sh
+merge_pr_base_branch
+
 #######################################
 # Configuration
 #######################################
