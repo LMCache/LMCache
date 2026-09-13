@@ -1043,8 +1043,20 @@ class RawBlockCore:
         return self._apply_loaded_state(data)
 
     def report_status(self) -> dict:
-        """Return raw-block health, layout, metadata, and in-flight counters."""
+        """Return health, layout, metadata, and best-effort Rust I/O status.
+
+        ``device_io`` counts backend I/O attempts and requested submitted bytes,
+        not hardware commands or achieved device throughput. Its outstanding
+        request gauge includes queued work. ``inflight_io_count`` retains its
+        existing Python-level meaning. Unavailable Rust status is ``None``.
+        """
         with self._lock:
+            raw = self._raw
+            snapshot = getattr(raw, "io_stats_snapshot", None)
+            try:
+                device_io = snapshot() if snapshot is not None else None
+            except Exception:
+                device_io = None
             return {
                 "is_healthy": not self._closed,
                 "type": "RawBlockCore",
@@ -1067,6 +1079,7 @@ class RawBlockCore:
                 "metadata_dirty_total": self._meta_dirty_total,
                 "metadata_persisted": self._meta_persisted,
                 "inflight_io_count": self._inflight_io_count,
+                "device_io": device_io,
                 "use_odirect": self.use_odirect,
                 "enable_zero_copy": self.enable_zero_copy,
                 "io_engine": self.io_engine,
