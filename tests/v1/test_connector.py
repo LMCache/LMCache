@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 import asyncio
@@ -399,3 +400,56 @@ def test_redis_plugin_custom_url(mock_redis_connector, autorelease_v1) -> None:
 
     close_asyncio_loop(async_loop, async_thread)
     local_cpu_backend.close()
+
+
+@pytest.mark.parametrize(
+    "url_template",
+    [
+        # Documented form: fs:///path (no authority).
+        "fs://{path}",
+        # Legacy form used by existing fs tests: fs://host:0/path.
+        "fs://host:0{path}",
+    ],
+)
+def test_fs_connector_authority_is_optional(
+    autorelease_v1: Callable[..., object],
+    url_template: str,
+) -> None:
+    """An fs:// URL names the same directory with or without an authority.
+
+    The scheme is documented as fs://[host:port]/path, so fs:///var/lmcache
+    and fs://host:0/var/lmcache must both list files under /var/lmcache.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        marker = "fs-authority-optional"
+        Path(temp_dir, f"{marker}.data").write_bytes(b"marker")
+        url = url_template.format(path=temp_dir)
+        async_loop, async_thread = init_asyncio_loop()
+        memory_allocator = PinMemoryAllocator(8 * 1024 * 1024)
+        config = LMCacheEngineConfig.from_defaults()
+        local_cpu_backend = _create_local_cpu_backend(memory_allocator, False, config)
+        try:
+            connector = autorelease_v1(
+                CreateConnector(url, async_loop, local_cpu_backend, config)
+            )
+            listed = asyncio.run_coroutine_threadsafe(
+                connector.list(), async_loop
+            ).result()
+            assert listed == [marker]
+        finally:
+            close_asyncio_loop(async_loop, async_thread)
+            local_cpu_backend.close()
+
+
+def test_fs_connector_url_without_path_is_rejected() -> None:
+    """An fs:// URL carrying no path is rejected with a usable message."""
+    async_loop, async_thread = init_asyncio_loop()
+    memory_allocator = PinMemoryAllocator(8 * 1024 * 1024)
+    config = LMCacheEngineConfig.from_defaults()
+    local_cpu_backend = _create_local_cpu_backend(memory_allocator, False, config)
+    try:
+        with pytest.raises(ValueError, match="no path"):
+            CreateConnector("fs://", async_loop, local_cpu_backend, config)
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+        local_cpu_backend.close()
