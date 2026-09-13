@@ -432,6 +432,19 @@ else
   # of `setuptools` that would block the version vllm-cpu-nightly
   # pins.
   uv pip uninstall -y vllm vllm-cpu-nightly 2>/dev/null || true
+  if [ -z "${VLLM_CPU_NIGHTLY_SPEC:-}" ]; then
+    case "$(uname -s)" in
+      Darwin) vllm_pin_platform="macos-latest" ;;
+      *) vllm_pin_platform="ubuntu-22.04" ;;
+    esac
+    export LMCACHE_VLLM_PIN_URL="${LMCACHE_VLLM_PIN_URL:-https://raw.githubusercontent.com/LMCache/LMCache/github_nightly_tested_vllm/latest_tested_vllm_${vllm_pin_platform}.txt}"
+    # Reuse the common pin resolver so standalone CPU validation installs the
+    # same verified CPU nightly wheel as the GitHub CPU workflow.
+    source "${SHARED_SCRIPTS_DIR}/../../.buildkite/k3_harness/resolve-pinned-vllm.sh"
+    if [ -n "${PINNED_VLLM_VERSION:-}" ]; then
+      export VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly==${PINNED_VLLM_VERSION}"
+    fi
+  fi
   PIP_BIN="uv pip" \
   PIP_INSTALL_EXTRA_ARGS="--index-strategy unsafe-best-match" \
     bash "${SHARED_SCRIPTS_DIR}/install_vllm_cpu.sh"
