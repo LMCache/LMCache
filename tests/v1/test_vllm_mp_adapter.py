@@ -327,7 +327,7 @@ def test_connector_reset_cache_refuses_active_request_trackers():
         connector_mod.LMCacheMPConnector
     )
     tracker = MagicMock(name="request_tracker")
-    connector.role = connector_mod.KVConnectorRole.SCHEDULER
+    connector._role = connector_mod.KVConnectorRole.SCHEDULER
     connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
     connector.request_trackers = {"req-1": tracker}
 
@@ -343,7 +343,7 @@ def test_connector_reset_cache_forwards_when_scheduler_is_quiesced():
     connector = connector_mod.LMCacheMPConnector.__new__(
         connector_mod.LMCacheMPConnector
     )
-    connector.role = connector_mod.KVConnectorRole.SCHEDULER
+    connector._role = connector_mod.KVConnectorRole.SCHEDULER
     connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
     connector.scheduler_adapter.reset_cache.return_value = True
     connector.request_trackers = {}
@@ -359,7 +359,7 @@ def test_connector_reset_cache_returns_none_for_worker_role():
     connector = connector_mod.LMCacheMPConnector.__new__(
         connector_mod.LMCacheMPConnector
     )
-    connector.role = connector_mod.KVConnectorRole.WORKER
+    connector._role = connector_mod.KVConnectorRole.WORKER
 
     assert connector.reset_cache() is None
 

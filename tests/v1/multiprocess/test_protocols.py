@@ -5,6 +5,7 @@
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.protocol import get_response_class
 from lmcache.v1.multiprocess.protocols import initialize_protocols
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.protocols.blend import (
@@ -83,6 +84,10 @@ def test_wire_ids_are_unique() -> None:
 def test_every_request_type_has_a_definition() -> None:
     definitions = initialize_protocols()
     assert set(definitions) == set(RequestType)
+
+
+def test_clear_protocol_returns_completion_status() -> None:
+    assert get_response_class(RequestType.CLEAR) is bool
 
 
 def test_blend_requests_are_registered() -> None:

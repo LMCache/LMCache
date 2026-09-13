@@ -30,10 +30,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     return {
         # Clear all caches
         # Payload: None
-        # Returns: None
+        # Returns: bool - True if all cache state was cleared, False if locked
+        # objects were preserved.
         "CLEAR": ProtocolDefinition(
             payload_classes=[],
-            response_class=None,
+            response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),
         # Get chunk size configuration
