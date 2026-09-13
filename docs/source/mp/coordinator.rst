@@ -1069,9 +1069,12 @@ verbatim with its code.
 
 .. code-block:: json
 
-    {"status": "completed", "found_keys": 12, "total_keys": 12}
+    {"status": "completed", "found_keys": 12, "total_keys": 12, "missing_key_indices": []}
 
-``found_keys`` of ``total_keys`` requested chunks were resident.
+``found_keys`` of ``total_keys`` requested keys were loaded;
+``missing_key_indices`` lists the positions (chunk-major, then rank) of the
+rest. See the MP server's ``GET /cache/prefetches/{request_id}`` in
+:doc:`http_api` for the counting rule.
 
 **HTTP status codes:**
 
@@ -1085,7 +1088,7 @@ verbatim with its code.
 .. code-block:: bash
 
     curl -s http://localhost:9300/cache/prefetches/server-1/abc123
-    # -> {"status": "completed", "found_keys": 12, "total_keys": 12}
+    # -> {"status": "completed", "found_keys": 12, "total_keys": 12, "missing_key_indices": []}
 
 **Pin/unpin (protecting cache from eviction).** Pin a token sequence's cache so
 it is not evicted from L2 until unpinned. The coordinator resolves the token
