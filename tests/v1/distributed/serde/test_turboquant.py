@@ -451,6 +451,48 @@ def test_turboquant_storage_manager_roundtrip(
         sm.close()
 
 
+@pytest.mark.parametrize("dtype", ["fp16", "bf16"])
+def test_turboquant_fp8_store_compiles_sm80(dtype: str) -> None:
+    """Compile the Ampere store path independently of the host GPU."""
+    pytest.importorskip("triton.backends.nvidia.compiler")
+
+    # Third Party
+    from triton.backends.compiler import GPUTarget
+    from triton.compiler import ASTSource
+    import triton
+
+    # First Party
+    from lmcache.v1.distributed.serde.turboquant.store_kernel import _tq_fused_store_fp8
+
+    constants = {
+        "stride_cache_block": 16 * 8 * 196,
+        "stride_cache_pos": 8 * 196,
+        "stride_cache_head": 196,
+        "D": 128,
+        "H": 8,
+        "BLOCK_SIZE": 16,
+        "BLOCK_D": 128,
+        "KPS": 128,
+        "VQB": 4,
+        "VAL_DATA_BYTES": 64,
+        "BLOCK_VAL": 64,
+        "BLOCK_GRP": 16,
+        "FP8_E4B15": 1,
+    }
+    signature = {
+        "Key_ptr": f"*{dtype}",
+        "Value_ptr": f"*{dtype}",
+        "KV_cache_ptr": "*u8",
+        "Slot_mapping_ptr": "*i32",
+        **{name: "constexpr" for name in constants},
+    }
+    triton.compile(
+        ASTSource(_tq_fused_store_fp8, signature, constexprs=constants),
+        target=GPUTarget("cuda", 80, 32),
+        options={"num_warps": 4, "num_stages": 1},
+    )
+
+
 # =============================================================================
 # GPU direct test: TurboQuantSerializer + TurboQuantDeserializer
 # =============================================================================
@@ -474,7 +516,9 @@ class _FakeMemoryObj:
         ("turboquant_3bit_nc", 4.85, 0.80),
     ],
 )
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_turboquant_direct_roundtrip_cuda(
+    dtype: torch.dtype,
     preset: str,
     expected_ratio_lower_bound: float,
     corr_lower_bound: float,
@@ -484,8 +528,6 @@ def test_turboquant_direct_roundtrip_cuda(
     from lmcache.v1.distributed.serde.turboquant import TurboQuantDeserializer
 
     device = torch.device(f"{torch_device_type}:0")
-    dtype = torch.float16
-
     # LMCache KV layout: [2, num_layers, num_tokens, hidden_dim]
     num_layers = 4
     num_tokens = 128
