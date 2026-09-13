@@ -972,7 +972,7 @@ class LMCacheConnectorV1Impl:
             layer_name: the name of that layer
         """
         if self.layerwise_retrievers:
-            logger.debug(f"Waiting for layer {self.current_layer} to be loaded")
+            logger.debug("Waiting for layer %s to be loaded", self.current_layer)
 
         # Wait for the layer to be loaded
         for layerwise_retriever in self.layerwise_retrievers:
@@ -981,7 +981,7 @@ class LMCacheConnectorV1Impl:
             if self.current_layer == self.num_layers - 1:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                logger.info(f"Retrieved {num_retrieved_tokens} tokens")
+                logger.info("Retrieved %s tokens", num_retrieved_tokens)
 
         if self.layerwise_retrievers:
             self.current_layer += 1
@@ -1395,11 +1395,12 @@ class LMCacheConnectorV1Impl:
             # -1 means no result cached
             # None or int means ongoing (async) or cached result
             logger.debug(
-                f"Found {num_external_hit_tokens} hit tokens for request"
-                f" {req_id} in the lookup cache."
+                "Found %s hit tokens for request %s in the lookup cache.",
+                num_external_hit_tokens,
+                req_id,
             )
         else:
-            logger.debug(f"Looking up cache for the first time for request {req_id}!")
+            logger.debug("Looking up cache for the first time for request %s!", req_id)
             self._requests_priority[req_id] = getattr(request, "priority", 0)
 
             # token_ids = request.prompt_token_ids
