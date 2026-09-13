@@ -920,6 +920,13 @@ class LMCacheEngine:
                     if self.save_only_first_rank and self.metadata.is_first_rank():
                         self._leader_gpu_substitute_objs = []
 
+        # Build set of keys that will be unpinned by lookup_unpin() later
+        # to avoid double-unpin (retrieve + lookup_unpin both unpinning).
+        pinned_by_lookup = set()
+        for loc_dict in self.lookup_pins.values():
+            for keys in loc_dict.values():
+                pinned_by_lookup.update(keys)
+
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
         for key, memory_obj, _, _ in reordered_chunks:
@@ -932,7 +939,9 @@ class LMCacheEngine:
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
             else:
-                if memory_obj.is_pinned:
+                # Only unpin objects NOT tracked by lookup_pins;
+                # those will be unpinned by lookup_unpin() later.
+                if memory_obj.is_pinned and key not in pinned_by_lookup:
                     memory_obj.unpin()
                 memory_obj.ref_count_down()
 
@@ -1075,7 +1084,17 @@ class LMCacheEngine:
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
+            # Build set of keys that will be unpinned by lookup_unpin() later
+            # to avoid double-unpin (retrieve + lookup_unpin both unpinning).
+            pinned_by_lookup = set()
+            for loc_dict in self.lookup_pins.values():
+                for keys_list in loc_dict.values():
+                    pinned_by_lookup.update(keys_list)
+
             to_count_down = []
+            # Track mem_obj ids whose keys are pinned by lookup_unpin()
+            # so we skip unpinning them here (lookup_unpin handles them).
+            pinned_mem_obj_ids = set()
             for layer_id in range(self.num_layers):
                 task = next(get_generator)
 
@@ -1092,6 +1111,11 @@ class LMCacheEngine:
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
 
+                if pinned_by_lookup:
+                    for k, m in zip(keys_layer_major[layer_id], mem_objs_layer):
+                        if k in pinned_by_lookup:
+                            pinned_mem_obj_ids.add(id(m))
+
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
         else:
@@ -1105,12 +1129,13 @@ class LMCacheEngine:
         # synchronize the last layer
         next(mem_obj_consumer)
 
-        # Unpin any disk-loaded staging objects now that the device-side sync
-        # has been enqueued (mem_obj_consumer advanced past its sync point).
-        # Without this, pin_count stays at 1 forever and the CPU staging pool
-        # fills up, causing the next retrieve to deadlock inside allocate().
+        # Unpin disk-loaded staging objects that are NOT tracked by lookup_pins
+        # (those will be unpinned by lookup_unpin() later).
+        # Without unpinning non-lookup objects, pin_count stays at 1 forever
+        # and the CPU staging pool fills up, causing the next retrieve to
+        # deadlock inside allocate().
         for mem_obj in to_count_down:
-            if mem_obj.is_pinned:
+            if mem_obj.is_pinned and id(mem_obj) not in pinned_mem_obj_ids:
                 mem_obj.unpin()
 
         retrieved_tokens = torch.sum(ret_mask)
