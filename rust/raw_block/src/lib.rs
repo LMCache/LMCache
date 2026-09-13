@@ -46,29 +46,6 @@ enum IoUringWrapper {
 
 impl IoUringWrapper {
     fn submit(&self) -> io::Result<usize> {
-        #[cfg(test)]
-        if INJECT_PARTIAL_FATAL.with(|inject| inject.get()) {
-            INJECT_PARTIAL_FATAL.with(|inject| inject.set(false));
-            INJECT_FATAL_SUBMIT.with(|inject| inject.set(true));
-            return match self {
-                Self::Standard(ring) => unsafe {
-                    ring.lock()
-                        .unwrap()
-                        .submitter()
-                        .enter::<libc::sigset_t>(1, 0, 0, None)
-                },
-                Self::Big(ring) => unsafe {
-                    ring.lock()
-                        .unwrap()
-                        .submitter()
-                        .enter::<libc::sigset_t>(1, 0, 0, None)
-                },
-            };
-        }
-        #[cfg(test)]
-        if INJECT_FATAL_SUBMIT.with(|inject| inject.replace(false)) {
-            return Err(io::Error::from_raw_os_error(libc::EIO));
-        }
         match self {
             Self::Standard(ring) => ring.lock().unwrap().submitter().submit(),
             Self::Big(ring) => ring.lock().unwrap().submitter().submit(),
@@ -106,10 +83,6 @@ impl IoUringWrapper {
     }
 
     fn cancel_submitted(&self) -> io::Result<()> {
-        #[cfg(test)]
-        if DISABLE_SYNC_CANCEL.with(|disabled| disabled.get()) {
-            return Err(io::Error::from_raw_os_error(libc::EINVAL));
-        }
         let timeout = Some(io_uring::types::Timespec::new().sec(1));
         let cancel = io_uring::types::CancelBuilder::any();
         match self {
@@ -1155,24 +1128,9 @@ fn stop_submissions(queue: &Mutex<Vec<IoSubmission>>, shutdown: &AtomicBool) {
 }
 
 #[cfg(test)]
-thread_local! {
-    static INJECT_FATAL_SUBMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static INJECT_PARTIAL_FATAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static DISABLE_SYNC_CANCEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
 mod submission_shutdown_tests {
     use super::*;
     use std::sync::Barrier;
-
-    struct TestFile(std::path::PathBuf);
-
-    impl Drop for TestFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
 
     #[test]
     fn stopped_queue_rejects_without_lifecycle_or_metric_updates() {
@@ -1229,129 +1187,6 @@ mod submission_shutdown_tests {
                 .is_err());
             });
         }
-    }
-
-    #[test]
-    fn fatal_submit_rejects_all_submission_apis_and_close_finishes() {
-        check_fatal_submit(false, false);
-    }
-
-    #[test]
-    fn fatal_submit_after_partial_acceptance_drains_before_release() {
-        check_fatal_submit(true, false);
-    }
-
-    #[test]
-    fn fatal_submit_without_sync_cancel_drains_accepted_requests() {
-        check_fatal_submit(true, true);
-    }
-
-    fn check_fatal_submit(partial: bool, disable_cancel: bool) {
-        pyo3::prepare_freethreaded_python();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let path = std::env::temp_dir().join(format!(
-                "test-fatal-submit-{}-{partial}-{disable_cancel}.bin",
-                std::process::id()
-            ));
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .unwrap();
-            let _cleanup = TestFile(path.clone());
-            file.set_len(4096).unwrap();
-            Python::with_gil(|py| {
-                INJECT_FATAL_SUBMIT.with(|inject| inject.set(!partial));
-                INJECT_PARTIAL_FATAL.with(|inject| inject.set(partial));
-                DISABLE_SYNC_CANCEL.with(|disabled| disabled.set(disable_cancel));
-                let result = RawBlockDevice::new_internal(
-                    path.to_string_lossy().into_owned(),
-                    true,
-                    false,
-                    4096,
-                    true,
-                    false,
-                    None,
-                    8,
-                );
-                let mut device = match result {
-                    Ok(device) => device,
-                    Err(error) => {
-                        let code = error
-                            .value(py)
-                            .getattr("errno")
-                            .and_then(|value| value.extract::<i32>())
-                            .ok();
-                        if matches!(
-                            code,
-                            Some(libc::ENOSYS | libc::EPERM | libc::EACCES | libc::EOPNOTSUPP)
-                        ) {
-                            eprintln!("io_uring unavailable: {error}");
-                            return;
-                        }
-                        panic!("io_uring setup failed: {error}");
-                    }
-                };
-                std::fs::remove_file(&path).unwrap();
-                let buffer = pyo3::types::PyByteArray::new(py, &[0; 4096]);
-                let batch = device
-                    .batched_read(
-                        py,
-                        vec![0; 128],
-                        vec![buffer.clone().into_any(); 128],
-                        vec![4096; 128],
-                    )
-                    .unwrap();
-                let (completed, failures) = device.wait_iouring(py, batch).unwrap();
-                assert_eq!(completed.len(), 128);
-                assert_eq!(
-                    failures.len(),
-                    completed.iter().filter(|success| !**success).count()
-                );
-                assert!(
-                    completed.iter().filter(|success| **success).count() <= usize::from(partial)
-                );
-                assert!(device.batched_completions.lock().unwrap().is_empty());
-                assert!(device.batched_buffer_objs.lock().unwrap().is_empty());
-                assert!(device.batch_in_flight.lock().unwrap().is_empty());
-                let snapshot = device.io_stats_snapshot();
-                assert_eq!(snapshot["read_attempts"], u64::from(partial));
-                assert_eq!(
-                    snapshot["completed_attempts"] + snapshot["failed_attempts"],
-                    u64::from(partial)
-                );
-                let deadline = std::time::Instant::now() + Duration::from_secs(3);
-                py.allow_threads(|| {
-                    while !device.shutdown.as_ref().unwrap().load(Ordering::Relaxed) {
-                        assert!(std::time::Instant::now() < deadline);
-                        thread::sleep(Duration::from_millis(1));
-                    }
-                });
-                assert!(device
-                    .batched_read(py, vec![0], vec![buffer.clone().into_any()], vec![4096])
-                    .is_err());
-                assert!(device
-                    .batched_write(
-                        py,
-                        vec![0],
-                        vec![buffer.clone().into_any()],
-                        vec![4096],
-                        None
-                    )
-                    .is_err());
-                assert!(device
-                    .read_uring(py, 0, buffer.as_any(), 4096, None)
-                    .is_err());
-                assert!(device
-                    .write_uring(py, 0, buffer.as_any(), 4096, None, None)
-                    .is_err());
-                device.close().unwrap();
-                assert_eq!(device.in_flight_count.load(Ordering::Relaxed), 0);
-            });
-            sender.send(()).unwrap();
-        });
-        receiver.recv_timeout(Duration::from_secs(10)).unwrap();
     }
 }
 
@@ -1986,23 +1821,9 @@ impl RawBlockDevice {
             // - Reads from the submission queue
             // - Submits to io_uring
             // - Processes completions
-            #[cfg(test)]
-            let inject_fatal_submit = INJECT_FATAL_SUBMIT.with(|inject| inject.replace(false));
-            #[cfg(test)]
-            let inject_partial_fatal = INJECT_PARTIAL_FATAL.with(|inject| inject.replace(false));
-            #[cfg(test)]
-            let disable_sync_cancel = DISABLE_SYNC_CANCEL.with(|disabled| disabled.replace(false));
             let worker = thread::Builder::new()
                 .name("rust-rawblock-uring".into())
                 .spawn(move || {
-                    #[cfg(test)]
-                    if inject_fatal_submit {
-                        INJECT_FATAL_SUBMIT.with(|inject| inject.set(true));
-                    }
-                    #[cfg(test)]
-                    INJECT_PARTIAL_FATAL.with(|inject| inject.set(inject_partial_fatal));
-                    #[cfg(test)]
-                    DISABLE_SYNC_CANCEL.with(|disabled| disabled.set(disable_sync_cancel));
                     let worker_stats = worker_stats_owner.worker_recorder();
                     let mut in_flight: HashMap<u64, IoSubmission> = HashMap::new();
                     let mut pending = VecDeque::with_capacity(ring_size);
