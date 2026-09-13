@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 # Standard
+import ctypes
+import mmap
 import os
 import platform
 
@@ -133,3 +135,45 @@ def test_raw_block_device_odirect_optional_smoke(tmp_path):
     finally:
         if dev is not None:
             dev.close()
+
+
+@pytest.mark.skipif(
+    os.getenv("LMCACHE_RUN_ODIRECT_SMOKE") != "1",
+    reason="O_DIRECT smoke is opt-in and not part of default PR CI",
+)
+def test_raw_block_device_fixed_buffer_supports_inner_ranges(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    arena = mmap.mmap(-1, 3 * RAW_BLOCK_CI_BLOCK_ALIGN)
+    arena_view = memoryview(arena)
+    buffer_ptr = ctypes.addressof((ctypes.c_ubyte * 1).from_buffer(arena_view))
+    source = arena_view[RAW_BLOCK_CI_BLOCK_ALIGN : 2 * RAW_BLOCK_CI_BLOCK_ALIGN]
+    target = arena_view[2 * RAW_BLOCK_CI_BLOCK_ALIGN : 3 * RAW_BLOCK_CI_BLOCK_ALIGN]
+    dev = None
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=True,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+        dev.register_fixed_buffers([buffer_ptr], [len(arena_view)])
+
+        source[:] = bytes([37]) * len(source)
+        dev.write_uring(4096, source, len(source), len(source))
+        target[:] = bytes(len(target))
+        dev.read_uring(4096, target, len(target), len(target))
+
+        assert target == source
+    except Exception as e:
+        if is_skip_safe_io_error(e):
+            pytest.skip(f"O_DIRECT fixed buffers are unavailable: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+        source.release()
+        target.release()
+        arena_view.release()
+        arena.close()
