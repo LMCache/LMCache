@@ -14,9 +14,15 @@ x-flaky-retry: &flaky-retry
     - exit_status: "*"
       limit: 2
 
-# Run every regular multiprocess scenario against both request transports.
-# Worker-side KV transfer modes remain separate matrix dimensions below.
+# Most scenarios exercise transport-independent behavior, so keep their PR
+# coverage on the default ZMQ transport.
 x-request-transport-matrix: &request-transport-matrix
+  setup:
+    request_transport:
+      - "zmq"
+
+# Retain gRPC only for the representative GPU E2E and restart-recovery smokes.
+x-request-transport-smoke-matrix: &request-transport-smoke-matrix
   setup:
     request_transport:
       - "zmq"
@@ -93,7 +99,7 @@ steps:
     steps:
       - label: ":compression: vllm_bench / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-        matrix: *request-transport-matrix
+        matrix: *request-transport-smoke-matrix
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -195,7 +201,6 @@ steps:
               - "engine_driven"
             request_transport:
               - "zmq"
-              - "grpc"
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         retry: *flaky-retry
@@ -238,7 +243,6 @@ steps:
               - "engine_driven"
             request_transport:
               - "zmq"
-              - "grpc"
         timeout_in_minutes: 30
         env:
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -263,7 +267,7 @@ steps:
 
       - label: ":compression: restart_recovery / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
-        matrix: *request-transport-matrix
+        matrix: *request-transport-smoke-matrix
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -351,7 +355,6 @@ steps:
               - "server_copy"
             request_transport:
               - "zmq"
-              - "grpc"
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -387,7 +390,7 @@ steps:
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
       python3 -c 'import vllm; print(vllm.__version__)' \
         > "verified_vllm_{{matrix.request_transport}}.txt"
-    matrix: *request-transport-matrix
+    matrix: *request-transport-smoke-matrix
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     timeout_in_minutes: 30
     agents: { queue: "k8s" }

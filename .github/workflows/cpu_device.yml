@@ -87,7 +87,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest]
-        request_transport: [zmq, grpc]
+        request_transport: [zmq]
         # Each entry is a self-contained model profile the e2e steps
         # thread through env vars. Adding a new model = adding a new
         # entry here. All models share the same downloader
@@ -126,6 +126,21 @@ jobs:
             trust_remote_code: "1"
             mla_disable: "0"
             run_engine_driven_e2e: true
+        # One representative gRPC leg covers the CPU request path without
+        # duplicating every OS/model combination.
+        include:
+          - os: ubuntu-22.04
+            request_transport: grpc
+            model:
+              name: opt-125m
+              id: facebook/opt-125m
+              tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
+              cache_marker: pytorch_model.bin
+              load_format: ""
+              hf_overrides: ""
+              trust_remote_code: "0"
+              mla_disable: "0"
+              run_engine_driven_e2e: true
 
     env:
       # Threaded to run-cpu-e2e-validation.sh; server_bench ignores them.
