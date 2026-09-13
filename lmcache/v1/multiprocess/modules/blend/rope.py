@@ -31,7 +31,8 @@ class _CBRopeState:
     head_size: int
     is_neox_style: bool  # NeoX = contiguous halves; else GPT-J.
     cos_sin_caches: list[torch.Tensor]
-    group_to_cache: list[int]  # engine group idx -> cache idx; empty = cache 0
+    # engine group idx -> cache idx; -1 = rope-less group; empty = cache 0
+    group_to_cache: list[int]
     # Per-group rotation window ``(offset_elems, width_elems)``; ``None``
     # skips re-RoPE for the group, empty list = legacy inferred geometry.
     # Required for MLA: inference would rotate the latent's content dims.
@@ -41,6 +42,9 @@ class _CBRopeState:
         self, engine_group_idx: int, dtype: "torch.dtype | None" = None
     ) -> "tuple[int, int] | None":
         """The rotation window for one kernel group.
+
+        A ``-1`` group is rope-less: ``None`` regardless of ``group_rot``
+        (checked first, so the legacy ``(0, head_size)`` cannot claim it).
 
         Under a declared map, a non-float kernel group returns ``None``: one
         engine group can hold several kernel groups (e.g. a bf16 latent plus
@@ -55,6 +59,12 @@ class _CBRopeState:
         Raises:
             RuntimeError: If ``engine_group_idx`` is outside a non-empty map.
         """
+        if (
+            self.group_to_cache
+            and 0 <= engine_group_idx < len(self.group_to_cache)
+            and self.group_to_cache[engine_group_idx] < 0
+        ):
+            return None  # rope-less group
         if not self.group_rot:
             return (0, self.head_size)
         if dtype is not None and not dtype.is_floating_point:
@@ -70,8 +80,11 @@ class _CBRopeState:
         """The cos/sin cache for one engine group.
 
         Rope follows attention type, so each engine group has exactly one
-        cache. NoPE models register zero caches; every group then returns
-        ``None`` and re-RoPE is skipped.
+        cache. ``None`` means skip re-RoPE: either the model is NoPE (zero
+        caches) or the group is rope-less (``-1``).
+
+        Returns:
+            The group's cos/sin cache, or ``None`` when re-RoPE is skipped.
 
         Raises:
             RuntimeError: If ``engine_group_idx`` is outside the map.
@@ -80,6 +93,11 @@ class _CBRopeState:
             return None
         if not self.group_to_cache:
             return self.cos_sin_caches[0]
+        if (
+            0 <= engine_group_idx < len(self.group_to_cache)
+            and self.group_to_cache[engine_group_idx] < 0
+        ):
+            return None  # rope-less group
         if engine_group_idx >= len(self.group_to_cache):
             raise RuntimeError(
                 f"CB re-RoPE: engine group {engine_group_idx} has no rope "

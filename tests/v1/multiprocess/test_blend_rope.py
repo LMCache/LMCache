@@ -285,3 +285,25 @@ def test_rot_for_group_dtype_skip_under_declared_map():
         head_size=64, is_neox_style=False, cos_sin_caches=[], group_to_cache=[]
     )
     assert legacy.rot_for_group(0, torch.uint8) == (0, 64)
+
+
+def test_ropeless_group_sentinel_skips_rerope():
+    """A ``-1`` group is rope-less: both accessors return ``None``, so the
+    retrieve planner skips it instead of applying the geometry rules."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+
+    cache = torch.zeros((128, 64), dtype=torch.bfloat16)
+    state = _CBRopeState(
+        head_size=256,
+        is_neox_style=True,
+        cos_sin_caches=[cache],
+        # 3 rope-less + 1 attention KV
+        group_to_cache=[-1, -1, 0, -1],
+    )
+    for gi in (0, 1, 3):
+        assert state.rot_for_group(gi, torch.bfloat16) is None
+        assert state.cache_for_group(gi) is None
+    # The mapped group is unaffected.
+    assert state.rot_for_group(2, torch.bfloat16) == (0, 256)
+    assert state.cache_for_group(2) is cache
