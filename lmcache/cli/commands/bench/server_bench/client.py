@@ -735,6 +735,7 @@ class ServerBenchClient:
             % (config.rpc_url, config.mode)
         )
         self._zmq_context = zmq.Context()
+        self._zmq_context.setsockopt(zmq.LINGER, 0)
         self._req_client = RequestClientFactory.create(
             config.rpc_url,
             context=self._zmq_context,
