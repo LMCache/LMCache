@@ -1,0 +1,136 @@
+name: Build Artifacts
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: JSON array of artifact targets to build.
+        required: false
+        type: string
+        default: '["main"]'
+      dev_version:
+        description: Build a development version for supported targets.
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      version:
+        description: Version produced by a single versioned target.
+        value: ${{ jobs.build-artifacts.outputs.version }}
+    secrets:
+      DOCKERHUB_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: JSON array of artifact targets to build.
+        required: true
+        type: string
+        default: '["main"]'
+      dev_version:
+        description: Build a development version for supported targets.
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+    branches: [dev, "release-**"]
+    paths:
+      - 'lmcache/cli/**.py'
+      - 'pyproject_cli.toml'
+      - 'requirements/cli.txt'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'csrc/**'
+      - 'requirements/common.txt'
+      - 'requirements/build.txt'
+      - 'lmcache/__init__.py'
+      - '.github/workflows/build_artifacts.yml'
+      - '.github/actions/build-artifacts/action.yml'
+
+env:
+  LC_ALL: en_US.UTF-8
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: build-artifacts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  resolve_pr_targets:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            cli:
+              - 'lmcache/cli/**.py'
+              - 'pyproject_cli.toml'
+              - 'requirements/cli.txt'
+              - '.github/workflows/build_artifacts.yml'
+              - '.github/actions/build-artifacts/action.yml'
+            cpu:
+              - 'setup.py'
+              - 'pyproject.toml'
+              - 'csrc/**'
+              - 'requirements/common.txt'
+              - 'requirements/build.txt'
+              - 'lmcache/__init__.py'
+              - '.github/workflows/build_artifacts.yml'
+              - '.github/actions/build-artifacts/action.yml'
+      - id: targets
+        env:
+          CLI_CHANGED: ${{ steps.filter.outputs.cli }}
+          CPU_CHANGED: ${{ steps.filter.outputs.cpu }}
+        run: |
+          if [[ "${CLI_CHANGED}" == "true" && "${CPU_CHANGED}" == "true" ]]; then
+            echo 'targets=["cli", "cpu"]' >> "$GITHUB_OUTPUT"
+          elif [[ "${CLI_CHANGED}" == "true" ]]; then
+            echo 'targets=["cli"]' >> "$GITHUB_OUTPUT"
+          elif [[ "${CPU_CHANGED}" == "true" ]]; then
+            echo 'targets=["cpu"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'targets=[]' >> "$GITHUB_OUTPUT"
+          fi
+
+  build-artifacts:
+    needs: resolve_pr_targets
+    if: always() && (github.event_name != 'pull_request' || needs.resolve_pr_targets.outputs.targets != '[]')
+    name: Build ${{ matrix.target }} artifacts
+    runs-on: ${{ matrix.target == 'main-arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(github.event_name == 'pull_request' && needs.resolve_pr_targets.outputs.targets || inputs.targets) }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - id: build
+        uses: ./.github/actions/build-artifacts
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          MUSA_IMAGE: ${{ vars.MUSA_IMAGE }}
+          MUSA_IMAGE_DIGEST: ${{ vars.MUSA_IMAGE_DIGEST }}
+          MUSA_HOME: ${{ vars.MUSA_HOME }}
+          TORCH_MUSA_PACKAGES: ${{ vars.TORCH_MUSA_PACKAGES }}
+          TORCH_MUSA_INDEX: ${{ vars.TORCH_MUSA_INDEX }}
+        with:
+          target: ${{ matrix.target }}
+          dev_version: ${{ inputs.dev_version || 'false' }}
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}

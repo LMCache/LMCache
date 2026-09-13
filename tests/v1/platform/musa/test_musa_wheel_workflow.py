@@ -39,10 +39,10 @@ def test_musa_builder_script_is_executable_and_has_required_guards() -> None:
     assert "--exclude 'libmusa*.so*'" in content
     assert "wheel is missing the +musa local version" in content
 
-    workflow = _load_workflow(".github/workflows/build_musa_artifacts.yml")
+    workflow = _load_workflow(".github/actions/build-artifacts/action.yml")
     cleanup = next(
         step
-        for step in workflow["jobs"]["build-musa-artifacts"]["steps"]
+        for step in workflow["runs"]["steps"]
         if step.get("name") == "Remove non-release tags"
     )
     assert "grep -vE" in cleanup["run"]
@@ -51,72 +51,76 @@ def test_musa_builder_script_is_executable_and_has_required_guards() -> None:
 
 def test_musa_reusable_workflow_exposes_version_and_artifact_contract() -> None:
     """The reusable job output must match the artifact consumed by publish."""
-    workflow = _load_workflow(".github/workflows/build_musa_artifacts.yml")
-    assert workflow["env"]["MUSA_IMAGE"] == (
-        "${{ vars.MUSA_IMAGE || "
-        "'registry.mthreads.com/mcconline/musa-pytorch-release-public:"
-        "rc5.1.0-v2.9.1-S5000-py310_tef' }}"
-    )
-    assert workflow["env"]["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
-    assert workflow["env"]["SKIP_AUDITWHEEL_REPAIR"] == "0"
-    assert workflow["env"]["MAX_JOBS"] == "2"
+    workflow = _load_workflow(".github/workflows/build_artifacts.yml")
+    action = _load_workflow(".github/actions/build-artifacts/action.yml")
     call = workflow["on"]["workflow_call"]
     assert call["inputs"]["dev_version"]["type"] == "boolean"
     assert call["inputs"]["dev_version"]["default"] == "false"
-    assert call["outputs"]["musa_version"]["value"] == (
-        "${{ jobs.build-musa-artifacts.outputs.musa_version }}"
+    assert (
+        call["outputs"]["version"]["value"]
+        == "${{ jobs.build-artifacts.outputs.version }}"
     )
-    job = workflow["jobs"]["build-musa-artifacts"]
-    assert job["outputs"]["musa_version"] == (
-        "${{ steps.musa-version.outputs.musa_version }}"
-    )
-    assert not any(
-        step.get("uses", "").startswith("docker/login-action@") for step in job["steps"]
-    )
-    upload_steps = [
+    job = workflow["jobs"]["build-artifacts"]
+    assert job["outputs"]["version"] == "${{ steps.build.outputs.version }}"
+    assert "musa" in action["inputs"]["target"]["description"]
+
+    musa_build = next(
         step
-        for step in job["steps"]
-        if "uses" in step and "upload-artifact" in step["uses"]
-    ]
-    assert upload_steps[0]["with"]["name"] == "release-musa-artifacts"
-    smoke = next(
-        step
-        for step in job["steps"]
-        if step.get("name", "").startswith("Smoke-check wheel installation")
+        for step in action["runs"]["steps"]
+        if step.get("name") == "Build MUSA artifact"
     )
-    assert "torch_musa" not in smoke["run"]
-    assert "-e LMCACHE_LOG_LEVEL=ERROR" in smoke["run"]
-    assert "--no-deps" in smoke["run"]
+    assert musa_build["if"] == "inputs.target == 'musa'"
+    assert musa_build["env"]["MUSA_IMAGE"] == (
+        "${{ env.MUSA_IMAGE || "
+        "'registry.mthreads.com/mcconline/musa-pytorch-release-public:"
+        "rc5.1.0-v2.9.1-S5000-py310_tef' }}"
+    )
+    assert musa_build["env"]["SKIP_AUDITWHEEL_REPAIR"] == "0"
+    assert musa_build["env"]["MAX_JOBS"] == "2"
+    assert "torch_musa" not in musa_build["run"]
+    assert "-e TORCH_DEVICE_BACKEND_AUTOLOAD=0" in musa_build["run"]
+    assert "-e LMCACHE_LOG_LEVEL=ERROR" in musa_build["run"]
+    assert "--no-deps" in musa_build["run"]
 
     version_step = next(
         step
-        for step in job["steps"]
-        if step.get("name") == "Resolve MUSA wheel version"
+        for step in action["runs"]["steps"]
+        if step.get("name") == "Resolve platform wheel version"
     )
     assert version_step["env"]["DEV_VERSION"] == "${{ inputs.dev_version }}"
-    assert 'DEV_VERSION}" == "true"' in version_step["run"]
+    assert 'musa) version="${base}+musa"' in version_step["run"]
+
+    upload = next(
+        step
+        for step in action["runs"]["steps"]
+        if "upload-artifact" in step.get("uses", "")
+    )
+    assert "release-{0}-artifacts" in upload["with"]["name"]
 
 
 def test_publish_workflow_wires_musa_build_and_release() -> None:
     """Changes, build, and release jobs must all reference MUSA artifacts."""
     workflow = _load_workflow(".github/workflows/publish.yml")
     jobs = workflow["jobs"]
-    build = jobs["build-musa"]
-    assert build["uses"] == "./.github/workflows/build_musa_artifacts.yml"
+    build = jobs["build-artifacts"]
+    assert build["uses"] == "./.github/workflows/build_artifacts.yml"
+    assert "musa" in build["with"]["targets"]
     assert jobs["publish-musa-github-release"]["needs"] == [
         "changes",
-        "build-musa",
+        "build-artifacts",
         "test",
         "code-quality",
     ]
-    assert "secrets" not in build
+    assert build["secrets"] == "inherit"
     filter_text = jobs["changes"]["steps"][1]["with"]["filters"]
-    assert ".github/workflows/build_musa_artifacts.yml" in filter_text
+    assert ".github/workflows/build_artifacts.yml" in filter_text
+    assert ".github/actions/build-artifacts/action.yml" in filter_text
     assert ".github/scripts/build_musa_wheel.sh" in filter_text
 
     nightly = _load_workflow(".github/workflows/nightly_build.yml")
     nightly_build = nightly["jobs"]["nightly-musa-wheel"]
-    assert nightly_build["uses"] == "./.github/workflows/build_musa_artifacts.yml"
+    assert nightly_build["uses"] == "./.github/workflows/build_artifacts.yml"
+    assert nightly_build["with"]["targets"] == '["musa"]'
     assert nightly_build["with"]["dev_version"] == "true"
     nightly_publish = nightly["jobs"]["publish-nightly-musa"]
     assert nightly_publish["needs"] == "nightly-musa-wheel"

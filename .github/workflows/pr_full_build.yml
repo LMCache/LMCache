@@ -25,33 +25,9 @@ permissions:
     contents: read
 
 jobs:
-    # Each build runs independently — a failure in one does not skip the
-    # others, matching publish.yml's isolation model.
-
-    build-main:
-        name: Build main
+    build-artifacts:
         if: contains(github.event.pull_request.labels.*.name, 'full')
-        uses: ./.github/workflows/build_main_artifacts.yml
-
-    build-main-arm64:
-        name: Build main (arm64)
-        if: contains(github.event.pull_request.labels.*.name, 'full')
-        uses: ./.github/workflows/build_main_artifacts_arm64.yml
-
-    build-cli:
-        name: Build CLI
-        if: contains(github.event.pull_request.labels.*.name, 'full')
-        uses: ./.github/workflows/build_cli_artifacts.yml
-
-    build-cpu:
-        name: Build CPU
-        if: contains(github.event.pull_request.labels.*.name, 'full')
-        uses: ./.github/workflows/build_cpu_artifacts.yml
-
-    build-cu129:
-        name: Build cu129
-        if: contains(github.event.pull_request.labels.*.name, 'full')
-        uses: ./.github/workflows/build_cu129_artifacts.yml
-        # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
-        # step in build_cu129_artifacts.yml guards on the token being non-empty.
+        uses: ./.github/workflows/build_artifacts.yml
+        with:
+            targets: '["main", "main-arm64", "cli", "cpu", "cu129"]'
         secrets: inherit
