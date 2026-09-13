@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Configuration for the multiprocess server and HTTP frontend.
-"""
+"""Configuration for the multiprocess cache server and HTTP frontend."""
 
 # Standard
 from dataclasses import dataclass, field
@@ -24,8 +22,7 @@ class MPServerConfig:
     """Configuration for the multiprocess cache server."""
 
     transport: Literal["zmq", "grpc"] = "zmq"
-    """Request transport. gRPC is configurable for forward-compatible test
-    plumbing, but its runtime server is not available yet."""
+    """Request transport exposed by the cache server."""
 
     host: str = "localhost"
     """Request server host."""
@@ -46,6 +43,9 @@ class MPServerConfig:
     max_cpu_workers: int = 1
     """Worker threads for the normal (CPU) pool (LOOKUP, END_SESSION, etc.).
     Resolved from --max-cpu-workers or --max-workers."""
+
+    grpc_server_workers: int = 32
+    """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
 
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
@@ -130,6 +130,10 @@ class MPServerConfig:
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
+        if self.grpc_server_workers < 1:
+            raise ValueError(
+                f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
+            )
         if not math.isfinite(reap) or reap < 0 or (reap != 0 and reap < 30.0):
             raise ValueError(
                 "worker reap timeout must be 0 (disabled) or >= 30s; keep it "
@@ -280,11 +284,9 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--transport",
-        type=str,
-        choices=["zmq", "grpc"],
+        choices=("zmq", "grpc"),
         default="zmq",
-        help="Request transport. gRPC is reserved for the upcoming runtime "
-        "implementation. Default is zmq.",
+        help="Request transport exposed by the cache server. Default is zmq.",
     )
     mp_group.add_argument(
         "--host",
@@ -296,7 +298,7 @@ def add_mp_server_args(
         "--port",
         type=int,
         default=5555,
-        help="Port to bind the ZMQ server. Default is 5555.",
+        help="Port to bind the request server. Default is 5555.",
     )
     mp_group.add_argument(
         "--chunk-size",
@@ -325,6 +327,13 @@ def add_mp_server_args(
         default=None,
         help="Worker threads for the normal CPU pool (LOOKUP, etc.). "
         "Defaults to --max-workers if not specified.",
+    )
+    mp_group.add_argument(
+        "--grpc-server-workers",
+        type=int,
+        default=32,
+        help="Worker threads for gRPC request dispatch. Only used by "
+        "--transport grpc. Default is 32.",
     )
     mp_group.add_argument(
         "--hash-algorithm",
@@ -475,6 +484,7 @@ def parse_args_to_mp_server_config(
         max_workers=base,
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
+        grpc_server_workers=args.grpc_server_workers,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,

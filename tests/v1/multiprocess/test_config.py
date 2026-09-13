@@ -156,6 +156,18 @@ def test_transport_flag_is_parsed_without_starting_grpc():
     assert _parse_mp(["--transport", "grpc"]).transport == "grpc"
 
 
+def test_grpc_server_workers_are_parsed():
+    assert _parse_mp([]).grpc_server_workers == 32
+    assert MPServerConfig().grpc_server_workers == 32
+    assert _parse_mp(["--grpc-server-workers", "7"]).grpc_server_workers == 7
+
+
+@pytest.mark.parametrize("workers", ["0", "-1"])
+def test_grpc_server_workers_must_be_positive(workers):
+    with pytest.raises(ValueError, match="grpc server workers must be >= 1"):
+        _parse_mp(["--grpc-server-workers", workers])
+
+
 def test_instance_id_defaults_to_uuid4():
     # No --instance-id flag => a random UUID v4 is minted.
     config = _parse_mp([])

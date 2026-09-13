@@ -9,6 +9,13 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.grpc_impl.client import (
+    GrpcMultiprocessClient,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
+    client_method_name,
+    iter_methods,
+)
 from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 
 
@@ -38,17 +45,35 @@ def test_all_request_types_have_explicit_named_methods() -> None:
     contract_names = {
         name for name, value in RequestClient.__dict__.items() if callable(value)
     }
-    method_names = {
+    expected_names = {name.lower() for name in RequestType.__members__}
+
+    assert expected_names <= contract_names
+    zmq_method_names = {
         name
         for name, value in ZmqMultiprocessClient.__dict__.items()
         if callable(value)
     }
-    expected_names = {name.lower() for name in RequestType.__members__}
-
-    assert expected_names <= contract_names
-    assert expected_names <= method_names
-    assert "__getattr__" not in ZmqMultiprocessClient.__dict__
+    assert expected_names <= zmq_method_names
     assert "submit_request" not in ZmqMultiprocessClient.__dict__
+
+    grpc_client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        "grpc://127.0.0.1:1"
+    )
+    try:
+        generated_names = {
+            client_method_name(method.name) for _, method in iter_methods()
+        }
+        assert generated_names <= set(dir(grpc_client))
+        assert all(callable(getattr(grpc_client, name)) for name in generated_names)
+        assert generated_names <= GrpcMultiprocessClient.__dict__.keys()
+        assert "submit_request" not in GrpcMultiprocessClient.__dict__
+    finally:
+        grpc_client.close()
+
+
+def test_transport_clients_explicitly_inherit_shared_contract() -> None:
+    assert RequestClient in ZmqMultiprocessClient.__bases__
+    assert RequestClient in GrpcMultiprocessClient.__bases__
 
 
 def test_zmq_client_explicitly_inherits_shared_contract() -> None:
@@ -79,8 +104,12 @@ def test_business_callers_create_clients_through_factory() -> None:
     repo_root = Path(__file__).parents[3]
     transport_root = repo_root / "lmcache/v1/multiprocess/transport"
     implementation_tests = {
+        repo_root
+        / "tests/v1/distributed/l2_adapters/test_p2p_l2_adapter_integration.py",
         repo_root / "tests/v1/multiprocess/test_client.py",
         repo_root / "tests/v1/multiprocess/test_mq.py",
+        repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
+        repo_root / "tests/v1/multiprocess/transport_test_utils.py",
     }
     violations: list[str] = []
     for source_root in (repo_root / "lmcache", repo_root / "tests"):

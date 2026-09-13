@@ -11,6 +11,8 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -101,6 +103,7 @@ class ManagementModule:
         if self._reaper is not None:
             self._reaper.stop()
 
+    @request_handler(RequestType.PING, HandlerType.BLOCKING)
     def ping(self, instance_id: int | None) -> bool:
         """Respond to a ping and refresh the sender's liveness.
 
@@ -136,6 +139,7 @@ class ManagementModule:
                 target.drop_instance_state(instance_id)
         return ThreadRunSummary(success=True, message=f"reaped={len(reaped)}")
 
+    @request_handler(RequestType.GET_CHUNK_SIZE)
     def get_chunk_size(self) -> int:
         """Return the chunk size used for KV cache operations.
 
@@ -144,6 +148,7 @@ class ManagementModule:
         """
         return self._ctx.chunk_size
 
+    @request_handler(RequestType.GET_EXPERIMENTAL)
     def get_experimental(self) -> list[str]:
         """Return the experimental intermediate tensor transfer built in the
         server.
@@ -154,6 +159,7 @@ class ManagementModule:
         """
         return list(self._experimental_transfer)
 
+    @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
     def clear(self) -> None:
         """Clear all stored KV cache data from the storage manager."""
         with self._clear_lock:
@@ -161,6 +167,7 @@ class ManagementModule:
             self._ctx.storage_manager.clear(force=True)
             self._ctx.storage_manager.memcheck()
 
+    @request_handler(RequestType.NOOP)
     def debug(self) -> str:
         """Return a simple health-check string.
 
@@ -169,6 +176,7 @@ class ManagementModule:
         """
         return "OK"
 
+    @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
     def report_block_allocations(
         self,
         instance_id: int,

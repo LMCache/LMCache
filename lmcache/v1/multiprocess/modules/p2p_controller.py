@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
+from typing import Literal
 import threading
 
 # Third Party
@@ -30,6 +31,8 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -97,6 +100,8 @@ class P2PController:
         coordinator_config: Coordinator connection used for peer discovery.
         instance_id: Stable id of this instance, used to exclude itself from the
             discovered peer set.
+        request_transport: Request transport exposed by this server and its
+            discovered peers.
     """
 
     def __init__(
@@ -105,10 +110,12 @@ class P2PController:
         p2p_config: P2PConfig,
         coordinator_config: CoordinatorConfig,
         instance_id: str,
+        request_transport: Literal["zmq", "grpc"] = "zmq",
     ) -> None:
         self._ctx = ctx
         self._p2p_config = p2p_config
         self._instance_id = instance_id
+        self._request_scheme = "grpc" if request_transport == "grpc" else "tcp"
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
@@ -194,6 +201,7 @@ class P2PController:
     # RPC Handlers
     # -----------------------------------------------------------------
 
+    @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
     def p2p_lookup_and_lock(
         self,
         keys: list[ObjectKey],
@@ -243,6 +251,7 @@ class P2PController:
         )
         return task_id
 
+    @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
     def p2p_query_lookup_results(
         self,
         task_id: int,
@@ -285,6 +294,7 @@ class P2PController:
             self._jobs.pop(task_id, None)
         return addresses
 
+    @request_handler(RequestType.P2P_UNLOCK_OBJECTS, HandlerType.BLOCKING)
     def p2p_unlock_objects(
         self,
         keys: list[ObjectKey],
@@ -501,7 +511,7 @@ class P2PController:
             ``True`` if the adapter was created and tracked.
         """
         config = P2PL2AdapterConfig(
-            peer_mq_server_url=f"tcp://{inst.ip}:{inst.mq_port}",
+            peer_mq_server_url=(f"{self._request_scheme}://{inst.ip}:{inst.mq_port}"),
             peer_transfer_channel_server_url=inst.p2p_advertised_url,
             lookup_timeout_s=self._p2p_config.lookup_timeout,
             load_timeout_s=self._p2p_config.load_timeout,
