@@ -5,6 +5,7 @@ aiohttp
 awscrt
 cryptography
 cufile-python
+xxhash
 fastapi
 httpx
 huggingface_hub>=1.5.0

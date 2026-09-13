@@ -12,6 +12,10 @@ from lmcache.v1.distributed.serde.base import (
     SerdeTaskId,
     Serializer,
 )
+from lmcache.v1.distributed.serde.checksum import (
+    ChecksumDeserializer,
+    ChecksumSerializer,
+)
 from lmcache.v1.distributed.serde.factory import (
     create_serde_processor,
     get_registered_serde_types,
@@ -48,6 +52,8 @@ __all__ = [
     "AesGcmDeserializer",
     "AesGcmSerializer",
     "AsyncSerdeProcessor",
+    "ChecksumDeserializer",
+    "ChecksumSerializer",
     "Deserializer",
     "Fp8QuantizationDeserializer",
     "Fp8QuantizationSerializer",
