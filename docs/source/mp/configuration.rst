@@ -761,6 +761,31 @@ All connector-level options are passed through
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.autostart``
+     - ``false``
+     - Whether vLLM worker 0 should start a local ``lmcache server`` process
+       before workers connect to it. Other local workers wait for the server to
+       become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
+       IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
+       because the MP ZMQ transport does not enable IPv6 sockets.
+       Auto-start supports exactly one server endpoint; configuring
+       multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
+       connector initialization.
+   * - ``lmcache.mp.autostart.wait_timeout``
+     - ``90.0``
+     - Timeout (seconds) to wait for the auto-started server to respond to
+       ZMQ ``PING`` requests. Must be positive and finite.
+   * - ``lmcache.mp.autostart.server_args``
+     - ``""``
+     - Extra command-line arguments passed to the auto-started MP HTTP server
+       process. Required server settings such as ``--l1-size-gb`` and
+       ``--eviction-policy`` must be supplied here. For example, pass
+       ``--l1-size-gb 20 --eviction-policy LRU``. Endpoint flags such as
+       ``--host``, ``--port``, and ``--http-host`` are rejected because the
+       auto-started ZMQ and HTTP listeners are bound to the local connector
+       endpoint. If multiple auto-started MP servers run on the same host, pass
+       distinct ``--http-port`` values here to avoid HTTP frontend port
+       conflicts.
    * - ``lmcache.mp.lazy_offload``
      - ``false``
      - Defer store operations and submit finished requests in FIFO batches.
@@ -808,6 +833,50 @@ All connector-level options are passed through
        otherwise). Composes with ``lmcache.mp.isolated_ipc`` for
        fabric-exportable pools; a POSIX-fd-only pool under isolated IPC
        is rejected at registration.
+
+To let vLLM worker 0 start a local MP server automatically:
+
+.. code-block:: bash
+
+    vllm serve Qwen/Qwen3-14B \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.autostart": true, "lmcache.mp.autostart.server_args": "--l1-size-gb 20 --eviction-policy LRU"}}'
+
+Auto-start is a convenience for single-node, single-server deployments. The MP
+server is a child of vLLM worker 0, not an independently managed service.
+
+.. note::
+
+   LMCache's adapter shutdown does not explicitly terminate this child, but
+   vLLM's process-tree cleanup may terminate it. Its lifetime depends on the
+   vLLM version and exit path; neither survival nor automatic cleanup is
+   guaranteed. Stop any remaining auto-started server when it is no longer
+   needed.
+
+For servers that must survive vLLM restarts or be shared across vLLM instances,
+and for multi-node TP/PP deployments, start and manage the server separately.
+For example, run the server in a separate terminal or service manager and leave
+auto-start disabled in vLLM:
+
+.. code-block:: bash
+
+    # Terminal 1: independently managed MP server
+    lmcache server --host 127.0.0.1 --port 5555 \
+        --http-host 127.0.0.1 --l1-size-gb 20 --eviction-policy LRU
+
+    # Terminal 2: connect-only vLLM instance
+    vllm serve Qwen/Qwen3-14B \
+        --kv-transfer-config '{
+            "kv_connector": "LMCacheMPConnector",
+            "kv_connector_module_path":
+                "lmcache.integration.vllm.lmcache_mp_connector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "lmcache.mp.host": "127.0.0.1",
+                "lmcache.mp.port": 5555,
+                "lmcache.mp.autostart": false
+            }
+        }'
 
 Environment Variables
 ---------------------
