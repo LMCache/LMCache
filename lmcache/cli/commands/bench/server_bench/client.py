@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     # First Party
     from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
 
 
 @dataclass(frozen=True)
@@ -161,6 +162,7 @@ class ServerBenchClient:
         self._log = log
         self._zmq_context: Any | None = None
         self._req_client: "RequestClient | None" = None
+        self._event_backend: "EventIPCBackend | None" = None
         self._workers: list[WorkerContext] = []
         self._registered_instance_ids: list[int] = []
         self._shm_names: list[str] = []
@@ -360,6 +362,7 @@ class ServerBenchClient:
                 chunk_size=self._chunk_size,
                 server_pool=worker.server_pool,
                 instance_id=worker.spec.instance_id,
+                event_backend=self._event_backend,
             )
             if worker_status == "stored":
                 successful.append(worker.spec.rank)
@@ -452,6 +455,7 @@ class ServerBenchClient:
                 client_tensors=self._data_tensors(worker),
                 server_pool=worker.server_pool,
                 instance_id=worker.spec.instance_id,
+                event_backend=self._event_backend,
             )
             if worker_status == "retrieved":
                 successful.append(worker.spec.rank)
@@ -681,6 +685,7 @@ class ServerBenchClient:
         self._registered_instance_ids.clear()
         self._workers.clear()
         self._shm_names.clear()
+        self._event_backend = None
         self._started = False
 
     def _initialize(self) -> None:
@@ -707,6 +712,7 @@ class ServerBenchClient:
         )
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo
         from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+        from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
         config = self._config
         use_gpu = config.is_gpu
@@ -718,6 +724,11 @@ class ServerBenchClient:
                 "  [info] --transfer-mode=lmcache_driven on cpu mode: "
                 "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
             )
+        if use_gpu and use_handle:
+            device = torch_dev.current_device()
+            event_backend = get_event_ipc_backend(device)
+            event_backend.check_event_support(device)
+            self._event_backend = event_backend
 
         self._log(
             "Connecting to LMCache MP Server at %s (mode=%s) ..."
