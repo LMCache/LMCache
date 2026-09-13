@@ -44,19 +44,13 @@ struct CounterShard {
     counters: [AtomicU64; 10],
     peak_outstanding: AtomicU64,
     peak_queued: AtomicU64,
-    queue_full: AtomicU64,
 }
-
-#[repr(align(128))]
-#[derive(Default)]
-struct QueueGauge(AtomicU64);
 
 /// Preallocated observation shards; lifecycle synchronization lives elsewhere.
 pub(crate) struct RawBlockIoStats {
     shards: [CounterShard; SHARD_COUNT],
     worker: CounterShard,
     worker_claimed: AtomicBool,
-    queue: QueueGauge,
 }
 
 impl Default for RawBlockIoStats {
@@ -65,7 +59,6 @@ impl Default for RawBlockIoStats {
             shards: std::array::from_fn(|_| CounterShard::default()),
             worker: CounterShard::default(),
             worker_claimed: AtomicBool::new(false),
-            queue: QueueGauge::default(),
         }
     }
 }
@@ -77,7 +70,6 @@ impl RawBlockIoStats {
     pub(crate) fn recorder(&self) -> IoStatsRecorder<'_> {
         IoStatsRecorder {
             shard: &self.shards[THREAD_SHARD.with(|index| *index)],
-            queue: &self.queue,
             local: None,
         }
     }
@@ -92,7 +84,6 @@ impl RawBlockIoStats {
         }
         IoStatsRecorder {
             shard: &self.worker,
-            queue: &self.queue,
             local: Some(std::array::from_fn(|_| Cell::new(0))),
         }
     }
@@ -106,22 +97,18 @@ impl RawBlockIoStats {
         let mut totals = [0u64; 10];
         let mut peak_outstanding = 0;
         let mut peak_queued = 0;
-        let mut queue_full = 0u64;
         for shard in self.shards.iter().chain(std::iter::once(&self.worker)) {
             for (total, counter) in totals.iter_mut().zip(&shard.counters) {
                 *total = total.wrapping_add(counter.load(Ordering::Relaxed));
             }
             peak_outstanding = peak_outstanding.max(shard.peak_outstanding.load(Ordering::Relaxed));
             peak_queued = peak_queued.max(shard.peak_queued.load(Ordering::Relaxed));
-            queue_full = queue_full.wrapping_add(shard.queue_full.load(Ordering::Relaxed));
         }
         let mut result: HashMap<_, _> = COUNTER_NAMES.into_iter().zip(totals).collect();
         result.extend([
             ("outstanding_requests", outstanding),
             ("peak_outstanding_requests", peak_outstanding),
-            ("queued_requests", self.queue.0.load(Ordering::Relaxed)),
             ("peak_queued_requests", peak_queued),
-            ("queue_full_events", queue_full),
         ]);
         result
     }
@@ -130,7 +117,6 @@ impl RawBlockIoStats {
 /// Writer-local state with atomic publication for asynchronous snapshots.
 pub(crate) struct IoStatsRecorder<'stats> {
     shard: &'stats CounterShard,
-    queue: &'stats QueueGauge,
     local: Option<[Cell<u64>; 10]>,
 }
 
@@ -160,15 +146,9 @@ impl IoStatsRecorder<'_> {
         observe_max(&self.shard.peak_outstanding, count);
     }
 
-    /// Publish exact queue length while holding the caller's existing queue lock.
-    pub(crate) fn set_queued(&self, count: usize) {
-        self.queue.0.store(count as u64, Ordering::Relaxed);
+    /// Observe queue length for its lifetime peak under the existing queue lock.
+    pub(crate) fn observe_queued(&self, count: usize) {
         observe_max(&self.shard.peak_queued, count as u64);
-    }
-
-    /// Record a capacity-limited submission event, not a signal interruption.
-    pub(crate) fn queue_full(&self) {
-        self.shard.queue_full.fetch_add(1, Ordering::Relaxed);
     }
 
     fn add(&self, index: usize, value: u64) {
@@ -184,9 +164,21 @@ impl IoStatsRecorder<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RawBlockIoStats, SHARD_COUNT};
+    use super::{RawBlockIoStats, COUNTER_NAMES, SHARD_COUNT};
     use std::sync::{Arc, Barrier};
     use std::thread;
+
+    #[test]
+    fn snapshot_exposes_counters_outstanding_and_lifetime_peaks() {
+        let snapshot = RawBlockIoStats::default().snapshot(7);
+        assert_eq!(snapshot.len(), COUNTER_NAMES.len() + 3);
+        for name in COUNTER_NAMES {
+            assert_eq!(snapshot[name], 0);
+        }
+        assert_eq!(snapshot["outstanding_requests"], 7);
+        assert_eq!(snapshot["peak_outstanding_requests"], 0);
+        assert_eq!(snapshot["peak_queued_requests"], 0);
+    }
 
     #[test]
     fn concurrent_cumulative_counters_survive_thread_exit_and_shard_collisions() {
@@ -232,17 +224,14 @@ mod tests {
     fn gauges_preserve_lifetime_peaks() {
         let stats = RawBlockIoStats::default();
         let recorder = stats.recorder();
-        recorder.set_queued(10);
-        recorder.set_queued(3);
-        recorder.set_queued(0);
+        recorder.observe_queued(10);
+        recorder.observe_queued(3);
+        recorder.observe_queued(0);
         recorder.observe_outstanding(12);
         recorder.observe_outstanding(2);
-        recorder.queue_full();
         let snapshot = stats.snapshot(0);
-        assert_eq!(snapshot["queued_requests"], 0);
         assert_eq!(snapshot["peak_queued_requests"], 10);
         assert_eq!(snapshot["peak_outstanding_requests"], 12);
-        assert_eq!(snapshot["queue_full_events"], 1);
         assert_eq!(snapshot, stats.snapshot(0));
     }
 
@@ -284,7 +273,7 @@ mod tests {
         let producer = thread::spawn(move || {
             let recorder = producer_stats.recorder();
             recorder.observe_outstanding(16);
-            recorder.set_queued(12);
+            recorder.observe_queued(12);
             for _ in 0..1000 {
                 recorder.submit(true, 512, false, true);
                 recorder.complete(true);
@@ -297,12 +286,11 @@ mod tests {
             recorder.complete(true);
         }
         producer.join().unwrap();
-        recorder.set_queued(0);
+        recorder.observe_queued(0);
         let snapshot = stats.snapshot(0);
         assert_eq!(snapshot["completed_attempts"], 2000);
         assert_eq!(snapshot["peak_outstanding_requests"], 16);
         assert_eq!(snapshot["peak_queued_requests"], 12);
-        assert_eq!(snapshot["queued_requests"], 0);
         assert_eq!(snapshot["bounce_attempts"], 1000);
         assert_eq!(snapshot["fixed_buffer_attempts"], 1000);
         let other = RawBlockIoStats::default();

@@ -165,6 +165,49 @@ caller-provided load buffers during prefetch.
     # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
+**Device I/O statistics:**
+
+``RawBlockCore.report_status()`` exposes per-device backend I/O statistics under
+``device_io``. The L2 adapter nests this snapshot under ``core.device_io``:
+
+.. code-block:: json
+
+    {
+      "core": {
+        "device_io": {
+          "read_attempts": 8,
+          "write_attempts": 2,
+          "read_submitted_bytes": 32768,
+          "write_submitted_bytes": 8192,
+          "completed_attempts": 10,
+          "failed_attempts": 0,
+          "bounce_attempts": 2,
+          "bounce_submitted_bytes": 8192,
+          "fixed_buffer_attempts": 6,
+          "fixed_buffer_submitted_bytes": 24576,
+          "outstanding_requests": 0,
+          "peak_outstanding_requests": 8,
+          "peak_queued_requests": 6
+        }
+      }
+    }
+
+Counters and peaks accumulate over the device lifetime. Each backend I/O retry
+counts as a separate attempt. Submitted bytes are requested lengths, including
+retries and padding, not achieved device throughput or hardware-command counts.
+The ``bounce_*`` and ``fixed_buffer_*`` counters identify attempts using those
+buffer paths.
+
+``outstanding_requests`` is the current lifecycle count, including queued work;
+it is not the number of submitted device I/Os. ``peak_outstanding_requests`` is
+its lifetime maximum. ``peak_queued_requests`` records the lifetime maximum of
+the Rust userspace queue and is zero for POSIX I/O. Peaks preserve transient
+backlogs that a periodic status poll can miss.
+
+Snapshots are best-effort and are not atomic across fields. ``device_io`` is
+``null`` when the device is closed, the extension lacks snapshot support, or
+snapshot collection fails; statistics availability does not determine health.
+
 **Hardware-gated FDP status validation:**
 
 FDP live-device validation is opt-in because it requires an FDP-capable NVMe

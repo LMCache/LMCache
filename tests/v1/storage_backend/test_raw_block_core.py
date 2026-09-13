@@ -56,11 +56,12 @@ def test_raw_block_core_closed_stats_are_unavailable(tmp_path) -> None:
     core = RawBlockCore(make_raw_block_core_config(path), key_namespace="object")
     try:
         status = core.report_status()
-        assert isinstance(status["rust_io"], dict)
-        assert status["rust_io"]["outstanding_requests"] == 0
+        assert "rust_io" not in status
+        assert isinstance(status["device_io"], dict)
+        assert status["device_io"]["outstanding_requests"] == 0
     finally:
         core.close()
-    assert core.report_status()["rust_io"] is None
+    assert core.report_status()["device_io"] is None
 
 
 def test_raw_block_core_snapshot_failure_does_not_change_health(
@@ -82,7 +83,7 @@ def test_raw_block_core_snapshot_failure_does_not_change_health(
     try:
         status = core.report_status()
         assert status["is_healthy"] is True
-        assert status["rust_io"] is None
+        assert status["device_io"] is None
     finally:
         core.close()
 
@@ -971,8 +972,8 @@ def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
         status = core.report_status()
         assert status["next_slot"] == 2
         assert status["free_slot_count"] == 1
-        assert status["rust_io"]["write_attempts"] > 0
-        assert status["rust_io"]["outstanding_requests"] == 0
+        assert status["device_io"]["write_attempts"] > 0
+        assert status["device_io"]["outstanding_requests"] == 0
 
         put_recovered = core.put_many([recovered], [make_memory_obj(recovered_payload)])
 

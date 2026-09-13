@@ -1145,7 +1145,7 @@ fn enqueue_if_running(
     }
     stats.observe_outstanding(in_flight.fetch_add(1, Ordering::Relaxed) + 1);
     queue.push(submission);
-    stats.set_queued(queue.len());
+    stats.observe_queued(queue.len());
     Ok(())
 }
 
@@ -1364,15 +1364,7 @@ fn submit_pending(
     if pending.is_empty() {
         return Ok(());
     }
-    let submitted = match ring.submit() {
-        Ok(submitted) => submitted,
-        Err(error) => {
-            if error.raw_os_error() == Some(libc::EAGAIN) {
-                stats.queue_full();
-            }
-            return Err(error);
-        }
-    };
+    let submitted = ring.submit()?;
     record_submitted(pending, in_flight, stats, submitted);
     Ok(())
 }
@@ -1455,13 +1447,11 @@ mod submission_stats_tests {
         let stats = RawBlockIoStats::default();
         let recorder = stats.recorder();
         recorder.observe_outstanding(3);
-        recorder.set_queued(3);
+        recorder.observe_queued(3);
         let queued = stats.snapshot(3);
         assert_eq!(queued["outstanding_requests"], 3);
-        assert_eq!(queued["queued_requests"], 3);
         assert_eq!(queued["read_attempts"] + queued["write_attempts"], 0);
         assert_eq!(queued["completed_attempts"] + queued["failed_attempts"], 0);
-        recorder.set_queued(0);
         let cancelled_before_submission = stats.snapshot(0);
         assert_eq!(cancelled_before_submission["failed_attempts"], 0);
         assert_eq!(cancelled_before_submission["peak_outstanding_requests"], 3);
@@ -2103,8 +2093,7 @@ impl RawBlockDevice {
                                                 in_flight.remove(&user_data);
                                                 let mut queue = queue_clone.lock().unwrap();
                                                 queue.push(sub);
-                                                worker_stats.set_queued(queue.len());
-                                                worker_stats.queue_full();
+                                                worker_stats.observe_queued(queue.len());
                                             }
                                             continue;
                                         }
@@ -2199,8 +2188,7 @@ impl RawBlockDevice {
                                                 in_flight.remove(&user_data);
                                                 let mut queue = queue_clone.lock().unwrap();
                                                 queue.push(sub);
-                                                worker_stats.set_queued(queue.len());
-                                                worker_stats.queue_full();
+                                                worker_stats.observe_queued(queue.len());
                                             }
                                             continue;
                                         }
@@ -2261,14 +2249,12 @@ impl RawBlockDevice {
                             let to_submit_count = std::cmp::min(available, batch_len);
 
                             if to_submit_count < batch_len {
-                                worker_stats.queue_full();
                                 let remaining: Vec<_> = batch[to_submit_count..].to_vec();
                                 if !remaining.is_empty() {
                                     q.extend(remaining);
                                 }
                             }
 
-                            worker_stats.set_queued(q.len());
                             drop(q);
 
                             for sub in batch.iter().take(to_submit_count) {
@@ -2325,8 +2311,6 @@ impl RawBlockDevice {
                             );
                         }
                     }
-
-                    worker_stats.set_queued(0);
 
                     for user_data in pending.drain(..) {
                         if let Some(mut sub) = in_flight.remove(&user_data) {
