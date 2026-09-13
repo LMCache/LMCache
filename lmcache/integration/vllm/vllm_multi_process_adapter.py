@@ -1011,6 +1011,53 @@ class LMCacheMPSchedulerAdapter:
         self._per_server_hits.pop(request_id, None)
         self._lookup_params.pop(request_id, None)
 
+    def reset_cache(self) -> bool:
+        """Clear idle server-side cache state and local lookup bookkeeping.
+
+        Sends CLEAR to every backing LMCache server. The server preserves
+        locked objects, so a False reply means in-flight work kept some cache
+        entries alive and callers should treat the reset as incomplete.
+
+        Returns:
+            True when every healthy server reports a complete clear, False on
+            timeout or when any server preserves locked objects.
+        """
+        if not self.is_healthy:
+            return False
+
+        futures = {url: self.req_clients[url].clear() for url in self._server_urls}
+        success = True
+        for url, future in futures.items():
+            try:
+                cleared = future.result(timeout=self._mq_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "CLEAR to %s timed out after %ss. Marking server as unhealthy.",
+                    url,
+                    self._mq_timeout,
+                )
+                self._health_events[url].clear()
+                success = False
+                continue
+
+            if cleared is False:
+                logger.warning(
+                    "CLEAR on %s preserved locked cache objects; reset incomplete.",
+                    url,
+                )
+                success = False
+
+        if not success:
+            return False
+
+        self._pending_lookups.clear()
+        self._unacked_lookups.clear()
+        self._lookup_status.clear()
+        self._finished_lookup_results.clear()
+        self._per_server_hits.clear()
+        self._lookup_params.clear()
+        return True
+
     def shutdown(self) -> None:
         """Shutdown the scheduler adapter and its resources."""
         for client in self.req_clients.values():

@@ -1413,6 +1413,55 @@ class TestGetObjectState:
 
 
 # =============================================================================
+# Tests for L1Manager.clear()
+# =============================================================================
+
+
+class TestClear:
+    """
+    Tests for L1Manager.clear() method.
+
+    Per the docstring:
+    - clear(False) preserves locked objects and reports an incomplete clear.
+    - clear(True) removes all objects, including locked ones.
+    """
+
+    def test_clear_returns_false_when_locked_objects_remain(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that non-forced clear preserves locked objects."""
+        manager = L1Manager(basic_l1_config)
+        locked_key = make_object_key(12345)
+        unlocked_key = make_object_key(12346)
+
+        manager.reserve_write([locked_key, unlocked_key], [False, False], basic_layout)
+        manager.finish_write([unlocked_key])
+
+        assert manager.clear() is False
+
+        assert manager.get_object_state(locked_key) is not None
+        assert manager.get_object_state(unlocked_key) is None
+
+        assert manager.clear(force=True) is True
+        assert manager.get_object_state(locked_key) is None
+        manager.close()
+
+    def test_clear_returns_true_after_complete_clear(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that clear returns True when no locked objects remain."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        assert manager.clear() is True
+        assert manager.get_object_state(key) is None
+        manager.close()
+
+
+# =============================================================================
 # Tests for L1Manager.close()
 # =============================================================================
 
