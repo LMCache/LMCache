@@ -62,12 +62,14 @@ class _GeneratedServicer:
         normal_pool: ThreadPoolExecutor,
         affinity_pool: AffinityThreadPool,
         affinity_submit_lock: threading.Lock,
+        sync_handler_lock: threading.Lock,
     ) -> None:
         self._binding = binding
         self._handlers = handlers
         self._normal_pool = normal_pool
         self._affinity_pool = affinity_pool
         self._affinity_submit_lock = affinity_submit_lock
+        self._sync_handler_lock = sync_handler_lock
 
     def __getattr__(self, method_name: str) -> Callable[[Any, Any], Any]:
         full_name = f"{self._binding.descriptor.full_name}.{method_name}"
@@ -95,7 +97,8 @@ class _GeneratedServicer:
                 raise RuntimeError("gRPC context abort unexpectedly returned")
             payloads = registered.request_decoder(request)
             if registered.handler_type is HandlerType.SYNC:
-                result = registered.handler(*payloads)
+                with self._sync_handler_lock:
+                    result = registered.handler(*payloads)
             elif registered.handler_type is HandlerType.BLOCKING and (
                 registered.requires_client_affinity
             ):
@@ -149,6 +152,8 @@ class GrpcMultiprocessServer(RequestServer):
             thread_name_prefix="grpc-affinity",
         )
         self._affinity_submit_lock = threading.Lock()
+        # HandlerType.SYNC is a transport-neutral single-main-loop contract.
+        self._sync_handler_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
             max_workers=grpc_server_workers,
             thread_name_prefix="grpc-server",
@@ -223,6 +228,7 @@ class GrpcMultiprocessServer(RequestServer):
             self._normal_pool,
             self._affinity_pool,
             self._affinity_submit_lock,
+            self._sync_handler_lock,
         )
         add_servicer = getattr(
             binding.grpc_module,
