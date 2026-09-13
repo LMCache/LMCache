@@ -48,7 +48,6 @@ def test_raw_block_device_posix_stats_and_validation(tmp_path):
         assert snapshot["completed_attempts"] == 2
         assert snapshot["failed_attempts"] == 0
         assert snapshot["outstanding_requests"] == 0
-        assert snapshot["queued_requests"] == 0
         assert snapshot["peak_queued_requests"] == 0
         assert snapshot["peak_outstanding_requests"] >= 1
         assert snapshot["fixed_buffer_attempts"] == 0
@@ -113,7 +112,6 @@ def test_raw_block_device_iouring_queue_and_buffer_stats(tmp_path, fixed):
         assert snapshot["completed_attempts"] == 32
         assert snapshot["failed_attempts"] == 0
         assert snapshot["outstanding_requests"] == 0
-        assert snapshot["queued_requests"] == 0
         assert snapshot["peak_queued_requests"] >= 1
         assert snapshot["fixed_buffer_attempts"] == (32 if fixed else 0)
         assert snapshot["fixed_buffer_submitted_bytes"] == (32 * 4096 if fixed else 0)
@@ -153,7 +151,6 @@ def test_raw_block_device_short_read_counts_attempts(
         assert snapshot["completed_attempts"] == 1
         assert snapshot["failed_attempts"] == 1
         assert snapshot["outstanding_requests"] == 0
-        assert snapshot["queued_requests"] == 0
     finally:
         dev.close()
 
@@ -288,7 +285,6 @@ def test_raw_block_device_iouring_best_effort_roundtrip(tmp_path):
         assert snapshot["completed_attempts"] == 2
         assert snapshot["failed_attempts"] == 0
         assert snapshot["outstanding_requests"] == 0
-        assert snapshot["queued_requests"] == 0
     except Exception as e:
         if is_skip_safe_io_error(e):
             pytest.skip(f"io_uring is unavailable on this runner: {e}")

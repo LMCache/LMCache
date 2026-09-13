@@ -394,8 +394,8 @@ def test_raw_block_l2_adapter_uses_global_eviction_accounting():
             assert status["is_healthy"] is True
             assert status["type"] == "RawBlockL2Adapter"
             assert status["core"]["usable_capacity_bytes"] == slot_bytes
-            assert status["core"]["rust_io"]["write_attempts"] > 0
-            assert status["core"]["rust_io"]["outstanding_requests"] == 0
+            assert status["core"]["device_io"]["write_attempts"] > 0
+            assert status["core"]["device_io"]["outstanding_requests"] == 0
 
             _, bitmap1 = _run_lookup(adapter, [key1])
             assert bitmap1 is not None
