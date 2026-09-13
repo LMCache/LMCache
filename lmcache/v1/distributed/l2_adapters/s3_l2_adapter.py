@@ -188,9 +188,21 @@ def _object_key_to_string(key: ObjectKey) -> str:
     return base
 
 
-def _format_safe_path(key_str: str) -> str:
-    """URL-encode the object name to form a safe HTTP path."""
-    return "/" + url_quote(key_str)
+def _format_safe_path(key_str: str, bucket: Optional[str] = None) -> str:
+    """URL-encode an object name to form a virtual- or path-style HTTP path.
+
+    Args:
+        key_str: S3 object name.
+        bucket: Bucket name for path-style addressing. When omitted, produce
+            the virtual-hosted-style path.
+
+    Returns:
+        The request path for the object.
+    """
+    object_path = url_quote(key_str)
+    if bucket is None:
+        return "/" + object_path
+    return "/" + url_quote(bucket, safe="") + "/" + object_path
 
 
 def _make_credentials_provider(
@@ -309,12 +321,15 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     """Config for the S3 L2 adapter.
 
     Fields:
-    - s3_endpoint (str, required): bucket URL using **virtual-hosted**
-      style; accepts either ``"s3://<bucket>.<host>"`` or the bare
-      ``"<bucket>.<host>"`` form. The bucket name must be part of the
-      host because requests are signed and routed against this Host
-      header (path-style addressing is not supported).
+    - s3_endpoint (str, required): virtual-hosted bucket URL by default;
+      accepts either ``"s3://<bucket>.<host>"`` or the bare
+      ``"<bucket>.<host>"`` form. With ``s3_addressing_style="path"``,
+      it is the S3 service host, without a bucket prefix.
     - s3_region (str, required): AWS region used for SigV4.
+    - s3_addressing_style (str): ``"virtual"`` (default) or ``"path"``.
+    - s3_bucket (str): required for path-style addressing.
+    - s3_ca_bundle (str): optional PEM bundle used to trust the S3 data
+      plane's TLS certificate.
     - s3_num_io_threads (int): CRT IO threads.
     - s3_prefer_http2 (bool): ALPN negotiate to HTTP/2.
     - s3_enable_s3express (bool): enable S3 Express signing.
@@ -337,6 +352,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         s3_prefer_http2: bool = True,
         s3_enable_s3express: bool = False,
         disable_tls: bool = False,
+        s3_addressing_style: str = "virtual",
+        s3_bucket: Optional[str] = None,
+        s3_ca_bundle: Optional[str] = None,
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
@@ -347,6 +365,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.s3_prefer_http2 = s3_prefer_http2
         self.s3_enable_s3express = s3_enable_s3express
         self.disable_tls = disable_tls
+        self.s3_addressing_style = s3_addressing_style
+        self.s3_bucket = s3_bucket
+        self.s3_ca_bundle = s3_ca_bundle
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.max_capacity_gb = max_capacity_gb
@@ -359,6 +380,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         region = d.get("s3_region")
         if not isinstance(region, str) or not region:
             raise ValueError("s3_region must be a non-empty string")
+
+        addressing_style = d.get("s3_addressing_style", "virtual")
+        if addressing_style not in ("virtual", "path"):
+            raise ValueError("s3_addressing_style must be 'virtual' or 'path'")
 
         def _int(key, default):
             v = d.get(key, default)
@@ -380,6 +405,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
                 raise ValueError(f"{key} must be a string")
             return v
 
+        bucket = _opt_str("s3_bucket")
+        if addressing_style == "path" and not bucket:
+            raise ValueError("s3_bucket is required when s3_addressing_style is 'path'")
+
         max_cap = d.get("max_capacity_gb", 0.0)
         if not isinstance(max_cap, (int, float)) or isinstance(max_cap, bool):
             raise ValueError("max_capacity_gb must be a number")
@@ -391,6 +420,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             s3_prefer_http2=_bool("s3_prefer_http2", True),
             s3_enable_s3express=_bool("s3_enable_s3express", False),
             disable_tls=_bool("disable_tls", False),
+            s3_addressing_style=addressing_style,
+            s3_bucket=bucket,
+            s3_ca_bundle=_opt_str("s3_ca_bundle"),
             aws_access_key_id=_opt_str("aws_access_key_id"),
             aws_secret_access_key=_opt_str("aws_secret_access_key"),
             max_capacity_gb=float(max_cap),
@@ -402,9 +434,12 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     def help(cls) -> str:
         return (
             "S3 L2 adapter config fields:\n"
-            "- s3_endpoint (str, required): virtual-hosted bucket URL "
-            "('s3://<bucket>.<host>' or '<bucket>.<host>')\n"
+            "- s3_endpoint (str, required): virtual-hosted bucket URL by default; "
+            "service host when s3_addressing_style is 'path'\n"
             "- s3_region (str, required): AWS region for SigV4\n"
+            "- s3_addressing_style (str): 'virtual' (default) or 'path'\n"
+            "- s3_bucket (str): required for path-style addressing\n"
+            "- s3_ca_bundle (str): optional PEM bundle for S3 TLS trust\n"
             "- s3_num_io_threads (int): CRT IO threads (default 64)\n"
             "- s3_prefer_http2 (bool): try HTTP/2 via ALPN (default true)\n"
             "- s3_enable_s3express (bool): S3 Express signing (default false)\n"
@@ -452,6 +487,9 @@ class S3L2Adapter(L2AdapterInterface):
         self._endpoint = endpoint
         self._region = config.s3_region
         self._enable_s3express = config.s3_enable_s3express
+        self._bucket = (
+            config.s3_bucket if config.s3_addressing_style == "path" else None
+        )
 
         # awscrt client setup (mirrors s3_connector.py:103-153)
         event_loop_group = io.EventLoopGroup(config.s3_num_io_threads)
@@ -461,13 +499,19 @@ class S3L2Adapter(L2AdapterInterface):
         self._credentials_provider = _make_credentials_provider(config)
 
         tls_opts = None
-        if config.s3_prefer_http2:
-            tls_ctx = ClientTlsContext(TlsContextOptions())
+        if config.s3_prefer_http2 or config.s3_ca_bundle:
+            tls_ctx_options = TlsContextOptions()
+            if config.s3_ca_bundle:
+                tls_ctx_options.override_default_trust_store_from_path(
+                    ca_filepath=config.s3_ca_bundle,
+                )
+            tls_ctx = ClientTlsContext(tls_ctx_options)
             tls_opts = TlsConnectionOptions(tls_ctx)
-            try:
-                tls_opts.set_alpn_list(["h2", "http/1.1"])
-            except Exception:
-                tls_opts = None
+            if config.s3_prefer_http2:
+                try:
+                    tls_opts.set_alpn_list(["h2", "http/1.1"])
+                except Exception:
+                    tls_opts = None
 
         signing_config = None
         if self._enable_s3express:
@@ -838,7 +882,7 @@ class S3L2Adapter(L2AdapterInterface):
                 headers.add(k, v)
         return HttpRequest(
             method,
-            _format_safe_path(key_str),
+            _format_safe_path(key_str, self._bucket),
             headers,
             body_stream=body_stream,
         )
@@ -973,7 +1017,10 @@ class S3L2Adapter(L2AdapterInterface):
             params.append(("continuation-token", continuation_token))
         # urlencode handles percent-escaping of values (continuation
         # tokens are typically base64 with ``+``/``/``/``=`` chars).
-        path = "/?" + urlencode(params, quote_via=url_quote)
+        path_prefix = (
+            "/" if self._bucket is None else f"/{url_quote(self._bucket, safe='')}"
+        )
+        path = path_prefix + "?" + urlencode(params, quote_via=url_quote)
 
         headers = HttpHeaders()
         headers.add("Host", self._endpoint)
