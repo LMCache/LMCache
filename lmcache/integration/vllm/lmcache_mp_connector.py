@@ -1007,9 +1007,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
-        # TODO: support loading KV for preempted requests in the future
-        if request.status == RequestStatus.PREEMPTED:
-            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
