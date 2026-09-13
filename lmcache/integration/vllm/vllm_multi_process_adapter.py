@@ -2162,7 +2162,9 @@ class LMCacheMPWorkerAdapter:
         """Converge the internal states about finished stores
         and returns the 'safe finished store request ids' back
         """
-        safe_finished_s = self.finished_stores.intersection(self.previously_finished)
+        safe_finished_s = self.finished_stores.intersection(
+            self.previously_finished
+        ).difference(self.store_futures)
         self.finished_stores.difference_update(self.previously_finished)
         self.previously_finished.difference_update(safe_finished_s)
 

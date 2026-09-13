@@ -4,8 +4,9 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."""
 
 # Standard
-from typing import Callable, ClassVar
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from typing import Any, Callable, ClassVar
+from unittest.mock import MagicMock, call
 import gc
 import os
 import threading
@@ -29,6 +30,8 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.cuda.vmm_ipc import is_use_vmm_api, set_use_vmm_api
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+
+SchedulerConnectorFactory = Callable[..., tuple[Any, MagicMock]]
 
 
 class FakeCudaEvent:
@@ -1094,3 +1097,196 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok
+
+
+@pytest.fixture
+def scheduler_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> SchedulerConnectorFactory:
+    """Construct the scheduler connector with only external boundaries mocked."""
+    module = pytest.importorskip("lmcache.integration.vllm.lmcache_mp_connector")
+    pending_store = MagicMock()
+    monkeypatch.setattr(
+        module, "LazyOffloadPendingStore", MagicMock(return_value=pending_store)
+    )
+    monkeypatch.setattr(
+        module,
+        "build_parallel_strategy_from_vllm_config",
+        lambda *args: ParallelStrategy(False, 1, 0, 1, 1, 1),
+    )
+
+    def make(lazy_offload: bool = False) -> tuple[Any, MagicMock]:
+        extra_config = {"lmcache.mp.lazy_offload": lazy_offload}
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(model="test-model"),
+            cache_config=SimpleNamespace(block_size=16),
+            parallel_config=SimpleNamespace(world_size=1),
+            kv_transfer_config=SimpleNamespace(
+                kv_connector_extra_config=extra_config,
+                get_from_extra_config=extra_config.get,
+            ),
+        )
+        adapter = MagicMock(lmcache_tokens_per_chunk=64)
+        monkeypatch.setattr(
+            module, "LMCacheMPSchedulerAdapter", MagicMock(return_value=adapter)
+        )
+        connector = module.LMCacheMPConnector(config, module.KVConnectorRole.SCHEDULER)
+        return connector, pending_store
+
+    return make
+
+
+@pytest.mark.parametrize(
+    "finish_status", ["FINISHED_STOPPED", "FINISHED_LENGTH_CAPPED"]
+)
+def test_successful_session_waits_for_worker_store_completion(
+    finish_status: str,
+    scheduler_connector: SchedulerConnectorFactory,
+) -> None:
+    """Final STORE retirement, not token generation, permits session removal."""
+    pytest.importorskip("vllm")
+    # Third Party
+    from vllm.v1.request import RequestStatus
+
+    connector, _ = scheduler_connector()
+    request = SimpleNamespace(
+        request_id="late-store", status=getattr(RequestStatus, finish_status)
+    )
+
+    assert connector.request_finished(request, [0]) == (True, None)
+    connector.scheduler_adapter.assert_not_called()
+    assert connector.scheduler_adapter.mock_calls == []
+    connector.update_connector_output(SimpleNamespace(finished_sending=None))
+    assert connector.scheduler_adapter.mock_calls == []
+    connector.update_connector_output(
+        SimpleNamespace(finished_sending={"unrelated", "late-store"})
+    )
+    assert connector.scheduler_adapter.mock_calls == [
+        call.end_session("late-store"),
+        call.cleanup_lookup_result("late-store"),
+    ]
+    connector.update_connector_output(SimpleNamespace(finished_sending={"late-store"}))
+    assert connector.scheduler_adapter.end_session.call_count == 1
+    assert connector.scheduler_adapter.cleanup_lookup_result.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "finish_status", ["FINISHED_ABORTED", "FINISHED_ERROR", "FINISHED_IGNORED"]
+)
+def test_abort_session_cleanup_does_not_wait_for_finished_sending(
+    finish_status: str,
+    scheduler_connector: SchedulerConnectorFactory,
+) -> None:
+    """Aborts that retire only through finished_recving retain existing cleanup."""
+    pytest.importorskip("vllm")
+    # Third Party
+    from vllm.v1.request import RequestStatus
+
+    connector, _ = scheduler_connector()
+    request = SimpleNamespace(
+        request_id="abort-receive", status=getattr(RequestStatus, finish_status)
+    )
+    assert connector.request_finished(request, [0]) == (True, None)
+    assert connector.scheduler_adapter.mock_calls == [
+        call.end_session("abort-receive"),
+        call.cleanup_lookup_result("abort-receive"),
+    ]
+    connector.update_connector_output(
+        SimpleNamespace(finished_sending=None, finished_recving={"abort-receive"})
+    )
+    connector.update_connector_output(
+        SimpleNamespace(finished_sending={"abort-receive"})
+    )
+    assert connector.scheduler_adapter.end_session.call_count == 1
+    assert connector.scheduler_adapter.cleanup_lookup_result.call_count == 1
+
+
+def test_lazy_request_finished_retains_immediate_cleanup(
+    scheduler_connector: SchedulerConnectorFactory,
+) -> None:
+    """The normal-store prerequisite leaves lazy offload ownership unchanged."""
+    pytest.importorskip("vllm")
+    # Third Party
+    from vllm.v1.request import RequestStatus
+
+    connector, pending_store = scheduler_connector(lazy_offload=True)
+    request = SimpleNamespace(
+        request_id="lazy", status=RequestStatus.FINISHED_LENGTH_CAPPED
+    )
+    assert connector.request_finished(request, [0]) == (False, None)
+    assert connector.scheduler_adapter.mock_calls == [
+        call.end_session("lazy"),
+        call.cleanup_lookup_result("lazy"),
+    ]
+    pending_store.mark_req_finished.assert_called_once_with("lazy")
+
+
+def test_older_store_completion_cannot_retire_newer_pending_store(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+) -> None:
+    """An earlier completed chunk must not authorize final-store block release."""
+    adapter, _, _ = fake_adapter
+    first = MagicMock()
+    first.query.return_value = True
+    first.result.return_value = True
+    adapter.store_futures["chunks"] = first
+    assert adapter.get_finished(set()) == (set(), set())
+
+    final = MagicMock()
+    final.query.return_value = False
+    final.result.return_value = True
+    adapter.store_futures["chunks"] = final
+    assert adapter.get_finished({"chunks"}) == (set(), set())
+    assert adapter.get_finished({"chunks"}) == (set(), set())
+    final.result.assert_not_called()
+
+    final.query.return_value = True
+    assert adapter.get_finished(set()) == ({"chunks"}, set())
+    assert adapter.get_finished({"chunks"}) == (set(), set())
+
+
+def test_no_store_request_still_finishes_once(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+) -> None:
+    """APC, miss, and nonwriter requests need no STORE future to retire."""
+    adapter, _, _ = fake_adapter
+    assert adapter.get_finished({"no-store"}) == ({"no-store"}, set())
+    assert adapter.get_finished({"no-store"}) == (set(), set())
+
+
+def test_session_waits_for_all_eight_worker_store_reports(
+    scheduler_connector: SchedulerConnectorFactory,
+) -> None:
+    """Seven worker reports cannot end a successful eight-rank session."""
+    pytest.importorskip("vllm")
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+    from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+    from vllm.v1.request import RequestStatus
+
+    connector, _ = scheduler_connector()
+    request = SimpleNamespace(
+        request_id="eight-rank", status=RequestStatus.FINISHED_LENGTH_CAPPED
+    )
+    assert connector.request_finished(request, [0]) == (True, None)
+    aggregator = KVOutputAggregator(8)
+    for reporting_ranks in ({0, 1, 2, 3, 4, 5, 6}, {7}):
+        outputs = [
+            ModelRunnerOutput(
+                req_ids=[],
+                req_id_to_index={},
+                kv_connector_output=KVConnectorOutput(
+                    finished_sending={"eight-rank"} if rank in reporting_ranks else None
+                ),
+            )
+            for rank in range(8)
+        ]
+        aggregate = aggregator.aggregate(outputs)
+        assert aggregate is not None
+        connector.update_connector_output(aggregate.kv_connector_output)
+        if len(reporting_ranks) == 7:
+            assert connector.scheduler_adapter.mock_calls == []
+    assert connector.scheduler_adapter.mock_calls == [
+        call.end_session("eight-rank"),
+        call.cleanup_lookup_result("eight-rank"),
+    ]
