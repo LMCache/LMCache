@@ -1,5 +1,5 @@
-# XPU smoke test.
-# Runs on a dedicated `intel-xpu` queue using the public XPU CI image.
+# XPU device validation. Runs on a dedicated `intel-xpu` queue using the
+# vLLM XPU nightly runtime.
 
 steps:
   - label: ":intel-xpu-unit-tests"
@@ -9,10 +9,10 @@ steps:
     plugins:
       - kubernetes:
           podSpec:
-            # Use the prebuilt public XPU CI image.
+            # Device tests exercise the current vLLM XPU nightly runtime.
             containers:
               - name: container-0
-                image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu
+                image: ${PINNED_XPU_IMAGE}
                 imagePullPolicy: IfNotPresent
                 resources:
                   requests:
