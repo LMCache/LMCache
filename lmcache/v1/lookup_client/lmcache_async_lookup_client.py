@@ -35,6 +35,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     """
     ZMQ-based lookup client that communicates with a lookup server.
 
+    Submission and polling do not add a per-request backoff. The serving
+    engine is responsible for yielding between idle steps when all lookups
+    are pending, so runnable requests are not delayed by lookup polling.
+
     Related extra_config:
     - lookup_server_worker_ids:
         is a config to control create lookup server on some workers.
@@ -50,7 +54,16 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
-    ):
+    ) -> None:
+        """Connect to lookup workers and start the response thread.
+
+        Args:
+            config (LMCacheEngineConfig): Lookup and token-database configuration.
+            metadata (LMCacheMetadata): Worker topology and engine RPC identity.
+
+        Raises:
+            AssertionError: If metadata does not specify an engine ID.
+        """
         # lookup_id -> first lookup time
         # this helps us support timeout semantics
         self.first_lookup_time: dict[str, float] = {}
@@ -149,18 +162,24 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         )
         self.thread.start()
 
-        # default backoff time
-        self.lookup_backoff_time = 0.01
-        if config.extra_config is not None:
-            self.lookup_backoff_time = float(
-                config.extra_config.get("lookup_backoff_time", self.lookup_backoff_time)
+        if config.extra_config and "lookup_backoff_time" in config.extra_config:
+            logger.warning(
+                "lookup_backoff_time is deprecated and ignored. Async lookup "
+                "no longer sleeps per request on the scheduler thread; idle "
+                "polling backoff must be handled by the serving engine."
             )
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
-        """
-        -1 means not found;
-        None means ongoing;
-        int >= 0 means number of hit tokens
+        """Poll a lookup result without adding a delay while it is pending.
+
+        Args:
+            lookup_id (str): Request identifier to query. The first poll
+                registers the identifier and starts its timeout interval.
+
+        Returns:
+            Optional[int]: -1 for a newly registered lookup, None while pending,
+            or the minimum hit-token count across workers when complete.
+            An expired lookup returns 0 so the caller can recompute its tokens.
         """
         # Check if any aborted lookups are finished, send cleanup messages
         self._cleanup_finished_aborted_lookups()
@@ -170,7 +189,6 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 self.reqs_status[lookup_id] = None
                 self.first_lookup_time[lookup_id] = time.time()
             elif req_status is None:
-                time.sleep(self.lookup_backoff_time)
                 if (
                     time.time() - self.first_lookup_time[lookup_id]
                 ) * 1000 > self.config.lookup_timeout_ms:
@@ -196,6 +214,20 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
+        """Send a lookup to each worker without waiting for its result.
+
+        Args:
+            token_ids (Union[torch.Tensor, list[int]]): Tokens to look up.
+            lookup_id (str): Identifier previously registered by lookup_cache().
+            request_configs (Optional[dict]): Per-request options, including tags.
+
+        Returns:
+            Optional[int]: None; results are obtained through lookup_cache().
+
+        Notes:
+            No polling backoff is added after dispatch. Socket sends retain
+            their existing transport-level blocking behavior.
+        """
         hashes: list[int] = []
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
@@ -217,7 +249,6 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
         for i in range(self.world_size):
             self.push_sockets[i].send(msg_buf, copy=False)
-        time.sleep(self.lookup_backoff_time)
         return None
 
     def process_responses_from_workers(self):
