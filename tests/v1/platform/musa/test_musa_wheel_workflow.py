@@ -4,11 +4,21 @@
 # Standard
 from pathlib import Path
 import stat
+import subprocess
+import sys
+import zipfile
 
 # Third Party
 import yaml
 
 ROOT = Path(__file__).resolve().parents[4]
+
+
+def _extract_musa_wheel_metadata_verifier() -> str:
+    script = (ROOT / ".github/scripts/build_musa_wheel.sh").read_text()
+    start = script.index("<<'PY'\n") + len("<<'PY'\n")
+    end = script.index('\nPY\n\necho "=== bundled MUSA/torch libraries', start)
+    return script[start:end]
 
 
 def _load_workflow(relative_path: str) -> dict:
@@ -124,3 +134,49 @@ def test_publish_workflow_wires_musa_build_and_release() -> None:
     assert "nightly-musa" in publish_step["run"]
     assert "--prerelease" in publish_step["run"]
     assert "MUSA_VERSION" in publish_step["env"]
+
+
+def test_musa_wheel_metadata_verifier_accepts_pep440_normalized_version(
+    tmp_path: Path,
+) -> None:
+    """Wheel metadata may canonicalize release segments such as 1.0001 -> 1.1."""
+    wheel = tmp_path / "lmcache-1.1+musa-cp310-cp310-manylinux_2_35_x86_64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "lmcache-1.1+musa.dist-info/METADATA",
+            "\n".join(
+                [
+                    "Metadata-Version: 2.4",
+                    "Name: lmcache",
+                    "Version: 1.1+musa",
+                    "",
+                ]
+            ),
+        )
+        archive.writestr(
+            "lmcache-1.1+musa.dist-info/WHEEL",
+            "\n".join(
+                [
+                    "Wheel-Version: 1.0",
+                    "Generator: test",
+                    "Root-Is-Purelib: false",
+                    "Tag: cp310-cp310-manylinux_2_35_x86_64",
+                    "",
+                ]
+            ),
+        )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _extract_musa_wheel_metadata_verifier(),
+            str(wheel),
+            str(tmp_path / "check"),
+            "1.0001+musa",
+            "manylinux_2_35_x86_64",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
