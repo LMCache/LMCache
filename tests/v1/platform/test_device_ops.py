@@ -287,10 +287,6 @@ def test_package_exports_resolved_device_ops() -> None:
         "TransferDirection",
         "EngineKVFormat",
         "GPUKVFormat",
-        "is_cross_layer",
-        "is_kv_list",
-        "is_layer_list",
-        "is_mla",
     )
     for name in native_only_names:
         assert not hasattr(device_ops, name)

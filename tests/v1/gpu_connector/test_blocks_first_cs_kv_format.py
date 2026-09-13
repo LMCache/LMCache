@@ -17,6 +17,7 @@ import torch
 from lmcache import device_ops, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import utils as U
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
@@ -61,7 +62,7 @@ def test_accessors():
     # get_dtype is on the register_kv_caches -> group_layers_by_identity path,
     # so it must recognize this format too.
     assert U.get_dtype(norm, fmt) == _raw_blocks_first_caches()[0].dtype
-    assert not lmcache_native.is_mla(fmt)
+    assert not get_spec_class(fmt).is_mla
 
 
 def test_mp_gather_scatter_roundtrip():
