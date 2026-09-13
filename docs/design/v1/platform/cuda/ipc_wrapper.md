@@ -82,9 +82,14 @@ ordering hazard. The TRT-LLM adapter keeps instantiating
 ## Status
 
 Selected by `CudaDeviceSpec.ipc_wrapper_cls` behind the isolated-IPC
-switch, off by default. With both legs behind the switch, an
-isolated-IPC deployment has **zero `/dev/shm` dependencies** in the MP
-path — `--ipc host` / `hostIPC: true` can be dropped (see
-`docs/source/mp/deployment.rst`). Remaining series work: migrate the
-SGLang/CacheBlend/qstore call sites, flip the default, drop `hostIPC`
-from the operator.
+switch, off by default in the LMCache server itself. With both legs
+behind the switch, an isolated-IPC deployment has **zero `/dev/shm`
+dependencies** in the MP path — `--ipc host` / `hostIPC: true` can be
+dropped (see `docs/source/mp/deployment.rst`). The Kubernetes operator
+has already flipped: on `gpuVendor: nvidia` it now defaults to
+isolated IPC (`spec.isolatedIPC` unset resolves to true), starts the
+engine with `--isolated-ipc`, and injects vLLM pods without the host
+`/dev/shm` mount or `hostIPC` (see `docs/source/mp/operator.rst` and
+`operator/DESIGN.md`). Remaining series work: migrate the
+SGLang/CacheBlend/qstore call sites and flip the server-side default
+of `--isolated-ipc` itself.
