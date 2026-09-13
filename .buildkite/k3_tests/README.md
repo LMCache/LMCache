@@ -45,17 +45,27 @@ instead of `buildkite-agent pipeline upload` directly. The wrapper
 (`common_scripts/path-filter.sh`) inspects the changed files in the build and:
 
 - **Skips** the build (exits 0 without uploading `pipeline.yml` → build is
-  green with just the upload step) when *all* changed files match a "trivial"
-  pattern: `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
-  `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/`,
-  `asset/`, or `.github/`. (`.github/` is trivial here
-  because k3 tests run on Buildkite, not GitHub Actions, so workflow /
-  CODEOWNERS / template changes do not affect them.)
-- **Force-runs** the build when any changed file lives under `.buildkite/` —
-  those PRs are usually fixing the k3 CI itself, so we want them tested on
-  the PR rather than after merge.
-- **Runs** the build whenever there is at least one non-trivial file by
-  uploading `pipeline.yml`, which contains the real test steps.
+  green with just the upload step) when the changed files are not relevant to
+  the uploaded test pipeline. This includes docs-only / trivial changes such
+  as `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
+  `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/` or
+  `asset/`, or `.github/`. (`.github/` is trivial here because k3 tests run on Buildkite,
+  not GitHub Actions, so workflow / CODEOWNERS / template changes do not
+  affect them.)
+
+The filter intentionally uses a conservative blacklist instead of a whitelist.
+In other words, only files that are explicitly known to be irrelevant are
+skipped. Anything else is treated as potentially functional and therefore keeps
+that pipeline enabled.
+
+Known-irrelevant patterns include docs-only changes (`*.md`, `docs/**`,
+`asset/**`, `.github/**`, `LICENSE*`, `NOTICE*`, `.gitignore`,
+`.gitattributes`, `.editorconfig`, `.mailmap`, `CODEOWNERS`) and the K3 docs
+pages under `.buildkite/k3_tests/`.
+
+This policy is safer than a whitelist because it avoids false negatives: when a
+change may affect behavior, even if it is not 100% confirmed, the job still runs.
+
 
 Detection:
 - PR builds diff against `origin/${BUILDKITE_PULL_REQUEST_BASE_BRANCH}`
