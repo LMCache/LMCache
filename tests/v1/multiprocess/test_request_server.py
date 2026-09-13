@@ -13,6 +13,8 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -47,7 +49,19 @@ def test_sync_handlers_are_serialized(request_transport: RequestTransport) -> No
     """SYNC handlers must retain the single-main-loop execution contract."""
     state = _DispatchState()
 
-    class SyncModule:
+    class SyncModule(EngineModule):
+        @property
+        def context(self) -> MPCacheServerContext:
+            """The dispatch-only test does not use an engine context."""
+            raise NotImplementedError
+
+        def report_status(self) -> dict:
+            """Return the empty status of this test module."""
+            return {}
+
+        def close(self) -> None:
+            """Release no resources for this test module."""
+
         @request_handler(RequestType.NOOP)
         def noop(self) -> str:
             with state.lock:
@@ -68,9 +82,7 @@ def test_sync_handlers_are_serialized(request_transport: RequestTransport) -> No
     server.start()
     clients: list[RequestClient] = []
     try:
-        clients = [
-            RequestClientFactory.create(server_url) for _ in range(worker_count)
-        ]
+        clients = [RequestClientFactory.create(server_url) for _ in range(worker_count)]
         barrier = threading.Barrier(worker_count)
 
         def call_noop(client: RequestClient) -> str:
