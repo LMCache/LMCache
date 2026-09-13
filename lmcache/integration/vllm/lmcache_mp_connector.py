@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 import math
 import sys
+import time
 
 # Third Party
 from vllm.config import VllmConfig
@@ -53,6 +54,10 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
     LMCacheMPWorkerMetadata,
+)
+from lmcache.integration.vllm.lmcache_mp_metrics import (
+    LMCacheMPConnectorStats,
+    LMCacheMPPromMetrics,
 )
 from lmcache.integration.vllm.utils import (
     mla_only,
@@ -475,6 +480,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Older supported vLLM releases allow connectors to omit this value,
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
+        self._connector_stats = LMCacheMPConnectorStats()
 
         # Fail fast, before the server handshake below.
         kv_cache_config = getattr(self, "_kv_cache_config", None)
@@ -959,7 +965,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Get the KV connector stats collected during the last interval.
         """
-        return None
+        stats = self._connector_stats.clone_and_reset()
+        return None if stats.is_empty() else stats
 
     # ==============================
     # Scheduler-side methods
@@ -1045,6 +1052,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
             return 0, False
 
+        if tracker.lookup_started_at is None:
+            tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=tracker.get_token_ids(),
@@ -1055,6 +1064,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
         if ret is None:
             return None, True
+        assert tracker.lookup_started_at is not None
+        self._connector_stats.record_lookup(
+            time.monotonic() - tracker.lookup_started_at
+        )
+        tracker.lookup_started_at = None
 
         if ret == 0:
             return 0, False
@@ -1101,6 +1115,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.lookup_started_at is None:
+            tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=tracker.get_token_ids(),
@@ -1365,7 +1381,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
         """
-        return None
+        return LMCacheMPConnectorStats(data=data or {})
 
     @classmethod
     def build_prom_metrics(
@@ -1380,7 +1396,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         per-connector Prometheus metrics and implement observe() to
         expose connector transfer stats via Prometheus.
         """
-        return None
+        return LMCacheMPPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
     ##############################
     # Helper functions

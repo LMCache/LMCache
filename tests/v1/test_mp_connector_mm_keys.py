@@ -203,6 +203,7 @@ def test_eager_prefetch_forwards_request_configs():
         cache_salt="",
         request_configs={"lmcache.skip_save": True},
     )
+    assert tracker.lookup_started_at is not None
 
 
 def _prepare_storable_tracker(request: _FakeRequest) -> LMCacheMPRequestTracker:

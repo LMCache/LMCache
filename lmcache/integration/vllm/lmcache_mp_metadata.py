@@ -75,6 +75,7 @@ class LMCacheMPRequestTracker:
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
     max_offload_tokens: int | None = None
+    lookup_started_at: float | None = None
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
@@ -85,6 +86,7 @@ class LMCacheMPRequestTracker:
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
         )
+        self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
