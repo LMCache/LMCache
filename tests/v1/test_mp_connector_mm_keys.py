@@ -145,6 +145,7 @@ def test_tracker_extracts_request_configs():
             sampling_params_extra_args={
                 "kv_transfer_params": {
                     "lmcache.skip_save": True,
+                    "lmcache.max_offload_tokens": 4,
                     "lmcache.priority": "high",
                     "temperature": 0.8,
                 }
@@ -154,8 +155,28 @@ def test_tracker_extracts_request_configs():
 
     assert tracker.request_configs == {
         "lmcache.skip_save": True,
+        "lmcache.max_offload_tokens": 4,
         "lmcache.priority": "high",
     }
+    assert tracker.max_offload_tokens == 4
+
+
+def test_tracker_ignores_max_offload_tokens_outside_request_configs():
+    request = _FakeRequest(
+        [1, 2, 3, 4],
+        sampling_params_extra_args={
+            "kv_transfer_params": {
+                "max_offload_tokens": 4,
+                "lmcache.skip_save": True,
+            }
+        },
+    )
+    request.kv_transfer_params = {"lmcache.max_offload_tokens": 4}
+
+    tracker = LMCacheMPRequestTracker(request)
+
+    assert tracker.max_offload_tokens is None
+    assert tracker.request_configs == {"lmcache.skip_save": True}
 
 
 def test_eager_prefetch_forwards_request_configs():
@@ -225,6 +246,32 @@ def test_store_metadata_preserves_request_configs():
 
     assert metadata is not None
     assert metadata.request_configs == {"lmcache.skip_save": True}
+
+
+def test_store_metadata_respects_max_offload_tokens():
+    tracker = _prepare_storable_tracker(
+        _FakeRequest(
+            list(range(8)),
+            sampling_params_extra_args={
+                "kv_transfer_params": {"lmcache.max_offload_tokens": 4}
+            },
+        )
+    )
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, lmcache_tokens_per_chunk=4, group_tokens_per_block=[4]
+    )
+
+    assert metadata is not None
+    assert metadata.op.start == 0
+    assert metadata.op.end == 4
+    assert tracker.num_stored_tokens == 4
+    assert (
+        LMCacheMPRequestMetadata.GetStoreMetadata(
+            tracker, lmcache_tokens_per_chunk=4, group_tokens_per_block=[4]
+        )
+        is None
+    )
 
 
 def test_retrieve_metadata_uses_mm_adjusted_token_ids():
