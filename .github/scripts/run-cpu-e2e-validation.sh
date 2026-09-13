@@ -569,8 +569,10 @@ if [ "$(uname -s)" = "Linux" ]; then
   #               unconditionally, so `vllm serve` aborts with
   #               "libavutil.so.NN: cannot open shared object file"
   #               without FFmpeg — even for text-only models.
-  # Prefer sudo if present (GitHub ubuntu runners need it). Install only
-  # what's missing and never let an apt hiccup fail the step.
+  # Prefer sudo if present (GitHub ubuntu runners need it). These packages
+  # are runtime prerequisites for the vLLM CPU server, so an installation
+  # failure must fail the validation instead of surfacing later as a missing
+  # torch operator.
   MISSING_PKGS=()
   if [ ! -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 ] \
      && [ ! -e /lib/x86_64-linux-gnu/libnuma.so.1 ]; then
@@ -585,16 +587,25 @@ if [ "$(uname -s)" = "Linux" ]; then
   if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
     echo "Installing missing system packages: ${MISSING_PKGS[*]}"
     if command -v sudo >/dev/null 2>&1; then
-      sudo apt-get update \
-        && sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
-        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) via sudo failed; continuing"
+      sudo apt-get update -o Acquire::Retries=3
+      sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
     else
-      apt-get update \
-        && apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
-        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) failed; continuing"
+      apt-get update -o Acquire::Retries=3
+      apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
     fi
   else
     echo "libnuma1 and FFmpeg runtime libs already present, skipping apt install"
+  fi
+
+  # Do not let a missing runtime library turn into a misleading native
+  # operator error from vLLM during worker initialization.
+  if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so\.1'; then
+    echo "❌ Required runtime library libnuma.so.1 is unavailable"
+    false
+  fi
+  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+    echo "❌ Required FFmpeg runtime library libavutil.so is unavailable"
+    false
   fi
 fi
 # VLLM_DEVICE is the modern env var (vLLM 0.8+)
