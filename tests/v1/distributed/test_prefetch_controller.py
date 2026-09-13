@@ -1536,6 +1536,62 @@ class TestPrefetchMode:
         ctrl.stop()
         adapter.close()
 
+    def test_warm_result_excludes_prior_l1_hits(self, l1_manager):
+        """A key already in L1 when the warm starts is neither re-loaded nor
+        reported: it may be another lookup's temporary, gone once that reader
+        releases, so a caller acting per key on the result must not take it
+        as loaded. The result names exactly the keys this warm brought in."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        # keys[1] is loadable from L2; keys[0] is a temporary another reader
+        # still holds; keys[2] exists nowhere.
+        store_keys_in_l2(adapter, [keys[1]], layout)
+        reserved = l1_manager.reserve_write(
+            [keys[0]], is_temporary=[True], layout_desc=layout, mode="new"
+        )
+        assert reserved[keys[0]][0] == L1Error.SUCCESS
+        held = l1_manager.finish_write_and_reserve_read([keys[0]])
+        assert held[keys[0]][0] == L1Error.SUCCESS
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                PrefetchRequestSpec(
+                    keys,
+                    {0: layout},
+                    policy=TrimPolicy.SPARSE,
+                    mode=PrefetchMode.WARM,
+                )
+            )
+            result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+            assert result is not None
+            assert result.get_indices_list() == [1]
+
+            # The prior temporary was left alone: once its reader releases
+            # it, it is gone -- exactly why the warm must not have claimed it.
+            l1_manager.finish_read([keys[0]])
+            assert (
+                l1_manager.reserve_read([keys[0]])[keys[0]][0] == L1Error.KEY_NOT_EXIST
+            )
+            # What the warm did load remains resident after the probe read
+            # is released (retained, not temporary).
+            probe = l1_manager.reserve_read([keys[1]])
+            assert probe[keys[1]][0] == L1Error.SUCCESS
+            l1_manager.finish_read([keys[1]])
+            assert l1_manager.reserve_read([keys[1]])[keys[1]][0] == L1Error.SUCCESS
+            l1_manager.finish_read([keys[1]])
+        finally:
+            l1_manager.delete(keys)
+            ctrl.stop()
+            adapter.close()
+
     def test_default_deletes_keys_after_finish_read(self, l1_manager):
         """LOOKUP defers to ``DefaultPrefetchPolicy`` (temporary), so
         the keys are deleted from L1 once the read-lock is released."""

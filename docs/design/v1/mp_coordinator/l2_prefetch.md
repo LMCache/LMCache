@@ -22,10 +22,14 @@ sequenceDiagram
     loop until completed
         Cl->>Co: GET /cache/prefetches/{instance_id}/{request_id}
         Co->>M: GET /cache/prefetches/{request_id}
-        M-->>Co: {status: pending | completed}
+        M-->>Co: pending | completed {found_keys, total_keys, missing_key_indices}
         Co-->>Cl: (relayed verbatim)
     end
 ```
+
+A completed response reports what this warm request loaded, excluding prior
+L1 hits. `missing_key_indices` is the ascending complement in the submitted
+key order; neither it nor `found_keys` is a current residency snapshot.
 
 A client names **one** registered MP server and a **token sequence** (plus the
 model/world_size and tenant salt, and the optional `source_tier`=`l2` /

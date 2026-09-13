@@ -72,7 +72,9 @@ class PrefetchMode(enum.Enum):
 
     ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
     retained and left unlocked (immediately resident and evictable), so a later
-    lookup can hit them.
+    lookup can hit them. Its result names only the keys it loaded: a key
+    already resident when it started is neither re-loaded nor reported (it
+    may be another lookup's temporary, gone once that reader releases).
     """
 
     LOOKUP = enum.auto()
