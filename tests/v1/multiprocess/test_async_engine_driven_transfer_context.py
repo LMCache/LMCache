@@ -32,6 +32,7 @@ class _FakeStoreContext:
     commit_impl: Callable[[list[torch.Tensor]], bool]
     prepare_result: tuple[list[torch.Tensor], list[int]] | None = None
     prepare_impl: Callable[[], None] | None = None
+    is_pinned: bool = False
 
     def __post_init__(self) -> None:
         self.layout_desc = SimpleNamespace(
@@ -123,6 +124,11 @@ def _new_context(
     max_inflight: int = 8,
 ) -> AsyncEngineDrivenTransferContext:
     monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
+    monkeypatch.setattr(
+        async_engine_driven,
+        "EngineDrivenContextShm",
+        _FakeStoreContext,
+    )
     _install_fake_gather(monkeypatch)
     ctx = AsyncEngineDrivenTransferContext(commit_workers=max_inflight)
     ctx._engine_driven_context = (
@@ -474,4 +480,83 @@ def test_prepare_store_runs_on_background_thread_not_forward_thread(
     # Now release prepare_store and let the background work complete.
     prepare_gate.set()
     t.join(timeout=1)
+    ctx.close()
+
+
+def test_pinned_shm_staging_releases_engine_before_internal_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned SHM staging releases source blocks before the internal commit."""
+    gather_gate = threading.Event()
+    gather_gate.set()
+    commit_started = threading.Event()
+    commit_gate = threading.Event()
+    destination = torch.zeros((2, 1, 1, 1), dtype=torch.float32)
+
+    def _commit(chunks: list[torch.Tensor]) -> bool:
+        assert chunks == [destination]
+        commit_started.set()
+        commit_gate.wait(timeout=2)
+        return True
+
+    ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
+    ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]
+        commit_impl=_commit,
+        prepare_result=([destination], [0]),
+    )
+
+    future = ctx.submit_store(
+        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+    )
+
+    assert future.result(timeout=1) is True
+    assert commit_started.wait(timeout=1)
+    assert torch.equal(destination, torch.ones_like(destination))
+
+    closed = threading.Event()
+
+    def _close() -> None:
+        ctx.close()
+        closed.set()
+
+    close_thread = threading.Thread(target=_close, daemon=True)
+    close_thread.start()
+    assert not closed.wait(timeout=0.05)
+    commit_gate.set()
+    close_thread.join(timeout=1)
+    assert closed.is_set()
+
+
+def test_pinned_shm_gathers_directly_without_staging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned SHM gathers directly and completes after the internal commit."""
+    gather_gate = threading.Event()
+    gather_gate.set()
+    commit_started = threading.Event()
+    commit_gate = threading.Event()
+    destination = torch.zeros((2, 1, 1, 1), dtype=torch.float32)
+
+    def _commit(chunks: list[torch.Tensor]) -> bool:
+        assert chunks == [destination]
+        commit_started.set()
+        commit_gate.wait(timeout=2)
+        return True
+
+    ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
+    ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]
+        commit_impl=_commit,
+        prepare_result=([destination], [0]),
+        is_pinned=True,
+    )
+
+    future = ctx.submit_store(
+        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+    )
+
+    assert commit_started.wait(timeout=1)
+    assert not future.query()
+    assert torch.equal(destination, torch.ones_like(destination))
+    commit_gate.set()
+    assert future.result(timeout=1) is True
     ctx.close()
