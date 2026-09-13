@@ -287,10 +287,26 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens found in L1 or L2 during lookup (numerator of the
        L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
+   * - ``lmcache_mp.lookup_hit_l1``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Of ``lookup_hit``: tokens L1 could serve on its own under each
+       object group's attention-window rule.
+   * - ``lmcache_mp.lookup_hit_l2``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix.
+       ``l1 + l2 == lookup_hit`` per event.
+   * - ``lmcache_mp.lookups``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Completed lookups (denominator for ``lookup_early_exit``).
+   * - ``lmcache_mp.lookup_early_exit``
+     - Counter (attrs: ``model_name``, ``cache_salt``, ``reason``)
+     - Lookups that exited before a cache probe; ``reason`` is one of
+       ``no_gpu_context``, ``empty_chunk_hashes``, ``no_group_layout_descs``.
 
-Both counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
+All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
-contribute ``0`` to both, and abandoned lookups contribute to neither.
+contribute ``0`` tokens to all four token counters and ``+1`` to
+``lookups`` / ``lookup_early_exit``, and abandoned lookups contribute to neither.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
 time from ``IPCCacheServerKey`` so dashboards can compute per-model or
@@ -309,6 +325,14 @@ per tenant or isolation domain); drop it at scrape time with
     # Per-model:
     sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
     / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
+
+    # Share of hit tokens L1 could serve on its own:
+    rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
+    / rate(lmcache_mp_lookup_hit_tokens_total[5m])
+
+    # Fraction of lookups that early-exited, by reason:
+    sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
+    / sum(rate(lmcache_mp_lookups_requests_total[5m]))
 
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

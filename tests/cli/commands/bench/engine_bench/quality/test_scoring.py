@@ -40,6 +40,17 @@ class TestExtractFinalAnswer:
         """A missing closing tag means generation was cut off."""
         assert extract_final_answer("thinking... <final_answer>Par") == ""
 
+    @pytest.mark.parametrize("suffix", ["Ber", "", "\n Ber\n", "Berlin</final_ans"])
+    def test_truncated_final_region_does_not_fall_back_to_example(
+        self, suffix: str
+    ) -> None:
+        """A truncated final region invalidates an earlier example answer."""
+        response = (
+            "For example <final_answer>Paris</final_answer>. "
+            f"My answer: <FINAL_ANSWER>{suffix}"
+        )
+        assert extract_final_answer(response) == ""
+
     def test_no_region_at_all(self) -> None:
         assert extract_final_answer("I think the answer is Paris.") == ""
 

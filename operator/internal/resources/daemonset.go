@@ -118,7 +118,11 @@ func buildDaemonSetCore(
 		runtimeClassName = &rc
 	}
 	privileged := derefBool(spec.Privileged, false)
-	hostIPC := derefBool(spec.HostIPC, false)
+	// Isolated IPC needs neither the host IPC namespace nor the shared
+	// /dev/shm, and takes priority over spec.hostIPC (see the isolatedIPC
+	// field documentation).
+	isolatedIPC := spec.IsolatedIPCEnabled()
+	hostIPC := derefBool(spec.HostIPC, false) && !isolatedIPC
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -214,9 +218,12 @@ func buildDaemonSetCore(
 	// omitted. Never mount an emptyDir at /dev/shm — it would shadow the host's
 	// tmpfs and break CUDA IPC (cudaIpcOpenMemHandle fails with
 	// cudaErrorMapBufferObjectFailed).
+	// Under isolated IPC the handles rendezvous in the kernel driver, so no
+	// /dev/shm sharing is wired at all.
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
-	if !hostIPC && !HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
+	if !isolatedIPC && !hostIPC &&
+		!HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
 		volumes = append(volumes, BuildDevShmVolume())
 		volumeMounts = append(volumeMounts, BuildDevShmVolumeMount())
 	}
