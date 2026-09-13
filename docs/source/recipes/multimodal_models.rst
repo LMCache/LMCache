@@ -17,8 +17,23 @@ placeholder token ids for every image, so raw token ids cannot distinguish
 images. LMCache handles this automatically by overwriting each placeholder
 span with a per-position value sequence derived from the image's full content
 hash (``mm_hash``) before key hashing -- same text with different images gets
-distinct cache entries, and no configuration is required. This applies to
+distinct cache entries. This applies to
 both the in-process connector and MP mode.
+
+.. important::
+
+   For multimodal models, LMCache requires at least one of vLLM's prefix cache
+   or multimodal processor cache to be enabled. Disabling both replaces
+   content-based identifiers with request-local IDs that can repeat across
+   frontend restarts or replicas, causing a false hit for different media.
+   LMCache's in-process and MP connectors reject this configuration at startup.
+
+   If the model requires ``--no-enable-prefix-caching``, set
+   ``--mm-processor-cache-gb`` to a positive value, for example
+   ``--mm-processor-cache-gb 1``. Otherwise, keeping
+   ``--enable-prefix-caching`` also preserves content-based identifiers.
+   User-provided multimodal UUIDs do not work around this restriction: vLLM
+   overrides them when both caches are disabled. Text-only models are unaffected.
 
 Vision-encoder outputs are a separate, optional cache -- see
 :doc:`../non_kv_cache/encoder_cache` (in-process mode only; not yet available
