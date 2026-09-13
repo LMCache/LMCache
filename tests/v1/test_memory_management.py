@@ -150,6 +150,44 @@ def test_tensor_allocator(use_paging):
     allocator.close()
 
 
+@pytest.mark.parametrize("release_mode", ["free", "batched_free", "ref_count"])
+def test_paged_allocator_rejects_duplicate_release(release_mode: str) -> None:
+    """A duplicate release must not alias two live page allocations."""
+    page_count = 4
+    shape = torch.Size([16, 512])
+    dtype = torch.float16
+    page_bytes = shape.numel() * dtype.itemsize
+    allocator = PagedTensorMemoryAllocator(
+        torch.empty(page_count * page_bytes, dtype=torch.uint8),
+        [shape],
+        [dtype],
+        MemoryFormat.KV_2LTD,
+    )
+
+    original = allocator.allocate(shape, dtype)
+    assert original is not None
+    if release_mode == "free":
+        allocator.free(original)
+        allocator.free(original)
+    elif release_mode == "batched_free":
+        allocator.batched_free([original, original])
+    else:
+        original.ref_count_down()
+        original.ref_count_down()
+
+    live = allocator.batched_allocate(shape, dtype, page_count)
+    assert live is not None
+
+    assert len({memory_obj.tensor.data_ptr() for memory_obj in live}) == page_count
+    assert allocator.allocate(shape, dtype) is None
+    assert allocator.memcheck()
+
+    for memory_obj in live:
+        memory_obj.ref_count_down()
+    assert allocator.memcheck()
+    allocator.close()
+
+
 @pytest.mark.parametrize(
     "alloc_cls",
     [

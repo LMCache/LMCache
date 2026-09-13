@@ -2,6 +2,7 @@
 
 # Standard
 from collections import deque
+import threading
 from typing import List, Optional, Union
 
 # Third Party
@@ -69,10 +70,11 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
         self.paged_buffers = torch.split(self.buffer, self.align_bytes, dim=0)
 
-        # NOTE: deque is used since thread-safety is not a concern here as
-        # is implemented in C under the hood (in CPython), and operations
-        # on deque are atomic.
+        # Track both queue order and page membership. The lock makes the
+        # compound queue/set transitions atomic.
         self.free_blocks: deque[TensorMemoryObj] = deque()
+        self._free_blocks_lock = threading.Lock()
+        self._free_page_indices: set[int] = set()
 
         for idx, buf in enumerate(self.paged_buffers):
             # NOTE: idx is the paged index
@@ -95,6 +97,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 parent_allocator=self,
             )
             self.free_blocks.append(mem_obj)
+            self._free_page_indices.add(idx)
 
         # Address manager for memory usage tracking
         self.address_manager = PagedAddressManager(self)
@@ -133,9 +136,15 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
-        try:
-            free_block = self.free_blocks.popleft()
-        except IndexError:
+        with self._free_blocks_lock:
+            try:
+                free_block = self.free_blocks.popleft()
+            except IndexError:
+                free_block = None
+            if free_block is not None:
+                self._free_page_indices.remove(free_block.meta.address)
+
+        if free_block is None:
             logger.debug(
                 f"Failed to allocate memory for "
                 f"tensor({shapes}, {dtypes}) because "
@@ -185,19 +194,19 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
-        allocated_blocks: list[TensorMemoryObj] = []
-        for i in range(batch_size):
-            try:
-                free_block = self.free_blocks.popleft()
-            except IndexError:
+        with self._free_blocks_lock:
+            if len(self.free_blocks) < batch_size:
                 logger.debug(
                     f"Failed to allocate memory for "
                     f"tensor({shapes}, {dtypes}) because "
                     "no free blocks is available"
                 )
-                self.batched_free(allocated_blocks, update_stats=False)
                 return None
+            allocated_blocks = [self.free_blocks.popleft() for _ in range(batch_size)]
+            for free_block in allocated_blocks:
+                self._free_page_indices.remove(free_block.meta.address)
 
+        for free_block in allocated_blocks:
             # FIXME: think about whether parent_allocator
             # should be updated here.
             free_block.meta.shape = shapes[0]
@@ -212,8 +221,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             if shapes != self.shapes:
                 size_in_bytes = get_size_bytes(shapes, dtypes)
                 free_block.raw_data = free_block.raw_data[:size_in_bytes]
-
-            allocated_blocks.append(free_block)
 
         # TODO (Jiayi): need a flag to drop these debug ops
         # NOTE (Jiayi): the following code is not thread-safe but
@@ -237,15 +244,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             memory_obj: Memory object to return to the free-page pool.
             allocator_type: Optional allocator type string.
         """
-        if not memory_obj.is_valid():
+        if not self._return_block(memory_obj):
             return
-        if memory_obj.meta.shapes != self.shapes:
-            page_idx = memory_obj.meta.address
-            memory_obj.raw_data = self.paged_buffers[page_idx]
-
-        self.free_blocks.append(memory_obj)
-
-        # memory_obj.invalidate()
 
         # TODO (Jiayi): need a flag to drop these debug ops
         # NOTE (Jiayi): the following code is not thread-safe but
@@ -276,19 +276,11 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         if not memory_objs:
             return
 
-        for memory_obj in memory_objs:
-            if not memory_obj.is_valid():
-                logger.warning("Trying to free an invalidated MemoryObj")
-                continue
-            # memory_obj.invalidate()
-            if memory_obj.meta.shapes != self.shapes:
-                page_idx = memory_obj.meta.address
-                memory_obj.raw_data = self.paged_buffers[page_idx]
+        num_freed_blocks = sum(
+            self._return_block(memory_obj) for memory_obj in memory_objs
+        )
 
-            self.free_blocks.append(memory_obj)
-
-        if update_stats:
-            num_freed_blocks = len(memory_objs)
+        if update_stats and num_freed_blocks > 0:
             # TODO (Jiayi): need a flag to drop these debug ops
             # NOTE (Jiayi): the following code is not thread-safe but
             # is tolerable as this is only used for debugging purposes.
@@ -338,6 +330,25 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             for true zero copy operations.
         """
         return self.paged_buffers
+
+    def _return_block(self, memory_obj: TensorMemoryObj) -> bool:
+        """Return a page to the free pool exactly once."""
+        if not memory_obj.is_valid():
+            logger.warning("Trying to free an invalidated MemoryObj")
+            return False
+
+        page_idx = memory_obj.meta.address
+        with self._free_blocks_lock:
+            if page_idx in self._free_page_indices:
+                logger.debug("Ignoring duplicate free of page %d", page_idx)
+                return False
+
+            if memory_obj.meta.shapes != self.shapes:
+                memory_obj.raw_data = self.paged_buffers[page_idx]
+
+            self.free_blocks.append(memory_obj)
+            self._free_page_indices.add(page_idx)
+        return True
 
     def __del__(self) -> None:
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
