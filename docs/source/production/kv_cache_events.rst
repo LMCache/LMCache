@@ -85,7 +85,7 @@ How to Generate KV Cache events
       .. code-block:: bash
 
           Received event batch at 1765529395.2132685:
-        - BlockStored(block_hashes=[b'\x96\x95[h6\x1dE$v\x03\xe8\xf0\xc20\xcd\xe8\xa7#\x9cS\xe0\x16\xba\xab7\xf7z\x10P]\xfaT'], parent_block_hash=None, token_ids=[27, 91, 7265, 3575, 4326, 91, 1784, 91, 8948, 91, 397, 2610, 525, 264, 10950, 15235, 17847, 624, 27, 91, 872, 91, 397, 3838, 374, 279, 16158, 1685, 1370, 276, 5267, 27, 91, 77091, 91, 29], block_size=36, lora_id=None, medium='cpu')
+        - BlockStored(block_hashes=[b'\x96\x95[h6\x1dE$v\x03\xe8\xf0\xc20\xcd\xe8\xa7#\x9cS\xe0\x16\xba\xab7\xf7z\x10P]\xfaT'], parent_block_hash=None, token_ids=[27, 91, 7265, 3575, 4326, 91, 1784, 91, 8948, 91, 397, 2610, 525, 264, 10950, 15235, 17847, 624, 27, 91, 872, 91, 397, 3838, 374, 279, 16158, 1685, 1370, 276, 5267, 27, 91, 77091, 91, 29], block_size=36, lora_id=None, medium='CPU')
 
       This is the event generated after the cache store operation.
 
@@ -157,4 +157,4 @@ How to Generate KV Cache events
             - BlockStored(block_hashes=[8695562889830890067], parent_block_hash=-2282733302929094006, token_ids=[4396, 382, 7039, 11, 279, 1196, 6801, 311, 1414], block_size=8, lora_id=None)
             - BlockStored(block_hashes=[-6034740625096789744], parent_block_hash=8695562889830890067, token_ids=[1414, 911, 279, 15817, 16182, 315, 27950, 323, 20980], block_size=8, lora_id=None)
 
-      This is the event generated after the cache store operation. 
+      This is the event generated after the cache store operation.

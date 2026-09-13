@@ -4,7 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."""
 
 # Standard
-from typing import Callable, ClassVar
+from typing import Any, Callable, ClassVar
 from unittest.mock import MagicMock
 import gc
 import os
@@ -97,6 +97,7 @@ class FakeHeartbeatThread:
 
 def _make_worker_adapter(
     extra_config: dict[str, object] | None = None,
+    enable_kv_events: bool = False,
 ) -> LMCacheMPWorkerAdapter:
     """Construct a worker adapter with the standard test arguments; the
     network boundary must already be patched (see ``fake_adapter``).
@@ -117,6 +118,7 @@ def _make_worker_adapter(
         parallel_strategy=parallel_strategy,
         mq_timeout=5.0,
         extra_config=extra_config,
+        enable_kv_events=enable_kv_events,
     )
 
 
@@ -336,6 +338,111 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
         [0, 1],
         [10, 11],
     ]
+
+
+def test_store_kv_events_are_reported_after_successful_store(
+    fake_adapter,
+    monkeypatch,
+):
+    """Completed MP stores are exposed once as LMCache cache-store events."""
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    adapter = _make_worker_adapter(enable_kv_events=True)
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock()
+    store_future = MagicMock()
+    store_future.query.return_value = True
+    store_future.result.return_value = True
+    transfer_ctx.submit_store.return_value = store_future
+    adapter.transfer_ctx = transfer_ctx
+
+    chunk_size = adapter.lmcache_tokens_per_chunk
+    token_ids = list(range(chunk_size * 2))
+    op = LoadStoreOp(
+        token_ids=token_ids,
+        block_ids=[[1]],
+        start=chunk_size,
+        end=chunk_size * 2,
+    )
+    adapter.submit_store_request("req-1", op, event=None)
+
+    assert adapter.get_kv_events() == []
+
+    adapter.get_finished({"req-1"})
+    events = adapter.get_kv_events()
+    expected_hashes = TokenHasher(chunk_size=chunk_size).compute_chunk_hashes(
+        token_ids,
+        end=chunk_size * 2,
+    )
+
+    assert len(events) == 1
+    assert events[0].block_hashes == [expected_hashes[1]]
+    assert events[0].parent_block_hash == expected_hashes[0]
+    assert events[0].token_ids == token_ids[chunk_size : chunk_size * 2]
+    assert events[0].block_size == chunk_size
+    assert events[0].medium == "CPU"
+    assert adapter.get_kv_events() == []
+
+
+def test_store_kv_events_are_discarded_after_failed_store(
+    fake_adapter,
+    monkeypatch,
+):
+    """Failed MP stores must not emit cache-store events."""
+    adapter = _make_worker_adapter(enable_kv_events=True)
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock()
+    store_future = MagicMock()
+    store_future.query.return_value = True
+    store_future.result.return_value = False
+    transfer_ctx.submit_store.return_value = store_future
+    adapter.transfer_ctx = transfer_ctx
+
+    chunk_size = adapter.lmcache_tokens_per_chunk
+    op = LoadStoreOp(
+        token_ids=list(range(chunk_size)),
+        block_ids=[[0]],
+        start=0,
+        end=chunk_size,
+    )
+    adapter.submit_store_request("req-1", op, event=None)
+
+    adapter.get_finished({"req-1"})
+
+    assert adapter.get_kv_events() == []
+
+
+def test_store_kv_events_use_hash_algorithm_extra_config(
+    fake_adapter,
+    monkeypatch,
+):
+    """KV event hashes use the hash algorithm configured for the MP server."""
+    captured: dict[str, object] = {}
+
+    class FakeTokenHasher:
+        def __init__(self, chunk_size: int, hash_algorithm: str) -> None:
+            captured["chunk_size"] = chunk_size
+            captured["hash_algorithm"] = hash_algorithm
+
+        def compute_chunk_hashes(
+            self,
+            token_ids: list[int],
+            end: int | None = None,
+        ) -> list[bytes]:
+            return [b"hash"]
+
+    monkeypatch.setattr(adapter_mod, "TokenHasher", FakeTokenHasher)
+
+    adapter = _make_worker_adapter(
+        extra_config={"lmcache.mp.hash_algorithm": "builtin"},
+        enable_kv_events=True,
+    )
+
+    assert captured == {
+        "chunk_size": adapter.lmcache_tokens_per_chunk,
+        "hash_algorithm": "builtin",
+    }
 
 
 def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatch):
@@ -685,6 +792,100 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
     blocks.get_block_ids.return_value = ([7],)
     connector.update_state_after_alloc(request, blocks, num_external_tokens=0)
     assert tracker.state == LMCacheMPRequestState.READY
+
+
+def test_connector_converts_worker_kv_events_to_vllm_events() -> None:
+    """Worker LMCache events are wrapped in vLLM's KV event container."""
+    kv_events_mod = pytest.importorskip(
+        "vllm.distributed.kv_events",
+        exc_type=ModuleNotFoundError,
+    )
+    BlockStored = kv_events_mod.BlockStored
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.utils import CacheStoreEvent
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._enable_kv_events = True
+    connector.worker_adapter = MagicMock()
+    connector.worker_adapter.get_kv_events.return_value = [
+        CacheStoreEvent(
+            block_hashes=[b"hash-1"],
+            parent_block_hash=None,
+            token_ids=[1, 2, 3, 4],
+            block_size=4,
+            lora_id=None,
+            medium="CPU",
+            lora_name=None,
+        )
+    ]
+
+    kv_events = connector.get_kv_connector_kv_cache_events()
+
+    assert kv_events is not None
+    events = kv_events.get_all_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].token_ids == [1, 2, 3, 4]
+    assert events[0].block_size == 4
+    assert events[0].medium == kv_events_mod.MEDIUM_CPU
+
+
+def test_connector_take_events_aggregates_and_drains_once() -> None:
+    """Scheduler-side ``take_events`` publishes common worker events once."""
+    kv_events_mod = pytest.importorskip(
+        "vllm.distributed.kv_events",
+        exc_type=ModuleNotFoundError,
+    )
+    BlockStored = kv_events_mod.BlockStored
+
+    # Third Party
+    from vllm.v1.outputs import KVConnectorOutput
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import (
+        LMCacheMPConnector,
+        LMCacheMPKVEvents,
+    )
+
+    def make_container(*events: Any) -> LMCacheMPKVEvents:
+        container = LMCacheMPKVEvents(num_workers=1)
+        container.add_events(list(events))
+        return container
+
+    common = BlockStored(
+        block_hashes=[b"common"],
+        parent_block_hash=None,
+        token_ids=[1, 2, 3, 4],
+        block_size=4,
+        lora_id=None,
+        medium=kv_events_mod.MEDIUM_CPU,
+        lora_name=None,
+    )
+    worker_only = BlockStored(
+        block_hashes=[b"worker-only"],
+        parent_block_hash=None,
+        token_ids=[5, 6, 7, 8],
+        block_size=4,
+        lora_id=None,
+        medium=kv_events_mod.MEDIUM_CPU,
+        lora_name=None,
+    )
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._kv_cache_events = None
+    connector.lazy_offload = False
+
+    connector.update_connector_output(
+        KVConnectorOutput(kv_cache_events=make_container(common, worker_only))
+    )
+    connector.update_connector_output(
+        KVConnectorOutput(kv_cache_events=make_container(common))
+    )
+
+    assert list(connector.take_events()) == [common]
+    assert list(connector.take_events()) == []
 
 
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
