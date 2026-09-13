@@ -30,6 +30,8 @@ class AddAdapterOp:
     adapter: L2AdapterInterface
     descriptor: AdapterDescriptor
     done: threading.Event
+    error: Exception | None = None
+    """Policy validation error raised while attaching the adapter."""
 
 
 @dataclass

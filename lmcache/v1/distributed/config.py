@@ -359,6 +359,25 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     ):
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
 
+    striped_store = config.store_policy == "striped"
+    striped_prefetch = config.prefetch_policy == "striped"
+    if striped_store != striped_prefetch:
+        raise ValueError(
+            "striped placement requires both l2-store-policy and "
+            "l2-prefetch-policy to be 'striped'"
+        )
+    if striped_store:
+        unsupported = [
+            get_type_name_for_config(adapter)
+            for adapter in config.l2_adapter_config.adapters
+            if get_type_name_for_config(adapter) != "fs_native"
+        ]
+        if unsupported:
+            raise ValueError(
+                "striped placement currently supports only fs_native "
+                f"adapters; got {unsupported}"
+            )
+
     memory_config = config.l1_manager_config.memory_config
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
         return

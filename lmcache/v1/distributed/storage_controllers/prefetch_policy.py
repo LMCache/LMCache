@@ -15,6 +15,7 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
+    RendezvousHashRouter,
 )
 
 
@@ -26,6 +27,15 @@ class PrefetchPolicy(ABC):
     adapters have completed their lookup_and_lock operations. Given the
     lookup results, it decides which adapter should load which keys.
     """
+
+    def validate_adapters(self, adapters: list[AdapterDescriptor]) -> None:
+        """Validate and prepare an adapter set before it is used for routing.
+
+        Args:
+            adapters: Active L2 adapter descriptors. The controller calls this
+                before startup and whenever the active adapter set changes.
+        """
+        return None
 
     @abstractmethod
     def select_load_plan(
@@ -49,6 +59,23 @@ class PrefetchPolicy(ABC):
             overlap, and the union of all returned bitmaps should be a subset
             of the union of the input bitmaps.
         """
+
+    def select_lookup_targets(
+        self,
+        keys: list[ObjectKey],
+        adapters: list[AdapterDescriptor],
+    ) -> dict[int, list[int]] | None:
+        """Choose adapters queried during the lookup phase.
+
+        Args:
+            keys: Full list of keys being prefetched.
+            adapters: Descriptors of available L2 adapters.
+
+        Returns:
+            ``None`` to query every adapter for every key, or a mapping from
+            adapter index to indices in ``keys`` for targeted lookup.
+        """
+        return None
 
     def select_l1_retentions(
         self,
@@ -189,5 +216,47 @@ class RetainPrefetchPolicy(DefaultPrefetchPolicy):
         return [True] * len(keys)
 
 
+class StripedPrefetchPolicy(DefaultPrefetchPolicy):
+    """Query only the stable rendezvous owner of each striped key."""
+
+    def __init__(self) -> None:
+        self._router = RendezvousHashRouter()
+
+    def validate_adapters(self, adapters: list[AdapterDescriptor]) -> None:
+        """Validate and cache adapters accepted by rendezvous placement.
+
+        Args:
+            adapters: Configured L2 adapter descriptors.
+        """
+        self._router.update_adapters(adapters)
+
+    def select_lookup_targets(
+        self,
+        keys: list[ObjectKey],
+        adapters: list[AdapterDescriptor],
+    ) -> dict[int, list[int]] | None:
+        """Route each key lookup to exactly one stable adapter.
+
+        Args:
+            keys: Full list of keys being prefetched.
+            adapters: Descriptors of available L2 adapters.
+
+        Returns:
+            Mapping from adapter index to global key indices. With no
+            adapters, returns ``None`` so the controller retains its normal
+            no-adapter completion path.
+        """
+        if not adapters:
+            return None
+
+        targets: dict[int, list[int]] = {
+            adapter_index: [] for adapter_index in self._router.adapter_indices
+        }
+        for key_index, adapter_index in enumerate(self._router.select_adapters(keys)):
+            targets[adapter_index].append(key_index)
+        return targets
+
+
 register_prefetch_policy("default", DefaultPrefetchPolicy)
 register_prefetch_policy("retain", RetainPrefetchPolicy)
+register_prefetch_policy("striped", StripedPrefetchPolicy)
