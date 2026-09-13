@@ -533,6 +533,65 @@ class L1Manager:
         )
         return ret
 
+    def _unlock_write_checked(
+        self,
+        key: ObjectKey,
+        op: str,
+    ) -> tuple[L1Error, "L1ObjectState | None"]:
+        """Validate that ``key`` is exclusively write-locked and unlock it.
+
+        Args:
+            key: The object key to unlock.
+            op: Operation name used in the wrong-state warning logs.
+
+        Returns:
+            (SUCCESS, entry) on success; (KEY_NOT_EXIST, None) or
+            (KEY_IN_WRONG_STATE, None) otherwise.
+        """
+        entry = self._objects.get(key, None)
+        if entry is None:
+            return L1Error.KEY_NOT_EXIST, None
+
+        if not entry.write_lock.is_locked():
+            logger.warning(
+                "L1Manager: %s on non-write-locked key %s, "
+                "potential inconsistent data might be written",
+                op,
+                key,
+            )
+            return L1Error.KEY_IN_WRONG_STATE, None
+
+        if entry.read_lock.is_locked():
+            logger.warning(
+                "L1Manager: %s on read-locked key %s, "
+                "potential inconsistent data might be written",
+                op,
+                key,
+            )
+            return L1Error.KEY_IN_WRONG_STATE, None
+
+        entry.write_lock.unlock()
+        return L1Error.SUCCESS, entry
+
+    def _free_and_report_deleted(
+        self,
+        keys: list[ObjectKey],
+        objs: list[MemoryObj],
+    ) -> None:
+        """Free ``objs`` and report ``keys`` as deleted to listeners and
+        the event bus."""
+        freed_meta = [self._object_meta(obj) for obj in objs]
+        self._memory_manager.free(objs)
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_deleted_by_manager(keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_KEYS_EVICTED,
+                metadata={"keys": keys, "meta": freed_meta},
+            )
+        )
+
     @l1_mgr_synchronized
     def finish_write(
         self,
@@ -560,31 +619,10 @@ class L1Manager:
         notification_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                ret[key] = L1Error.KEY_NOT_EXIST
+            err, entry = self._unlock_write_checked(key, "finish write")
+            ret[key] = err
+            if err != L1Error.SUCCESS or entry is None:
                 continue
-
-            if not entry.write_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish write on non-write-locked key %s, "
-                    "potential inconsistent data might be written",
-                    key,
-                )
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                continue
-
-            if entry.read_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish write on read-locked key %s, "
-                    "potential inconsistent data might be written",
-                    key,
-                )
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                continue
-
-            entry.write_lock.unlock()
-            ret[key] = L1Error.SUCCESS
             if not entry.is_temporary:
                 notification_keys.append(key)
                 notification_keys_meta.append(self._object_meta(entry.memory_obj))
@@ -637,29 +675,12 @@ class L1Manager:
         successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                ret[key] = (L1Error.KEY_NOT_EXIST, None)
+            err, entry = self._unlock_write_checked(
+                key, "finish_write_and_reserve_read"
+            )
+            if err != L1Error.SUCCESS or entry is None:
+                ret[key] = (err, None)
                 continue
-
-            if not entry.write_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish_write_and_reserve_read on "
-                    "non-write-locked key %s",
-                    key,
-                )
-                ret[key] = (L1Error.KEY_IN_WRONG_STATE, None)
-                continue
-
-            if entry.read_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish_write_and_reserve_read on read-locked key %s",
-                    key,
-                )
-                ret[key] = (L1Error.KEY_IN_WRONG_STATE, None)
-                continue
-
-            entry.write_lock.unlock()
             for _ in range(total):
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
@@ -718,17 +739,46 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
-        freed_meta = [self._object_meta(obj) for obj in need_to_free]
-        self._memory_manager.free(need_to_free)
+        self._free_and_report_deleted(successful_keys, need_to_free)
+        return ret
 
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_deleted_by_manager(successful_keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": successful_keys, "meta": freed_meta},
-            )
-        )
+    @l1_mgr_synchronized
+    def finish_write_and_delete(
+        self,
+        keys: list[ObjectKey],
+    ) -> dict[ObjectKey, L1Error]:
+        """Atomically finish write access and delete the given keys.
+
+        Unlock and deletion happen in one critical section, so no other
+        component can observe or lock the key in between. No
+        write-finished notification is emitted; deletions are reported
+        the same way as :meth:`delete`.
+
+        Args:
+            keys: The list of object keys to unlock and delete.
+
+        Returns:
+            A dictionary mapping each object key to an L1Error.
+
+        Errors:
+            KEY_NOT_EXIST: The key does not exist.
+            KEY_IN_WRONG_STATE: The key is not write-locked, or it's
+                read-locked.
+        """
+        need_to_free: list[MemoryObj] = []
+        ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
+
+        for key in keys:
+            err, entry = self._unlock_write_checked(key, "finish_write_and_delete")
+            ret[key] = err
+            if err != L1Error.SUCCESS or entry is None:
+                continue
+            need_to_free.append(entry.memory_obj)
+            del self._objects[key]
+            successful_keys.append(key)
+
+        self._free_and_report_deleted(successful_keys, need_to_free)
         return ret
 
     def touch_keys(self, keys: list[ObjectKey]):
