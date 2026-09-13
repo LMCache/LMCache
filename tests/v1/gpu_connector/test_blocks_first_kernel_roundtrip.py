@@ -37,8 +37,10 @@ def make_pool(
     return buf, [buf[:, layer] for layer in range(NL)]
 
 
-def torch_gather(buf: torch.Tensor, order: str, slots: torch.Tensor) -> torch.Tensor:
-    """[1, NL, T, SPT] reference: token-major per layer, heads flattened."""
+def torch_gather(
+    buf: torch.Tensor, order: str, slots: torch.Tensor, staging_kv_size: int
+) -> torch.Tensor:
+    """Reference gather in packed or canonical split LMCache layout."""
     blocks, offsets = slots // BS, slots % BS
     buf = buf[:, :NL]
     if order == "BLHNC":  # buf [NB, NL, NH, BS, CS]
@@ -57,13 +59,22 @@ def torch_gather(buf: torch.Tensor, order: str, slots: torch.Tensor) -> torch.Te
             ],
             dim=1,
         )
-    return out.unsqueeze(0)  # [1, NL, T, SPT]
+    out = out.reshape(NL, len(slots), NH, CS)
+    if staging_kv_size == 1:
+        return out.reshape(1, NL, len(slots), SPT)
+    return torch.stack(
+        (
+            out[..., : CS // 2].reshape(NL, len(slots), SPT // 2),
+            out[..., CS // 2 :].reshape(NL, len(slots), SPT // 2),
+        )
+    )
 
 
 @cuda_only
 @pytest.mark.parametrize("order", ["BLHNC", "BLNHC"])
 @pytest.mark.parametrize("pad_layers", [0, 2])
-def test_kernel_roundtrip_matches_torch(order, pad_layers):
+@pytest.mark.parametrize("staging_kv_size", [1, 2])
+def test_kernel_roundtrip_matches_torch(order, pad_layers, staging_kv_size):
     buf, views = make_pool(order, pad_layers)
     fmt, kv = detect_format(views, EngineType.VLLM, {"kv_layout": order})
     expected_fmt = (
@@ -78,7 +89,14 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
     # layers, so stride(0) exceeds the per-layer tight step even unpadded.
     block_stride = kv[0].stride(0)
     slots = torch.tensor([5, 6, 7, 12, 13, 14, 15, 28], device="cuda")
-    staging = torch.zeros(1, NL, len(slots), SPT, dtype=torch.float32, device="cuda")
+    staging = torch.zeros(
+        staging_kv_size,
+        NL,
+        len(slots),
+        SPT // staging_kv_size,
+        dtype=torch.float32,
+        device="cuda",
+    )
 
     device_ops.multi_layer_kv_transfer(
         staging,
@@ -94,7 +112,7 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
         block_stride,
     )
     torch.cuda.synchronize()
-    ref = torch_gather(buf, order, slots.cpu())
+    ref = torch_gather(buf, order, slots.cpu(), staging_kv_size)
     assert torch.equal(staging.cpu(), ref.cpu())
 
     # Zero the touched blocks, write back, expect original bytes restored.
