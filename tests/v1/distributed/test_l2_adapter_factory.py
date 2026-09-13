@@ -5,7 +5,9 @@ PluginL2AdapterConfig.
 """
 
 # Standard
+from pathlib import Path
 import os
+import sys
 import tempfile
 import types
 
@@ -943,6 +945,76 @@ class TestFSNativeAdapterFactory:
             adapter.close()
         finally:
             _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = old
+
+    def test_factory_recovers_existing_files(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Factory restores disk usage and seeds eviction from existing files."""
+        # First Party
+        from lmcache.v1.distributed.api import ObjectKey
+        from lmcache.v1.distributed.config import EvictionConfig
+        from lmcache.v1.distributed.l2_adapters.fs_key_codec import (
+            object_key_to_filename,
+        )
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+        from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+            L2AdapterEvictionState,
+        )
+
+        older = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(1),
+            model_name="meta-llama/Llama-3",
+            kv_rank=0,
+        )
+        newer = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(2),
+            model_name="meta-llama/Llama-3",
+            kv_rank=0,
+        )
+        older_path = tmp_path / object_key_to_filename(older)
+        newer_path = tmp_path / object_key_to_filename(newer)
+        older_path.write_bytes(bytes(100))
+        newer_path.write_bytes(bytes(200))
+        os.utime(older_path, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(newer_path, ns=(2_000_000_000, 2_000_000_000))
+
+        (tmp_path / "unrecognized.data").write_bytes(bytes(50))
+        (tmp_path / "directory.data").mkdir()
+        (tmp_path / "incomplete.tmp").write_bytes(bytes(75))
+
+        fake_fs_module = types.ModuleType("lmcache.lmcache_fs")
+        fake_fs_module.__dict__["LMCacheFSClient"] = _FakeLMCacheFSClient
+        monkeypatch.setitem(sys.modules, "lmcache.lmcache_fs", fake_fs_module)
+
+        cfg = FSNativeL2AdapterConfig(
+            base_path=str(tmp_path),
+            max_capacity_gb=1000 / (1024**3),
+        )
+        adapter = create_l2_adapter_from_registry(cfg)
+        try:
+            usage = adapter.get_usage()
+            assert usage.total_bytes_used == 300
+            assert usage.usage_fraction == pytest.approx(0.3)
+
+            state = L2AdapterEvictionState(
+                0,
+                adapter,
+                EvictionConfig(eviction_policy="LRU", eviction_ratio=1.0),
+            )
+            actions = state.eviction_policy.get_eviction_actions(1.0)
+            assert len(actions) == 1
+            assert actions[0].keys == [older, newer]
+
+            status = adapter.report_status()
+            assert status["recovered_keys"] == 2
+            assert status["recovered_bytes"] == 300
+            assert status["recovery_skipped_files"] == 2
+        finally:
+            adapter.close()
 
     def test_factory_forwards_all_params(self, monkeypatch):
         """All config params are forwarded to the

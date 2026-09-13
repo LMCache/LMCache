@@ -11,6 +11,7 @@ from __future__ import annotations
 
 # Standard
 from typing import TYPE_CHECKING, Optional
+import os
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
 )
@@ -29,8 +31,60 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
+from lmcache.v1.distributed.l2_adapters.fs_key_codec import filename_to_object_key
 
 logger = init_logger(__name__)
+
+
+def _scan_existing_cache_entries(
+    base_path: str,
+) -> tuple[list[tuple[ObjectKey, int, int]], int]:
+    """Scan one native-FS cache directory for persisted entries.
+
+    Args:
+        base_path: Directory containing native filesystem cache files.
+
+    Returns:
+        A pair of ``(entries, skipped_files)``. Each entry contains its
+        decoded key, byte size, and modification timestamp in nanoseconds.
+
+    Raises:
+        RuntimeError: If the cache directory itself cannot be scanned.
+    """
+    recovered: list[tuple[ObjectKey, int, int]] = []
+    skipped_files = 0
+    try:
+        with os.scandir(base_path) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".data"):
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        skipped_files += 1
+                        continue
+                    key = filename_to_object_key(entry.name)
+                    if key is None:
+                        skipped_files += 1
+                        logger.warning(
+                            "Ignoring unrecognized fs_native cache file: %s",
+                            entry.path,
+                        )
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    # A concurrent cleanup may remove an entry between scandir
+                    # and stat. It no longer contributes to cache usage.
+                    continue
+                except OSError as e:
+                    raise RuntimeError(
+                        f"Unable to inspect fs_native cache file {entry.path!r}: {e}"
+                    ) from e
+                recovered.append((key, stat.st_size, stat.st_mtime_ns))
+    except OSError as e:
+        raise RuntimeError(
+            f"Unable to scan fs_native cache directory {base_path!r}: {e}"
+        ) from e
+    return recovered, skipped_files
 
 
 class FSNativeL2AdapterConfig(L2AdapterConfigBase):
@@ -141,6 +195,7 @@ def _create_fs_native_l2_adapter(
     # First Party
     from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (  # noqa: E501
         NativeConnectorL2Adapter,
+        RecoveredL2Entry,
     )
 
     assert isinstance(config, FSNativeL2AdapterConfig)
@@ -151,24 +206,39 @@ def _create_fs_native_l2_adapter(
         config.use_odirect,
         config.read_ahead_size or 0,
     )
-    logger.info(
-        "Created FS native L2 adapter: %s (workers=%d, odirect=%s, read_ahead=%s)",
-        config.base_path,
-        config.num_workers,
-        config.use_odirect,
-        config.read_ahead_size,
-    )
-    return NativeConnectorL2Adapter(
-        native_client,
-        max_capacity_gb=config.max_capacity_gb,
-        type_name="FSNativeL2Adapter",
-        extra_status={
-            "base_path": config.base_path,
-            "use_odirect": config.use_odirect,
-            "num_workers": config.num_workers,
-            "read_ahead_size": config.read_ahead_size,
-        },
-    )
+    try:
+        scanned_entries, skipped_files = _scan_existing_cache_entries(config.base_path)
+        recovered_entries = [
+            RecoveredL2Entry(key=key, size_bytes=size, mtime_ns=mtime_ns)
+            for key, size, mtime_ns in scanned_entries
+        ]
+        logger.info(
+            "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "
+            "read_ahead=%s, recovered_keys=%d, recovered_bytes=%d, skipped=%d)",
+            config.base_path,
+            config.num_workers,
+            config.use_odirect,
+            config.read_ahead_size,
+            len(recovered_entries),
+            sum(entry.size_bytes for entry in recovered_entries),
+            skipped_files,
+        )
+        return NativeConnectorL2Adapter(
+            native_client,
+            max_capacity_gb=config.max_capacity_gb,
+            type_name="FSNativeL2Adapter",
+            extra_status={
+                "base_path": config.base_path,
+                "use_odirect": config.use_odirect,
+                "num_workers": config.num_workers,
+                "read_ahead_size": config.read_ahead_size,
+                "recovery_skipped_files": skipped_files,
+            },
+            recovered_entries=recovered_entries,
+        )
+    except Exception:
+        native_client.close()
+        raise
 
 
 register_l2_adapter_type("fs_native", FSNativeL2AdapterConfig)
