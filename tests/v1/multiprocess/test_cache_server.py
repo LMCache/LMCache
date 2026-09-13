@@ -174,6 +174,7 @@ def lookup_all(
                 timeout=timeout
             )
             if result is not None:
+                client.free_lookup_locks(lookup_key, 1).result(timeout=timeout)
                 total += result
                 break
     return total
