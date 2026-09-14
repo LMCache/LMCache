@@ -27,11 +27,18 @@ export LM_EVAL_VERIFY_MODE_DEFAULT="${LM_EVAL_VERIFY_MODE_DEFAULT:-samples}"
 export LM_EVAL_SCORE_MIN_DEFAULT="${LM_EVAL_SCORE_MIN_DEFAULT:-0.80}"
 
 # ── Environment setup ────────────────────────────────────────
-SETUP_ENV_SCRIPT="${BK_SETUP_ENV_SCRIPT:-.buildkite/k3_harness/setup-env.sh}"
-source "${SETUP_ENV_SCRIPT}"
+if [ "${MUSA_CI_PREPROVISIONED:-0}" != "1" ]; then
+    SETUP_ENV_SCRIPT="${BK_SETUP_ENV_SCRIPT:-.buildkite/k3_harness/setup-env.sh}"
+    source "${SETUP_ENV_SCRIPT}"
+fi
 
-# Install test extras (lm-eval for eval workload, openai/pandas/matplotlib for benchmarks)
-uv pip install 'lm-eval[api]' openai pandas matplotlib
+# Install test extras (lm-eval for eval workload, openai/pandas/matplotlib for
+# benchmarks). Vendor images may provide pip but not uv.
+if command -v uv >/dev/null 2>&1; then
+    uv pip install 'lm-eval[api]' openai pandas matplotlib
+else
+    python3 -m pip install 'lm-eval[api]' openai pandas matplotlib
+fi
 
 # ── Ensure all scripts are executable ────────────────────────
 chmod +x "${SCRIPT_DIR}"/scripts/*.sh
