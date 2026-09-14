@@ -65,8 +65,8 @@ class LMCacheMPRequestTracker:
     # requests.
     num_stored_tokens: int = 0
 
-    # Whether the cached lookup result has been included in num_stored_tokens.
-    _lookup_result_accounted: bool = False
+    # Prefix tokens from the latest lookup included in num_stored_tokens.
+    _accounted_lookup_tokens: int = 0
 
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
@@ -93,7 +93,7 @@ class LMCacheMPRequestTracker:
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
-        self._lookup_result_accounted = False
+        self._accounted_lookup_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
@@ -134,22 +134,23 @@ class LMCacheMPRequestTracker:
         self.num_scheduled_tokens += num_new_tokens
 
     def account_lookup_result(self, num_stored_tokens: int) -> None:
-        """Include an external lookup result in the stored-token watermark.
+        """Replace the lookup contribution to the stored-token watermark.
 
         Args:
-            num_stored_tokens: Number of prefix tokens found by the lookup.
+            num_stored_tokens (int): Latest completed lookup's prefix token
+                count, including zero when the cache becomes unavailable.
 
         Returns:
             None.
 
         Notes:
-            Only the first call affects the watermark. Later calls are ignored
-            because the scheduler may poll the same cached result repeatedly
-            before it can allocate request blocks.
+            Scheduler retries before allocation may return the same result or
+            a changed result, including a downgrade to zero. Apply only the
+            difference from the previous result, preserving tokens accounted
+            for separately by store operations.
         """
-        if not self._lookup_result_accounted:
-            self.increase_num_stored_tokens(num_stored_tokens)
-            self._lookup_result_accounted = True
+        self.num_stored_tokens += num_stored_tokens - self._accounted_lookup_tokens
+        self._accounted_lookup_tokens = num_stored_tokens
 
     def increase_num_stored_tokens(self, num_new_tokens: int):
         """Increase the number of stored tokens for the current request

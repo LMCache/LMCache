@@ -1071,14 +1071,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         tracker.lookup_started_at = None
 
-        if ret == 0:
-            return 0, False
-
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # The scheduler may retry this method while allocation is blocked and
-        # the adapter will return the same cached lookup result. Account for
-        # that result only once during the lifetime of this tracker.
+        # Retries may repeat a cached hit or change it when server health drops.
+        # Account for the latest completed result, including zero, before
+        # updating the hit counts used by retrieve and store metadata.
         tracker.account_lookup_result(ret)
 
         # Save the vllm and lmcache hit tokens. The vLLM hit count is
