@@ -17,7 +17,8 @@ VLLM_LOG="${VLLM_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm_cpu_validation.log}"
 LMCACHE_PID=""
 VLLM_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
-LMCACHE_ZMQ_PORT="${LMCACHE_ZMQ_PORT:-5555}"
+LMCACHE_REQUEST_PORT="${LMCACHE_REQUEST_PORT:-${LMCACHE_ZMQ_PORT:-5555}}"
+LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-1}"
 LMCACHE_EVICTION_POLICY="${LMCACHE_EVICTION_POLICY:-LRU}"
@@ -78,6 +79,16 @@ VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 #   LMCACHE_MP_TRANSFER_MODE=lmcache_driven -> lmcache-driven IPC handle path
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
+
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+  zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
+  grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+  *)
+    echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
+    echo "Valid values: zmq, grpc" >&2
+    exit 1
+    ;;
+esac
 # Set SKIP_INSTALL=1 to skip Phase 1 (install) — useful when the caller
 # has already installed everything (e.g. macOS CI workflow steps).
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
@@ -323,8 +334,8 @@ start_vllm() {
   kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
   # Tell LMCacheMPConnector where the lmcache server actually listens.
   # Without this it falls back to tcp://localhost:5555 and dies with
-  # "Cannot reach the LMCache MP server" whenever we run multiple e2e
-  # steps in parallel/sequence on different ZMQ ports.
+  # "Cannot reach the LMCache MP server" whenever the selected request
+  # transport or port differs from that legacy default.
   local kv_transfer_config
   kv_transfer_config="$(python3 -c "
 import json
@@ -333,8 +344,8 @@ print(json.dumps({
     'kv_role': 'kv_both',
     'kv_connector_module_path': 'lmcache.integration.vllm.lmcache_mp_connector',
     'kv_connector_extra_config': {
-        'lmcache.mp.host': 'tcp://localhost',
-        'lmcache.mp.port': int('${LMCACHE_ZMQ_PORT}'),
+        'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
+        'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
     },
 }))")"
   # Optional flags — appended only when set, so unrelated callers stay
@@ -485,7 +496,8 @@ echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
 # Build lmcache server args
 LMCACHE_ARGS=(
-  --port "${LMCACHE_ZMQ_PORT}"
+  --transport "${LMCACHE_REQUEST_TRANSPORT}"
+  --port "${LMCACHE_REQUEST_PORT}"
   --http-port "${LMCACHE_HTTP_PORT}"
   --l1-size-gb "${LMCACHE_L1_SIZE_GB}"
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
@@ -557,8 +569,10 @@ if [ "$(uname -s)" = "Linux" ]; then
   #               unconditionally, so `vllm serve` aborts with
   #               "libavutil.so.NN: cannot open shared object file"
   #               without FFmpeg — even for text-only models.
-  # Prefer sudo if present (GitHub ubuntu runners need it). Install only
-  # what's missing and never let an apt hiccup fail the step.
+  # Prefer sudo if present (GitHub ubuntu runners need it). These packages
+  # are runtime prerequisites for the vLLM CPU server, so an installation
+  # failure must fail the validation instead of surfacing later as a missing
+  # torch operator.
   MISSING_PKGS=()
   if [ ! -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 ] \
      && [ ! -e /lib/x86_64-linux-gnu/libnuma.so.1 ]; then
@@ -573,16 +587,25 @@ if [ "$(uname -s)" = "Linux" ]; then
   if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
     echo "Installing missing system packages: ${MISSING_PKGS[*]}"
     if command -v sudo >/dev/null 2>&1; then
-      sudo apt-get update \
-        && sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
-        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) via sudo failed; continuing"
+      sudo apt-get update -o Acquire::Retries=3
+      sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
     else
-      apt-get update \
-        && apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
-        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) failed; continuing"
+      apt-get update -o Acquire::Retries=3
+      apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
     fi
   else
     echo "libnuma1 and FFmpeg runtime libs already present, skipping apt install"
+  fi
+
+  # Do not let a missing runtime library turn into a misleading native
+  # operator error from vLLM during worker initialization.
+  if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so\.1'; then
+    echo "❌ Required runtime library libnuma.so.1 is unavailable"
+    false
+  fi
+  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+    echo "❌ Required FFmpeg runtime library libavutil.so is unavailable"
+    false
   fi
 fi
 # VLLM_DEVICE is the modern env var (vLLM 0.8+)

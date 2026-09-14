@@ -43,6 +43,14 @@ func ConnectionConfigMapName(engineName string) string {
 func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.ConfigMap {
 	port := derefInt32(getServerPort(&engine.Spec), 5555)
 
+	// Mirror the engine's isolated-IPC mode onto the workers: the connector
+	// must pick the driver-level IPC transports when the server runs with
+	// --isolated-ipc (see the isolatedIPC field documentation).
+	var extra map[string]any
+	if engine.Spec.IsolatedIPCEnabled() {
+		extra = map[string]any{"lmcache.mp.isolated_ipc": true}
+	}
+
 	if engine.Spec.PD != nil {
 		return buildPDConnectionConfigMap(
 			engine.Name,
@@ -51,7 +59,7 @@ func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Con
 			"lmcache.integration.vllm.lmcache_mp_connector",
 			port,
 			engine.Spec.PD,
-			nil,
+			extra,
 		)
 	}
 
@@ -61,7 +69,7 @@ func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Con
 		"LMCacheMPConnector",
 		"lmcache.integration.vllm.lmcache_mp_connector",
 		port,
-		nil,
+		extra,
 	)
 }
 
@@ -126,16 +134,10 @@ func buildPDConnectionConfigMap(
 	}
 }
 
-// buildMultiConnectorJSON constructs the MultiConnector kv-transfer-config JSON
-// for a single role. kvRole must be "kv_producer" or "kv_consumer".
-func buildMultiConnectorJSON(
-	kvRole string,
-	lmcacheConnectorName, lmcacheModulePath string,
-	svcHost string,
-	port int32,
-	pd *lmcachev1alpha1.PDSpec,
-	lmcacheExtra map[string]any,
-) []byte {
+// buildNixlConnectorConfig constructs the NixlConnector config object used both
+// as an inner MultiConnector entry and as a standalone kv-transfer-config.
+// kvRole must be "kv_producer" or "kv_consumer".
+func buildNixlConnectorConfig(kvRole string, pd *lmcachev1alpha1.PDSpec) map[string]any {
 	nixlConnector := map[string]any{
 		"kv_connector":           "NixlConnector",
 		"kv_role":                kvRole,
@@ -146,6 +148,31 @@ func buildMultiConnectorJSON(
 			"enforce_handshake_compat": *pd.EnforceHandshakeCompat,
 		}
 	}
+	return nixlConnector
+}
+
+// buildNixlOnlyJSON constructs a bare NixlConnector kv-transfer-config JSON (no
+// MultiConnector, no LMCache connector). Used for the CacheBlend PD decoder,
+// which only receives KV from the prefiller and does not blend.
+func buildNixlOnlyJSON(kvRole string, pd *lmcachev1alpha1.PDSpec) []byte {
+	b, err := json.MarshalIndent(buildNixlConnectorConfig(kvRole, pd), "", "  ")
+	if err != nil {
+		panic(fmt.Sprintf("BUG: failed to marshal connector config: %v", err))
+	}
+	return b
+}
+
+// buildMultiConnectorJSON constructs the MultiConnector kv-transfer-config JSON
+// for a single role. kvRole must be "kv_producer" or "kv_consumer".
+func buildMultiConnectorJSON(
+	kvRole string,
+	lmcacheConnectorName, lmcacheModulePath string,
+	svcHost string,
+	port int32,
+	pd *lmcachev1alpha1.PDSpec,
+	lmcacheExtra map[string]any,
+) []byte {
+	nixlConnector := buildNixlConnectorConfig(kvRole, pd)
 
 	lmcacheConnectorExtra := map[string]any{
 		"lmcache.mp.host": fmt.Sprintf("tcp://%s", svcHost),

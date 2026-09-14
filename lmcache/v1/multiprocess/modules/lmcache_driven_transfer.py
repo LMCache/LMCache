@@ -31,24 +31,23 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
-from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
+from lmcache.v1.mp_observability.event_bus import (
+    get_event_bus,
+    is_observability_enabled,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -61,6 +60,7 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
+_HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timings")
 
 
 def get_layout_desc(
@@ -289,6 +289,8 @@ def _run_object_group_transfer_plan(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
+    *,
+    transfer_key: str,
 ) -> None:
     """Plan and execute one object group's transfer in a single native call.
 
@@ -311,6 +313,9 @@ def _run_object_group_transfer_plan(
         batch_size: Number of memory objects per batched copy.
         skip_first_n_tokens: Tokens to skip writing at the start of the range.
         direction: H2D (retrieve) or D2H (store).
+        transfer_key: Identity of this store/retrieve operation, echoed back
+            on every phase-timing sample (a request issues several transfers,
+            so the request id cannot identify one).
 
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
@@ -443,13 +448,26 @@ def _run_object_group_transfer_plan(
     if not batch_steps:
         return
 
-    execute_object_group_transfer = device_ops.execute_object_group_transfer
-    execute_object_group_transfer(
+    # Time the phases only when a subscriber consumes the samples. An older
+    # compiled extension has neither the keywords nor anything to consume
+    # them, so fall back to the untimed legacy signature.
+    timing_kwargs = (
+        {
+            "phase_timing_enabled": is_observability_enabled()
+            and get_event_bus().has_subscribers(EventType.MP_TRANSFER_PHASE_SAMPLES),
+            # Echoed back verbatim on each sample; the transfer's identity.
+            "session_id": transfer_key,
+        }
+        if _HAS_TRANSFER_PHASE_TIMING
+        else {}
+    )
+    device_ops.execute_object_group_transfer(
         direction,
         cache_context.device,
         LazyMemoryAllocator.PIN_CHUNK_SIZE,
         kernel_group_specs,
         batch_steps,
+        **timing_kwargs,
     )
 
 
@@ -461,6 +479,8 @@ def transfer_kv_per_object_group(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
+    *,
+    transfer_key: str,
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -481,6 +501,8 @@ def transfer_kv_per_object_group(
             the retrieve range. This avoids overwriting APC-shared GPU blocks that
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
+        transfer_key: Identity of this store/retrieve operation, echoed back on
+            every phase-timing sample; see _run_object_group_transfer_plan.
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
@@ -499,6 +521,7 @@ def transfer_kv_per_object_group(
             batch_size,
             skip_first_n_tokens,
             direction,
+            transfer_key=transfer_key,
         )
         return
 
@@ -687,6 +710,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
         self._device_host_func_dispatcher.start()
 
+    def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
+        """Register *handler* for *kind* on the per-process device host-func
+        dispatcher (stream-ordered callbacks without a driver-thread GIL
+        acquire); pair with ``submit_callback_to_stream``."""
+        self._device_host_func_dispatcher.register(kind, handler, payload_type)
+
     @property
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
@@ -857,36 +886,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if ipc_collect is not None:
             # Backends without IPC collection omit this optional operation.
             ipc_collect()
-
-    def get_handlers(self) -> list[HandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            A list of HandlerSpec entries mapping request types to
-            their handler callables and thread pool assignments.
-        """
-        return [
-            HandlerSpec(
-                RequestType.REGISTER_KV_CACHE,
-                self.register_kv_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE,
-                self.unregister_kv_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.STORE,
-                self.store,
-                ThreadPoolType.AFFINITY,
-            ),
-            HandlerSpec(
-                RequestType.RETRIEVE,
-                self.retrieve,
-                ThreadPoolType.AFFINITY,
-            ),
-        ]
 
     def report_status(self) -> dict:
         """Return GPU transfer module status information.
@@ -1179,6 +1178,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ):
                 self._publish_token_bindings(key, obj_keys_per_obj_group[0])
 
+            transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
                 Event(
@@ -1188,6 +1188,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "device": str(cache_context.device),
                         "engine_id": instance_id,
                         "model_name": model_name,
+                        "transfer_key": transfer_key,
                     },
                 ),
             )
@@ -1233,6 +1234,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
+                        transfer_key=transfer_key,
                     )
 
                 store_succeeded = True
@@ -1264,6 +1266,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "model_name": model_name,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
+                            "transfer_key": transfer_key,
                         },
                     ),
                 )
@@ -1358,6 +1361,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
         )
 
+        transfer_key = next_transfer_key(key.request_id)
         self._ctx.event_bus.publish_on_stream(
             cache_context.cupy_stream,
             Event(
@@ -1367,6 +1371,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     "device": str(cache_context.device),
                     "engine_id": instance_id,
                     "model_name": model_name,
+                    "transfer_key": transfer_key,
                 },
             ),
         )
@@ -1418,15 +1423,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
-            # Standalone (connector-private) groups are never served by the
+            # Aux (connector-private) groups are never served by the
             # std retrieve: the lookup does not lock their keys and their
             # block-id entry is a placeholder -- reading them would be an
             # unlocked read of a plane nobody consumes here.
             attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
             skipped_groups = {
-                g
-                for g, kind in enumerate(attn_desc.group_kinds)
-                if kind == "standalone"
+                g for g, kind in enumerate(attn_desc.group_kinds) if kind == "aux"
             }
             group_skips = [
                 0 if window < 0 else max(0, num_chunks - window)
@@ -1472,6 +1475,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             batch_size=cache_context.max_batch_size,
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmcache_native.TransferDirection.H2D,
+                            transfer_key=transfer_key,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
@@ -1506,6 +1510,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "cache_salt": key.cache_salt,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
+                            "transfer_key": transfer_key,
                         },
                     ),
                 )
