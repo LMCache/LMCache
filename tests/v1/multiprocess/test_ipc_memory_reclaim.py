@@ -15,7 +15,7 @@ module (``torch_dev``).
 """
 
 # Standard
-# Standard Library
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 import time
@@ -43,6 +43,11 @@ class _FakeTorchDev:
             self.ipc_collect = MagicMock(
                 side_effect=lambda: self.calls.append("ipc_collect")
             )
+
+    @staticmethod
+    def device(_device: object) -> nullcontext[None]:
+        """Registration creates completion events under the context's device."""
+        return nullcontext()
 
 
 def _module(monkeypatch) -> LMCacheDrivenTransferModule:

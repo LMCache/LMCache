@@ -2,6 +2,7 @@
 """Tests for platform event IPC use in the LMCache-driven handle path."""
 
 # Standard
+from collections import deque
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
@@ -14,6 +15,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.multiprocess.ipc_event_registry import IPCEventRegistry
 
 
 class _FakeEventBackend:
@@ -24,6 +26,7 @@ class _FakeEventBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self._next_event = 0
+        self.query_result = True
 
     def check_event_support(self, device: object) -> None:
         self.calls.append(("check", device))
@@ -36,7 +39,7 @@ class _FakeEventBackend:
 
     def export_event(self, event: object, device: object) -> bytes:
         self.calls.append(("export", event, device))
-        return b"completion-handle"
+        return b"completion-handle-%d" % id(event)
 
     def import_event(self, handle: bytes, device: object) -> object:
         event = ("remote", handle)
@@ -51,7 +54,7 @@ class _FakeEventBackend:
 
     def query_event(self, event: object) -> bool:
         self.calls.append(("query", event))
-        return True
+        return self.query_result
 
     def synchronize_event(self, event: object, device: object) -> None:
         self.calls.append(("synchronize", event, device))
@@ -156,8 +159,11 @@ def test_worker_exports_events_through_platform_backend(
     assert isinstance(retrieve_future, DeviceMessagingFuture)
     assert unregister_future is client.unregister_kv_cache.return_value
     client.unregister_kv_cache.assert_called_once_with(1)
-    client.store.assert_called_once_with("key", 1, [[0]], b"completion-handle")
-    client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2)
+    exported = [
+        b"completion-handle-%d" % id(c[1]) for c in backend.calls if c[0] == "export"
+    ]
+    client.store.assert_called_once_with("key", 1, [[0]], exported[0])
+    client.retrieve.assert_called_once_with("key", 1, [[0]], exported[1], 2)
     assert [call[0] for call in backend.calls] == [
         "check",
         "create",
@@ -221,8 +227,15 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     )
 
     storage_manager = _FakeStorageManager()
+    callbacks: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "submit_callback_to_stream",
+        lambda stream, kind, payload: callbacks.append((kind, payload)),
+    )
     server_context = SimpleNamespace(
         chunk_size=1,
+        ipc_events=IPCEventRegistry(),
         storage_manager=storage_manager,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
@@ -254,6 +267,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         model_name="model",
         world_size=1,
         event_backend=cast(Any, backend),
+        ipc_events=server_context.ipc_events,
     )
     monkeypatch.setattr(
         module,
@@ -262,24 +276,55 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     )
     key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
 
-    assert module.store(key, 1, [[]], b"store-producer") == (
-        b"completion-handle",
-        True,
-    )
-    assert module.retrieve(key, 1, [[]], b"retrieve-producer") == (
-        b"completion-handle",
-        False,
-    )
+    store_handle, store_ok = module.store(key, 1, [[]], b"store-producer")
+    retrieve_handle, retrieve_ok = module.retrieve(key, 1, [[]], b"retrieve-producer")
+    assert (store_ok, retrieve_ok) == (True, False)
 
     imported_handles = [call[1] for call in backend.calls if call[0] == "import"]
     waited_handles = [call[1][1] for call in backend.calls if call[0] == "wait"]
     assert imported_handles == [b"store-producer", b"retrieve-producer"]
     assert waited_handles == [b"store-producer", b"retrieve-producer"]
     assert sum(call[0] == "record" for call in backend.calls) == 2
-    assert sum(call[0] == "export" for call in backend.calls) == 2
+    exported = [call[1] for call in backend.calls if call[0] == "export"]
+    assert len(exported) == 2
     for index, call in enumerate(backend.calls):
         if call[0] == "export":
             assert backend.calls[index - 1][0] == "record"
+
+    # Exported events are held until the worker releases them; imported events
+    # are held until the stream callback queued after each wait fires.
+    registry = server_context.ipc_events
+    assert registry.exported_count == 2 and registry.imported_count == 2
+    assert [kind for kind, _ in callbacks] == ["release_imported_event"] * 2
+    assert list(entry.completion_event_pool) == []
+    module.release_event(store_handle)
+    assert registry.exported_count == 1 and len(entry.completion_event_pool) == 1
+    assert entry.next_completion_event() is exported[0]
+    assert [payload for _, payload in callbacks] == imported_handles
+    for _, handle in callbacks:
+        registry.release_imported(cast(bytes, handle))
+    assert registry.imported_count == 0
+
+
+def test_ipc_event_registry_releases_on_facts() -> None:
+    registry = IPCEventRegistry()
+    pool: deque[object] = deque()
+    registry.track_exported(b"h1", "e1", pool)
+    registry.release_exported(b"unknown")  # ignored
+    assert registry.exported_count == 1
+    registry.release_exported(b"h1")
+    assert list(pool) == ["e1"] and registry.exported_count == 0
+    registry.track_imported(b"w", "imp-a")  # the same worker handle, imported
+    registry.track_imported(b"w", "imp-b")  # once per transfer that waits on it
+    assert registry.imported_count == 2
+    registry.release_imported(b"w")
+    assert registry.imported_count == 1
+    registry.release_imported(b"w")
+    registry.release_imported(b"w")  # extra releases are ignored
+    assert registry.imported_count == 0
+    registry.track_exported(b"h2", "e2", pool)
+    registry.forget_pool(pool)
+    assert registry.exported_count == 0 and list(pool) == ["e1"]
 
 
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:

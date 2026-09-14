@@ -140,6 +140,7 @@ class GrpcMultiprocessClient(RequestClient):
     ) -> MessagingFuture[Any]:
         request = rpc.codec.request_encoder(args, kwargs)
         future: MessagingFuture[Any] = MessagingFuture()
+        future.release_hook = self.release_event
         call = rpc.stub_method.future(
             request,
             metadata=self._metadata,

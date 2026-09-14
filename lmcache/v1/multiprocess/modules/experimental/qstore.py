@@ -8,6 +8,7 @@ from the LMCache-driven KV transfer module.
 """
 
 # Standard
+from collections import deque
 import threading
 import time
 
@@ -180,6 +181,7 @@ class QStoreModule(InstanceLivenessTarget):
             self._ctx.layout_desc_registry.unregister(
                 entry.model_name, entry.world_size
             )
+            self._ctx.ipc_events.forget_pool(entry.completion_event_pool)
         del entry
         entries.clear()
         # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
@@ -291,6 +293,11 @@ class QStoreModule(InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                completion_event_pool=deque(
+                    event_backend.create_event(cache_context.device)
+                    for _ in range(ContextEntry.INITIAL_COMPLETION_EVENTS)
+                ),
+                ipc_events=self._ctx.ipc_events,
             )
 
         logger.info(
@@ -374,6 +381,7 @@ class QStoreModule(InstanceLivenessTarget):
                 "Q ring event backend is not initialized; register the Q cache "
                 "before submitting store requests"
             )
+        event = entry.next_completion_event()
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
@@ -394,8 +402,6 @@ class QStoreModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
-
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
             # drive the transfer kernel to read out-of-bounds GPU memory, so skip
@@ -418,16 +424,13 @@ class QStoreModule(InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                return entry.export_completion_event(event), False
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
 
-            vllm_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
-            event_backend.wait_event(vllm_event, cache_context.stream)
+            entry.import_producer_event(event_ipc_handle)
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -533,4 +536,4 @@ class QStoreModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
-        return event_backend.export_event(event, cache_context.device), store_succeeded
+        return entry.export_completion_event(event), store_succeeded

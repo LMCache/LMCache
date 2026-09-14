@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 # First Party
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.multiprocess.ipc_event_registry import IPCEventRegistry
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -116,8 +117,12 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     cache_context.max_batch_size = 8
 
     event_backend = MagicMock()
-    entry = SimpleNamespace(
-        cache_context=cache_context, model_name="m", event_backend=event_backend
+    entry = mod.ContextEntry(
+        cache_context=cache_context,
+        model_name="m",
+        world_size=1,
+        event_backend=event_backend,
+        ipc_events=IPCEventRegistry(),
     )
     module.get_and_touch_context_entry = MagicMock(return_value=entry)
 

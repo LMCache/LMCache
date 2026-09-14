@@ -36,6 +36,7 @@ REQUEST_NAMES = [
     "STORE_Q",
     "STORE",
     "RETRIEVE",
+    "RELEASE_EVENT",
     "LOOKUP",
     "QUERY_PREFETCH_STATUS",
     "WAIT_PREFETCH_STATUS",
@@ -158,6 +159,16 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool],
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Return a completion event once the worker has finished querying its
+        # import, so the server may record the event again.
+        # Payload:
+        #   - event_ipc_handle: bytes - handle returned by STORE / RETRIEVE / STORE_Q
+        # Returns: None
+        "RELEASE_EVENT": ProtocolDefinition(
+            payload_classes=[bytes],
+            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Submit a prefix lookup; job is tracked server-side by request_id

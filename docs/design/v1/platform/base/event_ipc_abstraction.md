@@ -76,6 +76,29 @@ complete the moment the consumer receives it. The subsequent `wait_event`
 returns immediately, the consumer's transfer kernel runs alongside the
 producer's writes, and it can read partially written KV-cache blocks.
 
+### Completion event lifetime
+
+An exported handle is valid only while the exporter keeps the event alive, and
+an imported event must outlive every stream wait queued on it. Some runtimes
+tolerate violations by keeping the underlying resource around; others free it
+as soon as the event is destroyed, after which the peer's open fails or a
+queued wait references freed memory. The server therefore releases both on
+facts rather than inference (`lmcache/v1/multiprocess/ipc_event_registry.py`):
+
+- **Exported**: each context owns a pool of completion events. A transfer
+  takes one, records it after its copies, and exports it; the event is held
+  until the worker sends `RELEASE_EVENT` with the handle, which
+  `DeviceMessagingFuture` does once its device side is done, and then returns
+  to the pool. The pool is pre-warmed at registration and grows on demand.
+- **Imported**: the worker's event is imported, waited on from the transfer
+  stream, and a host callback is queued on that same stream immediately after
+  the wait. The callback drops the import, so it runs only once the stream has
+  consumed the wait.
+
+Unregistering a context drops its unreleased exported events. `report_status`
+reports the pool size per context and the outstanding exported and imported
+counts.
+
 Substituting host-side synchronization does not work either. Draining the
 importing process's own streams says nothing about the exporting process --
 they are separate contexts, and without MPS-style serialization their kernels
@@ -200,10 +223,11 @@ Worker adapter
   send event handle in STORE/RETRIEVE
 
 Server: lmcache_driven_transfer.py
-  at KV registration: resolve, validate, and cache event_backend in ContextEntry
+  at KV registration: resolve, validate, and cache event_backend in ContextEntry,
+    and create_event once -> ContextEntry.completion_event
   event_backend.import_event / wait_event
   enqueue KV transfer
-  event_backend.create_event / record_event / export_event
+  event_backend.record_event / export_event on the long-lived completion_event
 
 Worker: futures.py
   reuse the transfer context's cached event_backend

@@ -23,6 +23,7 @@ from lmcache.v1.gpu_connector.gds_context import (
 )
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.ipc_event_registry import IPCEventRegistry
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -225,6 +226,7 @@ class MPCacheServerContext:
         self._session_manager = SessionManager(self._token_hasher)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
+        self._ipc_events = IPCEventRegistry()
 
     def close(self) -> None:
         """
@@ -250,6 +252,11 @@ class MPCacheServerContext:
     def full_sw_kv(self) -> bool:
         """Whether sliding-window groups cache full per-chunk KV (no window cutting)."""
         return self._full_sw_kv
+
+    @property
+    def ipc_events(self) -> IPCEventRegistry:
+        """Server-side lifetimes of IPC events shared with workers."""
+        return self._ipc_events
 
     @property
     def storage_manager(self) -> StorageManager:
