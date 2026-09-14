@@ -153,4 +153,51 @@ completion order, and safe teardown. CPU file-backed tests do not qualify a CXL
 fabric. Hardware qualification must prove cold-versus-warm output equality and
 external-cache hits on every consuming worker, not just successful HTTP replies.
 
+## Measured comparison with Maru
+
+The 2026-09-15 (KST) qualification compared LMCache MP at `9ffd4b14` with Maru
+at `626e2e6`, using benchmark-only compatibility fixes described below. Later
+code cleanup and documentation commits were not rebenchmarked.
+
+Both arms used the same image, full-attention Qwen2.5-7B-Instruct-1M checkpoint,
+bf16, vLLM model runner V2, and six TP1 RTX PRO 6000 Blackwell 96 GB GPUs.
+Each GPU had a 16 GiB KV budget, with GPU prefix caching disabled. Prefills ran
+on host 196 and decodes on host 197: two prefills/four decodes for 2P4D, and four
+prefills/two decodes for 4P2D.
+
+The workload used four repeated, nested document prefixes, 256-token chunks,
+8,192/32,768 input tokens, and 128 output tokens. Each concurrency level (1, 4,
+16) had 16 measured requests after a separate warmup. Every cell visited all
+eight P/D pairs. The table shows concurrency 16 only. Throughput is total output
+tokens divided by cell wall time. TTFT is median time to first nonempty output.
+
+| Layout | Input | MP output tok/s | Maru + fixes output tok/s | MP gain | MP TTFT ms | Maru TTFT ms |
+|---|---:|---:|---:|---:|---:|---:|
+| 2P4D | 8K | 815.66 | 732.88 | +11.3% | 753.32 | 1139.11 |
+| 2P4D | 32K | 400.99 | 359.40 | +11.6% | 2633.66 | 3527.49 |
+| 4P2D | 8K | 776.28 | 692.93 | +12.0% | 674.70 | 1135.36 |
+| 4P2D | 32K | 364.59 | 312.26 | +16.8% | 2531.81 | 3800.55 |
+
+Gain is `(MP / Maru - 1) * 100`, calculated before rounding. Across all 24 cells,
+384 measured requests completed without errors. Every response had 128 output
+tokens; output hashes matched across all eight prompt groups. Every decoder's
+measured external-cache hit ratio exceeded 99.9%. No worker or service restarted.
+
+Both arms had 24 GiB capacity. MP used one shared pool; Maru reserved six fixed
+4 GiB pools with expansion disabled. The workload occupied 7 GiB; Maru also kept
+56 MiB from a separate correctness probe. Neither arm was tested under pressure.
+
+**This is not a stock-Maru result.** Stock Maru failed correctness on this stack.
+The benchmark corrected its packed host/GPU staging layout and added the same
+qualified CXL publish/acquire fences used by MP. These hooks remain outside the
+feature patch. MP also waited for store-complete telemetry; Maru's in-process
+path did not emit that event, so its proxy did not wait for it.
+
+These short, closed-loop warm-cache runs show an observed throughput advantage,
+not statistical significance or steady-state capacity. They test shared-CXL PD
+through a common external proxy, not Dynamo routing or NIXL transfer. Warmup,
+failed stock-Maru runs, and packed-layout-only failures are excluded. Raw evidence
+is the `mp-*-measure*.jsonl` and `maru-*-fenced-measure*.jsonl` qualification
+artifacts; the benchmark harness and logs are not bundled in this minimal patch.
+
 See the [setup and operations guide](../../source/mp/shared_l1.rst).
