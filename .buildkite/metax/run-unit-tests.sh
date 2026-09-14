@@ -33,7 +33,8 @@ pytest --maxfail=1 --cov=lmcache \
     --deselect="tests/cli/commands/bench/test_server_bench.py::TestUnregisterKVCache::test_data_mode_sends_engine_driven_unregister" \
     --deselect="tests/v1/mp_coordinator/test_key_directory.py::test_token_ids_outside_uint32_leave_the_binding_unfilled" \
     --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_1_scenario[cuda_ops-load_and_reshape_flash-scenario_load_and_reshape_flash]" \
-    --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_2_compare[multi_layer_block_kv_transfer]"
+    --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_2_compare[multi_layer_block_kv_transfer]" \
+    --deselect="tests/v1/shm_allocator/test_shm_allocator.py::TestShmFileConnector::test_put_and_get_roundtrip"
 
 # Not deselected/ignored above for a MACA capability reason, documented
 # separately so a future re-run on different hardware knows what to revisit:
@@ -62,6 +63,9 @@ pytest --maxfail=1 --cov=lmcache \
 #   a pipe the parent blocks on with no timeout). The real fix is upstream:
 #   generalize the ROCm-only skip to cover any environment without
 #   `cuda.bindings`.
+# - test_shm_allocator.py::TestShmFileConnector::test_put_and_get_roundtrip:
+#   its 5GB pinned-memory allocation fails MACA's mcHostRegister with
+#   mcErrorInvalidValue on this host.
 
 cat << EOF | buildkite-agent annotate --style "info"
   Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
