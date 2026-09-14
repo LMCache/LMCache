@@ -3,6 +3,7 @@
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any
 import threading
 
@@ -17,7 +18,8 @@ from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     IPCEvent,
-    _single_group_block_ids,
+    _select_group_chunks,
+    null_chunk_mask_from_groups,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
@@ -48,12 +50,15 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
     1. prepare: call prepare_store() to negotiate buffers with the server
        (the costliest step in pickle mode due to the synchronous RPC round-trip).
-    2. gather: wait for the forward event on the copy stream, then enqueue
-       GPU->CPU copies. When SHM buffers are available, gather writes directly
-       into SHM views (matching the synchronous path). Otherwise, gather
-       targets pinned staging buffers.
+    2. gather: wait for the forward event on the copy stream, then loop over
+       every registered LMCache group, enqueuing its GPU->CPU copies. When
+       SHM buffers are available, gather writes directly into SHM views
+       (matching the synchronous path). Otherwise, gather targets pinned
+       staging buffers, bucketed per group since groups can have different
+       chunk shapes.
     3. commit: wait for gather completion (via a recorded CUDA event), then
-       perform commit_store() and resolve the returned future.
+       perform commit_store() with every group's gathered chunks concatenated
+       group-major, and resolve the returned future.
 
     ``submit_store`` performs only O(1) work on the forward thread (registration
     check and block-id flattening) before submitting all three phases to the
@@ -147,14 +152,21 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     def _release_staging(self, chunks: list[torch.Tensor]) -> None:
         """Return staging tensors to the pool for reuse.
 
+        Bucketed by ``(shape, dtype)`` rather than a single key derived from
+        ``chunks[0]``, since a multi-group store's chunks can have different
+        shapes per group.
+
         Args:
             chunks: Tensors previously obtained from :meth:`_alloc_pinned_staging`.
         """
         if not chunks:
             return
-        key = (tuple(chunks[0].shape), chunks[0].dtype)
+        buckets: dict[tuple[tuple[int, ...], torch.dtype], list[torch.Tensor]] = {}
+        for chunk in chunks:
+            buckets.setdefault((tuple(chunk.shape), chunk.dtype), []).append(chunk)
         with self._inflight_lock:
-            self._staging_pool.setdefault(key, []).extend(chunks)
+            for key, bucket in buckets.items():
+                self._staging_pool.setdefault(key, []).extend(bucket)
 
     def create_recorded_event(self) -> IPCEvent:
         """Create a local event that orders compute before the copy stream.
@@ -186,11 +198,12 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     ) -> MessagingFuture:
         """Three-phase async store (prepare, gather and commit all in background).
 
-        Performs only O(1) work on the forward thread (registration check and
-        block-id flattening), then submits all three phases — prepare_store,
-        gather (GPU->CPU), and commit — to the background ``commit_executor``.
-        Returns an unresolved future that resolves only after all three phases
-        complete.
+        Performs only O(1) work on the forward thread (registration check,
+        building the per-group transfer plan, computing the null-chunk mask),
+        then submits all three phases -- prepare_store, per-group gather
+        (GPU->CPU), and commit -- to the background ``commit_executor``.
+        Returns an unresolved future that resolves only after all three
+        phases complete.
 
         Args:
             _request_id: External request identifier (used for logging).
@@ -230,7 +243,13 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     return completion
                 self._pending_stores.add(gather_launched)
 
-            full_block_ids = _single_group_block_ids(block_ids)
+            transfer_groups = list(
+                self.iter_transfer_groups(kv_caches, block_ids, blocks_in_chunk)
+            )
+            if self._has_maskable_group():
+                key = replace(
+                    key, null_chunk_mask=null_chunk_mask_from_groups(transfer_groups)
+                )
 
             def _prepare_gather_and_commit() -> None:
                 gather_done: Any | None = None
@@ -253,19 +272,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         ok = True
                         return
 
-                    num_chunks = (
-                        len(chunk_indices)
-                        if chunk_indices is not None
-                        else len(full_block_ids) // blocks_in_chunk
-                    )
-
-                    # Determine gather target:
-                    # - SHM path (out_buffers available): gather into SHM views
-                    # - Pickle path (no out_buffers): gather into pinned staging
-                    if out_buffers is not None:
-                        gather_target = out_buffers
-                        used_shm_direct = True
-                    else:
+                    # Latch SHM vs. pickle mode once here, since it's the
+                    # same for every group in this store.
+                    used_shm_direct = out_buffers is not None
+                    if out_buffers is None:
                         layout_desc = engine_driven_context.layout_desc
                         if not layout_desc.shapes:
                             raise RuntimeError(
@@ -275,26 +285,57 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             raise RuntimeError(
                                 "engine-driven layout_desc.dtypes is empty"
                             )
-                        staged_chunks = self._alloc_pinned_staging(
-                            layout_desc.shapes[0],
-                            layout_desc.dtypes[0],
-                            num_chunks,
-                        )
-                        gather_target = staged_chunks
 
                     # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
+                    # ``out_buffers`` / ``chunk_indices`` (when present) are
+                    # flat over the whole multi-group chunk sequence,
+                    # group-major; each group's own chunk-count range is
+                    # sliced out before gathering that group.
+                    gather_target: list[torch.Tensor] = []
+                    group_offset = 0
                     with torch.inference_mode(), torch_dev.stream(self._copy_stream):
                         _event.wait(stream=self._copy_stream)
 
-                        gather_paged_kv_to_cpu(
-                            kv_caches,
-                            full_block_ids,
-                            blocks_in_chunk,
-                            layout_hints=self._layout_hints,
-                            engine_kv_format=self._engine_kv_format,
-                            out=gather_target,
-                            chunk_indices=chunk_indices,
-                        )
+                        for (
+                            plan,
+                            group_kv_caches,
+                            group_block_ids,
+                        ) in transfer_groups:
+                            selection = _select_group_chunks(
+                                chunk_indices,
+                                group_offset,
+                                len(group_block_ids) // plan.blocks_per_chunk,
+                            )
+                            group_offset += selection.num_group_chunks
+                            if selection.is_empty:
+                                continue
+
+                            if out_buffers is not None:
+                                group_out = [
+                                    out_buffers[out_idx]
+                                    for out_idx in selection.out_indices
+                                ]
+                            else:
+                                group_out = self._alloc_pinned_staging(
+                                    plan.chunk_shape,
+                                    engine_driven_context.layout_desc.dtypes[0],
+                                    len(selection.out_indices),
+                                )
+                                staged_chunks.extend(group_out)
+
+                            gather_target.extend(
+                                gather_paged_kv_to_cpu(
+                                    group_kv_caches,
+                                    group_block_ids,
+                                    plan.blocks_per_chunk,
+                                    layout_hints=self._layout_hints,
+                                    # This group's own pre-detected format
+                                    # (see GroupTransferPlan).
+                                    engine_kv_format=plan.engine_kv_format,
+                                    out=group_out,
+                                    chunk_indices=selection.chunk_indices,
+                                )
+                            )
 
                         gather_done = torch_dev.Event()
                         gather_done.record(self._copy_stream)

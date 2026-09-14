@@ -2,6 +2,7 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
@@ -1655,6 +1656,95 @@ def test_server_prepare_store_includes_chunk_indices(
     assert len(response_context.get("slots", [])) == 1
     # chunk_indices should be [1] (position of obj2 in [obj1, obj2])
     assert response_context.get("chunk_indices") == [1]
+
+
+def test_server_prepare_store_excludes_null_masked_chunk(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A key's null_chunk_mask keeps a chunk out of chunk_indices even
+    though the storage manager would happily reserve it.
+
+    Regression test for align-mode Mamba/GDN groups: their earlier chunks
+    hold no valid KV (vLLM nulled the block IDs), so they must never be
+    committed even when nothing else would exclude them.
+    """
+    mock_storage = MagicMock()
+    obj1 = "obj1"
+    obj2 = "obj2"
+    mock_memory_obj = MagicMock()
+    mock_memory_obj.tensor = torch.zeros(2, 2, 8, 16)
+    mock_memory_obj.shm_offset = 0
+    mock_memory_obj.shm_byte_length = 2048
+    # Storage would reserve BOTH -- neither is already cached.
+    mock_storage.reserve_write.return_value = {
+        obj1: mock_memory_obj,
+        obj2: mock_memory_obj,
+    }
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h1", b"h2"]
+
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=4096
+        ),
+        object_keys=[obj1, obj2],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=10)
+    )
+    key = _default_key(tokens=16)
+    # Single group: mask chunk 0 (obj1) as null, keep chunk 1 (obj2).
+    key = replace(key, null_chunk_mask=((True, False),))
+    response = module.prepare_store(key, 10)
+    response_context = response.context
+
+    # Only obj2 was ever offered to reserve_write.
+    mock_storage.reserve_write.assert_called_once()
+    reserved_keys_arg = mock_storage.reserve_write.call_args.args[0]
+    assert reserved_keys_arg == [obj2]
+    # slots/chunk_indices reflect only the unmasked chunk (position 1).
+    assert len(response_context.get("slots", [])) == 1
+    assert response_context.get("chunk_indices") == [1]
+
+
+def test_server_commit_store_slices_chunks_for_null_masked_group(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """commit_store must slice the worker's shorter chunk list against the
+    same masked-down key list, not the full unmasked one.
+    """
+    mock_storage = MagicMock()
+    obj1 = "obj1"
+    obj2 = "obj2"
+    mock_storage.reserve_write.return_value = {
+        obj2: MagicMock(tensor=torch.zeros(2, 2, 8, 16))
+    }
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h1", b"h2"]
+
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(),
+        object_keys=[obj1, obj2],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=10)
+    )
+    key = _default_key(tokens=16)
+    key = replace(key, null_chunk_mask=((True, False),))
+    # Worker only gathered and sent 1 chunk (chunk 0/obj1 was masked out).
+    one_chunk = [torch.ones(2, 2, 8, 16)]
+    ok = module.commit_store(key, 10, pickle.dumps(one_chunk))
+
+    assert ok is True
+    mock_storage.finish_write.assert_called_once()
+    written_keys = mock_storage.finish_write.call_args.args[0]
+    assert written_keys == [obj2]
 
 
 class _CompletedFuture:
