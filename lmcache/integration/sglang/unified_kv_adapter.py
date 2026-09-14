@@ -414,20 +414,19 @@ class SGLangUnifiedKVAdapter:
         tensors: list[torch.Tensor] = []
         for (
             field,
-            state_tensor,
+            layer_tensor,
             slice_axis,
-        ) in mamba_pool._iter_transfer_state_tensors():
+            layer_id,
+        ) in mamba_pool._iter_transfer_state_entries():
             if slice_axis != 0:
                 raise NotImplementedError(
                     f"LMCache MP does not support {field} state with slot "
                     f"slice_axis={slice_axis}"
                 )
-            for layer_idx in range(mamba_pool.num_mamba_layers):
-                layer_tensor = state_tensor[layer_idx]
-                if not layer_tensor.is_contiguous():
-                    raise NotImplementedError(
-                        f"LMCache MP requires contiguous {field} state for "
-                        f"Mamba layer {layer_idx}"
-                    )
-                tensors.append(layer_tensor)
+            if not layer_tensor.is_contiguous():
+                raise NotImplementedError(
+                    f"LMCache MP requires contiguous {field} state for "
+                    f"Mamba layer {layer_id}"
+                )
+            tensors.append(layer_tensor)
         return tuple(tensors)
