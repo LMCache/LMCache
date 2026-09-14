@@ -419,8 +419,6 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     if shared_config is not None:
         if not memory_config.devdax_path:
             raise ValueError("shared L1 requires l1-devdax-path")
-        if config.l1_manager_config.gds_l1_config is not None:
-            raise ValueError("shared L1 cannot be used with GDS L1")
         if memory_config.devdax_size_in_bytes:
             raise ValueError("shared L1 cannot use hybrid DRAM and Device-DAX")
         if config.l2_adapter_config.adapters:

@@ -492,24 +492,21 @@ class StorageManager:
                 for key, (error, obj) in l1_read_result.items()
                 if error == L1Error.SUCCESS and obj is not None
             ]
-            mismatched = []
             for key, obj in reserved:
                 expected = spec.group_layout_descs.get(key.object_group_id)
-                if expected is not None and (
-                    obj.get_shapes() != expected.shapes
+                if (
+                    expected is None
+                    or obj.get_shapes() != expected.shapes
                     or obj.get_dtypes() != expected.dtypes
                 ):
-                    mismatched.append(key)
-            if mismatched:
-                # The producer-supplied descriptor locates bytes, but the
-                # consuming engine's registered layout remains authoritative.
-                self._l1_manager.finish_read(
-                    [key for key, _ in reserved],
-                    read_locks=spec.num_kv_readers,
-                )
-                raise RuntimeError(
-                    "shared-L1 object layout does not match the local engine"
-                )
+                    # The consuming engine's registered layout is authoritative.
+                    self._l1_manager.finish_read(
+                        [key for key, _ in reserved],
+                        read_locks=spec.num_kv_readers,
+                    )
+                    raise RuntimeError(
+                        "shared-L1 object layout does not match the local engine"
+                    )
 
         if spec.policy is TrimPolicy.SPARSE:
             # SPARSE: retain a read lock on every L1 hit (not just the leading
@@ -917,15 +914,13 @@ class StorageManager:
         """
         # A coordinator-owned shared Device-DAX pool is fleet-shared: its
         # capacity must be declared once under shared_modules, not summed
-        # per mounting instance. getattr keeps capacity-only stubs (tests
-        # bind this method without an L1Manager) reporting unshared.
-        l1_shared = bool(getattr(self, "uses_shared_l1", False))
+        # per mounting instance.
         capacities = [
             ModuleMemoryCapacity(
                 tier=Tier.L1,
                 backend=backend.value,
                 capacity_bytes=configured,
-                shared=l1_shared,
+                shared=self.uses_shared_l1,
             )
             for backend, configured in get_configured_capacity_bytes(
                 self._l1_config
@@ -1080,6 +1075,9 @@ class StorageManager:
 
         Returns:
             The stable id assigned to the new adapter.
+
+        Raises:
+            ValueError: Shared L1 does not support L2 adapters.
         """
         with self._lifecycle_lock:
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
@@ -1267,6 +1265,8 @@ class StorageManager:
             the freshly allocated stable id, ``adapter`` is the new adapter
             instance, and ``descriptor`` is its descriptor carrying that id.
         """
+        if self.uses_shared_l1:
+            raise ValueError("shared L1 cannot be combined with L2 adapters")
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)

@@ -2,8 +2,6 @@
 """JSON metadata contracts for the shared Device-DAX coordinator."""
 
 # Standard
-from dataclasses import asdict
-import json
 import math
 
 # Third Party
@@ -46,14 +44,14 @@ def wire_dtype_itemsize(name: str) -> int:
         raise ValueError(f"unknown wire dtype {name!r}") from None
 
 
-def canonical_key(key: EncodedObjectKey) -> str:
-    """Return deterministic JSON after validating the object-key encoding.
+def canonical_key(key: EncodedObjectKey) -> EncodedObjectKey:
+    """Validate and return the immutable object-key encoding.
 
     Args:
         key: Encoded LMCache object key.
 
     Returns:
-        Canonical JSON string.
+        Canonical, hashable object key.
 
     Raises:
         ValueError: The encoding is non-canonical.
@@ -63,7 +61,7 @@ def canonical_key(key: EncodedObjectKey) -> str:
     canonical = key.to_object_key().to_encoded_object_key()
     if canonical != key:
         raise ValueError("encoded object key must use its canonical representation")
-    return json.dumps(asdict(canonical), sort_keys=True, separators=(",", ":"))
+    return canonical
 
 
 class MemoryCoordinatorError(RuntimeError):

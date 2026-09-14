@@ -3,6 +3,7 @@
 
 # Standard
 from unittest.mock import MagicMock
+import threading
 
 # Third Party
 import pytest
@@ -208,11 +209,14 @@ def test_shared_manager_compatibility_surface(
         manager.close()
 
 
-def test_shared_reader_rejects_producer_layout_mismatch() -> None:
+@pytest.mark.parametrize("object_group_id", [0, 1])
+def test_shared_reader_rejects_missing_or_mismatched_layout(
+    object_group_id: int,
+) -> None:
     manager = StorageManager.__new__(StorageManager)
     l1_manager = MagicMock(uses_shared_l1=True)
     manager._l1_manager = l1_manager
-    key = _key(1)
+    key = ObjectKey(b"key", "model", 0, object_group_id=object_group_id)
     memory_obj = MagicMock()
     memory_obj.get_shapes.return_value = [torch.Size([8, 2])]
     memory_obj.get_dtypes.return_value = [torch.float16]
@@ -224,3 +228,12 @@ def test_shared_reader_rejects_producer_layout_mismatch() -> None:
         manager.submit_prefetch_task(PrefetchRequestSpec([key], {0: _layout()}))
 
     l1_manager.finish_read.assert_called_once_with([key], read_locks=1)
+
+
+def test_shared_manager_rejects_runtime_l2_adapter() -> None:
+    manager = StorageManager.__new__(StorageManager)
+    manager._l1_manager = MagicMock(uses_shared_l1=True)
+    manager._lifecycle_lock = threading.Lock()
+
+    with pytest.raises(ValueError, match="cannot be combined with L2 adapters"):
+        manager.add_l2_adapter(MagicMock())

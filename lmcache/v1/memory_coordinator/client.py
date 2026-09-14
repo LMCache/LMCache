@@ -120,7 +120,7 @@ class MemoryCoordinatorHttpClient:
         payload = self._post("/v1/writes/reserve", body.model_dump())
         response = WriteReserveResponse.model_validate(payload)
         self._check_response_epoch(response.region_epoch)
-        return list(response.grants)
+        return response.grants
 
     def finish_writes(self, reservations: list[ReservationRef]) -> None:
         """Atomically publish a write batch (all become ``VALID``)."""
@@ -142,7 +142,7 @@ class MemoryCoordinatorHttpClient:
         payload = self._post("/v1/lookup", body.model_dump())
         response = LookupResponse.model_validate(payload)
         self._check_response_epoch(response.region_epoch)
-        return list(response.hits)
+        return response.hits
 
     def status(self) -> StatusResponse:
         """Return the coordinator's constant-size status."""

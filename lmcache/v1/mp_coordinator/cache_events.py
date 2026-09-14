@@ -394,8 +394,7 @@ class CacheEventSubscriber(EventSubscriber):
         by_backend: dict[tuple[L1BackendType, bool], list[CacheEventEntry]] = {}
         is_store = event_type is CacheEventType.STORE
         for key, meta in zip(keys, metadata, strict=True):
-            shared = getattr(meta, "shared", False)
-            by_backend.setdefault((meta.backend, shared), []).append(
+            by_backend.setdefault((meta.backend, meta.shared), []).append(
                 self._store_entry(key, meta.size_bytes)
                 if is_store
                 else CacheEventEntry(key=key.to_encoded_object_key())

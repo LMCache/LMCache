@@ -3,6 +3,7 @@
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 # Third Party
 import pytest
@@ -86,6 +87,30 @@ def test_tokens_and_epochs_fail_closed() -> None:
     with pytest.raises(StaleEpochError):
         pool.check_epoch("old-epoch")
     pool.finish_writes([_ref(grant)])
+    with pytest.raises(InvalidReservationError):
+        pool.finish_writes([_ref(grant)])
+    with pytest.raises(InvalidReservationError):
+        pool.abort_writes([_ref(grant)])
+
+
+def test_key_identity_preserves_every_field() -> None:
+    pool = _pool()
+    key = _key(1)
+    keys = [key] + [
+        replace(key, **change)
+        for change in (
+            {"model_name": "other"},
+            {"kv_rank": 1},
+            {"object_group_id": 1},
+            {"cache_salt": "tenant"},
+        )
+    ]
+    items = [_item(1).model_copy(update={"key": item}) for item in keys]
+    grants = pool.reserve_writes(items)
+    assert all(grant is not None for grant in grants)
+    assert pool.reserve_writes(items) == [None] * len(keys)
+    pool.finish_writes([_ref(grant) for grant in grants if grant is not None])
+    assert [hit.key for hit in pool.lookup(keys) if hit is not None] == keys
 
 
 def test_duplicate_writer_has_one_winner() -> None:

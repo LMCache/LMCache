@@ -186,10 +186,6 @@ class L1Manager:
     _gauge_registered: bool = False
     _gauge_target: "L1Manager | None" = None
 
-    # Class-level default so partially constructed instances (tests build
-    # them via ``__new__``) read "no shared backend" instead of raising.
-    _shared_backend: SharedDevDaxL1Backend | None = None
-
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
 
@@ -678,34 +674,27 @@ class L1Manager:
             raise ValueError("shared L1 does not support temporary objects")
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
-        pending: list[tuple[ObjectKey, bool]] = []
-        for key, is_temp in zip(keys, is_temporary, strict=True):
+        pending: list[ObjectKey] = []
+        for key, _ in zip(keys, is_temporary, strict=True):
             if mode == "update" or key in self._objects:
                 ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
                 continue
-            pending.append((key, is_temp))
+            pending.append(key)
 
         try:
-            memory_objects = backend.reserve_write(
-                [key for key, _ in pending],
-                layout_desc,
-            )
+            memory_objects = backend.reserve_write(pending, layout_desc)
         except OutOfSpaceError:
-            for key, _ in pending:
+            for key in pending:
                 ret[key] = (L1Error.OUT_OF_MEMORY, None)
             return ret
 
         granted_keys = [
             key
-            for (key, _), memory_obj in zip(pending, memory_objects, strict=True)
+            for key, memory_obj in zip(pending, memory_objects, strict=True)
             if memory_obj is not None
         ]
         try:
-            for (key, is_temp), memory_obj in zip(
-                pending,
-                memory_objects,
-                strict=True,
-            ):
+            for key, memory_obj in zip(pending, memory_objects, strict=True):
                 if memory_obj is None:
                     ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
                     continue
@@ -713,7 +702,7 @@ class L1Manager:
                     memory_obj=memory_obj,
                     write_lock=TTLLock(self._write_ttl_seconds),
                     read_lock=TTLLock(self._read_ttl_seconds),
-                    is_temporary=is_temp,
+                    is_temporary=False,
                 )
                 entry.write_lock.lock()
                 self._objects[key] = entry

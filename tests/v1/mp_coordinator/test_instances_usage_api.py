@@ -271,19 +271,20 @@ class TestFleetMemory:
         }
         assert ratios == {"mp-1": pytest.approx(0.25), "mp-2": pytest.approx(0.75)}
 
+    @pytest.mark.parametrize("tier,backend", [(Tier.L1, "devdax"), (Tier.L2, "s3")])
     def test_shared_pool_is_reported_once_not_per_mount(
-        self, client: TestClient
+        self, client: TestClient, tier: Tier, backend: str
     ) -> None:
-        shared = {
-            "tier": "l1",
-            "backend": "devdax",
+        shared: dict[str, object] = {
+            "tier": tier.value,
+            "backend": backend,
             "capacity_bytes": 100 * GIB,
             "shared": True,
         }
         _register(client, "mp-1", [shared])
         _register(client, "mp-2", [shared])
-        _ingest(client, "mp-1", Tier.L1, "devdax", 25 * GIB, index=1, shared=True)
-        _ingest(client, "mp-2", Tier.L1, "devdax", 25 * GIB, index=1, shared=True)
+        _ingest(client, "mp-1", tier, backend, 25 * GIB, index=1, shared=True)
+        _ingest(client, "mp-2", tier, backend, 25 * GIB, index=1, shared=True)
 
         body = client.get("/instances/usage").json()
         assert len(body["shared_modules"]) == 1

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The Memory Coordinator's single strong allocation and lifetime index.
 
-M0 deliberately uses a monotonic allocator: extents are never reclaimed, so
-aborting a write leaks its bytes until the coordinator is restarted. This is
-safe for a bounded functional run and avoids pretending that eviction, TTL
-recovery, or restart fencing are already implemented.
+Extents are never reclaimed, including after an aborted write. Reuse requires
+an operator-coordinated reset after all mapped workers stop; the persistent
+startup latch refuses ordinary restarts. Eviction and recovery are not supported.
 
 The pool holds exactly one immutable :class:`RegionContract`. There is no
 API that adds a region or mutates capacity, alignment, or layout after
@@ -15,6 +14,9 @@ construction; a restart constructs a new pool and therefore a new
 # Standard
 import threading
 import uuid
+
+# First Party
+from lmcache.utils import round_up
 
 # Local
 from .api import (
@@ -38,20 +40,19 @@ _MAX_GENERATION = (1 << 64) - 1
 class _ObjectRecord:
     """Mutable per-object state private to the pool."""
 
-    __slots__ = ("handle", "layout", "valid", "write_token")
+    __slots__ = ("handle", "layout", "write_token")
 
     def __init__(self, grant: WriteGrant) -> None:
         self.handle = grant.handle
         self.layout = grant.layout
-        self.valid = False
         self.write_token: str | None = grant.token
 
 
 class MemoryPool:
     """Strong allocation, object-lifetime, and reservation state for M0.
 
-    All operations are serialized under one lock; batched operations either
-    validate completely before mutating state. Lookups are partial by key.
+    All operations are serialized under one lock. Batches validate completely
+    before mutating state. Lookups are partial by key.
 
     Args:
         region_id: Operator-provisioned identity of the shared region.
@@ -88,7 +89,7 @@ class MemoryPool:
         )
         self._next_offset = 0
         self._next_generation = 1
-        self._objects: dict[str, _ObjectRecord] = {}
+        self._objects: dict[EncodedObjectKey, _ObjectRecord] = {}
         self._lock = threading.RLock()
 
     def region_contract(self) -> RegionContract:
@@ -147,7 +148,7 @@ class MemoryPool:
                     continue
                 if generation > _MAX_GENERATION:
                     raise OutOfSpaceError("generation space is exhausted")
-                offset = self._align_up(cursor, self._contract.alignment_bytes)
+                offset = round_up(cursor, self._contract.alignment_bytes)
                 if length > self._contract.capacity_bytes - offset:
                     raise OutOfSpaceError(
                         "write batch does not fit in the shared region"
@@ -189,7 +190,6 @@ class MemoryPool:
         with self._lock:
             records = self._validate_writes(reservations)
             for record in records:
-                record.valid = True
                 record.write_token = None
 
     def abort_writes(self, reservations: list[ReservationRef]) -> None:
@@ -227,7 +227,7 @@ class MemoryPool:
             result: list[LookupHit | None] = []
             for key, canonical in zip(keys, canonicals, strict=True):
                 record = self._objects.get(canonical)
-                if record is None or not record.valid:
+                if record is None or record.write_token is not None:
                     result.append(None)
                     continue
                 result.append(
@@ -258,15 +258,7 @@ class MemoryPool:
         records = []
         for reservation in reservations:
             record = self._objects.get(canonical_key(reservation.key))
-            if (
-                record is None
-                or record.valid
-                or record.write_token != reservation.token
-            ):
+            if record is None or record.write_token != reservation.token:
                 raise InvalidReservationError("reservation does not own the write")
             records.append(record)
         return records
-
-    @staticmethod
-    def _align_up(value: int, alignment: int) -> int:
-        return (value + alignment - 1) // alignment * alignment
