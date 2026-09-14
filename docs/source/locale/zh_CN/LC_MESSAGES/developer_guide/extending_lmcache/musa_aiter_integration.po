@@ -1,0 +1,197 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:2
+msgid "musa-aiter with LMCache on MUSA"
+msgstr "在 MUSA 上使用 LMCache 的 musa-aiter"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:4
+msgid ""
+"This guide shows how to install ``musa-aiter`` and use its optional "
+"LMCache KV-transfer adapter with vLLM on MUSA."
+msgstr "本指南展示了如何安装 ``musa-aiter`` 并在 MUSA 上使用其可选的 LMCache KV 传输适配器与 vLLM。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:8
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:10
+msgid "Use a machine or container with:"
+msgstr "使用一台或一个容器，具备："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:12
+msgid "MUSA runtime and TorchMUSA installed."
+msgstr "安装了 MUSA 运行时和 TorchMUSA。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:13
+msgid "A Python environment that can import ``torch`` and ``torch.musa``."
+msgstr "可以导入 ``torch`` 和 ``torch.musa`` 的 Python 环境。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:14
+msgid ""
+"LMCache source available on ``PYTHONPATH`` or installed in the "
+"environment."
+msgstr "``PYTHONPATH`` 上可用的 LMCache 源代码或已安装在环境中。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:15
+msgid "vLLM installed with MUSA support."
+msgstr "安装了 MUSA 支持的 vLLM。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:17
+msgid "Verify the MUSA runtime first:"
+msgstr "首先验证 MUSA 运行时："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:31
+msgid "Step 1: Activate the target environment"
+msgstr "步骤 1：激活目标环境"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:33
+msgid "Activate the same Python environment that will run vLLM and LMCache:"
+msgstr "激活将运行 vLLM 和 LMCache 的相同 Python 环境："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:42
+msgid "Step 2: Install LMCache"
+msgstr "步骤 2：安装 LMCache"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:44
+msgid "For source-tree validation, add LMCache to ``PYTHONPATH``:"
+msgstr "为了源树验证，将 LMCache 添加到 ``PYTHONPATH``："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:51
+msgid "For a normal editable install, install LMCache from the repository root:"
+msgstr "对于正常的可编辑安装，从仓库根目录安装 LMCache："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:58
+msgid ""
+"Use ``NO_NATIVE_EXT=1`` when you only need the Python path and do not "
+"want to rebuild LMCache native extensions in the test environment."
+msgstr "在仅需要 Python 路径且不想在测试环境中重建 LMCache 原生扩展时，请使用 ``NO_NATIVE_EXT=1``。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:62
+msgid "Step 3: Install musa-aiter"
+msgstr "步骤 3：安装 musa-aiter"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:64
+msgid "Install from a local ``musa-aiter`` source checkout:"
+msgstr "从本地 ``musa-aiter`` 源代码检出安装："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:72
+msgid ""
+"Verify the installed package and LMCache ABI entry point from outside the"
+" source checkout so Python imports the installed package, not the current"
+" working tree:"
+msgstr "验证已安装的包和 LMCache ABI 入口点，以便 Python 导入已安装的包，而不是当前工作树："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:86
+msgid "Expected result:"
+msgstr "预期结果："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:93
+msgid "Step 4: Enable LMCache's optional MUSA native transfer"
+msgstr "步骤 4：启用 LMCache 的可选 MUSA 原生传输"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:95
+msgid ""
+"LMCache does not require ``musa-aiter`` for correctness. The default "
+"torch fallback path still works when native transfer is disabled. Enable "
+"the optional native path explicitly:"
+msgstr "LMCache 并不需要 ``musa-aiter`` 来保证正确性。当禁用原生传输时，默认的 torch 回退路径仍然有效。显式启用可选的原生路径："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:102
+msgid "Disable it for a correctness baseline:"
+msgstr "禁用它以作为正确性基准："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:108
+msgid ""
+"Stage 4 MUSA handle support is merged. Prefer the LMCache-driven handle "
+"path when TorchMUSA provides the required memory and event IPC APIs:"
+msgstr "阶段 4 MUSA 句柄支持已合并。当 TorchMUSA 提供所需的内存和事件 IPC API 时，优先使用 LMCache 驱动的句柄路径："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:116
+msgid ""
+"This path lets the LMCache server access registered MUSA KV-cache tensors"
+" through device handles and avoids worker-side gather/scatter copies. The"
+" ``auto`` mode still selects ``engine_driven`` for MUSA, so request "
+"``lmcache_driven`` explicitly to use the handle path. If the required "
+"TorchMUSA IPC APIs are unavailable, use the engine-driven compatibility "
+"path instead:"
+msgstr "此路径允许 LMCache 服务器通过设备句柄访问注册的 MUSA KV Cache 张量，并避免工作端的收集/散布复制。``auto`` 模式仍然为 MUSA 选择 ``engine_driven``，因此请明确请求 ``lmcache_driven`` 以使用句柄路径。如果所需的 TorchMUSA IPC API 不可用，请改用引擎驱动的兼容路径："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:128
+msgid "Step 5: Create an LMCache config"
+msgstr "步骤 5：创建 LMCache 配置"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:130
+msgid "Example local CPU offload config:"
+msgstr "示例本地 CPU 卸载配置："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:143
+msgid "Step 6: Run vLLM with LMCache"
+msgstr "步骤 6：使用 LMCache 运行 vLLM"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:145
+msgid "Example vLLM server command:"
+msgstr "示例 vLLM 服务器命令："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:169
+msgid "Step 7: Validate cache store and hit"
+msgstr "步骤 7：验证缓存存储和命中"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:171
+msgid ""
+"Send two repeated long-prompt requests. The first request should store KV"
+" chunks; the second request should hit and retrieve them from LMCache."
+msgstr "发送两个重复的长提示请求。第一个请求应存储 KV 块；第二个请求应命中并从 LMCache 中检索它们。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:195
+msgid "Look for LMCache logs like:"
+msgstr "查找类似于以下的 LMCache 日志："
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:204
+msgid "Troubleshooting"
+msgstr "故障排除"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:206
+msgid ""
+"If ``musa_aiter`` import fails, reinstall it in the exact environment "
+"that launches vLLM."
+msgstr "如果 ``musa_aiter`` 导入失败，请在启动 vLLM 的确切环境中重新安装它。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:208
+msgid ""
+"If ``native_lmcache_kv_transfer_abi_version`` is missing, the installed "
+"package does not provide the LMCache native adapter ABI expected by "
+"LMCache."
+msgstr "如果缺少 ``native_lmcache_kv_transfer_abi_version``，则安装的包不提供 LMCache 所期望的 LMCache 原生适配器 ABI。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:210
+msgid ""
+"If native transfer fails but ``LMCACHE_MUSA_NATIVE_KV_TRANSFER=0`` "
+"passes, the issue is isolated to ``musa-aiter`` or the native input "
+"layout/contiguity requirements."
+msgstr "如果本地传输失败，但 ``LMCACHE_MUSA_NATIVE_KV_TRANSFER=0`` 成功，则问题仅限于 ``musa-aiter`` 或本地输入布局/连续性要求。"
+
+#: ../../source/developer_guide/extending_lmcache/musa_aiter_integration.rst:212
+msgid ""
+"If vLLM startup fails with low free memory, lower ``--gpu-memory-"
+"utilization`` or choose a less busy device with ``MUSA_VISIBLE_DEVICES``."
+msgstr "如果 vLLM 启动时可用内存不足，降低 ``--gpu-memory-utilization`` 或选择一个较少繁忙的设备并使用 ``MUSA_VISIBLE_DEVICES``。"
+

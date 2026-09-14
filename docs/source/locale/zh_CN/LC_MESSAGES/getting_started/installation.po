@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-13 10:13+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -35,6 +35,12 @@ msgstr ""
 msgid "Install LMCache"
 msgstr "安装 LMCache"
 
+#: ../../source/getting_started/installation.rst:11
+msgid ""
+"For guidance on choosing a vLLM release, LMCache release channel, and "
+"native runtime, see :doc:`compatibility` before installing."
+msgstr ""
+
 #: ../../source/getting_started/installation.rst
 msgid "Python (pip / uv)"
 msgstr "Python (pip / uv)"
@@ -47,13 +53,13 @@ msgstr "稳定版"
 msgid "CUDA 13.0"
 msgstr "CUDA 13.0"
 
-#: ../../source/getting_started/installation.rst:31
+#: ../../source/getting_started/installation.rst:34
 msgid ""
 "You're all set! You can now start using LMCache. For hands-on guides and "
 "more usage examples, see the :ref:`quickstart_examples` section."
 msgstr "一切准备就绪！您现在可以开始使用 LMCache。有关实践指南和更多使用示例，请参阅 :ref:`quickstart_examples` 部分。"
 
-#: ../../source/getting_started/installation.rst:36
+#: ../../source/getting_started/installation.rst:39
 msgid ""
 "NIXL support (e.g. for disaggregated prefill and P2P KV sharing) is an "
 "optional extra:"
@@ -63,7 +69,7 @@ msgstr "NIXL 支持（例如用于分离式 Prefill 和 P2P KV 共享）是一�
 msgid "CUDA 12.9"
 msgstr "CUDA 12.9"
 
-#: ../../source/getting_started/installation.rst:45
+#: ../../source/getting_started/installation.rst:48
 msgid ""
 "The CUDA 12.9 wheel is published to a dedicated `GitHub Release "
 "<https://github.com/LMCache/LMCache/releases>`__ rather than PyPI."
@@ -71,7 +77,7 @@ msgstr ""
 "CUDA 12.9 的 wheel 发布在专用的 `GitHub Release "
 "<https://github.com/LMCache/LMCache/releases>`__ 上，而不是 PyPI。"
 
-#: ../../source/getting_started/installation.rst:60
+#: ../../source/getting_started/installation.rst:63
 msgid ""
 "``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the "
 "CUDA 12.9 build of PyTorch is resolved. Without it, pip may select a "
@@ -81,23 +87,232 @@ msgstr ""
 " 的 CUDA 12.9 构建。没有它，pip 可能会选择不匹配的 CUDA 变体。"
 
 #: ../../source/getting_started/installation.rst
+msgid "ROCm / torch 2.11"
+msgstr ""
+
+#: ../../source/getting_started/installation.rst:68
+msgid ""
+"The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and "
+"**gfx950** (MI350X / MI355X) in one fat binary, and is ABI-matched to the"
+" upstream ``vllm/vllm-openai-rocm`` image (torch 2.11, ROCm 7.2, Python "
+"3.12). It is published to a dedicated `GitHub Release "
+"<https://github.com/LMCache/LMCache/releases>`__ rather than PyPI."
+msgstr ""
+
+#: ../../source/getting_started/installation.rst:74
+msgid ""
+"Install directly inside an upstream vLLM ROCm container — torch and the "
+"ROCm runtime are already present, so ``--no-deps`` binds against them:"
+msgstr ""
+
+#: ../../source/getting_started/installation.rst:89
+msgid ""
+"The wheel excludes torch and the ROCm runtime libraries (they bind to the"
+" host image at runtime). Match the wheel's minor torch/ROCm version to "
+"your container; for other bases, use the **From Source** tab."
+msgstr ""
+
+#: ../../source/getting_started/installation.rst:95
+#, python-brace-format
+msgid ""
+"The ROCm wheel carries a ``+rocm7.2`` PEP 440 local version, so ``pip "
+"show lmcache`` reports which build is installed and the ROCm build can be"
+" requested explicitly. A bare ``lmcache==${VERSION}`` also resolves it, "
+"since ``==`` ignores the local segment."
+msgstr ""
+
+#: ../../source/getting_started/installation.rst
+msgid "Intel XPU"
+msgstr "英特尔 XPU"
+
+#: ../../source/getting_started/installation.rst:102
+#, fuzzy
+msgid ""
+"The Intel XPU wheel is ABI-matched to the upstream ``vllm/vllm-openai-"
+"xpu:v0.26.0`` image (torch 2.12.0+xpu and oneAPI/SYCL). It is published "
+"to a dedicated `GitHub Release "
+"<https://github.com/LMCache/LMCache/releases>`__ rather than PyPI."
+msgstr ""
+"CUDA 12.9 的 wheel 发布在专用的 `GitHub Release "
+"<https://github.com/LMCache/LMCache/releases>`__ 上，而不是 PyPI。"
+
+#: ../../source/getting_started/installation.rst:107
+msgid ""
+"Install directly inside the matching upstream vLLM XPU container. Torch "
+"and the oneAPI/SYCL runtime are already present, so ``--no-deps`` "
+"preserves that runtime stack:"
+msgstr ""
+
+#: ../../source/getting_started/installation.rst:122
+msgid ""
+"The wheel excludes torch and oneAPI/SYCL runtime libraries, which bind to"
+" the host image at runtime. Match the wheel's torch and oneAPI versions "
+"to the container; for other bases, use the **From Source** tab."
+msgstr ""
+
+#: ../../source/getting_started/installation.rst:126
+msgid ""
+"``--no-index`` restricts pip to the GitHub Release asset, preventing it "
+"from selecting a same-version CUDA wheel from PyPI."
+msgstr "``--no-index`` 限制 pip 仅使用 GitHub Release 资产，防止其从 PyPI 选择相同版本的 CUDA wheel。"
+
+#: ../../source/getting_started/installation.rst:131
+#, python-brace-format
+msgid ""
+"The XPU wheel carries a ``+xpu`` PEP 440 local version, so ``pip show "
+"lmcache`` reports which build is installed and the XPU build can be "
+"requested explicitly. A bare ``lmcache==${VERSION}`` also resolves it, "
+"since ``==`` ignores the local segment."
+msgstr "XPU wheel 带有 ``+xpu`` PEP 440 本地版本，因此 ``pip show lmcache`` 会报告已安装的构建，并且可以显式请求 XPU 构建。一个简单的 ``lmcache==${VERSION}`` 也能解析它，因为 ``==`` 会忽略本地部分。"
+
+#: ../../source/getting_started/installation.rst
+msgid "Moore Threads MUSA"
+msgstr "Moore Threads MUSA"
+
+#: ../../source/getting_started/installation.rst:138
+msgid ""
+"The MUSA wheel is built in the validated TorchMUSA/MUSA SDK image used by"
+" the release workflow and is published to a dedicated `GitHub Release "
+"<https://github.com/LMCache/LMCache/releases>`__. It is not uploaded to "
+"PyPI because TorchMUSA is distributed by Moore Threads rather than the "
+"public PyPI index."
+msgstr "MUSA wheel 是在发布工作流中使用的经过验证的 TorchMUSA/MUSA SDK 镜像中构建的，并发布到专用的 `GitHub Release <https://github.com/LMCache/LMCache/releases>`__。它没有上传到 PyPI，因为 TorchMUSA 是由 Moore Threads 分发的，而不是公共 PyPI 索引。"
+
+#: ../../source/getting_started/installation.rst:144
+msgid ""
+"Start a matching MUSA runtime image. The image must provide "
+"``torch_musa``, the MUSA SDK libraries, and (for the native transfer fast"
+" path) ``musa_aiter``:"
+msgstr "启动匹配的 MUSA 运行时镜像。该镜像必须提供 ``torch_musa``、MUSA SDK 库，以及（用于本地传输快速路径）``musa_aiter``："
+
+#: ../../source/getting_started/installation.rst:162
+msgid ""
+"``--no-deps`` is required: it preserves the image's vendor-pinned "
+"TorchMUSA stack instead of resolving the generic ``torch`` dependency "
+"from PyPI. ``--no-index`` prevents pip from selecting a same-version CUDA"
+" wheel."
+msgstr "``--no-deps`` 是必需的：它保留了图像的供应商固定的 TorchMUSA 堆栈，而不是从 PyPI 解析通用的 ``torch`` 依赖项。``--no-index`` 防止 pip 选择相同版本的 CUDA wheel。"
+
+#: ../../source/getting_started/installation.rst:167
+msgid ""
+"The current MUSA profile ships LMCache's Python MUSA integration and "
+"common native modules. MUSA-specific fused kernels remain supplied by the"
+" optional ``musa_aiter`` package; build from source if your vendor image "
+"uses a different native extension."
+msgstr "当前的 MUSA 配置包含 LMCache 的 Python MUSA 集成和常见的本地模块。特定于 MUSA 的融合内核仍由可选的 ``musa_aiter`` 包提供；如果您的供应商镜像使用不同的本地扩展，请从源代码构建。"
+
+#: ../../source/getting_started/installation.rst:175
+#, python-brace-format
+msgid ""
+"The wheel carries a ``+musa`` PEP 440 local version, so ``pip show "
+"lmcache`` identifies the accelerator variant. A bare "
+"``lmcache==${VERSION}`` also matches this wheel, but the explicit local "
+"version avoids accidentally selecting the CUDA artifact."
+msgstr "该 wheel 带有 ``+musa`` PEP 440 本地版本，因此 ``pip show lmcache`` 可以识别加速器变体。一个简单的 ``lmcache==${VERSION}`` 也可以匹配这个 wheel，但显式的本地版本可以避免意外选择 CUDA 工件。"
+
+#: ../../source/getting_started/installation.rst
+msgid "ROCm 7.2.4 / torch 2.10"
+msgstr "ROCm 7.2.4 / torch 2.10"
+
+#: ../../source/getting_started/installation.rst:183
+msgid ""
+"This wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and "
+"**gfx950** (MI350X / MI355X). It is built and smoke-tested in the public "
+"AMD PyTorch image "
+"``rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0`` "
+"pinned at digest "
+"``sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e``."
+" It does not require the ATOM image."
+msgstr "此轮子针对 AMD Instinct **gfx942** (MI300X / MI325X) 和 **gfx950** (MI350X / MI355X)。它是在公共的 AMD PyTorch 镜像 ``rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0`` 中构建并经过烟雾测试，固定在摘要 ``sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e``。它不需要 ATOM 镜像。"
+
+#: ../../source/getting_started/installation.rst:191
+msgid "The supported ABI tuple is exact:"
+msgstr "支持的 ABI 元组是精确的："
+
+#: ../../source/getting_started/installation.rst:193
+msgid ""
+"AMD wheel source: "
+"`torch-2.10.0+rocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl "
+"<https://repo.radeon.com/rocm/manylinux/rocm-"
+"rel-7.2.4/torch-2.10.0%2Brocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl>`__"
+msgstr "AMD wheel 源： `torch-2.10.0+rocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl <https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.10.0%2Brocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl>`__"
+
+#: ../../source/getting_started/installation.rst:196
+msgid ""
+"torch runtime version: ``2.10.0+rocm7.2.4.git3d3aa833`` (git "
+"``3d3aa833db84eed6b7f5595cb5f162c2f78300a4``)"
+msgstr "torch 运行时版本: ``2.10.0+rocm7.2.4.git3d3aa833`` (git ``3d3aa833db84eed6b7f5595cb5f162c2f78300a4``)"
+
+#: ../../source/getting_started/installation.rst:198
+msgid "ROCm ``7.2.4`` with HIP runtime ``7.2.53211``"
+msgstr "ROCm ``7.2.4`` 与 HIP 运行时 ``7.2.53211``"
+
+#: ../../source/getting_started/installation.rst:199
+msgid "Python/platform tag: ``cp312-cp312-manylinux_2_39_x86_64``"
+msgstr "Python/platform tag: ``cp312-cp312-manylinux_2_39_x86_64``"
+
+#: ../../source/getting_started/installation.rst:200
+msgid "C++ ABI: ``_GLIBCXX_USE_CXX11_ABI=1``"
+msgstr "C++ ABI: ``_GLIBCXX_USE_CXX11_ABI=1``"
+
+#: ../../source/getting_started/installation.rst:202
+msgid "Install the matching wheel inside that pinned image:"
+msgstr "在该固定镜像中安装匹配的 wheel："
+
+#: ../../source/getting_started/installation.rst:217
+msgid ""
+"The wheel links torch and ROCm libraries from the container at runtime. "
+"Other torch 2.10, ROCm 7.2.x, Python, or C++ ABI combinations are not "
+"covered by this artifact; build from source for those environments."
+msgstr "该 wheel 在运行时从容器中链接 torch 和 ROCm 库。其他 torch 2.10、ROCm 7.2.x、Python 或 C++ ABI 组合不在此工件的覆盖范围内；对于这些环境，请从源代码构建。"
+
+#: ../../source/getting_started/installation.rst
 msgid "Nightly"
 msgstr "每日构建版"
 
-#: ../../source/getting_started/installation.rst:65
+#: ../../source/getting_started/installation.rst:223
 msgid ""
 "Nightly wheels are built from the latest ``dev`` branch each day at 07:30"
 " UTC and published to GitHub Releases. No version pinning required — "
 "``--pre`` picks the latest nightly automatically."
 msgstr ""
-"每日构建版 wheel 包每天 UTC 时间 07:30 从最新的 ``dev`` 分支构建并发布到 GitHub "
-"Releases。无需锁定版本 — ``--pre`` 会自动选取最新的每日构建版。"
+"每日构建版 wheel 包每天 UTC 时间 07:30 从最新的 ``dev`` 分支构建并发布到 GitHub Releases。无需锁定版本"
+" — ``--pre`` 会自动选取最新的每日构建版。"
+
+#: ../../source/getting_started/installation.rst
+msgid "ROCm 7.2"
+msgstr "ROCm 7.2"
+
+#: ../../source/getting_started/installation.rst:253
+msgid ""
+"Run inside an upstream vLLM ROCm container so torch and the ROCm runtime "
+"are already present, then install with ``--no-deps``:"
+msgstr "在上游 vLLM ROCm 容器中运行，以便 torch 和 ROCm 运行时已经存在，然后使用 ``--no-deps`` 安装："
+
+#: ../../source/getting_started/installation.rst:265
+msgid ""
+"Nightly ROCm wheels are versioned like the CUDA nightlies with the ROCm "
+"local segment appended, e.g. ``0.5.4.dev15+rocm7.2``."
+msgstr "每日构建版 ROCm wheel 的版本命名方式与 CUDA 每日构建版相同，后面附加 ROCm 本地段，例如 ``0.5.4.dev15+rocm7.2``。"
+
+#: ../../source/getting_started/installation.rst:270
+#, python-brace-format
+msgid ""
+"``--no-index`` is required here. ``--find-links`` only *adds* a source, "
+"so without it pip also considers PyPI — and under PEP 440 a pre-release "
+"such as ``0.5.4rc4`` outranks ``0.5.4.dev15+rocm7.2``, so ``--pre`` would"
+" install the CUDA wheel instead. The stable tab does not need it because "
+"``lmcache==${VERSION}+rocm7.2`` is an exact pin that only the ROCm "
+"release can satisfy. ``--no-deps`` is what makes ``--no-index`` safe "
+"here: torch and the ROCm runtime come from the container, so nothing else"
+" needs resolving."
+msgstr "``--no-index`` 在这里是必需的。 ``--find-links`` 仅仅 *添加* 一个源，因此如果没有它，pip 也会考虑 PyPI — 根据 PEP 440，像 ``0.5.4rc4`` 这样的预发布版本会优先于 ``0.5.4.dev15+rocm7.2``，因此 ``--pre`` 会安装 CUDA wheel。稳定版选项不需要它，因为 ``lmcache==${VERSION}+rocm7.2`` 是一个精确的固定版本，只有 ROCm 版本可以满足。 ``--no-deps`` 使得 ``--no-index`` 在这里是安全的：torch 和 ROCm 运行时来自容器，因此不需要解析其他内容。"
 
 #: ../../source/getting_started/installation.rst
 msgid "From Source"
 msgstr "从源代码安装"
 
-#: ../../source/getting_started/installation.rst:95
+#: ../../source/getting_started/installation.rst:281
 msgid ""
 "``--no-build-isolation`` ensures the kernels are compiled against the "
 "same torch already installed in your environment, preventing undefined "
@@ -109,14 +324,24 @@ msgid "ROCm"
 msgstr "ROCm"
 
 #: ../../source/getting_started/installation.rst
-msgid "Intel XPU"
-msgstr "英特尔 XPU"
+msgid "MetaX MACA"
+msgstr "MetaX MACA"
+
+#: ../../source/getting_started/installation.rst:367
+msgid ""
+"MACA is CUDA-compatible: a MACA-enabled torch build reports ``device.type"
+" == \"cuda\"``, so LMCache's existing CUDA-compatible connector path "
+"works without a separate device backend. There is no prebuilt MACA wheel "
+"or CI build -- this is a self-compile-only path, built with a MACA-"
+"enabled torch already installed via MetaX's own toolchain (not from "
+"PyPI)."
+msgstr "MACA 兼容 CUDA：启用 MACA 的 torch 构建报告 ``device.type == \\\"cuda\\\"``，因此 LMCache 现有的 CUDA 兼容连接器路径可以在没有单独设备后端的情况下工作。没有预构建的 MACA wheel 或 CI 构建——这是一个仅限自编译的路径，使用通过 MetaX 自己的工具链安装的启用 MACA 的 torch 构建（不是来自 PyPI）。"
 
 #: ../../source/getting_started/installation.rst
 msgid "Docker"
 msgstr "Docker"
 
-#: ../../source/getting_started/installation.rst:227
+#: ../../source/getting_started/installation.rst:464
 msgid "See :ref:`docker_deployment` for running the container and ROCm images."
 msgstr "请参阅 :ref:`docker_deployment` 以获取运行容器和 ROCm 镜像的信息。"
 
@@ -124,23 +349,23 @@ msgstr "请参阅 :ref:`docker_deployment` 以获取运行容器和 ROCm 镜像�
 msgid "CLI Only"
 msgstr "仅限 CLI"
 
-#: ../../source/getting_started/installation.rst:231
+#: ../../source/getting_started/installation.rst:468
 msgid ""
 "Lightweight CLI-only package for querying or benchmarking a remote "
 "LMCache server. No CUDA required, works on any OS."
 msgstr "轻量级纯 CLI 软件包，用于查询或对远程 LMCache 服务器进行基准测试。无需 CUDA，支持任意操作系统。"
 
-#: ../../source/getting_started/installation.rst:240
+#: ../../source/getting_started/installation.rst:477
 msgid ""
 "``lmcache-cli`` and ``lmcache`` ship the same ``lmcache`` CLI command. Do"
 " not install both in the same environment."
 msgstr "``lmcache-cli`` 和 ``lmcache`` 提供相同的 ``lmcache`` CLI 命令。请勿在同一环境中同时安装两者。"
 
-#: ../../source/getting_started/installation.rst:244
+#: ../../source/getting_started/installation.rst:481
 msgid "Build the Docker Image"
 msgstr "构建 Docker 镜像"
 
-#: ../../source/getting_started/installation.rst:246
+#: ../../source/getting_started/installation.rst:483
 msgid ""
 "Instead of pulling a prebuilt image, you can build the LMCache "
 "(integrated with vLLM) image yourself from the provided Dockerfile, "
@@ -150,11 +375,11 @@ msgstr ""
 "您也可以不拉取预构建镜像，而是直接使用仓库中提供的 Dockerfile 自行构建 LMCache（集成 vLLM）镜像，Dockerfile "
 "位于 `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_。"
 
-#: ../../source/getting_started/installation.rst:250
+#: ../../source/getting_started/installation.rst:487
 msgid "From the root of the LMCache repository:"
 msgstr "在 LMCache 仓库的根目录下："
 
-#: ../../source/getting_started/installation.rst:256
+#: ../../source/getting_started/installation.rst:493
 msgid ""
 "Replace ``<IMAGE_NAME>`` and ``<TAG>`` with your desired image name and "
 "tag. See the example build file in `docker/ "
@@ -164,7 +389,7 @@ msgstr ""
 "将 ``<IMAGE_NAME>`` 和 ``<TAG>`` 替换为所需的镜像名称和标签。各构建参数的说明请参阅 `docker/ "
 "<https://github.com/LMCache/LMCache/tree/dev/docker>`_ 中的示例构建文件。"
 
-#: ../../source/getting_started/installation.rst:261
+#: ../../source/getting_started/installation.rst:498
 msgid "Verify Installation"
 msgstr "验证安装"
 

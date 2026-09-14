@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -31,7 +31,10 @@ msgid ""
 "into more than one KV cache group; the ``LMCacheMPConnector`` stores and "
 "retrieves each group in its own block size, so KV reuse works without "
 "extra flags."
-msgstr "一个大型的专家混合模型，使用 **动态稀疏注意力 (DSA)**，由 **GLM-5.1 / GLM-5.2** 系列共享。与 DeepSeek-V4-Flash 类似，稀疏注意力路径将模型的层分成多个 KV Cache 组；``LMCacheMPConnector`` 在其自己的块大小中存储和检索每个组，因此 KV 重用在没有额外标志的情况下工作。"
+msgstr ""
+"一个大型的专家混合模型，使用 **动态稀疏注意力 (DSA)**，由 **GLM-5.1 / GLM-5.2** 系列共享。与 "
+"DeepSeek-V4-Flash 类似，稀疏注意力路径将模型的层分成多个 KV Cache 组；``LMCacheMPConnector`` "
+"在其自己的块大小中存储和检索每个组，因此 KV 重用在没有额外标志的情况下工作。"
 
 #: ../../source/recipes/glm5_2.rst:13
 msgid "Validated models"
@@ -41,7 +44,9 @@ msgstr "验证过的模型"
 msgid ""
 "`zai-org/GLM-5.2-FP8 <https://huggingface.co/zai-org/GLM-5.2-FP8>`_ (8 "
 "GPUs)"
-msgstr "`zai-org/GLM-5.2-FP8 <https://huggingface.co/zai-org/GLM-5.2-FP8>`_ (8 GPUs)"
+msgstr ""
+"`zai-org/GLM-5.2-FP8 <https://huggingface.co/zai-org/GLM-5.2-FP8>`_ (8 "
+"GPUs)"
 
 #: ../../source/recipes/glm5_2.rst
 msgid "vLLM"
@@ -53,7 +58,11 @@ msgid ""
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
 "generation>`_ (architecture ``GlmMoeDsaForCausalLM``). See also the `vLLM"
 " GLM-5.2 recipe <https://recipes.vllm.ai/zai-org/GLM-5.2>`_."
-msgstr "**引擎文档：** `GLM-5.2 在 vLLM 支持的模型 <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ （架构 ``GlmMoeDsaForCausalLM``）。另见 `vLLM GLM-5.2 食谱 <https://recipes.vllm.ai/zai-org/GLM-5.2>`_。"
+msgstr ""
+"**引擎文档：** `GLM-5.2 在 vLLM 支持的模型 "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_ （架构 ``GlmMoeDsaForCausalLM``）。另见 `vLLM GLM-5.2 食谱 "
+"<https://recipes.vllm.ai/zai-org/GLM-5.2>`_。"
 
 #: ../../source/recipes/glm5_2.rst:28
 msgid "**Status:** Validated with LMCache (vLLM 0.23.0 + LMCache 0.4.7)."
@@ -77,14 +86,22 @@ msgid ""
 "workers`` is set to the tensor-parallel size. Adjust ``--tensor-parallel-"
 "size`` to match your hardware. For the generic LMCache + vLLM wiring "
 "(ports, remote hosts), see :doc:`../getting_started/quickstart`."
-msgstr "``--tool-call-parser glm47``、``--enable-auto-tool-choice`` 和 ``--reasoning-parser glm45`` 是 GLM-5.2 的服务要求（请参见 vLLM 配方）。``--no-enable-prefix-caching`` 将所有 KV 重用路由通过 LMCache，而不是 vLLM 的引擎内前缀缓存。服务器的 ``--port 6555`` 必须与连接器配置中的 ``lmcache.mp.port`` 匹配；``--max-workers`` 设置为张量并行大小。调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用的 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
+msgstr ""
+"``--tool-call-parser glm47``、``--enable-auto-tool-choice`` 和 "
+"``--reasoning-parser glm45`` 是 GLM-5.2 的服务要求（请参见 vLLM 配方）。``--no-enable-"
+"prefix-caching`` 将所有 KV 重用路由通过 LMCache，而不是 vLLM 的引擎内前缀缓存。服务器的 ``--port "
+"6555`` 必须与连接器配置中的 ``lmcache.mp.port`` 匹配；``--max-workers`` 设置为张量并行大小。调整 "
+"``--tensor-parallel-size`` 以匹配您的硬件。有关通用的 LMCache + vLLM 连接（端口、远程主机），请参见 "
+":doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/glm5_2.rst:68
 msgid ""
 "If there are any issues with vLLM setup, please refer to the `vLLM "
 "Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
 "for more details."
-msgstr "如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
+msgstr ""
+"如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes "
+"<https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
 
 #: ../../source/recipes/glm5_2.rst
 msgid "SGLang"
@@ -102,7 +119,9 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
+msgstr ""
+"**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 "
+":doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/glm5_2.rst:81
 msgid "CacheBlend support"
@@ -137,14 +156,37 @@ msgid "Not validated"
 msgstr "未验证"
 
 #: ../../source/recipes/glm5_2.rst:100
+msgid "MTP (speculative decoding) support"
+msgstr ""
+
+#: ../../source/recipes/glm5_2.rst:102
+#, python-brace-format
+msgid ""
+"GLM-5.2 ships a native multi-token-prediction head "
+"(``num_nextn_predict_layers: 1``), usable for speculative decoding via "
+"vLLM's ``--speculative-config "
+"'{\"method\":\"mtp\",\"num_speculative_tokens\":1}'``. LMCache accounts "
+"for the MTP draft layer's KV cache automatically."
+msgstr ""
+
+#: ../../source/recipes/glm5_2.rst:107
+#, fuzzy
+msgid ""
+"**Status:** Not yet validated with LMCache (validation requires an 8-GPU "
+"node)."
+msgstr "**状态：** 未通过 LMCache 验证。"
+
+#: ../../source/recipes/glm5_2.rst:111
 msgid "Caveats"
 msgstr "注意事项"
 
-#: ../../source/recipes/glm5_2.rst:102
+#: ../../source/recipes/glm5_2.rst:113
 msgid ""
 "**Dynamic Sparse Attention KV groups.** GLM-5.2's DSA path splits the "
 "model's layers into more than one KV cache group with different block "
 "geometries. LMCache stores and retrieves each group in its own block "
 "size; no extra flags are required beyond the launch commands above."
-msgstr "**动态稀疏注意力 KV 组。** GLM-5.2 的 DSA 路径将模型的层分成多个具有不同块几何形状的 KV 缓存组。LMCache 在其各自的块大小中存储和检索每个组；除了上述启动命令外，不需要额外的标志。"
+msgstr ""
+"**动态稀疏注意力 KV 组。** GLM-5.2 的 DSA 路径将模型的层分成多个具有不同块几何形状的 KV 缓存组。LMCache "
+"在其各自的块大小中存储和检索每个组；除了上述启动命令外，不需要额外的标志。"
 

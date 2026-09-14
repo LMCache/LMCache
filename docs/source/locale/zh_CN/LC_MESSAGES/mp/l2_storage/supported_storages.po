@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -102,6 +102,7 @@ msgstr "``bigtable``"
 #: ../../source/mp/l2_storage/supported_storages.rst:42
 #: ../../source/mp/l2_storage/supported_storages.rst:45
 #: ../../source/mp/l2_storage/supported_storages.rst:48
+#: ../../source/mp/l2_storage/supported_storages.rst:51
 msgid "Remote & Distributed"
 msgstr "远程与分布式"
 
@@ -146,55 +147,65 @@ msgid "``resp``"
 msgstr "``resp``"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:46
+#, fuzzy
+msgid ":doc:`Valkey <valkey>`"
+msgstr "`:doc:`Bigtable <bigtable>``"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:47
+#, fuzzy
+msgid "``valkey``"
+msgstr "``bigtable``"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:49
 msgid ":doc:`Aerospike <aerospike>`"
 msgstr ":doc:`Aerospike <aerospike>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:47
+#: ../../source/mp/l2_storage/supported_storages.rst:50
 msgid "``aerospike``"
 msgstr "``aerospike``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:49
+#: ../../source/mp/l2_storage/supported_storages.rst:52
 msgid ":doc:`DAX <dax>`"
 msgstr ":doc:`DAX <dax>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:50
+#: ../../source/mp/l2_storage/supported_storages.rst:53
 msgid "``dax``"
 msgstr "``dax``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:51
+#: ../../source/mp/l2_storage/supported_storages.rst:54
 msgid "Byte-addressable memory"
 msgstr "字节可寻址内存"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:52
+#: ../../source/mp/l2_storage/supported_storages.rst:55
 msgid ":doc:`Mock <mock>`"
 msgstr ":doc:`Mock <mock>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:53
+#: ../../source/mp/l2_storage/supported_storages.rst:56
 msgid "``mock``"
 msgstr "``mock``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:54
 #: ../../source/mp/l2_storage/supported_storages.rst:57
+#: ../../source/mp/l2_storage/supported_storages.rst:60
 msgid "Testing"
 msgstr "测试"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:55
+#: ../../source/mp/l2_storage/supported_storages.rst:58
 msgid ":doc:`Fault Inject <fault_inject>`"
 msgstr "`:doc:`故障注入 <fault_inject>` `"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:56
+#: ../../source/mp/l2_storage/supported_storages.rst:59
 msgid "``fault_inject``"
 msgstr "``fault_inject``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:58
+#: ../../source/mp/l2_storage/supported_storages.rst:61
 msgid ":doc:`Plugin <plugin>`"
 msgstr "`:doc:`插件 <plugin>` `"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:59
+#: ../../source/mp/l2_storage/supported_storages.rst:62
 msgid "``plugin`` / ``native_plugin``"
 msgstr "``plugin`` / ``native_plugin``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:60
+#: ../../source/mp/l2_storage/supported_storages.rst:63
 msgid "Custom / External"
 msgstr "自定义 / 外部"
 

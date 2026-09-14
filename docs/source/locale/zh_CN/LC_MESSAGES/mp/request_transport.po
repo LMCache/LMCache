@@ -1,0 +1,125 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/request_transport.rst:2
+msgid "Request Transport"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:4
+msgid ""
+"LMCache MP clients select the request transport from the LMCache server "
+"URL. This transport carries control and cache-operation requests; it is "
+"separate from ``--supported-transfer-mode``, which controls how KV data "
+"moves between the engine worker and the LMCache server."
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:10
+msgid "Transport schemes"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:16
+msgid "Endpoint"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:17
+msgid "Transport"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:18
+msgid "Status"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:19
+msgid "``host:port`` or ``tcp://host:port``"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:20
+msgid "ZMQ over TCP"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:21
+msgid "Supported. A URL without a scheme defaults to ``tcp://``."
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:22
+msgid "``ipc://path`` or ``inproc://name``"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:23
+msgid "ZMQ IPC or in-process"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:24
+msgid ""
+"Recognized by the client factory; the standard LMCache server currently "
+"binds ZMQ over TCP."
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:26
+msgid "``grpc://host:port`` or ``grpc+unix:///path``"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:27
+msgid "gRPC"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:28
+msgid "Not supported yet. gRPC support is planned soon."
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:31
+msgid "gRPC schema development"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:33
+msgid ""
+"The protobuf schemas for the planned gRPC transport live under "
+"``lmcache/v1/multiprocess/transport/grpc_impl/protos``. Package builds "
+"generate their Python bindings under the sibling ``_proto_gen`` package. "
+"Landing these schemas and the build-time generator does not enable the "
+"gRPC client or server; ``grpc://`` endpoints remain unavailable until the"
+" runtime implementation lands."
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:40
+msgid "After changing a schema, regenerate and validate all bindings with:"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:47
+msgid ""
+"For a single vLLM connector, set the scheme in ``lmcache.mp.host`` and "
+"keep the port in ``lmcache.mp.port``. The current ZMQ configuration is:"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:57
+msgid ""
+"When gRPC becomes available, selecting it will use the same configuration"
+" shape with a ``grpc://`` host:"
+msgstr ""
+
+#: ../../source/mp/request_transport.rst:67
+msgid ""
+"For multiple servers, specify the scheme on every entry in "
+"``lmcache.mp.server_urls``, for example "
+"``tcp://host1:5555,tcp://host2:5555``. All clients and servers in a "
+"deployment must use matching transports."
+msgstr ""
+
