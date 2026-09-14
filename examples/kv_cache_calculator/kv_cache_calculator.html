@@ -5,522 +5,1142 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KV Cache Size Calculator</title>
     <style>
-        *, *::before, *::after { box-sizing: border-box; }
+        * {
+            box-sizing: border-box;
+        }
 
         body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             margin: 0;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: flex-start;
-            background-color: #f9f9f9;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-            padding: 24px 12px 48px;
+            padding: 0;
+            background: transparent;
+            overflow: hidden;
         }
 
-        .lang-bar {
-            width: 100%;
-            max-width: 480px;
-            display: flex;
-            justify-content: flex-end;
-            margin-bottom: 8px;
-            gap: 6px;
+        .calculator-container {
+            max-width: 100%;
+            margin: 0;
+            background: transparent;
+            padding: 0;
         }
 
-        .lang-btn {
-            padding: 4px 12px;
-            font-size: 13px;
-            border: 1px solid #b0c4de;
-            border-radius: 20px;
-            background: #fff;
-            color: #3898ec;
-            cursor: pointer;
-            transition: background 0.15s, color 0.15s;
-        }
-        .lang-btn.active, .lang-btn:hover {
-            background: #3898ec;
-            color: #fff;
-            border-color: #3898ec;
+        h1 {
+            display: none;
         }
 
-        .card {
-            width: 100%;
-            max-width: 480px;
-            background: #fff;
-            border-radius: 14px;
-            box-shadow: 0 4px 24px rgba(56, 152, 236, 0.10), 0 1px 4px rgba(0,0,0,0.06);
-            padding: 32px 28px 24px;
+        .form-group {
+            margin-bottom: 20px;
         }
 
-        .card h1 {
-            margin: 0 0 24px;
-            font-size: 22px;
-            font-weight: 700;
-            color: #1a2e4a;
-            letter-spacing: -0.3px;
-        }
-
-        .field {
-            margin-bottom: 18px;
-        }
-
-        .field label {
+        label {
             display: block;
-            font-size: 13px;
             font-weight: 600;
-            color: #4a5568;
-            margin-bottom: 6px;
-            letter-spacing: 0.1px;
-        }
-
-        .field select, .field input {
-            width: 100%;
-            padding: 9px 12px;
-            font-size: 15px;
-            border: 1.5px solid #d0d9e8;
-            border-radius: 8px;
-            background: #f7faff;
-            color: #1a2e4a;
-            outline: none;
-            transition: border-color 0.15s, box-shadow 0.15s;
-            appearance: none;
-            -webkit-appearance: none;
-        }
-        .select-wrap {
-            position: relative;
-        }
-        .select-wrap::after {
-            content: "▾";
-            position: absolute;
-            right: 12px;
-            top: 50%;
-            transform: translateY(-50%);
-            pointer-events: none;
-            color: #8aa4c8;
+            margin-bottom: 8px;
+            color: #333;
             font-size: 14px;
         }
-        .field select:focus, .field input:focus {
-            border-color: #3898ec;
-            box-shadow: 0 0 0 3px rgba(56,152,236,0.12);
-            background: #fff;
+
+        select, input {
+            width: 100%;
+            padding: 12px;
+            font-size: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            background: white;
+            transition: border-color 0.2s;
         }
 
-        .calc-btn {
-            display: block;
+        select:focus, input:focus {
+            outline: none;
+            border-color: #3898ec;
+        }
+
+        button {
             width: 100%;
-            padding: 11px;
-            font-size: 15px;
+            padding: 14px;
+            font-size: 16px;
             font-weight: 600;
             background: #3898ec;
-            color: #fff;
+            color: white;
             border: none;
             border-radius: 8px;
             cursor: pointer;
-            transition: background 0.15s, transform 0.1s;
-            margin-top: 4px;
-        }
-        .calc-btn:hover { background: #1a7fd4; }
-        .calc-btn:active { transform: scale(0.98); }
-
-        #result {
-            margin-top: 20px;
-            padding: 14px 16px;
-            background: linear-gradient(90deg, #e8f4fd, #f0f8ff);
-            border-left: 4px solid #3898ec;
-            border-radius: 6px;
-            font-size: 20px;
-            font-weight: 700;
-            color: #1a5fa8;
-            display: none;
+            transition: background 0.2s;
         }
 
-        #calculation-steps {
-            margin-top: 14px;
-            padding: 14px 16px;
-            background: #f7faff;
-            border: 1px solid #d8e8f8;
-            border-radius: 8px;
-            font-size: 12.5px;
-            line-height: 1.8;
-            color: #4a5568;
-            display: none;
+        button:hover {
+            background: #2578cc;
         }
 
-        .github-btn {
-            display: block;
-            width: 100%;
-            padding: 9px;
-            margin-top: 18px;
-            font-size: 13px;
-            font-weight: 500;
-            background: #f0f4fa;
-            color: #4a5568;
-            border: 1.5px solid #d0d9e8;
-            border-radius: 8px;
-            cursor: pointer;
-            text-align: center;
-            transition: background 0.15s;
+        button:active {
+            transform: scale(0.98);
         }
-        .github-btn:hover { background: #e2eaf6; }
 
-        footer {
+        .result {
             margin-top: 24px;
-            font-size: 12px;
-            color: #8aa4c8;
+            padding: 20px;
+            background: #f0f9ff;
+            border-left: 4px solid #3898ec;
+            border-radius: 8px;
+            display: none;
         }
+
+        .result.show {
+            display: block;
+        }
+
+        .result-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: #1a1a1a;
+            margin: 8px 0;
+        }
+
+        .result-label {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 4px;
+        }
+
+        .details {
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #d0e8f7;
+            font-size: 13px;
+            color: #555;
+            line-height: 1.6;
+        }
+
+        .details strong {
+            color: #333;
+        }
+
+        .error {
+            background: #fee;
+            border-left-color: #f44;
+        }
+
+        .loading {
+            text-align: center;
+            color: #666;
+            padding: 20px;
+            font-size: 14px;
+        }
+
+        .language-switcher {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .language-switcher button {
+            width: auto;
+            padding: 6px 12px;
+            border: 1px solid #3898ec;
+            background: white;
+            color: #2578cc;
+            font-size: 13px;
+        }
+
+        .language-switcher button.active {
+            background: #3898ec;
+            color: white;
+        }
+
+        .contribute-link {
+            display: block;
+            margin-top: 28px;
+            color: #2578cc;
+            font-size: 14px;
+            text-align: center;
+            text-decoration: none;
+        }
+
+        .contribute-link:hover {
+            text-decoration: underline;
+        }
+
     </style>
 </head>
 <body>
-    <div class="lang-bar">
-        <button class="lang-btn active" onclick="setLang('en')" id="btn-en">English</button>
-        <button class="lang-btn" onclick="setLang('zh')" id="btn-zh">中文</button>
-    </div>
-    <div class="card">
-        <h1 id="title">KV Cache Size Calculator</h1>
-
-        <div class="field">
-            <label id="lbl-model" for="model">Select LLM Model</label>
-            <div class="select-wrap">
-                <select id="model"></select>
-            </div>
+    <div class="calculator-container">
+        <div class="language-switcher" aria-label="Language">
+            <button id="lang-en" class="active" type="button" onclick="setLanguage('en')">English</button>
+            <button id="lang-zh" type="button" onclick="setLanguage('zh')">中文</button>
         </div>
 
-        <div class="field">
-            <label id="lbl-dtype" for="dtype">Data Type</label>
-            <div class="select-wrap">
-                <select id="dtype">
-                    <option value="float16">float16</option>
-                    <option value="bfloat16">bfloat16</option>
-                    <option value="float32">float32</option>
-                    <option value="int8">int8</option>
+        <h1 data-i18n="title">KV Cache Size Calculator</h1>
+
+        <div class="loading" id="loading" data-i18n="loading">Loading model configurations...</div>
+
+        <div id="calculator-form" style="display: none;">
+            <div class="form-group">
+                <label for="model" data-i18n="model">Model:</label>
+                <select id="model" onchange="updatePrecisionVisibility('')">
+                    <!-- Options will be populated dynamically -->
                 </select>
             </div>
+
+            <div class="form-group">
+                <label for="dtype" data-i18n="dataType">Data Type:</label>
+                <select id="dtype">
+                    <option value="float16">float16 (FP16)</option>
+                    <option value="bfloat16" selected>bfloat16 (BF16)</option>
+                    <option value="float32">float32 (FP32)</option>
+                    <option value="int8">int8 (INT8)</option>
+                </select>
+            </div>
+
+            <div class="form-group" id="precision-group" style="display: none;">
+                <label for="precision-mode" data-i18n="precision">DeepSeek V4 KV Precision (bytes / dimension):</label>
+                <select id="precision-mode" onchange="togglePrecisionInputs('')">
+                    <option value="default" selected data-i18n="paperDefault">Paper default — FP8 NoPE / BF16 RoPE / FP4 indexer</option>
+                    <option value="custom" data-i18n="custom">Custom…</option>
+                </select>
+                <div id="precision-custom" style="display: none; margin-top: 10px;">
+                    <label for="nope-bytes" data-i18n="nopeBytes">NoPE bytes/dim:</label>
+                    <input type="number" id="nope-bytes" min="0" step="0.1" value="1">
+                    <label for="rope-bytes" data-i18n="ropeBytes">RoPE bytes/dim:</label>
+                    <input type="number" id="rope-bytes" min="0" step="0.1" value="2">
+                    <label for="indexer-bytes" data-i18n="indexerBytes">Indexer bytes/dim:</label>
+                    <input type="number" id="indexer-bytes" min="0" step="0.1" value="0.5">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="tokens" data-i18n="tokens">Number of Tokens:</label>
+                <input type="number" id="tokens" placeholder="e.g., 1000" data-i18n-placeholder="tokensPlaceholder" min="1" value="1000">
+            </div>
+
+            <button onclick="calculateKVCache()" data-i18n="calculateSize">Calculate KV Cache Size</button>
+
+            <div id="result" class="result"></div>
+
+            <hr style="margin: 40px 0; border: none; border-top: 1px solid #e0e0e0;">
+
+            <h2 style="font-size: 18px; margin-bottom: 20px; color: #1a1a1a;" data-i18n="reverseTitle">Reverse Calculator: Find Maximum Tokens</h2>
+
+            <div class="form-group">
+                <label for="model-reverse" data-i18n="model">Model:</label>
+                <select id="model-reverse" onchange="updatePrecisionVisibility('-reverse')">
+                    <!-- Options will be populated dynamically -->
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="dtype-reverse" data-i18n="dataType">Data Type:</label>
+                <select id="dtype-reverse">
+                    <option value="float16">float16 (FP16)</option>
+                    <option value="bfloat16" selected>bfloat16 (BF16)</option>
+                    <option value="float32">float32 (FP32)</option>
+                    <option value="int8">int8 (INT8)</option>
+                </select>
+            </div>
+
+            <div class="form-group" id="precision-group-reverse" style="display: none;">
+                <label for="precision-mode-reverse" data-i18n="precision">DeepSeek V4 KV Precision (bytes / dimension):</label>
+                <select id="precision-mode-reverse" onchange="togglePrecisionInputs('-reverse')">
+                    <option value="default" selected data-i18n="paperDefault">Paper default — FP8 NoPE / BF16 RoPE / FP4 indexer</option>
+                    <option value="custom" data-i18n="custom">Custom…</option>
+                </select>
+                <div id="precision-custom-reverse" style="display: none; margin-top: 10px;">
+                    <label for="nope-bytes-reverse" data-i18n="nopeBytes">NoPE bytes/dim:</label>
+                    <input type="number" id="nope-bytes-reverse" min="0" step="0.1" value="1">
+                    <label for="rope-bytes-reverse" data-i18n="ropeBytes">RoPE bytes/dim:</label>
+                    <input type="number" id="rope-bytes-reverse" min="0" step="0.1" value="2">
+                    <label for="indexer-bytes-reverse" data-i18n="indexerBytes">Indexer bytes/dim:</label>
+                    <input type="number" id="indexer-bytes-reverse" min="0" step="0.1" value="0.5">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="gpu-ram" data-i18n="gpuRam">GPU RAM Size (GB):</label>
+                <input type="number" id="gpu-ram" placeholder="e.g., 20" data-i18n-placeholder="gpuRamPlaceholder" min="0.1" step="0.1" value="20">
+            </div>
+
+            <button onclick="calculateMaxTokens()" data-i18n="calculateMax">Calculate Maximum Tokens</button>
+
+            <div id="result-reverse" class="result"></div>
+
+            <a class="contribute-link"
+               href="https://github.com/LMCache/LMCache/tree/dev/examples/kv_cache_calculator"
+               target="_blank" rel="noopener noreferrer" data-i18n="contribute">
+                Contribute model configurations on GitHub
+            </a>
         </div>
-
-        <div class="field">
-            <label id="lbl-tokens" for="tokens">Number of Tokens</label>
-            <input type="number" id="tokens" placeholder="e.g. 4096">
-        </div>
-
-        <button class="calc-btn" onclick="calculateKVCache()" id="btn-calc">Calculate</button>
-
-        <div id="result"></div>
-        <div id="calculation-steps"></div>
-
-        <button class="github-btn" onclick="openGitHubRepo()" id="btn-github">
-            ➕ Contribute new models on GitHub
-        </button>
     </div>
-    <footer id="footer">Developed by Zhuohan Gu @ LMCache team</footer>
 
     <script>
         let modelConfigs = {};
-        let currentLang = 'en';
+        let currentLanguage = 'en';
 
-        const i18n = {
+        const translations = {
             en: {
                 title: 'KV Cache Size Calculator',
-                lblModel: 'Select LLM Model',
-                lblDtype: 'Data Type',
-                lblTokens: 'Number of Tokens',
-                tokenPlaceholder: 'e.g. 4096',
-                btnCalc: 'Calculate',
-                btnGithub: '➕ Contribute new models on GitHub',
-                footer: 'Developed by Zhuohan Gu @ LMCache team',
-                errTokens: 'Please enter a valid number of tokens.',
-                errModel: 'Model not recognized.',
-                errDtype: 'Invalid data type selected.',
-                errLoad: 'Failed to load model configurations. Please try again later.',
-                detailsTitle: 'Calculation Details',
-                fldModel: 'Selected Model',
-                fldLayers: 'Number of Hidden Layers',
-                fldKvLoraRank: 'KV-LoRA Rank (latent dim)',
-                fldQkRopeHeadDim: 'QK-Rope Head Dim',
-                fldDtypeSize: 'Data Type Size',
-                fldTotalElem: 'Total Elements',
-                fldTotalBytes: 'Total Bytes',
-                fldKvSize: 'KV Cache Size',
-                fldKvHeads: 'Number of Key-Value Heads',
-                fldHeadDim: 'Head Dim',
-                fldClaFactor: 'CLA Share Factor',
-                fldEffLayers: 'Effective KV Layers',
-                fldHeadSize: 'Head Size',
-                fldHiddenSize: 'Hidden Size',
-                fldAttnHeads: 'Number of Attention Heads',
-                claNote: (f) => `every ${f} layers share one KV cache`,
-                headSizeNote: 'Hidden Size / Attention Heads',
-                bytes: 'bytes',
-                result: (gb) => `KV Cache Size: ${gb} GB`,
+                loading: 'Loading model configurations...',
+                model: 'Model:',
+                dataType: 'Data Type:',
+                precision: 'DeepSeek V4 KV Precision (bytes / dimension):',
+                paperDefault: 'Paper default — FP8 NoPE / BF16 RoPE / FP4 indexer',
+                custom: 'Custom…',
+                nopeBytes: 'NoPE bytes/dim:',
+                ropeBytes: 'RoPE bytes/dim:',
+                indexerBytes: 'Indexer bytes/dim:',
+                tokens: 'Number of Tokens:',
+                tokensPlaceholder: 'e.g., 1000',
+                calculateSize: 'Calculate KV Cache Size',
+                reverseTitle: 'Reverse Calculator: Find Maximum Tokens',
+                gpuRam: 'GPU RAM Size (GB):',
+                gpuRamPlaceholder: 'e.g., 20',
+                calculateMax: 'Calculate Maximum Tokens',
+                contribute: 'Contribute model configurations on GitHub',
+                error: 'Error',
+                invalidTokens: 'Please enter a valid number of tokens (greater than 0).',
+                invalidRam: 'Please enter a valid GPU RAM size (greater than 0).',
+                configMissing: 'Model configuration not found.',
+                loadFailed: 'Failed to load model configurations. Please check your connection.',
+                kvCacheSize: 'KV Cache Size',
+                maximumTokens: 'Maximum Tokens',
+                calculationDetails: 'Calculation Details',
+                selectedModel: 'Selected Model',
+                hiddenSize: 'Hidden Size',
+                attentionHeads: 'Number of Attention Heads',
+                hiddenLayers: 'Number of Hidden Layers',
+                kvHeads: 'Number of Key-Value Heads',
+                headDimension: 'Head Dimension',
+                headSize: 'Head Size',
+                dtypeSize: 'Data Type Size',
+                totalElements: 'Total Elements',
+                totalBytes: 'Total Bytes',
+                kvLoraRank: 'KV LoRA Rank',
+                qkRopeDim: 'QK RoPE Head Dim',
+                indexerDim: 'Indexer Head Dim (DSA)',
+                compressedLayers: 'Compressed Layers (ratio > 0)',
+                slidingWindow: 'Sliding Window',
+                kvBytesEntry: 'KV Bytes / Entry',
+                indexerKey: 'Indexer Key (CSA, compressed)',
+                precisionLabel: 'Precision',
+                bytesPerToken: 'Bytes per Token',
+                slidingFloor: 'Sliding-Window Floor',
+                fullLayers: 'Full-Attention Layers',
+                linearLayers: 'Linear Layers',
+                slidingLayers: 'Sliding-Attention Layers',
+                elementsPerTokenLayer: 'Elements / Token / Layer',
+                elementsPerToken: 'Elements per Token',
+                kvSizeFullOnly: 'KV Cache Size (full-attention layers only)',
+                maxTokensFullOnly: 'Maximum Tokens (full-attention layers only)',
+                gpuRamSize: 'GPU RAM Size',
+                regime: 'Regime',
+                claFactor: 'CLA Share Factor',
+                effectiveLayers: 'Effective KV Layers',
+                of: 'of',
+                perLayer: 'per layer',
+                customPrecision: 'custom',
+                paperPrecision: 'paper default',
+                dtypeNotApplied: 'dtype selector not applied',
+                growingKv: 'growing KV',
+                recurrentNotCounted: 'recurrent state — not yet counted, TODO pending LMCache storage decision',
+                cacheFullSequence: 'cache full sequence',
+                slidingCap: 'cap at window {window}; using {tokens} tokens',
+                hiddenOverHeads: 'Hidden Size / Attention Heads',
+                allLayersFull: 'tokens ≤ window (all layers full)',
+                slidingCapped: 'tokens > window (sliding layers capped)',
             },
             zh: {
-                title: 'KV Cache 大小计算器',
-                lblModel: '选择 LLM 模型',
-                lblDtype: '数据类型',
-                lblTokens: 'Token 数量',
-                tokenPlaceholder: '例如：4096',
-                btnCalc: '开始计算',
-                btnGithub: '➕ 在 GitHub 上贡献新模型',
-                footer: '由 LMCache 团队 Zhuohan Gu 开发',
-                errTokens: '请输入有效的 Token 数量。',
-                errModel: '未识别的模型。',
-                errDtype: '无效的数据类型。',
-                errLoad: '模型配置加载失败，请稍后重试。',
-                detailsTitle: '计算详情',
-                fldModel: '所选模型',
-                fldLayers: '隐藏层数',
-                fldKvLoraRank: 'KV-LoRA 秩（隐空间维度）',
-                fldQkRopeHeadDim: 'QK-RoPE Head Dim',
-                fldDtypeSize: '数据类型大小',
-                fldTotalElem: '总元素数',
-                fldTotalBytes: '总字节数',
-                fldKvSize: 'KV Cache 大小',
-                fldKvHeads: 'KV 头数',
-                fldHeadDim: 'Head Dim',
-                fldClaFactor: 'CLA 共享因子',
-                fldEffLayers: '有效 KV 层数',
-                fldHeadSize: 'Head Size',
-                fldHiddenSize: '隐藏层维度',
-                fldAttnHeads: '注意力头数',
-                claNote: (f) => `每 ${f} 层共享一份 KV Cache`,
-                headSizeNote: '隐藏层维度 / 注意力头数',
-                bytes: '字节',
-                result: (gb) => `KV Cache 大小：${gb} GB`,
-            }
+                title: 'KV 缓存大小计算器',
+                loading: '正在加载模型配置…',
+                model: '模型：',
+                dataType: '数据类型：',
+                precision: 'DeepSeek V4 KV 精度（每维字节数）：',
+                paperDefault: '论文默认值 — FP8 NoPE / BF16 RoPE / FP4 索引器',
+                custom: '自定义…',
+                nopeBytes: 'NoPE 每维字节数：',
+                ropeBytes: 'RoPE 每维字节数：',
+                indexerBytes: '索引器每维字节数：',
+                tokens: 'Token 数量：',
+                tokensPlaceholder: '例如 1000',
+                calculateSize: '计算 KV 缓存大小',
+                reverseTitle: '反向计算器：计算最大 Token 数量',
+                gpuRam: 'GPU 显存大小（GB）：',
+                gpuRamPlaceholder: '例如 20',
+                calculateMax: '计算最大 Token 数量',
+                contribute: '在 GitHub 上贡献模型配置',
+                error: '错误',
+                invalidTokens: '请输入大于 0 的有效 Token 数量。',
+                invalidRam: '请输入大于 0 的有效 GPU 显存大小。',
+                configMissing: '未找到模型配置。',
+                loadFailed: '模型配置加载失败，请检查网络连接。',
+                kvCacheSize: 'KV 缓存大小',
+                maximumTokens: '最大 Token 数量',
+                calculationDetails: '计算详情',
+                selectedModel: '所选模型',
+                hiddenSize: '隐藏层维度',
+                attentionHeads: '注意力头数量',
+                hiddenLayers: '隐藏层数量',
+                kvHeads: '键值头数量',
+                headDimension: '头维度',
+                headSize: '头大小',
+                dtypeSize: '数据类型大小',
+                totalElements: '元素总数',
+                totalBytes: '总字节数',
+                kvLoraRank: 'KV LoRA 秩',
+                qkRopeDim: 'QK RoPE 头维度',
+                indexerDim: '索引器头维度（DSA）',
+                compressedLayers: '压缩层（压缩率 > 0）',
+                slidingWindow: '滑动窗口',
+                kvBytesEntry: '每个 KV 条目的字节数',
+                indexerKey: '索引键（CSA，已压缩）',
+                precisionLabel: '精度',
+                bytesPerToken: '每个 Token 的字节数',
+                slidingFloor: '滑动窗口固定开销',
+                fullLayers: '全注意力层',
+                linearLayers: '线性注意力层',
+                slidingLayers: '滑动注意力层',
+                elementsPerTokenLayer: '每 Token 每层元素数',
+                elementsPerToken: '每 Token 元素数',
+                kvSizeFullOnly: 'KV 缓存大小（仅全注意力层）',
+                maxTokensFullOnly: '最大 Token 数量（仅全注意力层）',
+                gpuRamSize: 'GPU 显存大小',
+                regime: '计算区间',
+                claFactor: 'CLA 共享因子',
+                effectiveLayers: '有效 KV 层数',
+                of: '共',
+                perLayer: '每层',
+                customPrecision: '自定义',
+                paperPrecision: '论文默认值',
+                dtypeNotApplied: '不使用数据类型选择器',
+                growingKv: 'KV 随序列增长',
+                recurrentNotCounted: '循环状态暂未计入，等待 LMCache 明确存储方式',
+                cacheFullSequence: '缓存完整序列',
+                slidingCap: '窗口上限 {window}；按 {tokens} 个 Token 计算',
+                hiddenOverHeads: '隐藏层维度 / 注意力头数量',
+                allLayersFull: 'Token 数量不超过窗口（所有层完整缓存）',
+                slidingCapped: 'Token 数量超过窗口（滑动层达到上限）',
+            },
         };
 
-        function t(key, ...args) {
-            const v = i18n[currentLang][key];
-            return typeof v === 'function' ? v(...args) : v;
+        function t(key) {
+            return translations[currentLanguage][key] || translations.en[key] || key;
         }
 
-        function setLang(lang) {
-            currentLang = lang;
-            document.getElementById('btn-en').classList.toggle('active', lang === 'en');
-            document.getElementById('btn-zh').classList.toggle('active', lang === 'zh');
-            document.getElementById('title').textContent = t('title');
-            document.getElementById('lbl-model').textContent = t('lblModel');
-            document.getElementById('lbl-dtype').textContent = t('lblDtype');
-            document.getElementById('lbl-tokens').textContent = t('lblTokens');
-            document.getElementById('tokens').placeholder = t('tokenPlaceholder');
-            document.getElementById('btn-calc').textContent = t('btnCalc');
-            document.getElementById('btn-github').textContent = t('btnGithub');
-            document.getElementById('footer').textContent = t('footer');
-            // Re-render result if visible
-            if (document.getElementById('result').style.display !== 'none') {
+        function field(key) {
+            return `<strong>${t(key)}:</strong>`;
+        }
+
+        function formatText(key, values = {}) {
+            return Object.entries(values).reduce(
+                (text, [name, value]) => text.replace(`{${name}}`, value),
+                t(key),
+            );
+        }
+
+        function setLanguage(language) {
+            currentLanguage = language;
+            document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
+            document.title = t('title');
+            document.querySelectorAll('[data-i18n]').forEach(element => {
+                element.textContent = t(element.dataset.i18n);
+            });
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(element => {
+                element.placeholder = t(element.dataset.i18nPlaceholder);
+            });
+            document.getElementById('lang-en').classList.toggle('active', language === 'en');
+            document.getElementById('lang-zh').classList.toggle('active', language === 'zh');
+            if (document.getElementById('result').classList.contains('show')) {
                 calculateKVCache();
             }
+            if (document.getElementById('result-reverse').classList.contains('show')) {
+                calculateMaxTokens();
+            }
         }
 
-        function openGitHubRepo() {
-            const githubUrl = 'https://github.com/LMCache/LMCache/issues/244#:~:text=https%3A//github.com/LMCache/LMCache/tree/dev/examples/kv_cache_calculator';
-            window.open(githubUrl, '_blank');
-        }
-
-        // Load model configurations: prefer local file, fallback to GitHub
+        // Load model configurations
         async function loadModelConfigs() {
-            const localUrl = './modelconfig.json';
-            const remoteUrl = 'https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/kv_cache_calculator/modelconfig.json';
-            // Try local first
-            try {
-                let response = await fetch(localUrl);
-                if (response.ok) {
-                    modelConfigs = await response.json();
-                    populateModelDropdown();
-                    return;
+            const urls = [
+                'modelconfig.json',
+                '_static/modelconfig.json',
+                '../_static/modelconfig.json',
+                'https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/kv_cache_calculator/modelconfig.json'
+            ];
+
+            for (const url of urls) {
+                try {
+                    const response = await fetch(url);
+                    if (response.ok) {
+                        modelConfigs = await response.json();
+                        populateModelDropdown();
+                        document.getElementById('loading').style.display = 'none';
+                        document.getElementById('calculator-form').style.display = 'block';
+                        return;
+                    }
+                } catch (error) {
+                    console.log('Failed to load from:', url);
                 }
-            } catch (e) {
-                // ignore local fetch errors and fallback
-                console.debug('Local modelconfig.json not available locally, falling back to remote.');
             }
 
-            // Fallback to remote
-            try {
-                const response = await fetch(remoteUrl);
-                if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
-                modelConfigs = await response.json();
-                populateModelDropdown();
-            } catch (error) {
-                console.error('Failed to load model configurations:', error);
-                showResult(t('errLoad'), true);
-            }
+            document.getElementById('loading').innerHTML =
+                `<div class="error">${t('loadFailed')}</div>`;
         }
 
-        // Populate the model dropdown dynamically
+        // Populate model dropdown
         function populateModelDropdown() {
-            const modelSelect = document.getElementById('model');
-            modelSelect.innerHTML = "";
+            const select = document.getElementById('model');
+            const selectReverse = document.getElementById('model-reverse');
+            select.innerHTML = '';
+            selectReverse.innerHTML = '';
+
             const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-            const sortedModelNames = Object.keys(modelConfigs).sort(collator.compare);
-            for (const modelName of sortedModelNames) {
+            const sortedModels = Object.keys(modelConfigs).sort(collator.compare);
+            const defaultModel = 'Qwen/Qwen3-8B';
+
+            for (const modelName of sortedModels) {
                 const option = document.createElement('option');
                 option.value = modelName;
                 option.textContent = modelName;
-                modelSelect.appendChild(option);
+                if (modelName === defaultModel) {
+                    option.selected = true;
+                }
+                select.appendChild(option);
+
+                const optionReverse = document.createElement('option');
+                optionReverse.value = modelName;
+                optionReverse.textContent = modelName;
+                if (modelName === defaultModel) {
+                    optionReverse.selected = true;
+                }
+                selectReverse.appendChild(optionReverse);
+            }
+
+            updatePrecisionVisibility('');
+            updatePrecisionVisibility('-reverse');
+        }
+
+        // Show the V4 precision controls only for DSA (compress_ratios) models, and
+        // seed the custom inputs with the selected model's paper-default byte widths.
+        function updatePrecisionVisibility(suffix) {
+            const model = document.getElementById('model' + suffix).value;
+            const config = modelConfigs[model] || {};
+            const isDSA = Array.isArray(config.compress_ratios)
+                && Number.isFinite(config.head_dim);
+            document.getElementById('precision-group' + suffix).style.display =
+                isDSA ? 'block' : 'none';
+            if (isDSA) {
+                document.getElementById('nope-bytes' + suffix).value =
+                    Number.isFinite(config.nope_bytes) ? config.nope_bytes : 1;
+                document.getElementById('rope-bytes' + suffix).value =
+                    Number.isFinite(config.rope_bytes) ? config.rope_bytes : 2;
+                document.getElementById('indexer-bytes' + suffix).value =
+                    Number.isFinite(config.indexer_bytes) ? config.indexer_bytes : 0.5;
             }
         }
 
-        function showResult(html, isError = false) {
-            const el = document.getElementById('result');
-            el.innerHTML = html;
-            el.style.display = 'block';
-            el.style.borderLeftColor = isError ? '#e05252' : '#3898ec';
-            el.style.color = isError ? '#a02020' : '#1a5fa8';
+        // Reveal the custom byte inputs only when "Custom" is selected.
+        function togglePrecisionInputs(suffix) {
+            const mode = document.getElementById('precision-mode' + suffix).value;
+            document.getElementById('precision-custom' + suffix).style.display =
+                mode === 'custom' ? 'block' : 'none';
         }
 
-        async function calculateKVCache() {
-            if (Object.keys(modelConfigs).length === 0) await loadModelConfigs();
+        // Resolve the per-dimension byte widths for a DSA model: paper defaults from
+        // the config (nope/rope/indexer_bytes), overridden by the custom inputs when
+        // the precision mode is "custom". Returns bytes/dim for each component + mode.
+        function getDSAPrecision(suffix, config) {
+            const def = {
+                nope: Number.isFinite(config.nope_bytes) ? config.nope_bytes : 1,
+                rope: Number.isFinite(config.rope_bytes) ? config.rope_bytes : 2,
+                indexer: Number.isFinite(config.indexer_bytes) ? config.indexer_bytes : 0.5,
+                mode: 'default',
+            };
+            if (document.getElementById('precision-mode' + suffix).value !== 'custom') {
+                return def;
+            }
+            const nope = parseFloat(document.getElementById('nope-bytes' + suffix).value);
+            const rope = parseFloat(document.getElementById('rope-bytes' + suffix).value);
+            const indexer = parseFloat(document.getElementById('indexer-bytes' + suffix).value);
+            return {
+                nope: Number.isFinite(nope) ? nope : def.nope,
+                rope: Number.isFinite(rope) ? rope : def.rope,
+                indexer: Number.isFinite(indexer) ? indexer : def.indexer,
+                mode: 'custom',
+            };
+        }
 
+        // Calculate KV cache size
+        function calculateKVCache() {
             const model = document.getElementById('model').value;
             const tokens = parseInt(document.getElementById('tokens').value);
             const dtype = document.getElementById('dtype').value;
+            const resultDiv = document.getElementById('result');
 
+            // Validation
             if (isNaN(tokens) || tokens <= 0) {
-                showResult(t('errTokens'), true);
-                document.getElementById('calculation-steps').style.display = 'none';
+                resultDiv.className = 'result show error';
+                resultDiv.innerHTML = `<div class="result-label">${t('error')}</div><div>${t('invalidTokens')}</div>`;
                 return;
             }
 
             const config = modelConfigs[model];
             if (!config) {
-                showResult(t('errModel'), true);
-                document.getElementById('calculation-steps').style.display = 'none';
+                resultDiv.className = 'result show error';
+                resultDiv.innerHTML = `<div class="result-label">${t('error')}</div><div>${t('configMissing')}</div>`;
                 return;
             }
 
-            let hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads;
-            let kv_lora_rank, qk_rope_head_dim;
-            let head_dim, head_size;
+            // Get dtype size
+            const dtypeSizes = {
+                'float32': 4,
+                'float16': 2,
+                'bfloat16': 2,
+                'int8': 1
+            };
+            const dtypeSize = dtypeSizes[dtype];
 
-            // Check for DeepSeek MLA models (prefix match covers V3, V3.1, V3.2, … ; plus R1)
-            const isDeepSeekModel = model.startsWith("deepseek-ai/DeepSeek-V3") || model === "deepseek-ai/DeepSeek-R1";
+            // Calculate based on model architecture
+            // DeepSeek V4 sparse attention: per-layer compression schedule.
+            const isDSA = Array.isArray(config.compress_ratios)
+                && Number.isFinite(config.head_dim);
+            // Multi-head Latent Attention (DeepSeek V3/R1, GLM-5.x DSA): a single
+            // latent KV vector per layer per token. Feature-gated on kv_lora_rank
+            // rather than the model name, so non-DeepSeek MLA models are caught too.
+            const isMLA = Number.isFinite(config.kv_lora_rank)
+                && Number.isFinite(config.qk_rope_head_dim);
+            // Interleaved sliding-window / full attention (Gemma 2/3/4): the sliding
+            // layers cap their KV cache at the window, only the full layers grow.
+            const isHybridSWA = Number.isFinite(config.full_attention_layers)
+                && Number.isFinite(config.sliding_attention_layers)
+                && Number.isFinite(config.sliding_window)
+                && Number.isFinite(config.num_key_value_heads)
+                && Number.isFinite(config.head_dim);
+            // Linear/full hybrid (Qwen3-Next / Qwen3.5): Gated DeltaNet layers keep a
+            // fixed-size recurrent state (no per-token KV); only full layers grow.
+            const isHybridLinear = Number.isFinite(config.full_attention_layers)
+                && Number.isFinite(config.linear_attention_layers)
+                && Number.isFinite(config.num_key_value_heads)
+                && Number.isFinite(config.head_dim);
+            const isCLA = Number.isFinite(config.cla_share_factor)
+                && config.cla_share_factor > 0;
+            const hasHeadDim = Number.isFinite(config.head_dim)
+                && Number.isFinite(config.num_key_value_heads);
 
-            // Check for Qwen3 models (fuzzy matching)
-            const isQwen3Model = model.toLowerCase().includes("qwen/qwen3-");
+            let totalElements;
+            let totalBytes;
+            let sizeGB;
+            let details = '';
 
-            // Check for GLM4 models (prefix matching)
-            const isGLM4Model = model.startsWith("zai-org/GLM-4.");
-
-            // Check for Hunyuan dense models (explicit head_dim, may differ from hidden/heads)
-            const isHunyuanDenseModel = model.toLowerCase().startsWith("tencent/hunyuan-") && model.toLowerCase() !== "tencent/hunyuan-large";
-
-            // Check for Hunyuan-Large (CLA: cross-layer attention sharing)
-            const isHunyuanLargeModel = model.toLowerCase() === "tencent/hunyuan-large";
-
-            const isGQAWithHeadDimModel = isQwen3Model || isGLM4Model || isHunyuanDenseModel;
-
-            if (isDeepSeekModel) {
-                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, kv_lora_rank, qk_rope_head_dim } = config);
-            } else if (isHunyuanLargeModel) {
-                // Hunyuan-Large uses CLA (Cross-Layer Attention): every cla_share_factor layers share one KV cache.
-                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads } = config);
-                head_size = hidden_size / num_attention_heads;
-            } else if (isGQAWithHeadDimModel) {
-                // Qwen3, GLM4, and Hunyuan dense models all have an explicit head_dim in their configs.
-                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, head_dim } = config);
+            if (isDSA) {
+                // DeepSeek V4 hybrid attention: Compressed Sparse Attention (CSA)
+                // + Heavily Compressed Attention (HCA). This is NOT MLA — V4 has no
+                // kv_lora_rank; head_dim (512) is the width of one shared compressed
+                // KV entry (per the paper's CSA/HCA shared-KV MQA). Each layer
+                // compresses every `r` tokens into one entry, so the amortized
+                // per-token KV cost is head_dim × Σ(1/r) over layers with r > 0.
+                // (r == 0 layers are pure sliding-window; no compressed entries.)
+                //
+                // This branch MUST come before the head_dim/GQA branch below:
+                // V4 configs carry num_key_value_heads == 1 and head_dim == 512,
+                // which would otherwise (incorrectly) match the standard
+                // 2 × layers × kv_heads × head_dim formula and overestimate wildly.
+                //
+                // Lightning-indexer keys: the paper compresses them at the SAME
+                // ratio as the KV entries (K_IComp ∈ R^{(n/m)×c_I}), so the indexer
+                // key cache is index_head_dim × Σ(1/r) — NOT full-rate. It is a
+                // ~25% addition to the compressed KV term, not ~2×. (Only CSA
+                // layers run the indexer; HCA keeps dense attention, but HCA's
+                // large r contributes negligibly to Σ(1/r), so summing over all
+                // r > 0 overcounts by <1%.) Net per-token: (head_dim + c_I) × Σ(1/r).
+                //
+                // Plus a constant sliding-window floor (numLayers × sliding_window
+                // × head_dim): ~50% of the total below ~1K tokens, <3% above ~32K.
+                //
+                // V4 uses its NATIVE mixed precision (paper §2.3.4), so this branch
+                // computes bytes directly and the dtype dropdown does NOT apply. The
+                // per-dimension byte widths come from getDSAPrecision(): the model's
+                // nope_bytes / rope_bytes / indexer_bytes config defaults (the paper
+                // values below), overridable live via the "Custom" precision control.
+                //  - KV entry (head_dim dims): RoPE dims (qk_rope_head_dim) in BF16
+                //    (2 B), the rest in FP8 (1 B) -> bytes/entry = (head_dim - rope)
+                //    ·nope + rope·rope_bytes. Paper V4: (512-64)·1 + 64·2 = 576 B
+                //    ("nearly half" of the 1024 B a pure-BF16 entry would take).
+                //  - Indexer keys: FP4 (0.5 B/dim), compressed at the same ratio.
+                //  - Sliding-window entries are uncompressed KV -> same 576 B/entry.
+                // Only remaining simplification: amortized Σ(1/r), not Σ ceil(tokens/r)
+                // (<1% at long context). Absolute check: V4-Pro ≈ 4.8 GB @ 1M ctx,
+                // ~10-12% of a same-precision V3.2 estimate — matching the paper's
+                // "~10% of V3.2 KV cache". (The V4/V3.2 ratio is ~8.7× / ~12.4× for
+                // Pro/Flash; precision cancels in the ratio, so the small gap to the
+                // paper's 9.5× / 13.7× is V3.2-side modeling detail, not V4.)
+                const activeRatios = config.compress_ratios.filter(r => r > 0);
+                const compressFactor = activeRatios.reduce((sum, r) => sum + 1 / r, 0);
+                const ropeDim = Number.isFinite(config.qk_rope_head_dim) ? config.qk_rope_head_dim : 0;
+                const indexerDim = Number.isFinite(config.index_head_dim) ? config.index_head_dim : 0;
+                const prec = getDSAPrecision('', config);
+                const kvBytesPerEntry = (config.head_dim - ropeDim) * prec.nope + ropeDim * prec.rope;
+                const indexerBytesPerEntry = indexerDim * prec.indexer;
+                const bytesPerToken = (kvBytesPerEntry + indexerBytesPerEntry) * compressFactor;
+                const numLayers = config.compress_ratios.length;
+                const windowBytes = numLayers * config.sliding_window * kvBytesPerEntry;
+                totalBytes = bytesPerToken * tokens + windowBytes;
+                totalElements = totalBytes; // unused downstream; bytes are authoritative for V4
+                sizeGB = totalBytes / (1024 ** 3);
+                const precLabel = prec.mode === 'custom'
+                    ? `${t('customPrecision')} (NoPE ${prec.nope} / RoPE ${prec.rope} / indexer ${prec.indexer} B/dim)`
+                    : `${t('paperPrecision')} (NoPE ${prec.nope}=FP8 / RoPE ${prec.rope}=BF16 / indexer ${prec.indexer}=FP4); ${t('dtypeNotApplied')}`;
+                const indexerLine = indexerDim
+                    ? `${field('indexerKey')} ${indexerDim} × ${prec.indexer} × Σ(1/r) = ${(indexerBytesPerEntry * compressFactor).toFixed(1)} B/token<br>`
+                    : '';
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('headDimension')} ${config.head_dim} (RoPE ${ropeDim} @ ${prec.rope} B, NoPE ${config.head_dim - ropeDim} @ ${prec.nope} B)<br>
+                    ${field('compressedLayers')} ${activeRatios.length} ${t('of')} ${numLayers}<br>
+                    ${field('slidingWindow')} ${config.sliding_window} (${t('perLayer')})<br>
+                    ${field('kvBytesEntry')} (${config.head_dim} − ${ropeDim}) × ${prec.nope} + ${ropeDim} × ${prec.rope} = ${kvBytesPerEntry} B<br>
+                    ${indexerLine}${field('precisionLabel')} ${precLabel}<br>
+                    ${field('bytesPerToken')} (${kvBytesPerEntry} + ${indexerBytesPerEntry}) × Σ(1/r) = ${bytesPerToken.toFixed(1)} B<br>
+                    ${field('slidingFloor')} ${numLayers} × ${config.sliding_window} × ${kvBytesPerEntry} = ${windowBytes} B<br>
+                    ${field('totalBytes')} ${bytesPerToken.toFixed(1)} × ${tokens} + ${windowBytes} = ${totalBytes.toFixed(0)} bytes<br>
+                    ${field('kvCacheSize')} ${totalBytes.toFixed(0)} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
+            } else if (isMLA) {
+                // Multi-head Latent Attention (DeepSeek V3/R1, GLM-5.x). Each layer
+                // caches one latent KV vector of (kv_lora_rank + qk_rope_head_dim)
+                // per token. DSA models (e.g. GLM-5.x) additionally cache a
+                // lightning-indexer key of index_head_dim per token; LMCache stores
+                // that indexer group in the same KV pool, so we fold it in whenever
+                // index_head_dim is present. The indexer key is often kept at lower
+                // precision than the latent cache, so at one uniform dtype this is a
+                // slight over-estimate (the safe direction for capacity planning).
+                const latentDim = config.kv_lora_rank + config.qk_rope_head_dim;
+                const indexerDim = Number.isFinite(config.index_head_dim) ? config.index_head_dim : 0;
+                const elementsPerToken = config.num_hidden_layers * (latentDim + indexerDim);
+                totalElements = elementsPerToken * tokens;
+                totalBytes = totalElements * dtypeSize;
+                sizeGB = totalBytes / (1024 ** 3);
+                const indexerLine = indexerDim
+                    ? `${field('indexerDim')} ${indexerDim}<br>`
+                    : '';
+                const latentExpr = indexerDim
+                    ? `(${config.kv_lora_rank} + ${config.qk_rope_head_dim} + ${indexerDim})`
+                    : `(${config.kv_lora_rank} + ${config.qk_rope_head_dim})`;
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvLoraRank')} ${config.kv_lora_rank}<br>
+                    ${field('qkRopeDim')} ${config.qk_rope_head_dim}<br>
+                    ${indexerLine}${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('totalElements')} ${config.num_hidden_layers} × ${tokens} × ${latentExpr} = ${totalElements}<br>
+                    ${field('totalBytes')} ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
+                    ${field('kvCacheSize')} ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
+            } else if (isHybridLinear) {
+                // Attention/recurrent hybrid (Qwen3-Next / Qwen3.5 Gated DeltaNet;
+                // Nemotron-H Mamba2 SSM). The recurrent (linear) layers keep a
+                // fixed-size state (no per-token KV growth); only the full-attention
+                // layers grow with the sequence:
+                //   2 × kv_heads × head_dim × n_full × tokens  (growing KV)
+                //
+                // TODO(SSM): the recurrent layers also hold a constant SSM/conv state.
+                // We are holding off on counting it until LMCache decides how it stores
+                // linear-attention layers (whether the state lives in the KV-cache pool
+                // at all, and at what precision / layout). The model's linear_* dims are
+                // kept in the config so we can wire in the exact constant once that's
+                // settled. For now we report only the full-attention KV cache.
+                //
+                // linear_attention_layers counts only the recurrent layers; any
+                // remaining layers (e.g. Nemotron's pure-MLP/MoE layers) hold no cache,
+                // so n_full + n_linear need not equal num_hidden_layers.
+                const linType = typeof config.linear_attention_type === 'string'
+                    ? config.linear_attention_type : 'Gated DeltaNet';
+                const perLayer = 2 * config.num_key_value_heads * config.head_dim;
+                const nFull = config.full_attention_layers;
+                const nLin = config.linear_attention_layers;
+                totalElements = perLayer * nFull * tokens;
+                totalBytes = totalElements * dtypeSize;
+                sizeGB = totalBytes / (1024 ** 3);
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headDimension')} ${config.head_dim}<br>
+                    ${field('fullLayers')} ${nFull} (${t('growingKv')})<br>
+                    ${field('linearLayers')} (${linType}) ${nLin} (${t('recurrentNotCounted')})<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('elementsPerTokenLayer')} 2 × ${config.num_key_value_heads} × ${config.head_dim} = ${perLayer}<br>
+                    ${field('totalElements')} ${perLayer} × ${nFull} × ${tokens} = ${totalElements}<br>
+                    ${field('totalBytes')} ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
+                    ${field('kvSizeFullOnly')} ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
+            } else if (isHybridSWA) {
+                // Gemma-style interleaved attention: full-attention layers cache the
+                // whole sequence; sliding-attention layers cap their KV at the window.
+                // So the cache grows only with the full layers once tokens > window:
+                //   2 × kv_heads × head_dim × (n_full × tokens + n_sliding × min(tokens, window)).
+                const perLayer = 2 * config.num_key_value_heads * config.head_dim;
+                const nFull = config.full_attention_layers;
+                const nSwa = config.sliding_attention_layers;
+                const win = config.sliding_window;
+                const swaTokens = Math.min(tokens, win);
+                totalElements = perLayer * (nFull * tokens + nSwa * swaTokens);
+                totalBytes = totalElements * dtypeSize;
+                sizeGB = totalBytes / (1024 ** 3);
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headDimension')} ${config.head_dim}<br>
+                    ${field('fullLayers')} ${nFull} (${t('cacheFullSequence')})<br>
+                    ${field('slidingLayers')} ${nSwa} (${formatText('slidingCap', {window: win, tokens: swaTokens})})<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('elementsPerTokenLayer')} 2 × ${config.num_key_value_heads} × ${config.head_dim} = ${perLayer}<br>
+                    ${field('totalElements')} ${perLayer} × (${nFull} × ${tokens} + ${nSwa} × ${swaTokens}) = ${totalElements}<br>
+                    ${field('totalBytes')} ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
+                    ${field('kvCacheSize')} ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
+            } else if (isCLA) {
+                // Cross-Layer Attention shares one KV cache across each group of
+                // cla_share_factor layers, so only the effective layer count stores KV.
+                const headSize = config.hidden_size / config.num_attention_heads;
+                const effectiveLayers = config.num_hidden_layers / config.cla_share_factor;
+                totalElements = 2 * effectiveLayers * tokens
+                    * config.num_key_value_heads * headSize;
+                totalBytes = totalElements * dtypeSize;
+                sizeGB = totalBytes / (1024 ** 3);
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('claFactor')} ${config.cla_share_factor}<br>
+                    ${field('effectiveLayers')} ${config.num_hidden_layers} / ${config.cla_share_factor} = ${effectiveLayers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headSize')} ${headSize}<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('totalElements')} 2 × ${effectiveLayers} × ${tokens} × ${config.num_key_value_heads} × ${headSize} = ${totalElements}<br>
+                    ${field('totalBytes')} ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
+                    ${field('kvCacheSize')} ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
+            } else if (hasHeadDim) {
+                // Models with explicit head_dim (e.g., GQA architectures)
+                totalElements = 2 * config.num_hidden_layers * tokens * config.num_key_value_heads * config.head_dim;
+                totalBytes = totalElements * dtypeSize;
+                sizeGB = totalBytes / (1024 ** 3);
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('hiddenSize')} ${config.hidden_size}<br>
+                    ${field('attentionHeads')} ${config.num_attention_heads}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headDimension')} ${config.head_dim}<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('totalElements')} 2 × ${config.num_hidden_layers} × ${tokens} × ${config.num_key_value_heads} × ${config.head_dim} = ${totalElements}<br>
+                    ${field('totalBytes')} ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
+                    ${field('kvCacheSize')} ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
             } else {
-                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads } = config);
-                head_size = hidden_size / num_attention_heads;
+                // Standard transformer architecture
+                const headSize = config.hidden_size / config.num_attention_heads;
+                totalElements = 2 * config.num_hidden_layers * tokens * config.num_key_value_heads * headSize;
+                totalBytes = totalElements * dtypeSize;
+                sizeGB = totalBytes / (1024 ** 3);
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('hiddenSize')} ${config.hidden_size}<br>
+                    ${field('attentionHeads')} ${config.num_attention_heads}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headSize')} ${headSize} (${t('hiddenOverHeads')})<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('totalElements')} 2 × ${config.num_hidden_layers} × ${tokens} × ${config.num_key_value_heads} × ${headSize} = ${totalElements}<br>
+                    ${field('totalBytes')} ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
+                    ${field('kvCacheSize')} ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
             }
 
-            // Determine dtype size in bytes
-            let dtype_size;
-            if (dtype === 'float32') dtype_size = 4;
-            else if (dtype === 'float16' || dtype === 'bfloat16') dtype_size = 2;
-            else if (dtype === 'int8') dtype_size = 1;
-            else {
-                showResult(t('errDtype'), true);
-                document.getElementById('calculation-steps').style.display = 'none';
-                return;
-            }
-
-            // Calculate KV cache size
-            let total_elements;
-            let effective_layers;
-            if (isDeepSeekModel) {
-                total_elements = num_hidden_layers * tokens * (kv_lora_rank + qk_rope_head_dim);
-            } else if (isHunyuanLargeModel) {
-                const cla_share_factor = config.cla_share_factor;
-                effective_layers = num_hidden_layers / cla_share_factor;
-                total_elements = 2 * effective_layers * tokens * num_key_value_heads * head_size;
-            } else if (isGQAWithHeadDimModel) {
-                total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_dim;
-            } else {
-                total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_size;
-            }
-            const total_bytes = total_elements * dtype_size;
-            const kvCacheSizeGB = total_bytes / (1024 ** 3);
-
-            showResult(t('result', kvCacheSizeGB.toFixed(4)));
-
-            // Prepare calculation steps
-            const B = (s) => `<b>${s}</b>`;
-            let rows;
-            if (isDeepSeekModel) {
-                rows = [
-                    [B(t('fldModel')), model],
-                    [B(t('fldLayers')), num_hidden_layers],
-                    [B(t('fldKvLoraRank')), kv_lora_rank],
-                    [B(t('fldQkRopeHeadDim')), qk_rope_head_dim],
-                    [B(t('fldDtypeSize')), `${dtype_size} ${t('bytes')}`],
-                    [B(t('fldTotalElem')), `${num_hidden_layers} × ${tokens} × (${kv_lora_rank} + ${qk_rope_head_dim}) = ${total_elements}`],
-                    [B(t('fldTotalBytes')), `${total_elements} × ${dtype_size} = ${total_bytes} ${t('bytes')}`],
-                    [B(t('fldKvSize')), `${total_bytes} / 1024³ ≈ ${kvCacheSizeGB.toFixed(4)} GB`],
-                ];
-            } else if (isHunyuanLargeModel) {
-                const cla_share_factor = config.cla_share_factor;
-                rows = [
-                    [B(t('fldModel')), model],
-                    [B(t('fldLayers')), num_hidden_layers],
-                    [B(t('fldClaFactor')), `${cla_share_factor} (${t('claNote', cla_share_factor)})`],
-                    [B(t('fldEffLayers')), `${num_hidden_layers} / ${cla_share_factor} = ${effective_layers}`],
-                    [B(t('fldKvHeads')), num_key_value_heads],
-                    [B(t('fldHeadSize')), `${head_size} (${t('headSizeNote')})`],
-                    [B(t('fldDtypeSize')), `${dtype_size} ${t('bytes')}`],
-                    [B(t('fldTotalElem')), `2 × ${effective_layers} × ${tokens} × ${num_key_value_heads} × ${head_size} = ${total_elements}`],
-                    [B(t('fldTotalBytes')), `${total_elements} × ${dtype_size} = ${total_bytes} ${t('bytes')}`],
-                    [B(t('fldKvSize')), `${total_bytes} / 1024³ ≈ ${kvCacheSizeGB.toFixed(4)} GB`],
-                ];
-            } else if (isGQAWithHeadDimModel) {
-                rows = [
-                    [B(t('fldModel')), model],
-                    [B(t('fldLayers')), num_hidden_layers],
-                    [B(t('fldKvHeads')), num_key_value_heads],
-                    [B(t('fldHeadDim')), head_dim],
-                    [B(t('fldDtypeSize')), `${dtype_size} ${t('bytes')}`],
-                    [B(t('fldTotalElem')), `2 × ${num_hidden_layers} × ${tokens} × ${num_key_value_heads} × ${head_dim} = ${total_elements}`],
-                    [B(t('fldTotalBytes')), `${total_elements} × ${dtype_size} = ${total_bytes} ${t('bytes')}`],
-                    [B(t('fldKvSize')), `${total_bytes} / 1024³ ≈ ${kvCacheSizeGB.toFixed(4)} GB`],
-                ];
-            } else {
-                rows = [
-                    [B(t('fldModel')), model],
-                    [B(t('fldHiddenSize')), hidden_size],
-                    [B(t('fldAttnHeads')), num_attention_heads],
-                    [B(t('fldLayers')), num_hidden_layers],
-                    [B(t('fldKvHeads')), num_key_value_heads],
-                    [B(t('fldHeadSize')), `${head_size} (${t('headSizeNote')})`],
-                    [B(t('fldDtypeSize')), `${dtype_size} ${t('bytes')}`],
-                    [B(t('fldTotalElem')), `2 × ${num_hidden_layers} × ${tokens} × ${num_key_value_heads} × ${head_size} = ${total_elements}`],
-                    [B(t('fldTotalBytes')), `${total_elements} × ${dtype_size} = ${total_bytes} ${t('bytes')}`],
-                    [B(t('fldKvSize')), `${total_bytes} / 1024³ ≈ ${kvCacheSizeGB.toFixed(4)} GB`],
-                ];
-            }
-
-            const stepsEl = document.getElementById('calculation-steps');
-            stepsEl.innerHTML = `<b>${t('detailsTitle')}</b><br><br>` +
-                rows.map(([k, v]) => `${k}: ${v}`).join('<br>');
-            stepsEl.style.display = 'block';
+            resultDiv.className = 'result show';
+            resultDiv.innerHTML = `
+                <div class="result-value">${t('kvCacheSize')}: ${sizeGB.toFixed(4)} GB</div>
+                <div class="result-label">${t('calculationDetails')}:</div>
+                <div class="details">${details}</div>
+            `;
         }
 
-        document.getElementById('tokens').addEventListener('keydown', function(event) {
-            if (event.key === 'Enter') calculateKVCache();
+        // Calculate maximum tokens from GPU RAM
+        function calculateMaxTokens() {
+            const model = document.getElementById('model-reverse').value;
+            const gpuRamGB = parseFloat(document.getElementById('gpu-ram').value);
+            const dtype = document.getElementById('dtype-reverse').value;
+            const resultDiv = document.getElementById('result-reverse');
+
+            // Validation
+            if (isNaN(gpuRamGB) || gpuRamGB <= 0) {
+                resultDiv.className = 'result show error';
+                resultDiv.innerHTML = `<div class="result-label">${t('error')}</div><div>${t('invalidRam')}</div>`;
+                return;
+            }
+
+            const config = modelConfigs[model];
+            if (!config) {
+                resultDiv.className = 'result show error';
+                resultDiv.innerHTML = `<div class="result-label">${t('error')}</div><div>${t('configMissing')}</div>`;
+                return;
+            }
+
+            // Get dtype size
+            const dtypeSizes = {
+                'float32': 4,
+                'float16': 2,
+                'bfloat16': 2,
+                'int8': 1
+            };
+            const dtypeSize = dtypeSizes[dtype];
+
+            // Convert GPU RAM to bytes
+            const totalBytes = gpuRamGB * (1024 ** 3);
+
+            // Calculate based on model architecture
+            // DeepSeek V4 sparse attention: per-layer compression schedule.
+            const isDSA = Array.isArray(config.compress_ratios)
+                && Number.isFinite(config.head_dim);
+            // Multi-head Latent Attention (DeepSeek V3/R1, GLM-5.x DSA): feature-gated
+            // on kv_lora_rank rather than the model name.
+            const isMLA = Number.isFinite(config.kv_lora_rank)
+                && Number.isFinite(config.qk_rope_head_dim);
+            // Interleaved sliding-window / full attention (Gemma 2/3/4): the sliding
+            // layers cap their KV cache at the window, only the full layers grow.
+            const isHybridSWA = Number.isFinite(config.full_attention_layers)
+                && Number.isFinite(config.sliding_attention_layers)
+                && Number.isFinite(config.sliding_window)
+                && Number.isFinite(config.num_key_value_heads)
+                && Number.isFinite(config.head_dim);
+            // Linear/full hybrid (Qwen3-Next / Qwen3.5): Gated DeltaNet layers keep a
+            // fixed-size recurrent state (no per-token KV); only full layers grow.
+            const isHybridLinear = Number.isFinite(config.full_attention_layers)
+                && Number.isFinite(config.linear_attention_layers)
+                && Number.isFinite(config.num_key_value_heads)
+                && Number.isFinite(config.head_dim);
+            const isCLA = Number.isFinite(config.cla_share_factor)
+                && config.cla_share_factor > 0;
+            const hasHeadDim = Number.isFinite(config.head_dim)
+                && Number.isFinite(config.num_key_value_heads);
+
+            let maxTokens;
+            let details = '';
+
+            if (isDSA) {
+                // DeepSeek V4 (CSA + HCA hybrid; NOT MLA). Bytes are computed in V4's
+                // native mixed precision (paper §2.3.4) — the dtype dropdown does NOT
+                // apply. KV entry = (head_dim - rope) FP8 + rope BF16; indexer keys
+                // FP4; both compressed at Σ(1/r). Sliding-window floor uses the same
+                // KV byte width and must be covered by the available RAM first.
+                const activeRatios = config.compress_ratios.filter(r => r > 0);
+                const compressFactor = activeRatios.reduce((sum, r) => sum + 1 / r, 0);
+                const ropeDim = Number.isFinite(config.qk_rope_head_dim) ? config.qk_rope_head_dim : 0;
+                const indexerDim = Number.isFinite(config.index_head_dim) ? config.index_head_dim : 0;
+                const prec = getDSAPrecision('-reverse', config);
+                const kvBytesPerEntry = (config.head_dim - ropeDim) * prec.nope + ropeDim * prec.rope;
+                const indexerBytesPerEntry = indexerDim * prec.indexer;
+                const bytesPerToken = (kvBytesPerEntry + indexerBytesPerEntry) * compressFactor;
+                const numLayers = config.compress_ratios.length;
+                const windowBytes = numLayers * config.sliding_window * kvBytesPerEntry;
+                maxTokens = Math.max(0, Math.floor((totalBytes - windowBytes) / bytesPerToken));
+
+                const precLabel = prec.mode === 'custom'
+                    ? `${t('customPrecision')} (NoPE ${prec.nope} / RoPE ${prec.rope} / indexer ${prec.indexer} B/dim)`
+                    : `${t('paperPrecision')} (NoPE ${prec.nope}=FP8 / RoPE ${prec.rope}=BF16 / indexer ${prec.indexer}=FP4); ${t('dtypeNotApplied')}`;
+                const indexerLine = indexerDim
+                    ? `${field('indexerKey')} ${indexerDim} × ${prec.indexer} × Σ(1/r) = ${(indexerBytesPerEntry * compressFactor).toFixed(1)} B/token<br>`
+                    : '';
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('gpuRamSize')} ${gpuRamGB} GB<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('headDimension')} ${config.head_dim} (RoPE ${ropeDim} @ ${prec.rope} B, NoPE ${config.head_dim - ropeDim} @ ${prec.nope} B)<br>
+                    ${field('compressedLayers')} ${activeRatios.length} ${t('of')} ${numLayers}<br>
+                    ${field('slidingWindow')} ${config.sliding_window} (${t('perLayer')})<br>
+                    ${field('kvBytesEntry')} (${config.head_dim} − ${ropeDim}) × ${prec.nope} + ${ropeDim} × ${prec.rope} = ${kvBytesPerEntry} B<br>
+                    ${indexerLine}${field('precisionLabel')} ${precLabel}<br>
+                    ${field('bytesPerToken')} (${kvBytesPerEntry} + ${indexerBytesPerEntry}) × Σ(1/r) = ${bytesPerToken.toFixed(1)} B<br>
+                    ${field('slidingFloor')} ${numLayers} × ${config.sliding_window} × ${kvBytesPerEntry} = ${windowBytes} B<br>
+                    ${field('maximumTokens')} (${totalBytes} − ${windowBytes}) / ${bytesPerToken.toFixed(1)} = ${maxTokens} tokens
+                `;
+            } else if (isMLA) {
+                // Multi-head Latent Attention (DeepSeek V3/R1, GLM-5.x): per-token
+                // cost is layers × (kv_lora_rank + qk_rope_head_dim), plus a DSA
+                // lightning-indexer key of index_head_dim per layer per token when
+                // present (LMCache stores the indexer group in the same KV pool).
+                const latentDim = config.kv_lora_rank + config.qk_rope_head_dim;
+                const indexerDim = Number.isFinite(config.index_head_dim) ? config.index_head_dim : 0;
+                const elementsPerToken = config.num_hidden_layers * (latentDim + indexerDim);
+                const bytesPerToken = elementsPerToken * dtypeSize;
+                maxTokens = Math.floor(totalBytes / bytesPerToken);
+
+                const indexerLine = indexerDim
+                    ? `${field('indexerDim')} ${indexerDim}<br>`
+                    : '';
+                const latentExpr = indexerDim
+                    ? `(${config.kv_lora_rank} + ${config.qk_rope_head_dim} + ${indexerDim})`
+                    : `(${config.kv_lora_rank} + ${config.qk_rope_head_dim})`;
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('gpuRamSize')} ${gpuRamGB} GB<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvLoraRank')} ${config.kv_lora_rank}<br>
+                    ${field('qkRopeDim')} ${config.qk_rope_head_dim}<br>
+                    ${indexerLine}${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('elementsPerToken')} ${config.num_hidden_layers} × ${latentExpr} = ${elementsPerToken}<br>
+                    ${field('bytesPerToken')} ${elementsPerToken} × ${dtypeSize} = ${bytesPerToken} bytes<br>
+                    ${field('maximumTokens')} ${totalBytes} / ${bytesPerToken} = ${maxTokens} tokens
+                `;
+            } else if (isHybridLinear) {
+                // Attention/recurrent hybrid: only the full-attention layers grow.
+                // TODO(SSM): the recurrent (Gated DeltaNet / Mamba2 SSM) layers' constant
+                // state is NOT subtracted yet — holding off until LMCache decides how it
+                // stores linear-attention layers. For now max tokens is computed from the
+                // full-attention KV cache alone.
+                const linType = typeof config.linear_attention_type === 'string'
+                    ? config.linear_attention_type : 'Gated DeltaNet';
+                const perLayer = 2 * config.num_key_value_heads * config.head_dim;
+                const nFull = config.full_attention_layers;
+                const nLin = config.linear_attention_layers;
+                const availElements = totalBytes / dtypeSize;
+                maxTokens = Math.max(0, Math.floor(availElements / (perLayer * nFull)));
+
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('gpuRamSize')} ${gpuRamGB} GB<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headDimension')} ${config.head_dim}<br>
+                    ${field('fullLayers')} ${nFull} (${t('growingKv')})<br>
+                    ${field('linearLayers')} (${linType}) ${nLin} (${t('recurrentNotCounted')})<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('elementsPerTokenLayer')} 2 × ${config.num_key_value_heads} × ${config.head_dim} = ${perLayer}<br>
+                    ${field('maxTokensFullOnly')} ${availElements} / (${perLayer} × ${nFull}) = ${maxTokens} tokens
+                `;
+            } else if (isHybridSWA) {
+                // Gemma-style interleaved attention. Sliding layers cap at the window,
+                // so the token count is piecewise: below the window all layers count
+                // as full; above it only the full layers keep growing.
+                const perLayer = 2 * config.num_key_value_heads * config.head_dim;
+                const nFull = config.full_attention_layers;
+                const nSwa = config.sliding_attention_layers;
+                const win = config.sliding_window;
+                const availElements = totalBytes / dtypeSize;
+                // First assume tokens <= window (every layer caches the full sequence).
+                let n = Math.floor(availElements / (perLayer * (nFull + nSwa)));
+                let regime = t('allLayersFull');
+                if (n > win) {
+                    // tokens > window: sliding layers are pinned at `win` tokens.
+                    n = Math.floor((availElements / perLayer - nSwa * win) / nFull);
+                    regime = t('slidingCapped');
+                }
+                maxTokens = Math.max(0, n);
+
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('gpuRamSize')} ${gpuRamGB} GB<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headDimension')} ${config.head_dim}<br>
+                    ${field('fullLayers')} ${nFull}<br>
+                    ${field('slidingLayers')} ${nSwa} (window ${win})<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('elementsPerTokenLayer')} 2 × ${config.num_key_value_heads} × ${config.head_dim} = ${perLayer}<br>
+                    ${field('regime')} ${regime}<br>
+                    ${field('maximumTokens')} ${maxTokens} tokens
+                `;
+            } else if (isCLA) {
+                // Cross-Layer Attention stores KV for only one layer in each sharing group.
+                const headSize = config.hidden_size / config.num_attention_heads;
+                const effectiveLayers = config.num_hidden_layers / config.cla_share_factor;
+                const elementsPerToken = 2 * effectiveLayers
+                    * config.num_key_value_heads * headSize;
+                const bytesPerToken = elementsPerToken * dtypeSize;
+                maxTokens = Math.floor(totalBytes / bytesPerToken);
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('gpuRamSize')} ${gpuRamGB} GB<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('claFactor')} ${config.cla_share_factor}<br>
+                    ${field('effectiveLayers')} ${config.num_hidden_layers} / ${config.cla_share_factor} = ${effectiveLayers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headSize')} ${headSize}<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('elementsPerToken')} 2 × ${effectiveLayers} × ${config.num_key_value_heads} × ${headSize} = ${elementsPerToken}<br>
+                    ${field('bytesPerToken')} ${elementsPerToken} × ${dtypeSize} = ${bytesPerToken} bytes<br>
+                    ${field('maximumTokens')} ${totalBytes} / ${bytesPerToken} = ${maxTokens} tokens
+                `;
+            } else if (hasHeadDim) {
+                // Explicit head_dim: tokens = total_bytes / (2 × layers × kv_heads × head_dim × dtype_size)
+                const elementsPerToken = 2 * config.num_hidden_layers * config.num_key_value_heads * config.head_dim;
+                const bytesPerToken = elementsPerToken * dtypeSize;
+                maxTokens = Math.floor(totalBytes / bytesPerToken);
+
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('gpuRamSize')} ${gpuRamGB} GB<br>
+                    ${field('hiddenSize')} ${config.hidden_size}<br>
+                    ${field('attentionHeads')} ${config.num_attention_heads}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headDimension')} ${config.head_dim}<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('elementsPerToken')} 2 × ${config.num_hidden_layers} × ${config.num_key_value_heads} × ${config.head_dim} = ${elementsPerToken}<br>
+                    ${field('bytesPerToken')} ${elementsPerToken} × ${dtypeSize} = ${bytesPerToken} bytes<br>
+                    ${field('maximumTokens')} ${totalBytes} / ${bytesPerToken} = ${maxTokens} tokens
+                `;
+            } else {
+                // Standard transformer: tokens = total_bytes / (2 × layers × kv_heads × head_size × dtype_size)
+                const headSize = config.hidden_size / config.num_attention_heads;
+                const elementsPerToken = 2 * config.num_hidden_layers * config.num_key_value_heads * headSize;
+                const bytesPerToken = elementsPerToken * dtypeSize;
+                maxTokens = Math.floor(totalBytes / bytesPerToken);
+
+                details = `
+                    ${field('selectedModel')} ${model}<br>
+                    ${field('gpuRamSize')} ${gpuRamGB} GB<br>
+                    ${field('hiddenSize')} ${config.hidden_size}<br>
+                    ${field('attentionHeads')} ${config.num_attention_heads}<br>
+                    ${field('hiddenLayers')} ${config.num_hidden_layers}<br>
+                    ${field('kvHeads')} ${config.num_key_value_heads}<br>
+                    ${field('headSize')} ${headSize} (${t('hiddenOverHeads')})<br>
+                    ${field('dtypeSize')} ${dtypeSize} bytes<br>
+                    ${field('elementsPerToken')} 2 × ${config.num_hidden_layers} × ${config.num_key_value_heads} × ${headSize} = ${elementsPerToken}<br>
+                    ${field('bytesPerToken')} ${elementsPerToken} × ${dtypeSize} = ${bytesPerToken} bytes<br>
+                    ${field('maximumTokens')} ${totalBytes} / ${bytesPerToken} = ${maxTokens} tokens
+                `;
+            }
+
+            resultDiv.className = 'result show';
+            resultDiv.innerHTML = `
+                <div class="result-value">${t('maximumTokens')}: ${maxTokens.toLocaleString()}</div>
+                <div class="result-label">${t('calculationDetails')}:</div>
+                <div class="details">${details}</div>
+            `;
+        }
+
+        // Enter key handler
+        document.addEventListener('DOMContentLoaded', () => {
+            const tokensInput = document.getElementById('tokens');
+            if (tokensInput) {
+                tokensInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        calculateKVCache();
+                    }
+                });
+            }
+
+            const gpuRamInput = document.getElementById('gpu-ram');
+            if (gpuRamInput) {
+                gpuRamInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        calculateMaxTokens();
+                    }
+                });
+            }
         });
 
-        window.onload = function() {
-            loadModelConfigs();
-        };
-
+        // Load configurations on page load
+        window.addEventListener('load', loadModelConfigs);
     </script>
 </body>
 </html>

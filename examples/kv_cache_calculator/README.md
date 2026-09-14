@@ -2,7 +2,9 @@
 
 ## Introduction
 
-The KV Cache Size Calculator provides a web interface for calculating the size of the key-value cache required by large language models (LLMs). Users can select a model, specify the data type, and enter the number of tokens to calculate the KV cache size in gigabytes. The web interface includes a form where users can input these parameters and view the results immediately, making it simple and efficient to estimate cache requirements.
+The KV Cache Size Calculator provides a bilingual web interface for estimating the key-value cache required by large language models (LLMs). It supports both forward calculations (tokens to cache size) and reverse calculations (available GPU memory to maximum tokens), including MLA, cross-layer attention (CLA), hybrid sliding-window attention, hybrid linear attention, and DSA model layouts.
+
+This directory is the single source of truth for the calculator. The files under `docs/source/_static/` are symbolic links to `kv_cache_calculator.html` and `modelconfig.json` here so the standalone example and the published documentation cannot drift apart. Update only the files in this directory when adding calculator behavior or model data.
 
 This document also provides an overview of the JSON format for model configurations and explains how to use the `generate_config.py` script to generate model configurations using the `transformers` library's `AutoConfig` feature.
 
@@ -24,6 +26,12 @@ The JSON configuration file produced by `generate_config.py` or manually maintai
 - **num_attention_heads**: The number of attention heads used in each transformer block.
 - **num_hidden_layers**: The total number of hidden layers in the model.
 - **num_key_value_heads**: (Optional) The number of key-value heads used in certain transformer architectures.
+- **head_dim**: (Optional) The explicit attention head dimension when it differs from `hidden_size / num_attention_heads`.
+- **kv_lora_rank** and **qk_rope_head_dim**: (Optional) MLA latent-cache dimensions.
+- **cla_share_factor**: (Optional) The number of layers that share one KV cache in a CLA model.
+- **full_attention_layers**, **sliding_attention_layers**, and **sliding_window**: (Optional) Hybrid sliding-window attention layout.
+- **linear_attention_layers**: (Optional) Hybrid recurrent/linear attention layout.
+- **compress_ratios**: (Optional) Per-layer compression ratios for DSA models.
 
 > Note: If an attribute is not applicable to a particular model, it may be set to `null` or omitted altogether.
 
@@ -105,5 +113,4 @@ We welcome contributions to improve the KV Cache Size Calculator and related scr
 - Submit a pull request describing your changes and the motivation behind them.
 
 If you have any suggestions or find any issues, feel free to open an issue on GitHub. Your contributions are greatly appreciated!
-
 
