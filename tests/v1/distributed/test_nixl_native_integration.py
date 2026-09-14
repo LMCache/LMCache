@@ -679,6 +679,7 @@ def test_posix_client_direct_io_mixed_batch_round_trip(tmp_path: Path) -> None:
     assert actual_sizes == expected_sizes
     assert not list(tmp_path.glob("*.tmp.*"))
 
+
 @requires_nixl_integration
 @requires_nixl_extension
 def test_posix_client_direct_io_fallback_releases_file_descriptors(

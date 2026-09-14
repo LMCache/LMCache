@@ -26,8 +26,10 @@ std::string replace_all(const std::string& str, const std::string& from,
 std::string key_to_filename(const std::string& key,
                             bool shard_directories = false) {
   // Input key format (from _object_key_to_string):
-  //   Unsalted: <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
-  //   Salted  : <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
+  // Unsalted:
+  //     <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
+  // Salted:
+  //     <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
   // Unsalted::
