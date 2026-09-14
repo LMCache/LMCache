@@ -1,8 +1,8 @@
-# Read depth in the native connectors
+# Read depth in the native filesystem connector
 
-How many reads a native connector keeps outstanding against storage, why the
-answer used to be wrong for every backend, and what each backend needs in
-order to fix it.
+How many reads the native filesystem connector keeps outstanding against
+storage, why the answer used to be `num_workers`, and how the connector now
+sizes it in bytes.
 
 ## The defect
 
@@ -24,40 +24,69 @@ both methods:
 That is a resource-sizing parameter, chosen for how much CPU the connector
 should use orchestrating batches. It is not a storage queue depth, and
 nothing makes the two equal. `redis` and `aerospike` inherit both methods
-unchanged; `mooncake` overrides both and has its own depth. The
-filesystem connector used to inherit them too.
+unchanged; `mooncake` overrides both and has its own depth. The filesystem
+connector used to inherit them too, and it is the one this document fixes.
 
 On an array of several devices the default of four is far below what the
 hardware needs to reach its read bandwidth. Measured on eight NVMe drives in
-RAID0 whose ceiling is ~54 GB/s, with 6 MiB objects:
+RAID0 whose ceiling is ~54 GB/s (fio, O_DIRECT), with a discarded warmup
+pass and the two arms interleaved so that drive settling cannot be mistaken
+for an effect; within-arm drift is under 0.5% on every row shown:
 
-| reads in flight | delivered |
-|---|---|
-| 4 (`num_workers=4`, the default) | 31 GB/s |
-| ~40 | 48 GB/s |
+| object size (`chunk_size`) | `num_workers=4`, the default | read pool, defaults | ratio |
+|---|---|---|---|
+| 1.5 MiB (64) | 10.9 GB/s | 48.1 GB/s | 4.41x |
+| 3 MiB (128) | 19.1 | 48.4 | 2.53x |
+| 6 MiB (256, LMCache's default) | 30.2 | 50.6 | 1.67x |
+| 24 MiB (1024) | 50.5 | 51.7 | 1.02x |
+| 192 MiB (8192) | 54.5 | 53.4 | 0.98x |
+
+At 12 MiB and 48 MiB the two arms tie within drift. End to end, at
+`chunk_size` 256 and 100 concurrent requests of 120k tokens served from L2
+through vLLM, the warm round went from 24.05 s to 14.49 s, 1.66x. On tmpfs,
+where a read is a memcpy, the pool reads 86 GB/s at 6 MiB objects against 15
+for the default, and ties `num_workers=64` at both 6 MiB and 1.5 MiB.
 
 The bytes were always reachable. The code was not asking for enough of them
 at once.
 
 ## Why the budget is in bytes, not objects
 
+The alternative is to raise `num_workers`, and on this array a well-chosen
+value reaches the same ceiling as the pool in an isolated read benchmark: at
+6 MiB objects, `num_workers=64` reads 54.0 GB/s against the pool's 54.1. End
+to end it does not keep up: the same `num_workers=64` completes the vLLM
+round above in 15.56 and 15.60 s against the pool's 14.49 s, 7.4% slower
+with 0.3% between its two runs. The two settings differ in what they hold in
+flight, 64 objects (384 MiB) against the pool's 1536 MiB budget; the
+benchmark has nothing but disk latency per read, the serving path has more,
+and 384 MiB is what a 54 GB/s array needs at 7 ms per read with no margin.
+Beyond that, `num_workers` has no value that is right at more than one
+object size, and the budget does.
+
 Throughput is set by the bytes outstanding against the device, not by the
 number of objects. An object here is `chunk_size x
 bytes_per_token_per_rank`, so the same object count means very different
-things at different `chunk_size` settings: on the hardware above, a depth
-of 64 objects is 384 MiB in flight at LMCache's default `chunk_size` of 256
-and 12 GiB at `chunk_size` 8192. The first is about right; the second is far
-past the point where more queueing helps:
+things at different `chunk_size` settings: on the hardware above, 64 objects
+in flight is 384 MiB at LMCache's default `chunk_size` of 256 and 12 GiB at
+`chunk_size` 8192. Same controls as above, `read_io_depth=256` so the budget
+is what binds:
 
-| object size | default | 64 objects in flight | measured byte budget |
+| reads in flight bounded by | 1.5 MiB objects | 192 MiB objects | worst case |
 |---|---|---|---|
-| 6 MiB | 31.3 | 48 | **48.1** |
-| 24 MiB | 41.0 | ~50 | **51.3** |
-| 192 MiB | 54.1 | 49 (**-8.7%**) | **53.6** |
+| `num_workers=4` | 11.0 GB/s (78% below best) | **53.9** | 78% |
+| `num_workers=256` | 49.3 | 50.4 (6.5% below) | 6.5% |
+| byte budget, 1536 MiB | **51.0** | 53.5 (0.8% below) | **0.8%** |
 
-No fixed setting is right everywhere: four workers wins at 192 MiB and loses
-42% at 6 MiB; a fixed 64-object depth wins at 6 MiB and loses 8.7% at
-192 MiB. A budget in bytes removes the object-size dependence; measuring it
+Four workers wins at 192 MiB and loses 78% at 1.5 MiB; 256 wins at 1.5 MiB
+and loses 6.5% at 192 MiB. The value tuned for 6 MiB objects,
+`num_workers=64`, reads 49.2 GB/s at 192 MiB against the budget's 52.4, 6.7%
+behind with 1.1% between its own repeats, because 64 workers there hold
+12 GiB in flight where the budget holds 1.5. The budget crosses over on its own because
+`budget / object_size` falls as objects grow: at 1.5 MiB it allows 1024
+objects so the thread count binds, at 192 MiB it allows 8 so the budget
+binds. The operator never has to know the object size, which only exists at
+dispatch. A budget in bytes removes the object-size dependence; measuring it
 removes the hardware dependence.
 
 ## Choosing the budget
@@ -109,6 +138,19 @@ can do:
    budget cannot express a smaller figure at that object size.
 2. **The thread pool is a separate ceiling.** Bytes in flight can never
    exceed `read_io_depth * object_size`, whatever the budget says.
+3. **A tile is read a group at a time, and each group drains before the
+   next is dispatched.** A batch too small to fill the depth therefore
+   holds fewer reads in flight than `read_io_depth`, and reads in flight
+   fall to zero at the end of every group. With four workers and
+   16-object batches the pool holds at most 64 objects and pays that
+   barrier once per 16 objects; against a `num_workers=64` that streams
+   continuously it measured between a tie and 12% behind on the same
+   array on the same day, depending on per-read latency at the time.
+   Batches of a few hundred objects, which is what a long prompt at the
+   default `chunk_size` produces, dispatch 64 at a time and do not show
+   it. Dispatching each object as the previous one completes, a sliding
+   window instead of groups, would remove the barrier; it is not in this
+   change.
 
 ## Configuration
 
@@ -119,30 +161,35 @@ can do:
 
 `read_io_depth` has to be large enough for the byte budget to be the
 constraint that binds: whichever of the two limits is smaller wins, and
-property 2 above is what makes that easy to get wrong. At the default
-`chunk_size` of 256, whose objects are 6 MiB, the default budget's
-384 MiB per-worker share needs a `read_io_depth` of 64 to be reachable.
+property 2 above is what makes that easy to get wrong. The budget is shared
+across the workers as equal per-worker shares, so at the default
+`chunk_size` of 256, whose objects are 6 MiB, the default budget's 384 MiB
+share per worker needs a `read_io_depth` of 64 to be reachable.
 
-Each reader thread holds one connection for the connector's lifetime, and
-for the filesystem connector one open file at a time, so `read_io_depth` is
-also the ceiling on both.
+Each reader thread has one file open at a time, so `read_io_depth` is also
+the ceiling on files the connector holds open for reads.
 
 ## Where the fix lives
 
-`ConnectorBase` owns the reader threads, the grouping and the byte budget,
-and executes a group by calling the backend's unmodified `do_single_get()`
-on threads that each hold their own `ConnectionType` from the existing
-`create_connection()`. Nothing about it is filesystem-specific, so every
-backend gains real depth by setting `depth`, with no backend-specific code.
+`FSConnector` owns the reader threads, the grouping and the byte budget. It
+overrides `do_batch_get()` to hand a tile to the pool a group at a time and
+wait for each group, and `choose_num_tiles()` so that a GET batch is split
+across workers only as far as leaves every tile at least `read_io_depth`
+objects deep. Without the second override the base class would split a
+16-object batch across four workers, each of which hands its own four
+objects to the pool and blocks, and reads in flight would stay at
+`num_workers` however large the depth was configured. The reads themselves
+run the unmodified `do_single_get()` on reader threads that each hold their
+own `WorkerFSConn` from the existing `create_connection()`. `ConnectorBase`
+is unchanged.
 
-Per-thread connections are how the base already works: each worker thread
-creates its own connection at the top of its loop, so this introduces no
-new concurrency contract. Sharing one connection across reader threads
-would, and several client libraries are not thread-safe per connection.
-
-The cost differs by backend and has to be checked before enabling one.
-`redis` opens a socket per connection, so `depth` is `depth` more sockets.
-`aerospike` does not: its `create_connection()` copies a pointer to one
-shared client whose own thread pool is sized from `num_workers`, which
-would need to follow `depth` instead. `mooncake` overrides `do_batch_get()`
-and is unaffected either way.
+This is the same shape as `MooncakeConnector`, which overrides the same two
+methods because its backend already parallelises a batch internally. The
+pool is not in the base class because the cost of a reader thread is
+backend-specific and the fix each backend needs is different: a `redis`
+connection is a socket, so depth would be that many more sockets per rank,
+and what a strictly send-then-receive protocol needs is pipelining, which is
+a change to `do_single_get` rather than to how many of them run at once;
+`aerospike` shares one client whose own thread pool is sized from
+`num_workers`. A pool in the base would be right for the filesystem and
+either costly or inert for the others.

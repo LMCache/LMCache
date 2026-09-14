@@ -6,9 +6,14 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <list>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace lmcache {
@@ -57,9 +62,11 @@ struct WorkerFSConn {
 
 class FSConnector : public ConnectorBase<WorkerFSConn> {
  public:
-  // read_io_depth: reader threads dedicated to executing reads.  Zero
-  //   keeps the legacy path, where reads run on the worker threads and
-  //   the depth against the device therefore equals num_workers.
+  // read_io_depth: reader threads dedicated to executing reads, and so
+  //   the maximum reads in flight.  Zero keeps the legacy path, where
+  //   reads run on the worker threads and the depth against the device
+  //   therefore equals num_workers.  Each reader thread holds one open
+  //   file at a time, so this is also the ceiling on those.
   // read_max_bytes_in_flight: bytes this connector may keep outstanding,
   //   shared across its workers.  Zero selects
   //   kDefaultReadMaxBytesInFlight when read_io_depth is positive.
@@ -69,6 +76,13 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
               size_t read_max_bytes_in_flight = 0);
   ~FSConnector() override;
 
+  // Bytes this connector allows outstanding against storage.
+  //
+  // Returns the configured byte budget, or 0 when none is in force: no
+  // read pool, or a pool bounded only by its thread count.  Exposed so a
+  // caller can report it alongside its other storage statistics.
+  size_t read_budget_bytes() const;
+
  protected:
   WorkerFSConn create_connection() override;
   void do_single_get(WorkerFSConn& conn, const std::string& key, void* buf,
@@ -77,6 +91,26 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
                      const void* buf, size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerFSConn& conn, const std::string& key) override;
   bool do_single_delete(WorkerFSConn& conn, const std::string& key) override;
+
+  // With a read pool, a GET batch is parallelised inside do_batch_get(),
+  // so it stays one tile, as MooncakeConnector::choose_num_tiles does for
+  // the same reason.  Splitting it across workers first would cap reads
+  // in flight at num_workers however large read_io_depth is: each worker
+  // only ever hands its OWN tile to the pool and then blocks on it, so the
+  // depth would be inert for any batch smaller than num_workers x depth,
+  // which is most real requests.
+  size_t choose_num_tiles(Op op, size_t num_items) const override;
+
+  // Read one tile of a batch: through the read pool when one is
+  // configured, otherwise the base class's serial path.  Per-key error
+  // tolerance is the same either way: a key whose read fails is marked 0
+  // in per_key_results and the rest of the tile still completes.
+  void do_batch_get(WorkerFSConn& conn, const Request& req) override;
+
+  // The pool may only stop once the workers have been joined: a worker may
+  // be blocked waiting for a group, and only the reader threads can finish
+  // it.  The base class calls this from close() at exactly that point.
+  void on_workers_stopped() override;
 
  private:
   // Build the filesystem-safe filename from a serialized key string.
@@ -99,11 +133,55 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
                                  const std::string& from,
                                  const std::string& to);
 
+  // Completion state for the objects of one group, living on the stack of
+  // the worker thread that is waiting for them.  Both fields are guarded
+  // by read_mu_, which is also what keeps the group alive long enough:
+  // the waiter can only return, and so destroy it, while holding that
+  // lock, and a reader only touches it while holding the same lock.
+  struct ReadGroup {
+    std::vector<uint8_t> ok;  // one flag per object of the group
+    size_t remaining = 0;
+  };
+
+  // One object to read.  `req` outlives the task: the worker that owns
+  // the request blocks until every task referring to it has finished.
+  struct ReadTask {
+    const Request* req = nullptr;
+    size_t index = 0;  // index into req->keys
+    size_t local = 0;  // index into group->ok
+    ReadGroup* group = nullptr;
+  };
+
+  // Hand a tile's objects to the reader threads, a group at a time, and
+  // wait for each group.  Reads run on the pool's own connections, so the
+  // calling worker's is idle for the duration.
+  void do_batch_get_pooled(const Request& req);
+
+  // Per-worker share of the byte budget, or no bound when none is set.
+  size_t worker_read_budget_bytes() const;
+
+  void start_read_pool();
+  void stop_read_pool();
+  void read_thread_main(WorkerFSConn& conn);
+
   std::string base_path_;
   std::string relative_tmp_dir_;
   bool use_odirect_;
   size_t disk_block_size_;
   size_t read_ahead_size_;
+
+  // Read pool.  read_conns_ is sized once in start_read_pool() and never
+  // resized, so each reader thread's reference stays valid; read_threads_
+  // being empty is the test for "no pool".
+  int read_io_depth_;
+  size_t read_max_bytes_in_flight_;
+  std::vector<WorkerFSConn> read_conns_;
+  std::vector<std::thread> read_threads_;
+  std::mutex read_mu_;
+  std::condition_variable read_cv_;       // a task is available
+  std::condition_variable read_done_cv_;  // some group finished
+  std::list<ReadTask> read_queue_;
+  bool read_stop_ = false;  // guarded by read_mu_
 };
 
 }  // namespace connector

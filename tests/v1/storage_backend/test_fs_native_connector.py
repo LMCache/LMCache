@@ -2,6 +2,7 @@
 """Tests for the native C++ filesystem connector."""
 
 # Standard
+from pathlib import Path
 from typing import Any
 import ctypes
 import os
@@ -150,8 +151,15 @@ def _aligned_pairs(
 ) -> tuple[list[memoryview], list[memoryview], list[bytearray]]:
     """Build `count` source/destination pairs, each source filled distinctly.
 
-    The third return value owns the backing allocations and must stay
-    referenced for as long as the views are used.
+    Args:
+        count: Number of pairs to build.
+        size: Bytes in each source and destination buffer.
+        block_size: Alignment of every buffer's start address, for O_DIRECT.
+
+    Returns:
+        Sources, destinations, and the bytearrays backing both.  The third
+        list owns the allocations and must stay referenced for as long as
+        the views are used.
     """
     sources: list[memoryview] = []
     dests: list[memoryview] = []
@@ -224,7 +232,7 @@ def test_reads_return_identical_bytes(
         reader.close()
 
 
-def test_pooled_read_tolerates_one_missing_object(tmp_path) -> None:
+def test_pooled_read_tolerates_one_missing_object(tmp_path: Path) -> None:
     """A missing object fails alone; its batch-mates still load."""
     LMCacheFSClient = _import_fs_client()
     block_size = os.statvfs(tmp_path).f_bsize
@@ -264,7 +272,7 @@ def test_pooled_read_tolerates_one_missing_object(tmp_path) -> None:
         reader.close()
 
 
-def test_the_default_budget_is_used_when_none_is_configured(tmp_path) -> None:
+def test_the_default_budget_is_used_when_none_is_configured(tmp_path: Path) -> None:
     """Zero selects the documented default rather than "no budget".
 
     Reads in flight is what sets throughput, and inheriting the base
@@ -295,7 +303,7 @@ def test_the_default_budget_is_used_when_none_is_configured(tmp_path) -> None:
         unused.close()
 
 
-def test_negative_read_io_depth_is_rejected(tmp_path) -> None:
+def test_negative_read_io_depth_is_rejected(tmp_path: Path) -> None:
     """A negative depth is a configuration error, not a silent fallback."""
     LMCacheFSClient = _import_fs_client()
     with pytest.raises(RuntimeError, match="depth must be >= 0"):

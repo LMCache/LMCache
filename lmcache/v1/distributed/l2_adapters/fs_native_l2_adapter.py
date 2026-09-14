@@ -43,8 +43,6 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     - num_workers: C++ worker threads for I/O (default 4).
     - relative_tmp_dir: relative sub-dir for temp files.
     - use_odirect: bypass page cache via O_DIRECT.
-    - read_ahead_size: trigger filesystem readahead by
-      reading this many bytes first (optional).
     - read_io_depth: threads dedicated to executing reads, and so the
       maximum reads in flight.  0 keeps the legacy path, where reads run
       on the worker threads and the depth against the device therefore
@@ -52,11 +50,13 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
       object size whatever read_max_bytes_in_flight says.
     - read_max_bytes_in_flight: bytes the connector may keep outstanding
       against the device.  Throughput is set by bytes in flight rather
-      than by object count, so this is the figure that decides it.  0 --
-      the default -- selects 1536 MiB, chosen for its worst case across
+      than by object count, so this is the figure that decides it.  The
+      default 0 selects 1536 MiB, chosen for its worst case across
       local and network-latency storage; see connector.h.  Only consulted
       when read_io_depth is positive, and only reachable when that depth
       is large enough to hold the budget in objects.
+    - read_ahead_size: trigger filesystem readahead by
+      reading this many bytes first (optional).
     """
 
     def __init__(
@@ -140,18 +140,18 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "sub-dir for temp files (default empty)\n"
             "- use_odirect (bool): bypass page cache "
             "via O_DIRECT (default false)\n"
-            "- read_ahead_size (int): trigger fs "
-            "readahead by reading this many bytes "
-            "first (optional)\n"
-            "- max_capacity_gb (float): max L2 capacity "
-            "in GB for usage tracking / eviction "
-            "(default 0 = disabled)\n"
             "- read_io_depth (int): threads dedicated to "
             "reads, decoupling device queue depth from "
             "num_workers (default 0 = legacy path)\n"
             "- read_max_bytes_in_flight (int): bytes kept "
             "outstanding against the device (default 0 = "
-            "1536 MiB)"
+            "1536 MiB)\n"
+            "- read_ahead_size (int): trigger fs "
+            "readahead by reading this many bytes "
+            "first (optional)\n"
+            "- max_capacity_gb (float): max L2 capacity "
+            "in GB for usage tracking / eviction "
+            "(default 0 = disabled)"
         )
 
 

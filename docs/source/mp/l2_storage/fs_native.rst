@@ -33,15 +33,15 @@ I/O queue depth on a single Python thread.
   legacy path, where reads run on the worker threads themselves and the
   depth against the device therefore equals ``num_workers``, which on an
   array of several devices is far below what its read bandwidth needs.
-  Each reader thread holds one connection for the connector's lifetime
-  and one open file at a time, so this is the ceiling on both.  Bytes in
+  Each reader thread has one file open at a time, so this is also the
+  ceiling on files held open for reads.  Bytes in
   flight can never exceed ``read_io_depth`` x object size however large
   ``read_max_bytes_in_flight`` is: size it so the byte budget is the
   constraint that binds.
 - ``read_max_bytes_in_flight`` (int, default ``0``): When
   ``read_io_depth`` is positive, the bytes this connector may keep
   outstanding against the device, shared across its workers.  Throughput
-  is set by bytes in flight rather than by object count -- and object
+  is set by bytes in flight rather than by object count, and object
   size here is ``chunk_size`` x bytes-per-token-per-rank, so a depth
   expressed in objects means something different at every ``chunk_size``.
   The right figure is a property of the storage, and the default ``0``
