@@ -52,6 +52,7 @@ EXPECTED = {
     F.NL_X_NB_BS_HS: (False, False, True, True, False),
     F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
     F.NL_X_NB_BSV_BSS: (False, False, True, True, False),
+    F.NL_X_TWO_X_NB_BS_HS: (False, False, True, True, True),
 }
 
 # Facts that only the spec carries (no native predicate mirrors them):
@@ -74,6 +75,7 @@ EXPECTED_SPEC_FACTS = {
     F.NL_X_NBBS_ONE_HS: (False, False, False, True),
     F.NL_X_NB_BSV_BSS: (False, False, False, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, False, False),
+    F.NL_X_TWO_X_NB_BS_HS: (False, False, False, False),
 }
 
 

@@ -28,6 +28,7 @@ class EngineKVFormat(IntEnum):
     NL_X_NB_BSV_BSS = 14
     NL_X_TWO_NB_NH_ONE_BS_HS = 15
     NL_X_TWO_X_NB_BS_NH_HS = 16
+    NL_X_TWO_X_NB_BS_HS = 17
 
 # Backward-compat alias for EngineKVFormat.
 GPUKVFormat = EngineKVFormat
