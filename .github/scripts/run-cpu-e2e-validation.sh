@@ -93,6 +93,38 @@ esac
 # has already installed everything (e.g. macOS CI workflow steps).
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 
+resolve_vllm_cpu_nightly_spec() {
+  if [ -n "${VLLM_CPU_NIGHTLY_SPEC:-}" ]; then
+    echo "Using caller-provided VLLM_CPU_NIGHTLY_SPEC=${VLLM_CPU_NIGHTLY_SPEC}"
+    return
+  fi
+
+  local platform_label=""
+  case "$(uname -s)" in
+    Darwin) platform_label="macos-latest" ;;
+    Linux) platform_label="ubuntu-22.04" ;;
+  esac
+
+  if [ -n "${platform_label}" ] && [ -z "${LMCACHE_VLLM_PIN_URL:-}" ]; then
+    export LMCACHE_VLLM_PIN_URL="https://raw.githubusercontent.com/LMCache/LMCache/github_nightly_tested_vllm/latest_tested_vllm_${platform_label}.txt"
+  fi
+
+  local resolver="${SHARED_SCRIPTS_DIR}/../../.buildkite/k3_harness/resolve-pinned-vllm.sh"
+  if [ -f "${resolver}" ]; then
+    # shellcheck disable=SC1090
+    source "${resolver}"
+  else
+    echo "Pinned vLLM resolver not found at ${resolver}; using latest CPU nightly"
+  fi
+
+  if [ -n "${PINNED_VLLM_VERSION:-}" ]; then
+    export VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly==${PINNED_VLLM_VERSION}"
+  else
+    export VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly"
+  fi
+  echo "Resolved VLLM_CPU_NIGHTLY_SPEC=${VLLM_CPU_NIGHTLY_SPEC}"
+}
+
 # Directory to collect artifacts before workspace is deleted
 ARTIFACT_DIR="/tmp/build_${BUILD_ID}_artifacts"
 mkdir -p "${ARTIFACT_DIR}"
@@ -432,6 +464,7 @@ else
   # of `setuptools` that would block the version vllm-cpu-nightly
   # pins.
   uv pip uninstall -y vllm vllm-cpu-nightly 2>/dev/null || true
+  resolve_vllm_cpu_nightly_spec
   PIP_BIN="uv pip" \
   PIP_INSTALL_EXTRA_ARGS="--index-strategy unsafe-best-match" \
     bash "${SHARED_SCRIPTS_DIR}/install_vllm_cpu.sh"
