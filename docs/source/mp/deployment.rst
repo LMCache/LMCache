@@ -38,8 +38,8 @@ Required Docker flags:
 
 - ``--network host`` -- Allows the vLLM container to reach LMCache on localhost.
 - ``--ipc host`` -- Required for CUDA IPC shared memory transfers between
-  containers (see *Isolated IPC* below for the plan to remove this
-  requirement).
+  containers in the default (legacy) mode; see *Isolated IPC* below for
+  running without it.
 - ``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container
   runtime.
 
@@ -57,26 +57,28 @@ orchestrators), use the HTTP server entry point:
         /opt/venv/bin/lmcache server \
         --l1-size-gb 60 --eviction-policy LRU --max-workers 4 --port 6555
 
-Isolated IPC (toward removing ``--ipc host``)
+Isolated IPC (running without ``--ipc host``)
 ---------------------------------------------
 
-CUDA IPC in MP mode has two legs with different sharing requirements:
+CUDA IPC in MP mode has two legs, and by default both depend on a shared
+``/dev/shm`` tmpfs -- which is what ``--ipc host`` / ``hostIPC: true``
+really provides:
 
-- **KV-cache memory sharing** works through CUDA IPC *memory* handles,
-  which rendezvous in the kernel driver. The current registration path
-  still keeps a reference-counter file in ``/dev/shm``, so the containers
-  must share it for now.
-- **Event ordering** (the per-STORE/RETRIEVE device events) uses CUDA
-  interprocess *event* handles by default, which only resolve when both
-  containers share a ``/dev/shm`` tmpfs -- this is what ``--ipc host`` /
-  ``hostIPC: true`` really provides.
+- **KV-cache memory sharing**: the default registration path uses
+  PyTorch storage IPC, which keeps a reference-counter file in
+  ``/dev/shm``.
+- **Event ordering** (the per-STORE/RETRIEVE device events): CUDA
+  interprocess *event* handles only resolve when both containers share
+  a ``/dev/shm`` tmpfs.
 
-The **isolated IPC** setting removes the second dependency: when enabled,
-LMCache orders transfers with timeline-semaphore events carried over CUDA
-IPC memory handles (see
-``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``), which
-work across containers that share nothing -- no host IPC namespace, no
-common ``/dev/shm``. It must be enabled on **both** sides of a deployment:
+The **isolated IPC** setting removes both: KV-cache registration switches
+to raw CUDA IPC memory handles
+(``docs/design/v1/platform/cuda/ipc_wrapper.md``) and event ordering to
+timeline-semaphore events carried over CUDA IPC memory handles
+(``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``). Both
+rendezvous in the kernel driver, so they work across containers that
+share nothing -- no host IPC namespace, no common ``/dev/shm``, no
+``--ipc host``. It must be enabled on **both** sides of a deployment:
 
 .. code-block:: bash
 
@@ -95,17 +97,24 @@ immediately; the server side logs the error and the worker times out
 after ``lmcache.mp.mq_timeout``).
 
 .. note::
-   Keep ``--ipc host`` (or the shared ``/dev/shm`` mount) for now even
-   with isolated IPC enabled: the KV-cache *memory* registration path
-   still requires it. Once registration moves to raw CUDA IPC memory
-   handles, the flag combination will allow dropping ``--ipc host`` /
-   ``hostIPC: true`` entirely.
+   With isolated IPC enabled on both sides, the MP data path has no
+   ``/dev/shm`` dependency left: ``--ipc host`` (Docker) and
+   ``hostIPC: true`` / the shared ``/dev/shm`` mount (Kubernetes) can be
+   dropped. The two containers only need access to the same GPUs and
+   distinct PID *values* (any regular container setup provides both).
+   The Kubernetes :doc:`operator` wires isolated IPC by default on NVIDIA
+   (``spec.isolatedIPC``).
 
 Current limitations:
 
 - Supported by the **vLLM MP connector only**. SGLang, TensorRT-LLM,
   CacheBlend, and qstore still create raw CUDA interprocess events and
   require isolated IPC to stay off (the default).
+- KV-cache tensors must live in ``cudaMalloc``-style memory. CUDA VMM
+  allocations have no IPC memory handle, so
+  ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` and vLLM's sleep
+  mode (``CuMemAllocator``) are incompatible with isolated IPC;
+  registration fails with an explanatory error.
 - Requires the ``cuda-python`` package on both sides (included in the
   CUDA requirement files).
 
@@ -196,8 +205,8 @@ Architecture Notes
 - **DaemonSet uses ``hostNetwork: true``** so vLLM pods discover the LMCache
   server via ``status.hostIP``.
 - **Both containers mount ``/dev/shm``** from the host to enable CUDA IPC
-  memory sharing (see *Isolated IPC* above for the plan to remove this
-  requirement).
+  memory sharing in the default (legacy) mode; see *Isolated IPC* above for
+  running without it.
 - **GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain
   exclusively allocated to vLLM pods.  The NVIDIA container runtime
   automatically provides GPU access for IPC-based memory transfers.

@@ -15,8 +15,8 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.gpu_connector.utils import get_device
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RequestType
 
 if TYPE_CHECKING:
     # Third Party
@@ -31,9 +31,9 @@ if TYPE_CHECKING:
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
         StoreResult,
-        _IpcEvent,
     )
     from lmcache.v1.multiprocess.mq import MessagingFuture
+    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 
 logger = lmcache_init_logger(__name__)
 
@@ -289,7 +289,7 @@ class QRingBufferCapture:
             if isinstance(raw_dtype, torch.dtype)
             else getattr(torch, str(raw_dtype))
         )
-        device = next(iter(kv_caches.values())).device
+        device = get_device(next(iter(kv_caches.values())))
         block_size = vllm_config.cache_config.block_size
 
         cfg = vllm_config.kv_transfer_config
@@ -512,7 +512,7 @@ class QRingBufferCapture:
             return list(block_ids[0])
         return None
 
-    def batched_submit_qstore_requests(self, event: "_IpcEvent | None") -> None:
+    def batched_submit_qstore_requests(self, event: IPCEvent | None) -> None:
         """
         Submit a batched Q store request to LMCache.
         A copy of batched_submit_store_requests for Q stores.
@@ -520,8 +520,8 @@ class QRingBufferCapture:
         cache salts for the current forward step.
 
         Args:
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event that is recorded after the current model
+                inference step.
         """
         state = self.q_step_state
         self.q_step_state = None
@@ -547,18 +547,16 @@ class QRingBufferAdapter:
         self,
         adapter: "LMCacheMPWorkerAdapter",
         q_model_name: str,
-        send_lmcache_request: Any,
     ) -> None:
         self._adapter = adapter
         self.q_model_name = q_model_name
-        self.send_lmcache_request = send_lmcache_request
 
         self.q_ring: QRingBuffer | None = None
         self.q_engine_group_infos: Sequence[EngineGroupInfo] | None = None
         self.q_store_futures: dict[
             int, tuple[MessagingFuture[StoreResult], list[int]]
         ] = {}
-        self.q_store_events: dict[int, _IpcEvent] = {}
+        self.q_store_events: dict[int, object] = {}
         self._q_store_seq: int = 0
 
     def register_q_ring(
@@ -632,9 +630,8 @@ class QRingBufferAdapter:
                 self.q_model_name,
                 self._adapter.world_size,
                 self._adapter.blocks_in_chunk,
-                self._adapter.mq_client,
+                self._adapter.req_client,
                 self._adapter._mq_timeout,
-                send_request=self.send_lmcache_request,
                 layout_hints=vllm_layout_hints(),
                 engine_group_infos=self.q_engine_group_infos,
             )
@@ -678,7 +675,7 @@ class QRingBufferAdapter:
         request_id: str,
         op: LoadStoreOp,
         ring_block_ids: list[int],
-        event: "_IpcEvent",
+        event: IPCEvent,
         cache_salt: str = "",
     ) -> None:
         """Submit a store request for QRingBuffer content at ring_block_ids
@@ -752,10 +749,8 @@ class QRingBufferAdapter:
         if not self.q_ring:
             return
         try:
-            self.send_lmcache_request(
-                self._adapter.mq_client,
-                RequestType.UNREGISTER_Q_CACHE,
-                [self._adapter.instance_id],
+            self._adapter.req_client.unregister_q_cache(
+                self._adapter.instance_id
             ).result(timeout=self._adapter._mq_timeout)
         except TimeoutError:
             logger.warning(

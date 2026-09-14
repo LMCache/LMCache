@@ -23,11 +23,13 @@
 /lmcache/v1/distributed/l2_adapters/    @ApostaC @maobaolong @chunxiaozheng @DongDongJu @zhengfeihe
 /lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py  @maobaolong
 /lmcache/v1/distributed/l2_adapters/resp_l2_adapter.py           @sammshen
+/lmcache/v1/distributed/memory_manager/gds_l1_memory_manager.py  @ApostaC @maobaolong @chunxiaozheng @DongDongJu @Shaoting-Feng
 
 # GPU connector
 /lmcache/v1/gpu_connector/             @sammshen @ApostaC @hlin99
-/lmcache/v1/gpu_connector/_gds_async.py   @sammshen @ApostaC @hlin99 @andyluo7
-/lmcache/v1/gpu_connector/gds_context.py  @sammshen @ApostaC @hlin99 @andyluo7
+/lmcache/v1/gpu_connector/_gds_async.py   @sammshen @ApostaC @hlin99 @andyluo7 @Shaoting-Feng
+/lmcache/v1/gpu_connector/gds_context.py  @sammshen @ApostaC @hlin99 @andyluo7 @Shaoting-Feng
+/lmcache/v1/gpu_connector/_cufile_async.py @sammshen @ApostaC @hlin99 @Shaoting-Feng
 /lmcache/v1/gpu_connector/_hipfile_async.py @andyluo7
 
 # Platform

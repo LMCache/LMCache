@@ -356,6 +356,39 @@ class GPUCacheContext(BaseCacheContext):
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
     ):
+        # Kept for close(): raw-IPC wrappers hold driver-level mappings
+        # that pin the exporter's device memory until explicitly closed.
+        self._kv_wrappers: KVCache = list(kv_caches)
+        try:
+            self._init_impl(
+                kv_caches,
+                lmcache_tokens_per_chunk,
+                layout_hints,
+                engine_group_infos,
+                engine_type,
+                separate_object_groups,
+                full_sw_kv,
+            )
+        except BaseException:
+            # Partial construction may have imported some mappings
+            # already; roll them back so a failed registration does not
+            # pin the worker's KV pool.
+            self._close_kv_wrappers()
+            raise
+
+    def _init_impl(
+        self,
+        kv_caches: KVCache,
+        lmcache_tokens_per_chunk: int,
+        layout_hints: LayoutHints | None,
+        engine_group_infos: Sequence[EngineGroupInfo],
+        engine_type: EngineType,
+        separate_object_groups: bool,
+        full_sw_kv: bool,
+    ) -> None:
+        """Body of ``__init__``; split out so the constructor can roll
+        back partially imported KV mappings on failure.
+        """
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
             unwrapped,
@@ -434,11 +467,30 @@ class GPUCacheContext(BaseCacheContext):
         )
 
     def close(self) -> None:
+        """Drain the context stream, deregister the GDS staging buffer and
+        release the imported KV mappings (reverse of __init__).
+
+        The stream is synchronized first so no in-flight kernel still
+        touches the mappings when they are unmapped. The wrapper close
+        unmaps raw CUDA IPC imports; without it a dead worker's KV pool
+        stays resident on this process's GPUs for the process lifetime.
+        The tensors built over those mappings must not be dereferenced
+        afterwards -- the caller (``_release_entries``) drops the context
+        right after this call.
         """
-        Deregister this context's GDS staging buffer (reverse of __init__).
-        """
+        self.cuda_stream_.synchronize()
         with torch_dev.stream(self.cuda_stream_):
             get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+        self._close_kv_wrappers()
+
+    def _close_kv_wrappers(self) -> None:
+        """Close every KV wrapper, continuing past per-wrapper failures."""
+        for wrapper in self._kv_wrappers:
+            try:
+                wrapper.close()
+            except Exception:
+                logger.warning("KV wrapper close failed", exc_info=True)
+        self._kv_wrappers = []
 
     @property
     def stream(self) -> Any:

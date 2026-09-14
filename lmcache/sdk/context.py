@@ -27,12 +27,12 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -50,7 +50,7 @@ ModifyFnType = Callable[
 
 class LMCacheSDKContext:
     """
-    Retrieve and store KV cache tensors via LMCache's MQ endpoints.
+    Retrieve and store KV cache tensors through an LMCache MP request client.
 
     The model layout must already be registered in the running LMCache server
     (e.g. by a vllm instance that called REGISTER_KV_CACHE).
@@ -73,7 +73,8 @@ class LMCacheSDKContext:
         Initialize the SDK context and register the SDK transfer strategy.
 
         Args:
-            url: ZMQ endpoint URL for the LMCache message queue.
+            url: Multiprocess request endpoint. The URL scheme selects the
+                transport.
             http_url: HTTP endpoint URL for fetching information.
             model_name: Model name used by the running LMCache server instance.
             kind: The type of cache.
@@ -84,7 +85,10 @@ class LMCacheSDKContext:
         """
         self._kind = kind
         self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(url, self._zmq_context)
+        self._req_client: RequestClient = RequestClientFactory.create(
+            url,
+            context=self._zmq_context,
+        )
         self._mq_timeout = timeout
         self._model_name = kind.server_model_name(model_name)
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
@@ -228,20 +232,14 @@ class LMCacheSDKContext:
             head_dim=head_dim,
         )
 
-        # First Party
-        from lmcache.integration.vllm.vllm_multi_process_adapter import (
-            send_lmcache_request,
-        )
-
         transfer_ctx.register(
             self.instance_id,
             self._kv_caches,
             self._model_name,
             self._world_size,
             self.blocks_in_chunk,
-            self._mq_client,
+            self._req_client,
             self._mq_timeout,
-            send_request=send_lmcache_request,
             layout_hints=layout_hints,
         )
 
@@ -270,14 +268,15 @@ class LMCacheSDKContext:
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the MQ client and ZMQ context."""
-        self._mq_client.close()
+        """Close the request client and ZMQ context."""
+        self._req_client.close()
 
     def maybe_submit_lookup_request(
         self,
         request_id: str,
         token_ids: list[int],
         cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
     ) -> None:
         """Submit a LOOKUP request for the given token IDs.
         Modification from lmcache/integration/vllm/vllm_multi_process_adapter.py.
@@ -288,6 +287,8 @@ class LMCacheSDKContext:
             request_id: Unique ID for this lookup request.
             token_ids: List of token IDs to look up.
             cache_salt: Optional cache salt string for the lookup.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
         """
         if request_id in self._pending_lookups:
             # Skip if there is already a lookup request
@@ -301,13 +302,10 @@ class LMCacheSDKContext:
             end=aligned_end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         ).no_worker_id_version()
 
-        future = self._mq_client.submit_request(
-            RequestType.LOOKUP,
-            [key, self._world_size],
-            get_response_class(RequestType.LOOKUP),
-        )
+        future = self._req_client.lookup(key, self._world_size)
         try:
             future.result(timeout=self._mq_timeout)
         except TimeoutError:
@@ -341,11 +339,9 @@ class LMCacheSDKContext:
             return self._finished_lookups[request_id]
 
         try:
-            result = self._mq_client.submit_request(
-                RequestType.QUERY_PREFETCH_STATUS,
-                [request_id],
-                get_response_class(RequestType.QUERY_PREFETCH_STATUS),
-            ).result(timeout=self._mq_timeout)
+            result = self._req_client.query_prefetch_status(request_id).result(
+                timeout=self._mq_timeout
+            )
         except TimeoutError:
             logger.warning(
                 "QUERY_PREFETCH_STATUS timed out after %ss.",
@@ -370,11 +366,7 @@ class LMCacheSDKContext:
         self._pending_lookups.discard(request_id)
         self._finished_lookups.pop(request_id, None)
         try:
-            self._mq_client.submit_request(
-                RequestType.END_SESSION,
-                [request_id],
-                get_response_class(RequestType.END_SESSION),
-            ).result(timeout=self._mq_timeout)
+            self._req_client.end_session(request_id).result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "END_SESSION timed out after %ss for request_id=%s.",
@@ -386,12 +378,15 @@ class LMCacheSDKContext:
         self,
         tokens: Sequence[int],
         cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
     ) -> torch.Tensor | None:
         """Retrieve KV cache tensors for the given token IDs.
 
         Args:
             tokens: The list of token IDs to retrieve KV cache for.
             cache_salt: Optional cache salt string for the lookup.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             A contiguous CPU tensor containing the retrieved KV cache for
@@ -420,6 +415,7 @@ class LMCacheSDKContext:
             request_id,
             token_ids=list(tokens[:total_tokens]),
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
 
         start_time = time.time()
@@ -452,6 +448,7 @@ class LMCacheSDKContext:
             end=num_prefetched_tokens,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
             worker_id=0,
         )
         try:
@@ -464,6 +461,7 @@ class LMCacheSDKContext:
         kv: torch.Tensor,
         tokens: Sequence[int],
         cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
     ) -> bool:
         """Store KV cache tensors for the given token IDs.
 
@@ -471,6 +469,8 @@ class LMCacheSDKContext:
             kv: The KV cache tensor to store, of shape [2, L, T, D].
             tokens: The list of token IDs corresponding to the KV cache tensor.
             cache_salt: Optional cache salt string for the store.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
 
         Returns:
             True if the store operation is successful, False otherwise.
@@ -493,6 +493,7 @@ class LMCacheSDKContext:
             end=total_tokens,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
             worker_id=0,
         )
 
@@ -510,6 +511,7 @@ class LMCacheSDKContext:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        request_configs: dict[str, object] | None = None,
         worker_id: int | None = None,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
@@ -520,6 +522,8 @@ class LMCacheSDKContext:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
             worker_id: Optional worker ID for the key.
                 If None, the key will be created without a worker ID (for lookups).
 
@@ -536,4 +540,5 @@ class LMCacheSDKContext:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )

@@ -16,10 +16,9 @@ import torch
 # First Party
 from lmcache import device_ops, torch_dev
 from lmcache import torch_device_type as torch_device_type  # noqa: F401
-from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
@@ -1444,7 +1443,8 @@ class AddressManager:
         Args:
             size: The requested size of the memory block. Should be greater
                 than 0.
-            batch_size: The number of memory blocks to allocate.
+            batch_size: The number of memory blocks to allocate. Must be
+                non-negative; zero returns an empty list.
 
         Returns:
             A list of tuple (address, allocated_size) where address is the starting
@@ -1453,8 +1453,12 @@ class AddressManager:
             Note: the length of the return list is the same as the batch_size.
 
         Raises:
-            RuntimeError: If no memory is available to allocate.
+            RuntimeError: If batch_size is negative or no memory is available
+                to allocate.
         """
+        if batch_size < 0:
+            raise RuntimeError("batch_size must be non-negative")
+
         aligned_size = self.compute_aligned_size(size)
         remaining = batch_size
         allocate_result: list[tuple[int, int]] = []
@@ -1497,21 +1501,6 @@ class AddressManager:
             raise RuntimeError(
                 f"Failed to batched allocate {batch_size} memory blocks "
                 f"of size {size} because no enough memory is available"
-            )
-        if len(allocate_result) != batch_size:
-            # The length of allocate_result is not equal to batch_size;
-            # free list is untouched, no rollback needed
-            logger.warning(
-                "Failed to batched allocate %d memory blocks of size %d "
-                "because the length of allocate_result %d is not equal to batch_size",
-                batch_size,
-                size,
-                len(allocate_result),
-            )
-            raise RuntimeError(
-                f"Failed to batched allocate {batch_size} memory blocks "
-                f"of size {size} because the length of allocate_result "
-                f"{len(allocate_result)} is not equal to batch_size"
             )
 
         # Allocation succeeded; batch-update the free list

@@ -99,6 +99,18 @@ def test_messaging_future_basic_usage():
     assert result == 42, f"Expected result 42, got {result}"
 
 
+def test_messaging_future_propagates_request_exception():
+    """A transport failure is raised when the future result is consumed."""
+    future = MessagingFuture[int]()
+    error = RuntimeError("request failed")
+
+    future.set_exception(error)
+
+    assert future.query()
+    with pytest.raises(RuntimeError, match="request failed"):
+        future.result()
+
+
 def test_messaging_future_with_thread():
     """Test MessagingFuture with result set from another thread."""
     future = MessagingFuture[str]()
@@ -794,3 +806,43 @@ def test_device_future_checks_backend_support_during_initialization(
         DeviceMessagingFuture.FromMessagingFuture(
             MessagingFuture[tuple[bytes, int]](), device="dev"
         )
+
+
+def test_device_future_reuses_prevalidated_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hot-path future construction reuses the caller's registered backend."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    class _CachedBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device: object) -> None:
+            raise AssertionError("cached backend must not be checked per request")
+
+        def import_event(self, handle: bytes, device: object) -> object:
+            return (handle, device)
+
+        def synchronize_event(self, event: object, device: object) -> None:
+            return None
+
+        def query_event(self, event: object) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: (_ for _ in ()).throw(
+            AssertionError("cached backend must not be resolved per request")
+        ),
+    )
+
+    raw = MessagingFuture[tuple[bytes, int]]()
+    future = DeviceMessagingFuture.FromMessagingFuture(
+        raw,
+        device="dev",
+        event_backend=_CachedBackend(),  # type: ignore[arg-type]
+    )
+    raw.set_result((b"event", 7))
+
+    assert future.result() == 7
