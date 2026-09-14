@@ -2,6 +2,7 @@
 """Tests for the native C++ filesystem connector."""
 
 # Standard
+from pathlib import Path
 from typing import Any
 import ctypes
 import os
@@ -80,6 +81,68 @@ def _submit_and_wait(
 ) -> tuple[int, bool, str, list[bool] | None]:
     future_id = getattr(client, method_name)([key], [view])
     return _wait_for_completion(client, future_id)
+
+
+def _expected_filename(key: str) -> str:
+    model, kv_rank, object_group_id, chunk_hash = key.split("@")
+    safe_model = model.replace("/", "-SEP-")
+    return f"{safe_model}@0x{kv_rank}@{object_group_id}@{chunk_hash}.data"
+
+
+def _expected_path(base_path: Path, key: str, hash_subdir_levels: int) -> Path:
+    chunk_hash = key.split("@")[3]
+    path = base_path
+    for level in range(hash_subdir_levels):
+        path /= chunk_hash[level * 2 : level * 2 + 2]
+    return path / _expected_filename(key)
+
+
+@pytest.mark.parametrize("hash_subdir_levels", [0, 1, 2])
+def test_hash_subdir_layout_round_trip_and_delete(
+    tmp_path: Path,
+    hash_subdir_levels: int,
+) -> None:
+    """All operations should use the configured chunk-hash path layout."""
+    chunk_hash = "a1b2c3d4e5f60718"
+    key = f"test_model@00000000@7@{chunk_hash}"
+    LMCacheFSClient = _import_fs_client()
+    client = LMCacheFSClient(
+        str(tmp_path),
+        1,
+        hash_subdir_levels=hash_subdir_levels,
+    )
+    source_data = bytearray(b"hash-subdirectory-test-data")
+    source = memoryview(source_data)
+    destination_data = bytearray(len(source_data))
+    destination = memoryview(destination_data)
+    expected_path = _expected_path(tmp_path, key, hash_subdir_levels)
+
+    try:
+        store = _submit_and_wait(client, "submit_batch_set", key, source)
+        assert store[1], store[2]
+        assert expected_path.is_file()
+
+        future_id = client.submit_batch_exists([key])
+        exists = _wait_for_completion(client, future_id)
+        assert exists[1], exists[2]
+        assert exists[3] == [True]
+
+        load = _submit_and_wait(client, "submit_batch_get", key, destination)
+        assert load[1], load[2]
+        assert load[3] == [True]
+        assert destination_data == source_data
+
+        future_id = client.submit_batch_delete([key])
+        delete = _wait_for_completion(client, future_id)
+        assert delete[1], delete[2]
+        assert delete[3] == [True]
+        assert not expected_path.exists()
+
+        future_id = client.submit_batch_exists([key])
+        exists = _wait_for_completion(client, future_id)
+        assert exists[3] == [False]
+    finally:
+        client.close()
 
 
 def test_odirect_read_does_not_split_for_read_ahead(tmp_path) -> None:

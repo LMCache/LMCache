@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace lmcache {
@@ -30,13 +31,15 @@ struct WorkerFSConn {
   // If > 0, trigger filesystem readahead by issuing a small
   // initial read of this many bytes before reading the rest.
   size_t read_ahead_size = 0;
+  // Hash directories this worker has successfully ensured exist.
+  std::unordered_set<std::filesystem::path> prepared_hash_subdirs;
 };
 
 class FSConnector : public ConnectorBase<WorkerFSConn> {
  public:
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,
-              size_t read_ahead_size = 0);
+              size_t read_ahead_size = 0, int hash_subdir_levels = 0);
   ~FSConnector() override;
 
  protected:
@@ -49,6 +52,15 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   bool do_single_delete(WorkerFSConn& conn, const std::string& key) override;
 
  private:
+  // Build the final path for a serialized key. When hash subdirectories are
+  // enabled, the current native wire format's chunk-hash field (parts[3])
+  // supplies two hex characters per directory level.
+  std::filesystem::path key_to_file_path(const WorkerFSConn& conn,
+                                         const std::string& key) const;
+
+  // Extract the chunk hash from the current 4/5-field native wire format.
+  static std::string key_to_chunk_hash(const std::string& key);
+
   // Build the filesystem-safe filename from a serialized key string.
   //
   // Input key (from NativeConnectorL2Adapter._object_key_to_string):
@@ -74,6 +86,7 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   bool use_odirect_;
   size_t disk_block_size_;
   size_t read_ahead_size_;
+  int hash_subdir_levels_;
 };
 
 }  // namespace connector
