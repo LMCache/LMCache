@@ -467,15 +467,18 @@ class GPUCacheContext(BaseCacheContext):
         )
 
     def close(self) -> None:
-        """Deregister the GDS staging buffer and release the imported KV
-        mappings (reverse of __init__).
+        """Drain the context stream, deregister the GDS staging buffer and
+        release the imported KV mappings (reverse of __init__).
 
-        The wrapper close unmaps raw CUDA IPC imports; without it a dead
-        worker's KV pool stays resident on this process's GPUs for the
-        process lifetime. The tensors built over those mappings must not
-        be dereferenced afterwards -- the caller (``_release_entries``)
-        drops the context right after this call.
+        The stream is synchronized first so no in-flight kernel still
+        touches the mappings when they are unmapped. The wrapper close
+        unmaps raw CUDA IPC imports; without it a dead worker's KV pool
+        stays resident on this process's GPUs for the process lifetime.
+        The tensors built over those mappings must not be dereferenced
+        afterwards -- the caller (``_release_entries``) drops the context
+        right after this call.
         """
+        self.cuda_stream_.synchronize()
         with torch_dev.stream(self.cuda_stream_):
             get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
         self._close_kv_wrappers()

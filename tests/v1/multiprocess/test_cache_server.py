@@ -25,12 +25,9 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_response_class,
-)
 from lmcache.v1.multiprocess.server import run_cache_server
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
 # Configuration constants
@@ -157,7 +154,7 @@ BLOCKS_PER_KEY = 16
 
 
 def lookup_all(
-    client: MessageQueueClient,
+    client: RequestClient,
     keys: list[IPCCacheServerKey],
     timeout: float = DEFAULT_TIMEOUT,
 ) -> int:
@@ -170,18 +167,12 @@ def lookup_all(
     for key in keys:
         lookup_key = key.no_worker_id_version()
         # Phase 1: Submit lookup (server tracks by request_id, returns None)
-        client.submit_request(
-            RequestType.LOOKUP,
-            [lookup_key, 1],
-            get_response_class(RequestType.LOOKUP),
-        ).result(timeout=timeout)
+        client.lookup(lookup_key, 1).result(timeout=timeout)
         # Phase 2: Poll by request_id until done
         while True:
-            result = client.submit_request(
-                RequestType.QUERY_PREFETCH_STATUS,
-                [lookup_key.request_id],
-                get_response_class(RequestType.QUERY_PREFETCH_STATUS),
-            ).result(timeout=timeout)
+            result = client.query_prefetch_status(lookup_key.request_id).result(
+                timeout=timeout
+            )
             if result is not None:
                 total += result
                 break
@@ -208,7 +199,7 @@ def _recorded_event_handle() -> bytes:
 
 
 def store_keys(
-    client: MessageQueueClient,
+    client: RequestClient,
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
@@ -220,17 +211,13 @@ def store_keys(
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
         block_ids = gpu_block_ids[start:end]
-        future = client.submit_request(
-            RequestType.STORE,
-            [key, instance_id, [block_ids], event_handle],
-            get_response_class(RequestType.STORE),
-        )
+        future = client.store(key, instance_id, [block_ids], event_handle)
         result = future.to_device_future().result(timeout=timeout)
         assert result is True, f"Store should succeed for key {i}"
 
 
 def retrieve_keys(
-    client: MessageQueueClient,
+    client: RequestClient,
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
@@ -243,11 +230,7 @@ def retrieve_keys(
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
         block_ids = gpu_block_ids[start:end]
-        future = client.submit_request(
-            RequestType.RETRIEVE,
-            [key, instance_id, [block_ids], event_handle, 0],
-            get_response_class(RequestType.RETRIEVE),
-        )
+        future = client.retrieve(key, instance_id, [block_ids], event_handle, 0)
         result = future.to_device_future().result(timeout=timeout)
         results.append(result)
     return results
@@ -318,11 +301,11 @@ def zmq_context() -> Generator[zmq.Context, None, None]:
 @pytest.fixture(scope="function")
 def client(
     server_process: mp.Process, zmq_context: zmq.Context
-) -> Generator[MessageQueueClient, None, None]:
+) -> Generator[RequestClient, None, None]:
     """
     Fixture that provides a message queue client for each test function.
     """
-    client = MessageQueueClient(server_url=SERVER_URL, context=zmq_context)
+    client = RequestClientFactory.create(SERVER_URL, context=zmq_context)
     yield client
     # Client cleanup
     client.close()
@@ -344,7 +327,7 @@ def client_context() -> Generator[ClientContext, None, None]:
 
 @pytest.fixture(scope="function")
 def registered_instance(
-    client: MessageQueueClient, client_context: ClientContext
+    client: RequestClient, client_context: ClientContext
 ) -> Generator[int, None, None]:
     """
     Fixture that registers a KV cache instance and returns the instance ID.
@@ -355,18 +338,14 @@ def registered_instance(
     # Register KV cache. No engine group infos are sent, so the server
     # detects ``slots_per_block`` from the tensors and treats every group
     # as uncompressed (``compress_ratio == 1``).
-    future = client.submit_request(
-        RequestType.REGISTER_KV_CACHE,
-        [
-            instance_id,
-            client_context.get_kv_cache(),
-            "testmodel",
-            1,
-            EngineType.VLLM,
-            {},
-            [],
-        ],
-        get_response_class(RequestType.REGISTER_KV_CACHE),
+    future = client.register_kv_cache(
+        instance_id,
+        client_context.get_kv_cache(),
+        "testmodel",
+        1,
+        EngineType.VLLM,
+        {},
+        [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None, "Register should return None"
@@ -375,14 +354,8 @@ def registered_instance(
 
     # Unregister KV cache
     try:
-        client.submit_request(
-            RequestType.CLEAR, [], get_response_class(RequestType.CLEAR)
-        ).result(timeout=DEFAULT_TIMEOUT)
-        future = client.submit_request(
-            RequestType.UNREGISTER_KV_CACHE,
-            [instance_id],
-            get_response_class(RequestType.UNREGISTER_KV_CACHE),
-        )
+        client.clear().result(timeout=DEFAULT_TIMEOUT)
+        future = client.unregister_kv_cache(instance_id)
         future.result(timeout=DEFAULT_TIMEOUT)
     except Exception as e:
         print(f"Error during unregister: {e}")
@@ -401,7 +374,7 @@ def test_server_running(server_process: mp.Process):
 
 
 def test_register_unregister_kv_cache(
-    client: MessageQueueClient, client_context: ClientContext
+    client: RequestClient, client_context: ClientContext
 ):
     """
     Test registering and unregistering a KV cache.
@@ -410,34 +383,26 @@ def test_register_unregister_kv_cache(
 
     # Register. No engine group infos: geometry is detected from the
     # tensors (uncompressed).
-    future = client.submit_request(
-        RequestType.REGISTER_KV_CACHE,
-        [
-            instance_id,
-            client_context.get_kv_cache(),
-            "testmodel",
-            1,
-            EngineType.VLLM,
-            {},
-            [],
-        ],
-        get_response_class(RequestType.REGISTER_KV_CACHE),
+    future = client.register_kv_cache(
+        instance_id,
+        client_context.get_kv_cache(),
+        "testmodel",
+        1,
+        EngineType.VLLM,
+        {},
+        [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
     # Unregister
-    future = client.submit_request(
-        RequestType.UNREGISTER_KV_CACHE,
-        [instance_id],
-        get_response_class(RequestType.UNREGISTER_KV_CACHE),
-    )
+    future = client.unregister_kv_cache(instance_id)
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
 
 def test_store_and_lookup(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -463,7 +428,7 @@ def test_store_and_lookup(
 
 
 def test_store_fails_closed_on_incomplete_block_ids(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -486,15 +451,11 @@ def test_store_fails_closed_on_incomplete_block_ids(
     event_handle = _recorded_event_handle()
 
     result = (
-        client.submit_request(
-            RequestType.STORE,
-            [
-                key,
-                registered_instance,
-                [list(range(BLOCKS_PER_KEY // 2))],
-                event_handle,
-            ],
-            get_response_class(RequestType.STORE),
+        client.store(
+            key,
+            registered_instance,
+            [list(range(BLOCKS_PER_KEY // 2))],
+            event_handle,
         )
         .to_device_future()
         .result(timeout=DEFAULT_TIMEOUT)
@@ -504,7 +465,7 @@ def test_store_fails_closed_on_incomplete_block_ids(
 
 
 def test_store_retrieve_verify(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -555,7 +516,7 @@ def test_store_retrieve_verify(
 
 
 def test_retrieve_partial_miss(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -613,7 +574,7 @@ def test_retrieve_partial_miss(
 
 
 def test_multiple_retrieve_operations(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -694,7 +655,7 @@ def test_multiple_retrieve_operations(
 
 
 def test_multiple_store_operations(
-    client: MessageQueueClient,
+    client: RequestClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -721,15 +682,11 @@ def test_multiple_store_operations(
 
 
 def test_get_chunk_size(
-    client: MessageQueueClient,
+    client: RequestClient,
 ):
     """
     Test retrieving the chunk size from the server.
     """
-    chunk_size = client.submit_request(
-        RequestType.GET_CHUNK_SIZE,
-        [],
-        get_response_class(RequestType.GET_CHUNK_SIZE),
-    ).result(timeout=DEFAULT_TIMEOUT)
+    chunk_size = client.get_chunk_size().result(timeout=DEFAULT_TIMEOUT)
 
     assert chunk_size == CHUNK_SIZE, f"Chunk size should be {CHUNK_SIZE}"

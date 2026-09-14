@@ -147,6 +147,23 @@ def test_submit_store_returns_pending_future_until_gather_and_commit(
     ctx.close()
 
 
+def test_create_recorded_event_uses_local_device_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async engine-driven ordering uses a local, non-IPC event."""
+    fake_torch_dev = MagicMock()
+    event = fake_torch_dev.Event.return_value
+    stream = fake_torch_dev.current_stream.return_value
+    monkeypatch.setattr(async_engine_driven, "torch_dev", fake_torch_dev)
+    ctx = AsyncEngineDrivenTransferContext()
+    ctx._engine_driven_context = MagicMock()
+
+    assert ctx.create_recorded_event() is event
+    fake_torch_dev.Event.assert_called_once_with()
+    event.record.assert_called_once_with(stream)
+    ctx.close()
+
+
 def test_submit_store_commit_waits_for_gather_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

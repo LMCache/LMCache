@@ -386,6 +386,25 @@ class TestFetchJson:
         finally:
             server.server_close()
 
+    def test_invalid_json(self):
+        handler = type(
+            "_H",
+            (_MockHandler,),
+            {
+                "response_body": b"",
+                "response_code": 200,
+            },
+        )
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        t = Thread(target=server.handle_request, daemon=True)
+        t.start()
+        try:
+            with pytest.raises(DescribeError, match="Invalid JSON response"):
+                fetch_json(f"http://127.0.0.1:{port}/status")
+        finally:
+            server.server_close()
+
 
 class TestFetchHealth:
     def test_ok(self):

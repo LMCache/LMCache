@@ -117,10 +117,28 @@ selected per server with ``--p2p-transfer-engine``.
      - RDMA-based transport, shipped as the optional ``lmcache[nixl]`` extra
        (``uv pip install lmcache[nixl]``). Runs over InfiniBand / RoCE
        fabrics.
+   * - ``mooncake_te``
+     - Uses Mooncake Transfer Engine for P2P transfers. It uses TCP by default
+       and can use RDMA when configured through environment variables.
 
-``nixl`` is the only backend available today. The transfer engine is a
-pluggable abstraction, so additional backends can be added in the future
-without changing the rest of the P2P stack.
+Mooncake Transfer Engine
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Select the Mooncake Transfer Engine backend by passing
+``--p2p-transfer-engine mooncake_te`` to ``lmcache server``. This backend uses
+TCP unless an RDMA protocol and device are specified. To use RDMA, set
+``MC_TE_PROTOCOL`` to ``rdma`` and ``MC_TE_DEVICE`` to the RDMA device name
+when starting each server. For example:
+
+.. code-block:: bash
+
+   MC_TE_PROTOCOL=rdma MC_TE_DEVICE=mlx5_0 \
+       lmcache server \
+       <argument-list> \
+       --p2p-transfer-engine mooncake_te
+
+Replace ``mlx5_0`` with the RDMA device available on the node. Both variables
+must be set for RDMA; when they are omitted, Mooncake Transfer Engine uses TCP.
 
 Running a multi-node deployment
 -------------------------------
