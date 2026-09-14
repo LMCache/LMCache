@@ -149,17 +149,15 @@ def _aligned_pairs(
     size: int,
     block_size: int,
 ) -> tuple[list[memoryview], list[memoryview], list[bytearray]]:
-    """Build `count` source/destination pairs, each source filled distinctly.
+    """Build `count` distinctly filled source/destination pairs.
 
     Args:
         count: Number of pairs to build.
-        size: Bytes in each source and destination buffer.
+        size: Bytes in each buffer.
         block_size: Alignment of every buffer's start address, for O_DIRECT.
 
     Returns:
-        Sources, destinations, and the bytearrays backing both.  The third
-        list owns the allocations and must stay referenced for as long as
-        the views are used.
+        Sources, destinations, and the bytearrays that own both.
     """
     sources: list[memoryview] = []
     dests: list[memoryview] = []
@@ -190,13 +188,9 @@ def test_reads_return_identical_bytes(
     read_io_depth: int,
     read_max_bytes_in_flight: int,
 ) -> None:
-    """Neither the pool nor the byte budget may change the bytes returned.
+    """Neither the pool nor the budget may change the bytes returned.
 
-    They decide who issues a read and how many are outstanding, nothing
-    else, so the destination buffer must be indistinguishable from the
-    legacy path's.  A budget below one object size is the interesting
-    case: the group must still take that object, or a batch containing it
-    could never complete.
+    A budget below one object size must still take that object.
     """
     LMCacheFSClient = _import_fs_client()
     block_size = os.statvfs(tmp_path).f_bsize
@@ -273,13 +267,7 @@ def test_pooled_read_tolerates_one_missing_object(tmp_path: Path) -> None:
 
 
 def test_the_default_budget_is_used_when_none_is_configured(tmp_path: Path) -> None:
-    """Zero selects the documented default rather than "no budget".
-
-    Reads in flight is what sets throughput, and inheriting the base
-    class's behaviour leaves it equal to num_workers objects, which is
-    far below what an array needs.  A caller that turns on read_io_depth
-    and says nothing about bytes should get a working figure.
-    """
+    """Zero selects the documented default rather than "no budget"."""
     LMCacheFSClient = _import_fs_client()
     reader = LMCacheFSClient(str(tmp_path), 2, "", False, 0, 8)
     try:

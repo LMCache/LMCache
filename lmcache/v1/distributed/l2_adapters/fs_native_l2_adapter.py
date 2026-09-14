@@ -201,9 +201,6 @@ def _create_fs_native_l2_adapter(
         config.read_io_depth,
         config.read_max_bytes_in_flight,
     )
-    # The connector substitutes its own default when read_io_depth is on
-    # and no budget was configured, so ask it rather than reporting the
-    # raw 0 the caller passed.
     effective_read_budget = native_client.read_budget_bytes()
     logger.info(
         "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "
