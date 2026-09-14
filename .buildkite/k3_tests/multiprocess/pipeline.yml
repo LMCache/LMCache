@@ -335,6 +335,7 @@ steps:
         # we branch on {{matrix.mode}} inside the command to set the
         # per-mode env before invoking the shared runner script.
         command: |
+          export VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly==0.29.1.dev202609121016"
           case "{{matrix.mode}}" in
             shm) ;;  # rely on script defaults (engine-driven + shm transport)
             pickle) export LMCACHE_SHM_NAME="" ;;
