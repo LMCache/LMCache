@@ -11,7 +11,7 @@ import threading
 # First Party
 from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
@@ -23,6 +23,8 @@ from lmcache.v1.distributed.memory_manager import (
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
+from lmcache.v1.distributed.shared_l1.backend import SharedDevDaxL1Backend
+from lmcache.v1.memory_coordinator.api import OutOfSpaceError
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -184,15 +186,39 @@ class L1Manager:
     _gauge_registered: bool = False
     _gauge_target: "L1Manager | None" = None
 
+    # Class-level default so partially constructed instances (tests build
+    # them via ``__new__``) read "no shared backend" instead of raising.
+    _shared_backend: SharedDevDaxL1Backend | None = None
+
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
-        # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
-        # owns its backing allocator instead of branching inside the CPU path.
-        self._memory_manager: L1ManagerProtocol
-        if config.gds_l1_config is not None:
+        # GDS, Device-DAX, shared Device-DAX, and CPU L1 are mutually
+        # exclusive tiers. The shared tier is not a local allocator at all:
+        # it goes through the narrow L1 coordination seam instead of
+        # L1ManagerProtocol, because the Memory Coordinator owns offsets and
+        # object lifetimes.
+        self._memory_manager: L1ManagerProtocol | None
+        self._shared_backend: SharedDevDaxL1Backend | None = None
+        if config.shared_l1_config is not None:
+            self._memory_manager = None
+            shared = config.shared_l1_config
+            memory_config = config.memory_config
+            self._shared_backend = SharedDevDaxL1Backend(
+                devdax_path=memory_config.devdax_path or "",
+                capacity_bytes=memory_config.size_in_bytes,
+                alignment_bytes=memory_config.align_bytes,
+                region_id=shared.region_id,
+                layout_id=shared.layout_id,
+                mapping_offset_bytes=shared.mapping_offset_bytes,
+                coordinator_endpoint=shared.coordinator_endpoint,
+                coordinator_token_file=shared.coordinator_token_file,
+                visibility_library_path=shared.visibility_library_path,
+            )
+            logger.info("L1Manager: coordinator-owned shared Device-DAX L1 enabled")
+        elif config.gds_l1_config is not None:
             self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
             logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
         elif config.memory_config.devdax_path:
@@ -242,6 +268,11 @@ class L1Manager:
         with self._lock:
             self._registered_listeners.append(listener)
 
+    @property
+    def uses_shared_l1(self) -> bool:
+        """Return whether this manager uses coordinator-owned shared L1."""
+        return self._shared_backend is not None
+
     @l1_mgr_synchronized
     def reserve_read(
         self,
@@ -267,6 +298,9 @@ class L1Manager:
             KEY_NOT_READABLE: The key exists but is not
                 readable.
         """
+        if self._shared_backend is not None:
+            return self._shared_reserve_read(keys, read_locks)
+
         total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
@@ -296,6 +330,57 @@ class L1Manager:
                 metadata={"keys": successful_keys},
             )
         )
+        return ret
+
+    def _shared_reserve_read(
+        self,
+        keys: list[ObjectKey],
+        read_locks: int,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Acquire a whole key list and attach shared tensor views."""
+        backend = self._shared_backend
+        assert backend is not None
+        if read_locks != 1:
+            raise ValueError("shared L1 currently supports TP=1 reads only")
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
+
+        try:
+            memory_objects = backend.reserve_read(keys)
+            for key, memory_obj in zip(keys, memory_objects, strict=True):
+                if memory_obj is None:
+                    ret[key] = (L1Error.KEY_NOT_EXIST, None)
+                    continue
+                entry = self._objects.get(key)
+                if entry is not None and not entry.available_for_read():
+                    ret[key] = (L1Error.KEY_NOT_READABLE, None)
+                    continue
+                if entry is None:
+                    entry = L1ObjectState(
+                        memory_obj=memory_obj,
+                        write_lock=TTLLock(self._write_ttl_seconds),
+                        read_lock=TTLLock(self._read_ttl_seconds),
+                        is_temporary=False,
+                    )
+                    self._objects[key] = entry
+                else:
+                    entry.memory_obj = memory_obj
+                entry.read_lock.lock()
+                successful_keys.append(key)
+                ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_reserved_read(successful_keys)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_RESERVED,
+                    metadata={"keys": successful_keys},
+                )
+            )
+        except BaseException:
+            for key in successful_keys:
+                self._objects[key].read_lock.unlock()
+            raise
+
         return ret
 
     @l1_mgr_synchronized
@@ -366,6 +451,9 @@ class L1Manager:
                 non-read-locked, which means the reader may
                 read inconsistent data.
         """
+        if self._shared_backend is not None:
+            return self._shared_finish_read(keys, read_locks)
+
         total = _validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
@@ -416,6 +504,7 @@ class L1Manager:
             successful_keys.append(key)
 
         freed_meta = [self._object_meta(obj) for obj in need_to_free]
+        assert self._memory_manager is not None
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
@@ -434,6 +523,44 @@ class L1Manager:
             )
         )
 
+        return ret
+
+    def _shared_finish_read(
+        self,
+        keys: list[ObjectKey],
+        read_locks: int,
+    ) -> dict[ObjectKey, L1Error]:
+        """Drop local read locks after H2D; immutable M0 needs no global pins."""
+        if read_locks != 1:
+            raise ValueError("shared L1 currently supports TP=1 reads only")
+        ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
+        for key in keys:
+            entry = self._objects.get(key)
+            if (
+                entry is None
+                or entry.write_lock.is_locked()
+                or not entry.read_lock.is_locked()
+            ):
+                ret[key] = (
+                    L1Error.KEY_NOT_EXIST
+                    if entry is None
+                    else L1Error.KEY_IN_WRONG_STATE
+                )
+                continue
+            ret[key] = L1Error.SUCCESS
+            successful_keys.append(key)
+
+        for key in successful_keys:
+            self._objects[key].read_lock.unlock()
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_read_finished(successful_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_READ_FINISHED,
+                metadata={"keys": successful_keys},
+            )
+        )
         return ret
 
     @l1_mgr_synchronized
@@ -465,6 +592,9 @@ class L1Manager:
             KEY_NOT_WRITABLE: The key exists but is not writable.
             OUT_OF_MEMORY: Not enough memory to allocate for the object.
         """
+        if self._shared_backend is not None:
+            return self._shared_reserve_write(keys, is_temporary, layout_desc, mode)
+
         need_to_allocate: list[tuple[ObjectKey, bool]] = []
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
@@ -497,6 +627,7 @@ class L1Manager:
                 ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
             return ret
 
+        assert self._memory_manager is not None
         err, allocated_objs = self._memory_manager.allocate(
             layout_desc, len(need_to_allocate)
         )
@@ -533,6 +664,78 @@ class L1Manager:
         )
         return ret
 
+    def _shared_reserve_write(
+        self,
+        keys: list[ObjectKey],
+        is_temporary: list[bool],
+        layout_desc: MemoryLayoutDesc,
+        mode: Literal["new", "update", "all"],
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Reserve immutable placements with one coordinator batch."""
+        backend = self._shared_backend
+        assert backend is not None
+        if any(is_temporary):
+            raise ValueError("shared L1 does not support temporary objects")
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
+        pending: list[tuple[ObjectKey, bool]] = []
+        for key, is_temp in zip(keys, is_temporary, strict=True):
+            if mode == "update" or key in self._objects:
+                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
+                continue
+            pending.append((key, is_temp))
+
+        try:
+            memory_objects = backend.reserve_write(
+                [key for key, _ in pending],
+                layout_desc,
+            )
+        except OutOfSpaceError:
+            for key, _ in pending:
+                ret[key] = (L1Error.OUT_OF_MEMORY, None)
+            return ret
+
+        granted_keys = [
+            key
+            for (key, _), memory_obj in zip(pending, memory_objects, strict=True)
+            if memory_obj is not None
+        ]
+        try:
+            for (key, is_temp), memory_obj in zip(
+                pending,
+                memory_objects,
+                strict=True,
+            ):
+                if memory_obj is None:
+                    ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
+                    continue
+                entry = L1ObjectState(
+                    memory_obj=memory_obj,
+                    write_lock=TTLLock(self._write_ttl_seconds),
+                    read_lock=TTLLock(self._read_ttl_seconds),
+                    is_temporary=is_temp,
+                )
+                entry.write_lock.lock()
+                self._objects[key] = entry
+                successful_keys.append(key)
+                ret[key] = (L1Error.SUCCESS, memory_obj)
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_reserved_write(successful_keys)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_WRITE_RESERVED,
+                    metadata={"keys": successful_keys},
+                )
+            )
+        except BaseException:
+            try:
+                backend.abort_write(granted_keys)
+            finally:
+                for key in successful_keys:
+                    del self._objects[key]
+            raise
+        return ret
+
     @l1_mgr_synchronized
     def finish_write(
         self,
@@ -555,6 +758,9 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not write-locked, or it's read-locked,
                 which means the writer may have caused inconsistent data.
         """
+        if self._shared_backend is not None:
+            return self._shared_finish_write(keys)
+
         ret: dict[ObjectKey, L1Error] = {}
         notification_keys: list[ObjectKey] = []
         notification_keys_meta: list[L1ObjectMeta] = []
@@ -603,6 +809,103 @@ class L1Manager:
             )
         return ret
 
+    def _shared_finish_write(
+        self,
+        keys: list[ObjectKey],
+    ) -> dict[ObjectKey, L1Error]:
+        """Publish the complete payload batch before one metadata commit."""
+        backend = self._shared_backend
+        assert backend is not None
+        ret: dict[ObjectKey, L1Error] = {}
+        if len(keys) != len(set(keys)):
+            raise ValueError("shared-L1 finish_write keys must be unique")
+
+        failed = False
+        for key in keys:
+            entry = self._objects.get(key)
+            if entry is None:
+                ret[key] = L1Error.KEY_NOT_EXIST
+                failed = True
+                continue
+            if not entry.write_lock.is_locked() or entry.read_lock.is_locked():
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                failed = True
+                continue
+            ret[key] = L1Error.SUCCESS
+
+        if failed:
+            # No object in a request batch may become globally readable unless
+            # every local reservation is ready to commit.
+            for key, result in list(ret.items()):
+                if result == L1Error.SUCCESS:
+                    ret[key] = L1Error.KEY_IN_WRONG_STATE
+            return ret
+
+        backend.finish_write(keys)
+        successful_keys_meta = [
+            self._object_meta(self._objects[key].memory_obj) for key in keys
+        ]
+        for key in keys:
+            self._objects[key].write_lock.unlock()
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_write_finished(keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_WRITE_FINISHED,
+                metadata={"keys": keys, "meta": successful_keys_meta},
+            )
+        )
+        return ret
+
+    @l1_mgr_synchronized
+    def abort_write(
+        self,
+        keys: list[ObjectKey],
+    ) -> dict[ObjectKey, L1Error]:
+        """Abort coordinator-owned writes that never became readable.
+
+        The existing local allocators do not expose an abort operation. This
+        method is therefore intentionally limited to the shared-L1 path,
+        where leaving a failed transfer in ``WRITING`` would block that
+        object key for every MP server connected to the coordinator.
+
+        Args:
+            keys: The list of object keys whose writes are being aborted.
+
+        Returns:
+            A dictionary mapping each object key to an L1Error.
+
+        Raises:
+            RuntimeError: This manager is not using shared L1.
+
+        Errors:
+            KEY_NOT_EXIST: The key does not exist.
+            KEY_IN_WRONG_STATE: The key is not write-locked or has readers.
+        """
+        backend = self._shared_backend
+        if backend is None:
+            raise RuntimeError("abort_write is only supported by shared L1")
+
+        ret: dict[ObjectKey, L1Error] = {}
+        aborted_keys: list[ObjectKey] = []
+        for key in keys:
+            entry = self._objects.get(key)
+            if entry is None:
+                ret[key] = L1Error.KEY_NOT_EXIST
+                continue
+            if not entry.write_lock.is_locked() or entry.read_lock.is_locked():
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
+            ret[key] = L1Error.SUCCESS
+            aborted_keys.append(key)
+
+        backend.abort_write(aborted_keys)
+        for key in aborted_keys:
+            self._objects[key].memory_obj.invalidate()
+            del self._objects[key]
+        return ret
+
     @l1_mgr_synchronized
     def finish_write_and_reserve_read(
         self,
@@ -631,6 +934,9 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not write-locked, or it already
                 has read locks.
         """
+        if self._shared_backend is not None:
+            raise RuntimeError("shared L1 does not support the L2 prefetch transition")
+
         total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
@@ -696,6 +1002,18 @@ class L1Manager:
             KEY_IS_LOCKED: The key is write-locked or read-locked and cannot be
                 deleted. Never returned when ``force`` is True.
         """
+        if self._shared_backend is not None:
+            # M0 never reuses extents, so a local MP must not pretend that
+            # deleting its view reclaimed the global object.
+            return {
+                key: (
+                    L1Error.KEY_IS_LOCKED
+                    if key in self._objects
+                    else L1Error.KEY_NOT_EXIST
+                )
+                for key in keys
+            }
+
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
         successful_keys: list[ObjectKey] = []
@@ -719,6 +1037,7 @@ class L1Manager:
             successful_keys.append(key)
 
         freed_meta = [self._object_meta(obj) for obj in need_to_free]
+        assert self._memory_manager is not None
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
@@ -757,6 +1076,10 @@ class L1Manager:
                 If False (default), only clear unlocked objects, keeping
                 write-locked and read-locked objects intact.
         """
+        if self._shared_backend is not None:
+            logger.info("L1Manager: shared-L1 M0 does not reclaim objects")
+            return
+
         if force:
             logger.warning(
                 "L1Manager: force-clearing all %d objects "
@@ -767,6 +1090,7 @@ class L1Manager:
             all_keys = list(self._objects.keys())
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
             all_meta = [self._object_meta(obj) for obj in all_memory_objs]
+            assert self._memory_manager is not None
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
@@ -798,6 +1122,7 @@ class L1Manager:
             del self._objects[key]
 
         cleared_meta = [self._object_meta(obj) for obj in objs_to_free]
+        assert self._memory_manager is not None
         self._memory_manager.free(objs_to_free)
 
         if keys_to_clear:
@@ -845,19 +1170,32 @@ class L1Manager:
             In the future, we many want to make a "callback" based mechanism
             via "L1ManagerListener" to notify the memory usage changes.
         """
+        if self._shared_backend is not None:
+            return self._shared_backend.get_memory_usage()
+        assert self._memory_manager is not None
         return self._memory_manager.get_memory_usage()
 
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
+        if self._shared_backend is not None:
+            return self._shared_backend.get_l1_memory_desc()
+        assert self._memory_manager is not None
         return self._memory_manager.get_l1_memory_desc()
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
+        if self._shared_backend is not None:
+            with self._lock:
+                self._objects.clear()
+            self._shared_backend.close()
+            return
         with self._lock:
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+            assert self._memory_manager is not None
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
 
+        assert self._memory_manager is not None
         self._memory_manager.close()
 
     # Status reporting
@@ -874,12 +1212,19 @@ class L1Manager:
                 read_locked += 1
             if entry.is_temporary:
                 temporary += 1
-        used, total = self._memory_manager.get_memory_usage()
+        if self._shared_backend is not None:
+            used, total = self._shared_backend.get_memory_usage()
+            healthy = self._shared_backend.memcheck()
+        else:
+            assert self._memory_manager is not None
+            used, total = self._memory_manager.get_memory_usage()
+            healthy = self._memory_manager.memcheck()
         # ``memory_total_bytes`` is what the allocator currently backs (the
         # grown heap on the lazy tier); this is the declared size. Summed to
         # fit this dict's flat shape; ``0`` means undeclared.
         return {
-            "is_healthy": self._memory_manager.memcheck(),
+            "is_healthy": healthy,
+            "shared_l1": self._shared_backend is not None,
             "total_object_count": len(self._objects),
             "write_locked_count": write_locked,
             "read_locked_count": read_locked,
@@ -908,7 +1253,11 @@ class L1Manager:
     @l1_mgr_synchronized
     def memcheck(self) -> bool:
         """Perform memory check for L1 cache."""
-        mem_check_result = self._memory_manager.memcheck()
+        if self._shared_backend is not None:
+            mem_check_result = self._shared_backend.memcheck()
+        else:
+            assert self._memory_manager is not None
+            mem_check_result = self._memory_manager.memcheck()
 
         # Log the locked objects for debugging
         num_write_locked = 0
@@ -930,6 +1279,13 @@ class L1Manager:
 
     def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
         """Build the listener-facing metadata for one resident object."""
+        if self._shared_backend is not None:
+            return L1ObjectMeta(
+                size_bytes=memory_obj.get_size(),
+                backend=L1BackendType.DEVDAX,
+                shared=True,
+            )
+        assert self._memory_manager is not None
         return L1ObjectMeta(
             size_bytes=memory_obj.get_size(),
             backend=self._memory_manager.get_backend_type(memory_obj),

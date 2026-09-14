@@ -275,15 +275,15 @@ class TestFleetMemory:
         self, client: TestClient
     ) -> None:
         shared = {
-            "tier": "l2",
-            "backend": "s3",
+            "tier": "l1",
+            "backend": "devdax",
             "capacity_bytes": 100 * GIB,
             "shared": True,
         }
         _register(client, "mp-1", [shared])
         _register(client, "mp-2", [shared])
-        _ingest(client, "mp-1", Tier.L2, "s3", 25 * GIB, index=1, shared=True)
-        _ingest(client, "mp-2", Tier.L2, "s3", 25 * GIB, index=1, shared=True)
+        _ingest(client, "mp-1", Tier.L1, "devdax", 25 * GIB, index=1, shared=True)
+        _ingest(client, "mp-2", Tier.L1, "devdax", 25 * GIB, index=1, shared=True)
 
         body = client.get("/instances/usage").json()
         assert len(body["shared_modules"]) == 1

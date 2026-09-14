@@ -177,6 +177,11 @@ class StorageManager:
             self.get_l2_usages,
         )
 
+    @property
+    def uses_shared_l1(self) -> bool:
+        """Return whether L1 is the coordinator-owned shared-DAX path."""
+        return self._l1_manager.uses_shared_l1
+
     # External APIs for serving engine integration code to call
     @enable_tracing()
     def reserve_write(
@@ -260,6 +265,35 @@ class StorageManager:
         )
 
         # TODO: global key states update
+        if failed_keys and self.uses_shared_l1:
+            raise RuntimeError(
+                "shared-L1 write batch was not committed: "
+                f"{len(failed_keys)} of {len(keys)} keys failed validation"
+            )
+
+    @enable_tracing()
+    def abort_write(
+        self,
+        keys: list[ObjectKey],
+    ) -> None:
+        """Abort failed writes in the coordinator-owned shared-L1 path.
+
+        Args:
+            keys: List of object keys whose reservations must be released.
+
+        Raises:
+            RuntimeError: Some keys could not be aborted, or L1 is not the
+                shared path.
+        """
+        abort_result = self._l1_manager.abort_write(keys)
+        failed_keys = [
+            key for key, error in abort_result.items() if error != L1Error.SUCCESS
+        ]
+        if failed_keys:
+            raise RuntimeError(
+                "shared-L1 write batch was not fully aborted: "
+                f"{len(failed_keys)} of {len(keys)} keys failed"
+            )
 
     @contextmanager
     def read_prefetched_results(
@@ -452,6 +486,30 @@ class StorageManager:
         l1_read_result = self._l1_manager.reserve_read(
             keys, read_locks=spec.num_kv_readers
         )
+        if self.uses_shared_l1:
+            reserved = [
+                (key, obj)
+                for key, (error, obj) in l1_read_result.items()
+                if error == L1Error.SUCCESS and obj is not None
+            ]
+            mismatched = []
+            for key, obj in reserved:
+                expected = spec.group_layout_descs.get(key.object_group_id)
+                if expected is not None and (
+                    obj.get_shapes() != expected.shapes
+                    or obj.get_dtypes() != expected.dtypes
+                ):
+                    mismatched.append(key)
+            if mismatched:
+                # The producer-supplied descriptor locates bytes, but the
+                # consuming engine's registered layout remains authoritative.
+                self._l1_manager.finish_read(
+                    [key for key, _ in reserved],
+                    read_locks=spec.num_kv_readers,
+                )
+                raise RuntimeError(
+                    "shared-L1 object layout does not match the local engine"
+                )
 
         if spec.policy is TrimPolicy.SPARSE:
             # SPARSE: retain a read lock on every L1 hit (not just the leading
@@ -857,12 +915,17 @@ class StorageManager:
         Returns:
             L1 per backing medium, then one entry per L2 adapter.
         """
+        # A coordinator-owned shared Device-DAX pool is fleet-shared: its
+        # capacity must be declared once under shared_modules, not summed
+        # per mounting instance. getattr keeps capacity-only stubs (tests
+        # bind this method without an L1Manager) reporting unshared.
+        l1_shared = bool(getattr(self, "uses_shared_l1", False))
         capacities = [
             ModuleMemoryCapacity(
                 tier=Tier.L1,
                 backend=backend.value,
                 capacity_bytes=configured,
-                shared=False,
+                shared=l1_shared,
             )
             for backend, configured in get_configured_capacity_bytes(
                 self._l1_config

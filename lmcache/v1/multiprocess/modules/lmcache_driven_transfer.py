@@ -913,14 +913,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
-        # Stop the drain thread before storage_manager.close() so any
-        # in-flight completions reach a live storage manager.
-        self._device_host_func_dispatcher.stop()
-
+        shared_l1 = self._ctx.storage_manager.uses_shared_l1
+        if not shared_l1:
+            self._device_host_func_dispatcher.stop()
         with self._lock:
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
         self._release_entries(entries)
+        if shared_l1:
+            # CacheContext.close synchronizes its stream. Drain completions
+            # before StorageManager unpins the shared mapping.
+            self._device_host_func_dispatcher.stop()
 
     def register_kv_cache(
         self,
@@ -946,7 +949,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+
+        Raises:
+            ValueError: Shared L1 is enabled and ``world_size`` is not 1 —
+                M0 supports TP=1 only.
         """
+        if self._ctx.storage_manager.uses_shared_l1 and world_size != 1:
+            raise ValueError(
+                "shared L1 M0 supports TP=1 only; got "
+                f"world_size={world_size} for instance {instance_id}"
+            )
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -1241,17 +1253,56 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             except Exception:
                 logger.exception("Cannot store keys due to exception")
             finally:
-                event_backend.record_event(event, cache_context.stream)
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
-                if stored_count:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_write",
-                        list(all_dict.keys()),
-                    )
+                uses_shared_l1 = self._ctx.storage_manager.uses_shared_l1
+                event_recorded = False
+                if stored_count and uses_shared_l1:
+                    # A shared object must not become observable until all D2H
+                    # writes are complete and the exact mapped range has been
+                    # published. The normal host callback is intentionally
+                    # asynchronous to the returned event, so use a synchronous
+                    # completion boundary for this minimal functional path.
+                    try:
+                        event_backend.record_event(event, cache_context.stream)
+                        event_recorded = True
+                        event_backend.synchronize_event(
+                            event,
+                            cache_context.device,
+                        )
+                        self._ctx.storage_manager.finish_write(list(all_dict.keys()))
+                    except Exception:
+                        logger.exception(
+                            "Cannot publish shared-L1 keys after D2H completion"
+                        )
+                        store_succeeded = False
+                        stored_count = 0
+                if uses_shared_l1:
+                    if not stored_count:
+                        if all_dict:
+                            try:
+                                self._ctx.storage_manager.abort_write(
+                                    list(all_dict.keys())
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Cannot abort shared-L1 reservations after "
+                                    "failed store"
+                                )
+                        # Record only after abort: a recording failure must not
+                        # strand globally WRITING objects.
+                        if not event_recorded:
+                            event_backend.record_event(event, cache_context.stream)
                 else:
+                    event_backend.record_event(event, cache_context.stream)
+                    if stored_count:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_write",
+                            list(all_dict.keys()),
+                        )
+                if not stored_count:
                     total_bytes = 0
                 num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
