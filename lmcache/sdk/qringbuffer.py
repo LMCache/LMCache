@@ -735,6 +735,7 @@ class QRingBufferAdapter:
                 continue
             if not future.result():
                 logger.error("Q store failed for seq=%d", seq)
+            self._adapter._release_completion_event(future)
             self.q_ring.free(ring_block_ids)
             done.append(seq)
         for seq in done:

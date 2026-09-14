@@ -16,7 +16,7 @@ because TRT-LLM's pool is allocated outside PyTorch's caching allocator
 
 # Standard
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 import os
 import time
 
@@ -38,6 +38,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.base.event_ipc import (
@@ -408,6 +409,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                     device=self._device,
                     event_backend=self._event_backend,
                 ).result(timeout=self._mq_timeout)
+                self._release_completion_event(raw_future)
             except Exception as e:
                 logger.error(
                     "LMCache MP worker: retrieve failed for req %d: %s",
@@ -464,6 +466,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                     device=self._device,
                     event_backend=self._event_backend,
                 ).result(timeout=self._mq_timeout)
+                self._release_completion_event(raw_future)
                 if not success:
                     logger.warning(
                         "LMCache MP worker: store returned False for req %d",
@@ -500,6 +503,16 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         event = self._event_backend.create_event(self._device)
         self._event_backend.record_event(event, stream)
         return event
+
+    def _release_completion_event(self, raw_future: MessagingFuture[Any]) -> None:
+        """Tell the server this worker is done with the reply's completion event.
+
+        Args:
+            raw_future: The finished STORE or RETRIEVE reply future.
+        """
+        event_ipc_handle = raw_future.result(timeout=0)[0]
+        if event_ipc_handle:
+            self._req_client.release_event(self._instance_id, event_ipc_handle)
 
     def _export_event(self, event: object) -> bytes:
         """Export ``event`` with the backend selected at registration."""

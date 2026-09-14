@@ -76,6 +76,28 @@ complete the moment the consumer receives it. The subsequent `wait_event`
 returns immediately, the consumer's transfer kernel runs alongside the
 producer's writes, and it can read partially written KV-cache blocks.
 
+### Completion event lifetime
+
+An exported handle is valid only while the exporter keeps the event alive, and
+an imported event must outlive every stream wait queued on it. Some runtimes
+tolerate violations by keeping the underlying resource around; others free it
+as soon as the event is destroyed, after which the peer's open fails or a
+queued wait references freed memory. The server therefore holds both until
+their consumer is done, in the `IPCEventRegistry` each cache context owns
+(`lmcache/v1/multiprocess/ipc_event_registry.py`):
+
+- **Exported**: a transfer creates its completion event, records it after
+  its copies, and exports it; the event is held until the worker sends
+  `RELEASE_EVENT` with its instance id and the handle, which the engine
+  adapter does once the transfer's future reports done, and is dropped then.
+- **Imported**: the worker's event is imported, waited on from the transfer
+  stream, and a host callback is queued on that same stream immediately after
+  the wait. The callback drops the import, so it runs only once the stream has
+  consumed the wait.
+
+Whatever a context still holds when it is unregistered or reaped is dropped
+with it.
+
 Substituting host-side synchronization does not work either. Draining the
 importing process's own streams says nothing about the exporting process --
 they are separate contexts, and without MPS-style serialization their kernels

@@ -91,6 +91,10 @@ class RequestType(enum.Enum):
 
     CB_PROTOCOL_HANDSHAKE = enum.auto()
 
+    # Worker -> server: done with an exported completion event (appended last;
+    # wire ids are frozen).
+    RELEASE_EVENT = enum.auto()
+
     # Deprecated aliases.
     CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
     CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE

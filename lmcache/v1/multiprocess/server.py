@@ -265,7 +265,7 @@ def _build_modules(
                 f"Experimental module '{enabled_module}' requires "
                 "supported_transfer_mode='lmcache_driven' or 'auto'."
             )
-        module = QStoreModule(ctx)
+        module = QStoreModule(ctx, lmcache_driven_module)
         experimental_modules.append(module)
         liveness_targets.append(module)
         experimental_transfer.append(enabled_module)

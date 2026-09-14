@@ -21,7 +21,7 @@ import zmq
 # First Party
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
@@ -719,6 +719,18 @@ class AtomMPWorkerAdapter:
             while self._context_submission_leases.get(transfer_context, 0):
                 self._state_changed.wait()
 
+    def _release_completion_event(self, future: MessagingFuture[bool]) -> None:
+        """Tell the server this worker is done with ``future``'s completion event.
+
+        Args:
+            future: A finished store or retrieve future.
+        """
+        if not isinstance(future, DeviceMessagingFuture):
+            return
+        event_ipc_handle = future.raw_future_.result(timeout=0)[0]
+        if event_ipc_handle:
+            self._client.release_event(self.instance_id, event_ipc_handle)
+
     def _track_operation_future(
         self,
         transfer_context: TransferContext,
@@ -733,6 +745,7 @@ class AtomMPWorkerAdapter:
             try:
                 if pending.query():
                     completed.append(pending)
+                    self._release_completion_event(pending)
             except Exception:
                 # Keep failures tracked so shutdown observes them via result().
                 continue
@@ -759,6 +772,7 @@ class AtomMPWorkerAdapter:
                 # completion event, so the server no longer uses this worker's
                 # GPUCacheContext when unregister is sent below.
                 future.result()
+                self._release_completion_event(future)
             except Exception:
                 logger.warning(
                     "ATOM transfer ended with an error during shutdown",
