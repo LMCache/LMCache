@@ -7,6 +7,7 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
+from pathlib import Path
 from unittest.mock import call, patch
 import errno
 import os
@@ -867,6 +868,68 @@ class TestReportStatus:
         status = adpt.report_status()
         assert status["stored_object_count"] == 1
         assert status["pool_free_slots"] < status["pool_size"]
+
+    def test_report_status_counts_slots_for_multi_page_files(
+        self, tmp_path: Path
+    ) -> None:
+        """Pool status should use page-slot units for multi-page files."""
+        pages_per_file = 3
+        pool_file_count = 2
+        expected_slot_count = pool_file_count * pages_per_file
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            align_bytes=PAGE_SIZE,
+        )
+        config = NixlStoreL2AdapterConfig(
+            backend="POSIX",
+            backend_params={
+                "file_path": str(tmp_path),
+                "file_size": str(PAGE_SIZE * pages_per_file),
+                "use_direct_io": "false",
+            },
+            pool_size=pool_file_count,
+        )
+        adpt = NixlStoreL2Adapter(config, l1_memory)
+
+        try:
+            status_before_store = adpt.report_status()
+            assert status_before_store["pool_size"] == expected_slot_count
+            assert status_before_store["pool_free_slots"] == expected_slot_count
+            assert (
+                0
+                <= status_before_store["pool_free_slots"]
+                <= status_before_store["pool_size"]
+            )
+
+            key = create_object_key(42)
+            obj = create_memory_obj(buffer, page_index=0, num_pages=2)
+            _store_and_wait(adpt, key, obj)
+
+            status_during_store = adpt.report_status()
+            assert status_during_store["pool_size"] == expected_slot_count
+            assert status_during_store["pool_free_slots"] == expected_slot_count - 2
+            assert (
+                0
+                <= status_during_store["pool_free_slots"]
+                <= status_during_store["pool_size"]
+            )
+
+            adpt.delete([key])
+
+            status_after_delete = adpt.report_status()
+            assert status_after_delete["pool_size"] == expected_slot_count
+            assert status_after_delete["pool_free_slots"] == expected_slot_count
+            assert (
+                0
+                <= status_after_delete["pool_free_slots"]
+                <= status_after_delete["pool_size"]
+            )
+        finally:
+            adpt.close()
 
     def test_report_status_after_close(self):
         """is_healthy should become False after close()."""
