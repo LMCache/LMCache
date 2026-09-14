@@ -31,7 +31,7 @@ pytest --maxfail=1 \
     tests/v1/cli \
     --ignore=tests/v1/platform/test_cuda_ipc_wrapper.py \
     --ignore=tests/v1/platform/test_timeline_semaphore_event_ipc.py \
-    --deselect="tests/v1/shm_allocator/test_shm_allocator.py::TestShmFileConnector::test_put_and_get_roundtrip"
+    --deselect="tests/v1/shm_allocator/test_shm_allocator.py::TestShmFileConnector"
 
 # Whole files ignored -- both depend on NVIDIA's `cuda.bindings`
 # (cuda-python) package for raw driver-level IPC calls
@@ -45,9 +45,9 @@ pytest --maxfail=1 \
 # The real fix is upstream: generalize the ROCm-only skip to cover any
 # environment without `cuda.bindings`.
 #
-# test_shm_allocator.py::TestShmFileConnector::test_put_and_get_roundtrip:
-# its 5GB pinned-memory allocation fails MACA's mcHostRegister with
-# mcErrorInvalidValue on this host.
+# test_shm_allocator.py::TestShmFileConnector (all 3 tests, sharing one
+# fixture): its 5GB pinned-memory allocation fails MACA's mcHostRegister
+# with mcErrorInvalidValue on this host.
 
 # Matches the main CUDA pipeline.yml's own end-of-step cleanup on its
 # bare-metal queue: delete the whole workspace so the next build starts from
