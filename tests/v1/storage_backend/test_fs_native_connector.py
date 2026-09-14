@@ -178,9 +178,9 @@ def _aligned_pairs(
         (0, 0),  # legacy path: one blocking read per object on the worker
         (1, 0),  # a pool of one, so every read still queues behind the last
         (4, 0),  # several reads of one batch in flight at once
-        (8, 1),  # budget below one object: the group must still take one
-        (8, 1 << 17),  # a few objects per group at a 4 KiB block size
-        (8, 1 << 30),  # larger than the whole batch: one group
+        (8, 1),  # budget below one object: it must still be read
+        (8, 1 << 17),  # a few objects in flight at a 4 KiB block size
+        (8, 1 << 30),  # larger than the whole batch: never waits
     ],
 )
 def test_reads_return_identical_bytes(

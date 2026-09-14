@@ -31,8 +31,8 @@ I/O queue depth on a single Python thread.
   depth equals ``num_workers``, usually far below what an array of several
   devices needs.  Each reader thread holds one file open at a time.
 - ``read_max_bytes_in_flight`` (int, default ``0``): With ``read_io_depth``
-  positive, the bytes kept outstanding against the device, split into
-  equal per-worker shares.  ``0`` selects 1536 MiB, chosen for its worst
+  positive, the bytes kept outstanding against the device.  ``0``
+  selects 1536 MiB, chosen for its worst
   case across local and network-latency storage; a single slow device
   does better with a smaller value.  Bytes in flight also never exceed
   ``read_io_depth`` x object size, so the depth must be large enough for

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "connector.h"
-#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -339,12 +338,7 @@ size_t FSConnector::choose_num_tiles(Op op, size_t num_items) const {
   if (op != Op::BATCH_TILE_GET || read_threads_.empty()) {
     return ConnectorBase::choose_num_tiles(op, num_items);
   }
-  // See connector.h.  A large batch is still spread over the workers so
-  // their per-worker budget shares add up to the whole budget.
-  const size_t depth = read_threads_.size();
-  const size_t tiles_for_depth = (num_items + depth - 1) / depth;
-  const size_t workers = static_cast<size_t>(worker_count_for_op(op));
-  return std::max<size_t>(1, std::min(workers, tiles_for_depth));
+  return 1;
 }
 
 void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
@@ -359,56 +353,39 @@ void FSConnector::on_workers_stopped() { stop_read_pool(); }
 
 void FSConnector::do_batch_get_pooled(const Request& req) {
   const size_t num_keys = req.keys.size();
+  ReadTile tile;
+  tile.ok.assign(num_keys, 1);
+  tile.remaining = num_keys;
+  // Allocated before anything is published, so nothing below can throw
+  // while readers hold pointers into this frame.
+  std::vector<ReadTask> tasks(num_keys);
 
-  // Bounded by the reader count and by the byte budget, whichever binds.
-  const size_t max_count = read_threads_.size();
-  const size_t budget = worker_read_budget_bytes();
-
-  for (size_t base = 0; base < num_keys;) {
-    size_t end = base;
-    size_t group_bytes = 0;
-    while (end < num_keys && end - base < max_count) {
-      const size_t len = req.buf_lens[end];
-      // The first object is always taken, or one larger than the budget
-      // could never be read.
-      if (end > base && group_bytes + len > budget) {
-        break;
+  {
+    std::unique_lock<std::mutex> lk(read_mu_);
+    for (size_t i = 0; i < num_keys; ++i) {
+      const size_t len = req.buf_lens[i];
+      // An object larger than the whole budget goes when nothing else is
+      // in flight, or it could never be read.
+      read_done_cv_.wait(lk, [this, len] {
+        return read_bytes_in_flight_ == 0 ||
+               read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
+      });
+      read_bytes_in_flight_ += len;
+      tasks[i] = ReadTask{&req, i, &tile, nullptr};
+      if (read_queue_tail_ != nullptr) {
+        read_queue_tail_->next = &tasks[i];
+      } else {
+        read_queue_head_ = &tasks[i];
       }
-      group_bytes += len;
-      ++end;
+      read_queue_tail_ = &tasks[i];
+      read_cv_.notify_one();
     }
-    const size_t count = end - base;
-
-    ReadGroup group;
-    group.ok.assign(count, 1);
-    group.remaining = count;
-
-    // Built off to the side so an allocation failure cannot leave a
-    // half-published group behind.
-    std::list<ReadTask> pending;
-    for (size_t local = 0; local < count; ++local) {
-      pending.push_back(ReadTask{&req, base + local, local, &group});
-    }
-
-    {
-      std::unique_lock<std::mutex> lk(read_mu_);
-      read_queue_.splice(read_queue_.end(), pending);
-      read_cv_.notify_all();
-      read_done_cv_.wait(lk, [&group] { return group.remaining == 0; });
-    }
-
-    for (size_t local = 0; local < count; ++local) {
-      req.batch->per_key_results[req.start_idx + base + local] =
-          group.ok[local];
-    }
-    base = end;
+    read_done_cv_.wait(lk, [&tile] { return tile.remaining == 0; });
   }
-}
 
-size_t FSConnector::worker_read_budget_bytes() const {
-  const size_t workers =
-      static_cast<size_t>(worker_count_for_op(Op::BATCH_TILE_GET));
-  return std::max<size_t>(1, read_max_bytes_in_flight_ / workers);
+  for (size_t i = 0; i < num_keys; ++i) {
+    req.batch->per_key_results[req.start_idx + i] = tile.ok[i];
+  }
 }
 
 // Connections are built here so a failure surfaces in the constructor.
@@ -446,23 +423,27 @@ void FSConnector::stop_read_pool() {
 
 void FSConnector::read_thread_main(WorkerFSConn& conn) {
   for (;;) {
-    ReadTask task;
+    ReadTask* task = nullptr;
     {
       std::unique_lock<std::mutex> lk(read_mu_);
-      read_cv_.wait(lk, [this] { return read_stop_ || !read_queue_.empty(); });
-      if (read_queue_.empty()) {
+      read_cv_.wait(
+          lk, [this] { return read_stop_ || read_queue_head_ != nullptr; });
+      if (read_queue_head_ == nullptr) {
         return;  // the predicate admits an empty queue only on stop
       }
-      task = read_queue_.front();
-      read_queue_.pop_front();
+      task = read_queue_head_;
+      read_queue_head_ = task->next;
+      if (read_queue_head_ == nullptr) {
+        read_queue_tail_ = nullptr;
+      }
     }
 
     uint8_t ok = 1;
-    const std::string& key = task.req->keys[task.index];
+    const Request& req = *task->req;
+    const std::string& key = req.keys[task->index];
     try {
-      do_single_get(conn, key, task.req->buf_ptrs[task.index],
-                    task.req->buf_lens[task.index],
-                    task.req->batch_chunk_num_bytes);
+      do_single_get(conn, key, req.buf_ptrs[task->index],
+                    req.buf_lens[task->index], req.batch_chunk_num_bytes);
     } catch (const std::exception& e) {
       ok = 0;
       fprintf(stderr, "[LMCache GET] key %s failed: %s\n", key.c_str(),
@@ -473,13 +454,15 @@ void FSConnector::read_thread_main(WorkerFSConn& conn) {
               key.c_str());
     }
 
+    // The submitting worker may destroy `task` and its tile as soon as it
+    // takes read_mu_ and sees remaining == 0, so nothing touches them
+    // after this block.
     {
       std::lock_guard<std::mutex> lk(read_mu_);
-      ReadGroup& group = *task.group;
-      group.ok[task.local] = ok;
-      if (--group.remaining == 0) {
-        read_done_cv_.notify_all();
-      }
+      task->tile->ok[task->index] = ok;
+      --task->tile->remaining;
+      read_bytes_in_flight_ -= req.buf_lens[task->index];
+      read_done_cv_.notify_all();
     }
   }
 }

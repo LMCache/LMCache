@@ -81,13 +81,14 @@ Three properties bound what the budget can do:
    objects cannot dispatch less than 768 MiB.
 2. **The thread pool is a separate ceiling.** Bytes in flight never exceed
    `read_io_depth x object_size`, whatever the budget says.
-3. **A tile is read a group at a time, and each group drains before the
-   next.** A batch too small to fill the depth holds fewer reads than
-   `read_io_depth`, and reads in flight fall to zero after every group.
-   At 16-object batches on four workers this measured between a tie and
-   12% behind `num_workers=64` on the same array, depending on per-read
-   latency at the time; batches of a few hundred objects do not show it.
-   A sliding window would remove the barrier; it is not in this change.
+3. **A worker blocks on its own tile.** Objects are dispatched one at a
+   time as the budget has room, so a large tile keeps the depth full, but
+   a batch smaller than the depth holds only its own objects in flight:
+   four workers and 16-object batches keep at most 64 objects in flight
+   however deep the pool is. Against `num_workers=64`, which streams
+   continuously, this measured between a tie and 12% behind on the same
+   array, depending on per-read latency at the time; batches of a few
+   hundred objects do not show it.
 
 ## Configuration
 
@@ -96,20 +97,20 @@ Three properties bound what the budget can do:
 | `read_io_depth` | reader threads, and so the maximum reads in flight; `0` keeps the legacy path where depth equals `num_workers` |
 | `read_max_bytes_in_flight` | bytes outstanding against the device; `0` selects the 1536 MiB default when `read_io_depth` is positive |
 
-The budget is split into equal per-worker shares, but the reader threads
-are what hold reads in flight, so at 6 MiB objects the full 1536 MiB default
-needs `read_io_depth=256` before the budget rather than the thread count
-binds. At `read_io_depth=64` the pool holds 384 MiB, the same as
+The budget bounds dispatched bytes connector-wide, but the reader threads
+are what hold reads against the device, so at 6 MiB objects the full
+1536 MiB default needs `read_io_depth=256` before the budget rather than the
+thread count binds. At `read_io_depth=64` the pool holds 384 MiB, the same as
 `num_workers=64` does on the legacy path.
 
 ## Where the fix lives
 
-`FSConnector` owns the reader threads, the grouping and the budget. It
-overrides `do_batch_get()` to hand a tile to the pool a group at a time, and
-`choose_num_tiles()` so a GET batch is split across workers only as far as
-leaves every tile `read_io_depth` deep; without that, a 16-object batch on
-four workers would keep four reads in flight whatever the depth. This is
-the shape `MooncakeConnector` already uses. `ConnectorBase` is unchanged:
+`FSConnector` owns the reader threads, the queue and the budget. It
+overrides `do_batch_get()` to dispatch a tile's objects one at a time as the
+budget has room and wait for all of them, and `choose_num_tiles()` to keep a
+GET batch as one tile, the shape `MooncakeConnector` already uses; split
+across workers first, a 16-object batch on four workers would keep four
+reads in flight whatever the depth. `ConnectorBase` is unchanged:
 the cost of a reader is backend-specific, a `redis` reader would be one more
 socket and that path needs pipelining instead, and `aerospike` shares one
 client with its own thread pool.

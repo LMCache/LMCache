@@ -48,8 +48,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
       on the worker threads and the depth against the device therefore
       equals num_workers.
     - read_max_bytes_in_flight: bytes the connector may keep outstanding
-      against the device, split into equal shares, one per worker.  0
-      selects 1536 MiB when read_io_depth is positive; ignored otherwise.
+      against the device.  0 selects 1536 MiB when read_io_depth is
+      positive; ignored otherwise.
       See docs/source/mp/l2_storage/fs_native.rst for how to size both.
     - read_ahead_size: trigger filesystem readahead by
       reading this many bytes first (optional).
