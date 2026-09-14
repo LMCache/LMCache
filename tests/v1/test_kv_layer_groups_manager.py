@@ -681,10 +681,27 @@ class TestKernelAndObjectGroups:
         assert manager.get_subchunk_sw_size_tokens(0) == 256
         assert manager.get_subchunk_sw_size_tokens(1) == 64
         assert manager.get_subchunk_sw_size_tokens(2) == 256
+        assert manager.get_sw_size_chunks(0) == -1
+        assert manager.get_sw_size_chunks(1) == 1
+        assert manager.get_sw_size_chunks(2) == 2
         # Transfer slots follow the sub-chunk window (ratio 1 here).
         assert manager.get_slots_per_chunk_in_sw(0) == 256
         assert manager.get_slots_per_chunk_in_sw(1) == 64
         assert manager.get_slots_per_chunk_in_sw(2) == 256
+
+    def test_full_sw_kv_disables_cross_chunk_window(self):
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), sw_size_tokens=64),
+            ],
+        )
+        assert manager.get_sw_size_chunks(0) == 1
+
+        manager.enable_full_sw_kv()
+
+        assert manager.get_sw_size_chunks(0) == -1
 
     def test_mixed_sw_kernel_groups_share_single_object_group(self):
         # Object-level bucketing by sliding window size is not enabled yet:
