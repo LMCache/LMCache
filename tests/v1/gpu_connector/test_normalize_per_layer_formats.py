@@ -30,7 +30,10 @@ def test_sglang_kv_list_uniform():
     # K/V-split format, so it is returned whole -- never sliced per layer.
     flat = [_t(NB * BS, NH, HS) for _ in range(2 * NL)]
     normalized, formats = normalize_and_discover_per_layer_formats(
-        flat, (), EngineType.SGLANG, {"tokens_per_block": BS}
+        flat,
+        (),
+        EngineType.SGLANG,
+        {"tokens_per_block": BS, "kv_list_layout": "k_v"},
     )
     assert len(normalized) == 2 and len(normalized[0]) == NL
     assert tuple(normalized[0][0].shape) == (NB, BS, NH, HS)

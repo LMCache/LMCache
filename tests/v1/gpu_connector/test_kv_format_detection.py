@@ -16,6 +16,7 @@ import torch
 from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 import lmcache.lmcache_native as lmcache_native
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -107,16 +108,38 @@ def test_sglang_mha_depth2_fused():
 
 
 def test_sglang_mha_mp_reshape():
-    # MP path: flat list of 2*NL 3-D tensors + tokens_per_block hint;
-    # detection should un-flatten + reshape to the 4-D inner MP format.
+    # MP path: flat list of 2*NL 3-D tensors + explicit split-K/V and
+    # tokens-per-block hints; detection should un-flatten + reshape to the
+    # 4-D inner MP format.
     if not hasattr(F, "TWO_X_NL_X_NB_BS_NH_HS"):
         pytest.skip("extension lacks TWO_X_NL_X_NB_BS_NH_HS")
     flat = [_t(NB * BS, NH, HS) for _ in range(2 * NL)]
-    fmt, out = detect_format(flat, EngineType.SGLANG, {"tokens_per_block": BS})
+    hints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
+    fmt, out = detect_format(flat, EngineType.SGLANG, hints)
     assert fmt == F.TWO_X_NL_X_NB_BS_NH_HS
     # Canonical depth-2 [K_layers, V_layers], inner reshaped to 4-D.
     assert len(out) == 2 and len(out[0]) == NL
     assert tuple(out[0][0].shape) == (NB, BS, NH, HS)
+
+
+def test_sglang_mha_mp_single_head_is_not_mla() -> None:
+    """TP may reduce split K/V to one head without changing its MHA layout."""
+    flat = [_t(NB * BS, 1, HS) for _ in range(2 * NL)]
+    hints: LayoutHints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
+    fmt, out = detect_format(flat, EngineType.SGLANG, hints)
+    assert fmt == F.TWO_X_NL_X_NB_BS_NH_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], list)
+    assert isinstance(out[0][0], torch.Tensor)
+    assert tuple(out[0][0].shape) == (NB, BS, 1, HS)
+
+
+def test_sglang_mha_mp_rejects_non_divisible_page_buffer() -> None:
+    """Split K/V registration rejects invalid paged-buffer geometry."""
+    flat = [_t(NB * BS + 1, 1, HS) for _ in range(2 * NL)]
+    hints: LayoutHints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
+    with pytest.raises(ValueError, match="not divisible"):
+        detect_format(flat, EngineType.SGLANG, hints)
 
 
 def test_trtllm_cross_layer_6d():

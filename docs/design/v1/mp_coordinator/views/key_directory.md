@@ -46,10 +46,11 @@ the binding's tokens (see below).
 deletes too). Removing an absent placement/key is a no-op. A key with no
 remaining placements is dropped from the directory (leaving its chunk's
 token binding).
-- `ACCESS` — refresh the key's `last_access` recency (max of batch `ts`);
-never creates records, and carries no placement identity — its
-`backend` may be empty (`tier`/`backend` are ignored on apply). `ts` is
-emitter wall-clock and is never compared across instances.
+- `ACCESS` — refresh the key's `last_access` recency (max of batch `ts`)
+and increment its `access_count`; never creates records, and carries no
+placement identity — its `backend` may be empty (`tier`/`backend` are
+ignored on apply). `ts` is emitter wall-clock and is never compared
+across instances.
 
 Plus one non-batch hook, `fence_instance(instance_id)`: the gate calls
 it when an emitter restarts (a higher incarnation) or leaves the fleet,
@@ -100,8 +101,11 @@ The lookups this serves:
   window is verified against `binding.token_ids` (exact), and the
   binding's keys give the placements. Discovery uses blend's cheap
   polynomial hash family; the index itself never needs a
-  content-addressed key because every hit is token-verified. Implemented
-  as a derived view over these bindings — see
+  content-addressed key because every hit is token-verified. The query
+  carries the caller's `model_name`/`cache_salt`/`world_size` as the
+  namespace to scope matches to, so a match names a chunk the caller's
+  own key expansion can reach. Implemented as a derived view over these
+  bindings — see
   [blend_index.md](blend_index.md), served by `POST
   /directory/blend-lookup`.
 
@@ -172,7 +176,7 @@ reporter:
 ```
 ObjectKey → _KeyRecord {
     placements: list[Placement],   # ≤1 per placement identity (see STORE)
-    content_hash_hex, last_access
+    content_hash_hex, last_access, access_count
 }
 chunk_hash → _TokenBinding { token_ids: uint32[], token_offset, keys }
 instance_id → set[ObjectKey]       # L1 reverse index
@@ -201,15 +205,17 @@ Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
 as the pin APIs do; requires `model_name` / `world_size` / `cache_salt`
 since key identity includes them — and the sequence must be the
 request's whole prefix, since chunk hashes are prefix-chained). One
-result per resolved key, request order, both fields empty for unknown
-keys. Position-independent token matching arrives with the content
-index (M2).
+result per resolved key, request order, with placements, token ids,
+and `access_count`. Unknown keys get empty lists and `0`.
+Position-independent token matching arrives with the content index
+(M2).
 - `GET /directory/keys` — paginated listing (`offset`/`limit`) with
 `tier`/`instance_id`/`backend` filters; each row carries the key, its
-matching placements, recency, and `num_tokens` — a cheap indicator of
-whether the chunk's tokens are known. Full token ids are deliberately
-not inlined (a page repeats each chunk across its ranks/groups; fetch
-content via `/directory/lookup` for exactly the keys that need it).
+matching placements, recency, `access_count`, and `num_tokens` — a
+cheap indicator of whether the chunk's tokens are known. Full token ids
+are deliberately not inlined (a page repeats each chunk across its
+ranks/groups; fetch content via `/directory/lookup` for exactly the keys
+that need it).
 - `GET /directory/stats` — key/placement counts, per-instance L1 key
 counts (the fencing index), and the blend-index counts; per-key L2
 detail lives on the keys listing endpoint. Directory contents only —
@@ -219,7 +225,8 @@ yet (see [ingest.md](ingest.md)).
 Type placement:
 
 - **`api.py`** — the cache-event vocabulary (`CacheEventType`,
-`CacheEventEntry`, `CacheEventBatch`): the contract between the
+`CacheEventEntry`, `CacheEventBatch`) plus the blend vocabulary
+(`BlendMatch`, `BlendNamespace`): the contract between the
 MP-server emitter and the directory. Plain dataclasses with intrinsic
 invariants in `__post_init__` (the `ObjectKey` pattern: `seq >= 1`,
 concrete tier, non-empty ids are unconstructible anywhere).

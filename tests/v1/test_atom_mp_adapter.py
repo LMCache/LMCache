@@ -23,7 +23,6 @@ from lmcache.v1.gpu_connector.kv_format import detect_format
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RequestType
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -85,14 +84,24 @@ class _FakeEvent:
         del stream
 
 
+def _patch_request_client_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    client: MagicMock,
+) -> None:
+    """Make the transport-neutral factory return the supplied client."""
+    factory = MagicMock(name="request_client_factory")
+    factory.create.return_value = client
+    monkeypatch.setattr(atom_adapter, "RequestClientFactory", factory)
+
+
 @pytest.fixture
 def worker_with_transfer_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]]:
     """Construct a worker with its MQ and transfer boundaries stubbed."""
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     transfer_context = MagicMock(name="transfer_context")
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
     monkeypatch.setattr(
         atom_adapter,
@@ -163,6 +172,32 @@ def _mock_client(worker: AtomMPWorkerAdapter) -> MagicMock:
     return cast(MagicMock, worker._client)
 
 
+def test_atom_lookup_submits_valid_reader_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduler lookups declare one reader for each rank-local object."""
+    client = MagicMock(name="req_client")
+    future: MessagingFuture[None] = MessagingFuture()
+    future.set_result(None)
+    client.lookup.return_value = future
+    _patch_request_client_factory(monkeypatch, client)
+    monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
+    scheduler = AtomMPSchedulerAdapter(
+        server_url="tcp://127.0.0.1:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="atom-test-model",
+        block_size=64,
+        parallel_config=AtomMPParallelConfig(2, 1, 2),
+    )
+
+    scheduler.maybe_submit_lookup_request("request-1", list(range(300)))
+
+    lookup_call = client.lookup.call_args
+    key = lookup_call.args[0]
+    assert key.require_num_kv_readers() == 1
+    assert lookup_call.args[1] == 2
+
+
 def test_atom_worker_registers_native_engine_type(
     worker_with_transfer_context: tuple[
         AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]
@@ -216,6 +251,7 @@ def test_atom_submit_returns_future_and_expands_physical_groups(
     assert returned is future
     assert event in returned._retained_references
     submit_call = getattr(transfer_context, submit_name).call_args
+    assert submit_call.args[1].require_num_kv_readers() == 1
     assert submit_call.args[4] == [[7, 8, 9, 10], [7, 8, 9, 10]]
 
     future.set_result(True)
@@ -271,23 +307,19 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
     """A successful ping only restores health after re-registration succeeds."""
     ping_results = iter([False, True])
 
-    def send_request(
-        _client: Any,
-        request_type: RequestType,
-        _payloads: list[Any],
-    ) -> MessagingFuture[Any]:
+    def ping(_instance_id: int) -> MessagingFuture[Any]:
         future: MessagingFuture[Any] = MessagingFuture()
-        result = next(ping_results) if request_type is RequestType.PING else True
-        future.set_result(result)
+        future.set_result(next(ping_results))
         return future
 
-    monkeypatch.setattr(atom_adapter, "_send_request", send_request)
+    client = MagicMock()
+    client.ping.side_effect = ping
     health_event = threading.Event()
     health_event.set()
     recover = MagicMock(return_value=True)
     unhealthy = MagicMock()
     heartbeat = atom_adapter._HeartbeatThread(
-        MagicMock(),
+        client,
         health_event,
         instance_id=7,
         interval=1.0,
@@ -312,8 +344,8 @@ def test_atom_adapter_constructor_closes_client_on_failure(
     failure_kind: str,
 ) -> None:
     """GET_CHUNK_SIZE and validation failures do not leak the MQ client."""
-    client = MagicMock(name="mq_client")
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    client = MagicMock(name="req_client")
+    _patch_request_client_factory(monkeypatch, client)
     if failure_kind == "chunk_query":
         monkeypatch.setattr(
             atom_adapter,
@@ -337,9 +369,9 @@ def test_atom_constructor_preserves_error_when_client_close_fails(
     adapter_kind: str,
 ) -> None:
     """Cleanup errors cannot replace the constructor's original failure."""
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     client.close.side_effect = RuntimeError("close failed")
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(
         atom_adapter,
         "_get_chunk_size",
@@ -361,15 +393,13 @@ def test_atom_initial_registration_failure_rolls_back_candidate(
     transfer_context.register.side_effect = register_error
     rollback_future: MessagingFuture[None] = MessagingFuture()
     rollback_future.set_result(None)
-    client.submit_request.return_value = rollback_future
+    client.unregister_kv_cache.return_value = rollback_future
 
     with pytest.raises(type(register_error)) as exc_info:
         worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
 
     assert exc_info.value is register_error
-    rollback_call = client.submit_request.call_args
-    assert rollback_call.args[0] is RequestType.UNREGISTER_KV_CACHE
-    assert rollback_call.args[1] == [worker.instance_id]
+    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
     assert worker.is_healthy is False
@@ -384,7 +414,7 @@ def test_atom_initial_registration_preserves_error_across_cleanup_failures(
     worker, transfer_context, caches = worker_with_transfer_context
     client = _mock_client(worker)
     transfer_context.register.side_effect = ValueError("original register failure")
-    client.submit_request.side_effect = RuntimeError("rollback failed")
+    client.unregister_kv_cache.side_effect = RuntimeError("rollback failed")
     transfer_context.close.side_effect = RuntimeError("context close failed")
     client.close.side_effect = RuntimeError("client close failed")
 
@@ -420,7 +450,7 @@ def test_atom_failed_recovery_rolls_back_candidate_and_keeps_old_context(
     )
     rollback_future: MessagingFuture[None] = MessagingFuture()
     rollback_future.set_result(None)
-    client.submit_request.return_value = rollback_future
+    client.unregister_kv_cache.return_value = rollback_future
 
     assert heartbeat.recover() is False
     failed_candidate.close.assert_called_once_with()
@@ -428,8 +458,7 @@ def test_atom_failed_recovery_rolls_back_candidate_and_keeps_old_context(
     assert worker._transfer_context is old_context
     assert worker._registered is True
     assert worker.is_healthy is False
-    rollback_call = client.submit_request.call_args
-    assert rollback_call.args[0] is RequestType.UNREGISTER_KV_CACHE
+    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
 
     assert heartbeat.recover() is True
     old_context.close.assert_called_once_with()
@@ -635,7 +664,7 @@ def test_atom_shutdown_discards_late_recovery_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A callback returning after shutdown cannot republish context or health."""
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     initial_context = MagicMock(name="initial_context")
     recovery_context = MagicMock(name="recovery_context")
     recovery_entered = threading.Event()
@@ -648,7 +677,7 @@ def test_atom_shutdown_discards_late_recovery_registration(
 
     recovery_context.register.side_effect = delayed_register
     contexts = iter([initial_context, recovery_context])
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
     monkeypatch.setattr(
         atom_adapter,
@@ -716,9 +745,9 @@ def test_atom_heartbeat_publish_and_start_are_one_lifecycle_transition(
             assert release_start.wait(timeout=5.0)
             super().start()
 
-    client = MagicMock(name="mq_client")
+    client = MagicMock(name="req_client")
     transfer_context = MagicMock(name="transfer_context")
-    monkeypatch.setattr(atom_adapter, "MessageQueueClient", lambda *args: client)
+    _patch_request_client_factory(monkeypatch, client)
     monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
     monkeypatch.setattr(
         atom_adapter,
@@ -797,8 +826,7 @@ def test_atom_shutdown_unregisters_gpu_context(
 
     worker.shutdown()
 
-    request_types = [call.args[0] for call in client.submit_request.call_args_list]
-    assert request_types == [RequestType.UNREGISTER_KV_CACHE]
+    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
 
 
 @pytest.mark.parametrize(
@@ -843,7 +871,7 @@ def test_atom_shutdown_drains_unresolved_operation_before_unregister(
     assert wait_started.wait(timeout=5.0)
     transfer_context.close.assert_not_called()
     client.close.assert_not_called()
-    client.submit_request.assert_not_called()
+    client.unregister_kv_cache.assert_not_called()
 
     future.set_result(True)
     shutdown_thread.join(timeout=5.0)
@@ -853,8 +881,7 @@ def test_atom_shutdown_drains_unresolved_operation_before_unregister(
     assert returned.result(timeout=0) is True
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
-    unregister_call = client.submit_request.call_args
-    assert unregister_call.args[0] is RequestType.UNREGISTER_KV_CACHE
+    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
 
 
 @pytest.mark.parametrize(
@@ -906,7 +933,7 @@ def test_atom_restart_window_transfer_and_shutdown_terminate(
     assert raw_wait_started.wait(timeout=5.0)
     transfer_context.close.assert_not_called()
     client.close.assert_not_called()
-    client.submit_request.assert_not_called()
+    client.unregister_kv_cache.assert_not_called()
 
     raw_future.set_result((b"", False))
     shutdown_thread.join(timeout=5.0)
@@ -915,8 +942,7 @@ def test_atom_restart_window_transfer_and_shutdown_terminate(
     assert returned.result(timeout=0) is False
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
-    unregister_call = client.submit_request.call_args
-    assert unregister_call.args[0] is RequestType.UNREGISTER_KV_CACHE
+    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
 
 
 def test_atom_shutdown_finally_closes_client_when_context_close_fails(
