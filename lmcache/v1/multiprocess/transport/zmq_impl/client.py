@@ -122,6 +122,10 @@ class ZmqMultiprocessClient(RequestClient):
             skip_first_n_tokens,
         )
 
+    def release_event(self, event_ipc_handle: bytes) -> MessagingFuture[Any]:
+        """Tell the server the worker is done with an exported completion event."""
+        return self._call(RequestType.RELEASE_EVENT, event_ipc_handle)
+
     def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Start a prefix lookup."""
         return self._call(RequestType.LOOKUP, key, tp_size)
@@ -292,8 +296,10 @@ class ZmqMultiprocessClient(RequestClient):
     def _call(
         self, request_type: RequestType, *request_payloads: Any
     ) -> MessagingFuture[Any]:
-        return self._message_queue_client.submit_request(
+        future = self._message_queue_client.submit_request(
             request_type,
             list(request_payloads),
             get_response_class(request_type),
         )
+        future.release_hook = self.release_event
+        return future

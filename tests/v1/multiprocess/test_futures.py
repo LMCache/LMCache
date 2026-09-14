@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import Any, cast
 import gc
 import multiprocessing as mp
 import threading
@@ -846,3 +847,48 @@ def test_device_future_reuses_prevalidated_backend(
     raw.set_result((b"event", 7))
 
     assert future.result() == 7
+
+
+def test_device_future_releases_imported_event_once() -> None:
+    """After the device side is done the future drops its import and tells the
+    exporter once, via the request client's hook, that the event is free."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            return None
+
+        def import_event(self, handle, device):
+            return ("imported", handle)
+
+        def synchronize_event(self, event, device):
+            return None
+
+        def query_event(self, event):
+            return True
+
+    released: list[bytes] = []
+    raw: MessagingFuture[tuple[bytes, int]] = MessagingFuture()
+    raw.release_hook = released.append
+    future = DeviceMessagingFuture(
+        raw, device="fake", event_backend=cast(Any, _FakeBackend())
+    )
+    assert future.query() is False and released == []
+
+    raw.set_result((b"handle", 7))
+    assert future.query() is True
+    assert future.query() is True
+    assert future.result() == 7
+    assert released == [b"handle"]  # once, even across repeated query/result
+
+    empty_raw: MessagingFuture[tuple[bytes, int]] = MessagingFuture()
+    empty_raw.release_hook = released.append
+    empty = DeviceMessagingFuture(
+        empty_raw, device="fake", event_backend=cast(Any, _FakeBackend())
+    )
+    empty_raw.set_result((b"", 1))
+    assert empty.query() is True
+    assert released == [b"handle"]  # nothing exported, nothing released

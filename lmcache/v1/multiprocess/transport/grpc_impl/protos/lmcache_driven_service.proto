@@ -49,10 +49,17 @@ message RetrieveResponse {
   EventIpcHandleResult result = 1;
 }
 
+message ReleaseEventRequest {
+  bytes event_ipc_handle = 1;
+}
+
+message ReleaseEventResponse {}
+
 service LMCacheDrivenService {
   rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
   rpc UnregisterKvCache(UnregisterKvCacheRequest)
       returns (UnregisterKvCacheResponse);
   rpc Store(StoreRequest) returns (StoreResponse);
   rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
+  rpc ReleaseEvent(ReleaseEventRequest) returns (ReleaseEventResponse);
 }

@@ -17,6 +17,7 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.ipc_event_registry import IPCEventRegistry
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
@@ -242,6 +243,7 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
         *REGISTER_ARGS,
         time.monotonic(),
         event_backend=stub_device,
+        ipc_events=IPCEventRegistry(),
     )
 
     handle, ok = module.store_q(MagicMock(), 1, [[0, 1, 2]], b"peer-handle")
