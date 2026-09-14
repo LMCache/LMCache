@@ -115,6 +115,32 @@ jobs:
         run: |
           pytest -m "not (cuda or musa or xpu or npu or neuron)"
 
+  rust-unit-tests:
+    needs: changes
+    if: needs.changes.outputs.raw_block == 'true'
+    name: Rust unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path rust/raw_block/Cargo.toml --no-default-features
+
   raw-block-tests:
     needs: changes
     if: needs.changes.outputs.raw_block == 'true'

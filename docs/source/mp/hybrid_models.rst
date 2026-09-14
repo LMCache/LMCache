@@ -35,7 +35,7 @@ Recipe pages for the validated hybrid-attention architectures:
    * - gpt-oss
      - Sliding-window + full
      - :doc:`/recipes/gpt_oss`
-   * - Qwen3.5 / Qwen3.6 series
+   * - Qwen3.5 / Qwen3.6 / Qwen3.8 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
    * - Kimi-Linear
@@ -134,8 +134,9 @@ Mamba / Linear-Attention Hybrids
 --------------------------------
 
 Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention layers**
-with full attention — the Qwen3.5 and Qwen3.6 series (``Qwen/Qwen3.5-0.8B``,
-``Qwen/Qwen3.6-27B``, …), Qwen3-Next, Kimi-Linear
+with full attention — the Qwen3.5, Qwen3.6 and Qwen3.8 series
+(``Qwen/Qwen3.5-0.8B``, ``Qwen/Qwen3.6-27B``, ``Qwen/Qwen3.8-27B``, …),
+Qwen3-Next, Kimi-Linear
 (``moonshotai/Kimi-Linear-48B-A3B-Instruct``), Kimi K3
 (``moonshotai/Kimi-K3``), and other GDN hybrids — are supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
@@ -199,6 +200,9 @@ example:
      - Unified block size ``N``
      - GPUs
    * - ``Qwen/Qwen3.6-27B``
+     - 784
+     - 1
+   * - ``Qwen/Qwen3.8-27B``
      - 784
      - 1
    * - ``Qwen/Qwen3.5-0.8B``
@@ -266,8 +270,8 @@ Caveats
   is not validated.
 - vLLM's Mamba prefix caching in ``align`` mode is marked experimental upstream.
 
-See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the validated
-end-to-end commands and the per-model block sizes.
+See the :doc:`Qwen3.5 / Qwen3.6 / Qwen3.8 recipe <../recipes/qwen3_5>` for the
+validated end-to-end commands and the per-model block sizes.
 
 Verifying Correctness
 ---------------------
