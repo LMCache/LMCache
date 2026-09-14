@@ -49,15 +49,27 @@ uv venv --python 3.10 .venv
 source .venv/bin/activate
 uv pip install --upgrade pip setuptools wheel
 
-# MACA-enabled torch is published on MetaX's own pip index, not PyPI.
-uv pip install torch \
+# MACA-enabled torch is published on MetaX's own pip index, not PyPI. Pinned
+# to the version matching this host's installed MACA SDK (check with
+# `apt list --installed | grep maca_sdk`) -- MetaX's index carries multiple
+# SDK lines at once and an unpinned install here silently tracks whatever
+# they published most recently, which can drift ahead of this host's actual
+# SDK and fail at import with something like
+# "undefined symbol: mcclCommWindowRegister". requirements/maca_core.txt
+# itself (the general, end-user-facing requirements list) stays unpinned on
+# purpose -- different users' hosts run different SDK versions, so this
+# pinning is CI-only, not something to push into that shared file.
+uv pip install "torch==2.10.0+metax3.8.2.2" \
     --index-url https://repos.metax-tech.com/r/maca-pypi/simple
 
 uv pip install -r requirements/common.txt
 uv pip install -r requirements/test.txt
-# maca_core.txt lists mcpy (MetaX's cupy equivalent, MP mode only); also on
-# MetaX's index, not PyPI.
+# maca_core.txt lists mcpy/triton (unpinned, for general end users); pin
+# them here to this host's matching SDK version for the same reason as
+# torch above.
 uv pip install -r requirements/maca_core.txt \
+    --index-url https://repos.metax-tech.com/r/maca-pypi/simple
+uv pip install "mcpy==3.5.3.3" "triton==3.6.0+metax3.8.2.2" \
     --index-url https://repos.metax-tech.com/r/maca-pypi/simple
 
 BUILD_WITH_MACA=1 uv pip install -e . --no-build-isolation
