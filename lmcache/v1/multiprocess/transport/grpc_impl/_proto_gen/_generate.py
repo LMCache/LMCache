@@ -7,9 +7,6 @@ import re
 import subprocess
 import sys
 
-# Third Party
-from grpc_tools import protoc
-
 GENERATED_DIR = Path(__file__).resolve().parent
 PROTO_DIR = GENERATED_DIR.parent / "protos"
 PROJECT_ROOT = GENERATED_DIR.parents[5]
@@ -64,6 +61,42 @@ def _patch_generated_file(path: Path) -> None:
     path.write_text(prefix + text)
 
 
+def _check_generated_imports(generated_files: tuple[Path, ...]) -> bool:
+    """Import generated modules without importing ``lmcache.__init__``."""
+    module_names = tuple(path.stem for path in generated_files if path.suffix == ".py")
+    script = f"""
+from pathlib import Path
+import importlib
+import sys
+import types
+
+package = {GENERATED_PACKAGE!r}
+project_root = Path({str(PROJECT_ROOT)!r})
+generated_dir = Path({str(GENERATED_DIR)!r})
+parts = package.split(".")
+
+for index in range(1, len(parts) + 1):
+    name = ".".join(parts[:index])
+    package_path = (
+        generated_dir
+        if index == len(parts)
+        else project_root.joinpath(*parts[:index])
+    )
+    module = sys.modules.get(name)
+    if module is None:
+        module = types.ModuleType(name)
+        module.__path__ = [str(package_path)]
+        sys.modules[name] = module
+    parent_name, _, child_name = name.rpartition(".")
+    if parent_name:
+        setattr(sys.modules[parent_name], child_name, module)
+
+for stem in {module_names!r}:
+    importlib.import_module(f"{{package}}.{{stem}}")
+"""
+    return subprocess.call([sys.executable, "-c", script], cwd=PROJECT_ROOT) == 0
+
+
 def generate() -> None:
     """Generate all protobuf and gRPC modules under ``_proto_gen``.
 
@@ -77,6 +110,9 @@ def generate() -> None:
     proto_files = tuple(sorted(PROTO_DIR.glob("*.proto")))
     if not proto_files:
         raise RuntimeError(f"No proto sources found under {PROTO_DIR}")
+
+    # Third Party
+    from grpc_tools import protoc
 
     _cleanup_generated_files()
     result = protoc.main(
@@ -96,16 +132,7 @@ def generate() -> None:
     for path in generated_files:
         _patch_generated_file(path)
 
-    modules = "; ".join(
-        f"import {GENERATED_PACKAGE}.{path.stem}"
-        for path in generated_files
-        if path.suffix == ".py"
-    )
-    result = subprocess.call(
-        [sys.executable, "-c", modules],
-        cwd=PROJECT_ROOT,
-    )
-    if result != 0:
+    if not _check_generated_imports(generated_files):
         _cleanup_generated_files()
         raise RuntimeError("Generated gRPC modules failed their import check")
 
