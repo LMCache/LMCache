@@ -37,7 +37,7 @@ from lmcache.utils import (
     CacheStoreEvent,
     _lmcache_nvtx_annotate,
     compress_slot_mapping,
-    convert_tokens_to_list,
+    convert_token_range_to_list,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
@@ -532,7 +532,7 @@ class LMCacheEngine:
                         lora_name=None,
                     )
                     if tokens is not None:
-                        stored_event.token_ids = convert_tokens_to_list(
+                        stored_event.token_ids = convert_token_range_to_list(
                             tokens,
                             start,
                             end,
@@ -540,7 +540,10 @@ class LMCacheEngine:
                         if isinstance(tokens, torch.Tensor):
                             stored_event.medium = tokens.device
                     elif hashes is not None:
-                        stored_event.token_ids = hashes[start : end + 1]
+                        # ``hashes`` holds one entry per chunk, so it cannot be
+                        # sliced with token offsets; this chunk's hash is
+                        # exactly ``key.chunk_hash``.
+                        stored_event.token_ids = [key.chunk_hash]
                     logger.debug(
                         (
                             "Added kv cache event '%s' to kv cache events queue"
@@ -715,7 +718,7 @@ class LMCacheEngine:
                     lora_name=None,
                 )
                 if tokens is not None:
-                    stored_event.token_ids = convert_tokens_to_list(
+                    stored_event.token_ids = convert_token_range_to_list(
                         tokens,
                         start,
                         end,
