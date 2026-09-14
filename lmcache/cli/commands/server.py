@@ -86,6 +86,7 @@ class ServerCommand(BaseCommand):
                 parse_args_to_observability_config,
             )
             from lmcache.v1.multiprocess.config import (
+                merge_mp_config_file_into_args,
                 parse_args_to_coordinator_config,
                 parse_args_to_http_frontend_config,
                 parse_args_to_mp_server_config,
@@ -100,6 +101,7 @@ class ServerCommand(BaseCommand):
             )
             sys.exit(1)
 
+        args = merge_mp_config_file_into_args(args)
         run_http_server(
             http_config=parse_args_to_http_frontend_config(args),
             mp_config=parse_args_to_mp_server_config(args),

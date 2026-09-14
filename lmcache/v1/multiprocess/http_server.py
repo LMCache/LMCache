@@ -40,6 +40,7 @@ from lmcache.v1.multiprocess.config import (
     add_http_frontend_args,
     add_mp_server_args,
     add_p2p_args,
+    merge_mp_config_file_into_args,
     parse_args_to_coordinator_config,
     parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
@@ -279,6 +280,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    args = merge_mp_config_file_into_args(args)
     http_config = parse_args_to_http_frontend_config(args)
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
