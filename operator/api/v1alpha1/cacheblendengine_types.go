@@ -234,6 +234,14 @@ type CacheBlendEngineSpec struct {
 	// They are appended last and can override any auto-generated flag.
 	// +optional
 	ExtraArgs []string `json:"extraArgs,omitempty"`
+
+	// pd enables PD (Prefill-Decode) disaggregation. The prefiller config
+	// pairs the CacheBlend connector with NIXL in a MultiConnector; the
+	// decoder config is a bare NixlConnector (kv_consumer). The webhook
+	// selects the config by the lmcache.ai/pd-role pod annotation and
+	// injects the NIXL side-channel env vars.
+	// +optional
+	PD *PDSpec `json:"pd,omitempty"`
 }
 
 // CacheBlendEngineStatus defines the observed state of CacheBlendEngine.
