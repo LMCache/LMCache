@@ -52,12 +52,13 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // Build the filesystem-safe filename from a serialized key string.
   //
   // Input key (from NativeConnectorL2Adapter._object_key_to_string):
-  //   Unsalted: "{model}@{kv_rank:08x}@{hash.hex()}"
-  //   Salted  : "{model}@{kv_rank:08x}@{hash.hex()}@{cache_salt}"
+  //   Legacy : "{model}@{kv_rank:08x}@{hash.hex()}"
+  //   Current: "{model}@{kv_rank:08x}@{object_group_id:x}@{hash.hex()}"
+  //            optionally followed by "@{cache_salt}"
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
-  //   Unsalted: "{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
-  //   Salted  : "{safe_model}@{kv_rank:#010x}@{hash.hex()}@{cache_salt}.data"
+  //   Every field is preserved, with a safe model name, 0x-prefixed kv_rank,
+  //   and a .data suffix.
   //
   // Differences from the input: '/' in model becomes '-SEP-', kv_rank
   // gains a '0x' prefix, and '.data' is appended. Both model_name and
