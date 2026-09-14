@@ -870,9 +870,16 @@ class S3L2Adapter(L2AdapterInterface):
     def _get_request(self, key_str: str, mem_obj: MemoryObj):
         req = self._make_request("GET", key_str)
         data_ptr = mem_obj.data_ptr
+        buf_size = mem_obj.get_size()
+        overflow = {"hit": False}
 
         def on_body(chunk, offset, **kwargs):
-            # Write chunk into the caller-provided MemoryObj buffer.
+            # Write chunk into the caller-provided MemoryObj buffer, dropping
+            # any bytes past its bounds so an oversized S3 object can't write
+            # out of bounds; on_done fails the request if that happens (#3831).
+            if offset < 0 or offset + len(chunk) > buf_size:
+                overflow["hit"] = True
+                return
             ctypes.memmove(data_ptr + offset, chunk, len(chunk))
 
         def on_done(error=None, status_code=None, **kwargs):
@@ -880,6 +887,11 @@ class S3L2Adapter(L2AdapterInterface):
             if error or not ok:
                 raise RuntimeError(
                     f"S3 GET failed for {key_str}: {error or status_code}"
+                )
+            if overflow["hit"]:
+                raise RuntimeError(
+                    f"S3 GET for {key_str} returned more data than the "
+                    f"{buf_size}-byte destination buffer"
                 )
 
         s3_req = s3.S3Request(
@@ -1201,6 +1213,15 @@ class S3L2Adapter(L2AdapterInterface):
         for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
             try:
                 key_str = _object_key_to_string(key)
+                with self._lock:
+                    cached_size = self._object_size_cache.get(key_str)
+                if cached_size is not None and cached_size != obj.get_size():
+                    logger.error(
+                        f"Size mismatch for {key_str}: S3 has {cached_size} "
+                        f"bytes, but the destination expects {obj.get_size()} "
+                        f"bytes; skipping load to avoid writing past the buffer."
+                    )
+                    continue
                 s3_req = self._get_request(key_str, obj)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 launched_indices.append(i)

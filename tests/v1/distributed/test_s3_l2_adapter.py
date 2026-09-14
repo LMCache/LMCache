@@ -519,6 +519,47 @@ class TestStoreLookupLoad:
         assert adapter.query_lookup_and_lock_result(tid) is not None
         assert adapter.query_lookup_and_lock_result(tid) is None
 
+    def test_load_rejects_oversized_after_lookup(self, adapter):
+        """A cached object larger than the destination buffer is rejected
+        before the GET (size mismatch), so the load reports a miss and never
+        writes past the MemoryObj bounds (#3831).
+        """
+        key = create_object_key(7)
+        adapter.submit_store_task([key], [create_memory_obj(size=32, fill_value=2.0)])
+        wait_for_event_fd(adapter.get_store_event_fd())
+        adapter.pop_completed_store_tasks()
+
+        # Lookup caches the oversized object length.
+        tid = adapter.submit_lookup_and_lock_task([key])
+        wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+        adapter.query_lookup_and_lock_result(tid)
+
+        # Load into a smaller 16-element (64-byte) buffer.
+        dst = create_memory_obj(size=16, fill_value=0.0)
+        tid = adapter.submit_load_task([key], [dst])
+        assert wait_for_event_fd(adapter.get_load_event_fd())
+        bm = adapter.query_load_result(tid)
+        assert bm is not None and bm.test(0) is False
+        assert torch.allclose(dst.tensor, torch.zeros(16))
+
+    def test_load_rejects_oversized_without_lookup(self, adapter):
+        """With no cached size (no prior lookup) the GET is issued, so the
+        on_body guard must drop the oversized response and fail the load
+        instead of writing past the MemoryObj bounds (#3831).
+        """
+        key = create_object_key(8)
+        # 32-element (128-byte) object placed directly in the backend so the
+        # adapter has no cached size and issues the GET.
+        big = create_memory_obj(size=32, fill_value=2.0)
+        _BACKEND.put(_object_key_to_string(key), bytes(big.byte_array))
+
+        dst = create_memory_obj(size=16, fill_value=0.0)
+        tid = adapter.submit_load_task([key], [dst])
+        assert wait_for_event_fd(adapter.get_load_event_fd())
+        bm = adapter.query_load_result(tid)
+        assert bm is not None and bm.test(0) is False
+        assert torch.allclose(dst.tensor, torch.zeros(16))
+
 
 # =============================================================================
 # Eviction (delete + locking)
