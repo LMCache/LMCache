@@ -137,6 +137,8 @@ def test_raw_block_device_iouring_fixed_buffer_subranges(tmp_path: Path) -> None
         )
         base_ptr = _buffer_address(registered)
 
+        assert dev.fixed_buffer_status() == (False, 0)
+
         with pytest.raises(ValueError, match="null pointer"):
             dev.register_fixed_buffers([0], [1])
         with pytest.raises(ValueError, match="zero size"):
@@ -149,12 +151,16 @@ def test_raw_block_device_iouring_fixed_buffer_subranges(tmp_path: Path) -> None
                 [region_size, region_size],
             )
 
+        assert dev.fixed_buffer_status() == (False, 0)
+
         dev.register_fixed_buffers(
             [base_ptr, base_ptr + region_size],
             [region_size, region_size],
         )
+        assert dev.fixed_buffer_status() == (True, 2 * region_size)
         with pytest.raises(RuntimeError, match="already registered"):
             dev.register_fixed_buffers([base_ptr], [region_size])
+        assert dev.fixed_buffer_status() == (True, 2 * region_size)
 
         scalar_payload = b"fixed-buffer scalar interior subrange"
         scalar_view = registered[128 : 128 + len(scalar_payload)]
@@ -195,6 +201,8 @@ def test_raw_block_device_iouring_fixed_buffer_subranges(tmp_path: Path) -> None
         assert dev.wait_iouring(batch_id) == ([True, True], [])
         assert bytes(interior_view) == interior_payload
         assert bytes(crossing_view) == crossing_payload
+        dev.close()
+        assert dev.fixed_buffer_status() == (False, 0)
     except Exception as e:
         message = str(e).lower()
         memlock_unavailable = (

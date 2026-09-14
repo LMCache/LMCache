@@ -1088,8 +1088,14 @@ class RawBlockCore:
         return self._apply_loaded_state(data)
 
     def report_status(self) -> dict:
-        """Return raw-block health, layout, metadata, and in-flight counters."""
+        """Return raw-block health, layout, registration, and in-flight status."""
         with self._lock:
+            raw_device = self._raw
+            fixed_buffers_registered, fixed_buffer_registered_bytes = (
+                raw_device.fixed_buffer_status()
+                if raw_device is not None
+                else (False, 0)
+            )
             return {
                 "is_healthy": not self._closed,
                 "type": "RawBlockCore",
@@ -1114,6 +1120,8 @@ class RawBlockCore:
                 "inflight_io_count": self._inflight_io_count,
                 "use_odirect": self.use_odirect,
                 "enable_zero_copy": self.enable_zero_copy,
+                "fixed_buffers_registered": fixed_buffers_registered,
+                "fixed_buffer_registered_bytes": fixed_buffer_registered_bytes,
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
                 "use_uring_cmd": self.use_uring_cmd,

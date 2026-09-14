@@ -2161,6 +2161,22 @@ impl RawBlockDevice {
         fetch_fdp_status(self.fd, nsid)
     }
 
+    /// Return a consistent snapshot of fixed-buffer registration.
+    ///
+    /// Returns `(registered, registered_bytes)` for buffers accepted by the
+    /// kernel. Before successful registration and after close, this is
+    /// `(false, 0)`. Failed registration attempts do not contribute bytes.
+    fn fixed_buffer_status(&self) -> (bool, usize) {
+        let regions = self.fixed_buffer_regions.lock().unwrap();
+        let registered = self.fixed_buffers_registered.load(Ordering::Acquire);
+        let registered_bytes = if registered {
+            regions.iter().map(|region| region.end - region.start).sum()
+        } else {
+            0
+        };
+        (registered, registered_bytes)
+    }
+
     /// Register fixed buffers for zero-copy io_uring operations.
     ///
     /// - Pre-registering memory buffers with the kernel

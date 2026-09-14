@@ -132,6 +132,7 @@ class _FakeFdpCore:
         self.put_many_calls: list[list[int | None] | None] = []
         self.fixed_buffer_range_calls: list[tuple[int, int]] = []
         self.fixed_buffer_registration_error: Exception | None = None
+        self.registered_bytes = 0
 
     def fetch_fdp_status(self) -> list[tuple[int, int]]:
         return self.status
@@ -140,6 +141,8 @@ class _FakeFdpCore:
         return {
             "is_healthy": True,
             "usable_capacity_bytes": RAW_BLOCK_CI_SLOT_BYTES * 8,
+            "fixed_buffers_registered": self.registered_bytes > 0,
+            "fixed_buffer_registered_bytes": self.registered_bytes,
         }
 
     def put_many(
@@ -163,9 +166,10 @@ class _FakeFdpCore:
         self.fixed_buffer_range_calls.append((ptr, size))
         if self.fixed_buffer_registration_error is not None:
             raise self.fixed_buffer_registration_error
+        self.registered_bytes = size
 
     def close(self) -> None:
-        pass
+        self.registered_bytes = 0
 
 
 def _make_fdp_config(
@@ -264,8 +268,15 @@ def test_raw_block_adapter_registers_eligible_l1_range() -> None:
     )
     try:
         assert fake_core.fixed_buffer_range_calls == [(l1_memory_desc.ptr, stable_size)]
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is True
+        assert status["fixed_buffer_registered_bytes"] == stable_size
     finally:
         adapter.close()
+
+    status = adapter.report_status()["core"]
+    assert status["fixed_buffers_registered"] is False
+    assert status["fixed_buffer_registered_bytes"] == 0
 
 
 @pytest.mark.parametrize(
@@ -319,6 +330,9 @@ def test_raw_block_adapter_skips_ineligible_fixed_buffer_registration(
     )
     try:
         assert fake_core.fixed_buffer_range_calls == []
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is False
+        assert status["fixed_buffer_registered_bytes"] == 0
     finally:
         adapter.close()
 
@@ -344,6 +358,9 @@ def test_raw_block_adapter_falls_back_when_fixed_buffer_registration_fails() -> 
     try:
         assert fake_core.fixed_buffer_range_calls == [(l1_memory_desc.ptr, 8192)]
         assert adapter.report_status()["is_healthy"] is True
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is False
+        assert status["fixed_buffer_registered_bytes"] == 0
         warning.assert_called_once()
         assert "Falling back" in warning.call_args.args[0]
     finally:
