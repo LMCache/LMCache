@@ -11,49 +11,21 @@ import pytest
 
 # First Party
 from lmcache.v1.memory_coordinator.app import create_app
-from lmcache.v1.memory_coordinator.config import MemoryCoordinatorConfig
 
-_TOKEN = "test-memory-coordinator-token"
-_CAPACITY = 64 * 1024
-_ALIGNMENT = 4096
+# Local
+from .conftest import CAPACITY, TOKEN
+from .conftest import config as _config
+from .conftest import item
 
-
-@pytest.fixture
-def token_file(tmp_path: Path) -> Path:
-    path = tmp_path / "token"
-    path.write_text(_TOKEN + "\n")
-    return path
-
-
-def _config(token_file: Path) -> MemoryCoordinatorConfig:
-    return MemoryCoordinatorConfig(
-        token_file=str(token_file),
-        state_file=str(token_file.with_name("coordinator.state")),
-        region_id="region",
-        capacity_bytes=_CAPACITY,
-        alignment_bytes=_ALIGNMENT,
-        layout_id="layout",
-    )
+_ITEM = item(1).model_dump(mode="json")
+_KEY = _ITEM["key"]
+_HUGE = {"key": _KEY, "layout": {"shapes": [[CAPACITY * 2]], "dtypes": ["uint8"]}}
 
 
 @pytest.fixture
 def client(token_file: Path) -> TestClient:
     app = create_app(_config(token_file))
-    return TestClient(app, headers={"Authorization": f"Bearer {_TOKEN}"})
-
-
-def _key(seed: int) -> dict:
-    return {
-        "chunk_hash_hex": f"{seed:08x}",
-        "model_name": "model",
-        "kv_rank": 0,
-        "object_group_id": 0,
-        "cache_salt": "",
-    }
-
-
-def _layout() -> dict:
-    return {"shapes": [[64]], "dtypes": ["float16"]}
+    return TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
 
 
 def _epoch(client: TestClient) -> str:
@@ -61,12 +33,14 @@ def _epoch(client: TestClient) -> str:
 
 
 def test_health_endpoints_require_no_auth(token_file: Path) -> None:
-    app = create_app(_config(token_file))
-    anonymous = TestClient(app)
-    assert anonymous.get("/healthz").status_code == 200
-    assert anonymous.get("/readyz").status_code == 200
-    assert anonymous.get("/docs").status_code == 404
-    assert anonymous.get("/openapi.json").status_code == 404
+    with TestClient(create_app(_config(token_file))) as anonymous:
+        for path, status in (
+            ("/healthz", 200),
+            ("/readyz", 200),
+            ("/docs", 404),
+            ("/openapi.json", 404),
+        ):
+            assert anonymous.get(path).status_code == status
 
 
 @pytest.mark.parametrize(
@@ -85,68 +59,63 @@ def test_non_health_endpoints_reject_missing_and_wrong_tokens(
     method: str,
     path: str,
 ) -> None:
-    app = create_app(_config(token_file))
-    anonymous = TestClient(app)
-    assert anonymous.request(method, path).status_code == 401
-    wrong = TestClient(app, headers={"Authorization": "Bearer wrong"})
-    assert wrong.request(method, path).status_code == 403
+    with TestClient(create_app(_config(token_file))) as client:
+        assert client.request(method, path).status_code == 401
+        assert (
+            client.request(
+                method, path, headers={"Authorization": "Bearer wrong"}
+            ).status_code
+            == 403
+        )
 
 
-def test_schema_rejects_payload_fields(client: TestClient) -> None:
-    epoch = _epoch(client)
-    smuggled = client.post(
-        "/v1/writes/reserve",
-        json={
-            "region_epoch": epoch,
-            "items": [
-                {"key": _key(1), "layout": _layout(), "payload": "AAAA"},
-            ],
-        },
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"items": [_ITEM | {"payload": "AAAA"}]},
+        {"items": [], "data": "AAAA"},
+    ],
+)
+def test_schema_rejects_payload_fields(client: TestClient, body: dict) -> None:
+    assert (
+        client.post(
+            "/v1/writes/reserve", json={"region_epoch": _epoch(client)} | body
+        ).status_code
+        == 422
     )
-    assert smuggled.status_code == 422
-    top_level = client.post(
-        "/v1/writes/reserve",
-        json={"region_epoch": epoch, "items": [], "data": "AAAA"},
-    )
-    assert top_level.status_code == 422
 
 
-def test_stale_epoch_is_rejected(client: TestClient) -> None:
+@pytest.mark.parametrize(
+    ("path", "body", "status", "error"),
+    [
+        ("reserve", {"region_epoch": "stale", "items": []}, 409, "stale_epoch"),
+        (
+            "reserve",
+            {"items": [_HUGE]},
+            507,
+            "out_of_space",
+        ),
+        (
+            "finish",
+            {"reservations": [{"key": _KEY, "token": "wrong"}]},
+            409,
+            "invalid_reservation",
+        ),
+    ],
+)
+def test_errors_map_to_http_status(
+    client: TestClient,
+    path: str,
+    body: dict,
+    status: int,
+    error: str,
+) -> None:
     response = client.post(
-        "/v1/writes/reserve",
-        json={"region_epoch": "not-the-epoch", "items": []},
+        f"/v1/writes/{path}",
+        json={"region_epoch": _epoch(client)} | body,
     )
-    assert response.status_code == 409
-    assert response.json()["error"] == "stale_epoch"
-
-
-def test_out_of_space_maps_to_507(client: TestClient) -> None:
-    epoch = _epoch(client)
-    huge = {"shapes": [[_CAPACITY * 2]], "dtypes": ["uint8"]}
-    response = client.post(
-        "/v1/writes/reserve",
-        json={"region_epoch": epoch, "items": [{"key": _key(1), "layout": huge}]},
-    )
-    assert response.status_code == 507
-    assert response.json()["error"] == "out_of_space"
-
-
-def test_invalid_reservation_maps_to_409(client: TestClient) -> None:
-    epoch = _epoch(client)
-    response = client.post(
-        "/v1/writes/finish",
-        json={
-            "region_epoch": epoch,
-            "reservations": [
-                {
-                    "key": _key(1),
-                    "token": "wrong",
-                }
-            ],
-        },
-    )
-    assert response.status_code == 409
-    assert response.json()["error"] == "invalid_reservation"
+    assert response.status_code == status
+    assert response.json()["error"] == error
 
 
 @pytest.mark.parametrize(
@@ -156,16 +125,7 @@ def test_invalid_token_file_fails_startup(tmp_path: Path, contents: str) -> None
     empty = tmp_path / "token"
     empty.write_text(contents)
     with pytest.raises(ValueError, match="ASCII token"):
-        create_app(
-            MemoryCoordinatorConfig(
-                token_file=str(empty),
-                state_file=str(tmp_path / "coordinator.state"),
-                region_id="region",
-                capacity_bytes=_CAPACITY,
-                alignment_bytes=_ALIGNMENT,
-                layout_id="layout",
-            )
-        )
+        create_app(_config(empty))
 
 
 def test_startup_latch_survives_clean_shutdown(token_file: Path) -> None:
@@ -174,7 +134,7 @@ def test_startup_latch_survives_clean_shutdown(token_file: Path) -> None:
         assert client.get("/readyz").status_code == 200
     state_file = Path(config.state_file)
     marker = state_file.read_bytes()
-    assert marker and _TOKEN.encode() not in marker
+    assert marker and TOKEN.encode() not in marker
     with pytest.raises(RuntimeError, match="coordinated pool reset"):
         create_app(config)
     assert state_file.read_bytes() == marker

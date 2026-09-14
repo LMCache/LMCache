@@ -56,29 +56,11 @@ one coordinator process and one Uvicorn worker for the region.
    export LMCACHE_MEMORY_COORDINATOR_LAYOUT_ID=qwen25-7b-bf16-tp1-chunk256-v1
    python -m lmcache.v1.memory_coordinator
 
-All settings use the ``LMCACHE_MEMORY_COORDINATOR_`` prefix:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
-
-   * - Suffix
-     - Meaning
-   * - ``HOST``, ``PORT``
-     - Bind address and port. Defaults: ``0.0.0.0`` and ``9400``.
-   * - ``TOKEN_FILE``
-     - Required absolute token-file path.
-   * - ``STATE_FILE``
-     - Required absolute persistent startup-marker path. It must not exist
-       on the first start. It remains after shutdown.
-   * - ``REGION_ID``
-     - Required identity of the physical window.
-   * - ``CAPACITY_BYTES``
-     - Required logical pool size, in bytes.
-   * - ``ALIGNMENT_BYTES``
-     - Positive power-of-two alignment. Default: ``2097152``.
-   * - ``LAYOUT_ID``
-     - Required operator-supplied compatibility fingerprint.
+All settings use the ``LMCACHE_MEMORY_COORDINATOR_`` prefix. ``HOST``, ``PORT``
+and ``ALIGNMENT_BYTES`` have the defaults shown above; the remaining values
+are required. Alignment must be a positive power of two. ``STATE_FILE`` must
+not exist on the first start and remains after shutdown. ``REGION_ID`` names
+the physical window; ``LAYOUT_ID`` identifies compatible model/cache layouts.
 
 Attach each MP server
 ---------------------

@@ -27,17 +27,7 @@ _DTYPE_BYTES = {
 
 
 def wire_dtype_itemsize(name: str) -> int:
-    """Return bytes per element for a supported wire dtype.
-
-    Args:
-        name: Canonical dtype name.
-
-    Returns:
-        Bytes per element.
-
-    Raises:
-        ValueError: The dtype is unsupported.
-    """
+    """Return bytes per element for ``name``; raise ValueError if unsupported."""
     try:
         return _DTYPE_BYTES[name]
     except KeyError:
@@ -45,17 +35,7 @@ def wire_dtype_itemsize(name: str) -> int:
 
 
 def canonical_key(key: EncodedObjectKey) -> EncodedObjectKey:
-    """Validate and return the immutable object-key encoding.
-
-    Args:
-        key: Encoded LMCache object key.
-
-    Returns:
-        Canonical, hashable object key.
-
-    Raises:
-        ValueError: The encoding is non-canonical.
-    """
+    """Return immutable ``key``; raise ValueError for non-canonical encodings."""
     if type(key.kv_rank) is not int or type(key.object_group_id) is not int:
         raise ValueError("kv_rank and object_group_id must be integers")
     canonical = key.to_object_key().to_encoded_object_key()
@@ -91,14 +71,7 @@ class WireLayout(_WireModel):
     dtypes: tuple[str, ...]
 
     def size_bytes(self) -> int:
-        """Return the described payload size.
-
-        Returns:
-            Total bytes across all tensors.
-
-        Raises:
-            ValueError: Shapes and dtypes disagree or contain invalid values.
-        """
+        """Return total tensor bytes; raise ValueError for invalid shapes/dtypes."""
         if len(self.shapes) != len(self.dtypes):
             raise ValueError("shapes and dtypes must align")
         total = 0

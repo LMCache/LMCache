@@ -4,6 +4,7 @@
 # Standard
 import argparse
 import json
+import shlex
 
 # Third Party
 import pytest
@@ -28,31 +29,16 @@ from lmcache.v1.multiprocess.server import _validate_shared_l1_runtime_config
 
 
 def _shared_args() -> list[str]:
-    return [
-        "--l1-size-gb",
-        "2",
-        "--l1-devdax-path",
-        "/dev/dax1.0",
-        "--no-l1-use-lazy",
-        "--shm-name",
-        "",
-        "--l1-align-bytes",
-        "64",
-        "--eviction-policy",
-        "noop",
-        "--l1-coordinator-endpoint",
-        "http://memory-coordinator.shared-dax-e2e.svc:9400",
-        "--l1-coordinator-token-file",
-        "/var/run/secrets/lmcache/memory-coordinator-token",
-        "--l1-shared-region-id",
-        "cxl-window-0",
-        "--l1-shared-layout-id",
-        "scratch-v1",
-        "--l1-shared-mapping-offset-bytes",
-        "4096",
-        "--l1-shared-visibility-library-path",
-        "/opt/lmcache/lib/liblmcache_shared_l1_visibility.so",
-    ]
+    return shlex.split("""
+        --l1-size-gb 2 --l1-devdax-path /dev/dax1.0
+        --no-l1-use-lazy --shm-name '' --l1-align-bytes 64 --eviction-policy noop
+        --l1-coordinator-endpoint http://memory-coordinator.shared-dax-e2e.svc:9400
+        --l1-coordinator-token-file /var/run/secrets/lmcache/memory-coordinator-token
+        --l1-shared-region-id cxl-window-0 --l1-shared-layout-id scratch-v1
+        --l1-shared-mapping-offset-bytes 4096
+        --l1-shared-visibility-library-path
+        /opt/lmcache/lib/liblmcache_shared_l1_visibility.so
+    """)
 
 
 def _parse_mp_args(args: list[str]) -> StorageManagerConfig:
@@ -82,12 +68,21 @@ def test_shared_l1_flags_build_expected_config() -> None:
     )
 
 
-def test_shared_l1_requires_device_dax() -> None:
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--l1-devdax-path",
+        "--l1-coordinator-token-file",
+        "--l1-shared-region-id",
+        "--l1-shared-layout-id",
+        "--l1-shared-visibility-library-path",
+    ],
+)
+def test_shared_l1_requires_every_companion_flag(flag: str) -> None:
     args = _shared_args()
-    path_index = args.index("--l1-devdax-path")
-    del args[path_index : path_index + 2]
-
-    with pytest.raises(ValueError, match="requires l1-devdax-path"):
+    index = args.index(flag)
+    del args[index : index + 2]
+    with pytest.raises(ValueError, match=flag.lstrip("-")):
         _parse_mp_args(args)
 
 
@@ -97,20 +92,6 @@ def test_shared_l1_rejects_malformed_endpoint() -> None:
 
     with pytest.raises(ValueError, match="http"):
         _parse_mp_args(args)
-
-
-def test_shared_l1_requires_every_companion_flag() -> None:
-    for flag in (
-        "--l1-coordinator-token-file",
-        "--l1-shared-region-id",
-        "--l1-shared-layout-id",
-        "--l1-shared-visibility-library-path",
-    ):
-        args = _shared_args()
-        index = args.index(flag)
-        del args[index : index + 2]
-        with pytest.raises(ValueError, match=flag.lstrip("-")):
-            _parse_mp_args(args)
 
 
 def test_shared_l1_rejects_eviction_and_matching_dax_l2() -> None:
@@ -162,17 +143,10 @@ def test_shared_l1_runtime_requires_lmcache_driven_without_p2p() -> None:
 
 
 def test_old_options_alone_leave_shared_l1_disabled() -> None:
-    args = [
-        "--l1-size-gb",
-        "2",
-        "--l1-devdax-path",
-        "/dev/dax1.0",
-        "--no-l1-use-lazy",
-        "--shm-name",
-        "",
-        "--eviction-policy",
-        "noop",
-    ]
+    args = shlex.split("""
+        --l1-size-gb 2 --l1-devdax-path /dev/dax1.0
+        --no-l1-use-lazy --shm-name '' --eviction-policy noop
+    """)
     config = _parse_mp_args(args)
     assert config.l1_manager_config.shared_l1_config is None
     memory_config = config.l1_manager_config.memory_config

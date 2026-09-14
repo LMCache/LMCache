@@ -9,32 +9,18 @@ from dataclasses import replace
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey
 from lmcache.v1.memory_coordinator.api import (
     InvalidReservationError,
     OutOfSpaceError,
     ReservationRef,
     StaleEpochError,
-    WireLayout,
-    WriteGrant,
-    WriteReserveItem,
 )
 from lmcache.v1.memory_coordinator.pool import MemoryPool
 
-
-def _key(seed: int) -> EncodedObjectKey:
-    return EncodedObjectKey(f"{seed:08x}", "model", 0)
-
-
-def _item(seed: int, elements: int = 64) -> WriteReserveItem:
-    return WriteReserveItem(
-        key=_key(seed),
-        layout=WireLayout(shapes=((elements,),), dtypes=("float16",)),
-    )
-
-
-def _ref(grant: WriteGrant) -> ReservationRef:
-    return ReservationRef(key=grant.key, token=grant.token)
+# Local
+from .conftest import item as _item
+from .conftest import key as _key
+from .conftest import ref as _ref
 
 
 def _pool(capacity: int = 64 * 1024) -> MemoryPool:

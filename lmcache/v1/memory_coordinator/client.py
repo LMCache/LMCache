@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Typed httpx client for the Memory Coordinator.
-
-The client latches the ``region_epoch`` it observes at connect time and
-sends it with every request. When the coordinator restarts (new epoch), the
-server rejects the stale epoch with 409 and the client *fences itself*:
-every subsequent operation raises :class:`StaleEpochError` until an
-explicit, operator-coordinated reset/restart constructs a new client. This
-is deliberate — an MP server holding views into the old region layout must
-not silently adopt a new epoch.
-"""
+"""HTTP metadata client; epoch changes and ambiguous writes fence further use."""
 
 # Standard
 import threading
@@ -17,7 +8,6 @@ import threading
 import httpx
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.memory_coordinator.api import (
     EncodedObjectKey,
     EpochResponse,
@@ -39,8 +29,6 @@ from lmcache.v1.memory_coordinator.api import (
 )
 from lmcache.v1.memory_coordinator.config import read_token_file
 
-logger = init_logger(__name__)
-
 _ERROR_TYPES: dict[str, type[MemoryCoordinatorError]] = {
     "stale_epoch": StaleEpochError,
     "invalid_reservation": InvalidReservationError,
@@ -49,17 +37,13 @@ _ERROR_TYPES: dict[str, type[MemoryCoordinatorError]] = {
 
 
 class MemoryCoordinatorHttpClient:
-    """Synchronous HTTP client that latches one coordinator epoch.
+    """Connect to HTTP(S) ``endpoint`` with absolute ``token_file`` credentials.
 
-    Args:
-        endpoint: Base URL of the coordinator, e.g. ``http://host:9400``.
-        token_file: Absolute path to the bearer-token file.
-        timeout: Per-request timeout in seconds.
-
-    Raises:
-        ValueError: The endpoint or token file is invalid.
-        MemoryCoordinatorError: The coordinator rejected the first request.
-        httpx.HTTPError: The coordinator is unreachable.
+    ``timeout`` is in seconds. Invalid settings raise ValueError; transport
+    failures raise httpx.HTTPError; rejected operations raise
+    MemoryCoordinatorError. Epoch changes or ambiguous POSTs permanently fence
+    the client: subsequent operations raise StaleEpochError until a coordinated
+    reset constructs a new client. A closed client raises MemoryCoordinatorError.
     """
 
     def __init__(
@@ -78,19 +62,13 @@ class MemoryCoordinatorHttpClient:
         )
         self._lock = threading.RLock()
         self._fenced = False
-        self._closed = False
         try:
-            contract = RegionContract.model_validate(self._get("/v1/region"))
+            self._contract = RegionContract.model_validate(
+                self._request("GET", "/v1/region")
+            )
         except BaseException:
-            self._closed = True
             self._http.close()
             raise
-        self._contract = contract
-        logger.info(
-            "Memory coordinator client connected: region_id=%s epoch=%s",
-            contract.region_id,
-            contract.region_epoch,
-        )
 
     def region_contract(self) -> RegionContract:
         """Return the contract latched at connect time (epoch included)."""
@@ -100,53 +78,45 @@ class MemoryCoordinatorHttpClient:
         self,
         items: list[WriteReserveItem],
     ) -> list[WriteGrant | None]:
-        """Reserve every absent key in one capacity-atomic batch.
+        """Return one grant per key/layout in ``items``, None for existing keys.
 
-        Args:
-            items: Keys and layouts to reserve.
-
-        Returns:
-            One entry per item; ``None`` for keys that already exist.
-
-        Raises:
-            OutOfSpaceError: The complete batch does not fit.
-            StaleEpochError: The coordinator epoch changed; this client is
-                now fenced.
+        OutOfSpaceError rejects the whole batch; other errors follow the client
+        contract. Reservation and capacity checks are atomic.
         """
         body = WriteReserveRequest(
             region_epoch=self._contract.region_epoch,
             items=items,
         )
-        payload = self._post("/v1/writes/reserve", body.model_dump())
+        payload = self._request("POST", "/v1/writes/reserve", body.model_dump())
         response = WriteReserveResponse.model_validate(payload)
         self._check_response_epoch(response.region_epoch)
         return response.grants
 
     def finish_writes(self, reservations: list[ReservationRef]) -> None:
-        """Atomically publish a write batch (all become ``VALID``)."""
+        """Publish ``reservations`` atomically; invalid tokens raise errors."""
         self._reservation_batch("/v1/writes/finish", reservations)
 
     def abort_writes(self, reservations: list[ReservationRef]) -> None:
-        """Drop ``WRITING`` metadata for a failed batch."""
+        """Abort ``reservations`` without reclaiming; invalid tokens raise errors."""
         self._reservation_batch("/v1/writes/abort", reservations)
 
     def lookup(
         self,
         keys: list[EncodedObjectKey],
     ) -> list[LookupHit | None]:
-        """Return every ``VALID`` hit in one batch; misses return ``None``."""
+        """Return VALID hits for ``keys`` (None for misses); client errors apply."""
         body = LookupRequest(
             region_epoch=self._contract.region_epoch,
             keys=keys,
         )
-        payload = self._post("/v1/lookup", body.model_dump())
+        payload = self._request("POST", "/v1/lookup", body.model_dump())
         response = LookupResponse.model_validate(payload)
         self._check_response_epoch(response.region_epoch)
         return response.hits
 
     def status(self) -> StatusResponse:
         """Return the coordinator's constant-size status."""
-        response = StatusResponse.model_validate(self._get("/v1/status"))
+        response = StatusResponse.model_validate(self._request("GET", "/v1/status"))
         self._check_response_epoch(response.region.region_epoch)
         return response
 
@@ -158,9 +128,6 @@ class MemoryCoordinatorHttpClient:
     def close(self) -> None:
         """Release the transport; further operations fail."""
         with self._lock:
-            if self._closed:
-                return
-            self._closed = True
             self._http.close()
 
     def _reservation_batch(
@@ -173,11 +140,13 @@ class MemoryCoordinatorHttpClient:
             region_epoch=self._contract.region_epoch,
             reservations=reservations,
         )
-        response = EpochResponse.model_validate(self._post(path, body.model_dump()))
+        response = EpochResponse.model_validate(
+            self._request("POST", path, body.model_dump())
+        )
         self._check_response_epoch(response.region_epoch)
 
     def _ensure_usable(self) -> None:
-        if self._closed:
+        if self._http.is_closed:
             raise MemoryCoordinatorError("memory coordinator client is closed")
         if self._fenced:
             raise StaleEpochError(
@@ -193,24 +162,24 @@ class MemoryCoordinatorHttpClient:
                 "memory coordinator returned a different region epoch"
             )
 
-    def _get(self, path: str) -> dict[str, object]:
-        with self._lock:
-            self._ensure_usable()
-            response = self._http.get(path)
-        return self._decode(response)
-
-    def _post(self, path: str, payload: dict[str, object]) -> dict[str, object]:
+    def _request(
+        self, method: str, path: str, payload: dict[str, object] | None = None
+    ) -> dict[str, object]:
         with self._lock:
             self._ensure_usable()
             try:
-                response = self._http.post(path, json=payload)
+                response = self._http.request(method, path, json=payload)
             except httpx.HTTPError:
                 # The server may have committed before the connection failed.
-                self._fenced = True
+                self._fenced |= method == "POST"
                 raise
-            if response.status_code >= 500 and response.status_code != 507:
+            if (
+                method == "POST"
+                and response.status_code >= 500
+                and response.status_code != 507
+            ):
                 self._fenced = True
-        return self._decode(response)
+            return self._decode(response)
 
     def _decode(self, response: httpx.Response) -> dict[str, object]:
         if response.status_code < 400:

@@ -2,7 +2,6 @@
 """Standalone HTTP service for shared Device-DAX metadata."""
 
 # Standard
-from collections.abc import Callable
 import hmac
 import os
 
@@ -11,16 +10,15 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.memory_coordinator.api import (
     EpochResponse,
     InvalidReservationError,
     LookupRequest,
     LookupResponse,
+    MemoryCoordinatorError,
     OutOfSpaceError,
     RegionContract,
     ReservationBatchRequest,
-    ReservationRef,
     StaleEpochError,
     StatusResponse,
     WriteReserveRequest,
@@ -32,27 +30,13 @@ from lmcache.v1.memory_coordinator.config import (
 )
 from lmcache.v1.memory_coordinator.pool import MemoryPool
 
-logger = init_logger(__name__)
-
 
 def create_app(config: MemoryCoordinatorConfig) -> FastAPI:
-    """Build one in-process coordinator for one immutable region.
+    """Return a single-pool HTTP app using validated ``config`` settings.
 
-    A durable startup latch refuses every restart, including clean shutdowns.
-    Epoch checks cannot revoke GPU access to old extents, so an operator must
-    stop all MP servers before manually removing the latch to reset the pool.
-    The latch is not metadata recovery and must survive pod replacement.
-
-    Args:
-        config: Validated service and region settings.
-
-    Returns:
-        Ready-to-serve FastAPI application.
-
-    Raises:
-        ValueError: The token file or region contract is invalid.
-        RuntimeError: The persistent startup latch already exists.
-        OSError: The startup latch cannot be durably created.
+    Invalid tokens/contracts raise ValueError; an existing durable startup
+    latch raises RuntimeError. Other file errors propagate. The latch survives
+    shutdown: stop every mapped worker before removing it to reset the pool.
     """
     token = read_token_file(config.token_file).encode()
     pool = MemoryPool(
@@ -97,26 +81,23 @@ def create_app(config: MemoryCoordinatorConfig) -> FastAPI:
         if not hmac.compare_digest(presented.encode(), token):
             raise HTTPException(status_code=403, detail="invalid bearer token")
 
-    def error(status: int, name: str, exc: Exception) -> JSONResponse:
+    @app.exception_handler(MemoryCoordinatorError)
+    async def coordinator_error(
+        request: Request, exc: MemoryCoordinatorError
+    ) -> JSONResponse:
+        status, name = {
+            StaleEpochError: (409, "stale_epoch"),
+            InvalidReservationError: (409, "invalid_reservation"),
+            OutOfSpaceError: (507, "out_of_space"),
+        }[type(exc)]
         return JSONResponse(
             status_code=status,
             content={"error": name, "detail": str(exc)},
         )
 
-    @app.exception_handler(StaleEpochError)
-    async def stale_epoch(request: Request, exc: StaleEpochError) -> JSONResponse:
-        return error(409, "stale_epoch", exc)
-
-    @app.exception_handler(InvalidReservationError)
-    async def invalid_reservation(
-        request: Request,
-        exc: InvalidReservationError,
-    ) -> JSONResponse:
-        return error(409, "invalid_reservation", exc)
-
-    @app.exception_handler(OutOfSpaceError)
-    async def out_of_space(request: Request, exc: OutOfSpaceError) -> JSONResponse:
-        return error(507, "out_of_space", exc)
+    @app.exception_handler(ValueError)
+    async def invalid_request(request: Request, exc: ValueError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -142,52 +123,32 @@ def create_app(config: MemoryCoordinatorConfig) -> FastAPI:
     async def reserve_writes(body: WriteReserveRequest) -> WriteReserveResponse:
         """Reserve absent keys in one capacity-atomic batch."""
         pool.check_epoch(body.region_epoch)
-        try:
-            grants = pool.reserve_writes(body.items)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return WriteReserveResponse(
             region_epoch=body.region_epoch,
-            grants=grants,
+            grants=pool.reserve_writes(body.items),
         )
-
-    def complete(
-        body: ReservationBatchRequest,
-        operation: Callable[[list[ReservationRef]], None],
-    ) -> EpochResponse:
-        pool.check_epoch(body.region_epoch)
-        try:
-            operation(body.reservations)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return EpochResponse(region_epoch=body.region_epoch)
 
     @app.post("/v1/writes/finish", dependencies=[Depends(require_auth)])
     async def finish_writes(body: ReservationBatchRequest) -> EpochResponse:
         """Make a complete write batch readable."""
-        return complete(body, pool.finish_writes)
+        pool.check_epoch(body.region_epoch)
+        pool.finish_writes(body.reservations)
+        return EpochResponse(region_epoch=body.region_epoch)
 
     @app.post("/v1/writes/abort", dependencies=[Depends(require_auth)])
     async def abort_writes(body: ReservationBatchRequest) -> EpochResponse:
         """Discard failed write metadata without reusing its extents."""
-        return complete(body, pool.abort_writes)
+        pool.check_epoch(body.region_epoch)
+        pool.abort_writes(body.reservations)
+        return EpochResponse(region_epoch=body.region_epoch)
 
     @app.post("/v1/lookup", dependencies=[Depends(require_auth)])
     async def lookup(body: LookupRequest) -> LookupResponse:
         """Return immutable VALID objects and partial cache misses."""
         pool.check_epoch(body.region_epoch)
-        try:
-            hits = pool.lookup(body.keys)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return LookupResponse(
             region_epoch=body.region_epoch,
-            hits=hits,
+            hits=pool.lookup(body.keys),
         )
 
-    logger.info(
-        "Memory coordinator ready: region_id=%s capacity_bytes=%d",
-        config.region_id,
-        config.capacity_bytes,
-    )
     return app

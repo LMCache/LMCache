@@ -3,20 +3,13 @@
 
 # Standard
 from pathlib import Path
+from typing import Any
+import mmap
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.memory_coordinator.api import (
-    EncodedObjectKey,
-    LookupHit,
-    RegionContract,
-    ReservationRef,
-    StatusResponse,
-    WriteGrant,
-    WriteReserveItem,
-)
 from lmcache.v1.memory_coordinator.pool import MemoryPool
 
 _CAPACITY = 4096
@@ -24,40 +17,11 @@ _ALIGNMENT = 64
 
 
 class InProcessCoordinatorClient:
-    """MemoryCoordinatorClientProtocol over an in-process MemoryPool.
-
-    Lets backend tests exercise the full reservation lifecycle without an
-    HTTP server; several clients may share one pool to model several MP
-    servers sharing one coordinator.
-    """
+    """Delegate metadata operations to a pool shared by several test clients."""
 
     def __init__(self, pool: MemoryPool) -> None:
         self._pool = pool
         self.closed = False
-
-    def region_contract(self) -> RegionContract:
-        return self._pool.region_contract()
-
-    def reserve_writes(
-        self,
-        items: list[WriteReserveItem],
-    ) -> list[WriteGrant | None]:
-        return self._pool.reserve_writes(items)
-
-    def finish_writes(self, reservations: list[ReservationRef]) -> None:
-        self._pool.finish_writes(reservations)
-
-    def abort_writes(self, reservations: list[ReservationRef]) -> None:
-        self._pool.abort_writes(reservations)
-
-    def lookup(
-        self,
-        keys: list[EncodedObjectKey],
-    ) -> list[LookupHit | None]:
-        return self._pool.lookup(keys)
-
-    def status(self) -> StatusResponse:
-        return self._pool.status()
 
     def get_memory_usage(self) -> tuple[int, int]:
         status = self._pool.status()
@@ -65,6 +29,9 @@ class InProcessCoordinatorClient:
 
     def close(self) -> None:
         self.closed = True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
 
 
 class RecordingVisibility:
@@ -93,26 +60,13 @@ class RecordingVisibility:
 
 
 @pytest.fixture
-def region_capacity() -> int:
-    return _CAPACITY
+def region_pool() -> MemoryPool:
+    return MemoryPool("region", _CAPACITY, _ALIGNMENT, "layout")
 
 
 @pytest.fixture
-def region_alignment() -> int:
-    return _ALIGNMENT
-
-
-@pytest.fixture
-def region_pool(region_capacity: int, region_alignment: int) -> MemoryPool:
-    return MemoryPool("region", region_capacity, region_alignment, "layout")
-
-
-@pytest.fixture
-def region_file(tmp_path: Path, region_capacity: int) -> Path:
-    # Standard
-    import mmap
-
+def region_file(tmp_path: Path) -> Path:
     path = tmp_path / "region.bin"
     with path.open("wb") as region:
-        region.truncate(mmap.PAGESIZE + region_capacity)
+        region.truncate(mmap.PAGESIZE + _CAPACITY)
     return path

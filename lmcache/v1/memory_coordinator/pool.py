@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The Memory Coordinator's single strong allocation and lifetime index.
-
-Extents are never reclaimed, including after an aborted write. Reuse requires
-an operator-coordinated reset after all mapped workers stop; the persistent
-startup latch refuses ordinary restarts. Eviction and recovery are not supported.
-
-The pool holds exactly one immutable :class:`RegionContract`. There is no
-API that adds a region or mutates capacity, alignment, or layout after
-construction; a restart constructs a new pool and therefore a new
-``region_epoch``.
-"""
+"""Atomic metadata for one immutable region; aborted extents are never reused."""
 
 # Standard
 import threading
@@ -49,20 +39,12 @@ class _ObjectRecord:
 
 
 class MemoryPool:
-    """Strong allocation, object-lifetime, and reservation state for M0.
+    """Own one region's allocation index, serialized under one lock.
 
-    All operations are serialized under one lock. Batches validate completely
-    before mutating state. Lookups are partial by key.
-
-    Args:
-        region_id: Operator-provisioned identity of the shared region.
-        capacity_bytes: Logical capacity of the shared pool.
-        alignment_bytes: Allocation alignment; positive power of two.
-        layout_id: Operator-supplied immutable layout-profile fingerprint.
-
-    Raises:
-        ValueError: A contract parameter is empty, non-positive, or the
-            alignment is not a power of two.
+    ``region_id`` names the shared region; ``layout_id`` identifies its immutable
+    layout. ``capacity_bytes`` is its size and ``alignment_bytes`` its
+    power-of-two allocation alignment. Invalid settings raise ValueError.
+    Batches validate before mutation; reuse requires all mapped workers to stop.
     """
 
     def __init__(
@@ -97,14 +79,7 @@ class MemoryPool:
         return self._contract
 
     def check_epoch(self, region_epoch: str) -> None:
-        """Fail closed when a request names a different epoch.
-
-        Args:
-            region_epoch: The epoch the requesting client latched.
-
-        Raises:
-            StaleEpochError: The epoch does not match this pool's epoch.
-        """
+        """Raise StaleEpochError unless ``region_epoch`` matches this pool."""
         if region_epoch != self._contract.region_epoch:
             raise StaleEpochError(
                 "request epoch does not match the coordinator region epoch"
@@ -114,21 +89,10 @@ class MemoryPool:
         self,
         items: list[WriteReserveItem],
     ) -> list[WriteGrant | None]:
-        """Reserve every absent key in one capacity-atomic batch.
+        """Return grants for absent key/layout ``items``, None for existing keys.
 
-        Args:
-            items: Keys and layouts to reserve. Keys must be unique within
-                the batch and layouts must describe a positive size.
-
-        Returns:
-            One entry per item: a :class:`WriteGrant` for each newly
-            ``WRITING`` key, ``None`` for keys that already exist (one
-            writer wins a duplicate-key race).
-
-        Raises:
-            ValueError: Duplicate keys in the batch, or an invalid layout.
-            OutOfSpaceError: The complete batch of absent keys does not fit;
-                no state changes in that case (capacity-atomic).
+        Duplicate keys or invalid layouts raise ValueError. Insufficient capacity
+        raises OutOfSpaceError. Every failure leaves the whole batch unchanged.
         """
         canonicals = [canonical_key(item.key) for item in items]
         if len(canonicals) != len(set(canonicals)):
@@ -140,11 +104,10 @@ class MemoryPool:
         with self._lock:
             cursor = self._next_offset
             generation = self._next_generation
-            planned: dict[int, WriteGrant] = {}
-            for index, (item, canonical, length) in enumerate(
-                zip(items, canonicals, lengths, strict=True)
-            ):
+            result: list[WriteGrant | None] = []
+            for item, canonical, length in zip(items, canonicals, lengths, strict=True):
                 if canonical in self._objects:
+                    result.append(None)
                     continue
                 if generation > _MAX_GENERATION:
                     raise OutOfSpaceError("generation space is exhausted")
@@ -153,7 +116,7 @@ class MemoryPool:
                     raise OutOfSpaceError(
                         "write batch does not fit in the shared region"
                     )
-                planned[index] = WriteGrant(
+                grant = WriteGrant(
                     key=item.key,
                     handle=SharedObjectHandle(
                         region_id=self._contract.region_id,
@@ -164,43 +127,30 @@ class MemoryPool:
                     token=uuid.uuid4().hex,
                     layout=item.layout,
                 )
+                result.append(grant)
                 cursor = offset + length
                 generation += 1
 
-            result: list[WriteGrant | None] = []
-            for index, canonical in enumerate(canonicals):
-                grant = planned.get(index)
-                result.append(grant)
-                if grant is not None:
-                    self._objects[canonical] = _ObjectRecord(grant)
+            for reserved in result:
+                if reserved is not None:
+                    self._objects[reserved.key] = _ObjectRecord(reserved)
             self._next_offset = cursor
             self._next_generation = generation
             return result
 
     def finish_writes(self, reservations: list[ReservationRef]) -> None:
-        """Atomically publish a batch: every reservation becomes ``VALID``.
+        """Atomically publish token-bearing ``reservations`` as VALID.
 
-        Args:
-            reservations: The grants being committed, tokens included.
-
-        Raises:
-            InvalidReservationError: Duplicate reservations, or a token does
-                not own a ``WRITING`` object. No state changes on error.
+        Invalid or duplicate tokens raise InvalidReservationError without change.
         """
         with self._lock:
-            records = self._validate_writes(reservations)
-            for record in records:
+            for record in self._validate_writes(reservations):
                 record.write_token = None
 
     def abort_writes(self, reservations: list[ReservationRef]) -> None:
-        """Drop ``WRITING`` metadata without reusing its extents.
+        """Abort token-bearing ``reservations`` without reusing their extents.
 
-        Args:
-            reservations: The grants being aborted, tokens included.
-
-        Raises:
-            InvalidReservationError: Duplicate reservations, or a token does
-                not own a ``WRITING`` object. No state changes on error.
+        Invalid or duplicate tokens raise InvalidReservationError without change.
         """
         with self._lock:
             self._validate_writes(reservations)
@@ -208,25 +158,17 @@ class MemoryPool:
                 del self._objects[canonical_key(reservation.key)]
 
     def lookup(self, keys: list[EncodedObjectKey]) -> list[LookupHit | None]:
-        """Return every ``VALID`` hit in one partial batch operation.
+        """Return VALID hits for ``keys``, None for missing or WRITING entries.
 
-        Args:
-            keys: Keys to read. Must be unique within the batch.
-
-        Returns:
-            One entry per key: a :class:`LookupHit` for ``VALID`` objects,
-            ``None`` for absent or still-``WRITING`` keys.
-
-        Raises:
-            ValueError: Duplicate keys in the batch.
+        Duplicate or non-canonical keys raise ValueError.
         """
         canonicals = [canonical_key(key) for key in keys]
         if len(canonicals) != len(set(canonicals)):
             raise ValueError("a lookup batch must not contain duplicate keys")
         with self._lock:
             result: list[LookupHit | None] = []
-            for key, canonical in zip(keys, canonicals, strict=True):
-                record = self._objects.get(canonical)
+            for key in canonicals:
+                record = self._objects.get(key)
                 if record is None or record.write_token is not None:
                     result.append(None)
                     continue

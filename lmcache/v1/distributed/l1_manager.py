@@ -447,8 +447,9 @@ class L1Manager:
                 non-read-locked, which means the reader may
                 read inconsistent data.
         """
-        if self._shared_backend is not None:
-            return self._shared_finish_read(keys, read_locks)
+        shared = self._shared_backend is not None
+        if shared and read_locks != 1:
+            raise ValueError("shared L1 currently supports TP=1 reads only")
 
         total = _validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
@@ -485,78 +486,48 @@ class L1Manager:
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
-            if entry.is_temporary and not entry.read_lock.is_locked():
-                # NOTE: temporary objects shouldn't have write-locks
-                need_to_free.append(entry.memory_obj)
-                need_to_free_keys.append(key)
-                del self._objects[key]
+            if not shared:
+                # TODO(perf): support a count argument in
+                # TTLLock.unlock() to avoid Python for-loop
+                # overhead (TTLLock is C++ std::atomic).
+                for _ in range(total):
+                    entry.read_lock.unlock()
+                if entry.is_temporary and not entry.read_lock.is_locked():
+                    # NOTE: temporary objects shouldn't have write-locks
+                    need_to_free.append(entry.memory_obj)
+                    need_to_free_keys.append(key)
+                    del self._objects[key]
 
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
         freed_meta = [self._object_meta(obj) for obj in need_to_free]
-        assert self._memory_manager is not None
-        self._memory_manager.free(need_to_free)
+        if shared:
+            # Validate the whole shared batch before releasing local read locks.
+            for key in successful_keys:
+                self._objects[key].read_lock.unlock()
+        else:
+            assert self._memory_manager is not None
+            self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_read_finished(successful_keys)
-            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
+            if not shared:
+                listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_READ_FINISHED,
                 metadata={"keys": successful_keys},
             )
         )
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": need_to_free_keys, "meta": freed_meta},
-            )
-        )
-
-        return ret
-
-    def _shared_finish_read(
-        self,
-        keys: list[ObjectKey],
-        read_locks: int,
-    ) -> dict[ObjectKey, L1Error]:
-        """Drop local read locks after H2D; immutable M0 needs no global pins."""
-        if read_locks != 1:
-            raise ValueError("shared L1 currently supports TP=1 reads only")
-        ret: dict[ObjectKey, L1Error] = {}
-        successful_keys: list[ObjectKey] = []
-        for key in keys:
-            entry = self._objects.get(key)
-            if (
-                entry is None
-                or entry.write_lock.is_locked()
-                or not entry.read_lock.is_locked()
-            ):
-                ret[key] = (
-                    L1Error.KEY_NOT_EXIST
-                    if entry is None
-                    else L1Error.KEY_IN_WRONG_STATE
+        if not shared:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_EVICTED,
+                    metadata={"keys": need_to_free_keys, "meta": freed_meta},
                 )
-                continue
-            ret[key] = L1Error.SUCCESS
-            successful_keys.append(key)
-
-        for key in successful_keys:
-            self._objects[key].read_lock.unlock()
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_read_finished(successful_keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_READ_FINISHED,
-                metadata={"keys": successful_keys},
             )
-        )
+
         return ret
 
     @l1_mgr_synchronized
@@ -747,8 +718,9 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not write-locked, or it's read-locked,
                 which means the writer may have caused inconsistent data.
         """
-        if self._shared_backend is not None:
-            return self._shared_finish_write(keys)
+        backend = self._shared_backend
+        if backend is not None and len(keys) != len(set(keys)):
+            raise ValueError("shared-L1 finish_write keys must be unique")
 
         ret: dict[ObjectKey, L1Error] = {}
         notification_keys: list[ObjectKey] = []
@@ -778,13 +750,25 @@ class L1Manager:
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
                 continue
 
-            entry.write_lock.unlock()
+            if backend is None:
+                entry.write_lock.unlock()
             ret[key] = L1Error.SUCCESS
             if not entry.is_temporary:
                 notification_keys.append(key)
                 notification_keys_meta.append(self._object_meta(entry.memory_obj))
 
-        if notification_keys:
+        if backend is not None:
+            if any(result != L1Error.SUCCESS for result in ret.values()):
+                for key in ret:
+                    if ret[key] == L1Error.SUCCESS:
+                        ret[key] = L1Error.KEY_IN_WRONG_STATE
+                return ret
+            # Publish the whole payload batch before unlocking or notifying readers.
+            backend.finish_write(keys)
+            for key in keys:
+                self._objects[key].write_lock.unlock()
+
+        if notification_keys or backend is not None:
             for listener in self._registered_listeners:
                 listener.on_l1_keys_write_finished(notification_keys)
             self._event_bus.publish(
@@ -798,79 +782,22 @@ class L1Manager:
             )
         return ret
 
-    def _shared_finish_write(
-        self,
-        keys: list[ObjectKey],
-    ) -> dict[ObjectKey, L1Error]:
-        """Publish the complete payload batch before one metadata commit."""
-        backend = self._shared_backend
-        assert backend is not None
-        ret: dict[ObjectKey, L1Error] = {}
-        if len(keys) != len(set(keys)):
-            raise ValueError("shared-L1 finish_write keys must be unique")
-
-        failed = False
-        for key in keys:
-            entry = self._objects.get(key)
-            if entry is None:
-                ret[key] = L1Error.KEY_NOT_EXIST
-                failed = True
-                continue
-            if not entry.write_lock.is_locked() or entry.read_lock.is_locked():
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                failed = True
-                continue
-            ret[key] = L1Error.SUCCESS
-
-        if failed:
-            # No object in a request batch may become globally readable unless
-            # every local reservation is ready to commit.
-            for key, result in list(ret.items()):
-                if result == L1Error.SUCCESS:
-                    ret[key] = L1Error.KEY_IN_WRONG_STATE
-            return ret
-
-        backend.finish_write(keys)
-        successful_keys_meta = [
-            self._object_meta(self._objects[key].memory_obj) for key in keys
-        ]
-        for key in keys:
-            self._objects[key].write_lock.unlock()
-
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_WRITE_FINISHED,
-                metadata={"keys": keys, "meta": successful_keys_meta},
-            )
-        )
-        return ret
-
     @l1_mgr_synchronized
     def abort_write(
         self,
         keys: list[ObjectKey],
     ) -> dict[ObjectKey, L1Error]:
-        """Abort coordinator-owned writes that never became readable.
-
-        The existing local allocators do not expose an abort operation. This
-        method is therefore intentionally limited to the shared-L1 path,
-        where leaving a failed transfer in ``WRITING`` would block that
-        object key for every MP server connected to the coordinator.
+        """Abort shared-L1 write reservations without reclaiming their extents.
 
         Args:
-            keys: The list of object keys whose writes are being aborted.
+            keys: Object keys whose writes are being aborted.
 
         Returns:
-            A dictionary mapping each object key to an L1Error.
+            Each key maps to SUCCESS, KEY_NOT_EXIST, or KEY_IN_WRONG_STATE
+            (not write-locked or has readers).
 
         Raises:
             RuntimeError: This manager is not using shared L1.
-
-        Errors:
-            KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key is not write-locked or has readers.
         """
         backend = self._shared_backend
         if backend is None:

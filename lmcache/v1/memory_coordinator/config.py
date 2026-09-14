@@ -10,27 +10,13 @@ _ENV_PREFIX = "LMCACHE_MEMORY_COORDINATOR_"
 
 @dataclass(frozen=True)
 class MemoryCoordinatorConfig:
-    """Startup configuration for one Memory Coordinator process.
+    """One-process, one-region settings; invalid values raise ValueError.
 
-    The coordinator is deliberately single-everything for M0: one process,
-    one Uvicorn worker, one region, one immutable layout profile. The
-    bearer token is read from ``token_file`` at startup and never appears
-    in CLI arguments, logs, or status responses.
-
-    Attributes:
-        host: Interface the HTTP server binds to.
-        port: Port the HTTP server binds to.
-        token_file: Absolute path to the bearer-token file (mounted from a
-            Kubernetes Secret in cluster deployments).
-        state_file: Absolute startup-latch path on persistent storage shared
-            by every replacement coordinator for this region. Remove it only
-            after all MP servers are stopped; it contains no recoverable state.
-        region_id: Operator-provisioned stable identity of the shared
-            physical region.
-        capacity_bytes: Logical shared-region capacity in bytes.
-        alignment_bytes: Allocation alignment in bytes; positive power of
-            two.
-        layout_id: Operator-supplied immutable layout-profile fingerprint.
+    ``host``/``port`` bind HTTP; ``token_file`` is an absolute secret path.
+    ``state_file`` is an absolute persistent startup latch, removed only after
+    every mapped worker stops. ``region_id`` identifies the physical region,
+    ``layout_id`` its immutable layout, ``capacity_bytes`` its logical size,
+    and ``alignment_bytes`` its power-of-two allocation alignment.
     """
 
     host: str = "0.0.0.0"
@@ -43,12 +29,7 @@ class MemoryCoordinatorConfig:
     layout_id: str = ""
 
     def __post_init__(self) -> None:
-        """Validate the complete region contract.
-
-        Raises:
-            ValueError: A field is empty, out of range, or the alignment is
-                not a positive power of two.
-        """
+        """Raise ValueError for missing, out-of-range, or unaligned settings."""
         if not self.host.strip():
             raise ValueError("host must not be empty")
         if not 1 <= self.port <= 65535:
@@ -69,14 +50,9 @@ class MemoryCoordinatorConfig:
 
     @classmethod
     def from_env(cls) -> "MemoryCoordinatorConfig":
-        """Build a config from ``LMCACHE_MEMORY_COORDINATOR_*`` variables.
+        """Return settings from ``LMCACHE_MEMORY_COORDINATOR_*`` environment.
 
-        Returns:
-            The parsed and validated configuration.
-
-        Raises:
-            ValueError: A variable is malformed or the resulting config is
-                invalid.
+        Malformed or invalid values raise ValueError.
         """
 
         def value(name: str, default: str | int) -> str:
@@ -95,17 +71,9 @@ class MemoryCoordinatorConfig:
 
 
 def read_token_file(token_file: str) -> str:
-    """Read a nonempty bearer token from an absolute file path.
+    """Return the stripped ASCII bearer token from absolute ``token_file``.
 
-    Args:
-        token_file: Absolute path to the token file.
-
-    Returns:
-        The token with surrounding whitespace stripped.
-
-    Raises:
-        ValueError: The path is not an absolute regular file, or the file
-            is empty after stripping whitespace.
+    Invalid paths/tokens raise ValueError; file access errors propagate.
     """
     if not os.path.isabs(token_file) or not os.path.isfile(token_file):
         raise ValueError("token file must be an absolute regular file")

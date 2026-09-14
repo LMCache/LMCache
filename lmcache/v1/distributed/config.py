@@ -198,13 +198,7 @@ class GdsL1Config:
 
 @dataclass(frozen=True)
 class SharedL1Config:
-    """Connection and mapping settings for coordinator-owned shared L1.
-
-    The Memory Coordinator owns object metadata and offsets. Each MP server
-    supplies only its local Device-DAX path (via ``memory_config``) and the
-    mapping offset for its view of the same physical region; virtual
-    addresses are intentionally not part of this contract.
-    """
+    """Validated coordinator contract and host-local mapping settings."""
 
     coordinator_endpoint: str
     """Base URL of the Memory Coordinator, e.g. ``http://host:9400``."""
@@ -535,37 +529,26 @@ def add_storage_manager_args(
     # Shared Device-DAX L1 (optional, opt-in via --l1-coordinator-endpoint)
     shared_group = parser.add_argument_group(
         "Shared Device-DAX L1",
-        "Coordinator-owned shared Device-DAX functional path (M0). Setting "
-        "--l1-coordinator-endpoint makes the standalone Memory Coordinator "
-        "the allocation and lifetime authority over the region named by "
-        '--l1-devdax-path. Requires --no-l1-use-lazy, --shm-name "", '
+        'Requires Device-DAX, --no-l1-use-lazy, --shm-name "", '
         "--eviction-policy noop, no L2 adapters, and TP=1.",
     )
     shared_group.add_argument(
         "--l1-coordinator-endpoint",
-        type=str,
-        default=None,
-        metavar="URL",
-        help="Memory Coordinator base URL (http://host:port). Unset disables "
-        "shared L1.",
+        help="Memory Coordinator HTTP(S) URL; unset keeps private L1.",
     )
     shared_group.add_argument(
         "--l1-coordinator-token-file",
-        type=str,
-        default=None,
-        help="Absolute path to the coordinator bearer-token file (mounted "
-        "Secret). Never pass the token itself on the command line.",
+        default="",
+        help="Absolute bearer-token file path; do not pass the token itself.",
     )
     shared_group.add_argument(
         "--l1-shared-region-id",
-        type=str,
-        default=None,
+        default="",
         help="Expected stable identity of the shared physical region.",
     )
     shared_group.add_argument(
         "--l1-shared-layout-id",
-        type=str,
-        default=None,
+        default="",
         help="Expected operator-supplied immutable layout fingerprint.",
     )
     shared_group.add_argument(
@@ -576,8 +559,7 @@ def add_storage_manager_args(
     )
     shared_group.add_argument(
         "--l1-shared-visibility-library-path",
-        type=str,
-        default=None,
+        default="",
         help="Absolute path to the platform-qualified visibility ABI library.",
     )
 
@@ -771,23 +753,9 @@ def parse_args_to_config(
         )
 
     shared_l1_config: SharedL1Config | None = None
-    coordinator_endpoint = getattr(args, "l1_coordinator_endpoint", None)
-    if coordinator_endpoint is not None:
-        required_values = {
-            "l1-coordinator-token-file": args.l1_coordinator_token_file,
-            "l1-shared-region-id": args.l1_shared_region_id,
-            "l1-shared-layout-id": args.l1_shared_layout_id,
-            "l1-shared-visibility-library-path": (
-                args.l1_shared_visibility_library_path
-            ),
-        }
-        missing = [name for name, value in required_values.items() if not value]
-        if missing:
-            raise ValueError(
-                "shared L1 requires " + ", ".join(f"--{name}" for name in missing)
-            )
+    if args.l1_coordinator_endpoint is not None:
         shared_l1_config = SharedL1Config(
-            coordinator_endpoint=coordinator_endpoint,
+            coordinator_endpoint=args.l1_coordinator_endpoint,
             coordinator_token_file=args.l1_coordinator_token_file,
             region_id=args.l1_shared_region_id,
             layout_id=args.l1_shared_layout_id,

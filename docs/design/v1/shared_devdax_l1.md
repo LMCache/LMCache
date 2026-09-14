@@ -105,9 +105,9 @@ int lmcache_shared_l1_visibility_v1(
 
 The mode is `software_fenced`. Operation `1` publishes completed writes; operation
 `2` acquires visibility before reading. The call is synchronous and covers the
-exact payload range. It returns zero on success and a nonzero status on failure
-(negative errno values give readable errors). The FD is open, the address is
-local, and the device offset includes the host-local mapping offset.
+exact payload range. It returns zero on success and a nonzero status on failure.
+The FD is open, the address is local, and the device offset includes the
+host-local mapping offset.
 
 The current ABI uses 64-byte visibility granularity. Allocation alignment must
 be compatible with it. The library must round a partial final cache line safely

@@ -1,16 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MP-side Device-DAX mapping for coordinator-owned shared objects.
-
-The backend maps the host-local Device-DAX view of the shared region with
-``MAP_SHARED``, registers the whole mapping with CUDA (mandatory — there is
-no pageable-staging fallback), and constructs :class:`TensorMemoryObj`
-views at ``local_mapping_base + handle.offset`` for handles granted by the
-Memory Coordinator. Write tokens are retained locally until ``finish`` or
-``abort``. Payload bytes never travel to the coordinator.
-"""
+"""CUDA-registered views of coordinator-owned Device-DAX objects."""
 
 # Standard
-from typing import Any
 import mmap
 import os
 import threading
@@ -21,6 +12,7 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
+from lmcache.utils import round_up
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.shared_l1.layouts import layout_to_wire, wire_to_layout
@@ -48,35 +40,28 @@ from lmcache.v1.platform import current_device_spec
 logger = init_logger(__name__)
 
 
+def _ref(grant: WriteGrant) -> ReservationRef:
+    return ReservationRef(key=grant.key, token=grant.token)
+
+
 class SharedDevDaxL1Backend:
-    """Coordinator-backed shared Device-DAX lifecycle for one MP server.
+    """Map one fixed shared pool; payload bytes never reach the coordinator.
 
     Args:
-        devdax_path: Host-local Device-DAX character device path.
-        capacity_bytes: Expected logical capacity of the shared pool.
+        devdax_path: Host-local Device-DAX device.
+        capacity_bytes: Expected pool capacity.
         alignment_bytes: Expected allocation alignment.
-        region_id: Expected stable identity of the shared region.
-        layout_id: Expected immutable layout-profile fingerprint.
-        mapping_offset_bytes: Host-local byte offset at which the logical
-            shared pool starts inside the device.
-        coordinator_endpoint: Base URL of the Memory Coordinator; used only
-            when ``client`` is not injected.
-        coordinator_token_file: Absolute path to the bearer-token file;
-            used only when ``client`` is not injected.
-        visibility_library_path: Absolute path to the visibility library;
-            used only when ``visibility`` is not injected.
-        client: Injected coordinator client (tests); defaults to
-            :class:`MemoryCoordinatorHttpClient`.
-        visibility: Injected visibility implementation (tests); defaults to
-            :class:`NativeDeviceDaxVisibility`.
-        register_cuda: Register the whole mapping with CUDA. Mandatory in
-            production; tests without a GPU pass ``False``.
+        region_id: Expected physical-region identity.
+        layout_id: Expected layout fingerprint.
+        mapping_offset_bytes: Host-local start of the pool in the device.
+        coordinator_endpoint: HTTP service URL.
+        coordinator_token_file: Absolute token path.
+        visibility_library_path: Qualified library path.
 
     Raises:
-        ValueError: The coordinator contract does not match the local
-            expectation, or the mapping violates visibility alignment.
-        RuntimeError: The visibility library is unusable, or CUDA host
-            registration failed (pageable staging is not accepted).
+        ValueError: The contract or mapping alignment is incompatible.
+        RuntimeError: CUDA registration fails; no pageable fallback is used.
+        OSError: Opening, mapping, or loading the visibility library fails.
     """
 
     def __init__(
@@ -88,20 +73,15 @@ class SharedDevDaxL1Backend:
         region_id: str,
         layout_id: str,
         mapping_offset_bytes: int = 0,
-        coordinator_endpoint: str = "",
-        coordinator_token_file: str = "",
-        visibility_library_path: str = "",
-        client: Any | None = None,
-        visibility: Any | None = None,
-        register_cuda: bool = True,
+        coordinator_endpoint: str,
+        coordinator_token_file: str,
+        visibility_library_path: str,
     ) -> None:
         if not devdax_path:
             raise ValueError("shared L1 requires a Device-DAX path")
-        if client is None:
-            client = MemoryCoordinatorHttpClient(
-                coordinator_endpoint,
-                coordinator_token_file,
-            )
+        client = MemoryCoordinatorHttpClient(
+            coordinator_endpoint, coordinator_token_file
+        )
         self._client = client
 
         contract = client.region_contract()
@@ -124,8 +104,7 @@ class SharedDevDaxL1Backend:
         buffer = torch.empty(0, dtype=torch.uint8)
         registered_ptr: int | None = None
         try:
-            if visibility is None:
-                visibility = NativeDeviceDaxVisibility(visibility_library_path)
+            visibility = NativeDeviceDaxVisibility(visibility_library_path)
             self._visibility = visibility
             granularity = visibility.granularity
             if (
@@ -148,16 +127,14 @@ class SharedDevDaxL1Backend:
             mapped_address = buffer.data_ptr()
             if mapped_address % granularity:
                 raise RuntimeError("shared-L1 mapping base is not visibility-aligned")
-            if register_cuda:
-                if not current_device_spec.pin_memory(
-                    mapped_address,
-                    contract.capacity_bytes,
-                ):
-                    raise RuntimeError(
-                        "CUDA host registration failed for shared Device-DAX; "
-                        "pageable staging is not accepted"
-                    )
-                registered_ptr = mapped_address
+            if not current_device_spec.pin_memory(
+                mapped_address, contract.capacity_bytes
+            ):
+                raise RuntimeError(
+                    "CUDA host registration failed for shared Device-DAX; "
+                    "pageable staging is not accepted"
+                )
+            registered_ptr = mapped_address
         except BaseException:
             if registered_ptr is not None:
                 current_device_spec.unpin_memory(registered_ptr)
@@ -187,19 +164,11 @@ class SharedDevDaxL1Backend:
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
     ) -> list[TensorMemoryObj | None]:
-        """Reserve a whole L1Manager key list with one coordinator call.
+        """Reserve unique keys with layout_desc; return views or None for duplicates.
 
-        Args:
-            keys: Keys to reserve, unique within the batch.
-            layout_desc: The layout every reserved object uses.
-
-        Returns:
-            One writable view per granted key, ``None`` for existing keys.
-
-        Raises:
-            RuntimeError: A key already has a local write reservation.
-            OutOfSpaceError: The complete batch does not fit.
-            StaleEpochError: The coordinator restarted (client fenced).
+        Raise RuntimeError for local reservations, OutOfSpaceError if the batch
+        cannot fit, or StaleEpochError if the client is fenced. Invalid grants
+        raise ValueError before exposing views.
         """
         with self._lock:
             self._ensure_open()
@@ -215,20 +184,19 @@ class SharedDevDaxL1Backend:
                     for key in keys
                 ]
             )
-            granted_refs = [_ref(grant) for grant in grants if grant is not None]
             try:
                 layouts = self._validate_results(keys, grants, wire_layout)
             except BaseException:
-                self._client.abort_writes(granted_refs)
+                self._client.abort_writes(
+                    [_ref(grant) for grant in grants if grant is not None]
+                )
                 raise
-            granted_keys = [
-                key
+            pending = {
+                key: grant
                 for key, grant in zip(keys, grants, strict=True)
                 if grant is not None
-            ]
-            for key, grant in zip(keys, grants, strict=True):
-                if grant is not None:
-                    self._write_grants[key] = grant
+            }
+            self._write_grants.update(pending)
             try:
                 result = [
                     None
@@ -237,19 +205,15 @@ class SharedDevDaxL1Backend:
                     for grant, layout in zip(grants, layouts, strict=True)
                 ]
             except BaseException:
-                self.abort_write(granted_keys)
+                self.abort_write(list(pending))
                 raise
             return result
 
     def finish_write(self, keys: list[ObjectKey]) -> None:
-        """Publish every D2H-complete range, then commit the batch.
+        """Publish D2H-complete ranges for keys, then atomically commit the batch.
 
-        Args:
-            keys: Keys whose local write reservations are being committed.
-
-        Raises:
-            RuntimeError: A visibility publish failed; the batch is aborted
-                and the error re-raised so the store fails closed.
+        Propagate visibility/RPC errors after attempting abort. Failed aborts
+        retain local grants so cleanup can be retried.
         """
         with self._lock:
             grants = [self._write_grants[key] for key in keys]
@@ -260,13 +224,9 @@ class SharedDevDaxL1Backend:
                 self._client.finish_writes(refs)
             except BaseException:
                 try:
-                    self._client.abort_writes(refs)
+                    self.abort_write(keys)
                 except BaseException:
                     logger.exception("failed to abort shared-L1 write batch")
-                else:
-                    for key, grant in zip(keys, grants, strict=True):
-                        del self._write_grants[key]
-                        self._forget_memory_object(grant.handle)
                 raise
             for key in keys:
                 del self._write_grants[key]
@@ -287,17 +247,9 @@ class SharedDevDaxL1Backend:
                 self._forget_memory_object(grant.handle)
 
     def reserve_read(self, keys: list[ObjectKey]) -> list[TensorMemoryObj | None]:
-        """Acquire all VALID hits from one coordinator batch.
+        """Look up keys and acquire readable views; return None for each miss.
 
-        Args:
-            keys: Keys to read.
-
-        Returns:
-            One readable view per hit, ``None`` per miss.
-
-        Raises:
-            StaleEpochError: The coordinator restarted (client fenced).
-            RuntimeError: A visibility acquire failed.
+        Propagate stale-epoch, descriptor-validation and visibility errors.
         """
         with self._lock:
             self._ensure_open()
@@ -330,39 +282,26 @@ class SharedDevDaxL1Backend:
             return False
         try:
             status = self._client.status()
-        except BaseException:
+        except Exception:
             return False
         return status.region == self._contract
 
     def close(self) -> None:
-        """Quiesce transfers, abort pending writes, unpin, and unmap.
+        """Abort pending writes, unregister CUDA, invalidate views, then unmap.
 
-        Callers must drain every GPU stream and drop every exported view
-        before closing; teardown order is abort writes → CUDA
-        unregister → invalidate views → unmap → close fd → close client.
-        A view is considered exported while its reference count is above
-        the backend's own cache reference; closing with a live exported
-        view is refused so the mapping can never vanish under a reader.
-
-        Raises:
-            RuntimeError: An exported view is still live, or CUDA host
-                unregistration failed; the mapping is kept in both cases so
-                close can be retried after the caller drains.
+        Callers must first drain GPU streams and release exported references.
+        Raise RuntimeError, retaining the mapping for retry, if exports remain
+        or CUDA unregistration fails. An export raises the reference count
+        above the backend cache's own reference.
         """
         with self._lock:
             if self._closed:
                 return
-            live_views = [
-                memory_obj
-                for memory_obj in self._memory_objects.values()
-                if memory_obj.is_valid() and memory_obj.get_ref_count() > 1
-            ]
-            if live_views:
-                raise RuntimeError(
-                    f"shared-L1 close refused: {len(live_views)} exported "
-                    "views are still referenced; drain GPU streams and drop "
-                    "views before closing"
-                )
+            if any(
+                obj.is_valid() and obj.get_ref_count() > 1
+                for obj in self._memory_objects.values()
+            ):
+                raise RuntimeError("shared-L1 close refused: exported views are live")
             self.abort_write(list(self._write_grants))
             if self._registered_ptr is not None:
                 if not current_device_spec.unpin_memory(self._registered_ptr):
@@ -381,7 +320,6 @@ class SharedDevDaxL1Backend:
             self._closed = True
 
     def _apply_visibility(self, operation: int, handle: SharedObjectHandle) -> None:
-        self._validate_handle(handle, handle.length)
         self._visibility.apply(
             operation,
             self._file_descriptor,
@@ -396,8 +334,6 @@ class SharedDevDaxL1Backend:
         handle: SharedObjectHandle,
         layout: MemoryLayoutDesc,
     ) -> TensorMemoryObj:
-        expected_length = get_size_bytes(layout.shapes, layout.dtypes)
-        self._validate_handle(handle, expected_length)
         memory_obj = self._memory_objects.get(handle)
         if memory_obj is not None:
             if (
@@ -406,18 +342,13 @@ class SharedDevDaxL1Backend:
             ):
                 raise ValueError("shared-L1 handle has a different layout")
             return memory_obj
-        end = handle.offset + handle.length
         memory_obj = TensorMemoryObj(
-            raw_data=self._buffer[handle.offset : end],
+            raw_data=self._buffer[handle.offset : handle.offset + handle.length],
             metadata=MemoryObjMetadata(
                 shape=layout.shapes[0],
                 dtype=layout.dtypes[0],
                 address=handle.offset,
-                phy_size=(
-                    (handle.length + self._contract.alignment_bytes - 1)
-                    // self._contract.alignment_bytes
-                    * self._contract.alignment_bytes
-                ),
+                phy_size=round_up(handle.length, self._contract.alignment_bytes),
                 ref_count=1,
                 fmt=MemoryFormat.KV_2LTD,
                 shapes=layout.shapes,
@@ -440,6 +371,7 @@ class SharedDevDaxL1Backend:
         results: list[WriteGrant | LookupHit | None],
         expected_layout: WireLayout | None = None,
     ) -> list[MemoryLayoutDesc | None]:
+        """Validate the entire batch before exposing views or calling native code."""
         if len(results) != len(keys):
             raise ValueError("coordinator returned the wrong number of results")
         layouts: list[MemoryLayoutDesc | None] = []
@@ -480,8 +412,3 @@ class SharedDevDaxL1Backend:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("shared-L1 backend is closed")
-
-
-def _ref(grant: WriteGrant) -> ReservationRef:
-    """Project a grant onto the reservation reference the coordinator expects."""
-    return ReservationRef(key=grant.key, token=grant.token)
