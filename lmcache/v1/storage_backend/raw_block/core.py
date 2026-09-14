@@ -1115,15 +1115,22 @@ class RawBlockCore:
             raise RuntimeError(worker_error)
 
     def report_status(self) -> dict:
-        """Return health, terminal worker error, layout, and in-flight counters.
+        """Return health, registration, layout, and in-flight status.
 
         Returns:
             Status dictionary with ``is_healthy=False`` after close or terminal
             worker failure, and the failure reason in ``worker_error`` when
-            available. Inspecting status never opens a new native device.
+            available. Fixed-buffer fields describe successful kernel
+            registration. Inspecting status never opens a new native device.
         """
         with self._lock:
             worker_error = self._worker_error()
+            raw_device = self._raw
+            fixed_buffers_registered, fixed_buffer_registered_bytes = (
+                raw_device.fixed_buffer_status()
+                if raw_device is not None
+                else (False, 0)
+            )
             return {
                 "is_healthy": not self._closed and worker_error is None,
                 "worker_error": worker_error,
@@ -1149,6 +1156,8 @@ class RawBlockCore:
                 "inflight_io_count": self._inflight_io_count,
                 "use_odirect": self.use_odirect,
                 "enable_zero_copy": self.enable_zero_copy,
+                "fixed_buffers_registered": fixed_buffers_registered,
+                "fixed_buffer_registered_bytes": fixed_buffer_registered_bytes,
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
                 "use_uring_cmd": self.use_uring_cmd,
