@@ -719,6 +719,11 @@ a 277-token prompt with ``--chunk-size 256`` stores and can retrieve 256
 tokens. Requests that vLLM marks as resumable bypass LMCache entirely because
 their prompt boundary can change between turns.
 
+The per-request ``lmcache.max_offload_tokens`` setting can further limit
+stores to complete chunks within this prompt boundary; it never enables
+decode caching. This write limit does not shorten lookup or retrieval of
+prompt KV already present in LMCache.
+
 The connector automatically appends the
 ``##lmcache-rswa-prompt-v1`` policy marker to its cache model namespace, after
 any DCP layout decoration. This keeps prompt-only entries separate from normal
@@ -801,6 +806,13 @@ All connector-level options are passed through
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.nonblocking_lookup_status``
+     - ``true``
+     - Poll lookup-status replies without blocking the scheduler by default.
+       Set to ``false`` to wait for each status RPC reply in the current
+       callback, for example when long prefill steps delay observation of an
+       already-ready reply. LOOKUP acknowledgement polling
+       remains asynchronous. Available with the current ``LMCacheMPConnector``.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,

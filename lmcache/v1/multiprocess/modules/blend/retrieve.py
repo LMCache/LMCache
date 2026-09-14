@@ -22,9 +22,8 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import device_ops, torch_dev, torch_device_type
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -581,6 +580,12 @@ class RetrieveMixin:
                 "send CB_REGISTER_ROPE before CB_RETRIEVE_PRE_COMPUTED."
             )
         gpu_context = entry.cache_context
+        event_backend = entry.event_backend
+        if event_backend is None:
+            raise RuntimeError(
+                "Blend event backend is not initialized; register the KV cache "
+                "before submitting retrieve requests"
+            )
         rope_state = self._cb_rope_state[instance_id]
         chunk_size = self._ctx.chunk_size
         # Blend's read set: attention (+ connector-private aux), never
@@ -615,10 +620,9 @@ class RetrieveMixin:
                 torch_dev.device(gpu_context.device),
                 torch_dev.stream(gpu_context.stream),
             ):
-                check_interprocess_event_support()
-                done_event = torch_dev.Event(interprocess=True)
-                done_event.record()
-                handle = done_event.ipc_handle()
+                done_event = event_backend.create_event(gpu_context.device)
+                event_backend.record_event(done_event, gpu_context.stream)
+                handle = event_backend.export_event(done_event, gpu_context.device)
 
             if reason.publish:
                 self._event_bus.publish(
@@ -803,8 +807,7 @@ class RetrieveMixin:
             torch_dev.device(gpu_context.device),
             torch_dev.stream(retrieve_stream),
         ):
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            event = event_backend.create_event(gpu_context.device)
 
             # Resolve each kernel group's block table + block size once by
             # engine_group_idx (kernel groups may share one). CPU tables only.
@@ -849,16 +852,10 @@ class RetrieveMixin:
                 ),
             )
 
-            if not hasattr(torch_dev.Event, "from_ipc_handle"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support IPC "
-                    "event handles (Event.from_ipc_handle not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
-            vllm_event = torch_dev.Event.from_ipc_handle(
-                gpu_context.device, event_ipc_handle
+            vllm_event = event_backend.import_event(
+                event_ipc_handle, gpu_context.device
             )
-            vllm_event.wait(stream=retrieve_stream)
+            event_backend.wait_event(vllm_event, retrieve_stream)
 
             # Stage marks for the scatter_ms log line (CPU enqueue wall time):
             # fetch = prefetched read, plan = table build, exec = native enqueue.
@@ -894,8 +891,11 @@ class RetrieveMixin:
                                 session_id=key.request_id,
                             ),
                         )
-                        event.record()
-                        return event.ipc_handle(), False
+                        event_backend.record_event(event, retrieve_stream)
+                        return (
+                            event_backend.export_event(event, gpu_context.device),
+                            False,
+                        )
 
                     # Per-token scatter handles any cur_st. Each match owns n_read
                     # consecutive memory objects (chunk-major).
@@ -1049,10 +1049,10 @@ class RetrieveMixin:
                     ),
                 )
                 # Fresh server event + False (never echo the client handle).
-                event.record()
-                return event.ipc_handle(), False
+                event_backend.record_event(event, retrieve_stream)
+                return event_backend.export_event(event, gpu_context.device), False
 
-            event.record()
+            event_backend.record_event(event, retrieve_stream)
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
@@ -1092,4 +1092,4 @@ class RetrieveMixin:
                 session_id=key.request_id,
             ),
         )
-        return event.ipc_handle(), True
+        return event_backend.export_event(event, gpu_context.device), True

@@ -15,11 +15,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.modules.blend.lookup import (
     LookupMixin,
     _CBUnifiedJob,
@@ -39,7 +35,6 @@ from lmcache.v1.multiprocess.modules.blend.store import (
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.blend import handshake_response
 from lmcache.v1.multiprocess.session import Session
 
@@ -150,38 +145,6 @@ class BlendModule(
     @property
     def context(self) -> MPCacheServerContext:
         return self._ctx
-
-    def get_handlers(self) -> list[HandlerSpec]:
-        # STORE shadows LMCacheDrivenTransfer's; the blend module is
-        # registered last so this handler wins.
-        return [
-            HandlerSpec(RequestType.STORE, self.store, ThreadPoolType.AFFINITY),
-            HandlerSpec(
-                RequestType.CB_REGISTER_ROPE,
-                self.cb_register_rope,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.CB_UNREGISTER_ROPE,
-                self.cb_unregister_rope,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.CB_UNIFIED_LOOKUP,
-                self.cb_unified_lookup,
-                ThreadPoolType.NORMAL,
-            ),
-            HandlerSpec(
-                RequestType.CB_RETRIEVE_PRE_COMPUTED,
-                self.cb_retrieve_pre_computed,
-                ThreadPoolType.AFFINITY,
-            ),
-            HandlerSpec(
-                RequestType.CB_PROTOCOL_HANDSHAKE,
-                self.cb_protocol_handshake,
-                ThreadPoolType.SYNC,
-            ),
-        ]
 
     def cb_protocol_handshake(self, client_version: int) -> tuple[int, bool]:
         return handshake_response(client_version)

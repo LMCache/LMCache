@@ -12,6 +12,7 @@ pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorBase_V1,
     KVConnectorRole,
 )
 from vllm.v1.request import RequestStatus  # noqa: E402
@@ -29,6 +30,9 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
+)
+from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
+    LMCacheMPConnectorStats,
 )
 from lmcache.integration.vllm.utils import is_rswa_model  # noqa: E402
 from lmcache.integration.vllm.vllm_v1_adapter import (  # noqa: E402
@@ -97,6 +101,30 @@ def _kv_cache_config(spec: object) -> SimpleNamespace:
     return SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
     )
+
+
+def _lookup_connector(
+    adapter: MagicMock,
+    *,
+    eager_prefetch: bool = False,
+) -> LMCacheMPConnector:
+    """Build callback state without starting network or device resources."""
+    # These public-callback tests bypass the networked constructor, so seed
+    # its scheduler state explicitly, including the real per-instance stats.
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    KVConnectorBase_V1.__init__(
+        connector,
+        _vllm_config(rswa_window=128),  # type: ignore[arg-type]
+        KVConnectorRole.SCHEDULER,
+        _kv_cache_config(RSWASpec()),  # type: ignore[arg-type]
+    )
+    connector._prompt_only_cache = True
+    connector._hit_alignment_tokens = 16
+    connector._eager_prefetch = eager_prefetch
+    connector._connector_stats = LMCacheMPConnectorStats()
+    connector.request_trackers = {}
+    connector.scheduler_adapter = adapter
+    return connector
 
 
 @pytest.mark.parametrize(
@@ -233,15 +261,85 @@ def test_prompt_only_tracker_excludes_decode_tokens() -> None:
     assert tracker.get_cache_token_ids() == list(range(256))
 
 
-def test_resumable_rswa_request_fails_closed() -> None:
+@pytest.mark.parametrize("max_offload_tokens", [None, 1024])
+def test_resumable_rswa_request_fails_closed(
+    max_offload_tokens: int | None,
+) -> None:
     """A mutable streaming prompt is not assigned a stale cache boundary."""
-    tracker = LMCacheMPRequestTracker(
-        _FakeRequest(prompt_tokens=256, total_tokens=256, resumable=True),
-        prompt_only=True,
-    )
+    request = _FakeRequest(prompt_tokens=256, total_tokens=256, resumable=True)
+    request.sampling_params.extra_args = {
+        "kv_transfer_params": {"lmcache.max_offload_tokens": max_offload_tokens}
+    }
+    tracker = LMCacheMPRequestTracker(request, prompt_only=True)
 
     assert tracker.num_cache_tokens == 0
     assert tracker.get_cache_token_ids() == []
+
+
+@pytest.mark.parametrize("resumable", [False, True])
+def test_uncacheable_rswa_lookup_does_not_start_timer_or_report_metrics(
+    resumable: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither prefetch nor polling times a lookup that was never submitted."""
+    request = _FakeRequest(
+        prompt_tokens=256 if resumable else 0,
+        total_tokens=512,
+        resumable=resumable,
+    )
+    clock = MagicMock()
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.lmcache_mp_connector.time",
+        SimpleNamespace(monotonic=clock),
+    )
+    adapter = MagicMock()
+    connector = _lookup_connector(adapter, eager_prefetch=True)
+
+    connector.on_new_request(request)
+    assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert connector.get_kv_connector_stats() is None
+    assert connector.request_trackers[request.request_id].lookup_started_at is None
+    adapter.maybe_submit_lookup_request.assert_not_called()
+    adapter.check_lookup_result.assert_not_called()
+    clock.assert_not_called()
+
+
+@pytest.mark.parametrize("eager_prefetch", [False, True])
+def test_rswa_lookup_latency_spans_pending_polls(
+    eager_prefetch: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prompt-only lookup retains one latency interval through pending replies."""
+    now = [10.0]
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.lmcache_mp_connector.time",
+        SimpleNamespace(monotonic=lambda: now[0]),
+    )
+    request = _FakeRequest(prompt_tokens=256, total_tokens=512)
+    adapter = MagicMock()
+    adapter.lmcache_tokens_per_chunk = 256
+    adapter.check_lookup_result.side_effect = [None, 256]
+    connector = _lookup_connector(adapter, eager_prefetch=eager_prefetch)
+
+    if eager_prefetch:
+        connector.on_new_request(request)
+        now[0] = 11.0
+    assert connector.get_num_new_matched_tokens(request, 0) == (None, True)
+    assert connector.get_kv_connector_stats() is None
+    assert connector.request_trackers[request.request_id].lookup_started_at == 10.0
+
+    now[0] = 12.0
+    assert connector.get_num_new_matched_tokens(request, 0) == (255, True)
+    stats = connector.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.reduce() == {
+        "LMCache MP lookup count": 1,
+        "LMCache MP lookup avg latency (ms)": 2000.0,
+    }
+    assert connector.get_kv_connector_stats() is None
+    assert connector.request_trackers[request.request_id].lookup_started_at is None
+    for call in adapter.maybe_submit_lookup_request.call_args_list:
+        assert call.kwargs["token_ids"] == list(range(256))
 
 
 @pytest.mark.parametrize("preempted", [False, True])
@@ -321,6 +419,76 @@ def test_rswa_store_drops_partial_prompt_tail() -> None:
     assert second is None
 
 
+@pytest.mark.parametrize(
+    ("max_offload_tokens", "expected_end"),
+    [(None, 512), (0, 0), (255, 0), (256, 256), (300, 256), (512, 512), (768, 512)],
+)
+def test_rswa_store_respects_both_prompt_and_offload_limits(
+    max_offload_tokens: int | None,
+    expected_end: int,
+) -> None:
+    """A write budget can shorten prompt stores but cannot include decode KV."""
+    request = _FakeRequest(prompt_tokens=512, total_tokens=1024)
+    request.sampling_params.extra_args = {
+        "kv_transfer_params": {"lmcache.max_offload_tokens": max_offload_tokens}
+    }
+    tracker = LMCacheMPRequestTracker(request, prompt_only=True)
+    tracker.allocated_block_ids = {0: list(range(1000, 1064))}
+    tracker.increase_num_scheduled_tokens(1024)
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, lmcache_tokens_per_chunk=256, group_tokens_per_block=[16]
+    )
+
+    assert tracker.num_cache_tokens == 512
+    assert tracker.get_cache_token_ids() == list(range(512))
+    assert tracker.num_stored_tokens == expected_end
+    if expected_end:
+        assert metadata is not None
+        assert (metadata.op.start, metadata.op.end) == (0, expected_end)
+        assert metadata.op.token_ids == list(range(512))
+        assert metadata.op.block_ids == [list(range(1000, 1000 + expected_end // 16))]
+    else:
+        assert metadata is None
+    assert (
+        LMCacheMPRequestMetadata.GetStoreMetadata(
+            tracker, lmcache_tokens_per_chunk=256, group_tokens_per_block=[16]
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("max_offload_tokens", [0, 256])
+def test_rswa_offload_limit_does_not_shorten_prompt_retrieval(
+    max_offload_tokens: int,
+) -> None:
+    """An offload budget limits writes, not already-cached prompt reads."""
+    request = _FakeRequest(prompt_tokens=512, total_tokens=1024)
+    request.sampling_params.extra_args = {
+        "kv_transfer_params": {"lmcache.max_offload_tokens": max_offload_tokens}
+    }
+    tracker = LMCacheMPRequestTracker(request, prompt_only=True)
+    tracker.allocated_block_ids = {0: list(range(1000, 1064))}
+    tracker.num_lmcache_hit_tokens = 512
+    tracker.num_stored_tokens = 512
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+
+    metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+        tracker, lmcache_tokens_per_chunk=256, group_tokens_per_block=[16]
+    )
+
+    assert metadata is not None
+    assert (metadata.op.start, metadata.op.end) == (0, 512)
+    assert metadata.op.token_ids == list(range(512))
+    assert metadata.op.block_ids == [list(range(1000, 1032))]
+    assert (
+        LMCacheMPRequestMetadata.GetStoreMetadata(
+            tracker, lmcache_tokens_per_chunk=256, group_tokens_per_block=[16]
+        )
+        is None
+    )
+
+
 def test_rswa_retrieve_uses_only_prompt_blocks() -> None:
     """A prompt hit never maps retrieval through the later sparse gap."""
     request = _FakeRequest(prompt_tokens=256, total_tokens=512)
@@ -384,13 +552,7 @@ def test_rswa_full_prompt_hit_recomputes_last_prompt_token() -> None:
     adapter.lmcache_tokens_per_chunk = 256
     adapter.check_lookup_result.return_value = 256
 
-    # Construct without the networked adapter initialization; the exercised
-    # public scheduler method only needs this scheduler-side state.
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector._prompt_only_cache = True
-    connector._hit_alignment_tokens = 16
-    connector.request_trackers = {}
-    connector.scheduler_adapter = adapter
+    connector = _lookup_connector(adapter)
 
     matched_tokens, load_async = connector.get_num_new_matched_tokens(request, 0)
 
@@ -410,11 +572,7 @@ def test_rswa_lock_release_uses_prompt_cache_key() -> None:
     adapter.lmcache_tokens_per_chunk = 256
     adapter.check_lookup_result.return_value = 256
 
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector._prompt_only_cache = True
-    connector._hit_alignment_tokens = 16
-    connector.request_trackers = {}
-    connector.scheduler_adapter = adapter
+    connector = _lookup_connector(adapter)
 
     assert connector.get_num_new_matched_tokens(request, 256) == (0, False)
     blocks = MagicMock()
@@ -692,11 +850,7 @@ def test_rswa_lookup_respects_short_and_unaligned_prompt_boundaries(
     adapter.lmcache_tokens_per_chunk = 256
     adapter.check_lookup_result.return_value = remote_hit
 
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector._prompt_only_cache = True
-    connector._hit_alignment_tokens = 16
-    connector.request_trackers = {}
-    connector.scheduler_adapter = adapter
+    connector = _lookup_connector(adapter)
 
     assert connector.get_num_new_matched_tokens(request, 0) == expected
     adapter.maybe_submit_lookup_request.assert_called_once_with(
