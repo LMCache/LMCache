@@ -47,7 +47,9 @@ class CheckModeRegistry:
                         if inspect.isfunction(obj) and hasattr(obj, "is_check_mode"):
                             self.register(obj.mode_name, obj)
                 except ImportError as e:
-                    logger.error("Failed to load check mode module %s: %s", module_name, e)
+                    logger.error(
+                        "Failed to load check mode module %s: %s", module_name, e
+                    )
 
         self.loaded = True
         logger.info("Loaded %d check modes", len(self.modes))
