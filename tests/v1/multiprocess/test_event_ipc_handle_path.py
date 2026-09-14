@@ -250,12 +250,15 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
     )
+    completion_event = backend.create_event(cache_context.device)
     entry = lmcache_driven_transfer.ContextEntry(
         cache_context=cast(Any, cache_context),
         model_name="model",
         world_size=1,
         event_backend=cast(Any, backend),
+        completion_event=completion_event,
     )
+    backend.calls.clear()
     monkeypatch.setattr(
         module,
         "get_and_touch_context_entry",
@@ -281,6 +284,10 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     for index, call in enumerate(backend.calls):
         if call[0] == "export":
             assert backend.calls[index - 1][0] == "record"
+    # Handlers export the entry's long-lived event, never a per-request one.
+    assert not any(call[0] == "create" for call in backend.calls)
+    exported = [call[1] for call in backend.calls if call[0] == "export"]
+    assert exported == [completion_event, completion_event]
 
 
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:

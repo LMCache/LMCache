@@ -76,6 +76,17 @@ complete the moment the consumer receives it. The subsequent `wait_event`
 returns immediately, the consumer's transfer kernel runs alongside the
 producer's writes, and it can read partially written KV-cache blocks.
 
+### Completion event lifetime
+
+An exported handle is valid only while the exporter keeps the event alive.
+CUDA and ROCm 7.2 tolerated violations; ROCm 10.0 frees the underlying ROCr
+signal once the exporting event is destroyed, and the peer's open then fails.
+The server therefore exports no per-request events: each registered context
+owns one `completion_event` for its lifetime, which every STORE / RETRIEVE /
+STORE_Q records after its copies and exports. Since a context's transfers
+share one stream, the latest recording completing implies every earlier
+transfer completed, so a handle imported late is conservative, never early.
+
 Substituting host-side synchronization does not work either. Draining the
 importing process's own streams says nothing about the exporting process --
 they are separate contexts, and without MPS-style serialization their kernels
@@ -200,10 +211,11 @@ Worker adapter
   send event handle in STORE/RETRIEVE
 
 Server: lmcache_driven_transfer.py
-  at KV registration: resolve, validate, and cache event_backend in ContextEntry
+  at KV registration: resolve, validate, and cache event_backend in ContextEntry,
+    and create_event once -> ContextEntry.completion_event
   event_backend.import_event / wait_event
   enqueue KV transfer
-  event_backend.create_event / record_event / export_event
+  event_backend.record_event / export_event on the long-lived completion_event
 
 Worker: futures.py
   reuse the transfer context's cached event_backend
