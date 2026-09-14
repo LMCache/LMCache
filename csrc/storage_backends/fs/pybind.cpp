@@ -14,6 +14,7 @@ PYBIND11_MODULE(lmcache_fs, m) {
            py::arg("read_max_bytes_in_flight") = 0)
       .def("read_budget_bytes",
            &lmcache::connector::FSConnector::read_budget_bytes,
-           "Bytes currently allowed outstanding; 0 when no budget applies.")
+           "Bytes allowed outstanding against the device; 0 when there is "
+           "no read pool.")
           LMCACHE_BIND_CONNECTOR_METHODS(lmcache::connector::FSConnector);
 }

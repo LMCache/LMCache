@@ -25,7 +25,7 @@ static constexpr const char* PATH_SLASH_REPLACEMENT = "-SEP-";
 static constexpr const char* FILE_EXT = ".data";
 static constexpr const char* TMP_EXT = ".tmp";
 
-// Bytes of reads the connector keeps outstanding against storage when
+// Bytes of reads the connector keeps outstanding against the device when
 // read_io_depth is on and no explicit figure is configured.
 //
 // Throughput is set by bytes in flight, not by object count, so this is
@@ -45,7 +45,7 @@ static constexpr const char* TMP_EXT = ".tmp";
 // between 96 MiB and 1536 MiB.  A deployment that knows its storage can
 // do better by pinning its own value, and a single slow device is the
 // case most worth pinning.  See
-// docs/design/v1/distributed/l2_adapters/native-connector-read-depth.md.
+// docs/design/v1/distributed/l2_adapters/fs_native_read_depth.md.
 static constexpr size_t kDefaultReadMaxBytesInFlight = size_t{1536} << 20;
 
 // Per-worker connection state for the FS connector.
@@ -68,19 +68,23 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   //   therefore equals num_workers.  Each reader thread holds one open
   //   file at a time, so this is also the ceiling on those.
   // read_max_bytes_in_flight: bytes this connector may keep outstanding,
-  //   shared across its workers.  Zero selects
+  //   split into equal shares, one per worker.  Zero selects
   //   kDefaultReadMaxBytesInFlight when read_io_depth is positive.
+  // Throws std::runtime_error if read_io_depth is negative.  If starting
+  // the pool or the workers fails, every thread already started is joined
+  // before the exception propagates.
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,
               size_t read_ahead_size = 0, int read_io_depth = 0,
               size_t read_max_bytes_in_flight = 0);
   ~FSConnector() override;
 
-  // Bytes this connector allows outstanding against storage.
+  // Bytes this connector allows outstanding against the device.
   //
-  // Returns the configured byte budget, or 0 when none is in force: no
-  // read pool, or a pool bounded only by its thread count.  Exposed so a
-  // caller can report it alongside its other storage statistics.
+  // Returns the byte budget in force, which is the configured value or
+  // kDefaultReadMaxBytesInFlight when none was given, or 0 when there is
+  // no read pool and so nothing to bound.  Exposed so a caller can report
+  // it alongside its other storage statistics.
   size_t read_budget_bytes() const;
 
  protected:
@@ -92,17 +96,18 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   bool do_single_exists(WorkerFSConn& conn, const std::string& key) override;
   bool do_single_delete(WorkerFSConn& conn, const std::string& key) override;
 
-  // With a read pool, a GET batch is parallelised inside do_batch_get(),
-  // so it stays one tile, as MooncakeConnector::choose_num_tiles does for
-  // the same reason.  Splitting it across workers first would cap reads
-  // in flight at num_workers however large read_io_depth is: each worker
-  // only ever hands its OWN tile to the pool and then blocks on it, so the
-  // depth would be inert for any batch smaller than num_workers x depth,
-  // which is most real requests.
+  // With a read pool, a GET batch is split across workers only as far as
+  // leaves every tile at least read_io_depth objects deep; a smaller batch
+  // stays one tile.  The base class's split into num_workers tiles would
+  // cap reads in flight at num_workers however large read_io_depth is:
+  // each worker only ever hands its OWN tile to the pool and then blocks
+  // on it, so the depth would be inert for any batch smaller than
+  // num_workers x depth, which is most real requests.
   size_t choose_num_tiles(Op op, size_t num_items) const override;
 
   // Read one tile of a batch: through the read pool when one is
-  // configured, otherwise the base class's serial path.  Per-key error
+  // configured, otherwise the base class's legacy path, one blocking
+  // read at a time.  Per-key error
   // tolerance is the same either way: a key whose read fails is marked 0
   // in per_key_results and the rest of the tile still completes.
   void do_batch_get(WorkerFSConn& conn, const Request& req) override;
@@ -157,10 +162,10 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // calling worker's is idle for the duration.
   void do_batch_get_pooled(const Request& req);
 
-  // Per-worker share of the byte budget, or no bound when none is set.
+  // Per-worker share of the byte budget.
   size_t worker_read_budget_bytes() const;
 
-  void start_read_pool();
+  void start_read_pool(int read_io_depth);
   void stop_read_pool();
   void read_thread_main(WorkerFSConn& conn);
 
@@ -172,8 +177,8 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
 
   // Read pool.  read_conns_ is sized once in start_read_pool() and never
   // resized, so each reader thread's reference stays valid; read_threads_
-  // being empty is the test for "no pool".
-  int read_io_depth_;
+  // being empty is the test for "no pool".  read_max_bytes_in_flight_ is
+  // normalised in the constructor: 0 without a pool, never 0 with one.
   size_t read_max_bytes_in_flight_;
   std::vector<WorkerFSConn> read_conns_;
   std::vector<std::thread> read_threads_;

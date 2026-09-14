@@ -46,15 +46,11 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     - read_io_depth: threads dedicated to executing reads, and so the
       maximum reads in flight.  0 keeps the legacy path, where reads run
       on the worker threads and the depth against the device therefore
-      equals num_workers.  Bytes in flight never exceed read_io_depth x
-      object size whatever read_max_bytes_in_flight says.
+      equals num_workers.
     - read_max_bytes_in_flight: bytes the connector may keep outstanding
-      against the device.  Throughput is set by bytes in flight rather
-      than by object count, so this is the figure that decides it.  The
-      default 0 selects 1536 MiB, chosen for its worst case across
-      local and network-latency storage; see connector.h.  Only consulted
-      when read_io_depth is positive, and only reachable when that depth
-      is large enough to hold the budget in objects.
+      against the device, split into equal shares, one per worker.  0
+      selects 1536 MiB when read_io_depth is positive; ignored otherwise.
+      See docs/source/mp/l2_storage/fs_native.rst for how to size both.
     - read_ahead_size: trigger filesystem readahead by
       reading this many bytes first (optional).
     - max_capacity_gb: declared L2 capacity in GB, used for usage
@@ -161,7 +157,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "num_workers (default 0 = legacy path)\n"
             "- read_max_bytes_in_flight (int): bytes kept "
             "outstanding against the device (default 0 = "
-            "1536 MiB)\n"
+            "1536 MiB when read_io_depth > 0)\n"
             "- read_ahead_size (int): trigger fs "
             "readahead by reading this many bytes "
             "first (optional)\n"

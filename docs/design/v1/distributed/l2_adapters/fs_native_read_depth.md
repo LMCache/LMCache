@@ -54,15 +54,15 @@ at once.
 
 The alternative is to raise `num_workers`, and on this array a well-chosen
 value reaches the same ceiling as the pool in an isolated read benchmark: at
-6 MiB objects, `num_workers=64` reads 54.0 GB/s against the pool's 54.1. End
-to end it does not keep up: the same `num_workers=64` completes the vLLM
-round above in 15.56 and 15.60 s against the pool's 14.49 s, 7.4% slower
-with 0.3% between its two runs. The two settings differ in what they hold in
-flight, 64 objects (384 MiB) against the pool's 1536 MiB budget; the
-benchmark has nothing but disk latency per read, the serving path has more,
-and 384 MiB is what a 54 GB/s array needs at 7 ms per read with no margin.
-Beyond that, `num_workers` has no value that is right at more than one
-object size, and the budget does.
+6 MiB objects, `num_workers=64` reads 54.0 GB/s against the pool's 54.1, in
+a separate run from the table above. End to end it does not keep up: the
+same `num_workers=64` completes the vLLM round above in 15.56 and 15.60 s
+against the pool's 14.49 s, 7.4% slower with 0.3% between its two runs.
+Both settings hold at most 64 reads in flight, since the pool ran with
+`read_io_depth=64` and property 2 below caps it there, so the gap is not in
+bytes outstanding; what it is in has not been established. What is
+established is that `num_workers` has no value that is right at more than
+one object size, and the budget does.
 
 Throughput is set by the bytes outstanding against the device, not by the
 number of objects. An object here is `chunk_size x
@@ -80,9 +80,10 @@ is what binds:
 
 Four workers wins at 192 MiB and loses 78% at 1.5 MiB; 256 wins at 1.5 MiB
 and loses 6.5% at 192 MiB. The value tuned for 6 MiB objects,
-`num_workers=64`, reads 49.2 GB/s at 192 MiB against the budget's 52.4, 6.7%
-behind with 1.1% between its own repeats, because 64 workers there hold
-12 GiB in flight where the budget holds 1.5. The budget crosses over on its own because
+`num_workers=64`, reads 49.2 GB/s at 192 MiB against the budget's 52.4 in a
+separate run, 6.7% behind with 1.1% between its own repeats, because 64
+workers there hold 12 GiB in flight where the budget holds 1.5. The budget
+crosses over on its own because
 `budget / object_size` falls as objects grow: at 1.5 MiB it allows 1024
 objects so the thread count binds, at 192 MiB it allows 8 so the budget
 binds. The operator never has to know the object size, which only exists at
@@ -130,7 +131,7 @@ value whose worst column is best. A deployment that knows its storage
 should pin its own value, and a single slow device is the case most worth
 pinning.
 
-Two properties of the budget are worth stating because they bound what it
+Three properties of the budget are worth stating because they bound what it
 can do:
 
 1. **Dispatch is quantised in whole objects.** With four workers and 192 MiB
@@ -157,14 +158,16 @@ can do:
 | field | meaning |
 |---|---|
 | `read_io_depth` | reader threads, and so the maximum reads in flight; `0` keeps the legacy path where depth equals `num_workers` |
-| `read_max_bytes_in_flight` | bytes outstanding against the store; `0` selects the 1536 MiB default |
+| `read_max_bytes_in_flight` | bytes outstanding against the device; `0` selects the 1536 MiB default when `read_io_depth` is positive |
 
 `read_io_depth` has to be large enough for the byte budget to be the
 constraint that binds: whichever of the two limits is smaller wins, and
-property 2 above is what makes that easy to get wrong. The budget is shared
-across the workers as equal per-worker shares, so at the default
-`chunk_size` of 256, whose objects are 6 MiB, the default budget's 384 MiB
-share per worker needs a `read_io_depth` of 64 to be reachable.
+property 2 above is what makes that easy to get wrong. The budget is split
+into equal shares, one per worker, but it is the reader threads that hold
+reads in flight, so at the default `chunk_size` of 256, whose objects are
+6 MiB, the full 1536 MiB default needs a `read_io_depth` of 256 before the
+budget rather than the thread count binds. At `read_io_depth=64` the pool
+holds 384 MiB, the same as `num_workers=64` does on the legacy path.
 
 Each reader thread has one file open at a time, so `read_io_depth` is also
 the ceiling on files the connector holds open for reads.

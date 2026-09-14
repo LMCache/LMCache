@@ -40,8 +40,8 @@ I/O queue depth on a single Python thread.
   constraint that binds.
 - ``read_max_bytes_in_flight`` (int, default ``0``): When
   ``read_io_depth`` is positive, the bytes this connector may keep
-  outstanding against the device, shared across its workers.  Throughput
-  is set by bytes in flight rather than by object count, and object
+  outstanding against the device, split into equal shares, one per
+  worker.  Throughput is set by bytes in flight rather than by object count, and object
   size here is ``chunk_size`` x bytes-per-token-per-rank, so a depth
   expressed in objects means something different at every ``chunk_size``.
   The right figure is a property of the storage, and the default ``0``

@@ -181,12 +181,12 @@ def _aligned_pairs(
         (1, 0),  # a pool of one, so every read still queues behind the last
         (4, 0),  # several reads of one batch in flight at once
         (8, 1),  # budget below one object: the group must still take one
-        (8, 4096),  # a few objects per group
+        (8, 1 << 17),  # a few objects per group at a 4 KiB block size
         (8, 1 << 30),  # larger than the whole batch: one group
     ],
 )
 def test_reads_return_identical_bytes(
-    tmp_path,
+    tmp_path: Path,
     read_io_depth: int,
     read_max_bytes_in_flight: int,
 ) -> None:
@@ -206,7 +206,7 @@ def test_reads_return_identical_bytes(
     # An odd number of blocks, so an object is never a round power of two.
     size = block_size * 7
     keys = [f"test_model@00000000@{i:016x}" for i in range(6)]
-    sources, dests, _keep = _aligned_pairs(len(keys), size, block_size)
+    sources, dests, keep_alive = _aligned_pairs(len(keys), size, block_size)
 
     writer = LMCacheFSClient(str(tmp_path), 2, "", True, 0)
     try:

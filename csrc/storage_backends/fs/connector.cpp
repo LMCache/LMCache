@@ -5,7 +5,6 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -168,10 +167,9 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
       use_odirect_(use_odirect),
       disk_block_size_(0),
       read_ahead_size_(read_ahead_size),
-      read_io_depth_(read_io_depth),
       read_max_bytes_in_flight_(
           effective_read_budget(read_io_depth, read_max_bytes_in_flight)) {
-  if (read_io_depth_ < 0) {
+  if (read_io_depth < 0) {
     throw std::runtime_error("read_io_depth must be >= 0");
   }
 
@@ -197,7 +195,7 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
   // destructor does not run for a half-constructed object, and a thread
   // still holding `this` would use it after the base has been destroyed.
   try {
-    start_read_pool();
+    start_read_pool(read_io_depth);
     start_workers();  // IMPORTANT: call at END of constructor
   } catch (...) {
     close();
@@ -337,7 +335,7 @@ bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
 // ---------------------------------------------------------------
 
 size_t FSConnector::read_budget_bytes() const {
-  return read_threads_.empty() ? 0 : read_max_bytes_in_flight_;
+  return read_max_bytes_in_flight_;
 }
 
 size_t FSConnector::choose_num_tiles(Op op, size_t num_items) const {
@@ -371,10 +369,9 @@ void FSConnector::on_workers_stopped() { stop_read_pool(); }
 void FSConnector::do_batch_get_pooled(const Request& req) {
   const size_t num_keys = req.keys.size();
 
-  // A group is bounded twice: by the reader-thread count, and by the
-  // byte budget when one is configured.  Whichever binds first wins, so
-  // bytes in flight can never exceed depth * object_size however large
-  // the budget is.
+  // A group is bounded twice: by the reader-thread count and by the
+  // byte budget.  Whichever binds first wins, so bytes in flight can
+  // never exceed depth * object_size however large the budget is.
   const size_t max_count = read_threads_.size();
   const size_t budget = worker_read_budget_bytes();
 
@@ -421,9 +418,6 @@ void FSConnector::do_batch_get_pooled(const Request& req) {
 }
 
 size_t FSConnector::worker_read_budget_bytes() const {
-  if (read_max_bytes_in_flight_ == 0) {
-    return std::numeric_limits<size_t>::max();
-  }
   const size_t workers =
       static_cast<size_t>(worker_count_for_op(Op::BATCH_TILE_GET));
   return std::max<size_t>(1, read_max_bytes_in_flight_ / workers);
@@ -432,11 +426,11 @@ size_t FSConnector::worker_read_budget_bytes() const {
 // Build the reader threads' connections on the caller's thread, so a
 // failure surfaces in the constructor rather than losing a reader thread
 // and hanging the first group that waits on it.
-void FSConnector::start_read_pool() {
-  if (read_io_depth_ <= 0) {
+void FSConnector::start_read_pool(int read_io_depth) {
+  if (read_io_depth <= 0) {
     return;
   }
-  const size_t depth = static_cast<size_t>(read_io_depth_);
+  const size_t depth = static_cast<size_t>(read_io_depth);
   read_conns_.reserve(depth);
   for (size_t i = 0; i < depth; ++i) {
     read_conns_.push_back(create_connection());
@@ -472,10 +466,7 @@ void FSConnector::read_thread_main(WorkerFSConn& conn) {
       std::unique_lock<std::mutex> lk(read_mu_);
       read_cv_.wait(lk, [this] { return read_stop_ || !read_queue_.empty(); });
       if (read_queue_.empty()) {
-        if (read_stop_) {
-          return;
-        }
-        continue;
+        return;  // the predicate admits an empty queue only on stop
       }
       task = read_queue_.front();
       read_queue_.pop_front();
