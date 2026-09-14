@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
@@ -43,7 +44,9 @@ from lmcache.v1.multiprocess.group_view import (
 )
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transfer_context import (
+    AsyncEngineDrivenTransferContext,
     EngineDrivenTransferContext,
+    LMCacheDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
@@ -616,6 +619,11 @@ class HeartbeatThread(PeriodicThread):
                 )
             # If the callback fails, it should not become healthy
             healthy = self._recover_callback()
+
+        if self.stop_requested:
+            return ThreadRunSummary(
+                success=True, message="stop requested after recovery"
+            )
 
         if healthy:
             self._health_event.set()
@@ -1519,7 +1527,9 @@ class LMCacheMPWorkerAdapter:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
-        self._recovery_lock = threading.Lock()
+        self._recovery_lock = threading.RLock()
+        self._closing = threading.Event()
+        self._pending_cleanup: TransferContext | None = None
         self._primary_registration_type: str | None = None
         if 3 * heartbeat_interval > _SERVER_REAP_TIMEOUT_FLOOR_SECONDS:
             logger.warning(
@@ -1567,7 +1577,7 @@ class LMCacheMPWorkerAdapter:
         Re-registration after an outage or missing primary Context is handled
         by the heartbeat thread; this property only reads the shared event.
         """
-        return self._health_event.is_set()
+        return not self._closing.is_set() and self._health_event.is_set()
 
     @property
     def world_size(self) -> int:
@@ -1618,13 +1628,22 @@ class LMCacheMPWorkerAdapter:
                     f"multiple of engine group {info.engine_group_id} "
                     f"tokens_per_block {info.tokens_per_block}"
                 )
-        self.kv_caches = kv_caches
-        self.engine_group_infos = list(engine_group_infos)
-        # Reused when heartbeat recovery re-registers.
-        self._layout_hints = (
-            layout_hints if layout_hints is not None else vllm_layout_hints()
-        )
-        self._send_register_kv_caches_request(kv_caches)
+        with self._recovery_lock:
+            previous = (self.kv_caches, self.engine_group_infos, self._layout_hints)
+            previous_ctx = self.transfer_ctx
+            self.kv_caches = kv_caches
+            self.engine_group_infos = list(engine_group_infos)
+            self._layout_hints = (
+                layout_hints if layout_hints is not None else vllm_layout_hints()
+            )
+            try:
+                self._send_register_kv_caches_request(kv_caches)
+            except Exception:
+                if self.transfer_ctx is previous_ctx:
+                    self.kv_caches, self.engine_group_infos, self._layout_hints = (
+                        previous
+                    )
+                raise
         self._ensure_heartbeat_started()
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
@@ -1646,7 +1665,9 @@ class LMCacheMPWorkerAdapter:
             ConnectionError: if the server does not respond within
                 mq_timeout.
         """
-        self.kv_caches = kv_caches
+        if self._closing.is_set():
+            raise RuntimeError("Worker adapter is closing")
+        self._retry_context_cleanup()
         transfer_ctx = create_transfer_context(
             kv_caches,
             instance_id=self.instance_id,
@@ -1654,11 +1675,7 @@ class LMCacheMPWorkerAdapter:
             mode=self._mp_transfer_mode,
         )
         layout_hints = self._layout_hints
-        self.transfer_ctx = transfer_ctx
         try:
-            # Register on the local, not self.transfer_ctx: a concurrent
-            # shutdown() may null self.transfer_ctx between publish and this
-            # call. The local is always non-None.
             transfer_ctx.register(
                 kv_caches,
                 self.model_name,
@@ -1674,13 +1691,29 @@ class LMCacheMPWorkerAdapter:
                 if isinstance(transfer_ctx, EngineDrivenTransferContext)
                 else "register_kv_cache"
             )
-            self._primary_registration_type = primary_type
-        except TimeoutError:
-            raise ConnectionError(
-                "LMCache server did not respond to "
-                "register_kv_caches within "
-                f"{self._mq_timeout}s. Is the server running?"
-            ) from None
+            if self._closing.is_set():
+                raise RuntimeError("Worker adapter closed during registration")
+        except Exception as error:
+            # An ACK timeout may still have registered on the server. Only
+            # release local resources; do not UNREGISTER the shared instance.
+            try:
+                transfer_ctx.close()
+            except Exception:
+                self._pending_cleanup = transfer_ctx
+                self._health_event.clear()
+                logger.exception("Failed to clean registration candidate")
+            if isinstance(error, TimeoutError):
+                raise ConnectionError(
+                    "LMCache server did not respond to register_kv_caches within "
+                    f"{self._mq_timeout}s. Is the server running?"
+                ) from error
+            raise
+        previous_ctx = self.transfer_ctx
+        self.transfer_ctx = transfer_ctx
+        self._primary_registration_type = primary_type
+        if previous_ctx is not None:
+            self._pending_cleanup = previous_ctx
+            self._retry_context_cleanup()
 
     def _ensure_heartbeat_started(self) -> None:
         """Start the heartbeat thread once after KV cache registration.
@@ -1696,7 +1729,7 @@ class LMCacheMPWorkerAdapter:
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
-            if self._heartbeat is not None:
+            if self._heartbeat is not None or self._closing.is_set():
                 return
             heartbeat = HeartbeatThread(
                 req_client=self.req_client,
@@ -1729,7 +1762,14 @@ class LMCacheMPWorkerAdapter:
             (event stays cleared; retried on the next successful PING).
         """
         with self._recovery_lock:
-            return self._reregister_kv_caches_locked()
+            self._health_event.clear()
+            try:
+                return self._reregister_kv_caches_locked()
+            except Exception:
+                logger.exception(
+                    "Failed to restore dispatcher; will retry on heartbeat"
+                )
+                return False
 
     def _reregister_kv_caches_locked(self) -> bool:
         """Re-register while serialized with shutdown."""
@@ -1740,7 +1780,7 @@ class LMCacheMPWorkerAdapter:
             return True
 
         # Skip the rebuild if a shutdown already requested the heartbeat stop.
-        if self._heartbeat_stop_requested():
+        if self._closing.is_set() or self._heartbeat_stop_requested():
             logger.info("Heartbeat stop requested; skipping KV cache re-registration")
             return False
 
@@ -1768,7 +1808,41 @@ class LMCacheMPWorkerAdapter:
                 )
                 return False
 
-        return True
+        return not self._closing.is_set() and not self._heartbeat_stop_requested()
+
+    @contextmanager
+    def use_transfer_context(
+        self, *, blocking: bool = False, require_healthy: bool = True
+    ) -> Iterator[TransferContext | None]:
+        """Provide a stable Context for the duration of a synchronous call.
+
+        Args:
+            blocking: Wait for recovery; intended for reentrant Q registration.
+            require_healthy: Reject unhealthy contexts for request submission.
+
+        Yields:
+            The registered Context, or None when closing, unhealthy or busy.
+
+        Raises:
+            RuntimeError: If healthy but KV caches have never been registered.
+        """
+        acquired = self._recovery_lock.acquire(blocking=blocking)
+        try:
+            if (
+                not acquired
+                or self._closing.is_set()
+                or (require_healthy and not self.is_healthy)
+            ):
+                yield None
+            elif self.transfer_ctx is None:
+                raise RuntimeError(
+                    "KV caches are not registered. Call register_kv_caches() first."
+                )
+            else:
+                yield self.transfer_ctx
+        finally:
+            if acquired:
+                self._recovery_lock.release()
 
     def create_recorded_event(self) -> _IpcEvent | None:
         """Create the ordering event required by the active transfer context.
@@ -1781,15 +1855,10 @@ class LMCacheMPWorkerAdapter:
         Raises:
             RuntimeError: If called before ``register_kv_caches()``.
         """
-        transfer_ctx = self.transfer_ctx
-        if transfer_ctx is None:
-            raise RuntimeError(
-                "KV caches are not registered. Call register_kv_caches() "
-                "before creating transfer events."
+        with self.use_transfer_context() as transfer_ctx:
+            return (
+                None if transfer_ctx is None else transfer_ctx.create_recorded_event()
             )
-        if not self.is_healthy:
-            return None
-        return transfer_ctx.create_recorded_event()
 
     @_lmcache_nvtx_annotate
     def submit_store_request(
@@ -1827,15 +1896,7 @@ class LMCacheMPWorkerAdapter:
             return
 
         if not self.is_healthy:
-            if self.lazy_offload:
-                logger.warning(
-                    "Dropping store for request %s while the server is "
-                    "unhealthy; reporting it as completed so its blocks "
-                    "are unpinned",
-                    request_id,
-                )
-                self._completed_store_requests[request_id] = 1
-                self._failed_store_requests.add(request_id)
+            self._drop_store_request(request_id)
             return
 
         assert op.token_ids is not None
@@ -1847,19 +1908,24 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting store requests."
+        with self.use_transfer_context() as transfer_ctx:
+            if transfer_ctx is None:
+                self._drop_store_request(request_id)
+                return
+            if event is None and isinstance(
+                transfer_ctx,
+                (LMCacheDrivenTransferContext, AsyncEngineDrivenTransferContext),
+            ):
+                # Event creation may have skipped while recovery held the lock.
+                event = transfer_ctx.create_recorded_event()
+            future = transfer_ctx.submit_store(
+                request_id,
+                key,
+                self.kv_caches,
+                self._block_ids_per_group(op),
+                event,
+                self.blocks_in_chunk,
             )
-        future = self.transfer_ctx.submit_store(
-            request_id,
-            key,
-            self.kv_caches,
-            self._block_ids_per_group(op),
-            event,
-            self.blocks_in_chunk,
-        )
         self.store_futures[request_id] = future
         if event is not None:
             self.store_events[request_id] = event
@@ -1909,20 +1975,22 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting retrieve requests."
+        with self.use_transfer_context() as transfer_ctx:
+            if transfer_ctx is None:
+                self.error_block_ids.update(op.flat_block_ids)
+                self._dropped_retrieves.add(request_id)
+                return
+            if event is None and isinstance(transfer_ctx, LMCacheDrivenTransferContext):
+                event = transfer_ctx.create_recorded_event()
+            future = transfer_ctx.submit_retrieve(
+                request_id,
+                key,
+                self.kv_caches,
+                self._block_ids_per_group(op),
+                event,
+                self.blocks_in_chunk,
+                skip_first_n_tokens=op.skip_first_n_tokens,
             )
-        future = self.transfer_ctx.submit_retrieve(
-            request_id,
-            key,
-            self.kv_caches,
-            self._block_ids_per_group(op),
-            event,
-            self.blocks_in_chunk,
-            skip_first_n_tokens=op.skip_first_n_tokens,
-        )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
         if event is not None:
             self.retrieve_events[request_id] = event
@@ -2377,11 +2445,16 @@ class LMCacheMPWorkerAdapter:
         """
         if not need_flush_before_forward:
             return
-        if not self.is_healthy or self.transfer_ctx is None:
-            return
-        self.transfer_ctx.flush_inflight_stores()
-        # Force device sync here, compare to preemption, perf panelty is trivial
-        torch_dev.synchronize()
+        # Unlike transfer submission, this safety barrier must not be dropped:
+        # deferred gathers may still read blocks the next forward overwrites.
+        with self.use_transfer_context(
+            blocking=True, require_healthy=False
+        ) as transfer_ctx:
+            if transfer_ctx is None:
+                return
+            transfer_ctx.flush_inflight_stores()
+            # Finish deferred gathers before paged blocks can be overwritten.
+            torch_dev.synchronize()
 
     def _build_store_kv_events(
         self,
@@ -2432,6 +2505,8 @@ class LMCacheMPWorkerAdapter:
         on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
         """
+        self._closing.set()
+        self._health_event.clear()
         with self._heartbeat_lock:
             if self._heartbeat is not None:
                 self._heartbeat.stop()
@@ -2449,18 +2524,45 @@ class LMCacheMPWorkerAdapter:
                         "Proceeding with shutdown.",
                         self._mq_timeout,
                     )
+                except Exception:
+                    logger.exception(
+                        "Failed to unregister; proceeding with local cleanup"
+                    )
 
             if self.dispatcher is not None:
-                dispatch(self.dispatcher, "shutdown")
+                try:
+                    dispatch(self.dispatcher, "shutdown")
+                except Exception:
+                    logger.exception("Failed to shut down dispatcher")
 
             if self.transfer_ctx is not None:
-                self.transfer_ctx.close()
-                self.transfer_ctx = None
+                context = self.transfer_ctx
+                try:
+                    context.close()
+                    self.transfer_ctx = None
+                except Exception:
+                    logger.exception("Failed to close current transfer Context")
+            try:
+                self._retry_context_cleanup()
+            except Exception:
+                logger.exception("Failed to close pending transfer Context on shutdown")
 
             self.req_client.close()
             self.request_telemetry.close()
 
     # Helper functions
+    def _drop_store_request(self, request_id: str) -> None:
+        """Complete a lazy store locally when no stable Context is available."""
+        if not self.lazy_offload:
+            return
+        logger.warning(
+            "Dropping store for request %s while the server is unavailable; "
+            "reporting completion so its blocks are unpinned",
+            request_id,
+        )
+        self._completed_store_requests[request_id] = 1
+        self._failed_store_requests.add(request_id)
+
     def _publish_store_kv_events(self, request_id: str) -> None:
         """Buffer successful store events and update metrics without a drain."""
         events = self._pending_store_kv_events.pop(request_id, [])
@@ -2468,6 +2570,21 @@ class LMCacheMPWorkerAdapter:
             self._kv_events.extend(events)
             self._kv_events_generated.inc(len(events))
             self._kv_events_buffered.set(len(self._kv_events))
+
+    def _retry_context_cleanup(self) -> None:
+        """Retry the sole retained failed cleanup before creating a candidate."""
+        if self._pending_cleanup is None:
+            return
+        try:
+            self._pending_cleanup.close()
+        except Exception:
+            self._health_event.clear()
+            raise
+        self._pending_cleanup = None
+        logger.debug(
+            "Closed previous local transfer Context for instance_id=%s",
+            self.instance_id,
+        )
 
     def _update_and_get_finished_store(
         self,

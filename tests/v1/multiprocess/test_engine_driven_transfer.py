@@ -1864,3 +1864,49 @@ def test_engine_driven_context_shm_close_is_idempotent() -> None:
     finally:
         shm_munmap(addr, 4096)
         shm_unlink(shm_name)
+
+
+def test_shm_close_failure_retains_mapping_for_retry(monkeypatch) -> None:
+    """A real exported SHM view must not make failed close lose its owner."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import shm as shm_module
+
+    name = f"lmcache_test_retry_{os.getpid()}"
+    addr = _create_shm_segment(name, 4096)
+    attachments = []
+    attach = shm_module.shared_memory.SharedMemory
+
+    def record_attachment(*args, **kwargs):
+        mapping = attach(*args, **kwargs)
+        attachments.append(mapping)
+        return mapping
+
+    monkeypatch.setattr(shm_module.shared_memory, "SharedMemory", record_attachment)
+    context = EngineDrivenContextShm(
+        metadata=EngineDrivenContextMetadata(
+            layout_desc=MemoryLayoutDesc(
+                shapes=[torch.Size([1])], dtypes=[torch.float32]
+            ),
+            block_size=1,
+            use_mla=False,
+        ),
+        req_client=MagicMock(),
+        mq_timeout=1.0,
+        shm_name=name,
+        pool_size=4096,
+    )
+    exported = memoryview(attachments[0].buf)
+    try:
+        with pytest.raises(BufferError):
+            context.close()
+        exported.release()
+        context.close()
+        # Inspect the real OS handle, not a mock close() call count.
+        assert attachments[0]._fd == -1
+        probe = shm_open_pool_as_mmap(name, 4096)
+        probe.close()  # Worker close must never unlink the server's segment.
+    finally:
+        exported.release()
+        attachments[0].close()
+        shm_munmap(addr, 4096)
+        shm_unlink(name)

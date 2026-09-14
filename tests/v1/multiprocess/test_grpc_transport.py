@@ -297,9 +297,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         ),
     )
 
-    probe_codec = registry.by_full_name[
-        "lmcache.mp.ControllerService.PingRegistered"
-    ]
+    probe_codec = registry.by_full_name["lmcache.mp.ControllerService.PingRegistered"]
     probe = probe_codec.request_encoder((7, "register_kv_cache"), {})
     assert probe_codec.request_decoder(probe) == (7, "register_kv_cache")
 

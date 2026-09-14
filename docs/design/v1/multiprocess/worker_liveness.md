@@ -77,19 +77,10 @@ The normal reap timeout applies only when both booleans are true; every other
 state uses registration grace. PING, registration, and transfer all refresh
 `last_seen`.
 
-Activation is scoped to each registered transfer context, not shared globally
-by `instance_id`. PING is fanned out to every context registered for that
-worker, while a transfer activates only the context that serves it. For example,
-a GPU KV retrieve activates the GPU KV context but not an optional QStore
-context; the QStore context retains registration grace until its own first
-`STORE_Q`. This prevents one transfer path from shortening another context's
-startup protection. A context that is never used is still cleaned up after a
-silent registration-grace interval.
-
-Mirrored state retains the same ownership boundary. Blend rope state is owned
-by the GPU KV context, so only reaping that context drops the mirror. Reaping an
-independently activated QStore context with the same `instance_id` does not
-invalidate a still-protected GPU/Blend context.
+Activation is per registered Context: PING fans out, while a transfer activates
+only its serving Context. A GPU retrieve therefore cannot activate QStore before
+its first `STORE_Q`. Blend rope state belongs to the GPU Context, so reaping a
+QStore with the same `instance_id` does not drop the GPU-owned mirror.
 
 | PING seen | Transfer seen | Reap window |
 |---|---|---|
@@ -176,14 +167,19 @@ T1        health_event is cleared; recover callback re-registers the same
 ```
 
 The same callback still handles a full server outage. If all Contexts survived,
-the idempotent register path refreshes `last_seen` and builds nothing.
+the idempotent server register path only refreshes `last_seen`. Locally, the
+worker initializes a candidate Context before publishing it, then closes the
+previous Context under the same lifecycle lock used by requests. Async close
+drains background Store work before releasing SHM. Failed cleanup retains one
+pending Context, keeps the worker unhealthy, and is retried before new allocation.
 
 ### 6.3 Shutdown
 
-`shutdown()` stops the heartbeat before sending UNREGISTER, so no stray ping
-lands on a closing client. The heartbeat cycle skips the recover callback and
-`health_event.set()` once stopped, and the callback skips re-registration when a
-stop is already requested — a straggling cycle cannot re-create a ghost context.
+`shutdown()` marks the adapter closing and clears health, stops the heartbeat
+without holding the lifecycle lock, then acquires that lock before UNREGISTER
+and local cleanup. A limited heartbeat join is not a synchronization guarantee:
+the closing check prevents late publication, and the lifecycle lock serializes
+in-flight registration with UNREGISTER. Heartbeat checks stop again after recovery.
 
 ## 7. Failure Modes
 
@@ -191,13 +187,12 @@ stop is already requested — a straggling cycle cannot re-create a ghost contex
 |---|---|
 | Worker crash (SIGKILL, no UNREGISTER) after serving | Both signals are latched; pings stop and the entry is reaped within ~`timeout + timeout/4`, using normal unregister cleanup. |
 | Worker dies during startup | Before both signals exist, prolonged silence is reaped on registration grace. The startup leak stays bounded. |
-| Worker remains alive but receives no traffic | Registration starts heartbeat; each PING refreshes registration grace, so request-idle time alone never reaps it. |
-| Worker continues warmup after registration | PING does not end startup protection. A temporarily starved heartbeat has the larger grace; silence beyond that grace is treated as startup death. |
-| Legacy client transfers but sends no PING | Transfer activity alone retains registration grace, preserving compatibility while keeping cleanup bounded. |
-| Worker has multiple registered contexts | Each context activates on its own first real transfer. An unused optional context retains registration grace and is cleaned up if it stays silent beyond that bound. |
+| Worker remains alive but receives no traffic | PING refreshes registration grace, so request-idle time alone never reaps it. |
+| Worker continues warmup after registration | PING alone retains startup grace; silence beyond it is treated as startup death. |
+| Legacy or multi-context worker | Each Context needs both signals; one transfer cannot activate another Context. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
-| Server stays healthy but the primary KV Context is reaped | The next registration-aware heartbeat reports it absent and triggers idempotent re-registration; detection takes at most one heartbeat interval. A transfer already entering the path may fall back once. |
-| Only an optional experimental Context is reaped | It is outside this PR's proactive registration-recovery scope; full QStore recovery can be added separately. |
+| Server stays healthy but primary KV is reaped | The next heartbeat detects it and re-registers; one in-flight transfer may fall back. |
+| Only an optional Context is reaped | Proactive recovery covers the primary KV registration. |
 | Partition shorter than the reap window | No reap. On heal, the recovery path is idempotent; an existing Context is only refreshed. |
 | Worker crash + restart | The new process gets a fresh uuid-derived id and a fresh entry; the dead id is reaped independently. No PID-reuse aliasing. |
 | New worker with an old server | `ping_registered` is unsupported, so the worker becomes unhealthy rather than silently transferring without a Context. Upgrade both sides together. |

@@ -1776,12 +1776,9 @@ def test_startup_does_not_warn_for_default_heartbeat_interval(
     assert not any("reap" in msg for msg in warnings)
 
 
-def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
+def test_recover_callback_rebuilds_transfer_ctx_and_closes_previous(
     fake_adapter, monkeypatch
 ) -> None:
-    """Pin current behavior: every recover-callback invocation rebuilds
-    ``transfer_ctx`` without closing the previous context (known IPC leak;
-    in-flight submissions may still hold a reference to the old context)."""
     adapter, _send_mock, _ = fake_adapter
     contexts = _patch_transfer_context_factory(monkeypatch)
 
@@ -1795,21 +1792,341 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     assert len(contexts) == 1
     assert adapter.transfer_ctx is contexts[0]
 
-    # Each recover-callback invocation rebuilds transfer_ctx without closing
-    # the previous context (known IPC leak; in-flight submissions may still
-    # hold a reference to the old context).
+    # Replacement releases the previous local resources exactly once.
     assert heartbeat.recover_callback() is True
     assert len(contexts) == 2
     assert adapter.transfer_ctx is contexts[1]
-    contexts[0].close.assert_not_called()
+    contexts[0].close.assert_called_once_with()
 
     assert heartbeat.recover_callback() is True
     assert len(contexts) == 3
     assert adapter.transfer_ctx is contexts[2]
-    contexts[1].close.assert_not_called()
+    contexts[1].close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), RuntimeError("local init")])
+def test_registration_failure_preserves_previous_context(
+    fake_adapter, monkeypatch, error: Exception
+) -> None:
+    adapter, client, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    kv = {"layer.0": MagicMock()}
+    adapter.register_kv_caches(kv)
+    previous = adapter.transfer_ctx
+    candidate = MagicMock()
+
+    def register(*args, **kwargs):
+        assert adapter.transfer_ctx is previous
+        raise error
+
+    candidate.register.side_effect = register
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda *a, **kw: candidate
+    )
+    with pytest.raises(
+        ConnectionError if isinstance(error, TimeoutError) else RuntimeError
+    ):
+        adapter.register_kv_caches(kv)
+    assert adapter.transfer_ctx is previous
+    contexts[0].close.assert_not_called()
+    candidate.close.assert_called_once_with()
+    client.unregister_kv_cache.assert_not_called()
+
+
+def test_registration_publishes_only_after_candidate_initialization(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, _, _ = fake_adapter
+    candidate = MagicMock()
+    candidate.register.side_effect = lambda *a, **kw: (
+        pytest.fail("candidate published before initialization")
+        if adapter.transfer_ctx is candidate
+        else None
+    )
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda *a, **kw: candidate
+    )
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    assert adapter.transfer_ctx is candidate
 
 
 # For the experimental dispatcher
+def test_q_store_busy_context_releases_ring_blocks(fake_adapter, monkeypatch) -> None:
+    # First Party
+    from lmcache.sdk.qringbuffer import QRingBufferAdapter
+
+    adapter, _, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    q = QRingBufferAdapter(adapter, "q-model")
+    q.q_ring = MagicMock()
+    with adapter.use_transfer_context(blocking=True):
+        request = threading.Thread(
+            target=q.submit_q_store_request,
+            args=("q-request", _op([[0]]), [0], MagicMock()),
+        )
+        request.start()
+        request.join(5)
+        assert not request.is_alive()
+    q.q_ring.free.assert_called_once_with([0])
+    contexts[0].submit_q_store.assert_not_called()
+
+
+def test_q_registration_uses_new_context_reentrantly(fake_adapter, monkeypatch) -> None:
+    # First Party
+    from lmcache.sdk import qringbuffer as q_module
+
+    adapter, _, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    monkeypatch.setattr(q_module, "vllm_layout_hints", lambda: {})
+    q = q_module.QRingBufferAdapter(adapter, "q-model")
+    q.q_ring = MagicMock()
+    q.q_engine_group_infos = []
+    dispatcher = MagicMock(spec=Dispatcher)
+
+    def register_q() -> bool:
+        q.reregister_q_ring()
+        return True
+
+    dispatcher.reregister.side_effect = register_q
+    adapter.dispatcher = dispatcher
+    recover = FakeHeartbeatThread.instances[0].recover_callback
+    assert recover is not None
+    assert recover() is True
+    contexts[1].register_q.assert_called_once()
+    contexts[0].register_q.assert_not_called()
+
+
+def test_context_use_serializes_recovery(fake_adapter, monkeypatch) -> None:
+    adapter, _, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    entered, release, finished = (threading.Event() for _ in range(3))
+
+    def submit(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        contexts[0].close.assert_not_called()
+        return MagicMock()
+
+    contexts[0].submit_store.side_effect = submit
+    request = threading.Thread(
+        target=adapter.submit_store_request, args=("request", _op([[0]]), None)
+    )
+    heartbeat = FakeHeartbeatThread.instances[0]
+
+    def recover() -> None:
+        assert heartbeat.recover_callback is not None
+        assert heartbeat.recover_callback() is True
+        finished.set()
+
+    recovery = threading.Thread(target=recover)
+    request.start()
+    assert entered.wait(5)
+    recovery.start()
+    try:
+        assert not finished.wait(0.1)
+        contexts[0].close.assert_not_called()
+    finally:
+        release.set()
+        request.join(5)
+        recovery.join(5)
+    assert not request.is_alive() and not recovery.is_alive()
+    assert finished.is_set()
+    contexts[0].close.assert_called_once_with()
+
+
+def test_preemption_waits_for_lifecycle_and_flushes_unhealthy_context(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, _, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    monkeypatch.setattr(adapter_mod.torch_dev, "synchronize", lambda: None)
+    entered, finished = threading.Event(), threading.Event()
+
+    def preempt() -> None:
+        entered.set()
+        adapter.handle_preemptions(True)
+        finished.set()
+
+    with adapter.use_transfer_context(blocking=True):
+        thread = threading.Thread(target=preempt)
+        thread.start()
+        assert entered.wait(5)
+        early = finished.wait(0.1)
+    thread.join(5)
+    assert not thread.is_alive()
+    assert not early
+    contexts[0].flush_inflight_stores.assert_called_once_with()
+    FakeHeartbeatThread.instances[0].health_event.clear()
+    adapter.handle_preemptions(True)
+    assert contexts[0].flush_inflight_stores.call_count == 2
+
+
+def test_retrieve_during_recovery_completes_without_submission(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, _, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    entered, release = threading.Event(), threading.Event()
+    candidate = MagicMock()
+
+    def register(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+
+    candidate.register.side_effect = register
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda *a, **kw: candidate
+    )
+    recovery = threading.Thread(
+        target=FakeHeartbeatThread.instances[0].recover_callback
+    )
+    recovery.start()
+    assert entered.wait(5)
+    try:
+        adapter.submit_retrieve_request("busy", _op([[4, 5]]), None)
+        assert adapter.get_finished(set())[1] == {"busy"}
+        assert adapter.get_finished(set())[1] == set()
+        assert adapter.get_block_ids_with_load_errors() == {4, 5}
+        contexts[0].submit_retrieve.assert_not_called()
+    finally:
+        release.set()
+        recovery.join(5)
+    assert not recovery.is_alive()
+
+
+def test_lazy_store_busy_context_reports_failed_completion(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, _, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.lazy_offload = True
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+
+    with adapter.use_transfer_context(blocking=True):
+        request = threading.Thread(
+            target=adapter.submit_store_request,
+            args=("busy", _op([[4, 5]]), None),
+        )
+        request.start()
+        request.join(5)
+        assert not request.is_alive()
+
+    assert adapter.get_completed_store_requests() == {"busy": 1}
+    assert adapter.get_failed_store_requests() == {"busy"}
+    contexts[0].submit_store.assert_not_called()
+
+
+def test_failed_old_cleanup_blocks_new_candidates(fake_adapter, monkeypatch) -> None:
+    adapter, _, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    contexts[0].close.side_effect = RuntimeError("cleanup")
+    recover = FakeHeartbeatThread.instances[0].recover_callback
+    assert recover is not None
+    assert recover() is False
+    assert adapter.transfer_ctx is contexts[1]
+    assert not adapter.is_healthy
+    assert recover() is False
+    assert len(contexts) == 2
+    contexts[0].close.side_effect = None
+    assert recover() is True
+    assert len(contexts) == 3
+    contexts[1].close.assert_called_once_with()
+
+
+def test_candidate_cleanup_error_preserves_registration_error(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, _, _ = fake_adapter
+    candidate = MagicMock()
+    original = RuntimeError("registration")
+    candidate.register.side_effect = original
+    candidate.close.side_effect = ValueError("cleanup")
+    factory = MagicMock(return_value=candidate)
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", factory)
+    with pytest.raises(RuntimeError) as exc:
+        adapter.register_kv_caches({"layer.0": MagicMock()})
+    assert exc.value is original
+    with pytest.raises(ValueError, match="cleanup"):
+        adapter.register_kv_caches({"layer.0": MagicMock()})
+    assert factory.call_count == 1
+    candidate.close.side_effect = None
+    adapter.shutdown()
+    assert candidate.close.call_count == 3
+
+
+def test_shutdown_during_slow_candidate_prevents_publication(
+    fake_adapter, monkeypatch
+) -> None:
+    adapter, client, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    candidate = MagicMock()
+    entered, release = threading.Event(), threading.Event()
+
+    def register(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        client.unregister_kv_cache.assert_not_called()
+        assert adapter.transfer_ctx is contexts[0]
+
+    candidate.register.side_effect = register
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda *a, **kw: candidate
+    )
+    result = []
+    heartbeat = FakeHeartbeatThread.instances[0]
+    recover = heartbeat.recover_callback
+    assert recover is not None
+    recovery = threading.Thread(target=lambda: result.append(recover()))
+    shutdown = threading.Thread(target=adapter.shutdown)
+    recovery.start()
+    assert entered.wait(5)
+    shutdown.start()
+    try:
+        deadline = time.monotonic() + 5
+        while "stop" not in heartbeat.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert "stop" in heartbeat.calls
+        assert not adapter.is_healthy
+    finally:
+        release.set()
+        recovery.join(5)
+        shutdown.join(5)
+    assert not recovery.is_alive() and not shutdown.is_alive()
+    assert result == [False]
+    candidate.close.assert_called_once_with()
+    contexts[0].close.assert_called_once_with()
+    assert adapter.transfer_ctx is None
+    assert not adapter.is_healthy
+    contexts[0].unregister.assert_called_once_with()
+    client.unregister_kv_cache.assert_not_called()
+
+
+@pytest.mark.parametrize("method", ["submit_store_request", "submit_retrieve_request"])
+def test_request_recreates_event_skipped_during_recovery(
+    fake_adapter, monkeypatch, method: str
+) -> None:
+    adapter, _, _ = fake_adapter
+    transfer = MagicMock(spec=adapter_mod.LMCacheDrivenTransferContext)
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda *a, **kw: transfer
+    )
+    adapter.register_kv_caches({"layer.0": MagicMock()})
+    getattr(adapter, method)("request", _op([[0]]), None)
+    call = (
+        transfer.submit_store
+        if method == "submit_store_request"
+        else transfer.submit_retrieve
+    )
+    assert call.call_args.args[4] is transfer.create_recorded_event.return_value
+
+
 def test_enabled_feature_receives_reclaim_and_shutdown(fake_adapter):
     """get_finished reclaims ring blocks and shutdown unregisters the ring."""
     adapter, _, _ = fake_adapter
