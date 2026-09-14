@@ -24,6 +24,7 @@ pytest --maxfail=1 --cov=lmcache \
     --ignore=tests/v1/mp_coordinator/test_instances_usage_e2e.py \
     --ignore=tests/v1/platform/test_cuda_ipc_wrapper.py \
     --ignore=tests/v1/platform/test_timeline_semaphore_event_ipc.py \
+    --ignore=tests/v1/platform/test_vmm_ipc_wrapper.py \
     --ignore=tests/v1/multiprocess/test_mq.py \
     --ignore=tests/v1/multiprocess/test_cb_plan_executor_gpu.py \
     --ignore=tests/v1/multiprocess/test_custom_types.py \
@@ -51,18 +52,18 @@ pytest --maxfail=1 --cov=lmcache \
 #   background uvicorn thread doesn't bind its port within the test's
 #   hardcoded 5s timeout under that load. Revisit if this queue ever moves
 #   to less contended hardware.
-# - test_cuda_ipc_wrapper.py, test_timeline_semaphore_event_ipc.py: whole
-#   files ignored. Both depend on NVIDIA's `cuda.bindings` (cuda-python)
-#   package for raw driver-level IPC calls (lmcache/v1/platform/cuda/utils.py's
-#   _import_cuda_bindings()), which isn't installed on MACA and isn't
-#   expected to work there even if it were -- it binds to NVIDIA's own
-#   driver ABI, not a CUDA-API surface MACA's cu-bridge shims. Both files
-#   already skip this area for ROCm for the same reason; MACA just isn't
-#   covered by that check since it's ROCm-specific. Affected tests either
-#   fail cleanly or hang (a spawned child process crashes before writing to
-#   a pipe the parent blocks on with no timeout). The real fix is upstream:
-#   generalize the ROCm-only skip to cover any environment without
-#   `cuda.bindings`.
+# - test_cuda_ipc_wrapper.py, test_timeline_semaphore_event_ipc.py,
+#   test_vmm_ipc_wrapper.py: whole files ignored. All three depend on
+#   NVIDIA's `cuda.bindings` (cuda-python) package for raw driver-level IPC
+#   calls (lmcache/v1/platform/cuda/utils.py's _import_cuda_bindings()),
+#   which isn't installed on MACA and isn't expected to work there even if
+#   it were -- it binds to NVIDIA's own driver ABI, not a CUDA-API surface
+#   MACA's cu-bridge shims. All three already skip this area for ROCm for
+#   the same reason; MACA just isn't covered by that check since it's
+#   ROCm-specific. Affected tests either fail cleanly or hang (a spawned
+#   child process crashes before writing to a pipe the parent blocks on
+#   with no timeout). The real fix is upstream: generalize the ROCm-only
+#   skip to cover any environment without `cuda.bindings`.
 # - test_shm_allocator.py::TestShmFileConnector (all 3 tests, sharing one
 #   fixture): its 5GB pinned-memory allocation fails MACA's mcHostRegister
 #   with mcErrorInvalidValue on this host.
