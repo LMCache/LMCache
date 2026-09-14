@@ -41,7 +41,7 @@ class S3ConnectorAdapter(ConnectorAdapter):
         if context.metadata is None:
             raise ValueError("metadata is required for S3Connector")
 
-        logger.info(f"Creating S3 connector for URL: {context.url}")
+        logger.info("Creating S3 connector for URL: %s", context.url)
 
         s3_endpoint = context.url
 
