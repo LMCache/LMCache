@@ -698,6 +698,7 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
+        disk_metas: list[DiskCacheMetadata] = []
 
         logger.debug(
             "lookup_id: %s; Prefetching %s keys from disk.", lookup_id, len(keys)
@@ -743,6 +744,7 @@ class LocalDiskBackend(StorageBackendInterface):
                     break
 
                 disk_meta.pin()
+                disk_metas.append(disk_meta)
 
                 # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
                 # Update cache recency
@@ -762,6 +764,7 @@ class LocalDiskBackend(StorageBackendInterface):
             paths=paths,
             keys=keys[: len(mem_objs)],
             memory_objs=mem_objs,
+            disk_metas=disk_metas,
         )
 
     async def batched_async_contains(
@@ -841,6 +844,7 @@ class LocalDiskBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         memory_objs: list[MemoryObj],
         write_back: bool = False,
+        disk_metas: Sequence[DiskCacheMetadata | None] | None = None,
     ) -> list[MemoryObj]:
         """Load the successfully read prefix of a staged disk batch.
 
@@ -849,6 +853,8 @@ class LocalDiskBackend(StorageBackendInterface):
             keys: Cache keys whose disk metadata is already pinned.
             memory_objs: Allocated, pinned destinations owned by this load.
             write_back: Retained for compatibility; currently unused.
+            disk_metas: Metadata objects pinned during staging. If omitted,
+                the current index entries are used for compatibility.
 
         Returns:
             The successfully populated prefix, with memory pins retained for
@@ -857,8 +863,9 @@ class LocalDiskBackend(StorageBackendInterface):
         """
 
         logger.debug("Executing `async_load_bytes` from disk.")
-        with self.disk_lock:
-            disk_metas = [self.dict.get(key) for key in keys]
+        if disk_metas is None:
+            with self.disk_lock:
+                disk_metas = [self.dict.get(key) for key in keys]
         loaded_mem_objs: list[MemoryObj] = []
         for idx, (path, key, mem_obj) in enumerate(
             zip(paths, keys, memory_objs, strict=False)
@@ -1130,8 +1137,8 @@ class LocalDiskBackend(StorageBackendInterface):
             self.stats_monitor.update_local_storage_usage(self.usage)
             self.cache_policy.update_on_force_evict(key)
 
-        if self.batched_msg_sender is not None:
-            self.batched_msg_sender.add_kv_op(
-                op_type=OpType.EVICT,
-                key=key.chunk_hash,
-            )
+            if self.batched_msg_sender is not None:
+                self.batched_msg_sender.add_kv_op(
+                    op_type=OpType.EVICT,
+                    key=key.chunk_hash,
+                )

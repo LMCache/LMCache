@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional
+from typing import Callable, Optional
 from unittest.mock import MagicMock, patch
 import asyncio
 import os
@@ -728,7 +728,9 @@ class TestGetBlockingCachePolicyUpdate:
         assert local_disk_backend.current_cache_size == 0.0
         assert local_disk_backend.usage == 0
 
-    @pytest.mark.parametrize("read_mode", ["blocking", "batched_blocking", "async"])
+    @pytest.mark.parametrize(
+        "read_mode", ["blocking", "batched_blocking", "async", "async_before_worker"]
+    )
     def test_read_failure_keeps_concurrent_replacement(
         self, local_disk_backend: LocalDiskBackend, read_mode: str
     ) -> None:
@@ -762,9 +764,26 @@ class TestGetBlockingCachePolicyUpdate:
             local_disk_backend.usage = 4
             return False
 
-        with patch.object(
-            local_disk_backend, "read_file", side_effect=replace_during_read
-        ):
+        async def replace_before_worker(
+            task_type: str,
+            load: Callable[..., list[MemoryObj]],
+            *,
+            paths: list[str],
+            keys: list[CacheEngineKey],
+            memory_objs: list[MemoryObj],
+            disk_metas: list[DiskCacheMetadata],
+        ) -> list[MemoryObj]:
+            replace_during_read()
+            return load(
+                paths=paths, keys=keys, memory_objs=memory_objs, disk_metas=disk_metas
+            )
+
+        read_effect = (
+            local_disk_backend.read_file
+            if read_mode == "async_before_worker"
+            else replace_during_read
+        )
+        with patch.object(local_disk_backend, "read_file", side_effect=read_effect):
             if read_mode == "blocking":
                 result = local_disk_backend.get_blocking(key)
             elif read_mode == "batched_blocking":
@@ -773,10 +792,25 @@ class TestGetBlockingCachePolicyUpdate:
                 )
                 assert missing is None
             else:
-                results = local_disk_backend.loop.run_until_complete(
-                    local_disk_backend.batched_get_non_blocking("replacement", [key])
-                )
+                if read_mode == "async_before_worker":
+                    with patch.object(
+                        local_disk_backend.disk_worker,
+                        "submit_task",
+                        side_effect=replace_before_worker,
+                    ):
+                        results = local_disk_backend.loop.run_until_complete(
+                            local_disk_backend.batched_get_non_blocking(
+                                "replacement", [key]
+                            )
+                        )
+                else:
+                    results = local_disk_backend.loop.run_until_complete(
+                        local_disk_backend.batched_get_non_blocking(
+                            "replacement", [key]
+                        )
+                    )
                 assert results == []
+                assert old_meta.pin_count == 0
                 result = None
 
         assert result is None
@@ -785,8 +819,8 @@ class TestGetBlockingCachePolicyUpdate:
         assert local_disk_backend.dict[key].pin_count == 0
         assert local_disk_backend.current_cache_size == 4.0
         assert local_disk_backend.usage == 4
-        with open(path, "rb") as file:
-            assert file.read() == b"new!"
+        with open(path, "rb") as reader:
+            assert reader.read() == b"new!"
         local_disk_backend.loop.run_until_complete(
             local_disk_backend.disk_worker.executor.shutdown_async()
         )
