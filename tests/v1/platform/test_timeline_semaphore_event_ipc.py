@@ -24,6 +24,7 @@ from lmcache.v1.platform.base.event_ipc import (
 from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
     TimelineSemaphoreEventIPCBackend,
 )
+from lmcache.v1.platform.cuda.utils import cuda_ipc_handle_to_bytes
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 pytestmark = [
@@ -301,7 +302,7 @@ def test_ipc_mem_handle_stable_and_unique_across_live_allocations() -> None:
         err, handle = runtime.cudaIpcGetMemHandle(ptr)
         if int(err) != 0:
             raise RuntimeError(f"cudaIpcGetMemHandle failed: {err}")
-        return bytes(handle.reserved)
+        return cuda_ipc_handle_to_bytes(handle)
 
     torch.cuda.init()
     nbytes = 32768

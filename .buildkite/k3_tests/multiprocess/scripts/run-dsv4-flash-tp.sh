@@ -106,7 +106,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 # Readiness timeout for the vLLM launch. Owned by the test (a 160GB fp8
 # TP-shard load is slow, and the first CI run also downloads the weights);
 # deliberately does NOT reuse MAX_WAIT_SECONDS, which run-single-test.sh
-# pre-exports to 300s -- that would shadow the value here.
+# pre-exports to 600s -- that would shadow the value here.
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-2700}"
 # DeepSeek-V4-Flash has multiple KV cache groups with different block
 # geometries. Keep per-group registration explicit instead of depending on the
@@ -356,6 +356,7 @@ provision_deepgemm_sm120
 # ── 1. Launch LMCache MP server with an explicit L1 pool ────
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT, L1 ${L1_SIZE_GB}GB) ==="
 lmcache server \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --host localhost \
     --port "$LMCACHE_PORT" \
     --chunk-size "$CHUNK_SIZE" \
@@ -432,7 +433,7 @@ VLLM_SERVER_DEV_MODE=1 vllm serve "$MODEL" \
     --max-model-len auto \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --port "$saved_port" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
     > "$VLLM_LOG" 2>&1 &
 VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
