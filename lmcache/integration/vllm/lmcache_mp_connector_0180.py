@@ -14,10 +14,7 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
     mla_enabled,
 )
-from lmcache.utils import (
-    check_interprocess_event_support,
-    init_logger as lmcache_init_logger,
-)
+from lmcache.utils import init_logger as lmcache_init_logger
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -504,9 +501,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
-
-        # fast-fail if interprocess is not supported
-        check_interprocess_event_support()
 
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
