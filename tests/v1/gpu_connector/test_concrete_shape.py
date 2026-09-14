@@ -1,24 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for :func:`get_concrete_engine_kv_shape_from_shape_desc`.
 
-These run without a CUDA build: ``lmcache.c_ops`` resolves to the
-pure-Python fallback, which provides both ``PageBufferShapeDesc`` and
-``EngineKVFormat``.
+These run without a CUDA build: ``lmcache.device_ops`` still exposes the
+shared native descriptor and ``EngineKVFormat`` surface needed by the
+geometry helpers.
 """
 
 # First Party
+from lmcache import device_ops
 from lmcache.v1.gpu_connector.utils import (
     get_concrete_engine_kv_shape_from_shape_desc,
 )
-import lmcache.c_ops as lmc_ops
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 
 def _make_shape_desc(
     *, kv_size: int, nl: int, nb: int, bs: int, nh: int, hs: int
-) -> "lmc_ops.PageBufferShapeDesc":
+) -> PageBufferShapeDesc:
     """Build a ``PageBufferShapeDesc`` with the given geometry."""
-    sd = lmc_ops.PageBufferShapeDesc()
+    sd = device_ops.PageBufferShapeDesc()
     sd.kv_size = kv_size
     sd.nl = nl
     sd.nb = nb

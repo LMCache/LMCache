@@ -51,6 +51,7 @@ echo "=== Launching LMCache server ==="
 echo "Port: $LMCACHE_PORT"
 
 lmcache server \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --host localhost \
     --port "$LMCACHE_PORT" \
     --chunk-size 256 \
@@ -92,7 +93,7 @@ vllm serve "$MODEL" \
     --scheduling-policy fcfs \
     --port "$SAVED_VLLM_PORT" \
     --enforce-eager \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 60}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 60}}" \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
 VLLM_PID=$!

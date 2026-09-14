@@ -57,7 +57,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
             include a ZMQ transport prefix (e.g. ``tcp://``); a bare
             ``host``/``host:port`` is also accepted and is normalized to
-            ``tcp://`` automatically:
+            ``tcp://`` automatically. See :doc:`/mp/request_transport` for
+            supported endpoint schemes and transport-selection behavior:
 
             .. code-block:: bash
 
@@ -467,8 +468,9 @@ pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
 normally, then set ``lmcache.mp.mp_transfer_mode=lmcache_driven`` on the vLLM
 side to enable the zero-copy SHM handle path (the default ``auto`` routing
-maps non-CUDA devices to ``engine_driven``, which uses the worker-side
-gather/scatter copy path instead).
+maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
+copy path that the server only loads when started with
+``--supported-transfer-mode engine_driven`` or ``auto``).
 
 **Docker** -- see :doc:`../production/docker_deployment`.
 

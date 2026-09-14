@@ -110,6 +110,25 @@ class Metrics:
         self._section_map[key] = section
         return section
 
+    def add_table(self, key: str, label: str, *columns: tuple[str, str]) -> Section:
+        """Add a table section: uniform rows instead of key-value entries.
+
+        Args:
+            key: Machine-readable section key; the JSON list is keyed by it.
+            label: Human-readable label. Unused by the table renderer, which
+                lets the column headers speak for themselves.
+            columns: ``(key, header)`` pairs in display order.
+
+        Returns:
+            The section, ready for :meth:`Section.add_row`.
+
+        Raises:
+            ValueError: If a section with the same *key* already exists.
+        """
+        section = self.add_section(key, label)
+        section.set_columns(*columns)
+        return section
+
     def __getitem__(self, key: str) -> Section:
         """Return the section registered under *key*.
 

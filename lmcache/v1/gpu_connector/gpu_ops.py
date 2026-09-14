@@ -6,10 +6,11 @@ from typing import Sequence
 import torch
 
 # First Party
+from lmcache import device_ops
 from lmcache.v1.gpu_connector.gds_context import SlabDirection, get_gds_context
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
-import lmcache.c_ops as lmc_ops
+from lmcache.v1.platform.ops_types import StagingCopy
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -41,7 +42,7 @@ def lmcache_memcpy_async_h2d(
             f"gpu_buffer nbytes={gpu_buffer.nbytes}"
         )
     if isinstance(memory_obj.parent(), LazyMemoryAllocator):
-        lmc_ops.lmcache_memcpy_async(
+        device_ops.lmcache_memcpy_async(
             gpu_buffer.data_ptr(),
             memory_obj.data_ptr,
             mem_obj_size,
@@ -82,7 +83,7 @@ def lmcache_memcpy_async_d2h(
             f"gpu_buffer nbytes={gpu_buffer.nbytes}"
         )
     if isinstance(memory_obj.parent(), LazyMemoryAllocator):
-        lmc_ops.lmcache_memcpy_async(
+        device_ops.lmcache_memcpy_async(
             memory_obj.data_ptr,
             gpu_buffer.data_ptr(),
             mem_obj_size,
@@ -100,7 +101,7 @@ def build_staging_copies(
     memory_objs: Sequence[MemoryObj],
     gpu_buffers: Sequence[torch.Tensor],
     is_h2d: bool,
-) -> list["lmc_ops.StagingCopy"]:
+) -> list[StagingCopy]:
     """Build native ``StagingCopy`` descriptors for one batch of lazy objects.
 
     The H2D/D2H direction decides which side is source vs. destination; the host
@@ -114,13 +115,13 @@ def build_staging_copies(
         is_h2d: True for retrieve (CPU->GPU), False for store (GPU->CPU).
 
     Returns:
-        One ``lmc_ops.StagingCopy`` per object, in input order.
+        One ``device_ops.StagingCopy`` per object, in input order.
 
     Raises:
         ValueError: If an object has not been allocated (``raw_tensor`` is None)
             or its size does not match its GPU buffer.
     """
-    copies: list["lmc_ops.StagingCopy"] = []
+    copies: list[StagingCopy] = []
     for memory_obj, gpu_buffer in zip(memory_objs, gpu_buffers, strict=True):
         if memory_obj.raw_tensor is None:
             raise ValueError(
@@ -138,10 +139,10 @@ def build_staging_copies(
         host_offset = memory_obj.meta.address
         if is_h2d:
             copies.append(
-                lmc_ops.StagingCopy(gpu_ptr, host_ptr, mem_obj_size, host_offset)
+                device_ops.StagingCopy(gpu_ptr, host_ptr, mem_obj_size, host_offset)
             )
         else:
             copies.append(
-                lmc_ops.StagingCopy(host_ptr, gpu_ptr, mem_obj_size, host_offset)
+                device_ops.StagingCopy(host_ptr, gpu_ptr, mem_obj_size, host_offset)
             )
     return copies

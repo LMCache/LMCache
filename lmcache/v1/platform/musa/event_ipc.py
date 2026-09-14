@@ -16,7 +16,7 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 
 
-class MusaEventIPCBackend:
+class MusaEventIPCBackend(EventIPCBackend):
     """Event IPC backend backed by TorchMUSA interprocess events."""
 
     device_type: str = "musa"
@@ -116,6 +116,3 @@ class MusaEventIPCBackend:
     def synchronize_event(self, event: object, device: object) -> None:
         """Block the host until a TorchMUSA event completes."""
         self._default_backend().synchronize_event(event, device)
-
-
-assert isinstance(MusaEventIPCBackend(), EventIPCBackend)

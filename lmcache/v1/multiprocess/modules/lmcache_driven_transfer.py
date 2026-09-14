@@ -4,7 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from itertools import islice
-from typing import Generator, Sequence
+from typing import Any, Generator, Sequence
 import threading
 import time
 
@@ -12,7 +12,7 @@ import time
 import torch
 
 # First Party
-from lmcache import torch_dev
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
@@ -31,36 +31,36 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
-from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
+from lmcache.v1.mp_observability.event_bus import (
+    get_event_bus,
+    is_observability_enabled,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.cache_context import create_cache_context
-import lmcache.c_ops as lmc_ops
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
-    lmc_ops, "execute_object_group_transfer"
+    device_ops, "execute_object_group_transfer"
 )
+_HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timings")
 
 
 def get_layout_desc(
@@ -289,6 +289,8 @@ def _run_object_group_transfer_plan(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
+    *,
+    transfer_key: str,
 ) -> None:
     """Plan and execute one object group's transfer in a single native call.
 
@@ -311,6 +313,9 @@ def _run_object_group_transfer_plan(
         batch_size: Number of memory objects per batched copy.
         skip_first_n_tokens: Tokens to skip writing at the start of the range.
         direction: H2D (retrieve) or D2H (store).
+        transfer_key: Identity of this store/retrieve operation, echoed back
+            on every phase-timing sample (a request issues several transfers,
+            so the request id cannot identify one).
 
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
@@ -324,7 +329,7 @@ def _run_object_group_transfer_plan(
     max_batch_size = cache_context.max_batch_size
 
     # --- Per-kernel-group invariants, resolved once (vs. every batch before) ---
-    kernel_group_specs: list["lmc_ops.KernelGroupSpec"] = []
+    kernel_group_specs: list[Any] = []
     spec_index_by_kg: dict[int, int] = {}
     blocks_per_chunk_by_kg: dict[int, int] = {}
     blocks_per_window_by_kg: dict[int, int] = {}
@@ -351,7 +356,7 @@ def _run_object_group_transfer_plan(
 
         spec_index_by_kg[kernel_group_id] = len(kernel_group_specs)
         kernel_group_specs.append(
-            lmc_ops.KernelGroupSpec(
+            device_ops.KernelGroupSpec(
                 paged_ptrs.data_ptr(),
                 [buffer.data_ptr() for buffer in temp_buffers],
                 cache_context.get_shape_desc(kernel_group_id),
@@ -381,7 +386,7 @@ def _run_object_group_transfer_plan(
         )
 
     # --- Walk the batches in order, emitting staging + launch work per step ---
-    batch_steps: list["lmc_ops.BatchStep"] = []
+    batch_steps: list[Any] = []
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs, batch_size, skip_count=num_objects_to_skip
     ):
@@ -411,7 +416,7 @@ def _run_object_group_transfer_plan(
             is_h2d,
         )
 
-        launches: list["lmc_ops.LaunchVar"] = []
+        launches: list[Any] = []
         for kernel_group_id in kernel_group_ids:
             blocks_per_chunk = blocks_per_chunk_by_kg[kernel_group_id]
             blocks_per_window = blocks_per_window_by_kg[kernel_group_id]
@@ -429,7 +434,7 @@ def _run_object_group_transfer_plan(
             )
 
             launches.append(
-                lmc_ops.LaunchVar(
+                device_ops.LaunchVar(
                     spec_index_by_kg[kernel_group_id],
                     start_block_pos,
                     end_block_pos - start_block_pos,
@@ -438,17 +443,31 @@ def _run_object_group_transfer_plan(
                 )
             )
 
-        batch_steps.append(lmc_ops.BatchStep(staging, launches))
+        batch_steps.append(device_ops.BatchStep(staging, launches))
 
     if not batch_steps:
         return
 
-    lmc_ops.execute_object_group_transfer(
+    # Time the phases only when a subscriber consumes the samples. An older
+    # compiled extension has neither the keywords nor anything to consume
+    # them, so fall back to the untimed legacy signature.
+    timing_kwargs = (
+        {
+            "phase_timing_enabled": is_observability_enabled()
+            and get_event_bus().has_subscribers(EventType.MP_TRANSFER_PHASE_SAMPLES),
+            # Echoed back verbatim on each sample; the transfer's identity.
+            "session_id": transfer_key,
+        }
+        if _HAS_TRANSFER_PHASE_TIMING
+        else {}
+    )
+    device_ops.execute_object_group_transfer(
         direction,
         cache_context.device,
         LazyMemoryAllocator.PIN_CHUNK_SIZE,
         kernel_group_specs,
         batch_steps,
+        **timing_kwargs,
     )
 
 
@@ -460,6 +479,8 @@ def transfer_kv_per_object_group(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
+    *,
+    transfer_key: str,
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -480,6 +501,8 @@ def transfer_kv_per_object_group(
             the retrieve range. This avoids overwriting APC-shared GPU blocks that
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
+        transfer_key: Identity of this store/retrieve operation, echoed back on
+            every phase-timing sample; see _run_object_group_transfer_plan.
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
@@ -498,6 +521,7 @@ def transfer_kv_per_object_group(
             batch_size,
             skip_first_n_tokens,
             direction,
+            transfer_key=transfer_key,
         )
         return
 
@@ -596,7 +620,7 @@ def transfer_kv_per_object_group(
                 ).data_ptr()
                 for i in range(batch_len)
             ]
-            lmc_ops.multi_layer_block_kv_transfer(
+            device_ops.multi_layer_block_kv_transfer(
                 group_kv_pointers,
                 tmp_gpu_buffers_batched,
                 block_ids_curr_batch,
@@ -686,6 +710,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
         self._device_host_func_dispatcher.start()
 
+    def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
+        """Register *handler* for *kind* on the per-process device host-func
+        dispatcher (stream-ordered callbacks without a driver-thread GIL
+        acquire); pair with ``submit_callback_to_stream``."""
+        self._device_host_func_dispatcher.register(kind, handler, payload_type)
+
     @property
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
@@ -710,6 +740,51 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
+
+    def _release_failed_retrieve_locks(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+    ) -> None:
+        """Release only one failed instance's unconsumed lookup locks.
+
+        The lookup session is the ownership record.  If it is absent or does
+        not match the RETRIEVE range, no release is attempted: L1 locks are
+        anonymous refcounts, so guessing could consume a concurrent reader's
+        lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
+        responses idempotent.
+        """
+        session = self._ctx.session_manager.get(key.request_id)
+        if session is None:
+            logger.warning(
+                "Cannot release RETRIEVE locks for unregistered instance %d: "
+                "request %s has no lookup session",
+                instance_id,
+                key.request_id,
+            )
+            return
+
+        lock_state = session.prepare_failed_retrieve_release(key)
+        if lock_state is None:
+            return
+        hit_chunks, locked_gids, group_windows, lookup_generation = lock_state
+        obj_keys = resolve_prefetched_obj_keys(
+            self._ctx,
+            key,
+            hit_chunks,
+            locked_gids,
+            group_windows=group_windows,
+        )
+        if not session.claim_failed_retrieve_release(
+            instance_id, key, lookup_generation
+        ):
+            return
+        if obj_keys:
+            # One failed RETRIEVE owns one read lock per key.  In
+            # particular, do not release the scheduler's whole MLA
+            # reservation here: the remaining TP workers and concurrent
+            # requests still own their independent read locks.
+            self._ctx.storage_manager.finish_read_prefetched(obj_keys, read_locks=1)
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -811,36 +886,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if ipc_collect is not None:
             # Backends without IPC collection omit this optional operation.
             ipc_collect()
-
-    def get_handlers(self) -> list[HandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            A list of HandlerSpec entries mapping request types to
-            their handler callables and thread pool assignments.
-        """
-        return [
-            HandlerSpec(
-                RequestType.REGISTER_KV_CACHE,
-                self.register_kv_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE,
-                self.unregister_kv_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.STORE,
-                self.store,
-                ThreadPoolType.AFFINITY,
-            ),
-            HandlerSpec(
-                RequestType.RETRIEVE,
-                self.retrieve,
-                ThreadPoolType.AFFINITY,
-            ),
-        ]
 
     def report_status(self) -> dict:
         """Return GPU transfer module status information.
@@ -1013,10 +1058,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             that signals the completion of the store operation, and the second
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
-            Notes).
+            Notes). The event handle is empty when no device work was submitted.
 
         Raises:
-            ValueError: If no GPU context is registered for the given instance ID.
             RuntimeError: If the backend does not support IPC event handles.
 
         Notes:
@@ -1031,7 +1075,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
-            raise ValueError(f"No GPU context registered for instance ID {instance_id}")
+            # The worker can reconnect to a replacement server before its next
+            # registration probe. No device work was submitted in that window,
+            # so return an empty completion-event handle and a terminal False
+            # response instead of leaving the MQ future unanswered. Echoing the
+            # producer handle would make the originating process import its own
+            # IPC event, which is invalid on HIP.
+            logger.warning(
+                "Rejecting STORE for unregistered GPU instance ID %d",
+                instance_id,
+            )
+            return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -1124,6 +1178,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ):
                 self._publish_token_bindings(key, obj_keys_per_obj_group[0])
 
+            transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
                 Event(
@@ -1133,6 +1188,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "device": str(cache_context.device),
                         "engine_id": instance_id,
                         "model_name": model_name,
+                        "transfer_key": transfer_key,
                     },
                 ),
             )
@@ -1178,6 +1234,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
+                        transfer_key=transfer_key,
                     )
 
                 store_succeeded = True
@@ -1209,6 +1266,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "model_name": model_name,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
+                            "transfer_key": transfer_key,
                         },
                     ),
                 )
@@ -1252,16 +1310,34 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
             second element indicates whether the key was successfully retrieved.
+            The event handle is empty when no device work was submitted.
 
         Raises:
-            ValueError: If no GPU context is registered for the given instance ID.
             RuntimeError: If the backend does not support IPC event handles.
         """
         st = time.perf_counter()
 
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
-            raise ValueError(f"No GPU context registered for instance ID {instance_id}")
+            # See store(): there is no completion event because no device work
+            # was submitted. The False result lets the caller recover or
+            # recompute without importing its own producer event.
+            logger.warning(
+                "Rejecting RETRIEVE for unregistered GPU instance ID %d",
+                instance_id,
+            )
+            try:
+                self._release_failed_retrieve_locks(key, instance_id)
+            except Exception:
+                # A cleanup failure must never suppress the terminal response:
+                # the client otherwise waits forever because blocking-handler
+                # exceptions are only logged by the MQ server.
+                logger.exception(
+                    "Failed to release RETRIEVE locks for unregistered "
+                    "GPU instance ID %d",
+                    instance_id,
+                )
+            return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -1285,6 +1361,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
         )
 
+        transfer_key = next_transfer_key(key.request_id)
         self._ctx.event_bus.publish_on_stream(
             cache_context.cupy_stream,
             Event(
@@ -1294,6 +1371,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     "device": str(cache_context.device),
                     "engine_id": instance_id,
                     "model_name": model_name,
+                    "transfer_key": transfer_key,
                 },
             ),
         )
@@ -1345,18 +1423,31 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
+            # Aux (connector-private) groups are never served by the
+            # std retrieve: the lookup does not lock their keys and their
+            # block-id entry is a placeholder -- reading them would be an
+            # unlocked read of a plane nobody consumes here.
             attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
+            skipped_groups = {
+                g for g, kind in enumerate(attn_desc.group_kinds) if kind == "aux"
+            }
             group_skips = [
                 0 if window < 0 else max(0, num_chunks - window)
                 for window in attn_desc.num_chunks_in_sw
             ]
-            expected_retained = sum(num_chunks - skip for skip in group_skips)
+            expected_retained = sum(
+                num_chunks - skip
+                for g, skip in enumerate(group_skips)
+                if g not in skipped_groups
+            )
 
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
             retrieve_succeeded = True
             try:
                 for obj_group_id in range(num_object_groups):
+                    if obj_group_id in skipped_groups:
+                        continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
                     with self._ctx.storage_manager.read_prefetched_results(
@@ -1384,6 +1475,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             batch_size=cache_context.max_batch_size,
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmcache_native.TransferDirection.H2D,
+                            transfer_key=transfer_key,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
@@ -1418,6 +1510,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "cache_salt": key.cache_salt,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
+                            "transfer_key": transfer_key,
                         },
                     ),
                 )

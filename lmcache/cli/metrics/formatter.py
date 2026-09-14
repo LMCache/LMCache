@@ -92,6 +92,72 @@ def _format_value(value: Any) -> str:
     return str(value)
 
 
+_PLACEHOLDERS = frozenset({"", "--", "N/A", "unknown", "none"})
+
+
+def _format_table(section: "Section") -> list[str]:
+    """Render a table section as aligned columns.
+
+    Column widths come from the content, so the table is as narrow as its
+    data allows rather than padded to a fixed report width. Numeric-looking
+    cells are right-aligned, text left-aligned, which is what makes a
+    column of sizes or percentages scannable.
+
+    Args:
+        section: A section with columns set.
+
+    Returns:
+        Header, rule, and one line per row.
+    """
+    headers = [header for _key, header in section.columns]
+    cells = [
+        [
+            _format_value(row.get(key)) if key in row else ""
+            for key, _h in section.columns
+        ]
+        for row in section.rows
+    ]
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in cells))
+        if cells
+        else len(headers[i])
+        for i in range(len(headers))
+    ]
+
+    # Right-align a column of numbers so sizes and percentages line up on
+    # the decimal point. The whole cell must parse as a number once a unit
+    # suffix is removed -- "starts with a digit" would also catch an address
+    # like "10.0.0.1:8000", which is text and belongs on the left.
+    # Placeholders get no vote; a column is numeric if every cell that
+    # carries a value is, and at least one does.
+    def _is_number(cell: str) -> bool:
+        head = cell.rstrip("%").rsplit(" ", 1)[0] if " " in cell else cell.rstrip("%")
+        try:
+            float(head)
+        except ValueError:
+            return False
+        return True
+
+    def _numeric(column: int) -> bool:
+        values = [row[column] for row in cells if row[column] not in _PLACEHOLDERS]
+        return bool(values) and all(_is_number(v) for v in values)
+
+    right = [_numeric(i) for i in range(len(headers))]
+
+    def line(values: list[str]) -> str:
+        parts = [
+            values[i].rjust(widths[i]) if right[i] else values[i].ljust(widths[i])
+            for i in range(len(values))
+        ]
+        return "  ".join(parts).rstrip()
+
+    out = [line(headers), "-" * (sum(widths) + 2 * (len(widths) - 1))]
+    out.extend(line(row) for row in cells)
+    if not cells:
+        out.append("(none)")
+    return out
+
+
 @register_formatter("terminal")
 class TerminalFormatter(MetricsFormatter):
     """Plain ASCII table formatter for terminal output.
@@ -125,6 +191,10 @@ class TerminalFormatter(MetricsFormatter):
         lines.append(title_text.center(width, "="))
 
         for section in sections:
+            if section.columns:
+                lines.extend(_format_table(section))
+                continue
+
             # Section header (skip for unnamed section)
             if section.label is not None:
                 header_text = f" {section.label} "

@@ -13,48 +13,19 @@ This module defines the protocol for:
 - END_SESSION: End a session and clean up associated resources
 """
 
-# Standard
-from dataclasses import dataclass, field
-
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
-
-
-@dataclass
-class PrepareStoreResponse:
-    """Response for PREPARE_STORE."""
-
-    context: dict = field(
-        default_factory=dict
-    )  # pickle: {}, shm will put slot info here
-
-
-@dataclass
-class PrepareRetrieveResponse:
-    """Response for PREPARE_RETRIEVE."""
-
-    success: bool
-    data: bytes = b""
-    context: dict = field(
-        default_factory=dict
-    )  # pickle: {}, shm will put slot info here
-
-
-@dataclass
-class RegisterEngineDrivenContextResponse:
-    """Response for REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT."""
-
-    shm_name: str = ""
-    pool_size: int = 0
-
 
 # Define request names for this protocol group
 REQUEST_NAMES = [
@@ -166,7 +137,8 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - gpu_block_ids: list[list[int]] - GPU block IDs containing the
         #     data, indexed by LMCache KV group index.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
-        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
+        # Returns: tuple[bytes, bool] - (device event handle, success flag).
+        #   The handle is empty when the server submitted no device work.
         "STORE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
@@ -181,7 +153,8 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
-        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
+        # Returns: tuple[bytes, bool] - (device event handle, success flag).
+        #   The handle is empty when the server submitted no device work.
         "RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool],

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Process-global GPUDirect Storage data path for the GDS L1 tier.
 
-The actual GPU<->slab DMA goes through the platform GDS library -- cuFile on
-NVIDIA, hipFile on AMD ROCm -- reached via the :mod:`_gds_async` dispatch shim
-(imported here as ``ca``), so this module is platform-agnostic.
+The default GPU<->slab DMA backend is cuFile on NVIDIA or hipFile on AMD ROCm.
+uGDS can instead be selected explicitly on either platform with a matching
+``libugds.so``. All backends are reached through the :mod:`_gds_async` dispatch
+shim (imported here as ``ca``), so this module is platform-agnostic.
 
-One :class:`GDSContext` per worker process owns the slab file, its GDS handle,
+One :class:`GDSContext` per worker process owns the slab, its GDS handle,
 the registered GPU staging buffers, and the stream-ordered GDS submissions.
 Created once at startup by :func:`initialize_gds_context`, reached via
 :func:`get_gds_context`. :meth:`GDSContext.register_gpu_buffer` registers a
@@ -22,6 +23,7 @@ import bisect
 import enum
 import functools
 import os
+import stat
 import threading
 
 # Third Party
@@ -47,13 +49,25 @@ _MAX_CUFILE_REGION = 16 * 1024 * 1024
 _SUBMISSION_CHECKPOINT_EVERY = 64
 
 
+def _validate_ugds_device(path: str) -> None:
+    """Require an uGDS character device before allowing destructive IO."""
+    device_stat = os.stat(path)
+    if not stat.S_ISCHR(device_stat.st_mode):
+        raise ValueError(f"uGDS path must be a character device: {path}")
+    major = os.major(device_stat.st_rdev)
+    minor = os.minor(device_stat.st_rdev)
+    subsystem = os.path.realpath(f"/sys/dev/char/{major}:{minor}/subsystem")
+    if os.path.basename(subsystem) != "ugds_drv":
+        raise ValueError(f"uGDS path is not managed by ugds_drv: {path}")
+
+
 class SlabDirection(enum.Enum):
     """Direction of a GDS slab transfer. GPUDirect DMAs run straight between GPU
-    memory and the slab *file* (no host buffer), so directions are file I/O
+    memory and slab storage (no host buffer), so directions are storage I/O
     (READ/WRITE), not host<->device (H2D/D2H)."""
 
-    READ = enum.auto()  # slab file -> GPU buffer
-    WRITE = enum.auto()  # GPU buffer -> slab file
+    READ = enum.auto()  # slab storage -> GPU buffer
+    WRITE = enum.auto()  # GPU buffer -> slab storage
 
 
 @dataclass
@@ -61,7 +75,7 @@ class _StreamSubmissions:
     """Per-stream GDS submissions, kept alive until their DMA has run.
 
     Submissions accumulate in ``uncommitted``, move to ``inflight`` behind a
-    CUDA event on the stream, and drop once it completes. Per-stream because an
+    GPU event on the stream, and drop once it completes. Per-stream because an
     event only orders work on its own stream.
     """
 
@@ -88,9 +102,10 @@ class GDSContext:
         # flipped to True by ``initialize``.
         self._slab_size = 0
         self._slab_path = ""
+        self._backend = ""
         self._slab_handle: Optional[ca.AsyncHandle] = None
-        # Per-stream in-flight submissions (keyed by raw ``CUstream``), released
-        # once a CUDA event recorded on that stream completes. Guarded by
+        # Per-stream in-flight submissions (keyed by raw GPU stream), released
+        # once a GPU event recorded on that stream completes. Guarded by
         # ``_submissions_lock`` (see ``_record_submission``).
         self._submissions_lock = threading.Lock()
         self._submissions: dict[int, _StreamSubmissions] = {}
@@ -106,23 +121,29 @@ class GDSContext:
 
         Args:
             config: GDS tier config. ``size_in_bytes`` sizes the preallocated
-                slab (rounded up to 4 KiB) at
-                ``<file_location>/lmcache_gds_slab.bin`` (one per process);
-                ``use_direct_io`` opens it with ``O_DIRECT``.
+                slab (rounded up to 4 KiB). cuFile/hipFile create
+                ``<file_location>/lmcache_gds_slab.bin``; uGDS maps the slab
+                directly onto the raw device at ``file_location``.
 
         Raises:
-            Exception: Whatever the GDS library (cuFile/hipFile) raises if GDS
-                is unavailable.
+            ValueError: If the backend is incompatible, the uGDS path is not
+                an ``ugds_drv`` character device, or the aligned slab size
+                exceeds the backing device capacity.
+            Exception: Whatever the GDS library raises if GDS is unavailable.
         """
         self._slab_size = (config.size_in_bytes + _CUFILE_ALIGNMENT - 1) & ~(
             _CUFILE_ALIGNMENT - 1
         )
+        self._backend = ca.select_backend(config.backend)
 
         # One shared slab per process (the GDSContext is a process-global
         # singleton used by every GPU instance).
         selected = config.file_location
-        os.makedirs(selected, exist_ok=True)
-        self._slab_path = os.path.join(selected, _SLAB_FILENAME)
+        if self._backend == "ugds":
+            self._slab_path = selected
+        else:
+            os.makedirs(selected, exist_ok=True)
+            self._slab_path = os.path.join(selected, _SLAB_FILENAME)
 
         self._open_and_register_slab(config.use_direct_io)
         self.initialized = True
@@ -136,7 +157,7 @@ class GDSContext:
         cap); :meth:`transfer_async` splits transfers at these boundaries.
 
         Args:
-            buffer: Contiguous CUDA staging buffer, 4 KiB-aligned in size.
+            buffer: Contiguous GPU staging buffer, 4 KiB-aligned in size.
         """
         if not self.initialized:
             return
@@ -248,38 +269,75 @@ class GDSContext:
     # --- Internal -----------------------------------------------------
 
     def _open_and_register_slab(self, use_direct_io: bool) -> None:
-        """Create, truncate, preallocate the slab file and register it with GDS.
+        """Open the slab and register it with the GDS backend.
+
+        cuFile/hipFile: create, truncate, and preallocate the slab file,
+        then open it (optionally with ``O_DIRECT``) and register the fd.
+        uGDS: open the existing raw character device directly; there is nothing
+        to create or preallocate, and ``O_DIRECT`` does not apply because
+        uGDS IO bypasses the kernel.
 
         Args:
-            use_direct_io: Open with ``O_DIRECT`` (required for the GDS fast path).
+            use_direct_io: Open with ``O_DIRECT`` (cuFile/hipFile only;
+                required for the GDS fast path).
         """
-        # Create, truncate, and fallocate via a regular (non-O_DIRECT) fd.
-        creator_fd = os.open(
-            self._slab_path, os.O_CREAT | os.O_RDWR | os.O_TRUNC, 0o644
-        )
-        try:
-            os.posix_fallocate(creator_fd, 0, self._slab_size)
-        finally:
-            os.close(creator_fd)
-        flags = os.O_RDWR
-        if use_direct_io:
-            flags |= os.O_DIRECT
-        fd = os.open(self._slab_path, flags)
+        if self._backend == "ugds":
+            _validate_ugds_device(self._slab_path)
+            if use_direct_io:
+                logger.warning("GDSContext: use_direct_io is ignored by uGDS")
+            fd = os.open(self._slab_path, os.O_RDWR)
+        else:
+            # Create, truncate, and fallocate via a regular (non-O_DIRECT) fd.
+            creator_fd = os.open(
+                self._slab_path, os.O_CREAT | os.O_RDWR | os.O_TRUNC, 0o644
+            )
+            try:
+                os.posix_fallocate(creator_fd, 0, self._slab_size)
+            finally:
+                os.close(creator_fd)
+            flags = os.O_RDWR
+            if use_direct_io:
+                flags |= os.O_DIRECT
+            fd = os.open(self._slab_path, flags)
+        handle = None
         try:
             handle = ca.register_handle(fd)
+            if self._backend == "ugds":
+                device_capacity = ca.get_ugds_device_capacity(fd, handle)
+                if self._slab_size > device_capacity:
+                    raise ValueError(
+                        "GDS L1 slab size "
+                        f"({self._slab_size} bytes) exceeds backing device capacity "
+                        f"({device_capacity} bytes): {self._slab_path}"
+                    )
         except Exception:
+            if handle is not None:
+                try:
+                    ca.deregister_handle(handle)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "GDSContext: handle cleanup after capacity check failed: %s",
+                        cleanup_error,
+                    )
             os.close(fd)
             raise
         self._slab_handle = ca.AsyncHandle.from_fd(
             fd, handle, self._slab_path, writable=True
         )
-        logger.info(
-            "GDSContext: slab created at %s (%.1f GiB, O_DIRECT=%s), GDS "
-            "handle registered",
-            self._slab_path,
-            self._slab_size / (1 << 30),
-            use_direct_io,
-        )
+        if self._backend == "ugds":
+            logger.info(
+                "GDSContext: uGDS raw-device slab opened at %s (%.1f GiB)",
+                self._slab_path,
+                self._slab_size / (1 << 30),
+            )
+        else:
+            logger.info(
+                "GDSContext: slab created at %s (%.1f GiB, O_DIRECT=%s), GDS "
+                "handle registered",
+                self._slab_path,
+                self._slab_size / (1 << 30),
+                use_direct_io,
+            )
 
     def _register_region_locked(self, buffer: torch.Tensor) -> None:
         """GDS-register one <=16 MiB region (caller holds the lock)."""
@@ -359,7 +417,7 @@ class GDSContext:
         """Track an in-flight submission so its ctypes storage outlives the DMA.
 
         Accumulated per (current) stream; every ``_SUBMISSION_CHECKPOINT_EVERY``
-        ops a CUDA event is recorded and completed batches are released.
+        ops a GPU event is recorded and completed batches are released.
         """
         stream = torch_dev.current_stream()
         raw_stream = stream.cuda_stream
@@ -375,7 +433,7 @@ class GDSContext:
     def _checkpoint_submissions_locked(
         self, st: _StreamSubmissions, stream: "torch.Stream"
     ) -> None:
-        """Close ``st``'s current batch behind a CUDA event on ``stream`` and
+        """Close ``st``'s current batch behind a GPU event on ``stream`` and
         drop earlier batches whose event has completed. Hold
         ``self._submissions_lock``.
         """

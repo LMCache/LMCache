@@ -4,7 +4,8 @@
 Implements ``LMCacheMPKvConnectorScheduler`` and
 ``LMCacheMPKvConnectorWorker`` — the two classes TRT-LLM's
 ``kv_connector_config`` requires — backed by a standalone LMCache server
-reached over ZMQ. Provides process isolation and shared caching across
+reached through the configured request transport. Provides process isolation
+and shared caching across
 multiple TRT-LLM instances on the same node.
 
 The KV pool tensor is shared with the server via :class:`RawCudaIPCWrapper`
@@ -33,12 +34,16 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType, check_interprocess_event_support
+from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
 from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
@@ -53,16 +58,6 @@ def _get_server_url(llm_args: "TorchLlmArgs") -> str:
     if cfg is not None and cfg.server_url is not None:
         return cfg.server_url
     return os.environ.get("LMCACHE_SERVER_URL", DEFAULT_SERVER_URL)
-
-
-def _send_request(
-    mq_client: MessageQueueClient,
-    request_type: RequestType,
-    payloads: list,
-) -> MessagingFuture:
-    return mq_client.submit_request(
-        request_type, payloads, get_response_class(request_type)
-    )
 
 
 @dataclass
@@ -87,14 +82,15 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         self._pending: dict = {}
 
         self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(
-            _get_server_url(self._llm_args), self._zmq_context
+        self._req_client: RequestClient = RequestClientFactory.create(
+            _get_server_url(self._llm_args),
+            context=self._zmq_context,
         )
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
 
-        future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
+        future = self._req_client.get_chunk_size()
         self._chunk_size = future.result(timeout=self._mq_timeout)
         logger.info(
             "LMCache MP scheduler: connected to server at %s (chunk_size=%d)",
@@ -121,6 +117,9 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._world_size,
+            # Each worker stores and reads only its own object (no MLA-style
+            # sharing in this adapter yet).
+            num_kv_readers=1,
             worker_id=None,
             token_ids=tuple(token_ids),
             start=start,
@@ -161,13 +160,9 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         t1 = time.perf_counter()
 
         try:
-            _send_request(self._mq_client, RequestType.LOOKUP, [key, 1]).result(
-                timeout=self._mq_timeout
-            )
-            result = _send_request(
-                self._mq_client,
-                RequestType.QUERY_PREFETCH_STATUS,
-                [str(request.request_id)],
+            self._req_client.lookup(key, 1).result(timeout=self._mq_timeout)
+            result = self._req_client.query_prefetch_status(
+                str(request.request_id)
             ).result(timeout=self._mq_timeout)
             cached_tokens = result * self._chunk_size if result is not None else 0
         except Exception as e:
@@ -194,11 +189,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
                 request_id=request.request_id,
             ).no_worker_id_version()
             try:
-                _send_request(
-                    self._mq_client,
-                    RequestType.FREE_LOOKUP_LOCKS,
-                    [free_key, 1],
-                )
+                self._req_client.free_lookup_locks(free_key, 1)
             except Exception as e:
                 logger.warning("LMCache MP scheduler: free_lookup_locks failed: %s", e)
 
@@ -257,11 +248,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         release the server-side token-hash/session state for the request.
         """
         try:
-            _send_request(
-                self._mq_client,
-                RequestType.END_SESSION,
-                [str(request.request_id)],
-            )
+            self._req_client.end_session(str(request.request_id))
         except Exception as e:
             logger.warning("LMCache MP scheduler: end_session failed: %s", e)
         return False
@@ -281,8 +268,9 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._block_size: int = self._llm_args.kv_cache_config.tokens_per_block
 
         self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(
-            _get_server_url(self._llm_args), self._zmq_context
+        self._req_client: RequestClient = RequestClientFactory.create(
+            _get_server_url(self._llm_args),
+            context=self._zmq_context,
         )
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
@@ -290,6 +278,8 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
         self._instance_id = os.getpid()
         self._registered = False
+        self._device: torch.device | None = None
+        self._event_backend: EventIPCBackend | None = None
 
         # Third Party
         import tensorrt_llm
@@ -300,7 +290,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._world_size = tp_size * pp_size
         self._model_name = str(getattr(llm_args, "model", "unknown_model"))
 
-        future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
+        future = self._req_client.get_chunk_size()
         self._chunk_size = future.result(timeout=self._mq_timeout)
 
     def _create_key(
@@ -312,6 +302,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._world_size,
+            num_kv_readers=1,
             worker_id=self._rank,
             token_ids=tuple(token_ids),
             start=0,
@@ -358,22 +349,24 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             "head_dim": head_dim,
         }
 
-        future = _send_request(
-            self._mq_client,
-            RequestType.REGISTER_KV_CACHE,
-            [
-                self._instance_id,
-                wrapped,
-                self._model_name,
-                self._world_size,
-                EngineType.TRTLLM,
-                layout_hints,
-                [],
-            ],
+        event_backend = get_event_ipc_backend(kv_cache_tensor.device)
+        event_backend.check_event_support(kv_cache_tensor.device)
+
+        future = self._req_client.register_kv_cache(
+            self._instance_id,
+            wrapped,
+            self._model_name,
+            self._world_size,
+            EngineType.TRTLLM,
+            layout_hints,
+            [],
         )
+
         try:
             future.result(timeout=self._mq_timeout)
             self._registered = True
+            self._device = kv_cache_tensor.device
+            self._event_backend = event_backend
             logger.info(
                 "LMCache MP worker: registered KV caches "
                 "(tensor_shape=%s, NH=%d, BS=%d, HS=%d)",
@@ -395,10 +388,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             return
 
         t0 = time.perf_counter()
-        # Not all backends support interprocess Events (CUDA IPC specific)
-        check_interprocess_event_support()
-        event = torch_dev.Event(interprocess=True)
-        event.record(stream)
+        event = self._create_and_record_event(stream)
 
         for req_id, spec in meta.loads.items():
             if not spec.tokens or not spec.block_ids:
@@ -406,22 +396,32 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
             key = self._create_key(spec.tokens, req_id)
             try:
-                _send_request(
-                    self._mq_client,
-                    RequestType.RETRIEVE,
-                    [
-                        key,
-                        self._instance_id,
-                        [spec.block_ids],
-                        event.ipc_handle(),
-                        0,  # skip_first_n_tokens
-                    ],
+                raw_future = self._req_client.retrieve(
+                    key,
+                    self._instance_id,
+                    [spec.block_ids],
+                    self._export_event(event),
+                    0,  # skip_first_n_tokens
+                )
+                raw_future.retain_reference(event)
+                success = raw_future.to_device_future(
+                    device=self._device,
+                    event_backend=self._event_backend,
                 ).result(timeout=self._mq_timeout)
             except Exception as e:
-                logger.warning(
+                logger.error(
                     "LMCache MP worker: retrieve failed for req %d: %s",
                     req_id,
                     e,
+                )
+                raise RuntimeError(
+                    f"LMCache MP worker retrieve failed for request {req_id}"
+                ) from e
+
+            if not success:
+                raise RuntimeError(
+                    "LMCache MP worker retrieve returned False for request "
+                    f"{req_id}; refusing to use unloaded KV blocks"
                 )
 
         logger.debug(
@@ -445,10 +445,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             return
 
         t0 = time.perf_counter()
-        # Not all backends support interprocess Events (CUDA IPC specific)
-        check_interprocess_event_support()
-        event = torch_dev.Event(interprocess=True)
-        event.record(stream)
+        event = self._create_and_record_event(stream)
 
         for req_id, spec in meta.saves.items():
             if not spec.tokens or not spec.block_ids:
@@ -456,16 +453,22 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
             key = self._create_key(spec.tokens, req_id)
             try:
-                _send_request(
-                    self._mq_client,
-                    RequestType.STORE,
-                    [
-                        key,
-                        self._instance_id,
-                        [spec.block_ids],
-                        event.ipc_handle(),
-                    ],
+                raw_future = self._req_client.store(
+                    key,
+                    self._instance_id,
+                    [spec.block_ids],
+                    self._export_event(event),
+                )
+                raw_future.retain_reference(event)
+                success = raw_future.to_device_future(
+                    device=self._device,
+                    event_backend=self._event_backend,
                 ).result(timeout=self._mq_timeout)
+                if not success:
+                    logger.warning(
+                        "LMCache MP worker: store returned False for req %d",
+                        req_id,
+                    )
             except Exception as e:
                 logger.warning(
                     "LMCache MP worker: store failed for req %d: %s",
@@ -486,3 +489,23 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
     ) -> Tuple[List[int], List[int]]:
         """All operations are synchronous — nothing is ever pending."""
         return [], []
+
+    def _create_and_record_event(self, stream: object) -> object:
+        """Create and record an event for the registered KV cache device."""
+        if self._device is None or self._event_backend is None:
+            raise RuntimeError(
+                "LMCache MP worker: KV caches must be registered before "
+                "submitting transfer requests"
+            )
+        event = self._event_backend.create_event(self._device)
+        self._event_backend.record_event(event, stream)
+        return event
+
+    def _export_event(self, event: object) -> bytes:
+        """Export ``event`` with the backend selected at registration."""
+        if self._device is None or self._event_backend is None:
+            raise RuntimeError(
+                "LMCache MP worker: KV caches must be registered before "
+                "submitting transfer requests"
+            )
+        return self._event_backend.export_event(event, self._device)
