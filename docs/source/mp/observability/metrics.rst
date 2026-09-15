@@ -258,15 +258,17 @@ Prometheus ``/metrics`` endpoint.
    * - ``lmcache_mp.l2_store_failure``
      - Counter
      - Chunks whose L1→L2 store task failed, so the data never reached
-       L2. Tagged by ``l2_name`` plus ``model_name``. This is the only
-       counter that rises when a backend rejects writes:
-       ``l2_store_completed`` counts *finished* store tasks whatever
-       their outcome, and ``l2_store_completed_objects`` advances only on
-       the success path — so a backend failing every write leaves the
-       latter absent from ``/metrics`` rather than flat at zero, and an
-       alert written as ``rate(...) == 0`` never fires on a missing
-       series. Alert on
-       ``rate(lmcache_mp_l2_store_failure_chunks_total[5m]) > 0`` instead.
+       L2. Tagged by ``l2_name`` plus ``model_name``. Nothing else on the
+       endpoint counts a failed store: ``l2_store_completed`` counts
+       *finished* store tasks whatever their outcome, and
+       ``l2_store_completed_objects`` advances only on the success path,
+       so a backend failing every write leaves it absent from
+       ``/metrics`` rather than flat at zero — and ``rate(...) == 0``
+       never fires on a missing series. ``l2_usage_bytes`` reports
+       occupancy, not outcome, so it cannot fill the gap either: it
+       reads 0 for a cold cache as well as a broken one, and on a warm
+       cache it does not fall when writes start failing. Alert on
+       ``rate(lmcache_mp_l2_store_failure_chunks_total[5m]) > 0``.
 
 A ``reason=serde_failure`` value will be added to ``l2_prefetch_failure``
 as an additive, non-breaking extension once L2 adapters distinguish

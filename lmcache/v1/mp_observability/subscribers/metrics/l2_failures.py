@@ -17,11 +17,12 @@ This covers the health-monitoring surface for L2:
   failed, so the data never reached L2. Tagged by ``l2_name`` (which backend
   is dropping writes, when several are configured) and ``model_name``.
 
-  This is the only counter that rises on a failed store: ``L2_STORE_COMPLETED``
-  is published for both outcomes, so ``l2_store_completed`` counts *finished*
-  tasks, and ``l2_store_completed_objects`` is driven by ``key_count_per_salt``,
-  which only the success branch populates.  Without this counter a backend
-  failing every write leaves no rising series at all.
+  Nothing else counts a failed store. ``L2_STORE_COMPLETED`` is published for
+  both outcomes, so ``l2_store_completed`` counts *finished* tasks, and
+  ``l2_store_completed_objects`` is driven by ``key_count_per_salt``, which only
+  the success branch populates.  ``l2_usage_bytes`` measures occupancy rather
+  than outcome: it reads 0 for a cold cache as well as a broken one, and it does
+  not fall — it can even rise — when a warm cache starts rejecting writes.
 
 The ``serde_failure`` reason is intentionally omitted until the serde PR
 lands; once it does, it becomes an additive third value of the same tag
