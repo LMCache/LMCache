@@ -63,6 +63,11 @@ caching is disabled).
   either KV is missing (lazy coupled-eviction cleanup) or HS is missing
   (prefix-strict). Returns the contiguous prefix tensor or `None` for a
   full miss.
+- `coverage(chunks, layer_idxs=(0,)) -> int`
+  Walks the `(start, end, key)` chunks a token database produced for a request
+  and stops at the first one missing any layer in `layer_idxs`. The result is a
+  prefix length in tokens, directly comparable with what `engine.lookup`
+  reports for KV.
 - `close()`
   Frees the pinned pool.
 
@@ -71,6 +76,28 @@ distinct `layer_idx` (and `retrieve_hidden_states` per layer on restore).
 
 When `enable_hidden_state_cache` is `False`, `engine.hidden_state_store` is
 `None`; callers must omit HS APIs on that worker.
+
+## Reporting coverage to the scheduler
+
+`get_num_new_matched_tokens()` runs in the scheduler process, where there is no
+engine and therefore no `hidden_state_store`. A caller that wants to commit only
+to what both tiers can supply asks for it through the lookup:
+
+- put the layer indices it needs under `lmcache.hidden_state_layer_idxs` in
+  `request_configs`
+- the lookup server appends a second 4-byte field to its reply, and
+  `LookupClientInterface.lookup_hidden_state_coverage(lookup_id)` returns it
+
+The field is appended rather than substituted, so the ends stay compatible: an
+older server ignores the key and answers 4 bytes, in which case the client
+reports `None` and the caller falls back to the KV hit length alone; an older
+client never sends the key and sees the reply unchanged.
+
+This matters because the two tiers drift. They evict independently, hidden
+states are stored per layer, and the defaults size the HS pool under the KV
+pool, so KV routinely covers more tokens than hidden states do. Committing to
+the KV number alone means skipping a prefill whose hidden states nobody can
+supply, which nothing detects until the worker.
 
 ## Eviction (lazy coupled-check)
 
