@@ -242,6 +242,7 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
         *REGISTER_ARGS,
         time.monotonic(),
         event_backend=stub_device,
+        completion_event=stub_device.create_event(None),
     )
 
     handle, ok = module.store_q(MagicMock(), 1, [[0, 1, 2]], b"peer-handle")

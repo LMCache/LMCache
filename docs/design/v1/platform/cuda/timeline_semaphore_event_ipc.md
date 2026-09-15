@@ -81,7 +81,8 @@ Deliberate differences:
 
 - **Snapshot exports**: an exported handle captures the sequence at export
   time; a re-record does not move it (a CUDA event handle tracks the live
-  object). LMCache exports once, after the single record.
+  object). LMCache exports immediately after each record of a context's
+  long-lived completion event, so every handle snapshots its own recording.
 - **Same-process import works** (resolved via a local registry).
 - **Dead peer = unbounded wait, same as CUDA events.** No event backend
   has a timeout on the event leg (`cudaEventSynchronize` has none either);

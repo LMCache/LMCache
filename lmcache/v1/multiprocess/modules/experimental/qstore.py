@@ -288,6 +288,7 @@ class QStoreModule(InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                completion_event=event_backend.create_event(cache_context.device),
             )
 
         logger.info(
@@ -360,10 +361,11 @@ class QStoreModule(InstanceLivenessTarget):
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
-        if event_backend is None:
+        event = entry.completion_event
+        if event_backend is None or event is None:
             raise RuntimeError(
-                "Q ring event backend is not initialized; register the Q cache "
-                "before submitting store requests"
+                "Q ring event backend or completion event is not initialized; "
+                "register the Q cache before submitting store requests"
             )
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
@@ -385,8 +387,6 @@ class QStoreModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
-
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
             # drive the transfer kernel to read out-of-bounds GPU memory, so skip

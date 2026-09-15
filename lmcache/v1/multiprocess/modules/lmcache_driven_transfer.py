@@ -665,6 +665,11 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        completion_event: Interprocess event recorded and exported after each
+            transfer. Lives as long as the entry: an exported handle is only
+            valid while the exporter keeps the event alive (ROCm 10.0 enforces
+            this). All transfers share one stream, so the latest recording
+            completing implies every earlier one did.
     """
 
     cache_context: BaseCacheContext
@@ -673,6 +678,7 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    completion_event: object | None = None
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -1004,6 +1010,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                completion_event=event_backend.create_event(cache_context.device),
             )
 
         logger.info(
@@ -1089,8 +1096,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
-        if event_backend is None:
-            raise RuntimeError("Registered cache context has no event backend")
+        event = entry.completion_event
+        if event_backend is None or event is None:
+            raise RuntimeError(
+                "Registered cache context has no event backend or completion event"
+            )
 
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
@@ -1112,8 +1122,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
-
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
             # drive the transfer kernel to read out-of-bounds GPU memory, so skip
@@ -1341,8 +1349,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
-        if event_backend is None:
-            raise RuntimeError("Registered cache context has no event backend")
+        event = entry.completion_event
+        if event_backend is None or event is None:
+            raise RuntimeError(
+                "Registered cache context has no event backend or completion event"
+            )
 
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
@@ -1387,8 +1398,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
-
             # Fail closed: a short block-id list would drive the transfer
             # kernel to write out-of-bounds GPU memory. Checked on the raw
             # block ids, before cutting drops the per-chunk blocks that
