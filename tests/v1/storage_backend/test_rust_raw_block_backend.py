@@ -107,14 +107,27 @@ class _FakeRawBlockDevice:
         buffers: list[Any],
         total_lens: list[int],
         placement_ids: list[int | None] | None = None,
+        payload_lens: list[int] | None = None,
     ) -> int:
         del placement_ids
+        resolved_payload_lens = (
+            [int(payload) for payload in payload_lens]
+            if payload_lens is not None
+            else [int(total) for total in total_lens]
+        )
         batch_id = self._next_batch_id
         self._next_batch_id += 1
         self.batched_writes.append((list(offsets), list(total_lens)))
         results = []
-        for offset, buf, total_len in zip(offsets, buffers, total_lens, strict=True):
-            self.pwrite_from_buffer(offset, buf, total_len, total_len)
+        for offset, buf, total_len, payload_len in zip(
+            offsets, buffers, total_lens, resolved_payload_lens, strict=True
+        ):
+            # Mirror the Rust bounce: store only the valid payload and zero the
+            # [payload_len, total_len) padding region.
+            self.pwrite_from_buffer(offset, buf, payload_len, total_len)
+            self._data[offset + payload_len : offset + total_len] = bytes(
+                total_len - payload_len
+            )
             results.append(True)
         self._batch_results[batch_id] = results
         return batch_id
