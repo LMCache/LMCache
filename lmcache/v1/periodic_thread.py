@@ -279,6 +279,23 @@ class PeriodicThread(ABC):
                     timeout,
                 )
 
+    def wait_for_stop(self, timeout: float | None = None) -> bool:
+        """Wait for the periodic thread to terminate.
+
+        Args:
+            timeout: Maximum time to wait in seconds. If ``None``, wait until
+                the thread terminates.
+
+        Returns:
+            ``True`` if the periodic thread has terminated, otherwise ``False``
+            when the timeout expires first.
+        """
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
+
     def wake(self) -> None:
         """Trigger one execution now instead of waiting for the next tick.
 
