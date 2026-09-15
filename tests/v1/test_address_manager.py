@@ -139,6 +139,21 @@ class TestAddressManagerAllocation:
 
         assert manager.check_consistency()
 
+    @pytest.mark.parametrize("size", [0, -1, -4096])
+    def test_allocation_non_positive_size(self, size: int) -> None:
+        """Reject non-positive sizes without changing the allocator state."""
+        manager = AddressManager(4096 * 4)
+        allocated_before = manager.total_allocated_size
+        free_before = manager.get_free_size()
+
+        with pytest.raises(RuntimeError, match="size must be greater than 0"):
+            manager.allocate(size)
+
+        assert manager.total_allocated_size == allocated_before
+        assert manager.get_free_size() == free_before
+        assert manager.check_consistency()
+        assert manager.allocate(4096) == (0, 4096)
+
 
 class TestAddressManagerBatchedAllocation:
     """Test batched_allocate functionality."""
@@ -437,6 +452,21 @@ class TestAddressManagerBatchedAllocation:
         assert manager.get_free_size() == free_before
         assert manager.check_consistency()
 
+    @pytest.mark.parametrize("size", [0, -1, -4096])
+    def test_batch_non_positive_size(self, size: int) -> None:
+        """Reject non-positive sizes instead of raising ZeroDivisionError."""
+        manager = AddressManager(4096 * 4)
+        allocated_before = manager.total_allocated_size
+        free_before = manager.get_free_size()
+
+        with pytest.raises(RuntimeError, match="size must be greater than 0"):
+            manager.batched_allocate(size, 3)
+
+        assert manager.total_allocated_size == allocated_before
+        assert manager.get_free_size() == free_before
+        assert manager.check_consistency()
+        assert len(manager.batched_allocate(4096, 3)) == 3
+
 
 class TestAddressManagerFree:
     """Test free functionality."""
@@ -498,6 +528,31 @@ class TestAddressManagerFree:
         assert addr_large >= 0
         assert size_large == 8192
         assert manager.check_consistency()
+
+    def test_zero_size_request_does_not_fragment_free_list(self) -> None:
+        """A rejected 0-byte request must not leave the pool fragmented.
+
+        ``allocate(0)`` used to hand out a zero-length block, and freeing that
+        block inserted a zero-sized entry into the explicit free list. Its
+        neighbours could then never be coalesced again, so ``get_free_size()``
+        reported the whole heap as free while the next full-heap allocation
+        failed with "no memory is available".
+        """
+        heap = 1 << 20
+        manager = AddressManager(heap)
+
+        first = manager.allocate(4096)
+        with pytest.raises(RuntimeError, match="size must be greater than 0"):
+            manager.allocate(0)
+        second = manager.allocate(4096)
+
+        manager.free(*second)
+        manager.free(*first)
+
+        assert manager.total_allocated_size == 0
+        assert manager.get_free_size() == heap
+        assert manager.check_consistency()
+        assert manager.allocate(heap) == (0, heap)
 
     def test_coalescing_predecessor(self):
         """Test that freeing blocks coalesces with predecessor."""

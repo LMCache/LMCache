@@ -181,6 +181,39 @@ def test_tensor_allocator_negative_batch_size(
         allocator.close()
 
 
+def test_tensor_allocator_zero_size_shape() -> None:
+    """A zero-element shape is reported as a failed allocation.
+
+    The address manager rejects the zero-byte request, which the tensor
+    allocator translates into ``None`` just like an out-of-memory request.
+    Beforehand ``allocate`` handed out a zero-length block (fragmenting the
+    free list) and ``batched_allocate`` raised ``ZeroDivisionError``, which
+    escaped to callers such as ``LMCacheEngine.store_layer``.
+    """
+    tensor_buffer = torch.zeros(4096 * 4, dtype=torch.uint8, device="cpu")
+    allocator = TensorMemoryAllocator(tensor_buffer)
+    existing = None
+    try:
+        empty_shape = torch.Size([0])
+        allocated_before = allocator.total_allocated_size
+        active_before = allocator.num_active_allocations
+
+        assert allocator.allocate(empty_shape, torch.uint8) is None
+        assert allocator.batched_allocate(empty_shape, torch.uint8, 3) is None
+
+        assert allocator.total_allocated_size == allocated_before
+        assert allocator.num_active_allocations == active_before
+        assert allocator.memcheck()
+
+        # The rejected requests must not have damaged the pool.
+        existing = allocator.allocate(torch.Size([4096 * 4]), torch.uint8)
+        assert existing is not None
+    finally:
+        if existing is not None:
+            allocator.free(existing)
+        allocator.close()
+
+
 @pytest.mark.parametrize(
     "alloc_cls",
     [
