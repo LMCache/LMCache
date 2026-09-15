@@ -4,9 +4,11 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # Third Party
 import torch

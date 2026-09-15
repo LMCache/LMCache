@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -20,6 +19,7 @@ from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 if TYPE_CHECKING:
     # Third Party
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
