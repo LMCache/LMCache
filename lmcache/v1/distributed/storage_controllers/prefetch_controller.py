@@ -1350,10 +1350,12 @@ class PrefetchController(StorageControllerInterface):
                     loaded_keys, read_locks=request.num_kv_readers
                 )
 
-        # Clean up failed keys
+        # Clean up failed keys: drop the destinations without publishing a
+        # completed write. finish_write would make the unconfirmed data
+        # readable and announce the keys to the write-finished listeners,
+        # which could reserve a read and store it before the delete.
         if failed_keys:
-            l1_mgr.finish_write(failed_keys)
-            l1_mgr.delete(failed_keys)
+            l1_mgr.delete(failed_keys, force=True)
 
         self._event_bus.publish(
             Event(
@@ -1478,8 +1480,9 @@ class PrefetchController(StorageControllerInterface):
         for request in self._in_flight_requests.values():
             if request.phase == PrefetchPhase.PLAN_AND_LOAD:
                 if request.write_reserved_keys:
-                    l1_mgr.finish_write(request.write_reserved_keys)
-                    l1_mgr.delete(request.write_reserved_keys)
+                    # As for failed keys: drop the unfinished destinations
+                    # without publishing a completed write.
+                    l1_mgr.delete(request.write_reserved_keys, force=True)
             self._release_l2_locks(request, keep={})
             if request.l1_readlocks.popcount() > 0:
                 l1_mgr.finish_read(
