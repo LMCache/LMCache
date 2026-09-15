@@ -271,6 +271,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
             memory_obj.unpin()
             return True
 
+    def is_hot_cache_object(self, key: CacheEngineKey, memory_obj: MemoryObj) -> bool:
+        """
+        Check whether `memory_obj` is the object currently resident in the
+        hot cache under `key` (as opposed to a transient staging buffer).
+
+        Pins on hot-cache-resident objects are owned by whoever placed them
+        (e.g. `lookup(pin=True)` or the controller) and must be released by
+        the owner, not by the retrieve path.
+        """
+        with self.cpu_lock:
+            return self.hot_cache.get(key) is memory_obj
+
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         lock_context = self.cpu_lock if force else nullcontext()
         with lock_context:
