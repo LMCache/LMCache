@@ -61,14 +61,8 @@ jobs:
                         - '.github/workflows/test.yml'
                         - '.github/workflows/code_quality_checks.yml'
                         - '.github/workflows/publish.yml'
-                        - '.github/workflows/build_main_artifacts.yml'
-                        - '.github/workflows/build_main_artifacts_arm64.yml'
-                        - '.github/workflows/build_cli_artifacts.yml'
-                        - '.github/workflows/build_cu129_artifacts.yml'
-                        - '.github/workflows/build_rocm_artifacts.yml'
-                        - '.github/workflows/build_xpu_artifacts.yml'
-                        - '.github/workflows/build_musa_artifacts.yml'
-                        - '.github/workflows/build_rocm_torch210_artifacts.yml'
+                        - '.github/workflows/build_artifacts.yml'
+                        - '.github/actions/build-artifacts/action.yml'
                         - '.github/scripts/build_rocm_wheel.sh'
                         - '.github/scripts/rocm_wheel_common.sh'
                         - '.github/scripts/build_xpu_wheel.sh'
@@ -77,67 +71,12 @@ jobs:
                         - '.github/scripts/validate_rocm_torch210_wheel.py'
                         - '!operator/**'
 
-    # Build each artifact group in its own reusable workflow so that a
-    # failure in one (e.g. cu129) does not block publishing of the others.
-
-    build-main:
+    build-artifacts:
         needs: changes
         if: needs.changes.outputs.lmcache == 'true'
-        name: Build main
-        uses: ./.github/workflows/build_main_artifacts.yml
-
-    build-main-arm64:
-        needs: changes
-        if: needs.changes.outputs.lmcache == 'true'
-        name: Build main (arm64)
-        uses: ./.github/workflows/build_main_artifacts_arm64.yml
-
-    build-cli:
-        needs: changes
-        if: needs.changes.outputs.lmcache == 'true'
-        name: Build CLI
-        uses: ./.github/workflows/build_cli_artifacts.yml
-
-    build-cu129:
-        needs: changes
-        if: needs.changes.outputs.lmcache == 'true'
-        name: Build cu129
-        uses: ./.github/workflows/build_cu129_artifacts.yml
-        # DockerHub creds needed for the cu12.9 manylinux image pull;
-        # reusable workflows do not auto-inherit secrets.
-        secrets: inherit
-
-    build-rocm:
-        needs: changes
-        if: needs.changes.outputs.lmcache == 'true'
-        name: Build ROCm
-        uses: ./.github/workflows/build_rocm_artifacts.yml
-        # DockerHub creds avoid anonymous rate limits pulling the ROCm
-        # dev image; reusable workflows do not auto-inherit secrets.
-        secrets: inherit
-
-    build-xpu:
-        needs: changes
-        if: needs.changes.outputs.lmcache == 'true'
-        name: Build XPU
-        uses: ./.github/workflows/build_xpu_artifacts.yml
-        # DockerHub creds avoid anonymous rate limits pulling the oneAPI image;
-        # reusable workflows do not auto-inherit secrets.
-        secrets: inherit
-
-    build-musa:
-        needs: changes
-        if: needs.changes.outputs.lmcache == 'true'
-        name: Build MUSA
-        uses: ./.github/workflows/build_musa_artifacts.yml
-
-    build-rocm-torch210:
-        needs: changes
-        if: needs.changes.outputs.lmcache == 'true'
-        name: Build ROCm torch 2.10
-        uses: ./.github/workflows/build_rocm_torch210_artifacts.yml
-        # DockerHub credentials avoid rate limits when pulling the pinned
-        # torch 2.10 builder image; forks can still pull it anonymously.
+        uses: ./.github/workflows/build_artifacts.yml
+        with:
+            targets: '["main", "main-arm64", "cli", "cu129", "rocm", "xpu", "musa", "rocm-torch210"]'
         secrets: inherit
 
     # Run tests and code quality checks before publishing
@@ -161,8 +100,7 @@ jobs:
         # Require upstream jobs to have succeeded so a cancelled/skipped build
         # doesn't trigger a publish that fails on the missing artifact.
         if: |
-            needs.build-main.result == 'success' &&
-            needs.build-main-arm64.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -173,7 +111,7 @@ jobs:
             # see https://docs.pypi.org/trusted-publishers/
             id-token: write
         runs-on: ubuntu-latest
-        needs: [changes, build-main, build-main-arm64, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -203,7 +141,7 @@ jobs:
     publish-cli-test-pypi:
         name: Publish lmcache-cli packages to test.pypi.org
         if: |
-            needs.build-cli.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -213,7 +151,7 @@ jobs:
             contents: read
             id-token: write
         runs-on: ubuntu-latest
-        needs: [changes, build-cli, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -239,8 +177,7 @@ jobs:
     publish-pypi:
         name: Publish release to pypi.org
         if: |
-            needs.build-main.result == 'success' &&
-            needs.build-main-arm64.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -252,7 +189,7 @@ jobs:
             contents: write
 
         runs-on: ubuntu-latest
-        needs: [changes, build-main, build-main-arm64, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -287,7 +224,7 @@ jobs:
     publish-cli-pypi:
         name: Publish lmcache-cli release to pypi.org
         if: |
-            needs.build-cli.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -296,7 +233,7 @@ jobs:
             id-token: write
             contents: write
         runs-on: ubuntu-latest
-        needs: [changes, build-cli, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -326,7 +263,7 @@ jobs:
     publish-cu129-github-release:
         name: Publish cu129 wheel to GitHub Release
         if: |
-            needs.build-cu129.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -334,7 +271,7 @@ jobs:
         permissions:
             contents: write
         runs-on: ubuntu-latest
-        needs: [changes, build-cu129, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -375,7 +312,7 @@ jobs:
     publish-rocm-github-release:
         name: Publish ROCm wheel to GitHub Release
         if: |
-            needs.build-rocm.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -383,7 +320,7 @@ jobs:
         permissions:
             contents: write
         runs-on: ubuntu-latest
-        needs: [changes, build-rocm, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -414,7 +351,7 @@ jobs:
                   Install into an upstream vLLM ROCm container:
                   \`\`\`
                   VERSION=${{ github.ref_name }}
-                  pip install lmcache==${{ needs.build-rocm.outputs.rocm_version }} --no-deps \\
+                  pip install lmcache==${{ github.ref_name }}+rocm7.2 --no-deps \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-rocm
                   \`\`\`" \
                     dist/*.whl
@@ -424,7 +361,7 @@ jobs:
     publish-xpu-github-release:
         name: Publish XPU wheel to GitHub Release
         if: |
-            needs.build-xpu.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -432,7 +369,7 @@ jobs:
         permissions:
             contents: write
         runs-on: ubuntu-latest
-        needs: [changes, build-xpu, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -463,7 +400,7 @@ jobs:
                   Install into an upstream Intel vLLM XPU container:
                   \`\`\`
                   VERSION=${{ github.ref_name }}
-                  pip install lmcache==${{ needs.build-xpu.outputs.xpu_version }} --no-deps \\
+                  pip install lmcache==${{ github.ref_name }}+xpu --no-deps \\
                     --no-index \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-xpu
                   \`\`\`" \
@@ -474,7 +411,7 @@ jobs:
     publish-musa-github-release:
         name: Publish MUSA wheel to GitHub Release
         if: |
-            needs.build-musa.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -482,7 +419,7 @@ jobs:
         permissions:
             contents: write
         runs-on: ubuntu-latest
-        needs: [changes, build-musa, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -513,7 +450,7 @@ jobs:
                   Install inside the matching MUSA runtime image:
                   \`\`\`bash
                   VERSION=${{ github.ref_name }}
-                  pip install lmcache==${{ needs.build-musa.outputs.musa_version }} --no-deps \\
+                  pip install lmcache==${{ github.ref_name }}+musa --no-deps \\
                     --no-index \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-musa
                   \`\`\`" \
@@ -523,7 +460,7 @@ jobs:
     publish-rocm-torch210-github-release:
         name: Publish ROCm torch 2.10 wheel to GitHub Release
         if: |
-            needs.build-rocm-torch210.result == 'success' &&
+            needs.build-artifacts.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -531,7 +468,7 @@ jobs:
         permissions:
             contents: write
         runs-on: ubuntu-latest
-        needs: [changes, build-rocm-torch210, test, code-quality]
+        needs: [changes, build-artifacts, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -572,7 +509,7 @@ jobs:
                   Install into the pinned AMD PyTorch container:
                   \`\`\`bash
                   VERSION=${{ github.ref_name }}
-                  pip install lmcache==${{ needs.build-rocm-torch210.outputs.rocm_torch210_version }} --no-deps \\
+                  pip install lmcache==${{ github.ref_name }}+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1 --no-deps \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-rocm-torch210
                   \`\`\`
                   " \

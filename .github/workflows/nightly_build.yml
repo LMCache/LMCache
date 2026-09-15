@@ -120,8 +120,9 @@ jobs:
   # never be mistaken for a release.
   nightly-rocm-wheel:
     name: Build ROCm nightly wheel
-    uses: ./.github/workflows/build_rocm_artifacts.yml
+    uses: ./.github/workflows/build_artifacts.yml
     with:
+      targets: '["rocm"]'
       dev_version: true
     secrets: inherit
 
@@ -147,7 +148,7 @@ jobs:
       - name: Publish ROCm wheels to rolling nightly-rocm release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          ROCM_VERSION: ${{ needs.nightly-rocm-wheel.outputs.rocm_version }}
+          ROCM_VERSION: ${{ needs.nightly-rocm-wheel.outputs.version }}
         run: |
           gh release delete nightly-rocm --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
           gh release create nightly-rocm \
@@ -171,8 +172,9 @@ jobs:
   # published to a rolling GitHub Release rather than PyPI.
   nightly-musa-wheel:
     name: Build MUSA nightly wheel
-    uses: ./.github/workflows/build_musa_artifacts.yml
+    uses: ./.github/workflows/build_artifacts.yml
     with:
+      targets: '["musa"]'
       dev_version: true
 
   publish-nightly-musa:
@@ -197,7 +199,7 @@ jobs:
       - name: Publish MUSA wheels to rolling nightly-musa release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          MUSA_VERSION: ${{ needs.nightly-musa-wheel.outputs.musa_version }}
+          MUSA_VERSION: ${{ needs.nightly-musa-wheel.outputs.version }}
         run: |
           gh release delete nightly-musa --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
           gh release create nightly-musa \
