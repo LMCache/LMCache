@@ -108,6 +108,7 @@ def group_layers_by_identity(
         get_block_size,
         get_dtype,
         get_head_size,
+        get_kv_size,
         get_num_heads,
     )
 
@@ -134,7 +135,7 @@ def group_layers_by_identity(
             continue
         layer_format = engine_kv_formats[idx]
         mla = lmcache_native.is_mla(layer_format)
-        kv_size = 1 if mla else 2
+        kv_size = get_kv_size(kv_caches, layer_format)
         nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
         hs = get_head_size(kv_caches, layer_format, idx)
         dt = get_dtype(kv_caches, layer_format, idx)

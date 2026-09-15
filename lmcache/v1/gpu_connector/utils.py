@@ -500,6 +500,7 @@ _BLOCK_AXIS_FORMATS: frozenset = frozenset(
         # is layer-compact, stride(0) is simply the tight per-block step.
         lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
         lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS,
     }
 )
 
