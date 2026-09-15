@@ -69,14 +69,19 @@ exactly (enforced; see Invariants).
 
 ### 3. Sub-paged MLA
 
-The same re-paging for MLA-style caches, rank-3 `[NB, states, C]` (Kimi K3)
-or unified rank-4 with one head slot in either order (`[NB, 1, states, C]` or `[NB, states, 1, C]`) (GLM-5.3-Flash: sparse MLA at 64 rows
-and the kpool indexer at 32 rows under a 1152-token block). The target is
-`spec.num_states` (`block_size / tokens_per_state`) rather than `block_size`,
-so a declared slot compression survives the view and the compression path
-still derives it from `tokens_per_block / slots_per_block`. Each layer is
-matched against its own leaf spec: GLM's MLA and indexer layers share one
-`UniformTypeKVCacheSpecs` group with different `num_states`.
+The same re-paging for MLA-style caches: rank-3 `[NB, states, C]` (Kimi K3)
+or rank-4 with the single head slot on either side of the states,
+`[NB, 1, states, C]` (head-major layouts) or `[NB, states, 1, C]`
+(states-major). The order is decided by the attention backends, not the
+model, so the rule finds the states dim from the tensor and keeps the dim
+order in the view. The target is `spec.num_states`
+(`block_size / tokens_per_state`; `block_size / compress_ratio` on older
+vLLM) rather than `block_size`, so a declared slot compression survives the
+view and the compression path still derives it from
+`tokens_per_block / slots_per_block`. Each layer is matched against its own
+leaf spec: GLM-5.3-Flash's MLA and indexer layers share one
+`UniformTypeKVCacheSpecs` group with different `num_states` (sparse MLA at 64
+rows and the kpool indexer at 32 under a 1152-token block).
 
 ## Startup validation
 
