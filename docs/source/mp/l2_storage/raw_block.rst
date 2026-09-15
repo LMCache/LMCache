@@ -27,7 +27,9 @@ caller-provided load buffers during prefetch.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
-- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
+- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible. With
+  ``io_engine="io_uring"``, also try to register eligible L1 memory as fixed
+  buffers.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
   io_uring syscall path).
@@ -139,6 +141,75 @@ caller-provided load buffers during prefetch.
   write directive and is not used to locate data on reads.
 - Metadata checkpoint writes use ``meta_checkpoint_placement_id`` when
   configured, otherwise they use default NVMe placement with no directive.
+
+**Fixed-buffer registration and memlock:**
+
+With ``io_engine="io_uring"`` and ``enable_zero_copy=true``, the adapter
+registers the stable L1 memory range during initialization. An anonymous
+``MixedMemoryAllocator`` exposes its full arena; ``LazyMemoryAllocator``
+exposes only the currently pinned prefix. POSIX shared-memory arenas do not
+expose an eligible range. Registration uses regions no larger than 1 GiB and
+does not grow when the lazy allocator expands.
+
+The kernel charges registered buffers against ``RLIMIT_MEMLOCK`` unless the
+process has ``CAP_IPC_LOCK``. The default lazy initial prefix is 20 GiB, so
+allow at least that much locked memory, plus headroom for other registrations
+and locked memory. Splitting the prefix into 1 GiB regions does not reduce
+the total memlock requirement. See the Linux
+`io_uring_register(2) manual <https://man7.org/linux/man-pages/man2/io_uring_register.2.html>`_.
+
+For a Bash-launched server, inspect the soft and hard limits in KiB and set
+the soft limit before starting the server from the same shell:
+
+.. code-block:: bash
+
+    ulimit -Sl
+    ulimit -Hl
+    # 20 GiB in KiB; requires a hard limit of at least this value.
+    ulimit -Sl 20971520
+
+If the hard limit is too low, raise it through the service, container, or
+login configuration. A systemd service can use ``LimitMEMLOCK=infinity``;
+a Docker container can use ``--ulimit memlock=-1:-1``. Apply the setting to
+the process running the LMCache server, then restart it. Registration is
+attempted once during adapter initialization.
+
+If registration fails, the adapter logs a warning and continues with ordinary
+io_uring. The adapter can therefore remain healthy even when fixed buffers
+are inactive. Check ``RawBlockL2Adapter.report_status()["core"]`` for:
+
+- ``fixed_buffers_registered``: ``true`` only after successful kernel
+  registration.
+- ``fixed_buffer_registered_bytes``: Total bytes in the registered regions;
+  ``0`` when no buffers are registered. This is the registered range size,
+  not the final L1 capacity or the number of bytes transferred.
+
+Both fields also appear under each raw-block adapter in
+:doc:`GET /status <../http_api>`:
+
+.. code-block:: bash
+
+    curl -fsS http://localhost:8080/status | jq '
+      .storage_manager.l2_adapters[]
+      | select(.type == "RawBlockL2Adapter")
+      | .core
+      | {fixed_buffers_registered, fixed_buffer_registered_bytes}'
+
+For a successfully registered 20 GiB prefix, the result is:
+
+.. code-block:: json
+
+    {
+      "fixed_buffers_registered": true,
+      "fixed_buffer_registered_bytes": 21474836480
+    }
+
+Failed or skipped registration reports ``false`` and ``0``, as does a closed
+adapter. Successful registration does not mean every request uses fixed I/O:
+requests outside the registered prefix or crossing a region boundary still
+use ordinary io_uring. When comparing performance, verify these fields and
+keep ``enable_zero_copy`` enabled in both cases to isolate registration from
+direct-buffer I/O.
 
 **Configuration examples:**
 
