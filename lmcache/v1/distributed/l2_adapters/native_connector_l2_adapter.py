@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 import select
 import threading
@@ -30,7 +31,10 @@ import threading
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.internal_api import (
+    L2AdapterListener,
+    L2StoreResult,
+)
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -81,6 +85,22 @@ def _obj_to_memoryview(
     return obj.byte_array  # type: ignore[return-value]
 
 
+@dataclass(frozen=True)
+class RecoveredL2Entry:
+    """A cache entry discovered before a native adapter starts serving.
+
+    Attributes:
+        key: Decoded object key.
+        size_bytes: Size of the persisted object.
+        mtime_ns: Last modification timestamp used to approximate restart LRU
+            ordering. Larger values are considered more recent.
+    """
+
+    key: ObjectKey
+    size_bytes: int
+    mtime_ns: int = 0
+
+
 class NativeConnectorL2Adapter(L2AdapterInterface):
     """
     Wraps a pybind-wrapped C++ IStorageConnector to
@@ -108,12 +128,31 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         max_capacity_gb: float = 0,
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
+        recovered_entries: list[RecoveredL2Entry] | None = None,
     ) -> None:
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
         self._type_name: str = type_name or type(native_client).__name__
         self._extra_status: dict[str, Any] = dict(extra_status or {})
+
+        recovered_by_key: dict[ObjectKey, RecoveredL2Entry] = {}
+        for entry in recovered_entries or []:
+            if entry.size_bytes < 0:
+                raise ValueError("recovered entry size must be non-negative")
+            recovered_by_key[entry.key] = entry
+        # LRU's batch-create callback iterates its input in reverse. Passing
+        # newest-first therefore rebuilds an oldest-first eviction order.
+        self._recovered_entries = tuple(
+            sorted(
+                recovered_by_key.values(),
+                key=lambda entry: (
+                    entry.mtime_ns,
+                    _object_key_to_string(entry.key),
+                ),
+                reverse=True,
+            )
+        )
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -148,7 +187,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # at delete time (the native completion only carries booleans, not
         # sizes) so we can pass them to ``_notify_keys_deleted``. Aggregate
         # and per-user totals live in the base class — see ``get_usage``.
-        self._key_sizes: dict[ObjectKey, int] = {}
+        self._key_sizes: dict[ObjectKey, int] = {
+            entry.key: entry.size_bytes for entry in self._recovered_entries
+        }
+        self._seed_existing_keys(
+            list(self._key_sizes),
+            list(self._key_sizes.values()),
+        )
         # Pending store sizes: native future_id -> (keys, per_key_sizes).
         # Bridges the async store submit → demux completion gap so the
         # demux thread can fire ``_notify_keys_stored(keys, sizes)``.
@@ -341,6 +386,31 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # class tracks aggregate + per-user totals via ``_notify_keys_*``;
     # we feed it the byte sizes from each store/delete completion.
 
+    def register_listener(self, listener: L2AdapterListener) -> None:
+        """Register a listener and seed it with entries recovered at startup.
+
+        Args:
+            listener: Listener that should receive future events and the
+                current recovered-key snapshot.
+        """
+        super().register_listener(listener)
+        if not self._recovered_entries:
+            return
+        with self._lock:
+            current_entries = [
+                (entry.key, self._key_sizes[entry.key])
+                for entry in self._recovered_entries
+                if entry.key in self._key_sizes
+            ]
+        if not current_entries:
+            return
+        keys = [key for key, _size in current_entries]
+        sizes = [size for _key, size in current_entries]
+        try:
+            listener.on_l2_keys_stored(keys, sizes)
+        except Exception as e:
+            logger.warning("Native connector listener recovery bootstrap failed: %s", e)
+
     # ---------------------------------------------------------------
     # Status Interface
     # ---------------------------------------------------------------
@@ -362,6 +432,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             "type": self._type_name,
         }
         status.update(self._extra_status)
+        status.update(
+            {
+                "recovered_keys": len(self._recovered_entries),
+                "recovered_bytes": sum(
+                    entry.size_bytes for entry in self._recovered_entries
+                ),
+            }
+        )
         return status
 
     # ---------------------------------------------------------------
