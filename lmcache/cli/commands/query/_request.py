@@ -130,7 +130,8 @@ def _stream(
     chat: bool,
     max_tokens: int,
 ) -> dict[str, Any]:
-    """POST with ``stream: true``; parse SSE; return TTFT/TPOT and token metrics."""
+    """POST with ``stream: true``; parse SSE; return the completion text plus
+    TTFT/TPOT and token metrics."""
     payload = {
         **body,
         "stream": True,
@@ -214,6 +215,7 @@ def _stream(
         (decode_time / num_generated) if num_generated > 0 and decode_time > 0 else 0.0
     )
     return {
+        "answer": joined,
         "prompt_tokens": prompt_tokens,
         "output_tokens": num_generated,
         "ttft_ms": ttft_s * 1000.0,
@@ -283,14 +285,23 @@ class Request:
             "chat_first": self._chat_first,
         }
 
-    def send_request(self, prompt: str) -> dict[str, Any] | MetricMap:
-        """Send request and return stats."""
+    def send_request(self, prompt: str) -> tuple[str, MetricMap]:
+        """Send request and return the completion text and its metrics.
+
+        Args:
+            prompt: The fully expanded prompt to send to the engine.
+
+        Returns:
+            A ``(answer, metrics)`` tuple where ``answer`` is the model's
+            completion text and ``metrics`` is a :data:`MetricMap` of token
+            and latency stats keyed by metric id.
+        """
         request_data = self.build_request(prompt)
-        stats = {
-            "model": request_data["model"],
-            **self._query_with_fallback(request_data),
-        }
-        return {key: (_METRIC_NAMES.get(key, key), stats[key]) for key in stats}
+        result = self._query_with_fallback(request_data)
+        answer = str(result.pop("answer", ""))
+        stats = {"model": request_data["model"], **result}
+        metrics = {key: (_METRIC_NAMES.get(key, key), stats[key]) for key in stats}
+        return answer, metrics
 
     def _first_model_id(self) -> str:
         """Return the first model ID from ``GET /v1/models``."""

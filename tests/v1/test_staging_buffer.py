@@ -13,7 +13,7 @@ Tests cover:
 import torch
 
 # First Party
-from lmcache.v1.memory_management import TensorMemoryAllocator
+from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 
 
 class TestUnderlyingBug:

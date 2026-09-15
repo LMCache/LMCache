@@ -44,7 +44,7 @@ class RemoteBackend(StorageBackendInterface):
         if plugin_name is not None:
             # Using plugin-based approach
             self.remote_url = f"plugin://{plugin_name}"
-            logger.info(f"Creating RemoteBackend for plugin: {plugin_name}")
+            logger.info("Creating RemoteBackend for plugin: %s", plugin_name)
         else:
             # Legacy remote_url approach
             if config.remote_url is None:
@@ -80,10 +80,11 @@ class RemoteBackend(StorageBackendInterface):
             and metadata.world_size > 1
             and metadata.worker_id != 0
         )
-        logger.info(f"metadata={metadata}")
+        logger.info("metadata=%s", metadata)
         logger.info(
-            f"Connected to remote storage at {config.remote_url}, "
-            f"remote_mla_worker_id_as_0 mode: {self._mla_worker_id_as0_mode}"
+            "Connected to remote storage at %s, remote_mla_worker_id_as_0 mode: %s",
+            config.remote_url,
+            self._mla_worker_id_as0_mode,
         )
 
         # TODO(Jiayi): If we want to have cache admission policies,
@@ -132,7 +133,7 @@ class RemoteBackend(StorageBackendInterface):
                 # Using plugin-based approach
                 # Create a virtual URL that the adapter can recognize
                 url = f"plugin://{self.plugin_name}"
-                logger.info(f"Creating connector for plugin: {self.plugin_name}")
+                logger.info("Creating connector for plugin: %s", self.plugin_name)
             else:
                 # Legacy remote_url approach
                 if self.config.remote_url is None:
@@ -149,14 +150,14 @@ class RemoteBackend(StorageBackendInterface):
                 self.metadata,
                 plugin_name=self.plugin_name,
             )
-            logger.info(f"Connection initialized/re-established at {url}")
+            logger.info("Connection initialized/re-established at %s", url)
         except IrrecoverableException:
             logger.error("Irrecoverable error during connection initialization")
             raise
         except Exception as e:
             with self.lock:
                 self.failure_time = time.time()
-            logger.warning(f"Failed to initialize/re-establish remote connection: {e}")
+            logger.warning("Failed to initialize/re-establish remote connection: %s", e)
             self.connection = None
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -180,7 +181,7 @@ class RemoteBackend(StorageBackendInterface):
                 res = future.result()
                 return res
         except Exception as e:
-            logger.warning(f"Remote connection failed in contains: {e}")
+            logger.warning("Remote connection failed in contains: %s", e)
             logger.warning("Returning False")
             return False
 
@@ -202,7 +203,7 @@ class RemoteBackend(StorageBackendInterface):
         try:
             return self.connection.batched_contains(keys)
         except Exception as e:
-            logger.warning(f"Remote connection failed in batched_contains: {e}")
+            logger.warning("Remote connection failed in batched_contains: %s", e)
             return 0
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -216,7 +217,7 @@ class RemoteBackend(StorageBackendInterface):
             future.result()
         except Exception as e:
             self._put_failed_count += 1
-            logger.error(f"Put task failed for key {key}: {e}")
+            logger.error("Put task failed for key %s: %s", key, e)
 
     def submit_put_task(
         self,
@@ -261,7 +262,7 @@ class RemoteBackend(StorageBackendInterface):
                 try:
                     on_complete_callback(key)
                 except Exception as e:
-                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                    logger.warning("on_complete_callback failed for key %s: %s", key, e)
 
         # NOTE: No need to do error handling here
         # since the `future` is never waited
@@ -323,7 +324,7 @@ class RemoteBackend(StorageBackendInterface):
                             on_complete_callback(key)
                         except Exception as e:
                             logger.warning(
-                                f"on_complete_callback failed for key {key}: {e}"
+                                "on_complete_callback failed for key %s: %s", key, e
                             )
 
             future = asyncio.run_coroutine_threadsafe(
@@ -429,8 +430,9 @@ class RemoteBackend(StorageBackendInterface):
                     future.cancel()
                 else:
                     logger.warning(
-                        f"Error occurred in batched_get_blocking: {e}, "
-                        f"returning None list"
+                        "Error occurred in batched_get_blocking: %s, "
+                        "returning None list",
+                        e,
                     )
                 memory_objs = [None] * len(keys)
         else:
@@ -462,7 +464,7 @@ class RemoteBackend(StorageBackendInterface):
                             fut.cancel()
                         else:
                             logger.warning(
-                                f"Error occurred in get_blocking: {e}, returning None"
+                                "Error occurred in get_blocking: %s, returning None", e
                             )
                         memory_obj = None
                     memory_objs.append(memory_obj)
@@ -535,7 +537,7 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("batched_async_contains timed out")
             return 0
         except Exception as e:
-            logger.warning(f"Error occurred in batched_async_contains: {e}")
+            logger.warning("Error occurred in batched_async_contains: %s", e)
             return 0
 
     async def support_batched_get_non_blocking(self) -> bool:
@@ -574,7 +576,7 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("batched_get_non_blocking timed out")
             return []
         except Exception as e:
-            logger.warning(f"Error occurred in batched_get_non_blocking: {e}")
+            logger.warning("Error occurred in batched_get_non_blocking: %s", e)
             return []
 
     def pin(self, key: CacheEngineKey) -> bool:
@@ -600,7 +602,7 @@ class RemoteBackend(StorageBackendInterface):
             return self.connection.remove_sync(key)
         except Exception as e:
             logger.exception(
-                f"Failed to remove key {key} from remote backend, error: {e}"
+                "Failed to remove key %s from remote backend, error: %s", key, e
             )
             return False
 
@@ -620,4 +622,4 @@ class RemoteBackend(StorageBackendInterface):
             future.result()
             logger.info("Remote backend closed.")
         except Exception as e:
-            logger.warning(f"Error occurred when closing remote connection: {e}")
+            logger.warning("Error occurred when closing remote connection: %s", e)

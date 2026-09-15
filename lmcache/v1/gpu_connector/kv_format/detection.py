@@ -5,6 +5,9 @@
 off to the engine's :class:`EngineDetector` to reshape and identify the format.
 """
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
@@ -14,16 +17,38 @@ from lmcache.v1.gpu_connector.kv_format.contiguity import (
 from lmcache.v1.gpu_connector.kv_format.detectors import get_detector
 from lmcache.v1.gpu_connector.kv_format.specs import describe_shape
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+
+def extract_kv_cache_shapes(
+    kv_caches: DiscoverableKVCache,
+) -> set[torch.Size]:
+    """Extract the tensor shapes that is in the kv_caches structure.
+
+    Args:
+        kv_caches (DiscoverableKVCache): The kv_caches structure to extract shapes
+        from.
+
+    Returns:
+        set[torch.Size]: A set of tensor shapes found in the kv_caches structure.
+    """
+    if isinstance(kv_caches, torch.Tensor):
+        return {kv_caches.shape}
+
+    shapes = set()
+    for t in kv_caches:
+        shapes.update(extract_kv_cache_shapes(t))
+
+    return shapes
 
 
 def detect_format(
     kv_caches: DiscoverableKVCache,
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
-) -> "tuple[lmc_ops.EngineKVFormat, DiscoverableKVCache]":
+) -> "tuple[lmcache_native.EngineKVFormat, DiscoverableKVCache]":
     """Recover a contiguous view, then discover the format + canonical kv_caches.
 
     Returns ``(engine_kv_format, normalized_kv_caches)``. Callers must use the

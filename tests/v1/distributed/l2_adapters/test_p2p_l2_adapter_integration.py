@@ -20,14 +20,16 @@ import time
 import pytest
 import torch
 
+# First Party
+from lmcache import torch_dev, torch_device_type
+
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
+
 nixl = pytest.importorskip("nixl")
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
-# Third Party
-import zmq  # noqa: E402
 
 # First Party
 from lmcache.v1.distributed.api import (  # noqa: E402
@@ -55,11 +57,13 @@ from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E4
 )
 from lmcache.v1.multiprocess.config import (  # noqa: E402
     CoordinatorConfig,
+    MPServerConfig,
     P2PConfig,
 )
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
-from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
-from lmcache.v1.multiprocess.protocol import get_payload_classes  # noqa: E402
+from lmcache.v1.multiprocess.transport.server_factory import (  # noqa: E402
+    create_request_server,
+)
 
 _PAGE = 4096
 _NUM_KEYS = 3
@@ -148,16 +152,17 @@ def test_p2p_adapter_end_to_end():
             CoordinatorConfig(),
             instance_id="peer",
         )
-        peer_mq_url = f"tcp://{_next_url()}"
-        mq_server = MessageQueueServer(peer_mq_url, zmq.Context.instance())
-        specs = controller.get_handlers()
-        for spec in specs:
-            mq_server.add_blocking_handler(
-                spec.request_type,
-                get_payload_classes(spec.request_type),
-                spec.handler,
-            )
-        mq_server.add_normal_thread_pool([s.request_type for s in specs], max_workers=4)
+        peer_mq_host_port = _next_url()
+        peer_mq_url = f"tcp://{peer_mq_host_port}"
+        peer_mq_host, peer_mq_port = peer_mq_host_port.rsplit(":", maxsplit=1)
+        mq_server = create_request_server(
+            [controller],
+            MPServerConfig(
+                host=peer_mq_host,
+                port=int(peer_mq_port),
+                max_cpu_workers=4,
+            ),
+        )
         mq_server.start()
 
         # --- Local side: global NIXL context over the destination buffer ---
@@ -177,7 +182,7 @@ def test_p2p_adapter_end_to_end():
         )
 
         # Lookup: every key is resident on the peer.
-        lookup_id = adapter.submit_lookup_and_lock_task(keys, layout)
+        lookup_id = adapter.submit_lookup_and_lock_task(keys, {0: layout})
         bitmap = _poll(lambda: adapter.query_lookup_and_lock_result(lookup_id))
         assert bitmap is not None
         for i in range(_NUM_KEYS):

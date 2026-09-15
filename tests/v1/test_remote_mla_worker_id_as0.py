@@ -83,7 +83,9 @@ def test_remote_mla_worker_id_as0(mock_stream):
 
     # Create memory allocator and local backend
     # First Party
-    from lmcache.v1.memory_management import AdHocMemoryAllocator
+    from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import (
+        AdHocMemoryAllocator,
+    )
 
     pin_allocator = AdHocMemoryAllocator()
     local_cpu_backend = LocalCPUBackend(

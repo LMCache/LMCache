@@ -98,7 +98,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
                 kv_cache_utils.init_none_hash(self.hash_func)
                 NONE_HASH = _normalize_hash_to_int(kv_cache_utils.NONE_HASH)
                 logger.info(
-                    f"Initialized NONE_HASH={NONE_HASH} from vLLM (>= PR#20511)"
+                    "Initialized NONE_HASH=%s from vLLM (>= PR#20511)", NONE_HASH
                 )
             else:
                 NONE_HASH = 0
@@ -152,7 +152,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
                     module = __import__(module_path, fromlist=[func_name])
                     hash_func = getattr(module, func_name)
                     logger.info(
-                        f"Loaded '{func_name}' from {module_path} (direct import)"
+                        "Loaded '%s' from %s (direct import)", func_name, module_path
                     )
                     return hash_func
                 except (ImportError, AttributeError):
@@ -160,8 +160,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         # Fallback to builtin hash
         logger.warning(
-            f"Could not load '{hash_algorithm}' from vLLM. Using builtin hash. "
-            "This may cause inconsistencies in distributed caching."
+            "Could not load '%s' from vLLM. Using builtin hash. "
+            "This may cause inconsistencies in distributed caching.",
+            hash_algorithm,
         )
 
         # Check PYTHONHASHSEED when using builtin hash

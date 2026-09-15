@@ -27,8 +27,7 @@ msgstr "KV Cache 管理"
 msgid ""
 "The multiprocess (MP) cache-management surface (operations such as "
 "``move``, ``pin``, and ``compress``) is **coming soon**."
-msgstr ""
-"MP（多进程）缓存管理接口层（如 ``move``\\ 、\\ ``pin`` 和 ``compress`` 等操作）即将 **推出**\\ 。"
+msgstr "MP（多进程）缓存管理接口层（如 ``move``\\ 、\\ ``pin`` 和 ``compress`` 等操作）即将 **推出**\\ 。"
 
 #: ../../source/mp/kv_cache_management.rst:11
 msgid ""

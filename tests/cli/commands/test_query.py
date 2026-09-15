@@ -15,7 +15,7 @@ from lmcache.cli.commands.query import QueryCommand
 def _engine_metric_map(
     model_id: str = "facebook/opt-125m",
 ) -> dict[str, tuple[str, object]]:
-    """Shape returned by :meth:`lmcache.cli.request.Request.send_request`."""
+    """Metric-map portion of :meth:`lmcache.cli.request.Request.send_request`."""
     return {
         "model": ("Model", model_id),
         "prompt_tokens": ("Input tokens", 10),
@@ -153,7 +153,7 @@ class TestQueryCommandExecute:
     ) -> None:
         """query_engine should call Request.send_request with the expanded prompt."""
         mock_instance = MagicMock()
-        mock_instance.send_request.return_value = _engine_metric_map()
+        mock_instance.send_request.return_value = ("Paris.", _engine_metric_map())
         mock_request_cls.return_value = mock_instance
 
         args = parser.parse_args(
@@ -185,6 +185,8 @@ class TestQueryCommandExecute:
         assert "facebook/opt-125m" in out
         assert "Input tokens" in out
         assert "Prompt tokens" not in out
+        assert "Answer" in out
+        assert "Paris." in out
 
     @patch("lmcache.cli.commands.query.engine_command.Request")
     def test_execute_uses_engine_model_when_cli_model_omitted(
@@ -196,8 +198,9 @@ class TestQueryCommandExecute:
     ) -> None:
         """With no ``--model``, the report uses the model id from engine stats."""
         mock_instance = MagicMock()
-        mock_instance.send_request.return_value = _engine_metric_map(
-            model_id="listed-model"
+        mock_instance.send_request.return_value = (
+            "answer",
+            _engine_metric_map(model_id="listed-model"),
         )
         mock_request_cls.return_value = mock_instance
 

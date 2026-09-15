@@ -5,16 +5,13 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from concurrent.futures import Future
-from typing import Any, Callable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import threading
 import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StoragePluginInterface,
@@ -30,6 +27,14 @@ from lmcache.v1.storage_backend.raw_block import (
     round_up,
     validate_raw_block_io_options,
 )
+
+if TYPE_CHECKING:
+    # Standard
+    from concurrent.futures import Future
+
+    # First Party
+    from lmcache.utils import CacheEngineKey
+    from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -371,6 +376,34 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._pinned_keys.discard(spec.encoded)
         return removed
 
+    def batched_remove(
+        self,
+        keys: list[CacheEngineKey],
+        force: bool = True,
+    ) -> int:
+        """Remove multiple keys in a single locked batch.
+
+        Acquires ``_pin_lock`` once and issues one ``_core.delete_many`` call
+        for the whole batch, instead of locking per key.
+
+        Args:
+            keys: Cache keys to remove.
+            force: Passed through to ``RawBlockCore.delete_many``. When false,
+                locked entries are preserved.
+
+        Returns:
+            Number of keys that were actually removed.
+        """
+        if not keys:
+            return 0
+        encoded_keys = [encode_legacy_key(key).encoded for key in keys]
+        with self._pin_lock:
+            results = self._core.delete_many(encoded_keys, force=force)
+            for encoded_key, removed in zip(encoded_keys, results, strict=True):
+                if removed:
+                    self._pinned_keys.discard(encoded_key)
+        return sum(results)
+
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
@@ -406,22 +439,37 @@ class RustRawBlockBackend(StoragePluginInterface):
         if not pending:
             return None
 
-        if self._core.io_engine == "io_uring" and len(pending) > 1:
-            fut = asyncio.run_coroutine_threadsafe(
-                self._submit_put_many(pending, on_complete_callback),
-                loop,
-            )
-            return [fut]
+        # On scheduling failure, roll back unscheduled items; scheduled ones
+        # release their ref / put-task entry in their coroutine's finally.
+        scheduled_count = 0
+        try:
+            if self._core.io_engine == "io_uring" and len(pending) > 1:
+                coro = self._submit_put_many(pending, on_complete_callback)
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                except Exception:
+                    coro.close()
+                    raise
+                return [fut]
 
-        futures: list[Future] = []
-        for key, spec, obj in pending:
-            futures.append(
-                asyncio.run_coroutine_threadsafe(
-                    self._submit_put_one(key, spec, obj, on_complete_callback),
-                    loop,
-                )
-            )
-        return futures
+            futures: list[Future] = []
+            for key, spec, obj in pending:
+                coro = self._submit_put_one(key, spec, obj, on_complete_callback)
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                except Exception:
+                    coro.close()
+                    raise
+                futures.append(fut)
+                scheduled_count += 1
+            return futures
+        except Exception:
+            for _, _, obj in pending[scheduled_count:]:
+                obj.ref_count_down()
+            with self._put_lock:
+                for key, _, _ in pending[scheduled_count:]:
+                    self._put_tasks.discard(key)
+            raise
 
     async def _submit_put_one(
         self,
@@ -558,7 +606,6 @@ class RustRawBlockBackend(StoragePluginInterface):
             load_results = self._core.load_many_into(
                 [spec.encoded for spec in load_specs],
                 allocated,
-                raise_on_error=True,
             )
             loaded_count = 0
             for ok in load_results:
@@ -597,7 +644,6 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         Raises:
             RuntimeError: If the local CPU allocator backend is unavailable.
-            Exception: Propagates raw-device load failures from the core.
         """
         if not keys:
             return []
@@ -646,7 +692,6 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         Raises:
             RuntimeError: If the local CPU allocator backend is unavailable.
-            Exception: Propagates raw-device load failures from the core.
         """
         del lookup_id, transfer_spec
         return await asyncio.to_thread(self._batched_get_prefix, keys)

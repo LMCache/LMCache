@@ -133,7 +133,7 @@ class TestAerospikeL2Integration:
             done = adapter.pop_completed_store_tasks()
             assert done[tid].is_successful()
 
-            lookup_tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+            lookup_tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
             _wait_fd(adapter.get_lookup_and_lock_event_fd())
             lookup_bm = adapter.query_lookup_and_lock_result(lookup_tid)
             assert lookup_bm is not None

@@ -267,7 +267,7 @@ class TestStoreLookupLoad:
         assert wait_for_event_fd(adapter.get_store_event_fd())
         assert adapter.pop_completed_store_tasks()[tid].is_successful()
 
-        tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         bm = adapter.query_lookup_and_lock_result(tid)
         assert bm is not None and bm.test(0) is True
@@ -287,7 +287,7 @@ class TestStoreLookupLoad:
         adapter.pop_completed_store_tasks()
 
         keys = [create_object_key(i) for i in range(4)]
-        tid = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        tid = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         bm = adapter.query_lookup_and_lock_result(tid)
         assert bm is not None
@@ -324,7 +324,7 @@ class TestStoreLookupLoad:
         adapter: HFBucketL2Adapter,
     ) -> None:
         key = create_object_key(1)
-        tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         assert adapter.query_lookup_and_lock_result(tid) is not None
         assert adapter.query_lookup_and_lock_result(tid) is None
@@ -354,7 +354,7 @@ class TestEviction:
         adapter.pop_completed_store_tasks()
 
     def _lookup(self, adapter: HFBucketL2Adapter, key: ObjectKey):
-        tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         return adapter.query_lookup_and_lock_result(tid)
 
@@ -469,7 +469,7 @@ class TestListener:
         time.sleep(0.05)
         assert any(key in batch for batch in listener.stored)
 
-        tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(tid)
         time.sleep(0.05)

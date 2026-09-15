@@ -22,7 +22,8 @@ I/O queue depth on a single Python thread.
   ``O_DIRECT``.  Required to measure real disk bandwidth.  See alignment
   caveat below.
 - ``read_ahead_size`` (int, optional): Trigger filesystem readahead by
-  issuing a warm-up read of this many bytes at open time.
+  issuing a warm-up read of this many bytes at open time.  This is skipped
+  for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
 
@@ -47,9 +48,9 @@ I/O queue depth on a single Python thread.
       FS block size on parallel filesystems).  This is controlled by
       ``--l1-align-bytes`` (default ``4096``) -- raise it to match the
       FS block size when running on a filesystem with larger blocks.  If
-      the buffer is misaligned, the underlying ``read``/``write`` syscall
-      returns ``EINVAL`` (this is **not** caught by the length-fallback
-      path above and will surface as a runtime error).
+      the buffer is misaligned, the connector reports a runtime error instead
+      of silently falling back to buffered I/O.  This protects real-disk
+      benchmark runs from accidentally measuring the page cache.
 
    If unsure, start with ``use_odirect: false`` and confirm correctness
    before enabling ``O_DIRECT``.

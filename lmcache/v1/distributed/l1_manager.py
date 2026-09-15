@@ -9,16 +9,19 @@ from typing import Literal
 import threading
 
 # First Party
+from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig
+from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener
+from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
     L1MemoryManager,
+)
+from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
+    DevDaxL1MemoryManager,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -89,31 +92,29 @@ L1OperationResult = tuple[L1Error, MemoryObj | None]
 MAX_READ_LOCK_COUNT = 128
 
 
-def _validate_extra_count(extra_count: int) -> int:
-    """Validate and clamp extra_count.
+def _validate_read_locks(read_locks: int) -> int:
+    """Validate and clamp a per-key read-lock count.
 
     Args:
-        extra_count: Extra lock count on top of the
-            default 1 lock.
+        read_locks: Total read locks to take or release per key.
 
     Returns:
-        Clamped value in [0, MAX_READ_LOCK_COUNT - 1].
+        Clamped value in [1, MAX_READ_LOCK_COUNT].
     """
-    if extra_count < 0:
+    if read_locks < 1:
         logger.warning(
-            "L1Manager: extra_count=%d is invalid, clamping to 0",
-            extra_count,
+            "L1Manager: read_locks=%d is invalid, clamping to 1",
+            read_locks,
         )
-        return 0
-    upper = MAX_READ_LOCK_COUNT - 1
-    if extra_count > upper:
+        return 1
+    if read_locks > MAX_READ_LOCK_COUNT:
         logger.warning(
-            "L1Manager: extra_count=%d exceeds limit=%d, clamping",
-            extra_count,
-            upper,
+            "L1Manager: read_locks=%d exceeds limit=%d, clamping",
+            read_locks,
+            MAX_READ_LOCK_COUNT,
         )
-        return upper
-    return extra_count
+        return MAX_READ_LOCK_COUNT
+    return read_locks
 
 
 def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
@@ -188,16 +189,23 @@ class L1Manager:
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
-        # GDS and CPU L1 are mutually exclusive tiers, each driven by its own
-        # config: the GDS tier reads only ``gds_l1_config`` (slab size +
-        # alignment), the CPU tier only ``memory_config``.
+        # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
+        # owns its backing allocator instead of branching inside the CPU path.
         self._memory_manager: L1ManagerProtocol
         if config.gds_l1_config is not None:
             self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
             logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
+        elif config.memory_config.devdax_path:
+            self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
+            logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
         else:
             self._memory_manager = L1MemoryManager(config.memory_config)
 
+        # Precomputed: it derives from config alone and never changes, and
+        # report_status runs under the global L1 lock on a hot polling path.
+        self._configured_capacity_bytes = sum(
+            get_configured_capacity_bytes(config).values()
+        )
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
 
@@ -238,18 +246,17 @@ class L1Manager:
     def reserve_read(
         self,
         keys: list[ObjectKey],
-        extra_count: int = 0,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve read access for the given keys.
 
         Args:
             keys: The list of object keys to reserve
                 read access for.
-            extra_count: Extra read locks on top of the
-                default 1 lock.  Total locks acquired per
-                key = 1 + extra_count.  Useful when multiple
-                workers each consume one read lock for the
-                same key (e.g. MLA models with TP > 1).
+            read_locks: Total read locks acquired per key --
+                one per worker that consumes a read lock
+                for the same key (e.g. MLA models with
+                TP > 1).
 
         Returns:
             A dictionary mapping each object key to a tuple
@@ -260,8 +267,7 @@ class L1Manager:
             KEY_NOT_READABLE: The key exists but is not
                 readable.
         """
-        extra_count = _validate_extra_count(extra_count)
-        total = 1 + extra_count
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -334,7 +340,7 @@ class L1Manager:
     def finish_read(
         self,
         keys: list[ObjectKey],
-        extra_count: int = 0,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -344,10 +350,11 @@ class L1Manager:
         Args:
             keys: The list of object keys to finish read
                 access for.
-            extra_count: Extra read locks to release on top
-                of the default 1.  Must match the
-                ``extra_count`` used in the corresponding
-                ``reserve_read`` call.
+            read_locks: Read locks to release per key.  A caller
+                releasing only its own read lock passes 1 (the
+                default); the reservation owner releasing the
+                whole reservation passes the ``reserve_read``
+                total.
 
         Returns:
             A dictionary mapping each object key to an
@@ -359,8 +366,7 @@ class L1Manager:
                 non-read-locked, which means the reader may
                 read inconsistent data.
         """
-        extra_count = _validate_extra_count(extra_count)
-        total = 1 + extra_count
+        total = _validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -409,6 +415,7 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
@@ -423,7 +430,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": need_to_free_keys},
+                metadata={"keys": need_to_free_keys, "meta": freed_meta},
             )
         )
 
@@ -533,6 +540,10 @@ class L1Manager:
     ) -> dict[ObjectKey, L1Error]:
         """Finish write access for the given keys.
 
+        Temporary objects are unlocked normally but do not emit write-finished
+        notifications because they are internal staging buffers that must not
+        be routed to L2 storage.
+
         Args:
             keys: The list of object keys to finish write access for.
 
@@ -545,7 +556,8 @@ class L1Manager:
                 which means the writer may have caused inconsistent data.
         """
         ret: dict[ObjectKey, L1Error] = {}
-        successful_keys: list[ObjectKey] = []
+        notification_keys: list[ObjectKey] = []
+        notification_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -573,23 +585,29 @@ class L1Manager:
 
             entry.write_lock.unlock()
             ret[key] = L1Error.SUCCESS
-            successful_keys.append(key)
+            if not entry.is_temporary:
+                notification_keys.append(key)
+                notification_keys_meta.append(self._object_meta(entry.memory_obj))
 
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(successful_keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_WRITE_FINISHED,
-                metadata={"keys": successful_keys},
+        if notification_keys:
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_write_finished(notification_keys)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_WRITE_FINISHED,
+                    metadata={
+                        "keys": notification_keys,
+                        "meta": notification_keys_meta,
+                    },
+                )
             )
-        )
         return ret
 
     @l1_mgr_synchronized
     def finish_write_and_reserve_read(
         self,
         keys: list[ObjectKey],
-        extra_count: int = 0,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Atomically finish write and acquire read lock for the given keys.
 
@@ -600,10 +618,9 @@ class L1Manager:
 
         Args:
             keys: Keys to transition from write-locked to read-locked.
-            extra_count: Extra read locks on top of the default 1 lock.
-                Total locks acquired per key = 1 + extra_count.  Useful
-                when multiple TP workers each consume one read lock for
-                the same key (e.g. MLA models with TP > 1).
+            read_locks: Total read locks acquired per key -- one per TP
+                worker that consumes a read lock for the same key
+                (e.g. MLA models with TP > 1).
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -614,10 +631,10 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not write-locked, or it already
                 has read locks.
         """
-        extra_count = _validate_extra_count(extra_count)
-        total = 1 + extra_count
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
+        successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -647,31 +664,37 @@ class L1Manager:
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
+            successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": successful_keys_meta},
             )
         )
         return ret
 
     @l1_mgr_synchronized
-    def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+    def delete(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
         """Delete the given keys from L1 cache.
 
         Args:
             keys: The list of object keys to delete.
+            force: When True, delete even a read/write-locked key. This may free
+                memory a concurrent store/read still uses (same hazard as
+                :meth:`clear` with ``force=True``); use with care.
 
         Returns:
             A dictionary mapping each object key to an L1Error.
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is locked (either write-locked or read-locked
-                and cannot be deleted).
+            KEY_IS_LOCKED: The key is write-locked or read-locked and cannot be
+                deleted. Never returned when ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -683,15 +706,19 @@ class L1Manager:
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            if entry.read_lock.is_locked() or entry.write_lock.is_locked():
+            locked = entry.read_lock.is_locked() or entry.write_lock.is_locked()
+            if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
+            if locked:
+                logger.warning("L1Manager: force-deleting locked key %s", key)
 
             need_to_free.append(entry.memory_obj)
             del self._objects[key]
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
@@ -699,7 +726,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": freed_meta},
             )
         )
         return ret
@@ -712,6 +739,13 @@ class L1Manager:
         """
         for listener in self._registered_listeners:
             listener.on_l1_keys_accessed(keys)
+        if self._event_bus.has_subscribers(EventType.L1_KEYS_ACCESSED):
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_ACCESSED,
+                    metadata={"keys": keys},
+                )
+            )
 
     @l1_mgr_synchronized
     def clear(self, force: bool = False) -> None:
@@ -732,6 +766,7 @@ class L1Manager:
             )
             all_keys = list(self._objects.keys())
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+            all_meta = [self._object_meta(obj) for obj in all_memory_objs]
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
@@ -739,7 +774,7 @@ class L1Manager:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": all_keys},
+                    metadata={"keys": all_keys, "meta": all_meta},
                 )
             )
             logger.info(
@@ -762,6 +797,7 @@ class L1Manager:
         for key in keys_to_clear:
             del self._objects[key]
 
+        cleared_meta = [self._object_meta(obj) for obj in objs_to_free]
         self._memory_manager.free(objs_to_free)
 
         if keys_to_clear:
@@ -770,7 +806,7 @@ class L1Manager:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": keys_to_clear},
+                    metadata={"keys": keys_to_clear, "meta": cleared_meta},
                 )
             )
 
@@ -839,6 +875,9 @@ class L1Manager:
             if entry.is_temporary:
                 temporary += 1
         used, total = self._memory_manager.get_memory_usage()
+        # ``memory_total_bytes`` is what the allocator currently backs (the
+        # grown heap on the lazy tier); this is the declared size. Summed to
+        # fit this dict's flat shape; ``0`` means undeclared.
         return {
             "is_healthy": self._memory_manager.memcheck(),
             "total_object_count": len(self._objects),
@@ -847,6 +886,7 @@ class L1Manager:
             "temporary_count": temporary,
             "memory_used_bytes": used,
             "memory_total_bytes": total,
+            "memory_configured_bytes": self._configured_capacity_bytes,
             "memory_usage_ratio": used / total if total > 0 else 0.0,
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,
@@ -887,3 +927,10 @@ class L1Manager:
             num_read_locked,
         )
         return mem_check_result
+
+    def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
+        """Build the listener-facing metadata for one resident object."""
+        return L1ObjectMeta(
+            size_bytes=memory_obj.get_size(),
+            backend=self._memory_manager.get_backend_type(memory_obj),
+        )

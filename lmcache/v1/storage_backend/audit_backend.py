@@ -18,12 +18,13 @@ class AuditBackend(StorageBackendInterface):
     Audit wrapper for StorageBackend that logs operations and measures performance.
     """
 
-    def __init__(self, real_backend: StorageBackendInterface):
+    def __init__(self, real_backend: StorageBackendInterface) -> None:
+        """Wrap *real_backend* with operation logging and timing."""
         super().__init__(dst_device=real_backend.dst_device)
         self.real_backend = real_backend
         self.logger = logger.getChild("audit")
         self.logger.info(
-            f"[AUDIT_BACKEND] Initialized for backend: {str(real_backend)}"
+            "[AUDIT_BACKEND] Initialized for backend: %s", str(real_backend)
         )
 
     def _log_operation(
@@ -35,31 +36,36 @@ class AuditBackend(StorageBackendInterface):
         result=None,
         error=None,
         size=None,
-    ):
+    ) -> None:
         """Helper method to log operation results."""
         cost = (time.perf_counter() - start_time) * 1000
         backend_name = str(self.real_backend)
 
         if error:
             self.logger.error(
-                f"[AUDIT_BACKEND][{backend_name}]:{op_name}|FAILED|"
-                f"Key:{key}|Error:{str(error)}"
+                "[AUDIT_BACKEND][%s]:%s|FAILED|Key:%s|Error:%s",
+                backend_name,
+                op_name,
+                key,
+                str(error),
             )
         elif success:
-            log_msg = (
-                f"[AUDIT_BACKEND][{backend_name}]:{op_name}|SUCCESS|Cost:{cost:.2f}ms"
-            )
+            log_msg = "[AUDIT_BACKEND][%s]:%s|SUCCESS|Cost:%.2fms"
+            log_args = [backend_name, op_name, cost]
             if key:
-                log_msg += f"|Key:{key}"
+                log_msg += "|Key:%s"
+                log_args.append(key)
             if size is not None:
-                log_msg += f"|Size:{size}"
+                log_msg += "|Size:%s"
+                log_args.append(size)
             if result is not None:
-                log_msg += f"|Result:{result}"
-            self.logger.info(log_msg)
+                log_msg += "|Result:%s"
+                log_args.append(result)
+            self.logger.info(log_msg, *log_args)
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """Check key existence with audit logging."""
-        self.logger.debug(f"[AUDIT_BACKEND] Checking contains for key: {key}")
+        self.logger.debug("[AUDIT_BACKEND] Checking contains for key: %s", key)
         start_time = time.perf_counter()
         try:
             result = self.real_backend.contains(key, pin)
@@ -71,7 +77,7 @@ class AuditBackend(StorageBackendInterface):
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Retrieve data with audit logging."""
-        self.logger.debug(f"[AUDIT_BACKEND] Getting data for key: {key}")
+        self.logger.debug("[AUDIT_BACKEND] Getting data for key: %s", key)
         start_time = time.perf_counter()
         try:
             result = self.real_backend.get_blocking(key)
@@ -95,8 +101,8 @@ class AuditBackend(StorageBackendInterface):
             self._log_operation("CLOSE", start_time, None, False, error=e)
             raise
 
-    # Implement other required methods following the same pattern
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
+        """Check if *key* is in pending put tasks."""
         start_time = time.perf_counter()
         try:
             result = self.real_backend.exists_in_put_tasks(key)
@@ -113,6 +119,7 @@ class AuditBackend(StorageBackendInterface):
         transfer_spec: Any = None,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """Batched submit put task with audit logging."""
         sizes = [len(obj.byte_array) for obj in memory_objs]
         start_time = time.perf_counter()
         try:
@@ -134,9 +141,12 @@ class AuditBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
+        """Batched non-blocking get with audit logging."""
         start_time = time.perf_counter()
         try:
-            result = await self.real_backend.batched_get_non_blocking(lookup_id, keys)
+            result = await self.real_backend.batched_get_non_blocking(
+                lookup_id, keys, transfer_spec
+            )
             self._log_operation("BATCHED_GET_NON_BLOCKING", start_time, None, True)
             return result
         except Exception as e:
@@ -151,6 +161,7 @@ class AuditBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         pin: bool = False,
     ) -> int:
+        """Batched async contains with audit logging."""
         start_time = time.perf_counter()
         try:
             result = await self.real_backend.batched_async_contains(
@@ -165,6 +176,7 @@ class AuditBackend(StorageBackendInterface):
             raise
 
     def pin(self, key: CacheEngineKey) -> bool:
+        """Pin *key* in cache with audit logging."""
         start_time = time.perf_counter()
         try:
             result = self.real_backend.pin(key)
@@ -175,6 +187,7 @@ class AuditBackend(StorageBackendInterface):
             raise
 
     def unpin(self, key: CacheEngineKey) -> bool:
+        """Unpin *key* with audit logging."""
         start_time = time.perf_counter()
         try:
             result = self.real_backend.unpin(key)
@@ -188,6 +201,7 @@ class AuditBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
+        """Batched blocking get with audit logging."""
         start_time = time.perf_counter()
         try:
             result = self.real_backend.batched_get_blocking(keys)
@@ -206,6 +220,7 @@ class AuditBackend(StorageBackendInterface):
             raise
 
     def remove(self, key: CacheEngineKey, free_obj: bool = True) -> bool:
+        """Remove *key* from cache with audit logging."""
         start_time = time.perf_counter()
         try:
             result = self.real_backend.remove(key, free_obj)
@@ -220,6 +235,7 @@ class AuditBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         free_obj: bool = True,
     ) -> int:
+        """Batched remove with audit logging."""
         start_time = time.perf_counter()
         try:
             result = self.real_backend.batched_remove(keys, free_obj)
@@ -229,5 +245,6 @@ class AuditBackend(StorageBackendInterface):
             self._log_operation("BATCHED_REMOVE", start_time, None, False, error=e)
             raise
 
-    def get_allocator_backend(self):
+    def get_allocator_backend(self):  # type: ignore[no-untyped-def]
+        """Delegate to real backend."""
         return self.real_backend.get_allocator_backend()

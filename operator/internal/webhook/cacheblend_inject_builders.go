@@ -34,44 +34,37 @@ const (
 
 	// cbPluginMountPath is the in-container path the cb-plugin volume mounts at,
 	// in both the init container (read-write, the cp target) and the vLLM
-	// container (read-only). It must stay in lockstep with cbPythonPath
-	// (design §9.5).
+	// container (read-only). It is also the vLLM container's prepended PYTHONPATH
+	// entry, so the two stay in lockstep (design §9.5).
 	cbPluginMountPath = "/cb-plugin"
 
 	// cbSharedDirEnvName is the env var the payload init container reads to learn
 	// where to copy the plugin tree (cacheblend-plugin docker/Dockerfile:22-29).
 	cbSharedDirEnvName = "SHARED_DIR"
 
-	// cbPythonPath is the value prepended to the vLLM container's PYTHONPATH so
-	// vLLM (and every spawned engine-core/worker/front-end subprocess) discovers
-	// the staged plugin (design §7 M4). It must equal cbPluginMountPath.
-	cbPythonPath = "/cb-plugin"
-
-	// pythonPathEnvName is the standard Python module search-path env var.
-	pythonPathEnvName = "PYTHONPATH"
-
 	// cbInitContainerName is the name of the injected payload init container.
 	cbInitContainerName = "cb-plugin-stage"
 )
 
-// CacheBlend-required vLLM flag names and fixed values (design §7 M5). The
-// CacheBlend matcher and connector hard-require these; several fail loudly,
-// --no-async-scheduling fails silently (MoE garble).
-const (
-	cbFlagAttentionBackend = "--attention-backend"
-	cbValAttentionBackend  = "CUSTOM"
+// cbStaging is the CacheBlend injector's payload-staging parameters, consumed by
+// the shared payloadStaging builders. The vLLM container's prepended PYTHONPATH
+// equals cbPluginMountPath so the staged plugin is discoverable (design §7 M4).
+var cbStaging = payloadStaging{
+	volumeName:   cbPluginVolumeName,
+	mountPath:    cbPluginMountPath,
+	initName:     cbInitContainerName,
+	sharedDirEnv: cbSharedDirEnvName,
+}
 
+// CacheBlend-required vLLM flag names and fixed values (design §7 M5). The
+// CacheBlend matcher and connector hard-require these.
+const (
 	cbFlagKVTransferConfig = "--kv-transfer-config"
 
 	cbFlagNoChunkedPrefill = "--no-enable-chunked-prefill"
 
-	cbFlagBlockSize = "--block-size"
-	cbValBlockSize  = "64"
-
 	cbFlagPipelineParallelSize = "--pipeline-parallel-size"
 	cbValPipelineParallelSize  = "1"
-
-	cbFlagNoAsyncScheduling = "--no-async-scheduling"
 
 	// cudagraph mode flags. Eager (default) forces --enforce-eager; full
 	// decode-only enables decode graphs while never using full graphs in prefill
@@ -83,12 +76,7 @@ const (
 // BuildCBPluginVolume returns the shared emptyDir volume the init container
 // stages the plugin into and the vLLM container reads it back from (M1).
 func BuildCBPluginVolume() corev1.Volume {
-	return corev1.Volume{
-		Name: cbPluginVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
-	}
+	return cbStaging.volume()
 }
 
 // BuildCBInitContainer returns the payload init container (M2). It mounts the
@@ -100,31 +88,13 @@ func BuildCBPluginVolume() corev1.Volume {
 //     lmcache_cacheblend plugin tree under /payload.
 //   - pullPolicy: the image pull policy for that image.
 func BuildCBInitContainer(payloadImage string, pullPolicy corev1.PullPolicy) corev1.Container {
-	return corev1.Container{
-		Name:            cbInitContainerName,
-		Image:           payloadImage,
-		ImagePullPolicy: pullPolicy,
-		Env: []corev1.EnvVar{
-			{Name: cbSharedDirEnvName, Value: cbPluginMountPath},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      cbPluginVolumeName,
-				MountPath: cbPluginMountPath,
-				ReadOnly:  false,
-			},
-		},
-	}
+	return cbStaging.initContainer(payloadImage, pullPolicy)
 }
 
 // BuildCBVolumeMount returns the read-only mount of the cb-plugin volume added to
 // the target vLLM container (M3).
 func BuildCBVolumeMount() corev1.VolumeMount {
-	return corev1.VolumeMount{
-		Name:      cbPluginVolumeName,
-		MountPath: cbPluginMountPath,
-		ReadOnly:  true,
-	}
+	return cbStaging.volumeMount()
 }
 
 // BuildCBPodEnv returns the env list for the target vLLM container with
@@ -139,32 +109,7 @@ func BuildCBVolumeMount() corev1.VolumeMount {
 //
 // Returns a new env list; the input is not mutated.
 func BuildCBPodEnv(existing []corev1.EnvVar) []corev1.EnvVar {
-	out := make([]corev1.EnvVar, 0, len(existing)+1)
-	found := false
-	for _, e := range existing {
-		if e.Name == pythonPathEnvName {
-			found = true
-			prepended := e
-			if prepended.ValueFrom != nil {
-				// A valueFrom PYTHONPATH cannot be string-prepended safely; in
-				// that rare case overwrite with the plugin path so the plugin is
-				// at least discoverable (the alternative is no plugin at all).
-				prepended.ValueFrom = nil
-				prepended.Value = cbPythonPath
-			} else if prepended.Value == "" {
-				prepended.Value = cbPythonPath
-			} else {
-				prepended.Value = cbPythonPath + ":" + prepended.Value
-			}
-			out = append(out, prepended)
-			continue
-		}
-		out = append(out, e)
-	}
-	if !found {
-		out = append(out, corev1.EnvVar{Name: pythonPathEnvName, Value: cbPythonPath})
-	}
-	return out
+	return cbStaging.prependPythonPath(existing)
 }
 
 // cudagraphArgs returns the cudagraph-mode flag set for the given mode. "eager"
@@ -210,14 +155,11 @@ func BuildCBArgs(existingArgs []string, kvTransferConfigJSON, cudagraph string) 
 	args := make([]string, len(existingArgs))
 	copy(args, existingArgs)
 
-	args = applyArg(args, cbFlagAttentionBackend, cbValAttentionBackend)
 	if kvTransferConfigJSON != "" {
 		args = applyArg(args, cbFlagKVTransferConfig, kvTransferConfigJSON)
 	}
 	args = applyBareFlag(args, cbFlagNoChunkedPrefill)
-	args = applyArg(args, cbFlagBlockSize, cbValBlockSize)
 	args = applyArg(args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)
-	args = applyBareFlag(args, cbFlagNoAsyncScheduling)
 
 	// cudagraphArgs returns either a single bare flag (--enforce-eager), a
 	// [flag, value] pair (full_decode_only), or nil (piecewise). Apply with

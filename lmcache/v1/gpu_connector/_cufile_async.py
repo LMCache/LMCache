@@ -124,6 +124,30 @@ def _check(err: "CUfileError", op: str) -> None:
         )
 
 
+# --- Handle registration -------------------------------------------
+
+
+def register_handle(fd: int) -> Any:
+    """Register an open fd with cuFile and return the ``CUfileHandle_t``.
+
+    Opens the cuFile driver on first use. The returned handle is accepted
+    directly as the first argument of ``cuFileReadAsync`` / ``cuFileWriteAsync``.
+    """
+    _ensure_driver_open()
+    # Third Party
+    from cufile.bindings import cuFileHandleRegister
+
+    return cuFileHandleRegister(fd)
+
+
+def deregister_handle(handle: Any) -> None:
+    """Reverse of :func:`register_handle` (``cuFileHandleDeregister``)."""
+    # Third Party
+    from cufile.bindings import cuFileHandleDeregister
+
+    cuFileHandleDeregister(handle)
+
+
 # --- Buffer / stream registration ----------------------------------
 
 
@@ -257,10 +281,6 @@ class AsyncHandle:
         fallocate_size: Optional[int] = None,
         mode: int = 0o644,
     ) -> None:
-        _ensure_driver_open()
-        # Third Party
-        from cufile.bindings import cuFileHandleRegister
-
         flags = os.O_DIRECT
         if writable:
             flags |= os.O_CREAT | os.O_RDWR
@@ -272,7 +292,7 @@ class AsyncHandle:
         try:
             if fallocate_size is not None and writable:
                 os.posix_fallocate(self._fd, 0, fallocate_size)
-            self._handle = cuFileHandleRegister(self._fd)
+            self._handle = register_handle(self._fd)
         except Exception:
             os.close(self._fd)
             raise
@@ -366,11 +386,8 @@ class AsyncHandle:
         """Deregister the cuFile handle and close the fd."""
         if self._fd < 0:
             return
-        # Third Party
-        from cufile.bindings import cuFileHandleDeregister
-
         try:
-            cuFileHandleDeregister(self._handle)
+            deregister_handle(self._handle)
         finally:
             try:
                 os.close(self._fd)

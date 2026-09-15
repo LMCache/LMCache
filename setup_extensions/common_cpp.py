@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Common C++ extension builders shared by all backends.
 
-These extensions (storage manager, Redis, filesystem)
+These extensions (lmcache_native, Redis, filesystem)
 are always compiled regardless of which backend is selected.
 """
 
 # Standard
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+ROOT_DIR = Path(__file__).parent.parent
 
 if TYPE_CHECKING:
     # Third Party
@@ -28,16 +31,16 @@ class CommonExtSpec:
 
 COMMON_EXTENSIONS: list[CommonExtSpec] = [
     CommonExtSpec(
-        name="native_storage_ops",
+        name="lmcache_native",
         sources=[
-            "csrc/storage_manager/bitmap.cpp",
-            "csrc/storage_manager/fold.cpp",
-            "csrc/storage_manager/periodic_event_notifier.cpp",
-            "csrc/storage_manager/pybind.cpp",
-            "csrc/storage_manager/ttl_lock.cpp",
-            "csrc/storage_manager/utils.cpp",
+            "csrc/lmcache_native/bitmap.cpp",
+            "csrc/lmcache_native/fold.cpp",
+            "csrc/lmcache_native/periodic_event_notifier.cpp",
+            "csrc/lmcache_native/pybind.cpp",
+            "csrc/lmcache_native/ttl_lock.cpp",
+            "csrc/lmcache_native/utils.cpp",
         ],
-        include_dirs=["csrc/storage_manager"],
+        include_dirs=["csrc/lmcache_native", "csrc"],
     ),
     CommonExtSpec(
         name="lmcache_redis",
@@ -84,7 +87,7 @@ def build_common_cpp(
         cpp_extension.CppExtension(
             "lmcache." + spec.name,
             sources=spec.sources,
-            include_dirs=spec.include_dirs,
+            include_dirs=[str(ROOT_DIR / d) for d in spec.include_dirs],
             extra_compile_args={
                 "cxx": (
                     (profile.extra_cxx_flags_for(spec) if profile else [])

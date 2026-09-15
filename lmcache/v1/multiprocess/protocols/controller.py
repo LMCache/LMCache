@@ -5,6 +5,7 @@ Controller protocol definitions for cache management and configuration.
 This module defines the protocol for:
 - CLEAR: Clear all caches in the server
 - GET_CHUNK_SIZE: Get the chunk size configuration from the server
+- GET_EXPERIMENTAL: Get the enabled experimental intermediate tensor transfer
 """
 
 # First Party
@@ -14,6 +15,7 @@ from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefiniti
 REQUEST_NAMES = [
     "CLEAR",
     "GET_CHUNK_SIZE",
+    "GET_EXPERIMENTAL",
     "PING",
 ]
 
@@ -53,5 +55,14 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[int | None],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
+        ),
+        # Get the enabled experimental intermediate tensor transfer types
+        # Payload: None
+        # Returns: list[str]: the experimental intermediate tensor transfer
+        # types the server was launched with (empty when none are enabled)
+        "GET_EXPERIMENTAL": ProtocolDefinition(
+            payload_classes=[],
+            response_class=list[str],
+            handler_type=HandlerType.SYNC,
         ),
     }

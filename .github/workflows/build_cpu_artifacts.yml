@@ -81,14 +81,14 @@ jobs:
               run: |
                 set -e
                 # Required: common C++ extensions.
-                for mod in native_storage_ops lmcache_redis lmcache_fs; do
+                for mod in lmcache_native lmcache_redis lmcache_fs; do
                   if ! unzip -l dist/lmcache-*.whl | grep -qE "lmcache/${mod}\..*\.so"; then
                     echo "::error::missing common C++ extension: ${mod}"
                     exit 1
                   fi
                 done
                 # Forbidden: GPU extensions.
-                for mod in c_ops xpu_ops; do
+                for mod in cuda_ops xpu_ops; do
                   if unzip -l dist/lmcache-*.whl | grep -qE "lmcache/${mod}\..*\.so"; then
                     echo "::error::unexpected GPU extension in CPU wheel: ${mod}"
                     exit 1
@@ -106,13 +106,17 @@ jobs:
                 import lmcache
                 assert lmcache.torch_device_type == 'cpu', lmcache.torch_device_type
                 "
-                python -c "import lmcache.native_storage_ops"
+                python -c "
+                import lmcache.lmcache_native as native
+                assert hasattr(native, 'TransferDirection')
+                "
                 python -c "import lmcache.lmcache_redis"
                 python -c "import lmcache.lmcache_fs"
-                # c_ops resolves to the python_ops_fallback shim on CPU.
+                # On CPU, lmcache.device_ops is the resolved torch baseline.
                 python -c "
-                import sys, lmcache, lmcache.c_ops
-                assert sys.modules['lmcache.c_ops'].__name__ == 'lmcache.python_ops_fallback'
+                import lmcache
+                assert lmcache.device_ops.device_type == 'cpu'
+                assert not hasattr(lmcache.device_ops, 'TransferDirection')
                 "
 
             - name: Upload CPU release artifacts to GHA

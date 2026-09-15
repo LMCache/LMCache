@@ -8,6 +8,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -85,6 +86,7 @@ class TestPrefetchHandle:
             prefetch_request_id=7,
             external_request_id="req-1",
             l1_found_indices=(0, 1, 2),
+            l1_hit_chunks=3,
             total_requested_keys=10,
             submit_time=12345.6,
             l2_orig_indices=(3, 4, 5),
@@ -97,6 +99,30 @@ class TestTrimPolicy:
     def test_roundtrip(self):
         for p in TrimPolicy:
             assert _roundtrip(p) is p
+
+
+class TestAttnWindowDesc:
+    def test_full_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1]))
+        assert out.num_chunks_in_sw == [-1]
+        assert out.is_full_attention(0)
+
+    def test_mixed_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1, 4, 1]))
+        assert out.num_chunks_in_sw == [-1, 4, 1]
+        assert out.is_full_attention(0)
+        assert not out.is_full_attention(1)
+        assert out.num_object_groups == 3
+
+    def test_world_size_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1, 4], world_size=4))
+        assert out.num_chunks_in_sw == [-1, 4]
+        assert out.world_size == 4
+
+    def test_empty_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[]))
+        assert out.num_chunks_in_sw == []
+        assert out.num_object_groups == 0
 
 
 class TestSet:
@@ -140,12 +166,12 @@ class TestEncodeArgs:
         args = {
             "keys": [ObjectKey(chunk_hash=b"x", model_name="m", kv_rank=0)],
             "mode": "new",
-            "extra_count": 0,
+            "num_kv_readers": 1,
         }
         encoded = codecs.encode_args(args)
-        # mode and extra_count pass through; keys is wrapped.
+        # mode and num_kv_readers pass through; keys is wrapped.
         assert encoded["mode"] == "new"
-        assert encoded["extra_count"] == 0
+        assert encoded["num_kv_readers"] == 1
         assert isinstance(encoded["keys"], list)
         decoded = codecs.decode_args(encoded)
         assert decoded == args

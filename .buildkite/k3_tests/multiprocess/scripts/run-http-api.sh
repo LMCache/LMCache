@@ -187,23 +187,23 @@ assert_json_key "GET /healthcheck — status" "$HTTP_DIR/healthcheck.json" "stat
 # ── Step 2: Configuration ──────────────────────────────────
 echo ""
 echo "============================================"
-echo "=== Step 2: Configuration (/conf) ==="
+echo "=== Step 2: Configuration (/config) ==="
 echo "============================================"
 
-check_http "GET /conf" GET "/conf" "$HTTP_DIR/conf.json" 200
+check_http "GET /config" GET "/config" "$HTTP_DIR/config.json" 200
 
 python3 -c "
 import json, sys
-with open('$HTTP_DIR/conf.json') as f:
+with open('$HTTP_DIR/config.json') as f:
     data = json.load(f)
 required = ['mp', 'storage_manager', 'observability', 'http']
 missing = [k for k in required if k not in data]
 if missing:
-    print(f'FAIL: /conf missing keys: {missing}')
+    print(f'FAIL: /config missing keys: {missing}')
     sys.exit(1)
 print('All config sections present: ' + ', '.join(required))
-" && pass "GET /conf — required keys present" \
-  || fail "GET /conf — required keys present" "missing config sections"
+" && pass "GET /config — required keys present" \
+  || fail "GET /config — required keys present" "missing config sections"
 
 # ── Step 3: Status ─────────────────────────────────────────
 echo ""
@@ -301,11 +301,11 @@ assert_json_key "GET /periodic-threads-health — healthy key" "$HTTP_DIR/period
 # ── Step 8: Clear Cache ────────────────────────────────────
 echo ""
 echo "============================================"
-echo "=== Step 8: Clear Cache (/clear-cache) ==="
+echo "=== Step 8: Clear Cache (/cache/clear) ==="
 echo "============================================"
 
-check_http "POST /clear-cache" POST "/clear-cache" "$HTTP_DIR/clear_cache.json" 200
-assert_json_key "POST /clear-cache — status" "$HTTP_DIR/clear_cache.json" "status" "ok"
+check_http "POST /cache/clear" POST "/cache/clear" "$HTTP_DIR/clear_cache.json" 200
+assert_json_key "POST /cache/clear — status" "$HTTP_DIR/clear_cache.json" "status" "ok"
 
 # ── Step 9: Quota CRUD ─────────────────────────────────────
 echo ""

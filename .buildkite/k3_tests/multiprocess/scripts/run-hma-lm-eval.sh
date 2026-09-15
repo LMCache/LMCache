@@ -41,6 +41,11 @@ LIMIT="${LIMIT:-100}"
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0}"
 # Seconds to let async LMCache stores drain before the retrieve run.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
+# Gemma 4 is a sliding-window + full-attention hybrid whose groups have
+# different block sizes; register one object group per group so the per-group
+# HMA store/retrieve stays correct. Set explicitly (not via server default,
+# which flipped to off in #3869/#4437) so the bit-exact check is deterministic.
+SEPARATE_OBJECT_GROUPS="${SEPARATE_OBJECT_GROUPS:-1}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 # LMCache MP server log, scanned to confirm the retrieve run hit LMCache.

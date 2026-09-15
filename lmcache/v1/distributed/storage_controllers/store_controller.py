@@ -277,7 +277,7 @@ class StoreController(StorageControllerInterface):
             )
             register_gauge(
                 "lmcache.l2_store",
-                "lmcache_mp.l2_adapters",
+                "lmcache_mp.l2_store_adapters",
                 (
                     "Count of L2 adapters attached to the store controller, "
                     "tagged by ``state`` (active or draining)."
@@ -653,7 +653,16 @@ class StoreController(StorageControllerInterface):
                 continue
 
             adapter = self._l2_adapters[adapter_index]
-            task_id = adapter.submit_store_task(successful_keys, successful_objs)
+            try:
+                task_id = adapter.submit_store_task(successful_keys, successful_objs)
+            except Exception:
+                logger.exception(
+                    "Failed to submit store task to adapter %d for %d keys.",
+                    adapter_index,
+                    len(successful_keys),
+                )
+                l1_mgr.finish_read(successful_keys)
+                continue
 
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,

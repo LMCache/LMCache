@@ -86,7 +86,7 @@ def _log_config(self):
         value = getattr(self, name)
         config_dict[name] = value
 
-    logger.info(f"Controller Configuration: {config_dict}")
+    logger.info("Controller Configuration: %s", config_dict)
     return self
 
 
@@ -134,7 +134,7 @@ def override_controller_config_from_dict(
                         converted_value = env_converter(value)
                         setattr(config, key, converted_value)
                     except (ValueError, json.JSONDecodeError) as e:
-                        logger.warning(f"Failed to convert {key}={value!r}: {e}")
+                        logger.warning("Failed to convert %s=%r: %s", key, value, e)
                         # Keep the original value if conversion fails
                         setattr(config, key, value)
                 else:
@@ -145,10 +145,13 @@ def override_controller_config_from_dict(
             new_value = getattr(config, key)
             if old_value != new_value:
                 logger.info(
-                    f"Override controller config: {key} = {new_value} (was {old_value})"
+                    "Override controller config: %s = %s (was %s)",
+                    key,
+                    new_value,
+                    old_value,
                 )
         else:
-            logger.warning(f"Unknown controller config key: {key}, ignoring")
+            logger.warning("Unknown controller config key: %s, ignoring", key)
 
 
 def load_controller_config_with_overrides(

@@ -36,6 +36,7 @@ Focus: separating prefill from decode, and sharing KV cache across vLLM instance
 | Example | What it does | Hardware |
 |---------|-------------|----------|
 | [`disagg_prefill_mp/`](disagg_prefill_mp/) | PD disaggregation via the LMCache multiprocess server. P and D exchange KV through the LMCache MP service — no direct NIXL connection required. **Recommended starting point for PD disaggregation.** | 2 GPUs |
+| [`kv_cache_reuse/share_across_engines/`](kv_cache_reuse/share_across_engines/) | An SGLang instance computes a prompt KV cache and a vLLM instance reuses it through one LMCache multiprocess server. Includes a pinned `uv` setup and an automated correctness check. | 2 GPUs (80 GB each for the validated Qwen 32B model) |
 | [`disagg_prefill/1p1d/`](disagg_prefill/1p1d/) | PD disaggregation with direct NIXL transfer: 1 prefill server + 1 decode server + a FastAPI proxy. Includes a benchmark script with expected latency numbers. High-bandwidth interconnect (NVLink or PCIe Gen4/5) is strongly recommended — without it, KV transfer overhead may negate the gains. | 2 GPUs + [NIXL](https://github.com/ai-dynamo/nixl) |
 | [`kv_cache_reuse/share_across_instances/centralized_sharing/`](kv_cache_reuse/share_across_instances/centralized_sharing/) | Two vLLM instances share one LMCache server. A prefix computed by instance A is reused by instance B. ⚠️ Requires `PYTHONHASHSEED=0` in all processes — without this, hashes differ across processes and cache lookups silently miss. | 2 GPUs (same node) |
 | [`kv_cache_reuse/share_across_instances/p2p_sharing/`](kv_cache_reuse/share_across_instances/p2p_sharing/) | Two vLLM instances transfer KV directly peer-to-peer using NIXL and UCX RDMA (`UCX_TLS=rc`). | 2 GPUs + NIXL + UCX |
@@ -81,8 +82,7 @@ Focus: deploying, monitoring, and operating LMCache in production.
 
 | Example | What it does | Hardware |
 |---------|-------------|----------|
-| [`blend_kv_v1/`](blend_kv_v1/) | CacheBlend v1: reuse KV cache even when the new prompt is not a prefix of the cached one (e.g., RAG with swapped documents). Requires a small patch to vLLM source. | 1 GPU (experimental) |
-| [`blend_kv/`](blend_kv/) | CacheBlend v0 (legacy): same concept using the old `lmcache_vllm` integration. Kept for reference. | 1+ GPUs (legacy) |
+| [`blend_in_process/`](blend_in_process/) | CacheBlend in LMCache's in-process mode: reuse KV cache even when the new prompt is not a prefix of the cached one (e.g., RAG with swapped documents). Requires a small patch to vLLM source. | 1 GPU (experimental) |
 
 ### Developer Extensibility
 

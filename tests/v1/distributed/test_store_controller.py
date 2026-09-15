@@ -10,7 +10,9 @@ the full integration without mocking internals.
 """
 
 # Standard
+from typing import NoReturn
 import select
+import threading
 import time
 
 # Third Party
@@ -18,8 +20,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
@@ -38,12 +42,14 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
     StorePolicy,
 )
+from lmcache.v1.memory_management import MemoryObj
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Helpers
@@ -65,11 +71,6 @@ def make_layout() -> MemoryLayoutDesc:
         shapes=[torch.Size([100, 2, 512])],
         dtypes=[torch.bfloat16],
     )
-
-
-def should_use_lazy_alloc() -> bool:
-    """Determine if lazy allocation should be used based on CUDA availability."""
-    return torch.cuda.is_available()
 
 
 def wait_for_condition(
@@ -267,6 +268,71 @@ class TestStoreControllerLifecycle:
 class TestStoreControllerSingleAdapter:
     """Test StoreController with one MockL2Adapter."""
 
+    def test_temporary_l1_write_does_not_trigger_l2_store(self, l1_manager):
+        """Temporary staging objects should remain internal to L1."""
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        result = l1_manager.reserve_write(
+            keys=keys,
+            is_temporary=[True],
+            layout_desc=layout,
+            mode="new",
+        )
+        assert result[keys[0]][1] is not None
+
+        l1_manager.finish_write(keys)
+        time.sleep(0.3)
+
+        assert adapter.debug_get_stored_object_count() == 0
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_submit_failure_releases_l1_read_lock(self, l1_manager, monkeypatch):
+        """An adapter submission failure should not leak L1 read locks."""
+        adapter = make_adapter()
+        submission_attempted = threading.Event()
+
+        def fail_submit(
+            _keys: list[ObjectKey],
+            _memory_objs: list[MemoryObj],
+        ) -> NoReturn:
+            submission_attempted.set()
+            raise RuntimeError("injected store submission failure")
+
+        monkeypatch.setattr(adapter, "submit_store_task", fail_submit)
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        assert submission_attempted.wait(timeout=5.0)
+        ok = wait_for_condition(
+            lambda: l1_manager.report_status()["read_locked_count"] == 0,
+            timeout=5.0,
+        )
+        assert ok, "Submission failure should release the acquired L1 read lock"
+
+        ctrl.stop()
+        adapter.close()
+
     def test_l1_write_triggers_l2_store(self, l1_manager):
         """Writing to L1 should cause the object to appear in L2."""
         adapter = make_adapter()
@@ -343,13 +409,15 @@ class TestStoreControllerSingleAdapter:
 
         # Verify read lock is released: the key should be updatable
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="update",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="update",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be updatable after store controller releases read lock"
@@ -467,13 +535,15 @@ class TestStoreControllerMultipleAdapters:
         assert ok
 
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="update",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="update",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be updatable after all adapter stores complete"
@@ -587,13 +657,15 @@ class TestStoreControllerCustomPolicy:
 
         # After deletion, reserve_write with mode="new" should succeed
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="new",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="new",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be re-creatable after L1 deletion by policy"

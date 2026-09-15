@@ -91,7 +91,7 @@ msgstr "在 ``examples/multi_process/`` 中提供了示例 YAML 文件。"
 
 #: ../../source/mp/deployment.rst:68
 msgid "Prerequisites"
-msgstr "前提条件"
+msgstr "先决条件"
 
 #: ../../source/mp/deployment.rst:70
 msgid "Kubernetes cluster with GPU support (NVIDIA GPU Operator installed)"
@@ -125,8 +125,7 @@ msgstr "**步骤 3：部署 vLLM**"
 msgid ""
 "The default model is ``Qwen/Qwen3-14B``.  For gated models (e.g., Llama),"
 " create a Secret with your Hugging Face token:"
-msgstr ""
-"默认模型是 ``Qwen/Qwen3-14B``\\ 。对于受限模型（例如 Llama），请使用您的 Hugging Face Token 创建一个 Secret："
+msgstr "默认模型是 ``Qwen/Qwen3-14B``\\ 。对于受限模型（例如 Llama），请使用您的 Hugging Face Token 创建一个 Secret："
 
 #: ../../source/mp/deployment.rst:105
 msgid "Then add the ``HF_TOKEN`` environment variable to the vLLM container spec."
@@ -163,9 +162,7 @@ msgid ""
 "**GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain"
 " exclusively allocated to vLLM pods.  The NVIDIA container runtime "
 "automatically provides GPU access for IPC-based memory transfers."
-msgstr ""
-"**DaemonSet 不申请 GPU 资源** -- 这样 GPU 可以完全专属分配给 vLLM pod。NVIDIA 容器运行时会自动为基于"
-" IPC 的内存传输提供 GPU 访问权限。"
+msgstr "**DaemonSet 不申请 GPU 资源** -- 这样 GPU 可以完全专属分配给 vLLM pod。NVIDIA 容器运行时会自动为基于 IPC 的内存传输提供 GPU 访问权限。"
 
 #: ../../source/mp/deployment.rst:150
 msgid ""
@@ -221,11 +218,7 @@ msgid ""
 "instances sharing the cache server so each instance gets its own "
 "dedicated thread.  Use ``--max-cpu-workers`` to override the CPU pool for"
 " lookup and other non-GPU operations."
-msgstr ""
-"**工作线程数 (``--max-workers``, ``--max-gpu-workers``, ``--max-cpu-"
-"workers``):** ``--max-workers`` 同时设置 GPU 亲和性池和 CPU 普通池的大小（默认值为 1）。使用 "
-"``--max-gpu-workers`` 可单独覆盖 GPU 池大小——建议将其设置为至少等于共享同一缓存服务器的 vLLM "
-"实例数量，以便每个实例拥有专属的工作线程。使用 ``--max-cpu-workers`` 可覆盖用于查找及其他非 GPU 操作的 CPU 池大小。"
+msgstr "**工作线程数 (``--max-workers``, ``--max-gpu-workers``, ``--max-cpu-workers``):** ``--max-workers`` 同时设置 GPU 亲和性池和 CPU 普通池的大小（默认值为 1）。使用 ``--max-gpu-workers`` 可单独覆盖 GPU 池大小——建议将其设置为至少等于共享同一缓存服务器的 vLLM 实例数量，以便每个实例拥有专属的工作线程。使用 ``--max-cpu-workers`` 可覆盖用于查找及其他非 GPU 操作的 CPU 池大小。"
 
 #: ../../source/mp/deployment.rst:205
 msgid ""
@@ -245,16 +238,14 @@ msgstr "**逐出调优:**"
 msgid ""
 "``--eviction-trigger-watermark 0.8`` (default) triggers eviction when L1 "
 "is 80% full."
-msgstr ""
-"``--eviction-trigger-watermark 0.8``\\ （默认值）在 L1 达到 80% 满时触发逐出。"
+msgstr "``--eviction-trigger-watermark 0.8``\\ （默认值）在 L1 达到 80% 满时触发逐出。"
 
 #: ../../source/mp/deployment.rst:213
 #, python-format
 msgid ""
 "``--eviction-ratio 0.2`` (default) frees 20% of allocated memory per "
 "eviction cycle."
-msgstr ""
-"``--eviction-ratio 0.2``\\ （默认值）在每个逐出周期释放 20% 的分配内存。"
+msgstr "``--eviction-ratio 0.2``\\ （默认值）在每个逐出周期释放 20% 的分配内存。"
 
 #: ../../source/mp/deployment.rst:215
 msgid ""
@@ -267,8 +258,7 @@ msgid ""
 "**Logging:** Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to "
 "verify L2 store/load activity.  Switch to ``INFO`` (default) for "
 "production to reduce log volume."
-msgstr ""
-"**日志记录:** 在初始设置期间使用 ``LMCACHE_LOG_LEVEL=DEBUG`` 来验证 L2 存储/加载活动。 在生产中切换到 ``INFO``\\ （默认）以减少日志量。"
+msgstr "**日志记录:** 在初始设置期间使用 ``LMCACHE_LOG_LEVEL=DEBUG`` 来验证 L2 存储/加载活动。 在生产中切换到 ``INFO``\\ （默认）以减少日志量。"
 
 #: ../../source/mp/deployment.rst:223
 msgid "Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)"
@@ -288,7 +278,7 @@ msgid ""
 "``auto`` *(default)* -- load both paths.  Workers of either device type "
 "can connect without manual configuration; the server has no upfront "
 "knowledge of the connecting worker's device."
-msgstr "``auto`` *(默认)* -- 同时加载两条路径。任意设备类型的工作节点均可直接连接，无需手动配置；服务器无需预先知晓所连接工作节点的设备类型。"
+msgstr "``auto`` (默认) -- 同时加载两条路径。任意设备类型的工作节点均可直接连接，无需手动配置；服务器无需预先知晓所连接工作节点的设备类型。"
 
 #: ../../source/mp/deployment.rst:234
 msgid ""
@@ -309,8 +299,7 @@ msgid ""
 "LMCache by default creates a shared-memory (SHM) pool for KV transfers "
 "between the server and vLLM workers.  The ``--shm-name`` option lets you "
 "control this behavior:"
-msgstr ""
-"当加载引擎驱动路径（\\ ``auto`` 或 ``engine_driven``\\ ）时，LMCache 默认会为服务器与 vLLM 工作节点之间的 KV 传输创建一个共享内存（SHM）池。\\ ``--shm-name`` 选项让您可以控制此行为："
+msgstr "当加载引擎驱动路径（\\ ``auto`` 或 ``engine_driven``\\ ）时，LMCache 默认会为服务器与 vLLM 工作节点之间的 KV 传输创建一个共享内存（SHM）池。\\ ``--shm-name`` 选项让您可以控制此行为："
 
 #: ../../source/mp/deployment.rst:249
 msgid "Value"
@@ -318,11 +307,11 @@ msgstr "值"
 
 #: ../../source/mp/deployment.rst:250
 msgid "Effect"
-msgstr "行为说明"
+msgstr "效果"
 
 #: ../../source/mp/deployment.rst:251
 msgid "*(not set)* (default)"
-msgstr "*(未设置)* (默认)"
+msgstr "(未设置) (默认)"
 
 #: ../../source/mp/deployment.rst:252
 msgid "Auto-allocate a SHM pool (current default behavior)."
@@ -343,8 +332,7 @@ msgstr ""
 
 #: ../../source/mp/deployment.rst:257
 msgid "``\"my_pool\"`` (any non-empty name)"
-msgstr ""
-"``\"my_pool\"``\\ （任何非空名称）"
+msgstr "``\"my_pool\"``\\ （任何非空名称）"
 
 #: ../../source/mp/deployment.rst:258
 msgid ""

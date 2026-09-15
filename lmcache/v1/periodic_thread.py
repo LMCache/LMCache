@@ -128,6 +128,9 @@ class PeriodicThread(ABC):
         # Thread state
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        # Set to break out of the interval sleep early: either because
+        # stop() was called or because wake() requested an immediate run.
+        self._wake_event = threading.Event()
         self._running = False
 
         # Execution tracking
@@ -231,6 +234,7 @@ class PeriodicThread(ABC):
             return None
 
         self._stop_event.clear()
+        self._wake_event.clear()
         self._running = True
         self._start_time = time.time()
 
@@ -263,6 +267,8 @@ class PeriodicThread(ABC):
         logger.info("Stopping PeriodicThread: %s", self._name)
         self._running = False
         self._stop_event.set()
+        # Break the interval sleep so the loop notices stop immediately.
+        self._wake_event.set()
 
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=timeout)
@@ -273,6 +279,17 @@ class PeriodicThread(ABC):
                     timeout,
                 )
 
+    def wake(self) -> None:
+        """Trigger one execution now instead of waiting for the next tick.
+
+        Safe to call from any thread. No-op if the thread is not running.
+        If wake() is called during an execution, the next interval sleep
+        returns immediately and another cycle runs right after.
+        """
+        if not self._running:
+            return
+        self._wake_event.set()
+
     def _run_loop(self) -> None:
         """Main thread loop."""
         # Initial wait
@@ -280,6 +297,9 @@ class PeriodicThread(ABC):
             if self._stop_event.wait(timeout=self._init_wait):
                 logger.info("PeriodicThread %s stopped during init_wait", self._name)
                 return
+            # A wake() during init_wait should not count as stop; only
+            # honor stop_event above.
+            self._wake_event.clear()
 
         logger.info(
             "PeriodicThread %s entering main loop (interval=%.1fs)",
@@ -342,8 +362,10 @@ class PeriodicThread(ABC):
                     self._total_runs += 1
                     self._failed_runs += 1
 
-            # Wait for next interval
-            if self._stop_event.wait(timeout=self._interval):
+            # Wait for next interval; wake() can shorten this wait.
+            self._wake_event.wait(timeout=self._interval)
+            self._wake_event.clear()
+            if self._stop_event.is_set():
                 break
 
         logger.info("PeriodicThread %s loop stopped", self._name)

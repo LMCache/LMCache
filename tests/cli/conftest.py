@@ -2,7 +2,7 @@
 """Shared fixtures for CLI tests.
 
 The CLI arg-registration code transitively imports
-``lmcache.native_storage_ops`` (a compiled C extension). On CI runners
+``lmcache.lmcache_native`` (a compiled C extension). On CI runners
 without a CUDA build the module is absent, so we insert a lightweight
 stub into ``sys.modules`` for the duration of each CLI test only.
 """
@@ -19,12 +19,12 @@ import types
 # Third Party
 import pytest
 
-_MOD_NAME = "lmcache.native_storage_ops"
+_MOD_NAME = "lmcache.lmcache_native"
 
 
 @pytest.fixture(autouse=True)
-def _stub_native_storage_ops() -> Generator[None, None, None]:
-    """Temporarily stub ``native_storage_ops`` if the extension is not built.
+def _stub_lmcache_native() -> Generator[None, None, None]:
+    """Temporarily stub ``lmcache_native`` if the extension is not built.
 
     The stub is removed from ``sys.modules`` after the test so it does not
     interfere with other test suites that ``importorskip`` the real module.
@@ -34,12 +34,17 @@ def _stub_native_storage_ops() -> Generator[None, None, None]:
         return
 
     stub: Any = types.ModuleType(_MOD_NAME)
+    stub.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})
+    stub.KernelGroupSpec = type(
+        "KernelGroupSpec",
+        (),
+        {"__init__": lambda self, *args, **kwargs: None},
+    )
     stub.TTLLock = MagicMock()
     stub.Bitmap = MagicMock()
     stub.PeriodicEventNotifier = MagicMock()
     stub.ParallelPatternMatcher = MagicMock()
     stub.RangePatternMatcher = MagicMock()
-
     sys.modules[_MOD_NAME] = stub
     try:
         yield

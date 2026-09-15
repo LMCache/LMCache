@@ -25,20 +25,31 @@ from collections.abc import Sequence
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA not available"
-)
-
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
+
+# Skip this module before importing CUDA cache context on environments
+# without CuPy support.
+pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
+
+# First Party
 from lmcache.v1.platform.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
     _TempGPUBuffer,
 )
-import lmcache.c_ops as lmc_ops  # noqa: E402
+import lmcache.lmcache_native as lmcache_native  # noqa: E402
 
-_DEVICE = torch.device("cuda")
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        torch_device_type == "xpu",
+        reason="CUDA IPC cache-context tests are not supported on XPU",
+    ),
+]
+
+_DEVICE = torch.device(torch_device_type)
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +100,8 @@ def _make_kv_tensors(
 
 def _build_manager(
     tensors: list[torch.Tensor],
-    num_blocks: int = 4,
-    engine_kv_format: "lmc_ops.EngineKVFormat" = (
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    engine_kv_format: "lmcache_native.EngineKVFormat" = (
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     ),
     engine_group_infos: Sequence[EngineGroupInfo] = (),
     lmcache_tokens_per_chunk: int = 256,
@@ -99,8 +109,7 @@ def _build_manager(
     """Build a real :class:`KVLayerGroupsManager` from synthetic tensors."""
     return KVLayerGroupsManager(
         tensors,
-        engine_kv_format=engine_kv_format,
-        num_blocks=num_blocks,
+        engine_kv_formats=[engine_kv_format] * len(tensors),
         engine_group_infos=engine_group_infos,
         lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
     )
@@ -117,7 +126,6 @@ def _make_temp_buffer(
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
     manager = _build_manager(
         tensors,
-        num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
         lmcache_tokens_per_chunk=chunk_size,
     )
@@ -526,7 +534,7 @@ class TestGPUCacheContextReportStatus:
         assert group["layer_indices"] == [0, 1, 2, 3]
         assert group["is_mla"] is False
         assert group["engine_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
-        assert group["dtype"] == str(ctx.dtype)
+        assert group["dtype"] == str(ctx.kv_tensors[0].dtype)
 
     def test_report_status_multi_group(self) -> None:
         ctx = _make_context(_MULTI_GROUP)

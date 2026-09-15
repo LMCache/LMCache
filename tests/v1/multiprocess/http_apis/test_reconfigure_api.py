@@ -185,39 +185,6 @@ def test_status_filters_non_dax_reconfigurable_adapters():
     }
 
 
-def test_lists_available_reconfigure_backends():
-    sm = _FakeStorageManager(
-        status={
-            "enabled": True,
-            "num_adapters": 3,
-            "adapters": [
-                _adapter_status("fake", 0, {"ready": True}, ["flip"]),
-                _adapter_status(
-                    "dax",
-                    1,
-                    {"hotplug_enabled": True, "devices": []},
-                    _DAX_OPS,
-                ),
-                _adapter_status(
-                    "dax",
-                    2,
-                    {"hotplug_enabled": True, "devices": []},
-                    _DAX_OPS,
-                ),
-            ],
-        }
-    )
-
-    resp = _client(sm).get("/reconfigure/backends")
-
-    assert resp.status_code == 200
-    assert resp.json() == {
-        "enabled": True,
-        "num_backends": 2,
-        "backends": ["dax", "fake"],
-    }
-
-
 def test_add_resolves_public_dax_index_to_generic_reconfigure_index():
     sm = _FakeStorageManager(
         status={

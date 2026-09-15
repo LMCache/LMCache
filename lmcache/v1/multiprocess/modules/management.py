@@ -10,12 +10,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -38,12 +33,14 @@ class ManagementModule:
         ctx: The shared engine context.
         liveness_targets: Modules the reaper drives -- the transfer modules
             whose per-instance registrations are refreshed on PING and scanned
-            for staleness, plus any state mirror (e.g. ``BlendV3Module``)
+            for staleness, plus any state mirror (e.g. ``BlendModule``)
             notified via ``drop_instance_state`` when an instance is reaped.
         worker_reap_timeout_seconds: Silence budget for a ping-proven worker;
             0 disables reaping (no thread is started).
         worker_registration_grace_seconds: Silence budget for a worker that
             registered but never pinged.
+        experimental_transfer: Types of experimental intermediate tensor
+            transfer built in the server.
     """
 
     def __init__(
@@ -52,12 +49,14 @@ class ManagementModule:
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
+        experimental_transfer: Sequence[str] = (),
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
+        self._experimental_transfer = tuple(experimental_transfer)
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
@@ -77,29 +76,6 @@ class ManagementModule:
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
-
-    def get_handlers(self) -> list[HandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            A list of HandlerSpec entries mapping request types to
-            their handler callables and thread pool assignments.
-        """
-        return [
-            HandlerSpec(RequestType.CLEAR, self.clear, ThreadPoolType.NORMAL),
-            HandlerSpec(
-                RequestType.GET_CHUNK_SIZE,
-                self.get_chunk_size,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(RequestType.PING, self.ping, ThreadPoolType.NORMAL),
-            HandlerSpec(RequestType.NOOP, self.debug, ThreadPoolType.SYNC),
-            HandlerSpec(
-                RequestType.REPORT_BLOCK_ALLOCATION,
-                self.report_block_allocations,
-                ThreadPoolType.NORMAL,
-            ),
-        ]
 
     def report_status(self) -> dict:
         """Return module-specific status information.
@@ -167,6 +143,16 @@ class ManagementModule:
             The chunk size.
         """
         return self._ctx.chunk_size
+
+    def get_experimental(self) -> list[str]:
+        """Return the experimental intermediate tensor transfer built in the
+        server.
+
+        Returns:
+            The enabled experimental intermediate tensor transfer types.
+            See ``lmcache.v1.multiprocess.modules.experimental.__init__``.
+        """
+        return list(self._experimental_transfer)
 
     def clear(self) -> None:
         """Clear all stored KV cache data from the storage manager."""

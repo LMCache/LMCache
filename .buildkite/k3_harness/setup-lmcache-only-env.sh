@@ -12,12 +12,19 @@ trap 'echo "ERROR: setup-lmcache-only-env.sh failed at line $LINENO (exit code $
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
+merge_pr_base_branch
 
 echo "--- :python: Installing LMCache from source (no vLLM)"
 # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
 # (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 uv pip install -e . --no-build-isolation
+
+# Editable installs do not run setuptools' build_py hook. Install the pinned
+# generator and create the ignored bindings required when server.py is imported.
+uv pip install -r requirements/proto.txt
+echo "--- :gear: Generating LMCache gRPC bindings"
+python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"
 
 echo "--- :white_check_mark: Environment ready (LMCache only, no vLLM)"
 python -c "import lmcache; print('LMCache installed from source')"

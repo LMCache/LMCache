@@ -116,7 +116,7 @@ def _run_lookup_phase(adapter, keys):
     """Run lookup phase and return (stats, bitmap)."""
     efd = adapter.get_lookup_and_lock_event_fd()
     start = time.perf_counter()
-    task_id = adapter.submit_lookup_and_lock_task(keys)
+    task_id = adapter.submit_lookup_and_lock_task(keys, {})
     if not _wait_event_fd(efd):
         print("  Lookup: timed out waiting for eventfd")
         return None, None

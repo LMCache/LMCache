@@ -207,7 +207,21 @@ class LMCacheControllerManager:
             ret_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
         return ret_msg
 
-    async def handle_orchestration_message(self, msg: OrchMsg) -> OrchRetMsg:
+    async def handle_orchestration_message(
+        self, msg: OrchMsg
+    ) -> Union[OrchRetMsg, ErrorMsg]:
+        """Handle an orchestrator request and return its result.
+
+        Args:
+            msg: Orchestrator request to dispatch.
+
+        Returns:
+            The operation result, or an error message when the dispatched
+            operation fails.
+
+        Raises:
+            RuntimeError: If ``msg`` has an unsupported request type.
+        """
         if isinstance(msg, LookupMsg):
             return await self.kv_controller.lookup(msg)
         elif isinstance(msg, HealthMsg):

@@ -86,7 +86,7 @@ pop_completed_store_tasks() -> dict[L2TaskId, L2StoreResult]
 ### Lookup and Lock Operations
 
 ```
-submit_lookup_and_lock_task(keys) -> L2TaskId
+submit_lookup_and_lock_task(keys, group_layout_descs) -> L2TaskId
 query_lookup_and_lock_result(task_id) -> Bitmap | None
 submit_unlock(keys) -> None
 ```

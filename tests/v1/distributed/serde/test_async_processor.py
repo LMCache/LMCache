@@ -17,7 +17,7 @@ import select
 import time
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde import (
     AsyncSerdeProcessor,
     Deserializer,
@@ -25,13 +25,15 @@ from lmcache.v1.distributed.serde import (
 )
 from lmcache.v1.platform import consume_fd
 
+_TEST_KEY = ObjectKey(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
+
 
 class _FakeSerializer(Serializer):
     def __init__(self, transform: Optional[Callable[[int], None]] = None) -> None:
         self._transform = transform
         self.calls = 0
 
-    def serialize(self, src, dst) -> int:  # type: ignore[no-untyped-def]
+    def serialize(self, src, dst, key) -> int:  # type: ignore[no-untyped-def]
         if self._transform is not None:
             self._transform(self.calls)
         self.calls += 1
@@ -46,7 +48,7 @@ class _FakeDeserializer(Deserializer):
         self._transform = transform
         self.calls = 0
 
-    def deserialize(self, src, dst) -> None:  # type: ignore[no-untyped-def]
+    def deserialize(self, src, dst, key) -> None:  # type: ignore[no-untyped-def]
         if self._transform is not None:
             self._transform(self.calls)
         self.calls += 1
@@ -82,7 +84,7 @@ def test_serialize_signals_fd_and_result_is_true() -> None:
     serializer = _FakeSerializer()
     processor = AsyncSerdeProcessor(serializer, _FakeDeserializer())
     try:
-        task_id = processor.submit_serialize([object()], [object()])  # type: ignore[list-item]
+        task_id = processor.submit_serialize([object()], [object()], [_TEST_KEY])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         assert processor.query_serialize_result(task_id) is True
         # Non-idempotent: second query returns None.
@@ -96,7 +98,7 @@ def test_deserialize_signals_fd_and_result_is_true() -> None:
     deserializer = _FakeDeserializer()
     processor = AsyncSerdeProcessor(_FakeSerializer(), deserializer)
     try:
-        task_id = processor.submit_deserialize([object()], [object()])  # type: ignore[list-item]
+        task_id = processor.submit_deserialize([object()], [object()], [_TEST_KEY])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_deserialize_event_fd()), "fd never signaled"
         assert processor.query_deserialize_result(task_id) is True
         assert processor.query_deserialize_result(task_id) is None
@@ -113,7 +115,7 @@ def test_serialize_failure_reports_false() -> None:
 
     processor = AsyncSerdeProcessor(_FakeSerializer(_boom), _FakeDeserializer())
     try:
-        task_id = processor.submit_serialize([object()], [object()])  # type: ignore[list-item]
+        task_id = processor.submit_serialize([object()], [object()], [_TEST_KEY])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         assert processor.query_serialize_result(task_id) is False
     finally:
@@ -156,7 +158,7 @@ class _RecordingSerializer(Serializer):
     def __init__(self, n_bytes: int) -> None:
         self._n_bytes = n_bytes
 
-    def serialize(self, src, dst) -> int:  # type: ignore[no-untyped-def]
+    def serialize(self, src, dst, key) -> int:  # type: ignore[no-untyped-def]
         return self._n_bytes
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
@@ -183,7 +185,7 @@ def test_serialize_narrows_dst_to_actual_bytes_written() -> None:
     processor = AsyncSerdeProcessor(serializer, _FakeDeserializer())
     try:
         dst = _NarrowableDst()
-        task_id = processor.submit_serialize([object()], [dst])  # type: ignore[list-item]
+        task_id = processor.submit_serialize([object()], [dst], [_TEST_KEY])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         assert processor.query_serialize_result(task_id) is True
         assert dst.used_sizes == [213]
@@ -198,7 +200,7 @@ def test_serialize_failure_does_not_narrow_dst() -> None:
     size."""
 
     class _BoomSerializer(Serializer):
-        def serialize(self, src, dst) -> int:  # type: ignore[no-untyped-def]
+        def serialize(self, src, dst, key) -> int:  # type: ignore[no-untyped-def]
             raise RuntimeError("serialize failed")
 
         def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
@@ -207,7 +209,7 @@ def test_serialize_failure_does_not_narrow_dst() -> None:
     processor = AsyncSerdeProcessor(_BoomSerializer(), _FakeDeserializer())
     try:
         dst = _NarrowableDst()
-        task_id = processor.submit_serialize([object()], [dst])  # type: ignore[list-item]
+        task_id = processor.submit_serialize([object()], [dst], [_TEST_KEY])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         assert processor.query_serialize_result(task_id) is False
         assert dst.used_sizes == [], "narrowing must not happen on failure"
@@ -222,7 +224,7 @@ def test_serialize_works_when_dst_lacks_set_used_size() -> None:
     the narrowing call with ``hasattr``."""
     processor = AsyncSerdeProcessor(_FakeSerializer(), _FakeDeserializer())
     try:
-        task_id = processor.submit_serialize([object()], [object()])  # type: ignore[list-item]
+        task_id = processor.submit_serialize([object()], [object()], [_TEST_KEY])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         # Success despite dst lacking set_used_size.
         assert processor.query_serialize_result(task_id) is True
@@ -238,7 +240,7 @@ def test_serialize_skips_narrowing_when_serializer_returns_non_int() -> None:
     raise ``TypeError: '<' not supported between NoneType and int``."""
 
     class _NoneReturningSerializer(Serializer):
-        def serialize(self, src, dst):  # type: ignore[no-untyped-def]
+        def serialize(self, src, dst, key):  # type: ignore[no-untyped-def]
             return None  # type: ignore[return-value]
 
         def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
@@ -247,7 +249,7 @@ def test_serialize_skips_narrowing_when_serializer_returns_non_int() -> None:
     processor = AsyncSerdeProcessor(_NoneReturningSerializer(), _FakeDeserializer())
     try:
         dst = _NarrowableDst()
-        task_id = processor.submit_serialize([object()], [dst])  # type: ignore[list-item]
+        task_id = processor.submit_serialize([object()], [dst], [_TEST_KEY])  # type: ignore[list-item]
         assert _wait_for_fd(processor.get_serialize_event_fd()), "fd never signaled"
         # Task still succeeds; narrowing was skipped, not attempted.
         assert processor.query_serialize_result(task_id) is True

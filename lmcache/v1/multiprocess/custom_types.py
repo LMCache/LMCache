@@ -2,15 +2,15 @@
 # Standard
 from dataclasses import dataclass, field
 from typing import Any, Callable
-import pickle
-import threading
 
 # Third Party
 import msgspec
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
+    DeviceIPCWrapper,
+)
 
 """
 Defines the types and the customized encoder/decoders for inter-process
@@ -21,230 +21,6 @@ Key Types:
   - Contains token_ids, start, end, request_id (all required)
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
-
-
-class DeviceIPCWrapper:
-    """Base class for KV-cache IPC wrapper.
-
-    Holds the device-agnostic mechanism shared by all transports: the
-    interface fields (``dtype``/``shape``/``stride``/``storage_offset``/
-    ``device_uuid``), UUID<->ordinal discovery via the ``torch_dev``
-    abstraction, equality, and pickle-based (de)serialization.
-
-    Every wire-level wrapper subclasses this so they share the single
-    msgspec ext code (1) registered for ``DeviceIPCWrapper``: pickle
-    preserves the concrete subclass identity across the wire so
-    ``to_tensor`` dispatches correctly on the receiving side.
-
-    Subclasses implement ``__init__`` (populate the interface fields from a
-    tensor) and ``to_tensor`` (reconstruct the tensor from the handle).
-    """
-
-    _discovered_device_mapping: dict[str, int] = {}
-    _device_mapping_lock = threading.Lock()
-
-    @classmethod
-    def _get_device_uuid(cls, device_index: int) -> str:
-        """Get the UUID of a device given its index."""
-        return str(torch_dev.get_device_properties(device_index).uuid)
-
-    @classmethod
-    def _discover_devices(cls):
-        """Discover all available accelerator devices and map their UUIDs
-        to the physical device ordinals.
-        """
-        if not torch_dev.is_available():
-            return
-
-        num_devices = torch_dev.device_count()
-        with DeviceIPCWrapper._device_mapping_lock:
-            if DeviceIPCWrapper._discovered_device_mapping:
-                return  # Already discovered
-
-            for i in range(num_devices):
-                device_uuid = cls._get_device_uuid(i)
-                DeviceIPCWrapper._discovered_device_mapping[device_uuid] = i
-
-    @classmethod
-    def _get_device_index_from_uuid(cls, device_uuid: str) -> int:
-        """Get the physical device ordinal from its UUID."""
-        cls._discover_devices()
-
-        with DeviceIPCWrapper._device_mapping_lock:
-            device_index = DeviceIPCWrapper._discovered_device_mapping.get(
-                device_uuid, None
-            )
-
-        if device_index is None:
-            raise RuntimeError(
-                f"Device UUID {device_uuid} not found in the discovered "
-                "devices. Please make sure the process can see all the "
-                "accelerator devices"
-            )
-        return device_index
-
-    def to_tensor(self) -> torch.Tensor:
-        """Reconstruct the tensor in this process from the IPC handle.
-
-        Subclasses implement the transport-specific reconstruction.
-        """
-        raise NotImplementedError
-
-    def __eq__(self, other):
-        if type(self) is not type(other):
-            return False
-        return (
-            self.handle == other.handle
-            and self.dtype == other.dtype
-            and self.shape == other.shape
-            and self.stride == other.stride
-            and self.storage_offset == other.storage_offset
-            and self.device_uuid == other.device_uuid
-        )
-
-    @staticmethod
-    def Serialize(obj: "DeviceIPCWrapper") -> bytes:
-        return pickle.dumps(obj)
-
-    @staticmethod
-    def Deserialize(data: bytes) -> "DeviceIPCWrapper":
-        return pickle.loads(data)
-
-
-class CudaIPCWrapper(DeviceIPCWrapper):
-    def __init__(self, tensor: torch.Tensor):
-        # First Party
-        from lmcache.v1.gpu_connector.kv_format.contiguity import (
-            attempt_permute_to_contiguous_view,
-        )
-
-        # Permute any non-contiguous view (e.g. vLLM's NHD-over-HND) so the
-        # shape/stride we encode across IPC reflects the physical layout.
-        # Offset is preserved by the wrapper's storage_offset field.
-        tensor = attempt_permute_to_contiguous_view(tensor)
-
-        storage = tensor.untyped_storage()
-        handle = storage._share_cuda_()
-
-        self.handle = handle
-        self.dtype = tensor.dtype
-        self.shape = tuple(tensor.shape)
-        self.stride = tuple(tensor.stride())
-        self.storage_offset = int(tensor.storage_offset())
-
-        device_index = tensor.device.index
-        self.device_uuid = self._get_device_uuid(device_index)
-
-    def to_tensor(self) -> torch.Tensor:
-        """
-        Note:
-            This function may break if the accelerator is not initialized.
-            We should call `torch_dev.init()` before using this function
-            (guarded by hasattr since not all backends expose init()).
-        """
-        device_index = self._get_device_index_from_uuid(self.device_uuid)
-
-        storage = torch.UntypedStorage._new_shared_cuda(  # noqa: SLF001
-            device_index, *self.handle[1:]
-        )
-
-        t = torch.empty(
-            (), device=f"{torch_device_type}:{device_index}", dtype=self.dtype
-        )
-        t.set_(storage, self.storage_offset, self.shape, self.stride)
-        return t
-
-
-class RawCudaIPCWrapper(DeviceIPCWrapper):
-    """IPC wrapper for CUDA tensors allocated outside PyTorch's caching
-    allocator.
-
-    PyTorch's ``UntypedStorage._share_cuda_()`` only works for tensors
-    backed by its own caching allocator. TRT-LLM publishes its KV pool
-    via ``at::for_blob`` over a ``cudaMalloc``'d buffer, which raises in
-    ``_share_cuda_()``. This subclass bypasses that path: it calls
-    ``cudaIpcGetMemHandle`` on the raw data pointer, then reconstructs
-    the tensor on the receiving side via ``cudaIpcOpenMemHandle`` plus
-    a CuPy ``UnownedMemory`` → DLPack → ``torch`` round-trip.
-
-    Sharing the ``DeviceIPCWrapper`` base (rather than introducing a
-    parallel class with its own msgspec ext code) is load-bearing —
-    msgspec does not support unions of custom ext-encoded types. With a
-    common base, ``KVCache = list[DeviceIPCWrapper]`` type-checks, the
-    single ext code 1 round-trips every wrapper, and pickle preserves
-    the concrete subclass identity through the wire so ``to_tensor``
-    dispatches correctly.
-    """
-
-    def __init__(self, tensor: torch.Tensor) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import assert_contiguous
-
-        assert_contiguous(tensor)
-
-        try:
-            # Third Party
-            from cuda.bindings import runtime as cudart
-        except ImportError:
-            # Third Party
-            from cuda import cudart
-
-        data_ptr = tensor.data_ptr()
-        err, ipc_handle = cudart.cudaIpcGetMemHandle(data_ptr)
-        if err != cudart.cudaError_t.cudaSuccess:
-            raise RuntimeError(
-                f"cudaIpcGetMemHandle failed: {err} (ptr=0x{data_ptr:x})"
-            )
-
-        # Store only what's needed for reconstruction.
-        self._ipc_handle_reserved = bytes(ipc_handle.reserved)
-        self._nbytes = tensor.untyped_storage().nbytes()
-
-        # DeviceIPCWrapper interface fields. ``handle`` is unused —
-        # ``to_tensor`` is overridden to bypass it — but kept (None) so
-        # the base-class equality check has a value to compare.
-        self.handle = None
-        self.dtype = tensor.dtype
-        self.shape = tuple(tensor.shape)
-        self.stride = tuple(tensor.stride())
-        self.storage_offset = int(tensor.storage_offset())
-
-        device_index = tensor.device.index
-        self.device_uuid = self._get_device_uuid(device_index)
-
-    def to_tensor(self) -> torch.Tensor:
-        """Reconstruct the tensor in this process via raw CUDA IPC."""
-        # Third Party
-        import cupy
-
-        try:
-            # Third Party
-            from cuda.bindings import runtime as cudart
-        except ImportError:
-            # Third Party
-            from cuda import cudart
-
-        device_index = self._get_device_index_from_uuid(self.device_uuid)
-
-        handle = cudart.cudaIpcMemHandle_t()
-        handle.reserved = self._ipc_handle_reserved
-        err, ptr = cudart.cudaIpcOpenMemHandle(
-            handle, cudart.cudaIpcMemLazyEnablePeerAccess
-        )
-        if err != cudart.cudaError_t.cudaSuccess:
-            raise RuntimeError(f"cudaIpcOpenMemHandle failed: {err}")
-
-        # Wrap as a flat ``uint8`` CuPy array, DLPack to torch, then view
-        # as the original dtype/shape. ``uint8`` avoids dtype-conversion
-        # gaps (bfloat16, fp8 have no direct CuPy/NumPy equivalent without
-        # ml_dtypes).
-        with cupy.cuda.Device(device_index):
-            mem = cupy.cuda.UnownedMemory(ptr, self._nbytes, owner=self)
-            memptr = cupy.cuda.MemoryPointer(mem, 0)
-            cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
-
-        raw = torch.from_dlpack(cp_flat)
-        return raw.view(self.dtype).reshape(self.shape)
 
 
 @dataclass(order=True, frozen=True)
@@ -284,6 +60,15 @@ class IPCCacheServerKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # Request-scoped LMCache configuration passed across the IPC boundary.
+    # It is metadata, not part of cache identity.
+    request_configs: dict[str, Any] | None = field(default=None, compare=False)
+
+    # Number of workers that retrieve this key's object; the server reserves
+    # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
+    # lookups reject it.
+    num_kv_readers: int = field(default=0, compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -313,18 +98,39 @@ class IPCCacheServerKey:
         end: int = 0,
         request_id: str = "",
         cache_salt: str = "",
+        num_kv_readers: int = 1,
+        request_configs: dict[str, Any] | None = None,
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
             model_name=model_name,
             world_size=world_size,
             worker_id=worker_id,
+            num_kv_readers=num_kv_readers,
             token_ids=tuple(token_ids),
             start=start,
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
+
+    def require_num_kv_readers(self) -> int:
+        """Declared reader count; rejects keys from pre-field clients.
+
+        Each reader's retrieve releases one read lock, so the count must
+        be exact: under-counting unpins an object mid-copy; over-counting
+        only holds it to the TTL. 0 means the field was never sent --
+        rejected, not guessed.
+        """
+        if self.num_kv_readers < 1:
+            raise ValueError(
+                f"num_kv_readers={self.num_kv_readers}: this server "
+                "requires clients that send "
+                "IPCCacheServerKey.num_kv_readers. Upgrade the LMCache "
+                "client."
+            )
+        return self.num_kv_readers
 
     def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
@@ -332,11 +138,13 @@ class IPCCacheServerKey:
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
+            num_kv_readers=self.num_kv_readers,
             token_ids=self.token_ids,
             start=self.start,
             end=self.end,
             request_id=self.request_id,
             cache_salt=self.cache_salt,
+            request_configs=self.request_configs,
         )
 
 
@@ -356,6 +164,9 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
         use_mla: Whether the worker KV format is MLA.
+        num_physical_slots: Number of physical KV slots gathered into one
+            LMCache chunk. ``None`` accepts the legacy protocol, where the
+            server assumed one physical slot per logical token.
     """
 
     instance_id: int
@@ -366,6 +177,31 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
+    num_physical_slots: int | None = None
+
+
+@dataclass
+class RegisterEngineDrivenContextResponse:
+    """Shared response for engine-driven context registration."""
+
+    shm_name: str = ""
+    pool_size: int = 0
+
+
+@dataclass
+class PrepareStoreResponse:
+    """Shared response for an engine-driven store preparation."""
+
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
+class PrepareRetrieveResponse:
+    """Shared response for an engine-driven retrieve preparation."""
+
+    success: bool
+    data: bytes = b""
+    context: dict = field(default_factory=dict)
 
 
 @dataclass
