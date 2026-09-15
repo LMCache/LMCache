@@ -223,6 +223,25 @@ class TestValkeyL2AdapterIntegration:
         assert self._load(adapter, [key], [dst]).test(0) is True
         assert torch.equal(dst.tensor, src.tensor)
 
+    def test_repeat_store_preserves_usage_and_transfer_bytes(self, adapter):
+        """A real repeated SET retains one object's logical usage."""
+        key = create_object_key(1001, cache_salt="repeat-store")
+        src = create_memory_obj(size=128, fill_value=2.5)
+        dst = create_memory_obj(size=128, fill_value=0.0)
+
+        first = self._store(adapter, [key], [src])
+        second = self._store(adapter, [key], [src])
+
+        assert first.is_successful()
+        assert second.is_successful()
+        assert first.bytes_transferred() == src.get_size()
+        assert second.bytes_transferred() == src.get_size()
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == src.get_size()
+        assert usage.bytes_by_cache_salt == {"repeat-store": src.get_size()}
+        assert self._load(adapter, [key], [dst]).test(0) is True
+        assert torch.equal(dst.tensor, src.tensor)
+
     def test_batch_roundtrip_spreads_across_nodes(self, adapter):
         """Many keys round-trip with byte-exact data.
 
