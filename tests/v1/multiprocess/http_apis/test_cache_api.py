@@ -11,6 +11,7 @@ services resolved from the app context, so these inject a fake engine via
 # Standard
 from dataclasses import dataclass, field
 from typing import Optional
+import json
 
 # Third Party
 from fastapi import FastAPI
@@ -18,8 +19,16 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.v1.distributed.api import (
+    KeyEntry,
+    KeyListPage,
+    L1BackendType,
+    L1ObjectSnapshot,
+    ObjectKey,
+)
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
+from lmcache.v1.multiprocess.config import HTTPFrontendConfig
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
@@ -82,6 +91,12 @@ class _FakeStorageManager:
     l1_skip: int = 0
     # Records (keys, force) for each delete_l1_keys call.
     l1_delete_calls: list[tuple[list, bool]] = field(default_factory=list)
+    snapshot_result: tuple[L1Error, Optional[L1ObjectSnapshot]] = (
+        L1Error.KEY_NOT_EXIST,
+        None,
+    )
+    snapshot_calls: list[ObjectKey] = field(default_factory=list)
+    snapshot_limits: list[int | None] = field(default_factory=list)
 
     def l2_adapters(self) -> list[tuple[_FakeDescriptor, _FakeAdapter]]:
         return [(_FakeDescriptor(type_name=n), a) for n, a in self.adapters]
@@ -91,20 +106,33 @@ class _FakeStorageManager:
         deleted = max(0, len(keys) - self.l1_skip)
         return deleted, min(self.l1_skip, len(keys))
 
+    def snapshot_l1_object(
+        self, key: ObjectKey, max_size_bytes: int | None = None
+    ) -> tuple[L1Error, Optional[L1ObjectSnapshot]]:
+        self.snapshot_calls.append(key)
+        self.snapshot_limits.append(max_size_bytes)
+        return self.snapshot_result
+
 
 class _FakeEngine:
     def __init__(self, sm: _FakeStorageManager):
         self.storage_manager = sm
 
 
-def _make_app(sm: Optional[_FakeStorageManager]) -> FastAPI:
+def _make_app(
+    sm: Optional[_FakeStorageManager],
+    http_config: HTTPFrontendConfig | None = None,
+) -> FastAPI:
     """Build an app with the cache router and a context wrapping a fake engine
     (or no context, reproducing the not-initialized condition)."""
     app = FastAPI()
     app.include_router(cache_router)
     register_error_handlers(app)
     if sm is not None:
-        app.state.context = build_context(_FakeEngine(sm))
+        app.state.context = build_context(
+            _FakeEngine(sm),
+            http_config or HTTPFrontendConfig(enable_l1_cache_download=True),
+        )
     return app
 
 
@@ -114,6 +142,155 @@ def _hex(n: int, width: int = 4) -> str:
 
 def _sm_with(*entries: tuple[str, _FakeAdapter]) -> _FakeStorageManager:
     return _FakeStorageManager(adapters=list(entries))
+
+
+def _snapshot(
+    data: bytes = b"\x00\x01\x02\x03",
+    backend: L1BackendType = L1BackendType.DRAM,
+) -> L1ObjectSnapshot:
+    return L1ObjectSnapshot(
+        data=data,
+        size_bytes=len(data),
+        backend=backend,
+        memory_format="undefined",
+        shapes=((1, 2), (1,)),
+        dtypes=("torch.uint8", "torch.bfloat16"),
+    )
+
+
+# =============================================================================
+# Download object
+# =============================================================================
+
+
+class TestDownloadObjectEndpoint:
+    def test_disabled_by_default(self) -> None:
+        sm = _FakeStorageManager()
+        app = _make_app(sm, HTTPFrontendConfig())
+        response = TestClient(app).post(
+            "/cache/objects/download",
+            json={"key": {"chunk_hash_hex": "01", "model_name": "llama", "kv_rank": 0}},
+        )
+        assert response.status_code == 403
+        assert sm.snapshot_calls == []
+
+    def test_configured_size_limit_is_forwarded(self) -> None:
+        sm = _FakeStorageManager(snapshot_result=(L1Error.OBJECT_TOO_LARGE, None))
+        config = HTTPFrontendConfig(
+            enable_l1_cache_download=True, l1_cache_download_max_size_bytes=3
+        )
+        response = TestClient(_make_app(sm, config)).post(
+            "/cache/objects/download",
+            json={"key": {"chunk_hash_hex": "01", "model_name": "llama", "kv_rank": 0}},
+        )
+        assert response.status_code == 413
+        assert sm.snapshot_limits == [3]
+
+    def test_returns_exact_bytes_and_compact_metadata(self):
+        snapshot = _snapshot(backend=L1BackendType.DEVDAX)
+        sm = _FakeStorageManager(snapshot_result=(L1Error.SUCCESS, snapshot))
+        client = TestClient(_make_app(sm))
+
+        resp = client.post(
+            "/cache/objects/download",
+            json={
+                "key": {
+                    "chunk_hash_hex": "deadbeef",
+                    "model_name": "llama",
+                    "kv_rank": 2,
+                    "object_group_id": 1,
+                    "cache_salt": "alice",
+                }
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.content == snapshot.data
+        assert resp.headers["content-type"] == "application/octet-stream"
+        assert resp.headers["content-length"] == str(len(snapshot.data))
+        metadata = json.loads(resp.headers["x-lmcache-object-metadata"])
+        assert metadata == {
+            "size_bytes": 4,
+            "backend": "devdax",
+            "memory_format": "undefined",
+            "shapes": [[1, 2], [1]],
+            "dtypes": ["torch.uint8", "torch.bfloat16"],
+        }
+        assert sm.snapshot_calls == [
+            ObjectKey(
+                chunk_hash=b"\xde\xad\xbe\xef",
+                model_name="llama",
+                kv_rank=2,
+                object_group_id=1,
+                cache_salt="alice",
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        ("error", "expected_status"),
+        [
+            (L1Error.KEY_NOT_EXIST, 404),
+            (L1Error.KEY_NOT_READABLE, 409),
+            (L1Error.UNSUPPORTED_BACKEND, 501),
+            (L1Error.OBJECT_TOO_LARGE, 413),
+        ],
+    )
+    def test_maps_snapshot_errors(self, error, expected_status):
+        sm = _FakeStorageManager(snapshot_result=(error, None))
+        client = TestClient(_make_app(sm))
+        resp = client.post(
+            "/cache/objects/download",
+            json={
+                "key": {
+                    "chunk_hash_hex": _hex(1),
+                    "model_name": "m",
+                    "kv_rank": 0,
+                }
+            },
+        )
+        assert resp.status_code == expected_status, resp.text
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {},
+            {"key": []},
+            {"key": [{"chunk_hash_hex": _hex(1), "model_name": "m", "kv_rank": 0}]},
+        ],
+    )
+    def test_422_on_invalid_or_batch_request(self, body):
+        sm = _FakeStorageManager()
+        resp = TestClient(_make_app(sm)).post("/cache/objects/download", json=body)
+        assert resp.status_code == 422, resp.text
+        assert sm.snapshot_calls == []
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            {"chunk_hash_hex": "zz", "model_name": "m", "kv_rank": 0},
+            {"chunk_hash_hex": _hex(1), "model_name": "bad@name", "kv_rank": 0},
+        ],
+    )
+    def test_400_on_object_key_invariant_violation(self, key):
+        sm = _FakeStorageManager()
+        resp = TestClient(_make_app(sm)).post(
+            "/cache/objects/download", json={"key": key}
+        )
+        assert resp.status_code == 400, resp.text
+        assert sm.snapshot_calls == []
+
+    def test_503_when_not_initialized(self):
+        resp = TestClient(_make_app(None)).post(
+            "/cache/objects/download",
+            json={
+                "key": {
+                    "chunk_hash_hex": _hex(1),
+                    "model_name": "m",
+                    "kv_rank": 0,
+                }
+            },
+        )
+        assert resp.status_code == 503
 
 
 # =============================================================================
@@ -185,14 +362,13 @@ class TestDeleteObjectsEndpoint:
         assert resp.status_code == 404
         assert "nope" in resp.json()["detail"]
 
-    def test_propagates_adapter_failure_in_body(self):
+    def test_adapter_failure_returns_500(self):
         adapter = _FakeAdapter(delete_raises=RuntimeError("s3 down"))
-        client = TestClient(_make_app(_sm_with(("s3", adapter))))
+        client = TestClient(
+            _make_app(_sm_with(("s3", adapter))), raise_server_exceptions=False
+        )
         resp = client.request("DELETE", "/cache/objects", json={"keys": []})
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["ok"] is False
-        assert "s3 down" in body["error"]
+        assert resp.status_code == 500
 
     def test_tier_l1_deletes_l1_only(self):
         """tier=l1 deletes from L1 and never touches an L2 adapter."""
@@ -487,7 +663,7 @@ def _make_prefetch_app(ctx: Optional[_FakeContext]) -> FastAPI:
     app.include_router(cache_router)
     register_error_handlers(app)
     if ctx is not None:
-        app.state.context = build_context(_PrefetchEngine(ctx))
+        app.state.context = build_context(_PrefetchEngine(ctx), HTTPFrontendConfig())
     return app
 
 
@@ -598,7 +774,7 @@ def _make_clear_app(engine: Optional[_ClearEngine]) -> FastAPI:
     app.include_router(cache_router)
     register_error_handlers(app)
     if engine is not None:
-        app.state.context = build_context(engine)
+        app.state.context = build_context(engine, HTTPFrontendConfig())
     return app
 
 

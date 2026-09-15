@@ -15,6 +15,18 @@ from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 
 
 @dataclass(frozen=True)
+class DownloadObjectRequest:
+    """Wire body for ``POST /cache/objects/download``.
+
+    The exact existing object is addressed using the repository's JSON-safe
+    :class:`EncodedObjectKey` representation. Only one node-local L1 object is
+    downloaded per request.
+    """
+
+    key: EncodedObjectKey
+
+
+@dataclass(frozen=True)
 class DeleteObjectsRequest:
     """Wire body for ``DELETE /cache/objects``.
 
