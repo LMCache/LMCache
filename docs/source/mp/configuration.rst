@@ -454,7 +454,10 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-policy``
      - *required*
      - Eviction policy.
-       Choices: ``LRU``, ``IsolatedLRU``, ``noop``.
+       Choices: ``LRU``, ``ARC``, ``IsolatedLRU``, ``noop``.
+       ``ARC`` adaptively balances recently created keys and frequently
+       accessed keys. It keeps key-only ghost history for completed policy
+       evictions; no KV data is retained in the ghost lists.
        Use ``noop`` for buffer-only mode where L1 acts as a pure
        write buffer (data is deleted from L1 after L2 store).
        ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
