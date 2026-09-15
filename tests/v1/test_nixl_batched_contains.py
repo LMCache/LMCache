@@ -8,6 +8,7 @@ dependencies (NIXL agent, memory allocators) are replaced by mocks.
 """
 
 # Standard
+import asyncio
 from typing import List
 from unittest.mock import Mock
 
@@ -22,6 +23,7 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.nixl_storage_backend import (
     NixlDynamicStorageAgent,
     NixlDynamicStorageBackend,
+    NixlStaticStorageBackend,
 )
 
 # ---------------------------------------------------------------------------
@@ -389,3 +391,72 @@ class TestBatchedContains:
         backend._exists_in_put_tasks_or_cache.return_value = (False, False)
         backend.agent.batched_nixl_desc_exists.return_value = 0
         assert self._call(backend, _make_keys(1)) == 0
+
+
+# ---------------------------------------------------------------------------
+# NixlStaticStorageBackend.batched_async_contains (regression)
+# ---------------------------------------------------------------------------
+class TestStaticBatchedAsyncContains:
+    """Regression tests for ``NixlStaticStorageBackend.batched_async_contains``.
+
+    The method only depends on single-key ``contains``, so it is exercised on a
+    lightweight stub that borrows the unbound method — no full backend needed.
+    """
+
+    class _StubBackend:
+        # Borrow the method under test (it uses only ``self.contains``).
+        batched_async_contains = NixlStaticStorageBackend.batched_async_contains
+
+        def __init__(self, present: List[CacheEngineKey]) -> None:
+            self._present = set(present)
+            self.pinned: List[CacheEngineKey] = []
+
+        def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
+            hit = key in self._present
+            if hit and pin:
+                self.pinned.append(key)
+            return hit
+
+        def unpin(self, key: CacheEngineKey) -> bool:
+            # Mirrors NixlStaticStorageBackend.unpin: release a pinned key.
+            if key in self.pinned:
+                self.pinned.remove(key)
+                return True
+            return False
+
+    @staticmethod
+    def _run(present: List[CacheEngineKey], keys: List[CacheEngineKey], pin: bool = False):
+        backend = TestStaticBatchedAsyncContains._StubBackend(present)
+        count = asyncio.run(backend.batched_async_contains("lookup", keys, pin=pin))
+        return count, backend
+
+    def test_empty_keys_returns_zero(self) -> None:
+        count, _ = self._run([], [])
+        assert count == 0
+
+    def test_all_present(self) -> None:
+        keys = _make_keys(5)
+        count, _ = self._run(keys, keys)
+        assert count == 5
+
+    def test_stops_at_first_miss(self) -> None:
+        keys = _make_keys(5)
+        count, _ = self._run(keys[:3], keys)  # keys[3] absent
+        assert count == 3
+
+    def test_pin_pins_each_hit(self) -> None:
+        keys = _make_keys(3)
+        count, backend = self._run(keys, keys, pin=True)
+        assert count == 3
+        assert backend.pinned == keys
+
+    def test_unpin_releases_pinned_keys(self) -> None:
+        # pin=True pins every hit; the matching unpin() releases them with no
+        # leak. (In production the StorageManager unpins the chunk-rounding
+        # tail and the retrieve path unpins the rest.)
+        keys = _make_keys(3)
+        _, backend = self._run(keys, keys, pin=True)
+        assert backend.pinned == keys
+        for k in keys:
+            assert backend.unpin(k) is True
+        assert backend.pinned == []
