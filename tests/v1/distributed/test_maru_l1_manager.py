@@ -23,6 +23,7 @@ import torch
 try:
     # First Party
     from lmcache.v1.distributed.api import (
+        L1BackendType,
         MemoryLayoutDesc,
         ObjectKey,
         PrefetchRequestSpec,
@@ -33,6 +34,7 @@ try:
         L1MemoryManagerConfig,
         MaruL1Config,
         StorageManagerConfig,
+        get_configured_capacity_bytes,
         parse_args,
     )
     from lmcache.v1.distributed.error import L1Error
@@ -575,13 +577,13 @@ def test_temporary_promote_page_reclaimed_after_read():
     assert manager.unsafe_read([k])[k] == (L1Error.KEY_NOT_EXIST, None)
 
 
-def test_retained_promote_extra_count_pins_n():
+def test_retained_promote_read_locks_pins_n():
     manager, handler, _ = make_maru_manager()
     k = _key(1)
     manager.reserve_write([k], [False], _LAYOUT, mode="new")
 
-    manager.finish_write_and_reserve_read([k], extra_count=2)
-    assert handler.pins[object_key_to_string(k)] == 3  # 1 + extra_count
+    manager.finish_write_and_reserve_read([k], read_locks=3)
+    assert handler.pins[object_key_to_string(k)] == 3  # total read locks
 
 
 def test_retained_promote_dup_skip_resolves_winner():
@@ -629,7 +631,7 @@ def test_sweep_reclaims_expired_read_unpins():
     k = _key(1)
     ks = object_key_to_string(k)
     _seed(handler, k)
-    manager.reserve_read([k], extra_count=1)  # two pins
+    manager.reserve_read([k], read_locks=2)  # two pins
     manager._pending_read[k].deadline = time.monotonic() - 1
 
     manager._sweep_once()
@@ -872,3 +874,33 @@ def test_register_kv_layout_maps_engine_format_to_memory_format():
     )
     fmt = manager._allocator.init_layout.call_args.args[2]
     assert fmt == MemoryFormat.KV_2LTD
+
+
+@pytest.mark.parametrize("dram_gb", ["0", "64"])
+def test_maru_configured_capacity_uses_owned_pool(dram_gb: str) -> None:
+    """Ignored DRAM flags must not change Maru's initial owned capacity."""
+    config = parse_args(
+        [
+            "--maru-server-url",
+            "maru://localhost:5555",
+            "--maru-pool-size-gb",
+            "2",
+            "--no-maru-auto-expand",
+            "--l1-size-gb",
+            dram_gb,
+            "--eviction-policy",
+            "noop",
+        ]
+    )
+    assert get_configured_capacity_bytes(config.l1_manager_config) == {
+        L1BackendType.MARU: 2 << 30,
+    }
+
+
+def test_maru_status_reports_initial_owned_capacity() -> None:
+    """Configured capacity is the initial reservation, not global device free space."""
+    manager, _, _ = make_maru_manager()
+    try:
+        assert manager.report_status()["memory_configured_bytes"] == 1 << 20
+    finally:
+        manager.close()

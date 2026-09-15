@@ -33,11 +33,11 @@ if not (torch_dev.is_available() and torch_device_type == "cuda"):
     )
 
 # First Party
-import lmcache.c_ops as lmc_ops  # noqa: E402
+import lmcache.cuda_ops as cuda_ops  # noqa: E402
 
-if not hasattr(lmc_ops, "execute_cb_retrieve_plan_flat"):
+if not hasattr(cuda_ops, "execute_cb_retrieve_plan_flat"):
     pytest.skip(
-        "c_ops build lacks execute_cb_retrieve_plan_flat",
+        "cuda_ops build lacks execute_cb_retrieve_plan_flat",
         allow_module_level=True,
     )
 
@@ -86,7 +86,7 @@ def _reference_scatter(
     for i, host in enumerate(host_chunks):
         buf = host.to(dev)
         k_view = buf[0].reshape(_NL * _SPC, _NH, case.head_stride)
-        lmc_ops.rotary_embedding_k_fused_strided(
+        cuda_ops.rotary_embedding_k_fused_strided(
             old_sts[i] + ramp,
             cur_sts[i] + ramp,
             k_view,
@@ -95,7 +95,7 @@ def _reference_scatter(
             cos_sin,
             True,
         )
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             buf,
             paged_ptrs,
             slot_mapping[i * _SPC : (i + 1) * _SPC],
@@ -124,7 +124,7 @@ def _run_plan(
     """Drive the production flat-table entry point with the planner's
     double-buffer wave layout."""
     chunk_bytes = case.kv_size * _NL * _SPC * case.hidden * _DTYPE.itemsize
-    spec = lmc_ops.CBGroupSpec(
+    spec = cuda_ops.CBGroupSpec(
         paged_kv_ptrs=paged_ptrs.data_ptr(),
         temp_buffer_ptrs=[s.data_ptr() for s in slots],
         num_layers=_NL,
@@ -157,7 +157,7 @@ def _run_plan(
             ropes.append((0, slot, old_sts[ci], cur_sts[ci]))
             scatters.append((0, slot, ci * _SPC, _SPC))
         step_offsets.append((len(staging), len(ropes), len(scatters)))
-    lmc_ops.execute_cb_retrieve_plan_flat(
+    cuda_ops.execute_cb_retrieve_plan_flat(
         slot_mapping.device,
         1 << 26,
         [spec],

@@ -27,9 +27,9 @@ class L1ManagerInterface(Protocol):
         ...
 
     def reserve_read(
-        self, keys: list[ObjectKey], extra_count: int = 0
+        self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Reserve read; ``1+extra_count`` holds/key.
+        """Reserve read; ``read_locks`` holds/key.
         Fires ``on_l1_keys_reserved_read``."""
         ...
 
@@ -39,9 +39,9 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_read(
-        self, keys: list[ObjectKey], extra_count: int = 0
+        self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1Error]:
-        """Release ``1+extra_count`` holds/key.
+        """Release ``read_locks`` holds/key.
         Fires ``on_l1_keys_read_finished`` (+ ``on_l1_keys_deleted_by_manager`` for
         temporaries dropped at count 0)."""
         ...
@@ -63,9 +63,9 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], extra_count: int = 0
+        self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Finish write + take ``1+extra_count`` read holds/key (L2->L1 promote).
+        """Finish write + take ``read_locks`` read holds/key (L2->L1 promote).
         Fires ``on_l1_keys_finish_write_and_reserve_read`` (NOT write_finished)."""
         ...
 

@@ -519,7 +519,7 @@ def test_dax_backend_batched_memcpy_helper() -> None:
     dst = torch.zeros(16, dtype=torch.uint8)
     dst2 = torch.zeros(4, dtype=torch.uint8)
 
-    dax_backend_module.lmc_ops.batched_memcpy(
+    dax_backend_module.device_ops.batched_memcpy(
         [src.data_ptr(), src.data_ptr() + 4],
         [dst.data_ptr(), dst2.data_ptr()],
         [8, 4],

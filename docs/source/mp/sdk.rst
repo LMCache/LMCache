@@ -52,10 +52,14 @@ The SDK runs on **CPU** and hands you KV tensors in ``HND`` order with shape
 Configuration
 -------------
 
-To start the LMCache server with shared-memory transfer enabled, pass
-``--shm-name`` and disable lazy L1 allocation with ``--no-l1-use-lazy``. If
-shared memory is unavailable and these flags are not specified, the SDK falls 
-back to pickle.
+The SDK runs on CPU and talks to the server over the engine-driven
+transfer path, which the server does not load by default -- start the
+server with ``--supported-transfer-mode auto`` so both the vLLM
+(lmcache-driven) and SDK (engine-driven) paths are available.
+To enable shared-memory transfer, pass ``--shm-name`` and disable lazy
+L1 allocation with ``--no-l1-use-lazy``. If shared memory is
+unavailable and these flags are not specified, the SDK falls back to
+pickle.
 To transfer query tensors, add ``--enable transfer_query`` flag.
 
 .. code-block:: bash
@@ -66,6 +70,7 @@ To transfer query tensors, add ``--enable transfer_query`` flag.
         --chunk-size 256 \
         --port 6555 \
         --http-port 8080 \
+        --supported-transfer-mode auto \
         --shm-name lmcache_kvcache_sdk \
         --no-l1-use-lazy \
         --enable transfer_query

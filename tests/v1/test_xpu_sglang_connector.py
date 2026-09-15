@@ -650,7 +650,7 @@ def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
 
     calls: list[tuple[object, bool]] = []
     orig_single_layer_kv_transfer_sgl = (
-        xpu_connectors.lmc_ops.single_layer_kv_transfer_sgl
+        xpu_connectors.device_ops.single_layer_kv_transfer_sgl
     )
 
     def _recording_single_layer_kv_transfer_sgl(
@@ -672,7 +672,7 @@ def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
         )
 
     monkeypatch.setattr(
-        xpu_connectors.lmc_ops,
+        xpu_connectors.device_ops,
         "single_layer_kv_transfer_sgl",
         _recording_single_layer_kv_transfer_sgl,
     )
@@ -786,9 +786,9 @@ def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
 
     single_layer_calls: list[tuple[object, bool]] = []
     sgl_calls: list[tuple[object, bool]] = []
-    orig_single_layer_kv_transfer = xpu_connectors.lmc_ops.single_layer_kv_transfer
+    orig_single_layer_kv_transfer = xpu_connectors.device_ops.single_layer_kv_transfer
     orig_single_layer_kv_transfer_sgl = (
-        xpu_connectors.lmc_ops.single_layer_kv_transfer_sgl
+        xpu_connectors.device_ops.single_layer_kv_transfer_sgl
     )
 
     def _recording_single_layer_kv_transfer(
@@ -828,12 +828,12 @@ def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
         )
 
     monkeypatch.setattr(
-        xpu_connectors.lmc_ops,
+        xpu_connectors.device_ops,
         "single_layer_kv_transfer",
         _recording_single_layer_kv_transfer,
     )
     monkeypatch.setattr(
-        xpu_connectors.lmc_ops,
+        xpu_connectors.device_ops,
         "single_layer_kv_transfer_sgl",
         _recording_single_layer_kv_transfer_sgl,
     )

@@ -14,12 +14,12 @@ import os
 import threading
 
 # First Party
+from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
 from lmcache.v1.storage_backend.dax.core import DaxCore
-import lmcache.c_ops as lmc_ops
 
 if TYPE_CHECKING:
     # Standard
@@ -211,7 +211,7 @@ class DaxBackend(StoragePluginInterface):
                 )
 
             self._retrieve_staging_slab_ptr = int(
-                lmc_ops.alloc_pinned_ptr(self._retrieve_staging_slab_bytes, 0)
+                device_ops.alloc_pinned_ptr(self._retrieve_staging_slab_bytes, 0)
             )
             self._restore_executor = ThreadPoolExecutor(
                 max_workers=self._restore_workers,
@@ -649,7 +649,7 @@ class DaxBackend(StoragePluginInterface):
 
         if self._retrieve_staging_slab_ptr:
             try:
-                lmc_ops.free_pinned_ptr(self._retrieve_staging_slab_ptr)
+                device_ops.free_pinned_ptr(self._retrieve_staging_slab_ptr)
             except Exception as exc:
                 logger.warning("Failed to free DAX retrieve slab: %s", exc)
 
@@ -691,8 +691,8 @@ class DaxBackend(StoragePluginInterface):
     ) -> None:
         if not src_ptrs:
             return
-        if hasattr(lmc_ops, "batched_memcpy"):
-            lmc_ops.batched_memcpy(list(src_ptrs), list(dst_ptrs), list(sizes))
+        if hasattr(device_ops, "batched_memcpy"):
+            device_ops.batched_memcpy(list(src_ptrs), list(dst_ptrs), list(sizes))
             return
 
         for src_ptr, dst_ptr, size in zip(src_ptrs, dst_ptrs, sizes, strict=True):

@@ -979,6 +979,15 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  partialBucket:
+                    description: |-
+                      partialBucket pads PARTIAL row counts to a multiple of this bucket size,
+                      surfaced to the connector as kv_connector_extra_config["cb.partial_bucket"].
+                      Unset (the default) omits the key, leaving the padding disabled. Needed
+                      on fp8-MoE models (see DESIGN.md).
+                    format: int32
+                    minimum: 1
+                    type: integer
                   recompRatio:
                     default: 0.15
                     description: |-
@@ -1237,9 +1246,25 @@ spec:
                 - nvidia
                 - amd
                 type: string
+              hostIPC:
+                default: false
+                description: |-
+                  hostIPC runs the pod in the host's IPC namespace. Cross-pod CUDA IPC does
+                  not require it on NVIDIA stacks: the operator instead mounts the host's
+                  /dev/shm into the engine pod (hostPath), which is the requirement —
+                  PyTorch's CUDA IPC handles reference a shared-memory ref-counter file in
+                  /dev/shm that both processes must open by name. It therefore defaults to
+                  false. Set it to true only where the hostPath /dev/shm mount is
+                  unavailable (e.g. blocked by an admission policy) or where the GPU stack
+                  still needs a shared IPC namespace; the AMD (ROCm) HIP IPC path is
+                  unverified without hostIPC, so gpuVendor "amd" deployments should set it
+                  to true. When true, the /dev/shm hostPath mount is omitted (the shared
+                  namespace already exposes the host's /dev/shm). The injection webhook
+                  mirrors this setting on opted-in vLLM pods. Default: false.
+                type: boolean
               image:
                 description: |-
-                  image defines the container image to use for the blend_v3 engine. This
+                  image defines the container image to use for the blend engine. This
                   may be a PRIVATE image; use imagePullSecrets to pull it.
                 properties:
                   pullPolicy:
@@ -1538,6 +1563,43 @@ spec:
                   type: string
                 description: nodeSelector determines which nodes get a CacheBlend
                   engine instance.
+                type: object
+              pd:
+                description: |-
+                  pd enables PD (Prefill-Decode) disaggregation. The prefiller config
+                  pairs the CacheBlend connector with NIXL in a MultiConnector; the
+                  decoder config is a bare NixlConnector (kv_consumer). The webhook
+                  selects the config by the lmcache.ai/pd-role pod annotation and
+                  injects the NIXL side-channel env vars.
+                properties:
+                  enforceHandshakeCompat:
+                    description: |-
+                      enforceHandshakeCompat, when set, is forwarded to the NixlConnector as
+                      kv_connector_extra_config["enforce_handshake_compat"]. Set to false to
+                      disable strict NIXL version negotiation — useful when prefiller and
+                      decoder run different vLLM builds. When nil the key is omitted and
+                      NixlConnector uses its own default.
+                    type: boolean
+                  nixlLoadFailurePolicy:
+                    default: fail
+                    description: |-
+                      nixlLoadFailurePolicy controls what NixlConnector does when the remote
+                      peer cannot be reached. "fail" aborts the request (default);
+                      "ignore" falls back to local prefill.
+                    enum:
+                    - fail
+                    - ignore
+                    type: string
+                  nixlSideChannelPort:
+                    default: 5558
+                    description: |-
+                      nixlSideChannelPort is the port the NIXL agent advertises for
+                      side-channel negotiation. Use distinct values for prefiller and decoder
+                      when both roles run on the same node (e.g. local testing).
+                    format: int32
+                    maximum: 65535
+                    minimum: 1024
+                    type: integer
                 type: object
               podAnnotations:
                 additionalProperties:

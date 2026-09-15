@@ -8,7 +8,7 @@ import threading
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
@@ -19,7 +19,6 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.platform import current_device_spec
 from lmcache.v1.system_detection import NUMAMapping
-import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -114,7 +113,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         # Detect numa mapping
         if numa_mapping is not None:
             numa_id = get_numa_id(numa_mapping)
-            ptr = lmc_ops.alloc_numa_ptr(self._final_size, numa_id)
+            ptr = device_ops.alloc_numa_ptr(self._final_size, numa_id)
             arr_type = ctypes.c_uint8 * self._final_size
             buf = arr_type.from_address(ptr)
             self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
@@ -268,7 +267,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         # Free the underlying buffer if using NUMA allocation
         if self._use_numa:
-            lmc_ops.free_numa_ptr(self._buffer.data_ptr(), self._final_size)
+            device_ops.free_numa_ptr(self._buffer.data_ptr(), self._final_size)
 
     def memcheck(self) -> bool:
         """Return whether the delegated tensor allocator is consistent."""

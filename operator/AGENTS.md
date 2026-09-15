@@ -101,10 +101,11 @@ Both names point at the same image; only the hostnames differ.
 
 - **PodSecurity admission**: test namespaces are pre-labeled
   `pod-security.kubernetes.io/enforce=privileged` so the operator's
-  DaemonSet (which always sets `hostIPC=true`, and `privileged=true` only
-  when `spec.privileged` is enabled) is accepted at admission time.
-  `hostIPC=true` alone is rejected by the `baseline`/`restricted` profiles,
-  so the label is required regardless of `privileged`. Harmless on clusters
+  DaemonSet (which mounts the host's `/dev/shm` via hostPath by default, sets
+  `hostIPC=true` only when `spec.hostIPC` is enabled, and `privileged=true`
+  only when `spec.privileged` is enabled) is accepted at admission time.
+  The hostPath volume alone is rejected by the `baseline`/`restricted`
+  profiles, so the label is required regardless of `hostIPC`/`privileged`. Harmless on clusters
   that don't enforce PodSecurity.
 - **SCC (Security Context Constraints)**: M1 smokes never wait for
   DaemonSet pods to schedule, so SCC isn't a blocker. If you need pods
@@ -126,7 +127,7 @@ Both names point at the same image; only the hostnames differ.
 |---|---|
 | `runtime_smoke_test.go` | HTTP `/conf` round-trip — proves CR field values reach the live LMCache server (not just the K8s objects) by asserting `mp.port` / `mp.chunk_size` / `mp.max_workers` / `mp.hash_algorithm` / `http.http_port` against the running pod's `/conf` payload. |
 | `vllm_integration_smoke_test.go` | vLLM + LMCache round-trip — spins up a vLLM `Deployment` configured against the operator's `<engine>-connection` ConfigMap with `--no-enable-prefix-caching`, sends the same long prompt twice, and asserts `lmcache:num_hit_tokens` on the LMCache `/metrics` endpoint increments on the second call. |
-| `cacheblend_integration_smoke_test.go` | vLLM + CacheBlendEngine round-trip — reconciles a `CacheBlendEngine` (blend server DaemonSet), creates an args-only vLLM `Deployment` that opts into CacheBlend injection (label `lmcache.ai/cacheblend-inject` + engine annotation), and asserts: the mutating webhook stamped `cacheblend-injected=true` and injected `--attention-backend CUSTOM`; vLLM logs the CUSTOM backend banner and serves `/v1/models`; the engine logs `Registered CB rope state for instance N` after a completion; the completion returns HTTP 200. Pulls the PRIVATE payload image via a `dockerconfigjson` Secret built from `CACHEBLEND_REGISTRY_USER`/`CACHEBLEND_REGISTRY_TOKEN` — **Skips** if those are unset. |
+| `cacheblend_integration_smoke_test.go` | vLLM + CacheBlendEngine round-trip — reconciles a `CacheBlendEngine` (blend server DaemonSet), creates an args-only vLLM `Deployment` that opts into CacheBlend injection (label `lmcache.ai/cacheblend-inject` + engine annotation), and asserts: the mutating webhook stamped `cacheblend-injected=true`; vLLM logs the CUSTOM backend banner and serves `/v1/models`; the engine logs `Registered CB rope state for instance N` after a completion; the completion returns HTTP 200. Pulls the PRIVATE payload image via a `dockerconfigjson` Secret built from `CACHEBLEND_REGISTRY_USER`/`CACHEBLEND_REGISTRY_TOKEN` — **Skips** if those are unset. |
 
 ### Prerequisites
 
@@ -251,8 +252,8 @@ from `/etc/nvidia-container-runtime/config.toml`.
 
 Single-node is intentional: the LMCache DaemonSet and the test-side
 vLLM Deployment both schedule onto the same (only) worker, which is
-what the kv-cache transfer needs anyway (hostIPC + cudaIPC require
-colocation).
+what the kv-cache transfer needs anyway (the shared /dev/shm + cudaIPC
+require colocation).
 
 **Side effect of step 2 to be aware of**: after the flip, every
 docker container on the host — not just Kind workers — starts

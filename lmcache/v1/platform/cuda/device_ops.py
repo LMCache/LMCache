@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA ops backend: bulk-bind the compiled ``lmcache.c_ops`` extension.
+"""CUDA ops backend: bulk-bind the compiled ``lmcache.cuda_ops`` extension.
 
 :class:`CudaDeviceOps` calls :meth:`bind_native` in :meth:`ensure_native`
 to layer the compiled CUDA extension on top of the torch baseline.  If the
@@ -29,10 +29,10 @@ class CudaDeviceOps(DeviceOps):
         self._native_bound = True  # set early to prevent repeated attempts
         try:
             # First Party
-            import lmcache.c_ops as native
+            import lmcache.cuda_ops as native
         except ImportError:
             logger.warning(
-                "lmcache.c_ops compiled extension not found; "
+                "lmcache.cuda_ops compiled extension not found; "
                 "CudaDeviceOps stays on the torch baseline for all ops."
             )
             return

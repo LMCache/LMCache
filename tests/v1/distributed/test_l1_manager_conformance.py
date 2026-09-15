@@ -141,11 +141,11 @@ def test_delete_read_held_key_refused_then_retried(manager):
     assert manager.delete([k])[k] == L1Error.SUCCESS
 
 
-def test_extra_count_balances_across_independent_finishes(manager):
-    """1+extra holds; that many finish_read calls release them all."""
+def test_read_locks_balances_across_independent_finishes(manager):
+    """Total read holds; that many finish_read calls release them all."""
     k = _key(6)
     _write(manager, [k])
-    manager.reserve_read([k], extra_count=2)
+    manager.reserve_read([k], read_locks=3)
 
     assert manager.delete([k])[k] == L1Error.KEY_IS_LOCKED
     for _ in range(3):
@@ -354,3 +354,31 @@ def test_maru_signatures_match_interface():
         proto = _params(getattr(L1ManagerInterface, name))
         impl = _params(_unwrap(getattr(MaruL1Manager, name)))
         assert proto == impl, name
+
+
+@pytest.mark.parametrize(
+    "read_locks, expected", [(1, 1), (3, 3), (0, 1), (-2, 1), (129, 128)]
+)
+def test_total_read_locks_hold_until_last_finish(
+    manager: L1ManagerInterface, read_locks: int, expected: int
+) -> None:
+    """Clamped total counts protect a key until every reader finishes."""
+    key = _key(90)
+    _write(manager, [key])
+    assert manager.reserve_read([key], read_locks=read_locks)[key][0] == L1Error.SUCCESS
+    for _ in range(expected - 1):
+        assert manager.finish_read([key])[key] == L1Error.SUCCESS
+        assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+    assert manager.finish_read([key])[key] == L1Error.SUCCESS
+    assert manager.delete([key])[key] == L1Error.SUCCESS
+
+
+def test_total_read_locks_can_be_released_in_one_batch(
+    manager: L1ManagerInterface,
+) -> None:
+    """The reservation owner can release all three holds in one call."""
+    key = _key(91)
+    _write(manager, [key])
+    manager.reserve_read([key], read_locks=3)
+    assert manager.finish_read([key], read_locks=3)[key] == L1Error.SUCCESS
+    assert manager.delete([key])[key] == L1Error.SUCCESS

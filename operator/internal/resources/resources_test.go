@@ -19,6 +19,7 @@ package resources
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +37,8 @@ const (
 	kvRoleBoth     = "kv_both"
 	kvRoleProducer = "kv_producer"
 	kvRoleConsumer = "kv_consumer"
+
+	nixlConnectorName = "NixlConnector"
 )
 
 // --- helpers ---
@@ -612,9 +615,10 @@ func TestBuildDaemonSet_Minimal(t *testing.T) {
 		t.Fatal("expected HostNetwork=false")
 	}
 
-	// Should have HostIPC=true (required for CUDA IPC)
-	if !ds.Spec.Template.Spec.HostIPC {
-		t.Fatal("expected HostIPC=true")
+	// Should NOT have HostIPC by default — CUDA IPC is wired via the /dev/shm
+	// hostPath mount instead (opt back in via spec.hostIPC).
+	if ds.Spec.Template.Spec.HostIPC {
+		t.Fatal("expected HostIPC=false by default")
 	}
 
 	// Should have exactly 1 container
@@ -644,22 +648,25 @@ func TestBuildDaemonSet_Minimal(t *testing.T) {
 		t.Fatal("missing readiness probe")
 	}
 
-	// Should NOT have emptyDir /dev/shm volume (hostIPC provides host's /dev/shm)
+	// Should NOT have emptyDir /dev/shm volume (it would shadow the host's
+	// /dev/shm and break CUDA IPC)
 	for _, v := range ds.Spec.Template.Spec.Volumes {
 		if v.Name == "dshm" {
 			t.Fatal("dshm emptyDir volume should not be present — it shadows host /dev/shm and breaks CUDA IPC")
 		}
 	}
 
-	// Should have no volumes by default (no user-specified volumes)
+	// Default is isolated IPC (auto-on for the default nvidia vendor): no
+	// /dev/shm sharing is wired at all — no volumes, no mounts.
 	if len(ds.Spec.Template.Spec.Volumes) != 0 {
-		t.Fatalf("expected 0 volumes, got %d", len(ds.Spec.Template.Spec.Volumes))
+		t.Fatalf("expected no volumes under isolated IPC, got %+v", ds.Spec.Template.Spec.Volumes)
+	}
+	if len(c.VolumeMounts) != 0 {
+		t.Fatalf("expected no volume mounts under isolated IPC, got %+v", c.VolumeMounts)
 	}
 
-	// Should have no volume mounts by default
-	if len(c.VolumeMounts) != 0 {
-		t.Fatalf("expected 0 volume mounts, got %d", len(c.VolumeMounts))
-	}
+	// The server runs in isolated-IPC mode.
+	assertHasArg(t, c.Args, "--isolated-ipc")
 
 	// Should have LMCACHE_LOG_LEVEL env var
 	foundLogLevel := false
@@ -755,12 +762,23 @@ func TestBuildDaemonSet_CustomEnvAndVolumes(t *testing.T) {
 		t.Fatalf("expected 4 env vars, got %d", len(c.Env))
 	}
 
-	// Should have only user-specified extra-vol (no built-in dshm)
+	// Should have only the user-specified extra-vol: the default is isolated
+	// IPC, which wires no /dev/shm sharing.
 	if len(ds.Spec.Template.Spec.Volumes) != 1 {
 		t.Fatalf("expected 1 volume, got %d", len(ds.Spec.Template.Spec.Volumes))
 	}
+	foundExtra := false
+	for _, v := range ds.Spec.Template.Spec.Volumes {
+		if v.Name == "extra-vol" {
+			foundExtra = true
+		}
+	}
+	if !foundExtra {
+		t.Fatal("missing user-specified extra-vol volume")
+	}
 
-	// Should have only user-specified extra mount
+	// Should have only the user-specified extra mount (no /dev/shm sharing
+	// under the isolated-IPC default).
 	if len(c.VolumeMounts) != 1 {
 		t.Fatalf("expected 1 volume mount, got %d", len(c.VolumeMounts))
 	}
@@ -1197,7 +1215,7 @@ func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
 	}
 
 	nixl := connectors[0].(map[string]any)
-	if nixl["kv_connector"] != "NixlConnector" {
+	if nixl["kv_connector"] != nixlConnectorName {
 		t.Fatalf("first connector must be NixlConnector, got %v", nixl["kv_connector"])
 	}
 	if nixl["kv_role"] != kvRoleProducer {
@@ -1475,6 +1493,221 @@ func TestBuildDaemonSet_PrivilegedEnabled(t *testing.T) {
 
 	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
 		t.Fatal("expected privileged=true when spec.privileged=true")
+	}
+}
+
+func TestBuildDaemonSet_HostIPCEnabled(t *testing.T) {
+	// spec.hostIPC=true restores the legacy shared-IPC-namespace mode: the pod
+	// joins the host IPC namespace and the /dev/shm hostPath mount is omitted
+	// (the namespace already exposes the host's /dev/shm).
+	engine := minimalEngine()
+	engine.Spec.HostIPC = ptr(true)
+	engine.Spec.IsolatedIPC = ptr(false)
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if !podSpec.HostIPC {
+		t.Fatal("expected HostIPC=true when spec.hostIPC=true")
+	}
+	for _, v := range podSpec.Volumes {
+		if v.Name == devShmVolumeName {
+			t.Fatal("lmcache-dev-shm hostPath volume must be omitted when hostIPC=true")
+		}
+	}
+}
+
+func TestBuildDaemonSet_IsolatedIPCOverridesHostIPC(t *testing.T) {
+	// isolatedIPC=true takes priority: no host IPC namespace, no /dev/shm
+	// sharing, even with spec.hostIPC=true.
+	engine := minimalEngine()
+	engine.Spec.HostIPC = ptr(true)
+	engine.Spec.IsolatedIPC = ptr(true)
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if podSpec.HostIPC {
+		t.Fatal("isolatedIPC=true must override spec.hostIPC=true")
+	}
+	if len(podSpec.Volumes) != 0 {
+		t.Fatalf("expected no volumes under isolated IPC, got %+v", podSpec.Volumes)
+	}
+	assertHasArg(t, podSpec.Containers[0].Args, "--isolated-ipc")
+}
+
+func TestBuildDaemonSet_IsolatedIPCDisabledKeepsLegacyWiring(t *testing.T) {
+	// isolatedIPC=false restores the legacy default: host /dev/shm hostPath
+	// mount, no --isolated-ipc flag.
+	engine := minimalEngine()
+	engine.Spec.IsolatedIPC = ptr(false)
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if podSpec.HostIPC {
+		t.Fatal("expected HostIPC=false")
+	}
+	if len(podSpec.Volumes) != 1 || podSpec.Volumes[0].Name != devShmVolumeName ||
+		podSpec.Volumes[0].HostPath == nil {
+		t.Fatalf("expected the lmcache-dev-shm hostPath volume, got %+v", podSpec.Volumes)
+	}
+	assertNoArg(t, podSpec.Containers[0].Args, "--isolated-ipc")
+}
+
+func TestBuildDaemonSet_AMDDefaultsToLegacyIPC(t *testing.T) {
+	// gpuVendor "amd" has no isolated-IPC backends: unset isolatedIPC
+	// auto-resolves to false there.
+	engine := minimalEngine()
+	engine.Spec.GPUVendor = ptr(lmcachev1alpha1.GPUVendorAMD)
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if len(podSpec.Volumes) != 1 || podSpec.Volumes[0].HostPath == nil {
+		t.Fatalf("expected the lmcache-dev-shm hostPath volume on amd, got %+v", podSpec.Volumes)
+	}
+	assertNoArg(t, podSpec.Containers[0].Args, "--isolated-ipc")
+}
+
+func TestBuildContainerArgs_IsolatedIPC(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+	}
+	// Unset resolves to true for the default (nvidia) vendor.
+	assertHasArg(t, BuildContainerArgs(spec), "--isolated-ipc")
+
+	spec.IsolatedIPC = ptr(false)
+	assertNoArg(t, BuildContainerArgs(spec), "--isolated-ipc")
+}
+
+func TestBuildConnectionConfigMap_IsolatedIPC(t *testing.T) {
+	// The connector must mirror the engine's isolated-IPC mode: the extra
+	// config key is present exactly when the mode resolves to true.
+	engine := minimalEngine()
+	cm := BuildConnectionConfigMap(engine)
+	if !strings.Contains(cm.Data["kv-transfer-config.json"], `"lmcache.mp.isolated_ipc": true`) {
+		t.Fatalf("expected lmcache.mp.isolated_ipc in kv-transfer-config, got:\n%s",
+			cm.Data["kv-transfer-config.json"])
+	}
+
+	engine.Spec.IsolatedIPC = ptr(false)
+	cm = BuildConnectionConfigMap(engine)
+	if strings.Contains(cm.Data["kv-transfer-config.json"], "isolated_ipc") {
+		t.Fatalf("expected no isolated_ipc key when disabled, got:\n%s",
+			cm.Data["kv-transfer-config.json"])
+	}
+}
+
+func TestBuildPDConnectionConfigMap_IsolatedIPC(t *testing.T) {
+	// PD mode carries the key in all three emitted configs (prefiller,
+	// decoder, and the non-PD fallback).
+	engine := minimalEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+	cm := BuildConnectionConfigMap(engine)
+	for _, key := range []string{
+		"kv-transfer-config.json",
+		KVTransferConfigPrefillerDataKey,
+		KVTransferConfigDecoderDataKey,
+	} {
+		if !strings.Contains(cm.Data[key], `"lmcache.mp.isolated_ipc": true`) {
+			t.Fatalf("expected lmcache.mp.isolated_ipc in %s, got:\n%s", key, cm.Data[key])
+		}
+	}
+}
+
+func TestCacheBlendKeepsLegacyIPCWiring(t *testing.T) {
+	// CacheBlendEngine has no isolatedIPC field: its projection pins the mode
+	// off, so the blend engine keeps the /dev/shm hostPath and gets no
+	// --isolated-ipc flag.
+	engine := &lmcachev1alpha1.CacheBlendEngine{
+		ObjectMeta: metav1.ObjectMeta{Name: "blend", Namespace: testNamespace},
+		Spec: lmcachev1alpha1.CacheBlendEngineSpec{
+			L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		},
+	}
+
+	assertNoArg(t, BuildCBEngineArgs(&engine.Spec), "--isolated-ipc")
+
+	ds := BuildCBEngineDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+	if len(podSpec.Volumes) != 1 || podSpec.Volumes[0].Name != devShmVolumeName ||
+		podSpec.Volumes[0].HostPath == nil {
+		t.Fatalf("expected the lmcache-dev-shm hostPath volume for CacheBlend, got %+v",
+			podSpec.Volumes)
+	}
+}
+
+func TestBuildDaemonSet_UserDevShmMountWins(t *testing.T) {
+	// A user-supplied /dev/shm mount (any volume name) suppresses the default
+	// lmcache-dev-shm hostPath injection so the pod never gets two mounts at one path.
+	// Pinned to the legacy (non-isolated) mode, where the injection happens.
+	engine := minimalEngine()
+	engine.Spec.IsolatedIPC = ptr(false)
+	engine.Spec.Volumes = []corev1.Volume{{
+		Name: "my-shm",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: devShmPath},
+		},
+	}}
+	engine.Spec.VolumeMounts = []corev1.VolumeMount{{
+		Name:      "my-shm",
+		MountPath: devShmPath,
+	}}
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	for _, v := range podSpec.Volumes {
+		if v.Name == devShmVolumeName {
+			t.Fatal("default lmcache-dev-shm volume must not be added when the user already mounts /dev/shm")
+		}
+	}
+	mounts := 0
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		if m.MountPath == devShmPath {
+			mounts++
+		}
+	}
+	if mounts != 1 {
+		t.Fatalf("expected exactly 1 mount at /dev/shm, got %d", mounts)
+	}
+}
+
+func TestBuildDaemonSet_UserDevShmVolumeNameCollision(t *testing.T) {
+	// A user volume that collides with the injected volume name (even if not mounted at
+	// /dev/shm) suppresses the default injection: appending a second volume
+	// with the same name would make the pod spec invalid.
+	// Pinned to the legacy (non-isolated) mode, where the injection happens.
+	engine := minimalEngine()
+	engine.Spec.IsolatedIPC = ptr(false)
+	engine.Spec.Volumes = []corev1.Volume{{
+		Name: devShmVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	}}
+	engine.Spec.VolumeMounts = []corev1.VolumeMount{{
+		Name:      devShmVolumeName,
+		MountPath: "/custom",
+	}}
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	seen := 0
+	for _, v := range podSpec.Volumes {
+		if v.Name == devShmVolumeName {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("expected exactly 1 volume named lmcache-dev-shm, got %d (duplicate names are invalid)", seen)
+	}
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		if m.MountPath == devShmPath {
+			t.Fatal("must not mount the user's lmcache-dev-shm volume at /dev/shm")
+		}
 	}
 }
 

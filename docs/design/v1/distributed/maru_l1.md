@@ -104,7 +104,7 @@ in-flight/staged state. A single non-reentrant lock serializes every public meth
 
 A structural `typing.Protocol` (`@runtime_checkable`). Both `L1Manager` and
 `MaruL1Manager` satisfy it without inheritance; each method's docstring is the
-behavioral contract (listener firing, PINNED retry, `extra_count` balance).
+behavioral contract (listener firing, PINNED retry, `read_locks` total-count balance).
 `StorageManager` selects the implementation in one line:
 
 ```python
@@ -269,6 +269,11 @@ owned-pool allocation and `total` is the owned pool plus the CXL device free
 whole-device fill rather than only the owned pool — the pool auto-expands into free
 CXL before evicting. With `auto_expand` off, `total` is the owned pool alone (which
 is hard-capped at `pool_size_bytes`), so eviction engages before it is exhausted.
+
+The configured-capacity report uses backend `maru` and the initial
+`pool_size_bytes` owned by this MP. It is an instance-owned reservation, not a
+fleet-wide shared-capacity declaration; auto-expansion and device free space
+remain reflected separately in runtime usage.
 
 ## Current Limits
 

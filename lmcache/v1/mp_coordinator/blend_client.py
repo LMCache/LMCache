@@ -16,12 +16,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Empty, Queue
-import os
 import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.api import BlendMatch
+from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
 from lmcache.v1.mp_coordinator.schemas import encode_tokens
 
 logger = init_logger(__name__)
@@ -39,6 +38,7 @@ class _MatchItem:
 
     rid: str
     tokens: list[int]
+    namespace: BlendNamespace
 
 
 class BlendCoordinatorClient:
@@ -108,18 +108,22 @@ class BlendCoordinatorClient:
         )
         self._worker.start()
 
-    def submit_match(self, rid: str, tokens: list[int]) -> None:
+    def submit_match(
+        self, rid: str, tokens: list[int], namespace: BlendNamespace
+    ) -> None:
         """Submit a match query for a request once (idempotent per ``rid``).
 
         Args:
             rid: Request id, the poll key.
             tokens: The request tokens (the coordinator hashes and probes them).
+            namespace: This server's retrieval namespace, which scopes the
+                matches to chunk hashes its own key expansion can reach.
         """
         with self._results_lock:
             if rid in self._results:
                 return
             self._results[rid] = PENDING
-        self._match_q.put(_MatchItem(rid=rid, tokens=tokens))
+        self._match_q.put(_MatchItem(rid=rid, tokens=tokens, namespace=namespace))
 
     def poll_match(self, rid: str) -> object:
         """Return the match state for a request.
@@ -152,32 +156,37 @@ class BlendCoordinatorClient:
             self._client.close()
 
     @classmethod
-    def maybe_create(cls, url: str | None) -> "BlendCoordinatorClient | None":
+    def maybe_create(
+        cls,
+        url: str | None,
+        *,
+        timeout: float,
+        match_concurrency: int,
+    ) -> "BlendCoordinatorClient | None":
         """Build a started client for ``url``; an empty URL returns ``None``.
-
-        Timing knobs are read from the environment:
-        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (seconds, default 1.0; used as
-        both the per-request HTTP timeout and the per-lookup match budget) and
-        ``LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY`` (default 8).
 
         Args:
             url: Coordinator base URL; empty or ``None`` disables the client.
+            timeout: Seconds used as both the per-request HTTP timeout and the
+                per-lookup match budget.
+            match_concurrency: Max match round-trips in flight at once.
 
         Returns:
             A started client, or ``None`` when ``url`` is empty (the blend
             module then runs purely local).
+
+        Raises:
+            ValueError: If ``match_concurrency`` is not positive.
         """
         url = (url or "").strip()
         if not url:
             return None
-        concurrency = int(os.getenv("LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY", "8"))
-        timeout = float(os.getenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.0"))
         logger.info("Blend coordinator client enabled -> %s", url)
         return cls(
             url,
             request_timeout=timeout,
             match_budget_s=timeout,
-            match_concurrency=concurrency,
+            match_concurrency=match_concurrency,
         )
 
     # -- daemon ------------------------------------------------------------
@@ -198,7 +207,12 @@ class BlendCoordinatorClient:
             body = self._request(
                 "POST",
                 "/directory/blend-lookup",
-                {"tokens_b64": encode_tokens(item.tokens)},
+                {
+                    "tokens_b64": encode_tokens(item.tokens),
+                    "model_name": item.namespace.model_name,
+                    "cache_salt": item.namespace.cache_salt,
+                    "world_size": item.namespace.world_size,
+                },
             )
             matches = [
                 BlendMatch(

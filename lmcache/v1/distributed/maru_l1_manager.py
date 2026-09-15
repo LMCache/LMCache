@@ -112,22 +112,22 @@ def object_key_to_string(key: ObjectKey) -> str:
     return base
 
 
-def _clamp_extra_count(extra_count: int) -> int:
-    # PARITY(L1Manager._validate_extra_count): warn and clamp to [0, MAX-1].
-    if extra_count < 0:
+def _validate_read_locks(read_locks: int) -> int:
+    """Return total per-key read holds clamped to [1, MAX_READ_LOCK_COUNT]."""
+    # PARITY(L1Manager._validate_read_locks): counts include the first hold.
+    if read_locks < 1:
         logger.warning(
-            "MaruL1Manager: extra_count=%d is invalid, clamping to 0", extra_count
+            "MaruL1Manager: read_locks=%d is invalid, clamping to 1", read_locks
         )
-        return 0
-    upper = MAX_READ_LOCK_COUNT - 1
-    if extra_count > upper:
+        return 1
+    if read_locks > MAX_READ_LOCK_COUNT:
         logger.warning(
-            "MaruL1Manager: extra_count=%d exceeds limit=%d, clamping",
-            extra_count,
-            upper,
+            "MaruL1Manager: read_locks=%d exceeds limit=%d, clamping",
+            read_locks,
+            MAX_READ_LOCK_COUNT,
         )
-        return upper
-    return extra_count
+        return MAX_READ_LOCK_COUNT
+    return read_locks
 
 
 def _maru_l1_usage_ratio_or_zero(target: "MaruL1Manager | None") -> float:
@@ -529,18 +529,18 @@ class MaruL1Manager:
 
     @_maru_l1_synchronized
     def reserve_read(
-        self, keys: list[ObjectKey], extra_count: int = 0
+        self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1OperationResult]:
         """Pin keys on MaruServer and stage zero-copy views for reading.
 
         PARITY(L1Manager.reserve_read): per-key independent results; takes
-        ``1 + extra_count`` protection units per key. MARU: protection is the
+        ``read_locks`` protection units per key. MARU: protection is the
         cross-node server ``pin_count``; the local refcount balances the pins
         so N finish_read calls release them all.
 
         Args:
             keys: The list of object keys to reserve read access for.
-            extra_count: Extra protection units on top of the default 1.
+            read_locks: Total protection units per key, clamped to [1, 128].
 
         Returns:
             A dictionary mapping each key to (L1Error, MemoryObj | None).
@@ -550,7 +550,7 @@ class MaruL1Manager:
                 pin RPC failed.
             KEY_NOT_READABLE: The key is mid-write on this instance.
         """
-        total = 1 + _clamp_extra_count(extra_count)
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {
             k: (L1Error.KEY_NOT_EXIST, None) for k in keys
         }
@@ -608,17 +608,17 @@ class MaruL1Manager:
 
     @_maru_l1_synchronized
     def finish_read(
-        self, keys: list[ObjectKey], extra_count: int = 0
+        self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1Error]:
         """Release the protection taken by ``reserve_read``.
 
-        Releases ``1 + extra_count`` units per key: the local refcount drops
+        Releases ``read_locks`` units per key: the local refcount drops
         and the same number of server pins are released; the staged entry is
         dropped at refcount zero.
 
         Args:
             keys: The list of object keys to finish read access for.
-            extra_count: Extra units to release on top of the default 1.
+            read_locks: Total units to release per key, clamped to [1, 128].
 
         Returns:
             A dictionary mapping each key to an L1Error.
@@ -626,7 +626,7 @@ class MaruL1Manager:
         Errors:
             KEY_NOT_EXIST: The key has no staged read.
         """
-        total = 1 + _clamp_extra_count(extra_count)
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1Error] = {}
         to_unpin: list[str] = []
         need_to_free: list[MemoryObj] = []
@@ -809,7 +809,7 @@ class MaruL1Manager:
 
     @_maru_l1_synchronized
     def finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], extra_count: int = 0
+        self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1OperationResult]:
         """Finish a write and take read holds in one step (L2->L1 promote).
 
@@ -831,8 +831,8 @@ class MaruL1Manager:
 
         Args:
             keys: Keys to transition from write-staged to read-staged.
-            extra_count: Extra read holds on top of the default 1 (one per TP
-                worker for MLA models with TP > 1).
+            read_locks: Total read holds per key, clamped to [1, 128].
+                Defaults to one; callers may reserve for multiple readers.
 
         Returns:
             A dictionary mapping each key to (L1Error, MemoryObj | None).
@@ -842,7 +842,7 @@ class MaruL1Manager:
             KEY_IN_WRONG_STATE: The key is already read-staged, or registration
                 or re-resolve failed.
         """
-        total = 1 + _clamp_extra_count(extra_count)
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {
             k: (L1Error.KEY_NOT_EXIST, None) for k in keys
         }
@@ -1159,6 +1159,7 @@ class MaruL1Manager:
             + sum(1 for e in self._pending_write.values() if e.is_temporary),
             "memory_used_bytes": used,
             "memory_total_bytes": total,
+            "memory_configured_bytes": self._config.pool_size_bytes,
             "memory_usage_ratio": used / total if total > 0 else 0.0,
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,

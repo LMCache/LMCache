@@ -12,8 +12,9 @@
 # Environment variables (all optional, defaults shown):
 #   LMCACHE_BENCH_TRANSFER_MODE  lmcache_driven|engine_driven
 #                                (default: engine_driven)
+#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc (default: zmq)
 #   LMCACHE_HTTP_PORT            HTTP port            (default: 18080)
-#   LMCACHE_ZMQ_PORT             ZMQ RPC port         (default: 15555)
+#   LMCACHE_REQUEST_PORT         request RPC port     (default: 15555)
 #   LMCACHE_LOG_FILE             server log path      (default: /tmp/...)
 #   LMCACHE_HEALTHCHECK_TIMEOUT  seconds              (default: 60)
 #   BENCH_NUM_REQUESTS           requests to run      (default: 3)
@@ -27,11 +28,12 @@ echo "    Python: $(python3 --version 2>&1 || true)"
 
 TRANSFER_MODE="${LMCACHE_BENCH_TRANSFER_MODE:-engine_driven}"
 HTTP_PORT="${LMCACHE_HTTP_PORT:-18080}"
-ZMQ_PORT="${LMCACHE_ZMQ_PORT:-15555}"
+REQUEST_PORT="${LMCACHE_REQUEST_PORT:-${LMCACHE_ZMQ_PORT:-15555}}"
 LOG_FILE="${LMCACHE_LOG_FILE:-/tmp/cpu_server_bench_lmcache.log}"
 HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-60}"
 BENCH_NUM_REQUESTS="${BENCH_NUM_REQUESTS:-3}"
 BENCH_NUM_TOKENS="${BENCH_NUM_TOKENS:-512}"
+REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
 
 case "${TRANSFER_MODE}" in
   lmcache_driven|engine_driven) ;;
@@ -42,8 +44,19 @@ case "${TRANSFER_MODE}" in
     ;;
 esac
 
+case "${REQUEST_TRANSPORT}" in
+  zmq) REQUEST_SCHEME="tcp" ;;
+  grpc) REQUEST_SCHEME="grpc" ;;
+  *)
+    echo "!! Unknown LMCACHE_REQUEST_TRANSPORT='${REQUEST_TRANSPORT}'"
+    echo "   Valid values: zmq, grpc"
+    exit 1
+    ;;
+esac
+
 echo "    TRANSFER_MODE=${TRANSFER_MODE}"
-echo "    HTTP_PORT=${HTTP_PORT}  ZMQ_PORT=${ZMQ_PORT}"
+echo "    REQUEST_TRANSPORT=${REQUEST_TRANSPORT}"
+echo "    HTTP_PORT=${HTTP_PORT}  REQUEST_PORT=${REQUEST_PORT}"
 echo "    BENCH_NUM_REQUESTS=${BENCH_NUM_REQUESTS}"
 echo "    BENCH_NUM_TOKENS=${BENCH_NUM_TOKENS}"
 
@@ -54,11 +67,24 @@ echo ""
 echo "==> Starting lmcache server (log: ${LOG_FILE})"
 rm -f "${LOG_FILE}"
 
+# The server only loads the transfer paths named by
+# --supported-transfer-mode (default: lmcache_driven), so pass the
+# bench's mode explicitly. The engine-driven leg also names a SHM
+# segment: the default --shm-name "" would silently downgrade it to
+# pickle transport. Keep the name short — macOS caps POSIX SHM names
+# at 31 chars including the server's lmcache_l1_pool_ prefix.
+SERVER_MODE_ARGS=(--supported-transfer-mode "${TRANSFER_MODE}")
+if [ "${TRANSFER_MODE}" = "engine_driven" ]; then
+  SERVER_MODE_ARGS+=(--shm-name "bench_$$")
+fi
+
 lmcache server \
-  --port "${ZMQ_PORT}" \
+  --transport "${REQUEST_TRANSPORT}" \
+  --port "${REQUEST_PORT}" \
   --http-port "${HTTP_PORT}" \
   --l1-size-gb 1 \
   --eviction-policy LRU \
+  "${SERVER_MODE_ARGS[@]}" \
   >"${LOG_FILE}" 2>&1 &
 SERVER_PID=$!
 
@@ -112,7 +138,7 @@ echo "==> Running: lmcache bench server" \
 
 BENCH_LOG="${BENCH_OUTPUT_LOG:-/tmp/cpu_server_bench_output.log}"
 lmcache bench server \
-  --rpc-url "tcp://127.0.0.1:${ZMQ_PORT}" \
+  --rpc-url "${REQUEST_SCHEME}://127.0.0.1:${REQUEST_PORT}" \
   --url "http://127.0.0.1:${HTTP_PORT}" \
   --mode cpu \
   --transfer-mode "${TRANSFER_MODE}" \

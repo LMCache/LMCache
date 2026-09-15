@@ -14,20 +14,16 @@ gather/scatter round-trip for that layout.
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import device_ops, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import utils as U
 from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.platform.ops_types import (
-    set_shape_desc_dtype,
-)
 from lmcache.v1.platform.torch_ops import (
     multi_layer_block_kv_transfer as fallback_multi_layer_block_kv_transfer,
 )
-import lmcache.c_ops as lmc_ops
 import lmcache.lmcache_native as lmcache_native
 
 NB, NH, BS, HS, NL = 16, 4, 128, 64, 3
@@ -117,7 +113,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     chunk_tokens = NB * BS
     obj = torch.zeros((NL, chunk_tokens, NH * 2 * HS), dtype=norm[0].dtype)
 
-    sd = lmc_ops.PageBufferShapeDesc()
+    sd = device_ops.PageBufferShapeDesc()
     sd.kv_size = 1
     sd.nl = NL
     sd.nb = NB
@@ -126,7 +122,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     sd.hs = 2 * HS
     sd.element_size = norm[0].element_size()
     sd.block_stride_elems = NH * BS * 2 * HS
-    set_shape_desc_dtype(sd, norm[0].dtype)
+    sd.dtype = norm[0].dtype
 
     block_ids = torch.tensor(list(range(NB)), dtype=torch.long)
 
@@ -138,7 +134,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     obj_ptrs = [obj.data_ptr()]
 
     # Drive the python fallback directly: this regression specifically
-    # targets the CPU handle-mode path. ``lmc_ops.multi_layer_block_kv_transfer``
+    # targets the CPU handle-mode path. ``device_ops.multi_layer_block_kv_transfer``
     # is replaced by the CUDA C++ extension when CUDA is available, and that
     # extension rejects ``torch.device("cpu")`` with a CUDAGuard error.
     fallback_multi_layer_block_kv_transfer(

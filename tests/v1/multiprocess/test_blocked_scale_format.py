@@ -13,15 +13,21 @@ mod-block_size misalignment that silently garbled GLM CacheBlend reuse.
 import pytest
 import torch
 
-if not torch.cuda.is_available():
-    pytest.skip("CUDA is not available", allow_module_level=True)
+# First Party
+from lmcache import torch_dev, torch_device_type  # noqa: E402
+
+if torch_device_type != "cuda" or not torch_dev.is_available():
+    pytest.skip(
+        f"blocked-scale format test requires CUDA runtime, got {torch_device_type}",
+        allow_module_level=True,
+    )
 
 # First Party
-import lmcache.c_ops as lmc_ops  # noqa: E402
+import lmcache.cuda_ops as cuda_ops  # noqa: E402
 import lmcache.lmcache_native as lmcache_native
 
 if not hasattr(lmcache_native.EngineKVFormat, "NL_X_NB_BSV_BSS"):
-    pytest.skip("c_ops build lacks NL_X_NB_BSV_BSS", allow_module_level=True)
+    pytest.skip("cuda_ops build lacks NL_X_NB_BSV_BSS", allow_module_level=True)
 
 _BS = 64  # tokens per block
 _HD = 128  # fp8 value bytes per token
@@ -54,11 +60,11 @@ def _blocked_page_read(cache, layer, slot):
 def _make_paged():
     """Per-layer [NB, BS, 132] uint8 tensors + a pointer array."""
     caches = [
-        torch.zeros(_NB, _BS, _ROW, dtype=torch.uint8, device="cuda")
+        torch.zeros(_NB, _BS, _ROW, dtype=torch.uint8, device=torch_device_type)
         for _ in range(_NL)
     ]
     ptrs = torch.tensor(
-        [c.data_ptr() for c in caches], dtype=torch.int64, device="cuda"
+        [c.data_ptr() for c in caches], dtype=torch.uint64, device=torch_device_type
     )
     return caches, ptrs
 
@@ -82,41 +88,49 @@ def test_blocked_roundtrip_value_exact_across_alignments():
     torch.manual_seed(0)
     n_tok = 96
     src, src_ptrs = _make_paged()
-    rows = torch.randint(0, 255, (_NL, n_tok, _ROW), dtype=torch.uint8, device="cuda")
-    src_slots = torch.arange(32, 32 + n_tok, dtype=torch.int64, device="cuda")
+    rows = torch.randint(
+        0, 255, (_NL, n_tok, _ROW), dtype=torch.uint8, device=torch_device_type
+    )
+    src_slots = torch.arange(
+        32, 32 + n_tok, dtype=torch.int64, device=torch_device_type
+    )
     _write_all(src, src_slots, rows)
 
     # D2H-style gather into a token-major chunk buffer (kv=1, NL, n_tok, 132).
-    chunk = torch.zeros(1, _NL, n_tok, _ROW, dtype=torch.uint8, device="cuda")
-    lmc_ops.multi_layer_kv_transfer(
+    chunk = torch.zeros(
+        1, _NL, n_tok, _ROW, dtype=torch.uint8, device=torch_device_type
+    )
+    cuda_ops.multi_layer_kv_transfer(
         chunk,
         src_ptrs,
         src_slots,
-        torch.device("cuda"),
+        torch.device(torch_device_type),
         _NB * _BS,
         lmcache_native.TransferDirection.D2H,
         lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
         block_size=_BS,
         head_size=0,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     assert torch.equal(chunk[0], rows), "gather must produce token-major rows"
 
     # H2D scatter to a DIFFERENT intra-block alignment (delta 17 mod 64 != 0).
     dst, dst_ptrs = _make_paged()
-    dst_slots = torch.arange(17, 17 + n_tok, dtype=torch.int64, device="cuda")
-    lmc_ops.multi_layer_kv_transfer(
+    dst_slots = torch.arange(
+        17, 17 + n_tok, dtype=torch.int64, device=torch_device_type
+    )
+    cuda_ops.multi_layer_kv_transfer(
         chunk,
         dst_ptrs,
         dst_slots,
-        torch.device("cuda"),
+        torch.device(torch_device_type),
         _NB * _BS,
         lmcache_native.TransferDirection.H2D,
         lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
         block_size=_BS,
         head_size=0,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     got = _read_all(dst, dst_slots)
     assert torch.equal(got, rows), (
         "misaligned scatter must land every token's values AND scale at the "
