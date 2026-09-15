@@ -131,7 +131,8 @@ async def get_prefetch(request_id: str, request: Request) -> dict[str, object]:
 
     Responses:
         200: ``{"request_id", "status": "pending"}`` or ``{"request_id",
-            "status": "completed", "found_keys", "total_keys"}``.
+            "status": "completed", "found_keys", "total_keys",
+            "missing_key_indices"}``.
         404: unknown id. 503: server not initialized.
     """
     return get_context(request).prefetch_service.status(request_id)

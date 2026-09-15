@@ -7,11 +7,12 @@ loads every requested key not already in L1, and pins nothing -- there is no
 downstream reader to pin for.
 
 The table tracks in-flight warm prefetches: ``submit`` starts one and returns an
-opaque request id; ``poll`` reports its status (pending, then completed) and
-drops it once the load finishes. Status is observed reactively by the caller --
-there is no background polling -- and these calls do not block. A job whose
-status is never polled to completion simply lingers until a later cleanup drops
-it; since nothing is pinned, no L1 is held.
+opaque request id; ``poll`` reports its status (pending, then completed -- with
+the positions of the keys the load did not bring in, so a caller can act per
+key) and drops it once the load finishes. Status is observed reactively by the
+caller -- there is no background polling -- and these calls do not block. A job
+whose status is never polled to completion simply lingers until a later cleanup
+drops it; since nothing is pinned, no L1 is held.
 """
 
 # Standard
@@ -50,11 +51,17 @@ class WarmStatus:
         found_keys: Keys loaded into L1 (only meaningful when ``completed``).
         total_keys: Keys originally requested (only meaningful when
             ``completed``).
+        missing_key_indices: Positions, in the submitted key order, of the
+            keys this load did **not** bring into L1 -- not found on any L2
+            adapter, or already resident and therefore skipped. Ascending, and
+            ``len`` equals ``total_keys - found_keys``. Only meaningful when
+            ``completed``.
     """
 
     state: str
     found_keys: int = 0
     total_keys: int = 0
+    missing_key_indices: tuple[int, ...] = ()
 
 
 class WarmPrefetchJobs:
@@ -130,6 +137,7 @@ class WarmPrefetchJobs:
         with self._lock:
             self._jobs.pop(request_id, None)
         found_keys = found.popcount()
+        missing_key_indices = tuple((~found).get_indices_list())
         logger.info(
             "Warm prefetch %s completed: %d/%d keys loaded into L1",
             request_id,
@@ -140,4 +148,5 @@ class WarmPrefetchJobs:
             state=COMPLETED,
             found_keys=found_keys,
             total_keys=handle.total_requested_keys,
+            missing_key_indices=missing_key_indices,
         )

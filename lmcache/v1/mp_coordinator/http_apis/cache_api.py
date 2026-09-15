@@ -2,8 +2,9 @@
 """Cache-control endpoints on the coordinator (fleet-level).
 
 Warm-prefetch dispatch to a named MP server, thin over the
-:class:`PrefetchManager` on the typed :class:`CoordinatorContext` (resolved via
-:func:`get_context`). Handlers map fleet-routing failures to HTTP directly --
+:class:`PrefetchManager`, and cross-server moves, thin over the
+:class:`MoveController`, both on the typed :class:`CoordinatorContext` (resolved
+via :func:`get_context`). Handlers map fleet-routing failures to HTTP directly --
 ``404`` for an unknown ``instance_id`` and ``502`` when an MP server is
 unreachable or rejects a proxied call.
 
@@ -24,6 +25,11 @@ from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
+from lmcache.v1.mp_coordinator.controllers.move_controller import (
+    MoveController,
+    MoveSpec,
+    MoveSubmitError,
+)
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
@@ -32,6 +38,9 @@ from lmcache.v1.mp_coordinator.http_apis.dependencies import (
 from lmcache.v1.mp_coordinator.schemas import (
     DeleteRequest,
     DeleteResponse,
+    MoveRequest,
+    MoveResponse,
+    MoveStatusResponse,
     PinListResponse,
     PinnedKeyInfo,
     PinRequest,
@@ -39,10 +48,17 @@ from lmcache.v1.mp_coordinator.schemas import (
     PrefetchRequest,
     PrefetchResponse,
 )
-from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+)
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
+
+# The one direction a move supports today; the request carries the tiers so
+# the contract need not change when others land.
+_MOVE_SOURCE_TIER = Tier.L1
+_MOVE_TARGET_TIER = Tier.L1
 
 
 # -- Prefetch dispatch -------------------------------------------------------
@@ -361,3 +377,130 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
         skipped=node_skipped + pin_skipped,
         status="deleted",
     )
+
+
+# -- Move dispatch -----------------------------------------------------------
+
+
+@router.post("/cache/moves")
+async def request_move(body: MoveRequest, request: Request) -> MoveResponse:
+    """Move a token sequence's chunks from one MP server's L1 to another's.
+
+    Resolves the keys locally (like delete) and hands the move to the
+    :class:`MoveController`, which submits a warm prefetch on the target,
+    polls it, and -- unless ``body.keep_source`` -- deletes from the source
+    the keys the target reports it loaded. Poll ``GET /cache/moves/{move_id}``.
+
+    Args:
+        body: Source and target instances, model/world_size, token_ids,
+            cache_salt, tiers (``l1`` -> ``l1`` only), and ``keep_source``.
+
+    Returns:
+        ``MoveResponse`` carrying the ``move_id`` to poll (empty with
+        ``status`` ``"noop"`` when the sequence is shorter than one chunk).
+
+    Raises:
+        HTTPException: 400 if source and target are the same instance, the
+            tiers are not ``l1`` -> ``l1``, the token cap is exceeded, or a
+            key field is invalid; 404 if either instance is not registered;
+            502 if the target is unreachable, rejects the prefetch submit,
+            or gives it nothing to drive.
+    """
+    ctx = get_context(request)
+    if body.source_instance_id == body.target_instance_id:
+        raise HTTPException(
+            status_code=400,
+            detail="source_instance_id and target_instance_id must differ",
+        )
+    if body.source_tier != _MOVE_SOURCE_TIER or body.target_tier != _MOVE_TARGET_TIER:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unsupported move direction {body.source_tier.value!r}->"
+                f"{body.target_tier.value!r}; only {_MOVE_SOURCE_TIER.value!r}->"
+                f"{_MOVE_TARGET_TIER.value!r}"
+            ),
+        )
+    registry = ctx.views.get(InstanceRegistry)
+    for instance_id in (body.source_instance_id, body.target_instance_id):
+        if not registry.contains(instance_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"no MP server registered with instance_id={instance_id!r}",
+            )
+    try:
+        resolved, chunks = resolve_object_keys(
+            ctx.token_hasher,
+            body.model_name,
+            body.world_size,
+            body.token_ids,
+            body.cache_salt,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    if not chunks:
+        return MoveResponse(
+            move_id="",
+            source_instance_id=body.source_instance_id,
+            target_instance_id=body.target_instance_id,
+            requested=0,
+            status="noop",
+        )
+
+    try:
+        move_id = await ctx.controllers.get(MoveController).submit_move(
+            MoveSpec(
+                source_instance_id=body.source_instance_id,
+                target_instance_id=body.target_instance_id,
+                model_name=body.model_name,
+                world_size=body.world_size,
+                cache_salt=body.cache_salt,
+                keys=resolved,
+                chunks=chunks,
+                keep_source=body.keep_source,
+            ),
+            body.token_ids,
+            get_outbound_client(request),
+        )
+    except (httpx.HTTPError, MoveSubmitError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"prefetch submit to {body.target_instance_id!r} failed: {exc}",
+        ) from None
+
+    return MoveResponse(
+        move_id=move_id,
+        source_instance_id=body.source_instance_id,
+        target_instance_id=body.target_instance_id,
+        requested=chunks,
+        status="submitted",
+    )
+
+
+@router.get("/cache/moves/{move_id}")
+async def get_move_status(move_id: str, request: Request) -> MoveStatusResponse:
+    """Report where a move stands.
+
+    A terminal state (``completed`` or ``failed``) stays readable until the
+    coordinator's ``move_result_ttl_s`` runs out or ``move_result_limit``
+    evicts it; polling does not extend that.
+
+    Args:
+        move_id: The id returned by ``POST /cache/moves``.
+
+    Returns:
+        ``MoveStatusResponse`` with the status, the phase, and the per-key
+        counts.
+
+    Raises:
+        HTTPException: 404 for an unknown, expired, or evicted ``move_id``.
+    """
+    outcome = get_context(request).controllers.get(MoveController).get_status(move_id)
+    if outcome is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown move_id={move_id!r} (never submitted, expired, "
+            "or evicted)",
+        )
+    return MoveStatusResponse.model_validate(outcome)

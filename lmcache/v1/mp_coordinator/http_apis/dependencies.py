@@ -34,8 +34,9 @@ class CoordinatorContext:
         controllers: The coordinator's controllers, addressed by type --
             ``controllers.get(FleetEvictionController)`` for the fleet L2
             eviction loop (which owns the quota registry and the L2 pin
-            set, enforced against the ``l2`` half of the usage view), and
-            ``PrefetchManager`` for warm prefetch. Addressing by type only
+            set, enforced against the ``l2`` half of the usage view),
+            ``PrefetchManager`` for warm prefetch, and ``MoveController`` for
+            cross-server moves. Addressing by type only
             works for a class the coordinator imports, so a controller
             shipped out of tree registers its own routes instead (see
             ``HttpRoutes``) rather than being resolved here.
