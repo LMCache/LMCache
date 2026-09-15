@@ -65,6 +65,9 @@ class LMCacheMPRequestTracker:
     # requests.
     num_stored_tokens: int = 0
 
+    # Prefix tokens from the latest lookup included in num_stored_tokens.
+    _accounted_lookup_tokens: int = 0
+
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
@@ -90,6 +93,7 @@ class LMCacheMPRequestTracker:
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
+        self._accounted_lookup_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
@@ -128,6 +132,25 @@ class LMCacheMPRequestTracker:
     ####
     def increase_num_scheduled_tokens(self, num_new_tokens: int):
         self.num_scheduled_tokens += num_new_tokens
+
+    def account_lookup_result(self, num_stored_tokens: int) -> None:
+        """Replace the lookup contribution to the stored-token watermark.
+
+        Args:
+            num_stored_tokens (int): Latest completed lookup's prefix token
+                count, including zero when the cache becomes unavailable.
+
+        Returns:
+            None.
+
+        Notes:
+            Scheduler retries before allocation may return the same result or
+            a changed result, including a downgrade to zero. Apply only the
+            difference from the previous result, preserving tokens accounted
+            for separately by store operations.
+        """
+        self.num_stored_tokens += num_stored_tokens - self._accounted_lookup_tokens
+        self._accounted_lookup_tokens = num_stored_tokens
 
     def increase_num_stored_tokens(self, num_new_tokens: int):
         """Increase the number of stored tokens for the current request

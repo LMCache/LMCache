@@ -1011,7 +1011,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tokens for which KV cache is actually available at the time of the
             call. If the cache cannot be loaded for some tokens (e.g., due to
             connectivity issues or eviction), those tokens must not be taken
-            into account.
+            into account. This method may be called repeatedly before block
+            allocation, so stored-token accounting must be idempotent.
         """
         tracker = self._get_or_create_request_tracker(request)
         # TODO: support loading KV for preempted requests in the future
@@ -1070,13 +1071,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         tracker.lookup_started_at = None
 
-        if ret == 0:
-            return 0, False
-
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
+        # Retries may repeat a cached hit or change it when server health drops.
+        # Account for the latest completed result, including zero, before
+        # updating the hit counts used by retrieve and store metadata.
+        tracker.account_lookup_result(ret)
 
         # Save the vllm and lmcache hit tokens. The vLLM hit count is
         # rounded down to a boundary aligned for every engine group (e.g.
