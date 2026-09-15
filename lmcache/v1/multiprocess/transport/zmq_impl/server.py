@@ -113,7 +113,7 @@ def get_zmq_handler_specs(module: EngineModule) -> list[HandlerSpec]:
             ),
             HandlerSpec(
                 RequestType.END_SESSION,
-                module.end_session,
+                module.handle_end_session,
                 ThreadPoolType.NORMAL,
             ),
         ]

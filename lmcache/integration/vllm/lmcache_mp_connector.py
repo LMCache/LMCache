@@ -96,6 +96,9 @@ except ImportError:
         BlockAllocationRecord as RequestAllocationRecord,
     )
 
+# First Party
+from lmcache.v1.multiprocess.custom_types import SessionEndInfo
+
 if TYPE_CHECKING:
     # Third Party
     from vllm.distributed.kv_events import KVCacheEvent
@@ -118,6 +121,43 @@ _MAX_LCM_EXPANSION_FACTOR = 4
 
 
 # Helper functions
+def _build_session_end_info(request: "Request") -> SessionEndInfo:
+    """Report how a finished request ended, for the server's commit policy.
+
+    Raw observation, not a decision: the server owns the rule (see
+    ``lmcache/v1/multiprocess/commit_policy.py``). Two facts travel:
+
+    * the finish reason, which separates a turn that ended where the next
+      prompt will resume from an abort or a length cap, whose tail no
+      follow-up re-sends;
+    * the stop token id, which for a chat model is the turn-boundary marker
+      the model emits to end its turn (Qwen stops on ``<|im_end|>`` because
+      its ``generation_config.json`` lists it in ``eos_token_id``).
+      vLLM fills ``stop_reason`` only for ``stop_token_ids``; a request that
+      stopped on the model's own EOS leaves it None (``check_stop`` in
+      ``vllm/v1/core/sched/utils.py``), which is exactly the chat case, so the
+      last generated token is the fallback. ``stop_reason`` also carries stop
+      *strings*, which are not token ids; those fall back the same way.
+
+    Args:
+        request: The finished vLLM request.
+
+    Returns:
+        What the engine knows. Unknown fields keep their "no information"
+        defaults, which every built-in policy reads as "do not commit".
+    """
+    reason = RequestStatus.get_finished_reason(request.status)
+    stop_reason = getattr(request, "stop_reason", None)
+    if not isinstance(stop_reason, int):
+        output_token_ids = getattr(request, "output_token_ids", None)
+        stop_reason = output_token_ids[-1] if output_token_ids else None
+
+    return SessionEndInfo(
+        finish_reason="" if reason is None else str(reason),
+        stop_token_id=stop_reason if isinstance(stop_reason, int) else -1,
+    )
+
+
 def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
     """Return whether the scheduler output contains preemption-related requests.
 
@@ -600,6 +640,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+
+            # How each finished request ended, for the server's commit policy.
+            # ``request_finished`` observes it while the vLLM Request object is
+            # still around; in lazy-offload mode END_SESSION is only sent later,
+            # from ``update_connector_output``, so it has to be parked here in
+            # between. Entries are removed by whichever path sends END_SESSION.
+            self._pending_end_info: dict[str, SessionEndInfo] = {}
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -1261,7 +1308,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
                 )
                 self._pending_store.remove_request_gpu_block_ids(req_id)
-                self.scheduler_adapter.end_session(req_id)
+                self.scheduler_adapter.end_session(
+                    req_id, self._pending_end_info.pop(req_id, SessionEndInfo())
+                )
 
     def request_finished(
         self,
@@ -1300,19 +1349,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        # Observe how the request ended before the tracker is dropped: the
+        # commit policy needs it, and in lazy-offload mode END_SESSION is sent
+        # much later, from update_connector_output, when this Request is gone.
+        end_info = _build_session_end_info(request)
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
-
-        # have not been offloaded, the touch operation in end_session is incorrect
-        # Notify LMCache to end the session for this request
-        self.scheduler_adapter.end_session(request.request_id)
         # Drop lookup state for a request aborted before its lookup was
-        # consumed (update_state_after_alloc never ran for it).
+        # consumed (update_state_after_alloc never ran for it). Independent of
+        # END_SESSION, so it runs on both paths exactly as before.
         self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
         if self.lazy_offload:
+            self._pending_end_info[request.request_id] = end_info
             self._pending_store.mark_req_finished(request.request_id)
             return False, (return_params or None)
+
+        # have not been offloaded, the touch operation in end_session is incorrect
+        # Notify LMCache to end the session for this request
+        self.scheduler_adapter.end_session(request.request_id, end_info)
         return True, (return_params or None)
 
     def request_finished_all_groups(
