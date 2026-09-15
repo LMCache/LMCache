@@ -27,7 +27,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform.cuda.vmm_ipc import is_use_vmm_api, set_use_vmm_api
+from lmcache.v1.platform.devices.cuda.vmm_ipc import is_use_vmm_api, set_use_vmm_api
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 
 
