@@ -10,7 +10,7 @@ import threading
 import pytest
 
 # First Party
-from lmcache.cli.commands.trace.stats import (
+from lmcache.cli.commands.trace._stats import (
     OpStats,
     ReplayStatsCollector,
     _percentile,

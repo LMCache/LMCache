@@ -33,22 +33,29 @@ func ServiceMonitorEnabled(spec *lmcachev1alpha1.LMCacheEngineSpec) bool {
 
 // BuildServiceMonitor creates a ServiceMonitor CR for Prometheus Operator integration.
 func BuildServiceMonitor(engine *lmcachev1alpha1.LMCacheEngine) *monitoringv1.ServiceMonitor {
-	spec := &engine.Spec
+	return buildServiceMonitorCore(engine.Name, engine.Namespace, &engine.Spec)
+}
+
+// buildServiceMonitorCore is the name/namespace/spec-keyed core shared by the
+// LMCacheEngine and CacheBlendEngine ServiceMonitor builders. Callers must
+// ensure ServiceMonitorEnabled(spec) is true (spec.Prometheus.ServiceMonitor is
+// dereferenced here).
+func buildServiceMonitorCore(name, namespace string, spec *lmcachev1alpha1.LMCacheEngineSpec) *monitoringv1.ServiceMonitor {
 	smSpec := spec.Prometheus.ServiceMonitor
 
 	interval := monitoringv1.Duration(derefString(smSpec.Interval, "30s"))
 
-	labels := MergeLabels(StandardLabels(engine.Name), smSpec.Labels)
+	labels := MergeLabels(StandardLabels(name), smSpec.Labels)
 
 	return &monitoringv1.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      engine.Name,
-			Namespace: engine.Namespace,
+			Name:      name,
+			Namespace: namespace,
 			Labels:    labels,
 		},
 		Spec: monitoringv1.ServiceMonitorSpec{
 			Selector: metav1.LabelSelector{
-				MatchLabels: SelectorLabels(engine.Name),
+				MatchLabels: SelectorLabels(name),
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{

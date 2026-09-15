@@ -14,12 +14,12 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
-from lmcache.v1.multiprocess.transfer_context.base import NonGpuContextMetadata
+from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
 
 if TYPE_CHECKING:
@@ -39,11 +39,11 @@ def create_transfer_strategy(
     *,
     shm_name: str,
     pool_size: int,
-    pending_writes: dict[tuple[int, IPCCacheEngineKey], list[ObjectKey]],
-    pending_reads: dict[tuple[int, IPCCacheEngineKey], list[ObjectKey]],
+    pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+    pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
     pending_lock: LockType,
     transfer_key_factory: Callable[
-        [IPCCacheEngineKey, int], tuple[int, IPCCacheEngineKey]
+        [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
     ],
 ) -> "TransferStrategy":
     """Create the non-GPU transfer strategy for a registered context.
@@ -88,10 +88,10 @@ class TransferStrategy(abc.ABC):
     @abc.abstractmethod
     def prepare_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
-        context: NonGpuContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareStoreResponse:
         """Prepare destination resources for a store request.
 
@@ -108,11 +108,11 @@ class TransferStrategy(abc.ABC):
     @abc.abstractmethod
     def commit_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         cpu_data: bytes,
-        context: NonGpuContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> bool:
         """Finalize a store request.
 
@@ -130,9 +130,9 @@ class TransferStrategy(abc.ABC):
     @abc.abstractmethod
     def prepare_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareRetrieveResponse:
         """Prepare source resources for a retrieve request.
 
@@ -148,7 +148,7 @@ class TransferStrategy(abc.ABC):
     @abc.abstractmethod
     def commit_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
     ) -> bool:
         """Finalize a retrieve request.
@@ -184,10 +184,10 @@ class PickleTransferStrategy(TransferStrategy):
 
     def prepare_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
-        context: NonGpuContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareStoreResponse:
         """Return empty store context for pickle mode.
 
@@ -197,11 +197,11 @@ class PickleTransferStrategy(TransferStrategy):
 
     def commit_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         cpu_data: bytes,
-        context: NonGpuContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> bool:
         """Deserialize and write pickled chunks into reserved objects.
 
@@ -219,12 +219,35 @@ class PickleTransferStrategy(TransferStrategy):
                 if obj_key not in reserved_dict:
                     continue
                 if idx >= len(chunks):
+                    logger.error(
+                        "Engine-driven pickle store is missing chunk %d "
+                        "(instance_id=%d, object_keys=%d, chunks=%d)",
+                        idx,
+                        instance_id,
+                        len(obj_keys),
+                        len(chunks),
+                    )
                     continue
                 memory_obj = reserved_dict[obj_key]
                 if memory_obj.tensor is None:
+                    logger.error(
+                        "Engine-driven pickle store reserved an object without "
+                        "a tensor (instance_id=%d, chunk_index=%d)",
+                        instance_id,
+                        idx,
+                    )
                     continue
                 chunk_cpu = chunks[idx]
                 if chunk_cpu.shape != memory_obj.tensor.shape:
+                    logger.error(
+                        "Engine-driven pickle store chunk shape mismatch "
+                        "(instance_id=%d, chunk_index=%d, chunk_shape=%s, "
+                        "object_shape=%s)",
+                        instance_id,
+                        idx,
+                        tuple(chunk_cpu.shape),
+                        tuple(memory_obj.tensor.shape),
+                    )
                     continue
                 memory_obj.tensor.copy_(chunk_cpu)
                 written_keys.append(obj_key)
@@ -232,13 +255,24 @@ class PickleTransferStrategy(TransferStrategy):
             if written_keys:
                 self._storage_manager.finish_write(written_keys)
 
-        return len(written_keys) == len(reserved_dict)
+        success = len(written_keys) == len(reserved_dict)
+        if not success:
+            logger.error(
+                "Engine-driven pickle store incomplete (instance_id=%d, "
+                "object_keys=%d, reserved=%d, chunks=%d, written=%d)",
+                instance_id,
+                len(obj_keys),
+                len(reserved_dict),
+                len(chunks),
+                len(written_keys),
+            )
+        return success
 
     def prepare_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareRetrieveResponse:
         """Read prefetched objects and return serialized pickle payload."""
         obj_keys = resolve_obj_keys(key)
@@ -265,7 +299,7 @@ class PickleTransferStrategy(TransferStrategy):
 
     def commit_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
     ) -> bool:
         """No-op for pickle mode; data was already copied during prepare."""
@@ -284,11 +318,11 @@ class ShmTransferStrategy(TransferStrategy):
     def __init__(
         self,
         storage_manager: "StorageManager",
-        pending_writes: dict[tuple[int, IPCCacheEngineKey], list[ObjectKey]],
-        pending_reads: dict[tuple[int, IPCCacheEngineKey], list[ObjectKey]],
+        pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+        pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
         pending_lock: LockType,
         transfer_key_factory: Callable[
-            [IPCCacheEngineKey, int], tuple[int, IPCCacheEngineKey]
+            [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
         ],
         fallback_strategy: PickleTransferStrategy,
     ) -> None:
@@ -311,10 +345,10 @@ class ShmTransferStrategy(TransferStrategy):
 
     def prepare_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
-        context: NonGpuContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareStoreResponse:
         """Reserve SHM-backed objects and return slot descriptors.
 
@@ -361,11 +395,11 @@ class ShmTransferStrategy(TransferStrategy):
 
     def commit_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         cpu_data: bytes,
-        context: NonGpuContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> bool:
         """Finalize SHM store write locks or fallback to pickle commit.
 
@@ -391,9 +425,9 @@ class ShmTransferStrategy(TransferStrategy):
 
     def prepare_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
-        resolve_obj_keys: Callable[[IPCCacheEngineKey], list[ObjectKey]],
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareRetrieveResponse:
         """Read SHM objects and return slot descriptors for worker access."""
         obj_keys = resolve_obj_keys(key)
@@ -428,7 +462,7 @@ class ShmTransferStrategy(TransferStrategy):
 
     def commit_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
     ) -> bool:
         """Release pending SHM read locks for the completed retrieve request."""

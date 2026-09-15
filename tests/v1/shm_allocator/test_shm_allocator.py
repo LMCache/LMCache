@@ -25,9 +25,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    MixedMemoryAllocator,
-)
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 

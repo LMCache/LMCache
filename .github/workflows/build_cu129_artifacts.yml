@@ -35,8 +35,10 @@ jobs:
               with:
                 fetch-depth: 0
 
-            - name: Remove non-release tags
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
+            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
+            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
 
             - name: Login to DockerHub
               # Skip when either the username var or the token secret is
@@ -70,13 +72,17 @@ jobs:
 
             - name: Get base version for cu12.9 wheel
               run: |
-                BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
+                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+                  BASE="${GITHUB_REF_NAME#v}"
+                else
+                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
+                fi
                 echo "CU129_VERSION=${BASE}" >> "$GITHUB_ENV"
 
             - name: Build cu12.9 CUDA wheels with cibuildwheel
               env:
                 CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
-                CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU129_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129'
+                CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU129_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129 PIP_CONSTRAINT=/project/cibw-constraints.txt'
                 CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
                   auditwheel repair
                   --plat manylinux_2_28_x86_64
@@ -88,7 +94,7 @@ jobs:
                   --exclude libc10_cuda.so
                   --exclude libcudart.so.12
                   -w {dest_dir} {wheel}
-                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+                CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py"
               run: |
                 python -m cibuildwheel --output-dir dist
 

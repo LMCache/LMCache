@@ -33,7 +33,7 @@ The ``lmcache`` CLI ships in two packages:
    * - ``lmcache-cli``
      - ``pip install lmcache-cli``
      - CLI only: ``ping``, ``query``, ``describe``, ``kvcache``,
-       ``bench engine``. No GPU required, any OS.
+       ``quota``, ``bench engine``. No GPU required, any OS.
 
 .. note::
 
@@ -51,18 +51,24 @@ Available Commands
      - Description
    * - :doc:`server`
      - Launch the LMCache MP server (ZMQ + HTTP). Requires the full install.
+   * - :doc:`coordinator`
+     - Launch the LMCache MP coordinator (HTTP instance registry).
    * - :doc:`describe`
      - Show detailed status of a running LMCache service.
    * - :doc:`ping`
      - Liveness check for LMCache or vLLM servers.
    * - :doc:`query`
-     - Single-shot query interface for the serving engine.
+     - Single-shot queries: one inference request to a serving engine
+       (``engine``), or a read of the MP coordinator's read-only HTTP APIs
+       (``coordinator``).
    * - :doc:`bench`
      - Run sustained benchmarks against an inference engine
        (``engine``), an LMCache MP server (``server``), or an L2 cache
        adapter (``l2``).
    * - :doc:`kvcache`
      - Manage KV cache state (e.g. clear L1 cache) on a running server.
+   * - :doc:`quota`
+     - Manage per-salt cache quotas (set, get, list, delete).
    * - :doc:`trace`
      - Inspect and replay storage-level trace files.
    * - :doc:`tool`
@@ -92,10 +98,13 @@ See :doc:`/developer_guide/cli` for details.
    :maxdepth: 1
 
    server
+   coordinator
    describe
    ping
    query
    bench
    kvcache
+   quota
    trace
    tool
+

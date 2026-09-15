@@ -19,8 +19,8 @@ from typing import Callable
 import time
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
@@ -36,6 +36,10 @@ LogFn = Callable[[str], None]
 # in-flight submit, of length ``num_keys`` each.
 KeyProvider = Callable[[int], list[list[ObjectKey]]]
 ObjProvider = Callable[[int], list[list[MemoryObj]]]
+
+# TODO: bench passes a placeholder layout_desc; a real layout may be
+# required here in the future (e.g. when benchmarking the P2P adapter).
+_PLACEHOLDER_LAYOUT_DESC = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 
 def _bitmap_count(bitmap: Bitmap | None) -> int:
@@ -178,7 +182,7 @@ def bench_store(
                 f"({len(completed)}/{len(task_ids)} tasks completed, "
                 f"success_keys={success_keys}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(success_keys)
             continue
 
@@ -217,6 +221,11 @@ def bench_lookup(
         expected_hit_count=expected_hit_count,
     )
 
+    log(
+        "bench_lookup uses a placeholder MemoryLayoutDesc; this may need a "
+        "real layout for layout-sensitive adapters"
+    )
+
     for r in range(rounds):
         keys_batches = keys_for_round(r)
         assert len(keys_batches) == in_flight
@@ -224,7 +233,11 @@ def bench_lookup(
         t0 = time.perf_counter()
         task_ids: list[int] = []
         for i in range(in_flight):
-            task_ids.append(adapter.submit_lookup_and_lock_task(keys_batches[i]))
+            task_ids.append(
+                adapter.submit_lookup_and_lock_task(
+                    keys_batches[i], {0: _PLACEHOLDER_LAYOUT_DESC}
+                )
+            )
 
         results = _wait_lookup_finished(adapter, task_ids, 60.0)
         t1 = time.perf_counter()
@@ -239,7 +252,7 @@ def bench_lookup(
                 f"({len(results)}/{len(task_ids)} tasks completed, "
                 f"found={total_found}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(total_found)
             continue
 
@@ -305,7 +318,7 @@ def bench_load(
                 f"({len(results)}/{len(task_ids)} tasks completed, "
                 f"loaded={total_loaded}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(total_loaded)
             continue
 

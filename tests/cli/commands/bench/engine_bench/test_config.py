@@ -11,6 +11,7 @@ import pytest
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
+    WarmupPolicy,
     _find_model_meta,
     auto_detect_model,
     parse_args_to_config,
@@ -37,6 +38,7 @@ def base_namespace() -> argparse.Namespace:
         no_csv=False,
         json=False,
         quiet=False,
+        ignore_eos=False,
     )
 
 
@@ -68,6 +70,17 @@ class TestEngineBenchConfig:
         assert cfg.model == "test-model"
         assert cfg.workload == "long-doc-qa"
         assert cfg.tokens_per_gb_kvcache == 50000
+
+    def test_ignore_eos_defaults_false_and_overridable(self) -> None:
+        assert self._make_config().ignore_eos is False
+        assert self._make_config(ignore_eos=True).ignore_eos is True
+
+    def test_warmup_policy_defaults_to_run_and_overridable(self) -> None:
+        assert self._make_config().warmup_policy is WarmupPolicy.RUN
+        assert (
+            self._make_config(warmup_policy=WarmupPolicy.SKIP).warmup_policy
+            is WarmupPolicy.SKIP
+        )
 
     def test_empty_engine_url(self) -> None:
         with pytest.raises(ValueError, match="engine_url must be non-empty"):
@@ -182,6 +195,23 @@ class TestParseArgsToConfig:
         assert cfg.export_csv is False
         assert cfg.export_json is True
 
+    def test_warmup_runs_by_default(self, base_namespace) -> None:
+        # Namespaces built before --no-warmup existed (saved configs, older
+        # callers) must still resolve to a warmed run.
+        assert not hasattr(base_namespace, "no_warmup")
+        cfg = parse_args_to_config(base_namespace)
+        assert cfg.warmup_policy is WarmupPolicy.RUN
+
+    def test_no_warmup_selects_skip_policy(self, base_namespace) -> None:
+        base_namespace.no_warmup = True
+        cfg = parse_args_to_config(base_namespace)
+        assert cfg.warmup_policy is WarmupPolicy.SKIP
+
+    def test_no_warmup_false_selects_run_policy(self, base_namespace) -> None:
+        base_namespace.no_warmup = False
+        cfg = parse_args_to_config(base_namespace)
+        assert cfg.warmup_policy is WarmupPolicy.RUN
+
 
 # ---------------------------------------------------------------------------
 # _find_model_meta
@@ -236,7 +266,7 @@ class TestResolveTokensPerGb:
         model_name: str = "Qwen/Qwen3-14B",
     ) -> dict:
         return {
-            "gpu_context_meta": {
+            "cache_context_meta": {
                 "gpu_0": {
                     "model_name": model_name,
                     "world_size": world_size,
@@ -288,7 +318,7 @@ class TestResolveTokensPerGb:
         "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",
     )
     def test_no_gpu_meta_raises(self, mock_fetch) -> None:
-        mock_fetch.return_value = {"gpu_context_meta": {}}
+        mock_fetch.return_value = {"cache_context_meta": {}}
         with pytest.raises(RuntimeError, match="No model info"):
             resolve_tokens_per_gb(
                 "http://localhost:8080",
@@ -311,7 +341,9 @@ class TestResolveTokensPerGb:
     )
     def test_no_cache_size_raises(self, mock_fetch) -> None:
         data = self._status_response()
-        del data["gpu_context_meta"]["gpu_0"]["kv_cache_layout"]["cache_size_per_token"]
+        del data["cache_context_meta"]["gpu_0"]["kv_cache_layout"][
+            "cache_size_per_token"
+        ]
         mock_fetch.return_value = data
         with pytest.raises(RuntimeError, match="cache_size_per_token"):
             resolve_tokens_per_gb(
@@ -324,7 +356,7 @@ class TestResolveTokensPerGb:
     )
     def test_no_layout_raises(self, mock_fetch) -> None:
         data = self._status_response()
-        del data["gpu_context_meta"]["gpu_0"]["kv_cache_layout"]
+        del data["cache_context_meta"]["gpu_0"]["kv_cache_layout"]
         mock_fetch.return_value = data
         with pytest.raises(RuntimeError, match="kv_cache_layout"):
             resolve_tokens_per_gb(

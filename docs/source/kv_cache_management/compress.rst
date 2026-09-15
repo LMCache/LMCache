@@ -3,6 +3,11 @@
 Compress and Decompress the KV cache
 =====================================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 The ``compress`` interface is defined as the following:
 
 .. code-block:: python

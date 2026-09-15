@@ -21,13 +21,18 @@ import pytest
 import torch
 
 # First Party
-from lmcache.cli.commands.trace.dispatch import (
+from lmcache import torch_dev
+from lmcache.cli.commands.trace._dispatch import (
     CallDispatcher,
     ReplayContext,
     build_default_dispatcher,
 )
-from lmcache.cli.commands.trace.driver import StorageReplayDriver
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.cli.commands.trace._driver import StorageReplayDriver
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchRequestSpec,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -48,7 +53,7 @@ import lmcache.v1.mp_observability.event_bus as _bus_module
 def _should_use_lazy() -> bool:
     """Lazy allocator requires CUDA.  CPU-only hosts (our primary replay
     target) must use eager allocation."""
-    return torch.cuda.is_available()
+    return torch_dev.is_available()
 
 
 def _make_sm_config() -> StorageManagerConfig:
@@ -169,7 +174,7 @@ class TestRecordReplayRoundtrip:
         def script(sm: StorageManager) -> None:
             sm.reserve_write(keys, layout, mode="new")
             sm.finish_write(keys)
-            handle = sm.submit_prefetch_task(keys, layout)
+            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
             assert handle is not None
             with sm.read_prefetched_results(keys) as objs:
                 assert objs is not None
@@ -266,7 +271,7 @@ class TestMismatchHandling:
                 # is expected in this script but registering keeps
                 # the test robust against future decorator additions.
                 # First Party
-                from lmcache.cli.commands.trace.dispatch import (
+                from lmcache.cli.commands.trace._dispatch import (
                     _call_sm_method,
                     _enter_read_prefetched,
                     _exit_read_prefetched,

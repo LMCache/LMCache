@@ -11,7 +11,7 @@ import torch
 
 # First Party
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import PinMemoryAllocator
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
@@ -24,57 +24,6 @@ from .utils import (
     dumb_cache_engine_key,
     init_asyncio_loop,
 )
-
-
-@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.parametrize(
-    "url",
-    [
-        "lm://localhost:65000",
-    ],
-)
-def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
-    if url.startswith("lm"):
-        url = lmserver_v1_process.server_url
-
-    async_loop, async_thread = init_asyncio_loop()
-    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    local_cpu_backend = _create_local_cpu_backend(memory_allocator, False)
-    connector = autorelease_v1(CreateConnector(url, async_loop, local_cpu_backend))
-
-    random_key = dumb_cache_engine_key()
-    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
-    assert not future.result()
-
-    num_tokens = 1000
-    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
-    dtype = torch.bfloat16
-    memory_obj = local_cpu_backend.allocate(mem_obj_shape, dtype)
-    memory_obj.ref_count_up()
-
-    torch.manual_seed(42)
-    test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
-    memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
-
-    future = asyncio.run_coroutine_threadsafe(
-        connector.put(random_key, memory_obj), async_loop
-    )
-    future.result()
-
-    future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
-    assert future.result()
-    assert memory_obj.get_ref_count() == 1
-
-    future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
-    retrieved_memory_obj = future.result()
-
-    check_mem_obj_equal(
-        [retrieved_memory_obj],
-        [memory_obj],
-    )
-
-    close_asyncio_loop(async_loop, async_thread)
-    local_cpu_backend.close()
 
 
 @pytest.mark.parametrize("full_chunk", [True, False])

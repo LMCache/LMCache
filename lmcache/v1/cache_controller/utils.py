@@ -123,7 +123,7 @@ class WorkerNode:
                 elif op.op_type.value == "evict":
                     self.kv_store[location].discard(op.key)
                 else:
-                    logger.error(f"Unknown op_type: {op.op_type}")
+                    logger.error("Unknown op_type: %s", op.op_type)
 
                 # Skip sequence check during full sync
                 if is_full_sync:

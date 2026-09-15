@@ -3,6 +3,11 @@
 Example: Share KV cache across multiple LLMs
 ============================================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 LMCache should be able to reduce the generation time of the second and following calls.
 
 We have examples for the following types of across-instance KV cache sharing:

@@ -9,6 +9,7 @@ config from CLI args, and returns the workload instance.
 
 # Standard
 import argparse
+import os
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
@@ -34,12 +35,19 @@ from lmcache.cli.commands.bench.engine_bench.workloads.prefix_suffix_tuner impor
     PrefixSuffixTunerConfig,
     PrefixSuffixTunerWorkload,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
+    DEFAULT_DOC_ALIGN_TOKENS,
+    RagQaQualityConfig,
+    RagQaQualityWorkload,
+    parse_template_kwargs,
+)
 from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
     RandomPrefillConfig,
     RandomPrefillWorkload,
 )
 
 __all__ = [
+    "DEFAULT_DOC_ALIGN_TOKENS",
     "BaseWorkload",
     "LongDocPermutatorConfig",
     "LongDocPermutatorWorkload",
@@ -49,9 +57,13 @@ __all__ = [
     "MultiRoundChatWorkload",
     "PrefixSuffixTunerConfig",
     "PrefixSuffixTunerWorkload",
+    "RagQaQualityConfig",
+    "RagQaQualityWorkload",
     "RandomPrefillConfig",
     "RandomPrefillWorkload",
     "create_workload",
+    "parse_template_kwargs",
+    "validate_max_output_length_supported",
 ]
 
 _WORKLOAD_NAMES = (
@@ -59,8 +71,39 @@ _WORKLOAD_NAMES = (
     "long-doc-qa",
     "multi-round-chat",
     "prefix-suffix-tuner",
+    "rag-qa-quality",
     "random-prefill",
 )
+
+# Workloads that expose a user-configurable max output length, each via its own
+# flag (``--ldqa-max-output-length`` / ``--mrc-output-length`` /
+# ``--ldp-max-output-length``).
+_WORKLOADS_WITH_MAX_OUTPUT_LENGTH: frozenset[str] = frozenset(
+    {"long-doc-permutator", "long-doc-qa", "multi-round-chat"}
+)
+
+
+def validate_max_output_length_supported(workload: str) -> None:
+    """Validate that a max output length can be specified for ``workload``.
+
+    Only workloads with a max-output-length parameter (``long-doc-permutator``,
+    ``long-doc-qa``, ``multi-round-chat``) support setting it; every other
+    workload fixes its generation length internally, so requesting one is
+    rejected.
+
+    Args:
+        workload: The selected workload name (``EngineBenchConfig.workload``).
+
+    Raises:
+        ValueError: If ``workload`` has no max-output-length parameter.
+    """
+    if workload in _WORKLOADS_WITH_MAX_OUTPUT_LENGTH:
+        return
+    supported = ", ".join(sorted(_WORKLOADS_WITH_MAX_OUTPUT_LENGTH))
+    raise ValueError(
+        f"max output length cannot be specified for the {workload!r} workload: "
+        f"it has no max-output-length parameter. Supported workloads: {supported}."
+    )
 
 
 def create_workload(
@@ -97,6 +140,7 @@ def create_workload(
             num_permutations=args.ldp_num_permutations,
             vocab_size=8000,
             num_inflight_requests=args.ldp_num_inflight_requests,
+            max_output_length=args.ldp_max_output_length,
         )
         return LongDocPermutatorWorkload(
             config=ldp_workload_config,
@@ -104,6 +148,7 @@ def create_workload(
             stats_collector=stats_collector,
             progress_monitor=progress_monitor,
             seed=config.seed,
+            model_name=config.model,
         )
 
     if config.workload == "long-doc-qa":
@@ -114,6 +159,7 @@ def create_workload(
             query_per_document=args.ldqa_query_per_document,
             shuffle_policy=args.ldqa_shuffle_policy,
             num_inflight_requests=args.ldqa_num_inflight_requests,
+            max_output_length=args.ldqa_max_output_length,
         )
         return LongDocQAWorkload(
             config=ld_workload_config,
@@ -156,6 +202,25 @@ def create_workload(
             progress_monitor=progress_monitor,
             seed=config.seed,
             model_name=config.model,
+        )
+
+    if config.workload == "rag-qa-quality":
+        rag_workload_config = RagQaQualityConfig.resolve(
+            dataset=args.rag_dataset,
+            num_samples=args.rag_num_samples,
+            max_output_length=args.rag_max_output_length,
+            doc_align_tokens=args.rag_doc_align_tokens,
+            template_kwargs=parse_template_kwargs(args.rag_template_kwargs),
+            output_path=args.rag_output
+            or os.path.join(config.output_dir, "rag_qa_quality.json"),
+        )
+        return RagQaQualityWorkload(
+            config=rag_workload_config,
+            request_sender=request_sender,
+            stats_collector=stats_collector,
+            progress_monitor=progress_monitor,
+            model_name=config.model,
+            seed=config.seed,
         )
 
     if config.workload == "random-prefill":

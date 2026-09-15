@@ -56,7 +56,7 @@ class TokenHasher:
 
     This class encapsulates the hash function loading and hash computation
     logic needed by the multiprocess server to convert token IDs into
-    chunk hashes compatible with IPCCacheEngineKey (hash mode).
+    chunk hashes compatible with IPCCacheServerKey (hash mode).
     """
 
     def __init__(self, chunk_size: int = 256, hash_algorithm: str = "blake3"):
@@ -164,7 +164,15 @@ class TokenHasher:
                     none_hash = kv_cache_utils.NONE_HASH
                     logger.info("Initialized NONE_HASH=%s from vLLM", none_hash)
                     return none_hash
-            except (ImportError, AttributeError, ValueError, RuntimeError):
+            except (
+                ImportError,
+                AttributeError,
+                ValueError,
+                RuntimeError,
+                # torch._dynamo.device_interface raises AssertionError
+                # when CudaInterface is defined on non-CUDA platforms.
+                AssertionError,
+            ):
                 pass
 
         # Fallback: compute none_hash using our hash function
@@ -378,65 +386,3 @@ def update_table_id_numba(
     for i in range(n):
         idx = hashes_u64[i] & (m - 1)  # Assuming m is a power of 2
         table_id_i64[idx] = vals_to_update[i]
-
-
-@njit(cache=True)
-def unique_hits_direct_id_numba(
-    hashes_u64: np.ndarray, table_id_i64: np.ndarray, mask_u64: np.uint64, num_ids: int
-) -> np.ndarray:
-    """
-    Perform direct-address lookup with deduplication of results.
-
-    This function looks up each hash in a direct-address table using
-    the lower bits of the hash:
-
-        idx = hash & mask
-
-    The lookup table maps each index to an integer ID.
-
-    The function returns **unique IDs only**, meaning that if the same
-    ID appears multiple times across the hash stream it will be returned
-    only once.
-
-    Parameters
-    ----------
-    hashes_u64 : np.ndarray[np.uint64]
-        Array of rolling hash values.
-
-    table_id_i64 : np.ndarray[np.int64]
-        Direct-address lookup table mapping index → ID.
-        Values of -1 represent "no entry".
-
-    mask_u64 : np.uint64
-        Bitmask used to compute the index:
-
-            idx = hash & mask_u64
-
-        Typically mask = (2^bits - 1).
-
-    num_ids : int
-        Maximum possible ID value + 1. This determines the size of the
-        internal `seen` array used for deduplication.
-
-    Returns
-    -------
-    np.ndarray[np.int64]
-        Array containing the unique IDs encountered in the lookup stream.
-        Length ≤ len(hashes_u64).
-    """
-
-    # TODO(Jiayi): These allocations can be avoided by pre-allocations
-    seen = np.zeros(num_ids, dtype=np.uint8)  # 1 byte per possible id
-    out = np.empty(hashes_u64.shape[0], dtype=np.int64)
-
-    m = 0
-    for i in range(hashes_u64.shape[0]):
-        idx = hashes_u64[i] & mask_u64
-        hit = table_id_i64[idx]
-
-        if hit != -1 and seen[hit] == 0:
-            seen[hit] = 1
-            out[m] = hit
-            m += 1
-
-    return out[:m]

@@ -200,7 +200,7 @@ echo ""
 echo "============================================"
 echo "=== Step 4: Force-clearing L1 (CPU) cache ==="
 echo "============================================"
-curl -s -X POST "http://localhost:${LMCACHE_HTTP_PORT}/clear-cache" | python3 -m json.tool
+curl -s -X POST "http://localhost:${LMCACHE_HTTP_PORT}/cache/clear" | python3 -m json.tool
 echo "L1 cleared. Next request will miss L1 and trigger L2 prefetch."
 
 # ---------------------------------------------------------------------------

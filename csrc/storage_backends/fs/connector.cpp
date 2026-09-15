@@ -2,6 +2,7 @@
 
 #include "connector.h"
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -119,6 +120,28 @@ static size_t read_all(int fd, void* buf, size_t len) {
   return total;
 }
 
+static bool try_enable_odirect(int& flags, const void* buf, size_t len,
+                               size_t disk_block_size) {
+#ifdef O_DIRECT
+  if (disk_block_size == 0 || len % disk_block_size != 0) {
+    return false;
+  }
+  auto addr = reinterpret_cast<std::uintptr_t>(buf);
+  if (addr % disk_block_size != 0) {
+    throw std::runtime_error(
+        "O_DIRECT buffer address is not aligned to filesystem block size");
+  }
+  flags |= O_DIRECT;
+  return true;
+#else
+  (void)flags;
+  (void)buf;
+  (void)len;
+  (void)disk_block_size;
+  return false;
+#endif
+}
+
 // ---------------------------------------------------------------
 // FSConnector
 // ---------------------------------------------------------------
@@ -172,17 +195,8 @@ void FSConnector::do_single_get(WorkerFSConn& conn, const std::string& key,
   auto file_path = conn.base_path / filename;
 
   int flags = O_RDONLY;
-  bool do_odirect = conn.use_odirect;
-  if (do_odirect) {
-    bool aligned = conn.disk_block_size > 0 && len % conn.disk_block_size == 0;
-    if (aligned) {
-#ifdef O_DIRECT
-      flags |= O_DIRECT;
-#endif
-    } else {
-      do_odirect = false;
-    }
-  }
+  bool do_odirect = conn.use_odirect &&
+                    try_enable_odirect(flags, buf, len, conn.disk_block_size);
 
   int fd = ::open(file_path.c_str(), flags);
   if (fd < 0) {
@@ -192,7 +206,9 @@ void FSConnector::do_single_get(WorkerFSConn& conn, const std::string& key,
 
   try {
     size_t n;
-    if (conn.read_ahead_size > 0 && len > conn.read_ahead_size) {
+    bool use_read_ahead =
+        !do_odirect && conn.read_ahead_size > 0 && len > conn.read_ahead_size;
+    if (use_read_ahead) {
       // Trigger filesystem readahead with a small initial
       // read, then read the remainder.
       size_t ra = conn.read_ahead_size;
@@ -241,16 +257,8 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
   }
 
   int flags = O_CREAT | O_WRONLY | O_TRUNC;
-  bool do_odirect = conn.use_odirect;
-  if (do_odirect) {
-    bool aligned = conn.disk_block_size > 0 && len % conn.disk_block_size == 0;
-    if (aligned) {
-#ifdef O_DIRECT
-      flags |= O_DIRECT;
-#endif
-    } else {
-      do_odirect = false;
-    }
+  if (conn.use_odirect) {
+    try_enable_odirect(flags, buf, len, conn.disk_block_size);
   }
 
   int fd = ::open(tmp_path.c_str(), flags, 0644);

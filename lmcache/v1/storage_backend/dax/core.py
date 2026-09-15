@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Generic, Hashable, Optional, TypeVar
 import ctypes
+import enum
 import mmap
 import os
 import threading
@@ -23,6 +24,18 @@ logger = init_logger(__name__)
 
 KeyT = TypeVar("KeyT", bound=Hashable)
 _CopyFn = Callable[[int, MemoryObj, int], None]
+
+
+class DaxPutFromPtrResult(enum.Enum):
+    """Result of copying a reserved source payload into a DAX slot."""
+
+    INSERTED = enum.auto()
+    ALREADY_EXISTS = enum.auto()
+    INFLIGHT = enum.auto()
+    NO_SPACE = enum.auto()
+    CLOSED = enum.auto()
+    INVALID = enum.auto()
+    COPY_FAILED = enum.auto()
 
 
 @dataclass
@@ -353,6 +366,119 @@ class DaxCore(Generic[KeyT]):
 
         return results
 
+    def snapshot_keys(self) -> list[KeyT]:
+        """Return committed keys currently indexed by this DAX arena.
+
+        Returns:
+            A snapshot list of keys whose slots are committed and readable at
+            the time of the call. Later writes, deletes, or migration steps do
+            not mutate the returned list.
+        """
+        with self._state_lock:
+            if self._closing or self._closed:
+                return []
+
+            return [
+                key
+                for key, entry in self._index.items()
+                if self._get_committed_state_locked(entry) is not None
+            ]
+
+    def reserve_reads_for_keys(
+        self,
+        keys: list[KeyT],
+    ) -> list[DaxReadReservation[KeyT]]:
+        """Reserve readable slots for explicit keys.
+
+        Args:
+            keys: Keys to reserve for a lock-safe read or migration copy.
+
+        Returns:
+            Reservations for keys that were present and readable. The caller
+            must pass the returned reservations to ``finalize_reads``.
+        """
+        reservations, _ = self.reserve_reads(keys, prefix_only=False)
+        return reservations
+
+    def put_reserved_from_ptr(
+        self,
+        key: KeyT,
+        src_ptr: int,
+        size: int,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat,
+        cached_positions: torch.Tensor | None,
+    ) -> DaxPutFromPtrResult:
+        """Store one key by copying from an already reserved source pointer.
+
+        Args:
+            key: Destination key to commit.
+            src_ptr: Source memory address. The caller is responsible for
+                keeping this pointer valid until the call returns.
+            size: Number of bytes to copy.
+            shape: Tensor shape to record for future reads.
+            dtype: Tensor dtype to record for future reads.
+            fmt: Memory format to record for future reads.
+            cached_positions: Optional cached-position metadata.
+
+        Returns:
+            A ``DaxPutFromPtrResult`` describing whether the payload was newly
+            inserted, already present, full, closed, invalid, or failed.
+        """
+        if size <= 0 or size > self._slot_bytes:
+            return DaxPutFromPtrResult.INVALID
+        if src_ptr <= 0:
+            return DaxPutFromPtrResult.INVALID
+
+        with self._state_lock:
+            if self._closing or self._closed:
+                return DaxPutFromPtrResult.CLOSED
+            if key in self._index:
+                return DaxPutFromPtrResult.ALREADY_EXISTS
+            if key in self._inflight:
+                return DaxPutFromPtrResult.INFLIGHT
+
+            try:
+                slot_id = self._allocate_slot_locked()
+            except RuntimeError:
+                return DaxPutFromPtrResult.NO_SPACE
+
+            offset = slot_id * self._slot_bytes
+            generation = self._reserve_slot_state_locked(slot_id)
+            meta = DiskCacheMetadata(
+                path=f"{self._device_path}@{offset}",
+                size=size,
+                shape=shape,
+                dtype=dtype,
+                cached_positions=cached_positions,
+                fmt=fmt,
+                pin_count=0,
+            )
+            self._inflight[key] = _Inflight(
+                offset=offset,
+                meta=meta,
+                slot_id=slot_id,
+                generation=generation,
+            )
+            self._active_writes += 1
+            dst_ptr = self._base_ptr + offset
+
+        write_failed = False
+        try:
+            ctypes.memmove(
+                ctypes.c_void_p(dst_ptr),
+                ctypes.c_void_p(src_ptr),
+                size,
+            )
+        except Exception:
+            logger.exception("Failed to copy reserved DAX payload for key %s", key)
+            write_failed = True
+
+        if self._finalize_put(key, write_failed=write_failed):
+            return DaxPutFromPtrResult.INSERTED
+        return DaxPutFromPtrResult.COPY_FAILED
+
     def unlock_many(self, keys: list[KeyT]) -> None:
         """Release external locks for keys.
 
@@ -547,6 +673,106 @@ class DaxCore(Generic[KeyT]):
 
             self._state_condition.notify_all()
 
+    def can_shrink_to(self, new_max_slots: int) -> bool:
+        """Check whether every live or borrowed slot fits below a new limit.
+
+        Args:
+            new_max_slots: Candidate slot count after a shrink.
+
+        Returns:
+            ``True`` if remapping to ``new_max_slots`` would not invalidate
+            committed, in-flight, or borrowed slot state.
+        """
+        if new_max_slots <= 0:
+            return False
+
+        with self._state_lock:
+            if self._closed:
+                return False
+
+            for entry in self._index.values():
+                if (
+                    self._get_committed_state_locked(entry) is not None
+                    and entry.slot_id >= new_max_slots
+                ):
+                    return False
+            for inflight in self._inflight.values():
+                if inflight.slot_id >= new_max_slots and not inflight.canceled:
+                    return False
+            for slot_id, state in self._slot_states.items():
+                if slot_id >= new_max_slots and state.borrow_count > 0:
+                    return False
+            return True
+
+    def remap(self, new_max_dax_size_bytes: int) -> None:
+        """Remap this arena to a new byte size while preserving metadata.
+
+        Args:
+            new_max_dax_size_bytes: New number of bytes to map.
+
+        Raises:
+            ValueError: If the new size cannot fit at least one slot or would
+                cut off live slot metadata.
+            RuntimeError: If the arena is closed or the mmap operation fails.
+        """
+        if new_max_dax_size_bytes <= 0:
+            raise ValueError("new_max_dax_size_bytes must be > 0")
+        new_max_slots = new_max_dax_size_bytes // self._slot_bytes
+        if new_max_slots <= 0:
+            raise ValueError("new DAX arena does not fit even one slot")
+
+        old_fd: Optional[int] = None
+        old_mmap_obj: Optional[mmap.mmap] = None
+        old_arena_view: Optional[memoryview] = None
+
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("DaxCore is closed")
+
+            while self._active_writes > 0 or self._active_reads > 0:
+                if not self._state_condition.wait(timeout=30.0):
+                    logger.warning(
+                        "DaxCore remap: still waiting for %d writes, %d reads",
+                        self._active_writes,
+                        self._active_reads,
+                    )
+
+            if not self.can_shrink_to(new_max_slots):
+                raise ValueError("new DAX arena would cut off live slots")
+
+            old_fd = self._fd
+            old_mmap_obj = self._mmap_obj
+            old_arena_view = self._arena_view
+            old_arena_bytes = self._arena_bytes
+            old_max_slots = self._max_slots
+            old_base_ptr = self._base_ptr
+
+            self._fd = None
+            self._mmap_obj = None
+            self._arena_view = None
+            self._base_ptr = 0
+            self._arena_bytes = new_max_dax_size_bytes
+            self._max_slots = new_max_slots
+
+            try:
+                self._open_arena()
+            except Exception:
+                self._fd = old_fd
+                self._mmap_obj = old_mmap_obj
+                self._arena_view = old_arena_view
+                self._arena_bytes = old_arena_bytes
+                self._max_slots = old_max_slots
+                self._base_ptr = old_base_ptr
+                raise
+
+            self._free_slots = {
+                slot_id for slot_id in self._free_slots if slot_id < new_max_slots
+            }
+            self._next_slot = min(self._next_slot, new_max_slots)
+            self._state_condition.notify_all()
+
+        self._release_arena_resources(old_fd, old_mmap_obj, old_arena_view)
+
     def close(self) -> None:
         """Close the DAX arena after active reads and writes finish.
 
@@ -580,6 +806,7 @@ class DaxCore(Generic[KeyT]):
             self._inflight.clear()
             self._slot_states.clear()
             self._free_slots.clear()
+            self._next_slot = 0
 
             fd = self._fd
             mmap_obj = self._mmap_obj
@@ -613,6 +840,8 @@ class DaxCore(Generic[KeyT]):
                 "live_slot_count": live_slot_count,
                 "locked_key_count": len(self._external_lock_counts),
                 "borrowed_slot_count": borrowed_slot_count,
+                "active_read_count": self._active_reads,
+                "active_write_count": self._active_writes,
                 "closing": self._closing or self._closed,
                 "supports_restart_recovery": False,
             }

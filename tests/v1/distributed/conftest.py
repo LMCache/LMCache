@@ -12,7 +12,7 @@ from typing import Any, cast
 import sys
 import types
 
-if find_spec("lmcache.native_storage_ops") is None:
+if find_spec("lmcache.lmcache_native") is None:
 
     class Bitmap:
         """Small Python Bitmap fallback for source-only distributed tests."""
@@ -84,8 +84,66 @@ if find_spec("lmcache.native_storage_ops") is None:
     class TTLLock:
         """Minimal TTLLock fallback for tests that only import the symbol."""
 
-    fallback_module = types.ModuleType("lmcache.native_storage_ops")
+    class PageBufferShapeDesc:
+        """Minimal shape descriptor fallback for source-only imports."""
+
+    class KernelGroupSpec:
+        """Minimal kernel-group descriptor fallback for source-only imports."""
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    fallback_module = types.ModuleType("lmcache.lmcache_native")
     fallback_module_any = cast(Any, fallback_module)
+    fallback_module_any.PageBufferShapeDesc = PageBufferShapeDesc
+    fallback_module_any.KernelGroupSpec = KernelGroupSpec
     fallback_module_any.Bitmap = Bitmap
     fallback_module_any.TTLLock = TTLLock
-    sys.modules["lmcache.native_storage_ops"] = fallback_module
+    sys.modules["lmcache.lmcache_native"] = fallback_module
+
+
+# ---------------------------------------------------------------------------
+# CLI options for live-server integration tests (e.g. the Valkey adapter).
+#
+# These let integration tests point at a real Valkey/Redis without
+# environment variables, e.g.::
+#
+#   pytest test_valkey_l2_adapter_integration.py \
+#       --valkey-cluster --valkey-nodes=127.0.0.1:7000,127.0.0.1:7001
+#
+#   pytest test_valkey_l2_adapter_integration.py \
+#       --valkey-host=localhost --valkey-port=6390
+#
+# Defaults point at localhost so a bare run connects to a locally-running
+# server; the test still self-skips when nothing is reachable.
+# ---------------------------------------------------------------------------
+
+
+def pytest_addoption(parser: Any) -> None:
+    """Register Valkey integration-test connection options."""
+    group = parser.getgroup("valkey-integration")
+    group.addoption(
+        "--valkey-cluster",
+        action="store_true",
+        default=False,
+        help="Run Valkey integration tests in cluster mode against --valkey-nodes.",
+    )
+    group.addoption(
+        "--valkey-nodes",
+        action="store",
+        default="127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002",
+        help="Comma-separated host:port cluster seed nodes (cluster mode).",
+    )
+    group.addoption(
+        "--valkey-host",
+        action="store",
+        default="localhost",
+        help="Valkey host (standalone mode).",
+    )
+    group.addoption(
+        "--valkey-port",
+        action="store",
+        type=int,
+        default=6379,
+        help="Valkey port (standalone mode).",
+    )

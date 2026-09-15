@@ -13,7 +13,8 @@ steps:
       uv pip install -e . --no-build-isolation
       uv pip install matplotlib
       uv pip install pandas
-      uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+      # ">=0.0.0.dev0" explicitly limits vLLM to be the only pre-release package.
+      uv pip install -U "vllm>=0.0.0.dev0" --extra-index-url https://wheels.vllm.ai/nightly
       uv pip freeze
 
 

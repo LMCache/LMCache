@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench server`` subcommand implementation.
 
-This module owns the full registration + execution flow for the
-end-to-end LMCache MP cache-server sanity test. ``BenchCommand`` only
-forwards CLI dispatch to :func:`run_server_bench` and parser
-registration to :func:`register_server_parser`.
+This module provides argument registration via :func:`add_server_arguments`
+and the execution orchestrator :func:`run_server_bench` for the end-to-end
+LMCache MP cache-server sanity test.
 
 The command exercises the full store / retrieve data path:
 
@@ -35,12 +34,20 @@ from __future__ import annotations
 # Standard
 from typing import TYPE_CHECKING
 import argparse
-import itertools
+import math
+import os
 import sys
-import time
 
 # First Party
-from lmcache import torch_dev
+from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
+from lmcache.cli.commands.bench.server_bench.cases.baseline import (
+    BaselineBenchCase,
+)
+from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
+from lmcache.cli.commands.bench.server_bench.config import (
+    BenchRunSpec,
+    parse_args_to_config,
+)
 
 # Heavy imports reused by the orchestrator. ``DTYPE_MAP`` is required
 # for the ``--kvcache-shape-spec`` help string at parser-registration
@@ -49,24 +56,23 @@ from lmcache import torch_dev
 # orchestration safe.
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
-    _IMPORT_ERROR,
     DTYPE_MAP,
-    _allocate_gpu_kv_cache,
-    _get_chunk_size,
-    _process_request,
     _require_full_install,
-    _send_register_kv_cache,
 )
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Callable
+
     # First Party
     from lmcache.cli.commands.base import BaseCommand
+    from lmcache.cli.profiling import FlameProfiler
 
 
 # Stash the original (full-install) ImportError so the parser-stub
 # branch and the orchestrator branch can both surface it verbatim.
 __all__ = (
-    "register_server_parser",
+    "add_server_arguments",
     "run_server_bench",
 )
 
@@ -76,63 +82,71 @@ __all__ = (
 # ---------------------------------------------------------------------------
 
 
-def register_server_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache bench server`` subcommand parser.
+def add_server_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add ``lmcache bench server`` arguments to *parser*.
 
-    On a slim ``lmcache-cli`` install (where torch / zmq / the MP
-    runtime are absent) this still registers a *stub* parser so
-    ``lmcache bench --help`` keeps working; the stub defers to
-    :func:`run_server_bench`, which prints an actionable install
-    hint and exits with status ``1``.
+    Requires the full LMCache install (torch, zmq, etc.).
+    Callers should check ``_IMPORT_ERROR`` before calling this.
 
     Args:
-        subparsers: The ``bench`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
-            Typically ``BenchCommand.execute`` so that the outer
-            dispatcher can route the call back into
-            :func:`run_server_bench`.
-
-    Returns:
-        The created ``ArgumentParser`` (mostly for testing).
+        parser: The ``ArgumentParser`` for the server bench subcommand.
     """
-    if _IMPORT_ERROR is not None:
-        # Slim install — register a stub parser only.
-        stub = subparsers.add_parser(
-            "server",
-            help="(requires full lmcache install)",
-            description=(
-                "End-to-end sanity test for the LMCache MP cache server. "
-                "Requires the full `lmcache` package; not available in "
-                "the `lmcache-cli` install."
-            ),
-        )
-        stub.set_defaults(func=dispatch_func)
-        return stub
-
-    parser = subparsers.add_parser(
-        "server",
-        help="End-to-end test for LMCache MP cache server (GPU mode).",
-        description=(
-            "End-to-end sanity test for the LMCache MP cache server: "
-            "runs LOOKUP / STORE / RETRIEVE against a live MP server "
-            "and verifies KV cache checksums."
-        ),
-    )
 
     parser.add_argument(
         "--rpc-url",
         default="tcp://localhost:5555",
-        help=("ZMQ endpoint of the MP server (default: tcp://localhost:5555)"),
+        help=("MP request endpoint (default: tcp://localhost:5555)"),
     )
-    # TODO(maobaolong): add "cpu" choice once CPU mode is implemented.
     parser.add_argument(
         "--mode",
-        choices=["gpu"],
+        choices=["cpu", "gpu"],
         default="gpu",
-        help="Run mode (default: gpu)",
+        help=(
+            "Run mode (default: gpu). In cpu mode the client allocates "
+            "POSIX-SHM-backed KV cache tensors and the server maps the "
+            "same physical pages."
+        ),
+    )
+    parser.add_argument(
+        "--transfer-mode",
+        choices=["auto", "engine_driven", "lmcache_driven"],
+        default="auto",
+        help=(
+            "Transport routing for STORE/RETRIEVE (default: auto). "
+            "`lmcache_driven` forces the server-driven handle path "
+            "(REGISTER_KV_CACHE + STORE/RETRIEVE), which supports "
+            "both CUDA IPC and CPU SHM for zero-copy transfers. "
+            "`engine_driven` forces the worker-side gather/scatter "
+            "data path (REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT + "
+            "PREPARE/COMMIT). "
+            "`auto` keeps the historical mapping: "
+            "gpu->lmcache_driven, cpu->engine_driven."
+        ),
+    )
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help=(
+            "Simulated tensor-parallel world size (default: 1). Each "
+            "rank registers its own KV cache under a distinct "
+            "instance_id, and STORE / RETRIEVE fan out per rank the "
+            "same way LMCacheMPWorkerAdapter routes them in a real "
+            "vLLM deployment (MLA -> only rank 0 stores; non-MLA -> "
+            "every rank stores; every rank always retrieves)."
+        ),
+    )
+    parser.add_argument(
+        "--use-mla",
+        action="store_true",
+        default=False,
+        help=(
+            "MLA mode: fold all TP ranks into a single kv_worker "
+            "so only rank 0 writes KV and every rank retrieves "
+            "the shared KV object (default: False). "
+            "Also implied when --kvcache-shape-spec declares "
+            "kv_size=1."
+        ),
     )
     parser.add_argument(
         "--num-tokens",
@@ -204,8 +218,62 @@ def register_server_parser(
         help=("HTTP base URL for checksum API (default: http://localhost:8080)"),
     )
 
-    parser.set_defaults(func=dispatch_func)
-    return parser
+    prof = parser.add_argument_group(
+        "server profiling",
+        "Flame-graph the MP server process while this benchmark drives "
+        "load into it. The server's store path (hashing, allocation, "
+        "gather, D2H) runs in its own process, not in this client, so "
+        "profiling attaches to --profile-server-pid rather than to the "
+        "benchmark. See 'lmcache tool flamegraph' for the standalone form.",
+    )
+    prof.add_argument(
+        "--flamegraph",
+        choices=["on", "off"],
+        default="off",
+        help="Record a flame graph of the server during the run (default: off).",
+    )
+    prof.add_argument(
+        "--profile-server-pid",
+        type=int,
+        default=0,
+        metavar="PID",
+        help=(
+            "Server process to profile, e.g. $(pgrep -f 'lmcache server'). "
+            "Required when --flamegraph on."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-mode",
+        default="gil",
+        metavar="MODE[,MODE...]",
+        help=(
+            "What to sample in the server (default: gil). Pass several "
+            "comma-separated to profile one load run per mode. Modes: on-cpu, "
+            "off-cpu, wakeup, offwake (perf/bcc), wall, gil (py-spy). perf/bcc "
+            "name Python functions only when the server was launched with "
+            "PYTHONPERFSUPPORT=1. See the 'lmcache tool flamegraph' docs."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-output",
+        default="",
+        metavar="PATH",
+        help=(
+            "SVG output path. Default: "
+            "/tmp/lmcache_bench_flames/server-pid<PID>.<mode>.svg."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-scripts-dir",
+        default="",
+        metavar="DIR",
+        help=(
+            "Directory with the FlameGraph scripts (flamegraph.pl, "
+            "stackcollapse-perf.pl); default ~/FlameGraph (cloned there on "
+            "first use). Unused by --flamegraph-mode wall / gil, which "
+            "render their own SVG."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -213,233 +281,236 @@ def register_server_parser(
 # ---------------------------------------------------------------------------
 
 
-def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
+def _build_server_profiler(
+    args: argparse.Namespace,
+    log: "Callable[[str], None]",
+) -> "FlameProfiler | None":
+    """Build a profiler attached to the server, or ``None`` if disabled.
+
+    Validates the target pid and toolchain eagerly so a misconfigured run
+    fails before any load is sent. The returned profiler is not started;
+    the caller wraps the load loop with ``start`` / ``stop``.
+
+    Args:
+        args: Parsed CLI arguments for ``lmcache bench server``.
+        log: Progress logger.
+
+    Returns:
+        A ready :class:`FlameProfiler` targeting ``--profile-server-pid``,
+        or ``None`` when ``--flamegraph`` is off.
+    """
+    if getattr(args, "flamegraph", "off") != "on":
+        return None
+
+    # First Party
+    from lmcache.cli.profiling import (
+        PY_SPY_MODES,
+        FlameProfiler,
+        ProfileError,
+        check_profiling_deps,
+        default_output_path,
+        resolve_flamegraph_dir,
+    )
+
+    pid = args.profile_server_pid
+    if pid <= 0:
+        print(
+            "Error: --flamegraph on requires --profile-server-pid "
+            "(the pid of the running 'lmcache server').",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        print(f"Error: no such process: --profile-server-pid {pid}", file=sys.stderr)
+        sys.exit(2)
+    except PermissionError:
+        print(
+            f"Error: server pid {pid} belongs to another user; "
+            "profiling it needs root.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    try:
+        check_profiling_deps(args.flamegraph_mode)
+        flamegraph_dir = ""
+        if args.flamegraph_mode not in PY_SPY_MODES:
+            flamegraph_dir = resolve_flamegraph_dir(args.flamegraph_scripts_dir, log)
+        output = args.flamegraph_output or default_output_path(
+            f"server-pid{pid}", args.flamegraph_mode
+        )
+        return FlameProfiler(
+            mode=args.flamegraph_mode,
+            output=output,
+            flamegraph_dir=flamegraph_dir,
+            pid=pid,
+            title=f"{args.flamegraph_mode} (server pid {pid})",
+        )
+    except ProfileError as e:
+        print(
+            "Error: --flamegraph on was requested but profiling is "
+            f"unavailable:\n  {e}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def run_server_bench(
     command: "BaseCommand",
     args: argparse.Namespace,
 ) -> None:
     """Centralized orchestrator: run the server bench loop.
 
     Args:
-        command: The outer ``BenchCommand`` instance. Currently unused
-            (server prints directly), but kept for signature
-            symmetry with :func:`run_engine_bench` /
-            :func:`run_l2_adapter_bench` and to allow future migration
-            to ``command.create_metrics``.
+        command: The owning :class:`BaseCommand` instance, used to
+            obtain a configured :class:`Metrics` object via
+            ``command.create_metrics``.
         args: Parsed CLI arguments for ``lmcache bench server``.
     """
     _require_full_install()
-
-    # Heavy imports — safe now that _require_full_install passed.
-    # Third Party
-    import zmq
-
-    # First Party
-    from lmcache.v1.kv_layer_groups import (
-        format_kvcache_shape_spec,
-        parse_kvcache_shape_spec,
-    )
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
-
-    if not torch_dev.is_available():
-        print("ERROR: --mode gpu requires CUDA")
-        sys.exit(1)
-
-    url = args.rpc_url
-    print(
-        "Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, args.mode),
+    config = parse_args_to_config(args)
+    sequence_count = None if args.end is None else max(0, args.end - args.start)
+    run_spec = BenchRunSpec(
+        config=config,
+        bench_case=BaselineBenchCase(
+            sequence_count=sequence_count,
+            sequence_id_offset=args.start,
+            interval_seconds=args.interval,
+        ),
     )
 
-    ctx = zmq.Context()
-    client = MessageQueueClient(url, ctx)
+    def log(msg: str) -> None:
+        """Print progress messages; suppressed by --quiet."""
+        if not args.quiet:
+            print(msg)
 
+    # The profiler targets the server process (--profile-server-pid), not
+    # this benchmark client. Build it before opening any connection so a
+    # bad pid or a missing toolchain fails immediately, not after a full
+    # benchmark has already run. ``None`` when --flamegraph is off.
+    profiler = _build_server_profiler(args, log)
+
+    result = BenchResult(case_name=run_spec.bench_case.name)
+    bench_client = ServerBenchClient(run_spec.config, log)
     try:
-        # Query chunk size from server
-        chunk_size = _get_chunk_size(client)
-        print("Server chunk_size = %d" % chunk_size)
+        bench_client.start()
 
-        # Parse KV shape spec
-        layer_groups = parse_kvcache_shape_spec(args.kvcache_shape_spec)
-        # One block-id list is sent per LMCache KV group; each shape-spec
-        # group becomes its own group server-side.
-        num_group_views = len(layer_groups) or 1
-        # Echo the resolved spec so operators can verify that their
-        # input was interpreted as intended. The echoed string is a
-        # valid ``--kvcache-shape-spec`` itself.
-        print(
-            "Resolved KV shape spec: %s" % format_kvcache_shape_spec(layer_groups),
-        )
-        # Paged KV demands identical ``NB`` / ``BS`` across all groups
-        # (block_id -> slot maths is shared), but ``kv_size`` / ``NH`` /
-        # ``HS`` / ``dtype`` may vary per group. ``_allocate_gpu_kv_cache(
-        # groups=...)`` honours each group's own shape; ``_process_request``
-        # only needs a single ``block_size`` / ``total_blocks``.
-        first = layer_groups[0]
-        nb_vals = {g.shape_desc.nb for g in layer_groups}
-        bs_vals = {g.shape_desc.bs for g in layer_groups}
-        if len(nb_vals) > 1 or len(bs_vals) > 1:
-            raise ValueError(
-                "All groups must share NB and BS (paged KV "
-                "requires uniform block geometry). Got NB=%s BS=%s"
-                % (sorted(nb_vals), sorted(bs_vals))
-            )
-        num_layers = sum(g.num_layers for g in layer_groups)
-        spec_nb = getattr(first.shape_desc, "nb", 0) or 0
-        spec_bs = getattr(first.shape_desc, "bs", 0) or 0
-        num_blocks = spec_nb if spec_nb > 0 else args.num_blocks
-        block_size = spec_bs if spec_bs > 0 else args.block_size
-        if spec_nb and spec_nb != args.num_blocks:
-            print(
-                "  [info] spec nb=%d overrides --num-blocks=%d"
-                % (spec_nb, args.num_blocks)
-            )
-        if spec_bs and spec_bs != args.block_size:
-            print(
-                "  [info] spec bs=%d overrides --block-size=%d"
-                % (spec_bs, args.block_size)
-            )
-        # For display / legacy hint fields only: collapse to the first
-        # group when homogeneous, otherwise report "mixed".
-        heads_set = {g.shape_desc.nh for g in layer_groups}
-        hs_set = {g.shape_desc.hs for g in layer_groups}
-        kv_size_set = {g.shape_desc.kv_size for g in layer_groups}
-        dtype_set = {g.dtype for g in layer_groups}
-        num_heads_disp: int | str = (
-            first.shape_desc.nh if len(heads_set) == 1 else "mixed"
-        )
-        head_size_disp: int | str = first.shape_desc.hs if len(hs_set) == 1 else "mixed"
-        kv_size_disp: int | str = (
-            first.shape_desc.kv_size if len(kv_size_set) == 1 else "mixed"
-        )
-        if len(dtype_set) == 1:
-            dtype_str = next(
-                (k for k, v in DTYPE_MAP.items() if v == first.dtype),
-                "float16",
-            )
-        else:
-            dtype_str = "mixed"
-
-        # Build layout_hints. dtype is sent as a string ("float16")
-        # because torch.dtype is not msgpack-serializable. For
-        # heterogeneous multi-group specs, per-layer fields (heads /
-        # head_size / dtype / kv_size) are reported as "mixed" —
-        # ``layout_hints`` is only consumed by the server to pick a
-        # ``kv_layout``; the real per-layer shape is discovered from
-        # the tensors themselves.
-        layout_hints = {
-            "num_layers": num_layers,
-            "num_heads": num_heads_disp,
-            "head_size": head_size_disp,
-            "num_blocks": num_blocks,
-            "block_size": block_size,
-            "dtype": dtype_str,
-        }
-
-        num_tokens = args.num_tokens
-        print(
-            "Each request: %d tokens (%d full chunks)"
-            % (
-                num_tokens + 1,
-                (num_tokens + 1) // chunk_size,
-            )
-        )
-        print(
-            "KV shape: %d layers, %s heads x %s, "
-            "dtype=%s, blocks=%dx%d, kv=%s"
-            % (
-                num_layers,
-                num_heads_disp,
-                head_size_disp,
-                dtype_str,
-                num_blocks,
-                block_size,
-                kv_size_disp,
-            )
-        )
-
-        # Allocate GPU tensors — one tensor per layer, shaped according
-        # to that layer's group in the spec (so heterogeneous ``nh`` /
-        # ``hs`` / ``dtype`` / ``kv_size`` are honoured).
-        gpu_tensors = _allocate_gpu_kv_cache(groups=layer_groups)
-        print(
-            "Allocated %d GPU tensors on %s"
-            % (len(gpu_tensors), gpu_tensors[0].device),
-        )
-
-        # Register KV cache before any store/retrieve
-        ok = _send_register_kv_cache(
-            client,
-            layout_hints=layout_hints,
-            gpu_tensors=gpu_tensors,
-        )
-        print("REGISTER_KV_CACHE: %s" % ("OK" if ok else "FAIL"))
-        print()
-
-        if args.end is not None:
-            seq_iter: itertools.count | range = range(args.start, args.end)
-        else:
-            seq_iter = itertools.count(args.start)
-
-        http_base = args.url.rstrip("/")
-
-        for seq_no in seq_iter:
-            print("=== Request seq=%d ===" % seq_no)
-
-            # Pass 1: cold (miss -> store)
-            cold_checksums = _process_request(
-                client,
-                seq_no,
-                num_tokens,
-                chunk_size,
-                "cold",
-                http_base=http_base,
-                block_size=block_size,
-                total_blocks=num_blocks,
-                num_group_views=num_group_views,
-            )
-
-            time.sleep(args.interval)
-
-            # Pass 2: warm (hit -> retrieve)
-            warm_checksums = _process_request(
-                client,
-                seq_no,
-                num_tokens,
-                chunk_size,
-                "warm",
-                http_base=http_base,
-                block_size=block_size,
-                total_blocks=num_blocks,
-                num_group_views=num_group_views,
-            )
-
-            # Compare checksums
-            if cold_checksums and warm_checksums:
-                if cold_checksums == warm_checksums:
-                    print("  [seq %d] CHECKSUM MATCH OK" % seq_no)
-                else:
-                    print("  [seq %d] CHECKSUM MISMATCH!" % seq_no)
-                    for i, (c, w) in enumerate(
-                        zip(
-                            cold_checksums,
-                            warm_checksums,
-                            strict=False,
-                        )
-                    ):
-                        print(
-                            "    chunk %d: cold=%s warm=%s %s"
-                            % (
-                                i,
-                                c[:12],
-                                w[:12],
-                                ("OK" if c == w else "FAIL"),
-                            )
-                        )
-
-            print()
-            time.sleep(args.interval)
+        # Record only the steady-state load, not the one-time registration.
+        if profiler is not None:
+            profiler.start(log)
+        result = run_spec.bench_case.run(bench_client, log)
+        if result.interrupted:
+            log("\nStopping...")
+    except RuntimeError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        raise SystemExit(1) from None
     except KeyboardInterrupt:
-        print("\nStopping...")
+        log("\nStopping...")
     finally:
-        client.close()
-        ctx.term()
-    print("Done.")
+        # Stop recording once load ends, before teardown
+        if profiler is not None:
+            profiler.stop(log)
+        bench_client.close()
+
+    # Emit structured metrics summary.
+    _emit_server_bench_metrics(
+        command=command,
+        args=args,
+        result=result,
+    )
+    log("Done.")
+
+
+def _emit_server_bench_metrics(
+    command: "BaseCommand",
+    args: argparse.Namespace,
+    result: BenchResult,
+) -> None:
+    """Emit server bench summary using the CLI metrics system.
+
+    Args:
+        command: The owning :class:`BaseCommand` instance.
+        args: Parsed CLI arguments.
+        result: Structured result from the executed bench case.
+    """
+    if result.completed_runs == 0:
+        return
+
+    total_checksum_ok = result.passed_count("checksum_match")
+    total_checksum_fail = result.failed_count("checksum_match")
+
+    metrics = command.create_metrics("Server Bench Result", args, width=64)
+
+    cfg_section = metrics.add_section("config", "Configuration")
+    cfg_section.add("rpc_url", "RPC URL", args.rpc_url)
+    cfg_section.add("mode", "Mode", args.mode)
+    cfg_section.add(
+        "transfer_mode", "Transfer mode", getattr(args, "transfer_mode", "auto")
+    )
+    cfg_section.add("num_tokens", "Tokens / request", args.num_tokens)
+    cfg_section.add("interval", "Interval (s)", args.interval)
+
+    result_section = metrics.add_section("results", "Results")
+    result_section.add("total_requests", "Total requests", result.completed_runs)
+    result_section.add("checksum_ok", "Checksum OK", total_checksum_ok)
+    result_section.add("checksum_fail", "Checksum FAIL", total_checksum_fail)
+    if result.completed_runs > 0:
+        pass_rate = total_checksum_ok / result.completed_runs * 100
+        result_section.add("pass_rate", "Pass rate (%)", round(pass_rate, 2))
+
+    # Per-operation latency summary (cold pass).
+    _add_latency_section(
+        metrics,
+        "cold_lookup",
+        "Cold Lookup (ms)",
+        result.latencies_ms.get("cold.lookup"),
+    )
+    _add_latency_section(
+        metrics,
+        "cold_store",
+        "Cold Store (ms)",
+        result.latencies_ms.get("cold.store"),
+    )
+
+    # Per-operation latency summary (warm pass).
+    _add_latency_section(
+        metrics,
+        "warm_lookup",
+        "Warm Lookup (ms)",
+        result.latencies_ms.get("warm.lookup"),
+    )
+    _add_latency_section(
+        metrics,
+        "warm_retrieve",
+        "Warm Retrieve (ms)",
+        result.latencies_ms.get("warm.retrieve"),
+    )
+
+    metrics.emit()
+
+
+def _add_latency_section(
+    metrics,
+    section_id: str,
+    section_title: str,
+    latencies: list[float] | None,
+) -> None:
+    """Add count and latency statistics when samples are available."""
+    if not latencies:
+        return
+
+    sorted_lat = sorted(latencies)
+    count = len(sorted_lat)
+    mean = sum(sorted_lat) / count
+    p50_idx = max(0, math.ceil(count * 0.50) - 1)
+    p99_idx = max(0, math.ceil(count * 0.99) - 1)
+
+    section = metrics.add_section(section_id, section_title)
+    section.add(f"{section_id}_count", "count", count)
+    section.add(f"{section_id}_mean", "mean", round(mean, 3))
+    section.add(f"{section_id}_min", "min", round(sorted_lat[0], 3))
+    section.add(f"{section_id}_max", "max", round(sorted_lat[-1], 3))
+    section.add(f"{section_id}_p50", "p50", round(sorted_lat[p50_idx], 3))
+    section.add(f"{section_id}_p99", "p99", round(sorted_lat[p99_idx], 3))

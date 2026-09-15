@@ -15,6 +15,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import (
     CacheEngineKey,
     mock_up_broadcast_fn,
@@ -43,6 +44,14 @@ from .utils import (
 # required for GDS tests (cuFile err=5027 on overlayfs/tmpfs).
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
+
 
 def get_expected_count(token_len, save_unfull_chunk, chunk_size):
     """Calculate expected token count based on save_unfull_chunk setting.
@@ -62,12 +71,8 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
 
 
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
     num_blocks = 1000
     block_size = 16
@@ -147,10 +152,6 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_retrieve_prefix(
     chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
@@ -165,7 +166,7 @@ def test_paged_retrieve_prefix(
             check_equality = False
         else:
             remote_serde = "naive"
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
     new_num_tokens = 1000
     kv_shape = (32, 2, chunk_size, 8, 128)
@@ -268,17 +269,13 @@ def test_paged_retrieve_prefix(
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_store_offset(
     chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
     url = None
     if backend == "remote":
         url = lmserver_v1_process.server_url
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
     num_suffix_tokens = 500
     num_total_tokens = 3000
@@ -379,12 +376,8 @@ def test_paged_store_offset(
     ],
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_mixed_retrieve(chunk_size, backend, save_unfull_chunk, autorelease_v1):
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
     new_num_tokens = 1000
     num_blocks = 1000
@@ -528,12 +521,8 @@ def test_paged_mixed_retrieve(chunk_size, backend, save_unfull_chunk, autoreleas
 
 
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_store_kv_tensors_mask(save_unfull_chunk, autorelease_v1):
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 1000
     new_num_tokens = 2000
     num_blocks = 1000
@@ -705,10 +694,6 @@ def test_paged_store_kv_tensors_mask(save_unfull_chunk, autorelease_v1):
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_hierarchy_retrieve(
     chunk_size,
     backend,
@@ -720,7 +705,7 @@ def test_paged_hierarchy_retrieve(
     url = None
     if backend == "local_cpu_disk_remote":
         url = lmserver_v1_process.server_url
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
     new_num_tokens = 1000
     kv_shape = (32, 2, chunk_size, 8, 128)
@@ -852,14 +837,10 @@ def test_paged_hierarchy_retrieve(
     ],
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_prefetch_retrieve(
     backend, prefetch_from, save_unfull_chunk, autorelease_v1
 ):
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
     new_num_tokens = 1000
     num_blocks = 1000
@@ -979,10 +960,6 @@ def test_paged_prefetch_retrieve(
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_async_lookup_and_prefetch_layerwise(autorelease_v1):
     # Regression: before the fix, async_lookup_and_prefetch sent chunk-level
     # CacheEngineKey objects into batched_async_contains, but store_layer
@@ -1024,7 +1001,7 @@ def test_async_lookup_and_prefetch_layerwise(autorelease_v1):
         async_lookup_server=_RecordingAsyncLookupServer(),
     )
 
-    tokens = generate_tokens(num_tokens, "cuda")
+    tokens = generate_tokens(num_tokens, torch_device_type)
     chunk_keys = [
         key for _, _, key in engine.token_database.process_tokens(tokens=tokens)
     ]
@@ -1053,10 +1030,6 @@ def test_async_lookup_and_prefetch_layerwise(autorelease_v1):
     )
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_async_lookup_and_prefetch_layerwise_partial_layer_missing(autorelease_v1):
     # When a single per-layer key is missing for one chunk, that chunk must be
     # rounded down to a miss (the `// keys_per_chunk` round-down path).
@@ -1095,7 +1068,7 @@ def test_async_lookup_and_prefetch_layerwise_partial_layer_missing(autorelease_v
         async_lookup_server=_RecordingAsyncLookupServer(),
     )
 
-    tokens = generate_tokens(num_tokens, "cuda")
+    tokens = generate_tokens(num_tokens, torch_device_type)
     chunk_keys = [
         key for _, _, key in engine.token_database.process_tokens(tokens=tokens)
     ]
@@ -1141,10 +1114,6 @@ def test_async_lookup_and_prefetch_layerwise_partial_layer_missing(autorelease_v
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.no_shared_allocator
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_mem_leak(
     chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
@@ -1152,7 +1121,7 @@ def test_paged_mem_leak(
     if "remote" in backend:
         url = lmserver_v1_process.server_url
 
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
     kv_shape = (32, 2, chunk_size, 8, 128)
     num_blocks = 1000
@@ -1236,14 +1205,10 @@ def test_paged_mem_leak(
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_paged_retrieve_after_eviction(
     chunk_size, backend, save_unfull_chunk, autorelease_v1
 ):
-    device = "cuda"
+    device = torch_device_type
     # NOTE: The default backend cache size is 2 GB.
     # 10000 tokens ia around 1.3 GB so a second retrieve will cause an eviction.
     num_tokens = 10000
@@ -1381,12 +1346,8 @@ def test_builder(autorelease_v1):
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_force_store_wait(autorelease_v1):
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 10000
     num_blocks = 5000
     block_size = 16
@@ -1450,10 +1411,6 @@ def test_force_store_wait(autorelease_v1):
             assert engine.lookup(t) == expected_count
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_builder_destroy(autorelease_v1):
     """Test the destroy method of LMCacheEngineBuilder"""
     instance_id = "test_destroy"
@@ -1502,10 +1459,6 @@ def test_builder_destroy(autorelease_v1):
     LMCacheEngineBuilder.destroy("non_existent_id")  # Should not raise
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_builder_destroy_multiple_instances(autorelease_v1):
     """Test destroying one instance doesn't affect others"""
     instance_id1 = "test_destroy_1"
@@ -1561,10 +1514,6 @@ def test_builder_destroy_multiple_instances(autorelease_v1):
 
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Requires CUDA for test_multi_device_backends",
-)
-@pytest.mark.skipif(
     not has_cufile(),
     reason="Requires NVIDIA cuFile (libcufile.so). "
     "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
@@ -1573,7 +1522,7 @@ def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
     """Test running GPU-related backend with local CPU backends
     together
     """
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
     chunk_size = 256  # Default chunk size for this test
     num_blocks = 1000
@@ -2055,3 +2004,64 @@ def test_compress_decompress_unpin_when_pinned() -> None:
             event_id="event_123",
         )
         mock_compressed_mem_obj.unpin.assert_called_once()
+
+
+def test_retrieve_cleanup_ref_count_and_unpin() -> None:
+    """Verify that retrieve() unpins and ref_count_downs all retrieved chunks.
+
+    Specifically in the else branch when remove_after_retrieve is False.
+    """
+    # Create mock memory objects
+    mem_obj_pinned = MagicMock()
+    mem_obj_pinned.is_pinned = True
+
+    mem_obj_not_pinned = MagicMock()
+    mem_obj_not_pinned.is_pinned = False
+
+    # Mock engine instance
+    engine = MagicMock(spec=LMCacheEngine)
+    engine.is_healthy.return_value = True
+    engine.remove_after_retrieve = False
+    engine._is_passive.return_value = False
+    engine.save_only_first_rank = False
+    engine._get_req_id.return_value = "req_123"
+
+    # We want retrieve to process chunks
+    k0 = _make_key(0)
+    k1 = _make_key(1)
+    reordered_chunks = [
+        (k0, mem_obj_pinned, 0, 10),
+        (k1, mem_obj_not_pinned, 10, 20),
+    ]
+
+    engine.async_loading = False
+    engine._process_tokens_internal.return_value = (reordered_chunks, 1024)
+    engine._is_sync_pd_backend.return_value = False
+
+    # Mock stats monitor
+    engine.stats_monitor = MagicMock()
+    mock_stats = MagicMock()
+    mock_stats.time_to_retrieve.return_value = 1.0
+    engine.stats_monitor.on_retrieve_request.return_value = mock_stats
+
+    # Mock gpu_connector
+    engine.gpu_connector = MagicMock()
+
+    # Call retrieve
+    tokens = torch.zeros(20, dtype=torch.long)
+    kvcaches = torch.zeros(20)
+    slot_mapping = torch.zeros(20, dtype=torch.long)
+
+    LMCacheEngine.retrieve(
+        engine,
+        tokens=tokens,
+        kvcaches=kvcaches,
+        slot_mapping=slot_mapping,
+    )
+
+    # Assertions
+    mem_obj_pinned.ref_count_down.assert_called_once()
+    mem_obj_pinned.unpin.assert_called_once()
+
+    mem_obj_not_pinned.ref_count_down.assert_called_once()
+    mem_obj_not_pinned.unpin.assert_not_called()

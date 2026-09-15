@@ -13,11 +13,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from tests.v1.utils import (
     create_gpu_connector,
+    create_musa_connector,
+    create_xpu_connector,
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
@@ -49,6 +52,35 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
     if save_unfull_chunk:
         return token_len
     return (token_len // chunk_size) * chunk_size
+
+
+def create_runtime_connector(hidden_dim: int, num_layers: int):
+    """Create the benchmark connector for the active accelerator runtime."""
+    if torch_device_type == "xpu":
+        return create_xpu_connector(hidden_dim, num_layers)
+    if torch_device_type == "cuda":
+        return create_gpu_connector(hidden_dim, num_layers)
+    if torch_device_type == "musa":
+        return create_musa_connector(hidden_dim, num_layers)
+    raise ValueError(
+        f"Unsupported torch_device_type for benchmark: {torch_device_type}"
+    )
+
+
+@pytest.mark.musa
+def test_create_runtime_connector_dispatches_musa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared benchmark selects its MUSA connector on MUSA hosts."""
+    # First Party
+    from lmcache.v1.gpu_connector.musa_connectors import (
+        VLLMPagedMemMUSAConnectorV2,
+    )
+
+    monkeypatch.setitem(globals(), "torch_device_type", "musa")
+    connector = create_runtime_connector(1024, 32)
+
+    assert isinstance(connector, VLLMPagedMemMUSAConnectorV2)
 
 
 @pytest.fixture
@@ -105,12 +137,12 @@ def create_config():
 # test store 10GB data (1GB * 10)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_store_1GB(
     benchmark,
     backend,
@@ -146,7 +178,7 @@ def test_store_1GB(
     dtype = torch.bfloat16
 
     # lmcache and vllm configs
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
 
     num_blocks = 1000
@@ -162,7 +194,7 @@ def test_store_1GB(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_runtime_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -219,12 +251,12 @@ def test_store_1GB(
 # Test retrieve 10data (10 rounds, each round 1GB, 100% hit)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_retrieve_1GB_allhit(
     benchmark,
     backend,
@@ -260,7 +292,7 @@ def test_retrieve_1GB_allhit(
     dtype = torch.bfloat16
 
     # lmcache and vllm configs
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
 
     num_blocks = 1000
@@ -276,7 +308,7 @@ def test_retrieve_1GB_allhit(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_runtime_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -342,12 +374,12 @@ def test_retrieve_1GB_allhit(
 # Test lookup 2K * 10 requests, 100% hit
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
-)
 def test_lookup_20K_tokens(
     benchmark,
     backend,
@@ -379,7 +411,7 @@ def test_lookup_20K_tokens(
     dtype = torch.bfloat16
 
     # lmcache and vllm configs
-    device = "cuda"
+    device = torch_device_type
     num_tokens = 2000
 
     num_blocks = 1000
@@ -393,7 +425,7 @@ def test_lookup_20K_tokens(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_runtime_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )

@@ -11,11 +11,11 @@ This module provides the initialize_protocols() function that:
 # First Party
 from lmcache.v1.multiprocess.protocols import (
     blend,
-    blend_v2,
     controller,
     debug,
     engine,
     observability,
+    p2p,
 )
 from lmcache.v1.multiprocess.protocols.base import (
     HandlerType,
@@ -35,8 +35,8 @@ _PROTOCOL_MODULES = [
     ("controller", controller),
     ("debug", debug),
     ("blend", blend),
-    ("blend_v2", blend_v2),
     ("observability", observability),
+    ("p2p", p2p),
 ]
 
 

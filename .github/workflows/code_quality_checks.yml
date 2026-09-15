@@ -4,10 +4,9 @@ on:
   workflow_call:
   pull_request:
 
-# Cancel older in-flight runs on the same PR / branch. github.ref is
-# refs/pull/<N>/merge on pull_request events, so each PR gets its own group.
+# Cancel older in-flight runs on the same PR / branch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: code-quality-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

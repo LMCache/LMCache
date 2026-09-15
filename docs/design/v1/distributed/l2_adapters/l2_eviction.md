@@ -197,7 +197,7 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `MockL2Adapter`            | ✓        | ✓           | stored, deleted     |
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `RawBlockL2Adapter`        | ✓ (skips locked) | ✓ | stored, accessed, deleted |
-| `FSL2Adapter`              | no-op    | `(-1, -1)`  | none                |
+| `FSL2Adapter`              | ✓ (best-effort) | total only (no max cap) | stored, accessed, deleted |
 | `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:
@@ -208,6 +208,18 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 2. The adapter must be configured with `max_capacity_gb > 0` to enable client-side
    size tracking for `get_usage()`. Without it, `get_usage()` returns `(-1, -1)` and
    the eviction controller will not trigger.
+
+**Note on `FSL2Adapter`:** `delete()` and the listener events are implemented, so
+the base class tracks `total_bytes_used` from the store / delete notifications.
+Two caveats:
+
+1. The adapter declares no max capacity, so `usage_fraction == -1.0` and the
+   global (capacity-triggered) eviction controller skips it. `delete()` still runs
+   when invoked directly (e.g. via the per-user quota path).
+2. `delete()` is best-effort: the adapter tracks no per-key in-flight locks, so a
+   delete is not skipped when it races an in-flight load or store. A racing load
+   degrades to a miss (the load path treats the missing file as not-found); a
+   racing store may re-create the key, which a later cycle re-picks.
 
 Example configuration with eviction enabled:
 

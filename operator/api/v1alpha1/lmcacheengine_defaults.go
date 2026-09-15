@@ -16,13 +16,21 @@ limitations under the License.
 
 package v1alpha1
 
+// defaultLogLevel is the log level applied when spec.logLevel is unset (it
+// mirrors the kubebuilder default on both engine kinds).
+const defaultLogLevel = "INFO"
+
+// labelValueTrue is the string value of boolean-style node-selector labels
+// (e.g. nvidia.com/gpu.present: "true").
+const labelValueTrue = "true"
+
 // SetDefaults applies defaults that cannot be expressed purely via kubebuilder markers.
 func (e *LMCacheEngine) SetDefaults() {
 	spec := &e.Spec
 
 	// Default logLevel to INFO if unset (belt-and-suspenders with kubebuilder default).
 	if spec.LogLevel == nil {
-		info := "INFO"
+		info := defaultLogLevel
 		spec.LogLevel = &info
 	}
 
@@ -33,7 +41,19 @@ func (e *LMCacheEngine) SetDefaults() {
 
 	if spec.NodeSelector == nil && *spec.GPUVendor == GPUVendorNvidia {
 		spec.NodeSelector = map[string]string{
-			"nvidia.com/gpu.present": "true",
+			"nvidia.com/gpu.present": labelValueTrue,
 		}
 	}
+}
+
+// IsolatedIPCEnabled resolves spec.isolatedIPC: an explicit value wins;
+// unset means auto — enabled for gpuVendor "nvidia" (the default vendor),
+// disabled for "amd", whose ROCm stack has no isolated-IPC backends.
+// Callers must treat true as overriding spec.hostIPC and the /dev/shm
+// sharing (see the isolatedIPC field documentation).
+func (s *LMCacheEngineSpec) IsolatedIPCEnabled() bool {
+	if s.IsolatedIPC != nil {
+		return *s.IsolatedIPC
+	}
+	return s.GPUVendor == nil || *s.GPUVendor == GPUVendorNvidia
 }

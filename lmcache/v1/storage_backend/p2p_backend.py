@@ -21,10 +21,12 @@ from lmcache.v1.cache_controller.message import (
     ErrorMsg,
 )
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
+    PagedCpuGpuMemoryAllocator,
+)
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import (
@@ -150,7 +152,9 @@ class PeerInfo:
         try:
             self.lookup_socket.close(linger=0)
         except Exception as e:
-            logger.error("Failed to close peer %s lookup socket", self.peer_init_url, e)
+            logger.error(
+                "Failed to close peer %s lookup socket: %s", self.peer_init_url, e
+            )
         self.lookup_socket = new_lookup_socket
 
 

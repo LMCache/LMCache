@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 import argparse
 import json
 import os
@@ -18,6 +19,23 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 _GB = 1024**3
+
+
+class WarmupPolicy(str, Enum):
+    """Whether the workload runs its warmup phase before the measured run.
+
+    Subclasses ``str`` so the value lands in the JSON summary
+    (``bench_summary.json``) as a plain ``"run"`` / ``"skip"`` string.
+
+    Attributes:
+        RUN: Run warmup, then discard its stats and start the benchmark.
+        SKIP: Go straight to the benchmark, leaving the engine and the KV
+            cache in whatever state the run starts in.  The first requests
+            then pay any first-request cost and see a cold cache.
+    """
+
+    RUN = "run"
+    SKIP = "skip"
 
 
 @dataclass
@@ -39,6 +57,8 @@ class EngineBenchConfig:
     export_csv: bool
     export_json: bool
     quiet: bool
+    ignore_eos: bool = False
+    warmup_policy: WarmupPolicy = WarmupPolicy.RUN
 
     def __post_init__(self) -> None:
         if not self.engine_url:
@@ -125,7 +145,7 @@ def _find_model_meta(
     """Find the GPU metadata entry matching *model_name*.
 
     Args:
-        gpu_meta: The ``gpu_context_meta`` dict from ``/status``.
+        gpu_meta: The ``cache_context_meta`` dict from ``/status``.
         model_name: Model name to match.
 
     Returns:
@@ -171,10 +191,10 @@ def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
     """
     data = _fetch_lmcache_status(lmcache_url)
 
-    gpu_meta = data.get("gpu_context_meta", {})
+    gpu_meta = data.get("cache_context_meta", {})
     if not gpu_meta:
         # CB-only deployments (engine_type="blend") populate
-        # cb_gpu_context_meta instead of gpu_context_meta.
+        # cb_gpu_context_meta instead of cache_context_meta.
         gpu_meta = data.get("cb_gpu_context_meta", {})
     if not gpu_meta:
         raise RuntimeError(
@@ -246,4 +266,8 @@ def parse_args_to_config(args: argparse.Namespace) -> EngineBenchConfig:
         export_csv=not args.no_csv,
         export_json=args.json,
         quiet=args.quiet,
+        ignore_eos=args.ignore_eos,
+        warmup_policy=(
+            WarmupPolicy.SKIP if getattr(args, "no_warmup", False) else WarmupPolicy.RUN
+        ),
     )

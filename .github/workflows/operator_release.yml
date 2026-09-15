@@ -42,9 +42,20 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          # Strip "operator-" prefix from tag to get version
+          # Strip "operator-" prefix from tag to get version (e.g. operator-v0.4.8rc1 -> v0.4.8rc1).
           VERSION="${GITHUB_REF_NAME#operator-}"
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          # Pre-releases (rc/alpha/beta) get the floating ":latest-rc" tag and must
+          # never move the stable ":latest" image tag or the "operator-latest" alias.
+          # Detect from the version string rather than the GitHub "pre-release" flag
+          # so behavior is robust whether or not that box is ticked in the UI.
+          if [[ "${VERSION}" =~ (rc|alpha|beta) ]]; then
+            echo "FLOATING_TAG=latest-rc" >> "$GITHUB_OUTPUT"
+            echo "IS_PRERELEASE=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "FLOATING_TAG=latest" >> "$GITHUB_OUTPUT"
+            echo "IS_PRERELEASE=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -54,7 +65,7 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
-            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.FLOATING_TAG }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -70,6 +81,9 @@ jobs:
           files: operator/dist/install.yaml
 
       - name: Update latest release alias
+        # Skip for pre-releases: an rc/alpha/beta must not repoint the stable
+        # "operator-latest" alias (or its install.yaml) at a pre-release build.
+        if: steps.version.outputs.IS_PRERELEASE == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: operator-latest

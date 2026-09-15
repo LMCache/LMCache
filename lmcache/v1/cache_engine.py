@@ -31,7 +31,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
-from lmcache.usage_context import InitializeUsageContext
+from lmcache.usage_telemetry import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
     CacheStoreEvent,
@@ -43,18 +43,22 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
-from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
-from lmcache.v1.memory_management import (  # noqa: E501
+from lmcache.v1.hidden_state_store import HiddenStateStore
+from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
+)
+from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
-    MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
+from lmcache.v1.platform import current_device_spec
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 from lmcache.v1.token_database import (
@@ -102,7 +106,7 @@ class LMCacheEngine:
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
     ):
-        logger.info(f"Creating LMCacheEngine with config: {config}")
+        logger.info("Creating LMCacheEngine with config: %s", config)
         self.config = config
         self.metadata = metadata
         self.token_database = token_database
@@ -154,7 +158,7 @@ class LMCacheEngine:
             self.lmcache_worker = None
             logger.info(
                 "LMCacheWorker is not initialized (related configs: "
-                "enable_controller: %s, role: %s, worker_id: %s, worker_ids: %s).",
+                "enable_controller: %s, role: %s, worker_id: %d, worker_ids: %s).",
                 self.enable_controller,
                 self.metadata.role,
                 self.metadata.worker_id,
@@ -234,6 +238,13 @@ class LMCacheEngine:
         # Flag to indicate if initialization failed (irrecoverable error)
         self._init_failed = False
 
+        # Hidden-state cache (logically separate from KV; lives on its own
+        # pinned pool). Bound to storage_manager in post_init for coupled
+        # eviction. None when disabled in config.
+        self.hidden_state_store: Optional[HiddenStateStore] = None
+        if config.enable_hidden_state_cache:
+            self.hidden_state_store = HiddenStateStore(config, token_database)
+
     def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
         """
         Set the health monitor reference.
@@ -302,9 +313,12 @@ class LMCacheEngine:
                 or self.metadata.worker_id in lookup_server_worker_ids
             ):
                 logger.info(
-                    f"Initialize storage manager on rank {self.metadata.worker_id}, "
-                    f"use layerwise: {self.use_layerwise},"
-                    f"save only first rank: {self.save_only_first_rank}"
+                    "Initialize storage manager on rank %d, "
+                    "use layerwise: %s,"
+                    "save only first rank: %s",
+                    self.metadata.worker_id,
+                    self.use_layerwise,
+                    self.save_only_first_rank,
                 )
                 async_lookup_server = kwargs.get("async_lookup_server", None)
                 self.storage_manager = StorageManager(
@@ -314,6 +328,8 @@ class LMCacheEngine:
                     lmcache_worker=self.lmcache_worker,
                     async_lookup_server=async_lookup_server,
                 )
+                if self.hidden_state_store is not None:
+                    self.hidden_state_store.bind_storage_manager(self.storage_manager)
             self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
@@ -406,7 +422,7 @@ class LMCacheEngine:
         )
 
         if self._is_passive():
-            logger.debug(f"rank={self.metadata.worker_id} ignore store")
+            logger.debug("rank=%d ignore store", self.metadata.worker_id)
             return
 
         assert self.storage_manager is not None
@@ -492,8 +508,8 @@ class LMCacheEngine:
                     logger.warning(
                         "Local cpu memory under pressure so"
                         " choosing to store only "
-                        f" {len(memory_objs)}"
-                        " total chunks of KV cache."
+                        " %d total chunks of KV cache.",
+                        len(memory_objs),
                     )
                     break
 
@@ -707,7 +723,8 @@ class LMCacheEngine:
                     if isinstance(tokens, torch.Tensor):
                         stored_event.medium = tokens.device
                 logger.debug(
-                    f"Added kv cache event '{stored_event}' to kv cache events queue"
+                    "Added kv cache event '%s' to kv cache events queue",
+                    stored_event,
                 )
                 self.kv_events.append(stored_event)
                 prev_key = key.chunk_hash
@@ -914,7 +931,9 @@ class LMCacheEngine:
                 # See pd_backend.py line 605 TODO comment.
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
-            elif not self.async_loading:
+            else:
+                if memory_obj.is_pinned:
+                    memory_obj.unpin()
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
@@ -1293,7 +1312,9 @@ class LMCacheEngine:
         if not do_copy:
             self.storage_manager.batched_remove(keys, locations=[old_position])
 
-        logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
+        logger.debug(
+            "Moving %d token from %s to %s", num_tokens, old_position, new_position
+        )
         return num_tokens
 
     # TODO(Jiayi): Add layerwise support.
@@ -1388,10 +1409,12 @@ class LMCacheEngine:
                         memory_obj.unpin()
                     memory_obj.ref_count_down()
                 except Exception as e:
-                    logger.error(f"Error releasing memory object: {e}")
+                    logger.error("Error releasing memory object: %s", e)
         except Exception as e:
             logger.error(
-                f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}"
+                "Error during cleanup_memory_objs for lookup_id=%s: %s",
+                lookup_id,
+                e,
             )
 
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
@@ -1407,7 +1430,7 @@ class LMCacheEngine:
     ) -> int:
         assert self.storage_manager is not None
         if method not in ["cachegen"]:
-            logger.warning(f"Unsupported compression method: {method}.")
+            logger.warning("Unsupported compression method: %s.", method)
             return 0
 
         # First Party
@@ -1466,7 +1489,7 @@ class LMCacheEngine:
     ) -> int:
         assert self.storage_manager is not None
         if method not in ["cachegen"]:
-            logger.warning(f"Unsupported decompression method: {method}.")
+            logger.warning("Unsupported decompression method: %s.", method)
             return 0
 
         # First Party
@@ -1592,13 +1615,20 @@ class LMCacheEngine:
         """Close the cache engine and free all the resources"""
         logger.info("Closing LMCacheEngine...")
 
+        if self.hidden_state_store is not None:
+            try:
+                logger.info("Closing hidden_state_store...")
+                self.hidden_state_store.close()
+            except Exception as e:
+                logger.error("Error closing hidden_state_store: %s", e)
+
         if self.lmcache_worker is not None:
             try:
                 logger.info("Closing lmcache_worker...")
                 self.lmcache_worker.close()
                 logger.info("lmcache_worker closed successfully")
             except Exception as e:
-                logger.error(f"Error closing lmcache_worker: {e}")
+                logger.error("Error closing lmcache_worker: %s", e)
 
         try:
             logger.info("Closing storage_manager...")
@@ -1606,7 +1636,7 @@ class LMCacheEngine:
                 self.storage_manager.close()
             logger.info("storage_manager closed successfully")
         except Exception as e:
-            logger.error(f"Error closing storage_manager: {e}")
+            logger.error("Error closing storage_manager: %s", e)
 
         logger.info("LMCacheEngine closed.")
 
@@ -1643,7 +1673,7 @@ class LMCacheEngine:
             keyed_memory_objs = future.result()
             memory_obj_map: dict[CacheEngineKey, MemoryObj] = {}
         except Exception as e:
-            logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
+            logger.error("Error popping event for request %s: %s", kwargs["req_id"], e)
             return [], 0
 
         for backend_results in keyed_memory_objs:
@@ -1849,7 +1879,7 @@ class LMCacheEngine:
             chunk_count = self.broadcast_object_fn(None, self.metadata.first_rank)
             if chunk_count is None:
                 logger.warning(
-                    f"rank={self.metadata.worker_id} received None chunk_count"
+                    "rank=%d received None chunk_count", self.metadata.worker_id
                 )
                 return
 
@@ -1861,8 +1891,8 @@ class LMCacheEngine:
                 )
                 if combined_metadata is None:
                     logger.warning(
-                        f"rank={self.metadata.worker_id} "
-                        "received None combined_metadata"
+                        "rank=%d received None combined_metadata",
+                        self.metadata.worker_id,
                     )
                     break
                 start, end, metadata_dict = combined_metadata
@@ -2006,20 +2036,12 @@ class LMCacheEngineBuilder:
             )
 
             if corrected_device == "cpu":
-                # Not all backends support cudart() for host memory pinning
-                if not hasattr(torch_dev, "cudart"):
-                    raise RuntimeError(
-                        f"Backend '{torch_device_type}' does not support "
-                        "cudart(). NIXL storage CPU buffer requires "
-                        "pinned memory via cudaHostRegister, which is "
-                        "not available on this backend."
-                    )
-                else:
-                    torch_dev.cudart().cudaHostRegister(
-                        buffer.data_ptr(), config.nixl_buffer_size, 0
-                    )
+                if not current_device_spec.pin_memory(
+                    buffer.data_ptr(), config.nixl_buffer_size
+                ):
+                    raise RuntimeError("Failed to pin NIXL CPU buffer for DMA access")
             else:
-                logger.info(f"Setting device to {corrected_device} ")
+                logger.info("Setting device to %s", corrected_device)
                 torch_dev.set_device(corrected_device)
 
             return PagedTensorMemoryAllocator(
@@ -2087,7 +2109,7 @@ class LMCacheEngineBuilder:
         logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:
             numa_mapping = NUMADetector.get_numa_mapping(config)
-            logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
+            logger.info("NUMA mapping for instance %s: %s", instance_id, numa_mapping)
             token_database = cls._Create_token_database(config, metadata)
             stat_logger = LMCacheStatsLogger(
                 metadata,
@@ -2139,7 +2161,7 @@ class LMCacheEngineBuilder:
                 stat_logger.shutdown()
                 logger.info("Stats logger shut down successfully")
             except Exception as e:
-                logger.error(f"Error shutting down stats logger: {e}")
+                logger.error("Error shutting down stats logger: %s", e)
 
             engine = cls._instances[instance_id]
             try:
@@ -2147,7 +2169,7 @@ class LMCacheEngineBuilder:
                 engine.close()
                 logger.info("Cache engine closed successfully")
             except Exception as e:
-                logger.error(f"Error closing cache engine: {e}")
+                logger.error("Error closing cache engine: %s", e)
 
             try:
                 logger.info("Cleaning up instance dictionaries...")
@@ -2157,15 +2179,15 @@ class LMCacheEngineBuilder:
                 cls._stat_loggers.pop(instance_id, None)
                 logger.info("Instance dictionaries cleaned up")
             except Exception as e:
-                logger.error(f"Error cleaning up instances: {e}")
+                logger.error("Error cleaning up instances: %s", e)
 
             try:
                 logger.info("Destroying stats monitor...")
                 LMCStatsMonitor.DestroyInstance()
                 logger.info("Stats monitor destroyed successfully")
             except Exception as e:
-                logger.error(f"Error destroying stats monitor: {e}")
+                logger.error("Error destroying stats monitor: %s", e)
 
             logger.info("LMCacheEngine instance %s destroyed", instance_id)
         else:
-            logger.warning(f"Instance {instance_id} not found for destruction")
+            logger.warning("Instance %s not found for destruction", instance_id)

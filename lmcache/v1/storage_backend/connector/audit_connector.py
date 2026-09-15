@@ -124,7 +124,9 @@ class AuditConnectorMeta(abc.ABCMeta):
 
             # Generic audit logging
             self.logger.debug(
-                f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|START"
+                "[REMOTE_AUDIT][%s]:%s|START",
+                self.real_connector,
+                method_name.upper(),
             )
             t1 = time.perf_counter()
             try:
@@ -133,14 +135,18 @@ class AuditConnectorMeta(abc.ABCMeta):
                 t2 = time.perf_counter()
                 cost = (t2 - t1) * 1000
                 self.logger.info(
-                    f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|"
-                    f"SUCCESS|Cost:{cost:.6f}ms"
+                    "[REMOTE_AUDIT][%s]:%s|SUCCESS|Cost:%.6fms",
+                    self.real_connector,
+                    method_name.upper(),
+                    cost,
                 )
                 return result
             except Exception as e:
                 self.logger.error(
-                    f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|"
-                    f"FAILED|Error: {str(e)}"
+                    "[REMOTE_AUDIT][%s]:%s|FAILED|Error: %s",
+                    self.real_connector,
+                    method_name.upper(),
+                    str(e),
                 )
                 raise
 
@@ -160,7 +166,9 @@ class AuditConnectorMeta(abc.ABCMeta):
                 return real_method(*args, **kwargs)
 
             self.logger.debug(
-                f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|START"
+                "[REMOTE_AUDIT][%s]:%s|START",
+                self.real_connector,
+                method_name.upper(),
             )
             t1 = time.perf_counter()
             try:
@@ -169,14 +177,18 @@ class AuditConnectorMeta(abc.ABCMeta):
                 t2 = time.perf_counter()
                 cost = (t2 - t1) * 1000
                 self.logger.info(
-                    f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|"
-                    f"SUCCESS|Cost:{cost:.6f}ms"
+                    "[REMOTE_AUDIT][%s]:%s|SUCCESS|Cost:%.6fms",
+                    self.real_connector,
+                    method_name.upper(),
+                    cost,
                 )
                 return result
             except Exception as e:
                 self.logger.error(
-                    f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|"
-                    f"FAILED|Error: {str(e)}"
+                    "[REMOTE_AUDIT][%s]:%s|FAILED|Error: %s",
+                    self.real_connector,
+                    method_name.upper(),
+                    str(e),
                 )
                 raise
 
@@ -226,10 +238,14 @@ class AuditConnector(RemoteConnector, metaclass=AuditConnectorMeta):
         self.logger = logger.getChild("audit")
 
         logger.info(
-            f"[REMOTE_AUDIT][{self.real_connector}]:INITIALIZED|"
-            f"Calc Checksum:{self.calc_checksum}｜"
-            f"Verify Checksum: {self.verify_checksum}|"
-            f"Excluded Cmds: {self.excluded_cmds}"
+            "[REMOTE_AUDIT][%s]:INITIALIZED|"
+            "Calc Checksum:%s｜"
+            "Verify Checksum: %s|"
+            "Excluded Cmds: %s",
+            self.real_connector,
+            self.calc_checksum,
+            self.verify_checksum,
+            self.excluded_cmds,
         )
 
     def _calculate_checksum(self, data: bytes) -> str:
@@ -242,8 +258,12 @@ class AuditConnector(RemoteConnector, metaclass=AuditConnectorMeta):
         checksum = self._calculate_checksum(data) if self.calc_checksum else "N/A"
         data_size = len(data)
         self.logger.debug(
-            f"[REMOTE_AUDIT][{self.real_connector}]:PUT|START|Size:{data_size}|"
-            f"Checksum:{checksum[:8]}|Saved:{len(self.checksum_registry)}|Key:{key}"
+            "[REMOTE_AUDIT][%s]:PUT|START|Size:%s|Checksum:%s|Saved:%s|Key:%s",
+            self.real_connector,
+            data_size,
+            checksum[:8],
+            len(self.checksum_registry),
+            key,
         )
 
         try:
@@ -255,23 +275,33 @@ class AuditConnector(RemoteConnector, metaclass=AuditConnectorMeta):
                 with self.registry_lock:
                     self.checksum_registry[key] = checksum
             self.logger.info(
-                f"[REMOTE_AUDIT][{self.real_connector}]:PUT|SUCCESS|Size:{data_size}|"
-                f"Checksum:{checksum[:8]}|Cost:{cost:.6f}ms|Saved:"
-                f"{len(self.checksum_registry)}|Key:{key}"
+                "[REMOTE_AUDIT][%s]:PUT|SUCCESS|Size:%s|"
+                "Checksum:%s|Cost:%.6fms|Saved:%s|Key:%s",
+                self.real_connector,
+                data_size,
+                checksum[:8],
+                cost,
+                len(self.checksum_registry),
+                key,
             )
 
         except Exception as e:
             self.logger.error(
-                f"[REMOTE_AUDIT][{self.real_connector}]:PUT|FAILED|Size:{data_size}|"
-                f"Key:{key}|Error: {str(e)}"
+                "[REMOTE_AUDIT][%s]:PUT|FAILED|Size:%s|Key:%s|Error: %s",
+                self.real_connector,
+                data_size,
+                key,
+                str(e),
             )
             raise
 
     async def _audit_get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Retrieve data with optional integrity check"""
         self.logger.debug(
-            f"[REMOTE_AUDIT][{self.real_connector}]:GET|START|"
-            f"Saved:{len(self.checksum_registry)}|Key:{key}"
+            "[REMOTE_AUDIT][%s]:GET|START|Saved:%s|Key:%s",
+            self.real_connector,
+            len(self.checksum_registry),
+            key,
         )
 
         try:
@@ -280,8 +310,10 @@ class AuditConnector(RemoteConnector, metaclass=AuditConnectorMeta):
             t2 = time.perf_counter()
             if result is None:
                 self.logger.info(
-                    f"[REMOTE_AUDIT][{self.real_connector}]:GET|MISS|Key:{key}|"
-                    f"Saved: {len(self.checksum_registry)}"
+                    "[REMOTE_AUDIT][%s]:GET|MISS|Key:%s|Saved: %s",
+                    self.real_connector,
+                    key,
+                    len(self.checksum_registry),
                 )
                 return None
 
@@ -297,24 +329,33 @@ class AuditConnector(RemoteConnector, metaclass=AuditConnectorMeta):
 
                 if expected_checksum and current_checksum != expected_checksum:
                     self.logger.error(
-                        f"[REMOTE_AUDIT][{self.real_connector}]:"
-                        f"GET|MISMATCH|Size:{data_size}|"
-                        f"Expected:<{expected_checksum[:8]}>|"
-                        f"Actual:<{current_checksum[:8]}>|Key:{key}"
+                        "[REMOTE_AUDIT][%s]:GET|MISMATCH|Size:%s|"
+                        "Expected:<%s>|Actual:<%s>|Key:%s",
+                        self.real_connector,
+                        data_size,
+                        expected_checksum[:8],
+                        current_checksum[:8],
+                        key,
                     )
                     return None
 
             cost = (t2 - t1) * 1000
             self.logger.info(
-                f"[REMOTE_AUDIT][{self.real_connector}]:GET|SUCCESS|"
-                f"Checksum:{current_checksum[:8]}|"
-                f"Cost:{cost:.6f}ms|Saved:{len(self.checksum_registry)}|Key:{key}"
+                "[REMOTE_AUDIT][%s]:GET|SUCCESS|Checksum:%s|"
+                "Cost:%.6fms|Saved:%s|Key:%s",
+                self.real_connector,
+                current_checksum[:8],
+                cost,
+                len(self.checksum_registry),
+                key,
             )
             return result
 
         except Exception as e:
             self.logger.error(
-                f"[REMOTE_AUDIT][{self.real_connector}]:GET|"
-                f"FAILED|Key:{key}|Error: {str(e)}"
+                "[REMOTE_AUDIT][%s]:GET|FAILED|Key:%s|Error: %s",
+                self.real_connector,
+                key,
+                str(e),
             )
             raise

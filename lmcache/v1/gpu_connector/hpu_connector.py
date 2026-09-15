@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Standard
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 # Third Party
 import habana_frameworks.torch as htorch
@@ -33,11 +33,14 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
     get_num_layers,
     get_page_buffer_size,
-    is_mla,
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
+import lmcache.lmcache_native as lmcache_native
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -64,7 +67,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemHPUConnectorV2":
@@ -303,19 +306,19 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                 fake_shape,
             )
 
-        self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+        self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
             kv_caches, EngineType.VLLM
         )
-        self.num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
-        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
-        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
-        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
-        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.gpu_kv_format)
-        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
-        self.use_mla = is_mla(self.gpu_kv_format)
-        self.dtype = get_dtype(kv_caches, self.gpu_kv_format)
+        self.num_layers = get_num_layers(kv_caches, self.engine_kv_format)
+        self.num_blocks = get_num_blocks(kv_caches, self.engine_kv_format)
+        self.block_size = get_block_size(kv_caches, self.engine_kv_format)
+        self.page_buffer_size = get_page_buffer_size(kv_caches, self.engine_kv_format)
+        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.engine_kv_format)
+        self.head_size = get_head_size(kv_caches, self.engine_kv_format)
+        self.use_mla = lmcache_native.is_mla(self.engine_kv_format)
+        self.dtype = get_dtype(kv_caches, self.engine_kv_format)
         self.num_heads = (
-            1 if self.use_mla else get_num_heads(kv_caches, self.gpu_kv_format)
+            1 if self.use_mla else get_num_heads(kv_caches, self.engine_kv_format)
         )
 
         self._attributes_initialized = True
@@ -324,7 +327,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             "num_layers: %d, num_blocks: %d, block_size: %d, "
             "page_buffer_size: %d, hidden_dim_size: %d, head_size: %d, "
             "use_mla: %s, dtype: %s, num_heads: %d",
-            self.gpu_kv_format,
+            self.engine_kv_format,
             self.num_layers,
             self.num_blocks,
             self.block_size,

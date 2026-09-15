@@ -70,6 +70,14 @@ class EventNotifier(ABC):
         """
 
     @abstractmethod
+    def notify_fileno(self) -> int:
+        """Return the fd to write to for signaling.
+
+        For eventfd this is the same as ``fileno()``.  For pipes
+        this is the *write* end (``fileno()`` returns the read end).
+        """
+
+    @abstractmethod
     def close(self) -> None:
         """Release underlying OS resources.  Idempotent."""
 
@@ -110,6 +118,9 @@ if HAS_EVENTFD:
         def notify(self) -> None:
             os.eventfd_write(self._efd, 1)
 
+        def notify_fileno(self) -> int:
+            return self._efd
+
         def consume(self) -> None:
             try:
                 os.eventfd_read(self._efd)
@@ -138,6 +149,9 @@ else:
             raise RuntimeError("unreachable")
 
         def notify(self) -> None:  # pragma: no cover
+            raise RuntimeError("unreachable")
+
+        def notify_fileno(self) -> int:  # pragma: no cover
             raise RuntimeError("unreachable")
 
         def consume(self) -> None:  # pragma: no cover
@@ -181,6 +195,9 @@ class PipeNotifier(EventNotifier):
             os.write(self._write_fd, b"\x01")
         except BlockingIOError:
             pass  # pipe buffer full - signal already pending
+
+    def notify_fileno(self) -> int:
+        return self._write_fd
 
     def consume(self) -> None:
         while True:
