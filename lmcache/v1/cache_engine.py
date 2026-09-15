@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 import asyncio
 import gc
 import multiprocessing
+import threading
 import time
 
 # Third Party
@@ -167,6 +168,9 @@ class LMCacheEngine:
 
         self.async_loading = config.enable_async_loading
         self.event_manager = EventManager()
+        self._async_lookup_cleanup_lock = threading.Lock()
+        self._active_async_lookups: set[str] = set()
+        self._pending_async_lookup_cleanups: set[str] = set()
 
         self.use_layerwise = config.use_layerwise
 
@@ -327,6 +331,7 @@ class LMCacheEngine:
                     event_manager=self.event_manager,
                     lmcache_worker=self.lmcache_worker,
                     async_lookup_server=async_lookup_server,
+                    async_lookup_done_callback=self.finish_async_lookup,
                 )
                 if self.hidden_state_store is not None:
                     self.hidden_state_store.bind_storage_manager(self.storage_manager)
@@ -1339,6 +1344,10 @@ class LMCacheEngine:
         """
         assert self.storage_manager is not None
 
+        with self._async_lookup_cleanup_lock:
+            self._active_async_lookups.add(lookup_id)
+            self._pending_async_lookup_cleanups.discard(lookup_id)
+
         keys: list[CacheEngineKey] = []
         cum_chunk_lengths = [0]
 
@@ -1379,35 +1388,52 @@ class LMCacheEngine:
 
     def cleanup_memory_objs(self, lookup_id: str) -> None:
         """
-        Cleanup memory objects allocated during prefetch for an aborted lookup.
+        Request cleanup of memory objects allocated by an async lookup.
 
-        Called by the scheduler when it determines that an aborted lookup
-        has finished its prefetch tasks.
+        If prefetch is still running or its event has not been registered,
+        cleanup is deferred until :meth:`finish_async_lookup` is called.
+
+        Args:
+            lookup_id: Identifier of the lookup whose objects should be released.
         """
         try:
-            # Get the completed future from event_manager
-            if (
-                self.event_manager.get_event_status(EventType.LOADING, lookup_id)
-                != EventStatus.DONE
-            ):
-                logger.debug(
-                    "No completed event found for lookup_id=%s to clean up.", lookup_id
+            with self._async_lookup_cleanup_lock:
+                status = self.event_manager.get_event_status(
+                    EventType.LOADING, lookup_id
                 )
-                return
-            future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
+                if (
+                    lookup_id not in self._active_async_lookups
+                    and status == EventStatus.NOT_FOUND
+                ):
+                    logger.debug(
+                        "Ignoring cleanup for inactive lookup_id=%s.", lookup_id
+                    )
+                    return
 
-            # Get memory objects from the future result
+                self._pending_async_lookup_cleanups.add(lookup_id)
+                if status != EventStatus.DONE:
+                    logger.debug(
+                        "Deferring cleanup until lookup_id=%s completes.", lookup_id
+                    )
+                    return
+
+                future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
+                self._pending_async_lookup_cleanups.discard(lookup_id)
+                self._active_async_lookups.discard(lookup_id)
+
+            # Get memory objects from the completed future.
             memory_objs = future.result()
             # Flatten nested lists (each backend returns a list of chunks)
             memory_objs_flat = [mm for m in memory_objs for mm in m]
 
             # Release each memory object
-            for key, memory_obj in memory_objs_flat:
+            for _, memory_obj in memory_objs_flat:
                 try:
                     logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
                     if memory_obj.is_pinned:
                         memory_obj.unpin()
-                    memory_obj.ref_count_down()
+                    if memory_obj.get_ref_count() > 0:
+                        memory_obj.ref_count_down()
                 except Exception as e:
                     logger.error("Error releasing memory object: %s", e)
         except Exception as e:
@@ -1416,6 +1442,28 @@ class LMCacheEngine:
                 lookup_id,
                 e,
             )
+
+    def finish_async_lookup(
+        self, lookup_id: str, event_registered: bool = True
+    ) -> None:
+        """Finish worker-side lifecycle handling for an async lookup.
+
+        Args:
+            lookup_id: Identifier of the completed lookup.
+            event_registered: Whether the lookup registered a loading event.
+                A lookup with no cache hits has no event or memory objects.
+        """
+        if not event_registered:
+            with self._async_lookup_cleanup_lock:
+                self._pending_async_lookup_cleanups.discard(lookup_id)
+                self._active_async_lookups.discard(lookup_id)
+            return
+
+        with self._async_lookup_cleanup_lock:
+            cleanup_requested = lookup_id in self._pending_async_lookup_cleanups
+
+        if cleanup_requested:
+            self.cleanup_memory_objs(lookup_id)
 
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
     # In this case, we compress all tokens.

@@ -124,7 +124,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # A lock is needed since we need another thread to pull
         # responses from the lookup_and_prefetch server
         # (e.g., worker process).
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
         # map from lookup_id (i.e., req_id) to req's status.
         # None indicates ongoing.
@@ -162,9 +162,6 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         None means ongoing;
         int >= 0 means number of hit tokens
         """
-        # Check if any aborted lookups are finished, send cleanup messages
-        self._cleanup_finished_aborted_lookups()
-
         with self.lock:
             if (req_status := self.reqs_status.get(lookup_id, -1)) == -1:
                 self.reqs_status[lookup_id] = None
@@ -239,11 +236,16 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     if len(all_res) == self.world_size:
                         self.res_for_each_worker.pop(lookup_id)
 
-                        # NOTE: it is possible that the number of hit
-                        # tokens is different across (TP and PP) ranks, so we
-                        # can use the minimum value as the number of
-                        # hit tokens.
-                        self.reqs_status[lookup_id] = min(all_res)
+                        if lookup_id in self.aborted_lookups:
+                            self.aborted_lookups.discard(lookup_id)
+                            self.reqs_status.pop(lookup_id, None)
+                            self.first_lookup_time.pop(lookup_id, None)
+                        else:
+                            # NOTE: it is possible that the number of hit
+                            # tokens is different across (TP and PP) ranks, so we
+                            # can use the minimum value as the number of
+                            # hit tokens.
+                            self.reqs_status[lookup_id] = min(all_res)
 
             except Exception as e:
                 logger.error("Error processing response from worker: %s", e)
@@ -254,25 +256,24 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             self.first_lookup_time.pop(lookup_id, None)
 
     def cancel_lookup(self, lookup_id: str) -> None:
-        """Mark lookup as aborted. Cleanup will happen after task finishes."""
-        self.aborted_lookups.add(lookup_id)
+        """Cancel a lookup and immediately send cleanup intent to every worker."""
+        with self.lock:
+            if lookup_id in self.aborted_lookups:
+                return
+            self.aborted_lookups.add(lookup_id)
 
-    def _cleanup_finished_aborted_lookups(self) -> None:
-        """Check for finished aborted lookups and send cleanup messages to workers."""
-        # A lookup whose status is None is still loading.
-        # We wait for it to finish before cleanup.
-        finished_lookups = [
-            lookup_id
-            for lookup_id in self.aborted_lookups
-            if self.reqs_status.get(lookup_id) is not None
-        ]
-        if finished_lookups:
-            self.aborted_lookups.difference_update(finished_lookups)
+            if (
+                lookup_id in self.reqs_status
+                and self.reqs_status[lookup_id] is not None
+            ):
+                self.aborted_lookups.discard(lookup_id)
+                self.reqs_status.pop(lookup_id, None)
+                self.res_for_each_worker.pop(lookup_id, None)
+                self.first_lookup_time.pop(lookup_id, None)
 
-        # Tell the server to free the reserved memory buffers for each aborted lookup.
-        for lookup_id in finished_lookups:
-            self._send_cleanup_message(lookup_id)
-            self.clear_lookup_status(lookup_id)
+        # PUSH sockets stay on the Scheduler thread. Workers defer this cleanup
+        # if their loading event has not completed yet.
+        self._send_cleanup_message(lookup_id)
 
     def _send_cleanup_message(self, lookup_id: str) -> None:
         """Send cleanup message to workers to release memory objects."""

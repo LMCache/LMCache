@@ -5,6 +5,7 @@ from concurrent.futures import Future
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Coroutine,
     Dict,
     Generator,
@@ -230,6 +231,7 @@ class StorageManager:
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,
+        async_lookup_done_callback: Optional[Callable[[str, bool], None]] = None,
     ):
         self.config = config
         self.metadata = metadata
@@ -269,6 +271,7 @@ class StorageManager:
         self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
             async_lookup_server
         )
+        self.async_lookup_done_callback = async_lookup_done_callback
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The GPU stream for internal copies during put
@@ -571,9 +574,6 @@ class StorageManager:
             convert each tier's per-key result count back to chunk units.
         """
         assert self.async_lookup_server is not None
-        self.event_manager.update_event_status(
-            EventType.LOADING, lookup_id, status=EventStatus.DONE
-        )
         res = task.result()
 
         # Calculate total retrieved chunks across all tiers based on actual results
@@ -650,7 +650,26 @@ class StorageManager:
             lookup_id,
             retrieved_length,
         )
+        # Publish DONE only after result processing has finished, but before the
+        # response can cause the Scheduler to admit the request.
+        self.mark_async_lookup_done(lookup_id)
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
+
+    def mark_async_lookup_done(self, lookup_id: str) -> None:
+        """Publish lookup completion and run any deferred cleanup.
+
+        Args:
+            lookup_id: Identifier of the completed asynchronous lookup.
+        """
+        status = self.event_manager.get_event_status(EventType.LOADING, lookup_id)
+        if status == EventStatus.NOT_FOUND:
+            return
+        if status == EventStatus.ONGOING:
+            self.event_manager.update_event_status(
+                EventType.LOADING, lookup_id, status=EventStatus.DONE
+            )
+        if self.async_lookup_done_callback is not None:
+            self.async_lookup_done_callback(lookup_id, True)
 
     async def async_lookup_and_prefetch(
         self,
@@ -791,6 +810,8 @@ class StorageManager:
         if num_total_hit_chunks == 0:
             if self.async_lookup_server is not None:
                 self.async_lookup_server.send_response_to_scheduler(lookup_id, 0)
+            if self.async_lookup_done_callback is not None:
+                self.async_lookup_done_callback(lookup_id, False)
             return
 
         # gather_with_keys() here make a pair of (key, memory_obj) for each chunk
@@ -828,6 +849,7 @@ class StorageManager:
                 keys_per_chunk=keys_per_chunk,
             )
         )
+        all_done.add_done_callback(lambda _: self.mark_async_lookup_done(lookup_id))
 
     def set_hot_cache(self, enabled: bool) -> None:
         """
