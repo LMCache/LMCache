@@ -139,6 +139,16 @@ def get_zmq_handler_specs(module: EngineModule) -> list[HandlerSpec]:
         return [
             HandlerSpec(RequestType.CLEAR, module.clear, ThreadPoolType.NORMAL),
             HandlerSpec(
+                RequestType.UNREGISTER_KV_CACHE,
+                module.unregister_instance,
+                ThreadPoolType.SYNC,
+            ),
+            HandlerSpec(
+                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+                module.unregister_instance,
+                ThreadPoolType.SYNC,
+            ),
+            HandlerSpec(
                 RequestType.GET_CHUNK_SIZE,
                 module.get_chunk_size,
                 ThreadPoolType.SYNC,
@@ -163,11 +173,6 @@ def get_zmq_handler_specs(module: EngineModule) -> list[HandlerSpec]:
                 module.register_kv_cache,
                 ThreadPoolType.SYNC,
             ),
-            HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE,
-                module.unregister_kv_cache,
-                ThreadPoolType.SYNC,
-            ),
             HandlerSpec(RequestType.STORE, module.store, ThreadPoolType.AFFINITY),
             HandlerSpec(
                 RequestType.RETRIEVE,
@@ -180,11 +185,6 @@ def get_zmq_handler_specs(module: EngineModule) -> list[HandlerSpec]:
             HandlerSpec(
                 RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
                 module.register_kv_cache_engine_driven_context,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
-                module.unregister_kv_cache,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
