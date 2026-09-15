@@ -114,6 +114,7 @@ class EventBus:
         self._stop_flag = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._stopped: bool = False
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
         self._last_discard_warning: float = 0.0
@@ -229,6 +230,10 @@ class EventBus:
             return
 
         self._stop_flag.clear()
+        # Re-arm stop() so a bus that is started again can run its shutdown
+        # once more; without this a stop -> start -> stop cycle would skip the
+        # second cleanup.
+        self._stopped = False
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
@@ -239,7 +244,15 @@ class EventBus:
 
     def stop(self) -> None:
         """Stop the drain thread, flush remaining events, and shut down
-        all registered subscribers.  Safe to call when not started."""
+        all registered subscribers.  Safe to call when not started, and
+        idempotent: repeated calls after the first (until the bus is started
+        again) are no-ops, so each subscriber's ``shutdown()`` runs at most
+        once per start cycle."""
+        with self._lock:
+            if self._stopped:
+                return
+            self._stopped = True
+
         self._stop_flag.set()
         self._wake.set()
         if self._thread is not None and self._thread.is_alive():
@@ -380,9 +393,31 @@ def get_event_bus() -> EventBus:
 def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
     """Replace the global singleton with a new EventBus built from *config*.
 
+    The bus being replaced is stopped after the swap, so its drain thread
+    exits and its subscribers run their shutdown hooks rather than being left
+    running for the lifetime of the process.
+
+    Precondition: re-initialization is only safe once the existing producers
+    have stopped, or are prepared to re-fetch the global bus. A producer that
+    cached the result of ``get_event_bus()`` before this call keeps a reference
+    to the replaced bus, which is drained and stopped here, so anything it
+    publishes afterwards is dropped. Supporting reconfiguration while producers
+    are live needs a different design (lazy bus resolution in the publishers, or
+    a swap barrier) and is out of scope for this function.
+
     Returns the newly created bus.
     """
     global _global_bus, _observability_enabled
+    previous_bus = _global_bus
     _global_bus = EventBus(config)
     _observability_enabled = config.enabled if config else True
+
+    # Stop the old bus only after the swap, so publishers move to the new bus
+    # before the old one performs its final drain.
+    if previous_bus is not None:
+        try:
+            previous_bus.stop()
+        except Exception:
+            logger.exception("EventBus: error stopping the replaced event bus")
+
     return _global_bus
