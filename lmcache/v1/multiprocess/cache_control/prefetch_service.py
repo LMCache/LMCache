@@ -93,7 +93,10 @@ class PrefetchService:
 
         Returns:
             ``{"request_id", "status": "pending"}`` or ``{"request_id",
-            "status": "completed", "found_keys", "total_keys"}``.
+            "status": "completed", "found_keys", "total_keys",
+            "missing_key_indices"}`` -- the last being the ascending positions,
+            in the request's resolved key order, of the keys the load did not
+            bring into L1.
 
         Raises:
             NotFound: unknown id (already completed-and-consumed, or never
@@ -111,5 +114,6 @@ class PrefetchService:
                 "status": COMPLETED,
                 "found_keys": status.found_keys,
                 "total_keys": status.total_keys,
+                "missing_key_indices": list(status.missing_key_indices),
             }
         return {"request_id": request_id, "status": status.state}

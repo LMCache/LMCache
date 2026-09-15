@@ -8,8 +8,7 @@ path), status is polled reactively, and completion releases **nothing** (no
 """
 
 # Standard
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, PrefetchMode, TrimPolicy
@@ -35,39 +34,47 @@ class _FakeHandle:
 
 
 class _FakeBitmap:
-    """Stands in for the found-key ``Bitmap``; ``popcount`` is the found count."""
+    """Stands in for the loaded-key ``Bitmap``: exactly ``loaded`` of ``size``
+    positions are set."""
 
-    def __init__(self, n: int) -> None:
-        self._n = n
+    def __init__(self, loaded: set[int], size: int) -> None:
+        self._loaded = loaded
+        self._size = size
 
     def popcount(self) -> int:
-        return self._n
+        return len(self._loaded)
+
+    def __invert__(self) -> "_FakeBitmap":
+        return _FakeBitmap(set(range(self._size)) - self._loaded, self._size)
+
+    def get_indices_list(self) -> list[int]:
+        return sorted(self._loaded)
 
 
 @dataclass
 class _FakeStorageManager:
-    found: int = 0
+    loaded: set[int] = field(default_factory=set)
+    """Positions the load brings into L1."""
     delay_polls: int = 0
+    """Status polls answered "still running" before the load completes."""
 
-    submit_args: Optional[dict] = None
+    submit_args: dict[str, object] = field(default_factory=dict)
     finish_called: bool = False
     _polls: int = 0
-    _total: int = 0
 
     def submit_prefetch_task(self, spec):
-        self._total = len(spec.keys)
         self.submit_args = {
             "keys": list(spec.keys),
             "mode": spec.mode,
             "policy": spec.policy,
         }
-        return _FakeHandle(self._total)
+        return _FakeHandle(len(spec.keys))
 
     def query_prefetch_status(self, handle):
         if self._polls < self.delay_polls:
             self._polls += 1
             return None
-        return _FakeBitmap(self.found)
+        return _FakeBitmap(self.loaded, handle.total_requested_keys)
 
     def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
         # Must never be called: the warm holds no lock.
@@ -78,11 +85,10 @@ def test_submit_uses_retain_and_poll_completes_without_release():
     """submit goes through the WARM (no-lock) path; the caller polls
     (pending → completed); completion releases nothing and consumes the job."""
     keys = [_key(0), _key(1)]
-    sm = _FakeStorageManager(found=2, delay_polls=2)
+    sm = _FakeStorageManager(loaded={0, 1}, delay_polls=2)
     jobs = WarmPrefetchJobs()
 
     request_id = jobs.submit(sm, keys, layout_desc=object())
-    assert sm.submit_args is not None
     assert sm.submit_args["mode"] is PrefetchMode.WARM
     assert sm.submit_args["policy"] is TrimPolicy.SPARSE
 
@@ -94,11 +100,43 @@ def test_submit_uses_retain_and_poll_completes_without_release():
     assert status.state == COMPLETED
     assert status.found_keys == 2
     assert status.total_keys == 2
+    assert status.missing_key_indices == ()
     # No lock was held, so nothing is released.
     assert sm.finish_called is False
 
     # Exactly-once: the completing poll consumed the job.
     assert jobs.poll(sm, request_id).state == UNKNOWN
+
+
+def test_completed_reports_missing_key_positions():
+    """A partial load names the positions it did not bring in, in submitted
+    key order, so a caller can act per key; the count agrees with found/total."""
+    keys = [_key(0), _key(1), _key(2)]
+    sm = _FakeStorageManager(loaded={0})
+    jobs = WarmPrefetchJobs()
+
+    request_id = jobs.submit(sm, keys, layout_desc=object())
+    status = jobs.poll(sm, request_id)
+    assert status.state == COMPLETED
+    assert status.found_keys == 1
+    assert status.total_keys == 3
+    assert status.missing_key_indices == (1, 2)
+    assert len(status.missing_key_indices) == status.total_keys - status.found_keys
+
+
+def test_completed_reports_sparse_missing_key_positions():
+    """Gaps in the loaded set are reported as the exact unloaded positions,
+    not as a prefix count."""
+    keys = [_key(i) for i in range(5)]
+    sm = _FakeStorageManager(loaded={1, 3})
+    jobs = WarmPrefetchJobs()
+
+    request_id = jobs.submit(sm, keys, layout_desc=object())
+    status = jobs.poll(sm, request_id)
+    assert status.state == COMPLETED
+    assert status.found_keys == 2
+    assert status.total_keys == 5
+    assert status.missing_key_indices == (0, 2, 4)
 
 
 def test_poll_unknown_request_id():
