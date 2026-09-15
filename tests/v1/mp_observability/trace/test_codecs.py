@@ -12,6 +12,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 from lmcache.v1.mp_observability.trace import codecs
@@ -90,9 +91,35 @@ class TestPrefetchHandle:
             total_requested_keys=10,
             submit_time=12345.6,
             l2_orig_indices=(3, 4, 5),
+            generation=9,
         )
         out = _roundtrip(h)
         assert out == h
+
+    def test_legacy_trace_defaults_generation_to_zero(self):
+        h = PrefetchHandle(
+            prefetch_request_id=7,
+            external_request_id="req-1",
+            l1_found_indices=(),
+            l1_hit_chunks=0,
+            total_requested_keys=1,
+            submit_time=12345.6,
+        )
+        encoded = codecs._enc_prefetch_handle(h)
+        encoded.pop("generation")
+        assert codecs._dec_prefetch_handle(encoded).generation == 0
+
+
+class TestPrefetchRequestSpec:
+    def test_generation_roundtrip(self):
+        spec = PrefetchRequestSpec(
+            keys=[ObjectKey(chunk_hash=b"a", model_name="m", kv_rank=0)],
+            group_layout_descs={
+                0: MemoryLayoutDesc([torch.Size([1])], [torch.float16])
+            },
+            generation=11,
+        )
+        assert _roundtrip(spec) == spec
 
 
 class TestTrimPolicy:

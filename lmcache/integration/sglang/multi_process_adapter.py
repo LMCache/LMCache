@@ -27,12 +27,14 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform import get_device_spec
@@ -152,6 +154,55 @@ class _PendingLookup:
     locks_held: bool
 
 
+class _SparseLeaseFuture(MessagingFuture):
+    """Forward a sparse RPC result and clean up only after confirmation."""
+
+    def __init__(self, future: MessagingFuture, cleanup, should_cleanup) -> None:
+        super().__init__()
+        self._future = future
+        self._cleanup = cleanup
+        self._should_cleanup = should_cleanup
+        self._cleanup_lock = threading.Lock()
+        self._cleaned = False
+
+    def _observe_result(self, result) -> None:
+        if not self._should_cleanup(result):
+            return
+        with self._cleanup_lock:
+            if self._cleaned:
+                return
+            self._cleanup()
+            self._cleaned = True
+
+    def result(self, timeout=None):
+        result = self._future.result(timeout)
+        self._observe_result(result)
+        return result
+
+    def wait(self, timeout=None) -> bool:
+        if not self._future.wait(timeout):
+            return False
+        try:
+            self._observe_result(self._future.result(timeout=0))
+        except BaseException:
+            # Preserve the underlying exception for the explicit result()
+            # call and keep the cleanup record until it succeeds.
+            pass
+        return True
+
+    def query(self) -> bool:
+        if not self._future.query():
+            return False
+        try:
+            self._observe_result(self._future.result(timeout=0))
+        except BaseException:
+            pass
+        return True
+
+    def retain_reference(self, value: object) -> None:
+        self._future.retain_reference(value)
+
+
 class LMCacheMPConnector:
     """SGLang LMCache multi-process connector.
 
@@ -161,9 +212,9 @@ class LMCacheMPConnector:
       chunks L2→L1 (DRAM), keeps the read locks held, returns the
       matched-token count.
     - ``retrieve_kv``: fires RETRIEVE using the cached LOOKUP result.
-      Daemon copies L1→GPU via ``multi_layer_block_kv_transfer``
-      (one device transfer, all layers) and releases the read locks
-      via ``finish_read_prefetched``.
+      Daemon copies L1→GPU through the registered layer's single-layer
+      transfer path and releases the read locks via the sparse completion
+      callback.
     - ``release_pending``: frees the held locks when no RETRIEVE will
       follow (LMCache had nothing fresh beyond radix).
     - ``end_session``: per-request cleanup. Frees any still-held
@@ -204,6 +255,11 @@ class LMCacheMPConnector:
         self._health_event.set()
         self._pending_lookups: dict[str, _PendingLookup] = {}
         self._pending_lookups_lock = threading.Lock()
+        self._sparse_handles: set[tuple[str, int, int]] = set()
+        self._sparse_handles_lock = threading.Lock()
+        self._sparse_key_cache: dict[tuple, tuple[ObjectKey, ...]] = {}
+        self._sparse_hash_cache: dict[tuple, tuple[bytes, ...]] = {}
+        self._sparse_key_cache_lock = threading.Lock()
 
         self.context = zmq.Context.instance()
         server_url = f"{host}:{port}"
@@ -218,6 +274,10 @@ class LMCacheMPConnector:
                 "LMCache chunk size must be a multiple of SGLang page size, got "
                 f"{self._lmcache_chunk_size} and {self.page_size}"
             )
+        self._sparse_token_hasher = TokenHasher(
+            chunk_size=self._lmcache_chunk_size,
+            hash_algorithm="blake3",
+        )
 
         # Upstream's REGISTER_KV_CACHE protocol takes flat positional args:
         # (instance_id, kv_cache, model_name, world_size, engine_type,
@@ -259,6 +319,243 @@ class LMCacheMPConnector:
 
     def chunk_size(self) -> int:
         return self._lmcache_chunk_size
+
+    def _completed_sparse_future(self, result) -> MessagingFuture:
+        future: MessagingFuture = MessagingFuture()
+        future.set_result(result)
+        return future
+
+    def _sparse_key(self, request_id: str, generation: int, layer_id: int):
+        return request_id, generation, layer_id
+
+    def _forget_sparse_handle(
+        self, request_id: str, generation: int, layer_id: int
+    ) -> None:
+        with self._sparse_handles_lock:
+            self._sparse_handles.discard(
+                self._sparse_key(request_id, generation, layer_id)
+            )
+
+    def _clear_sparse_key_cache(self, request_id: str | None = None) -> None:
+        with self._sparse_key_cache_lock:
+            if request_id is None:
+                self._sparse_key_cache.clear()
+                self._sparse_hash_cache.clear()
+                return
+            self._sparse_key_cache = {
+                key: value
+                for key, value in self._sparse_key_cache.items()
+                if key[0] != request_id
+            }
+            self._sparse_hash_cache = {
+                key: value
+                for key, value in self._sparse_hash_cache.items()
+                if key[0] != request_id
+            }
+
+    def create_sparse_object_keys(
+        self,
+        token_ids: list[int],
+        chunk_indices: list[int],
+        cache_salt: str | None = None,
+        *,
+        request_id: str | None = None,
+        generation: int | None = None,
+        layer_id: int | None = None,
+    ) -> list[ObjectKey]:
+        """Map complete token chunks to LMCache logical object keys.
+
+        The server and this adapter must use the same rolling hash.  The
+        multiprocess SGLang path therefore requires the default ``blake3``
+        token hash; physical SGLang page IDs are deliberately not part of the
+        returned keys.
+        """
+        indices = sorted({int(index) for index in chunk_indices})
+        if not indices:
+            return []
+        if indices[0] < 0:
+            raise ValueError("sparse chunk indices must be non-negative")
+        end = (indices[-1] + 1) * self._lmcache_chunk_size
+        if end > len(token_ids):
+            return []
+
+        normalized_salt = cache_salt or ""
+        cache_key = None
+        hash_cache_key = None
+        if request_id is not None and generation is not None and layer_id is not None:
+            cache_key = (
+                request_id,
+                int(generation),
+                int(layer_id),
+                len(token_ids),
+                normalized_salt,
+                tuple(indices),
+            )
+            hash_cache_key = (
+                request_id,
+                int(generation),
+                len(token_ids),
+                normalized_salt,
+            )
+
+        cache_lock = getattr(self, "_sparse_key_cache_lock", None)
+        if cache_lock is None:
+            cache_lock = threading.Lock()
+            self._sparse_key_cache_lock = cache_lock
+        with cache_lock:
+            if cache_key is not None:
+                cached_keys = getattr(self, "_sparse_key_cache", {}).get(cache_key)
+                if cached_keys is not None:
+                    return list(cached_keys)
+
+            if hash_cache_key is not None:
+                cached_hashes = getattr(self, "_sparse_hash_cache", {}).get(
+                    hash_cache_key
+                )
+            else:
+                cached_hashes = None
+
+            required_hashes = end // self._lmcache_chunk_size
+            if cached_hashes is not None and len(cached_hashes) >= required_hashes:
+                hashes = list(cached_hashes[:required_hashes])
+            else:
+                hasher = getattr(self, "_sparse_token_hasher", None)
+                if hasher is None:
+                    hasher = TokenHasher(
+                        chunk_size=self._lmcache_chunk_size,
+                        hash_algorithm="blake3",
+                    )
+                hashes = hasher.compute_chunk_hashes(list(token_ids), end=end)
+                if hash_cache_key is not None:
+                    self._sparse_hash_cache[hash_cache_key] = tuple(hashes)
+
+        kv_rank = ObjectKey.ComputeKVRank(
+            world_size=self.tp_size,
+            global_rank=self.worker_id,
+            local_world_size=self.tp_size,
+            local_rank=self.worker_id,
+        )
+        result = [
+            ObjectKey(
+                chunk_hash=hashes[index],
+                model_name=self.model_name,
+                kv_rank=kv_rank,
+                object_group_id=0,
+                cache_salt=normalized_salt,
+            )
+            for index in indices
+        ]
+        if cache_key is not None:
+            with self._sparse_key_cache_lock:
+                self._sparse_key_cache[cache_key] = tuple(result)
+        return result
+
+    def sparse_prefetch(
+        self,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[ObjectKey],
+    ) -> MessagingFuture[bool]:
+        """Submit a logical sparse prefetch and retain its server lease."""
+        if (
+            not self.is_healthy
+            or not request_id
+            or generation < 0
+            or layer_id < 0
+            or not keys
+        ):
+            return self._completed_sparse_future(False)
+        with self._sparse_handles_lock:
+            self._sparse_handles.add(self._sparse_key(request_id, generation, layer_id))
+        future = self.req_client.sparse_prefetch(
+            self.instance_id,
+            request_id,
+            generation,
+            layer_id,
+            keys,
+        )
+        return _SparseLeaseFuture(
+            future,
+            lambda: self._forget_sparse_handle(request_id, generation, layer_id),
+            lambda result: result is False,
+        )
+
+    def sparse_query_prefetch(
+        self, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture:
+        """Query retained logical keys without releasing their lease."""
+        if not self.is_healthy:
+            return self._completed_sparse_future(None)
+        return self.req_client.sparse_query_prefetch(
+            self.instance_id, request_id, generation, layer_id
+        )
+
+    def sparse_wait_prefetch(
+        self, request_id: str, generation: int, layer_id: int, timeout: float
+    ) -> MessagingFuture:
+        """Wait for retained logical keys without consuming their lease."""
+        if not self.is_healthy or timeout < 0:
+            return self._completed_sparse_future(None)
+        return self.req_client.sparse_wait_prefetch(
+            self.instance_id, request_id, generation, layer_id, timeout
+        )
+
+    def sparse_retrieve(
+        self,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[ObjectKey],
+        block_ids: list[list[int]],
+    ) -> MessagingFuture:
+        """Load retained logical objects into the supplied GPU pages."""
+        if not self.is_healthy:
+            return self._completed_sparse_future((False, []))
+        event = torch_dev.Event(interprocess=True)
+        event.record(torch_dev.current_stream())
+        raw_future = self.req_client.sparse_retrieve(
+            self.instance_id,
+            request_id,
+            generation,
+            layer_id,
+            keys,
+            block_ids,
+            event.ipc_handle(),
+        )
+        future = raw_future.to_device_future(device=self.device)
+        future.retain_reference(event)
+        return future
+
+    def sparse_cancel_prefetch(
+        self, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture:
+        """Cancel a logical sparse prefetch and release its lease."""
+        if not self.is_healthy:
+            return self._completed_sparse_future(False)
+        future = self.req_client.sparse_cancel_prefetch(
+            self.instance_id, request_id, generation, layer_id
+        )
+        return _SparseLeaseFuture(
+            future,
+            lambda: self._forget_sparse_handle(request_id, generation, layer_id),
+            lambda result: result is True,
+        )
+
+    def sparse_release_prefetch(
+        self, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture:
+        """Release a logical sparse lease after the GPU consumer is done."""
+        if not self.is_healthy:
+            return self._completed_sparse_future(False)
+        future = self.req_client.sparse_release_prefetch(
+            self.instance_id, request_id, generation, layer_id
+        )
+        return _SparseLeaseFuture(
+            future,
+            lambda: self._forget_sparse_handle(request_id, generation, layer_id),
+            lambda result: result is True,
+        )
 
     @torch.no_grad()
     def _global_min_tokens(self, local_tokens: int) -> int:
@@ -438,6 +735,7 @@ class LMCacheMPConnector:
         before sending END_SESSION (covers failure paths where
         retrieve_kv didn't consume the locks).
         """
+        self._clear_sparse_key_cache(request_id)
         if not self.is_healthy:
             return
         with self._pending_lookups_lock:
@@ -687,10 +985,44 @@ class LMCacheMPConnector:
             raise RuntimeError("LMCache MP store failed")
 
     def reset(self) -> None:
-        pass
+        self._clear_sparse_key_cache()
 
     def close(self) -> None:
         self.reset()
+        with self._sparse_handles_lock:
+            sparse_handles = list(self._sparse_handles)
+        cleanup_confirmed = True
+        for request_id, generation, layer_id in sparse_handles:
+            try:
+                released = self.req_client.sparse_cancel_prefetch(
+                    self.instance_id,
+                    request_id,
+                    generation,
+                    layer_id,
+                ).result(timeout=self._mq_timeout)
+                if released:
+                    self._forget_sparse_handle(request_id, generation, layer_id)
+                else:
+                    cleanup_confirmed = False
+                    logger.warning(
+                        "LMCache sparse cleanup was not confirmed during close: "
+                        "request_id=%s generation=%d layer=%d",
+                        request_id,
+                        generation,
+                        layer_id,
+                    )
+            except Exception:
+                cleanup_confirmed = False
+                logger.warning(
+                    "Failed to cancel an SGLang sparse prefetch during close",
+                    exc_info=True,
+                )
+        if not cleanup_confirmed:
+            logger.error(
+                "Keeping LMCache connector open because sparse cleanup was not "
+                "confirmed; retry close after the connection recovers"
+            )
+            return
         if self._heartbeat is not None:
             self._heartbeat.stop()
             self._heartbeat = None

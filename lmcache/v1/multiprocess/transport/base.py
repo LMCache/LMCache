@@ -94,6 +94,47 @@ class RequestClient(Protocol):
 
     def commit_retrieve(self, key: Any, instance_id: int) -> MessagingFuture[Any]: ...
 
+    def sparse_prefetch(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[Any],
+    ) -> MessagingFuture[Any]: ...
+
+    def sparse_query_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[Any]: ...
+
+    def sparse_wait_prefetch(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        timeout: float,
+    ) -> MessagingFuture[Any]: ...
+
+    def sparse_retrieve(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[Any],
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[Any]: ...
+
+    def sparse_cancel_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[Any]: ...
+
+    def sparse_release_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[Any]: ...
+
     def clear(self) -> MessagingFuture[Any]: ...
 
     def get_chunk_size(self) -> MessagingFuture[Any]: ...

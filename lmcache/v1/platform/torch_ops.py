@@ -2302,7 +2302,15 @@ def lmcache_memcpy_async(
         try:
             # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
             # internally — no manual alignment splitting needed.
-            ret = libcudart.cudaMemcpy(
+            cuda_memcpy = libcudart.cudaMemcpy
+            cuda_memcpy.restype = ctypes.c_int
+            cuda_memcpy.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_int,
+            ]
+            ret = cuda_memcpy(
                 ctypes.c_void_p(dest),
                 ctypes.c_void_p(src),
                 ctypes.c_size_t(nbytes),

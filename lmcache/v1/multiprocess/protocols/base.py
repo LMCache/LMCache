@@ -62,6 +62,16 @@ class RequestType(enum.Enum):
     PREPARE_RETRIEVE = enum.auto()
     COMMIT_RETRIEVE = enum.auto()
 
+    # Sparse lookahead operations. These keep logical ObjectKey ownership in
+    # the storage manager while allowing a registered GPU client to provide a
+    # destination page mapping for one asynchronous retrieve.
+    SPARSE_PREFETCH = enum.auto()
+    SPARSE_QUERY_PREFETCH = enum.auto()
+    SPARSE_WAIT_PREFETCH = enum.auto()
+    SPARSE_RETRIEVE = enum.auto()
+    SPARSE_CANCEL_PREFETCH = enum.auto()
+    SPARSE_RELEASE_PREFETCH = enum.auto()
+
     # Controller operations
     CLEAR = enum.auto()
     GET_CHUNK_SIZE = enum.auto()

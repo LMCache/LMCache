@@ -174,6 +174,36 @@ def get_zmq_handler_specs(module: EngineModule) -> list[HandlerSpec]:
                 module.retrieve,
                 ThreadPoolType.AFFINITY,
             ),
+            HandlerSpec(
+                RequestType.SPARSE_PREFETCH,
+                module.sparse_prefetch,
+                ThreadPoolType.NORMAL,
+            ),
+            HandlerSpec(
+                RequestType.SPARSE_QUERY_PREFETCH,
+                module.sparse_query_prefetch,
+                ThreadPoolType.NORMAL,
+            ),
+            HandlerSpec(
+                RequestType.SPARSE_WAIT_PREFETCH,
+                module.sparse_wait_prefetch,
+                ThreadPoolType.NORMAL,
+            ),
+            HandlerSpec(
+                RequestType.SPARSE_RETRIEVE,
+                module.sparse_retrieve,
+                ThreadPoolType.AFFINITY,
+            ),
+            HandlerSpec(
+                RequestType.SPARSE_CANCEL_PREFETCH,
+                module.sparse_cancel_prefetch,
+                ThreadPoolType.NORMAL,
+            ),
+            HandlerSpec(
+                RequestType.SPARSE_RELEASE_PREFETCH,
+                module.sparse_release_prefetch,
+                ThreadPoolType.NORMAL,
+            ),
         ]
     if isinstance(module, EngineDrivenTransferModule):
         return [

@@ -432,6 +432,9 @@ class PrefetchRequestSpec:
             groups must narrow it to that subset (it drives the fold
             stride).
         mode: Prefetch intent (see :class:`PrefetchMode`).
+        generation: Caller-owned monotonically increasing generation.  A
+            consumer can invalidate an older request without affecting a
+            newer request that reuses the same logical keys.
     """
 
     keys: list[ObjectKey]
@@ -440,12 +443,17 @@ class PrefetchRequestSpec:
     policy: TrimPolicy = TrimPolicy.PREFIX
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     mode: PrefetchMode = PrefetchMode.LOOKUP
+    generation: int = 0
 
     def __post_init__(self) -> None:
         if self.num_kv_readers < 1:
             raise ValueError(
                 f"PrefetchRequestSpec: num_kv_readers={self.num_kv_readers} "
                 "must be >= 1 (total read locks per key)"
+            )
+        if self.generation < 0:
+            raise ValueError(
+                f"PrefetchRequestSpec: generation={self.generation} must be >= 0"
             )
         # A caller prefetching a SUBSET of the groups narrows attn_desc, so
         # extra layout entries are harmless; too FEW is the real mistake.
@@ -488,6 +496,13 @@ class PrefetchHandle:
     l2_orig_indices: tuple[int, ...] = ()
     """Original-key index of each key submitted to L2; maps the controller's
     local result bitmap back to original positions."""
+
+    generation: int = 0
+    """Generation captured when this request was submitted.
+
+    Generations are opaque to LMCache.  Adapters use them to cancel an old
+    lookahead request when a request slot is reordered or reused.
+    """
 
 
 def ipc_key_to_object_keys(
