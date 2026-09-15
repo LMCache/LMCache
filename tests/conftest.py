@@ -342,23 +342,29 @@ class MockRESPClient:
             arr = np.asarray(view, dtype=np.uint8, copy=False)
             arr.flat[:n] = np.frombuffer(data, dtype=np.uint8, count=n)
 
-    async def get(self, key: str, buf: memoryview) -> None:
-        data = self._store.get(key)
-        if data is None:
-            raise RuntimeError("key not found")
-        self._copy_into_buf(buf, data)
+    async def get(self, key: str, buf: memoryview) -> bool:
+        return (await self.batch_get([key], [buf]))[0]
 
     async def set(self, key: str, buf: memoryview) -> None:
         self._store[key] = bytes(buf.cast("B"))
 
-    async def batch_get(self, keys: list, bufs: list) -> None:
+    async def batch_get(self, keys: list, bufs: list) -> list:
+        """Fill buffers for hits and report one bool per key, like the C++ client.
+
+        A miss is not an error: the batch succeeds, the corresponding buffer is
+        left untouched, and its slot in the returned mask is False.
+        """
         if len(keys) != len(bufs):
             raise ValueError("keys and bufs length mismatch")
+        hits = []
         for k, b in zip(keys, bufs, strict=False):
             data = self._store.get(k)
             if data is None:
-                raise RuntimeError("key not found")
+                hits.append(False)
+                continue
             self._copy_into_buf(b, data)
+            hits.append(True)
+        return hits
 
     async def batch_set(self, keys: list, bufs: list) -> None:
         if len(keys) != len(bufs):

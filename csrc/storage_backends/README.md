@@ -215,6 +215,14 @@ class MyBackendClient(ConnectorClientBase[LMCacheMyBackendClient]):
 This gives you `async get/set/exists`, `batch_get/batch_set/batch_exists`,
 and sync variants, all with automatic eventfd-driven completion handling.
 
+`batch_get` returns one bool per key — `True` if that key hit and its buffer
+was filled, `False` if it missed — because a batch completes with `ok=True`
+even when individual keys miss. Buffers of missed keys are left untouched, so
+callers must consult the mask before reading them. This requires your
+`do_batch_get` to write `req.batch->per_key_results[req.start_idx + i]` for
+every key (the default implementation in `ConnectorBase` already does); the
+Python client raises if the mask length does not match the batch size.
+
 **Reference:** `lmcache/v1/storage_backend/native_clients/resp_client.py`
 
 ### Step 5: MP mode integration — L2 adapter config + factory
