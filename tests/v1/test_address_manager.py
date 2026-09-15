@@ -146,7 +146,7 @@ class TestAddressManagerAllocation:
         allocated_before = manager.total_allocated_size
         free_before = manager.get_free_size()
 
-        with pytest.raises(RuntimeError, match="size must be greater than 0"):
+        with pytest.raises(ValueError, match="size must be greater than 0"):
             manager.allocate(size)
 
         assert manager.total_allocated_size == allocated_before
@@ -459,7 +459,7 @@ class TestAddressManagerBatchedAllocation:
         allocated_before = manager.total_allocated_size
         free_before = manager.get_free_size()
 
-        with pytest.raises(RuntimeError, match="size must be greater than 0"):
+        with pytest.raises(ValueError, match="size must be greater than 0"):
             manager.batched_allocate(size, 3)
 
         assert manager.total_allocated_size == allocated_before
@@ -542,7 +542,7 @@ class TestAddressManagerFree:
         manager = AddressManager(heap)
 
         first = manager.allocate(4096)
-        with pytest.raises(RuntimeError, match="size must be greater than 0"):
+        with pytest.raises(ValueError, match="size must be greater than 0"):
             manager.allocate(0)
         second = manager.allocate(4096)
 
