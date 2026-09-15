@@ -19,6 +19,7 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
+    RecoveredL2Entry,
     _object_key_to_string,
 )
 from lmcache.v1.memory_management import (
@@ -1057,6 +1058,24 @@ class TestFSNativeL2AdapterConfig:
                 }
             )
 
+    @pytest.mark.parametrize("relative_tmp_dir", ["/tmp/lmcache", "../outside"])
+    def test_from_dict_rejects_tmp_dir_outside_base(
+        self, relative_tmp_dir: str
+    ) -> None:
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        with pytest.raises(ValueError, match="must stay within"):
+            FSNativeL2AdapterConfig.from_dict(
+                {
+                    "type": "fs_native",
+                    "base_path": "/tmp/cache",
+                    "relative_tmp_dir": relative_tmp_dir,
+                }
+            )
+
     def test_from_dict_invalid_use_odirect_raises(self):
         # First Party
         from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
@@ -1248,6 +1267,81 @@ class TestDeleteBackwardCompatibility:
         try:
             key = create_object_key(1)
             adp.delete([key])  # should not raise, just no-op
+        finally:
+            adp.close()
+
+
+# =============================================================================
+# Restart Recovery Tests
+# =============================================================================
+
+
+class TestRestartRecovery:
+    def test_recovered_entries_seed_usage_lru_and_status(self) -> None:
+        # First Party
+        from lmcache.v1.distributed.config import EvictionConfig
+        from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+            L2AdapterEvictionState,
+        )
+
+        older = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(1),
+            model_name="test_model",
+            kv_rank=0,
+            cache_salt="alice",
+        )
+        newer = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(2),
+            model_name="test_model",
+            kv_rank=0,
+            cache_salt="bob",
+        )
+        adp = NativeConnectorL2Adapter(
+            MockNativeConnector(),
+            max_capacity_gb=1000 / (1024**3),
+            recovered_entries=[
+                RecoveredL2Entry(older, 400, last_access_ns=1),
+                RecoveredL2Entry(newer, 200, last_access_ns=2),
+            ],
+        )
+        try:
+            usage = adp.get_usage()
+            assert usage.total_bytes_used == 600
+            assert usage.usage_fraction == pytest.approx(0.6)
+            assert dict(usage.bytes_by_cache_salt) == {
+                "alice": 400,
+                "bob": 200,
+            }
+
+            state = L2AdapterEvictionState(
+                0,
+                adp,
+                EvictionConfig(eviction_policy="LRU", eviction_ratio=1.0),
+            )
+            actions = state.eviction_policy.get_eviction_actions(1.0)
+            assert len(actions) == 1
+            assert actions[0].keys == [older, newer]
+            assert adp.report_status()["recovered_keys"] == 2
+            assert adp.report_status()["recovered_bytes"] == 600
+        finally:
+            adp.close()
+
+    def test_missing_recovered_file_is_removed_from_accounting(self) -> None:
+        key = create_object_key(1)
+        adp = NativeConnectorL2Adapter(
+            MockNativeConnector(),
+            max_capacity_gb=1000 / (1024**3),
+            recovered_entries=[RecoveredL2Entry(key, 400)],
+        )
+        try:
+            assert adp.get_usage().total_bytes_used == 400
+
+            # The mock backend has no corresponding object, so delete returns
+            # False for the key. A successful delete batch still proves that
+            # the recovered record is a ghost and must be forgotten.
+            adp.delete([key])
+
+            assert adp.get_usage().total_bytes_used == 0
         finally:
             adp.close()
 

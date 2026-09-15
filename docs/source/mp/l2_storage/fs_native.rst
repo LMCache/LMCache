@@ -29,6 +29,16 @@ I/O queue depth on a single Python thread.
 
 .. important::
 
+   ``max_capacity_gb`` supplies capacity accounting; it does not delete files
+   by itself. Configure an adapter-level ``eviction`` policy to enforce the
+   watermark. On restart, ``fs_native`` scans the flat ``.data`` file layout
+   produced by the native connector and restores sizes and a best-effort LRU
+   order from ``max(atime, mtime)``. Mount options such as ``noatime`` can
+   reduce the precision of this recovered order; live accesses are tracked
+   normally after startup.
+
+.. important::
+
    ``O_DIRECT`` has two independent alignment requirements:
 
    1. **Length alignment.**  The transfer length must be a multiple of
@@ -67,6 +77,33 @@ I/O queue depth on a single Python thread.
 
     # O_DIRECT for real-disk benchmarking
     --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+Stable multi-disk striping
+---------------------------
+
+Use one ``fs_native`` adapter per independently mounted disk and select the
+``striped`` store and prefetch policies. Each mount receives a persistent
+``.lmcache_disk_uuid`` file. Rendezvous hashing uses that UUID, so adapter
+configuration order does not affect placement and adding one disk remaps only
+approximately ``1 / (N + 1)`` of keys.
+
+.. code-block:: bash
+
+    lmcache server \
+        --host 0.0.0.0 --port 5555 \
+        --l1-size-gb 32 --l1-use-lazy \
+        --l2-store-policy striped \
+        --l2-prefetch-policy striped \
+        --l2-adapter '{"type":"fs_native","base_path":"/mnt/nvme0/lmcache","max_capacity_gb":3500,"eviction":{"eviction_policy":"LRU","trigger_watermark":0.8,"eviction_ratio":0.2}}' \
+        --l2-adapter '{"type":"fs_native","base_path":"/mnt/nvme1/lmcache","max_capacity_gb":3500,"eviction":{"eviction_policy":"LRU","trigger_watermark":0.8,"eviction_ratio":0.2}}'
+
+All striped adapters must be ``fs_native`` and expose distinct disk UUIDs.
+Keep ``.lmcache_disk_uuid`` with its physical mount across restarts; never copy
+one disk's UUID file to another disk. After the disk set changes, files on a
+former owner are recovered into that disk's normal LRU index and reclaimed
+under capacity pressure. Status output reports ``placement_id``,
+``recovered_keys``, ``recovered_bytes``, and ``recovery_skipped_files`` for
+each adapter.
 
 **Buffer-only mode example.**  L1 acts as a pure write buffer that
 absorbs the peak burst of in-flight chunks while the C++ worker pool

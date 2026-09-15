@@ -10,6 +10,7 @@ active/draining observability surface.
 """
 
 # Standard
+from dataclasses import replace
 import time
 
 # Third Party
@@ -27,14 +28,25 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
+from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+    FSNativeL2AdapterConfig,
+)
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
+)
+from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
+from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
+    PrefetchController,
+)
+from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    StripedPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.store_controller import StoreController
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     DefaultStorePolicy,
+    StripedStorePolicy,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from tests.v1.distributed.utils import should_use_lazy_alloc
@@ -84,6 +96,13 @@ def make_adapter() -> MockL2Adapter:
 
 def make_descriptor(index: int) -> AdapterDescriptor:
     return AdapterDescriptor(index=index, config=make_mock_config())
+
+
+def make_stable_descriptor(index: int, placement_id: str) -> AdapterDescriptor:
+    """Create a runtime adapter descriptor with a stable placement id."""
+    config = make_mock_config()
+    config.placement_id = placement_id
+    return AdapterDescriptor(index=index, config=config)
 
 
 def adapter_by_id(sm: StorageManager, adapter_id: int) -> MockL2Adapter:
@@ -186,6 +205,31 @@ class TestStoreControllerRuntimeAdapters:
             ctrl.stop()
             adapter.close()
 
+    def test_striped_add_validates_before_attach(self, l1_manager):
+        """A runtime adapter without stable identity is rejected at attach."""
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=StripedStorePolicy(),
+        )
+        adapter = make_adapter()
+        ctrl.start()
+        try:
+            with pytest.raises(ValueError, match="stable placement_id"):
+                ctrl.add_adapter(0, adapter, make_descriptor(0))
+
+            status = ctrl.report_status()
+            assert status["thread_alive"] is True
+            assert status["num_l2_adapters"] == 0
+
+            ctrl.add_adapter(1, adapter, make_stable_descriptor(1, "disk-1"))
+            assert ctrl.report_status()["num_active_adapters"] == 1
+            assert ctrl.request_remove_adapter(1).wait(timeout=5.0)
+        finally:
+            ctrl.stop()
+            adapter.close()
+
     def test_remove_adapter_drains_and_detaches(self, l1_manager):
         """request_remove_adapter drains in-flight work then detaches."""
         adapter = make_adapter()
@@ -263,6 +307,38 @@ class TestStoreControllerRuntimeAdapters:
 
 
 # =============================================================================
+# PrefetchController-level tests
+# =============================================================================
+
+
+class TestPrefetchControllerRuntimeAdapters:
+    def test_striped_add_validates_before_attach(self, l1_manager):
+        """Prefetch routing rejects unstable runtime adapters at attach."""
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=StripedPrefetchPolicy(),
+        )
+        adapter = make_adapter()
+        ctrl.start()
+        try:
+            with pytest.raises(ValueError, match="stable placement_id"):
+                ctrl.add_adapter(0, adapter, make_descriptor(0))
+
+            status = ctrl.report_status()
+            assert status["thread_alive"] is True
+            assert status["num_l2_adapters"] == 0
+
+            ctrl.add_adapter(1, adapter, make_stable_descriptor(1, "disk-1"))
+            assert ctrl.report_status()["num_active_adapters"] == 1
+            assert ctrl.request_remove_adapter(1).wait(timeout=5.0)
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+
+# =============================================================================
 # StorageManager-level tests
 # =============================================================================
 
@@ -277,6 +353,55 @@ class TestStorageManagerRuntimeAdapters:
             adapter_id = sm.add_l2_adapter(make_mock_config())
             assert adapter_id == 0
 
+            status = sm.report_status()
+            assert status["num_l2_adapters"] == 1
+            assert status["store_controller"]["num_active_adapters"] == 1
+            assert status["prefetch_controller"]["num_active_adapters"] == 1
+        finally:
+            sm.close()
+
+    def test_striped_runtime_add_rejects_p2p(self, empty_storage_manager_config):
+        """P2P runtime adapters are rejected before client construction."""
+        config = replace(
+            empty_storage_manager_config,
+            store_policy="striped",
+            prefetch_policy="striped",
+        )
+        sm = StorageManager(config)
+        try:
+            p2p_config = P2PL2AdapterConfig(
+                peer_mq_server_url="tcp://127.0.0.1:1",
+                peer_transfer_channel_server_url="tcp://127.0.0.1:2",
+            )
+            with pytest.raises(ValueError, match="only fs_native runtime adapters"):
+                sm.add_l2_adapter(p2p_config)
+
+            assert sm.l2_adapters() == []
+            assert sm.report_status()["num_l2_adapters"] == 0
+        finally:
+            sm.close()
+
+    def test_duplicate_fs_native_runtime_add_rolls_back(
+        self, empty_storage_manager_config, tmp_path
+    ):
+        """A duplicate disk identity is rejected without leaking an adapter."""
+        config = replace(
+            empty_storage_manager_config,
+            store_policy="striped",
+            prefetch_policy="striped",
+        )
+        sm = StorageManager(config)
+        try:
+            disk_path = str(tmp_path / "disk")
+            first_id = sm.add_l2_adapter(
+                FSNativeL2AdapterConfig(disk_path, num_workers=1)
+            )
+            with pytest.raises(ValueError, match="unique adapter placement_id"):
+                sm.add_l2_adapter(FSNativeL2AdapterConfig(disk_path, num_workers=1))
+
+            assert [descriptor.index for descriptor, _ in sm.l2_adapters()] == [
+                first_id
+            ]
             status = sm.report_status()
             assert status["num_l2_adapters"] == 1
             assert status["store_controller"]["num_active_adapters"] == 1
