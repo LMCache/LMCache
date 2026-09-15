@@ -40,6 +40,9 @@ target.
    * - :doc:`Mooncake Store <mooncake_store>`
      - ``mooncake_store``
      - Remote & Distributed
+   * - :doc:`SeaweedFS <seaweedfs>`
+     - ``native_plugin``
+     - Remote & Distributed
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
      - Remote & Distributed
@@ -72,3 +75,4 @@ target.
    mock
    fault_inject
    plugin
+   seaweedfs
