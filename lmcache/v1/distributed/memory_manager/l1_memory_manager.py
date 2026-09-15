@@ -12,6 +12,7 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.system_detection import SystemMemoryDetector
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
@@ -41,6 +42,55 @@ def _unlink_stale_shm(shm_name: str) -> None:
         )
 
 
+GIB = 1024**3
+
+
+def _clamp_to_available_memory(size_in_bytes: int) -> int:
+    """
+    Hold the L1 pool to what the host can actually give.
+
+    Unlike the per-rank local CPU backend, MP allocates this pool once per
+    cache server, so the configured size is the host footprint directly. It
+    was still unguarded: asking for more than the node has got the server
+    killed by the OOM killer during startup, with nothing in the log saying
+    how big the request had been.
+
+    Args:
+        size_in_bytes: The configured L1 pool size
+
+    Returns:
+        The size to actually allocate, in bytes
+    """
+    available_gb = SystemMemoryDetector.get_available_memory_gb()
+    requested_gb = size_in_bytes / GIB
+
+    if available_gb <= 0:
+        logger.warning(
+            "L1 pool: requesting %.2f GB; could not determine system available "
+            "memory, allocating the configured size unchecked",
+            requested_gb,
+        )
+        return size_in_bytes
+
+    logger.info(
+        "L1 pool: requesting %.2f GB of host memory (system available: %.2f GB)",
+        requested_gb,
+        available_gb,
+    )
+    if requested_gb <= available_gb:
+        return size_in_bytes
+
+    clamped = int(available_gb * GIB)
+    logger.warning(
+        "L1 pool: reducing %.2f GB to %.2f GB — the configured size exceeds "
+        "system available memory and would be killed by the OOM killer. "
+        "Lower the configured L1 size, or move to a host with more memory.",
+        requested_gb,
+        clamped / GIB,
+    )
+    return clamped
+
+
 def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInterface:
     """
     Create a memory allocator based on the provided configuration.
@@ -51,22 +101,34 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
+    # Write the effective size back onto the config, the way __post_init__
+    # already normalizes init_size. L1MemoryManager reports config.size_in_bytes
+    # in L1MemoryDesc, which consumers use to address the shared pool, so a
+    # clamp that did not reach it would hand out a length past the end of the
+    # mapping.
+    config.size_in_bytes = _clamp_to_available_memory(config.size_in_bytes)
+    size_in_bytes = config.size_in_bytes
+    # Lazy allocation only reserves init_size up front, but it grows to the
+    # full size later, so the cap has to apply to both ends.
+    config.init_size_in_bytes = min(config.init_size_in_bytes, size_in_bytes)
+    init_size_in_bytes = config.init_size_in_bytes
+
     if config.use_lazy:
         logger.debug(
             "use lazy memory allocator, init size is %d bytes, "
             "final size is %d bytes, align bytes is %d bytes",
-            config.init_size_in_bytes,
-            config.size_in_bytes,
+            init_size_in_bytes,
+            size_in_bytes,
             config.align_bytes,
         )
         return LazyMemoryAllocator(
-            config.init_size_in_bytes, config.size_in_bytes, config.align_bytes
+            init_size_in_bytes, size_in_bytes, config.align_bytes
         )
     else:
         logger.debug(
             "use mixed memory allocator, total size is %d bytes, "
             "align bytes is %d bytes",
-            config.size_in_bytes,
+            size_in_bytes,
             config.align_bytes,
         )
         shm_name = config.shm_name
@@ -78,13 +140,13 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
                 shm_name = f"lmcache_l1_pool_{bare}"
             _unlink_stale_shm(shm_name)
             return MixedMemoryAllocator(
-                config.size_in_bytes,
+                size_in_bytes,
                 align_bytes=config.align_bytes,
                 shm_name=shm_name,
                 use_hugepages=config.use_hugepages,
             )
         return MixedMemoryAllocator(
-            config.size_in_bytes,
+            size_in_bytes,
             align_bytes=config.align_bytes,
             use_hugepages=config.use_hugepages,
         )
@@ -102,6 +164,7 @@ class L1MemoryManager:
 
     def __init__(self, config: L1MemoryManagerConfig):
         self._allocator = create_memory_allocator(config)
+        # Read after the call: create_memory_allocator may have clamped it.
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
 
