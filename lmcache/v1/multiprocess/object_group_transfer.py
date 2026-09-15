@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Transfer-mode-agnostic KV copy helpers for the multiprocess server.
+"""Object-group KV transfer for the multiprocess server.
 
-Moved VERBATIM from ``modules/lmcache_driven_transfer.py`` so the
-engine-driven path can share them without importing the LMCache-driven
-module (#4079, per review: relocate, do not rewrite). All logic reads its
-geometry from the cache context's ``KVLayerGroupsManager``; nothing here is
-specific to who drives the transfer.
+Per-kernel-group gather and scatter between the engine's paged KV cache and
+LMCache memory objects, driven by the cache context's ``KVLayerGroupsManager``:
+block-id downsampling for sub-chunk sliding windows, skip recalculation, and
+the per-object-group transfer plan the copy kernels run.
 """
 
 # Standard
@@ -157,7 +156,7 @@ def downsample_and_stage_block_ids(
     return block_ids_gpu
 
 
-def _recalculate_blocks_to_skip(
+def recalculate_blocks_to_skip(
     blocks_per_chunk: int,
     blocks_per_window: int,
     blocks_to_skip: int,
@@ -333,7 +332,7 @@ def _run_object_group_transfer_plan(
             orig_skip_blocks = cache_context.calculate_num_blocks(
                 skip_tokens_in_chunk, kernel_group_id
             )
-            recalculated_skip_blocks = _recalculate_blocks_to_skip(
+            recalculated_skip_blocks = recalculate_blocks_to_skip(
                 blocks_per_chunk,
                 blocks_per_window,
                 orig_skip_blocks,
@@ -507,7 +506,7 @@ def transfer_kv_per_object_group(
             orig_skip_blocks = cache_context.calculate_num_blocks(
                 skip_tokens_in_chunk, kernel_group_id
             )
-            recalculated_skip_blocks = _recalculate_blocks_to_skip(
+            recalculated_skip_blocks = recalculate_blocks_to_skip(
                 blocks_per_chunk,
                 blocks_per_window,
                 orig_skip_blocks,
