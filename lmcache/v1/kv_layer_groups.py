@@ -104,6 +104,7 @@ def group_layers_by_identity(
             does not match ``engine_kv_formats``.
     """
     # First Party
+    from lmcache.v1.gpu_connector.kv_format import get_spec_class
     from lmcache.v1.gpu_connector.utils import (
         get_block_size,
         get_dtype,
@@ -133,7 +134,7 @@ def group_layers_by_identity(
         if engine_group_idx == EXCLUDED_ENGINE_GROUP:
             continue
         layer_format = engine_kv_formats[idx]
-        mla = lmcache_native.is_mla(layer_format)
+        mla = get_spec_class(layer_format).is_mla
         kv_size = 1 if mla else 2
         nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
         hs = get_head_size(kv_caches, layer_format, idx)

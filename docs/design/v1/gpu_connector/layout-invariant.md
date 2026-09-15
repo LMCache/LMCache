@@ -109,7 +109,9 @@ kv_format/
 1. Add the enum value in `csrc/kv_transfer_types.h` (the single
    backend-agnostic definition shared by every accelerator backend), then
    register it in the common native pybind module — `csrc/lmcache_native/pybind.cpp`
-   and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
+   and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU). Add its case to the
+   `format_facts` table in `csrc/engine_kv_format.h` too: the switch has no
+   fall-through default, and the kernels branch on those facts.
 2. Add a branch in the engine's `detectors/<engine>.py` `discover()`. It keys
    off `(list_depth, tensor_ndim)` from `measure_list_depth_until_tensor`,
    returning `(format, kv)`; any reshape-via-hints (e.g. TRT-LLM's 4-D `view`'d
@@ -195,8 +197,15 @@ helper.
 | `get_head_size(kv, fmt, layer_idx=0)` | yes | |
 | `get_hidden_dim_size(kv, fmt, layer_idx=0)` | yes | |
 | `get_dtype(kv, fmt, layer_idx=0)` | yes | |
-| `is_mla(fmt)` | — | Format predicate; the other static facts are read off `get_spec_class(fmt)`. |
 | `get_device(kv)` | — | Format-agnostic (descends to any leaf). |
+
+Static layout facts (`is_mla`, `is_cross_layer`, `is_kv_list`, `is_layer_list`,
+`is_hnd`, `is_fused_packed`, `is_two_major`, `is_pbs_fused`,
+`is_kv_second_tuple`) are not helpers: read them off `get_spec_class(fmt)`.
+`csrc/engine_kv_format.h` keeps a C++ copy of the same table for the device
+kernels, pinned against the specs by
+`tests/v1/gpu_connector/test_kv_format_classification.py`; no fact is exposed to
+Python through a pybind binding.
 
 ### Pointer and descriptor builders
 

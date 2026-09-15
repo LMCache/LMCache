@@ -13,6 +13,7 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
     GPUConnectorInterface,
     VLLMPagedMemGPUConnectorV2,
 )
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.gpu_connector.utils import (
     DiscoverableKVCache,
     LayoutHints,
@@ -471,7 +472,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             normalized_kv_caches, self.engine_kv_format
         )
         self.head_size = get_head_size(normalized_kv_caches, self.engine_kv_format)
-        self.use_mla = lmcache_native.is_mla(self.engine_kv_format)
+        self.use_mla = get_spec_class(self.engine_kv_format).is_mla
         self.dtype = get_dtype(normalized_kv_caches, self.engine_kv_format)
         self.num_heads = (
             1

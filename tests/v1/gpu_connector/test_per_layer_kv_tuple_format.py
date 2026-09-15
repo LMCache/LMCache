@@ -21,6 +21,7 @@ import torch
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import utils as U
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
@@ -67,7 +68,7 @@ def test_accessors() -> None:
     assert U.get_tokens_per_layer(norm, fmt) == NB * BS
     assert U.get_elements_per_layer(norm, fmt) == NB * BS * NH * HS * 2
     assert U.get_dtype(norm, fmt) == torch.float32
-    assert not lmc_ops.is_mla(fmt)
+    assert not get_spec_class(fmt).is_mla
 
 
 def test_group_data_ptrs_interleaved_kv_order() -> None:

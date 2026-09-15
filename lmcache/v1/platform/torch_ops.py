@@ -26,9 +26,6 @@ from lmcache.lmcache_native import GPUKVFormat  # noqa: F401
 from lmcache.lmcache_native import (
     EngineKVFormat,
     TransferDirection,
-    is_cross_layer,
-    is_kv_list,
-    is_mla,
 )
 from lmcache.logging import init_logger
 from lmcache.v1.platform._device_detect import (
@@ -789,6 +786,21 @@ def _is_kv_second_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
     return _format_spec(engine_kv_format).is_kv_second_tuple
 
 
+def _is_cross_layer_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when all layers live in one fused backing tensor."""
+    return _format_spec(engine_kv_format).is_cross_layer
+
+
+def _is_kv_list_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when keys and values are two separate top-level lists."""
+    return _format_spec(engine_kv_format).is_kv_list
+
+
+def _is_mla_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for MLA layouts: one latent KV head, no separate K/V split."""
+    return _format_spec(engine_kv_format).is_mla
+
+
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
     # Maps the byte width of a KV-cache element to a representative torch dtype.
     # Only widths that commonly appear in KV caches are listed; 1-byte entries
@@ -928,7 +940,7 @@ def _normalize_paged_layers(
           per-layer tuple format (``NL_X_TWO_X_NB_BS_NH_HS``).
         - ``list[torch.Tensor]`` (per-layer) for all other formats.
     """
-    if is_cross_layer(engine_kv_format):
+    if _is_cross_layer_format(engine_kv_format):
         if isinstance(paged_buffer_ptrs_tensor, torch.Tensor):
             if _is_ptr_tensor(paged_buffer_ptrs_tensor):
                 # 1-D pointer tensor with a single entry → reconstruct full tensor.
@@ -953,7 +965,7 @@ def _normalize_paged_layers(
             "Cross-layer formats require a single torch.Tensor input; "
             "got: " + type(paged_buffer_ptrs_tensor).__name__
         )
-    if is_kv_list(engine_kv_format):
+    if _is_kv_list_format(engine_kv_format):
         if _is_ptr_tensor(paged_buffer_ptrs_tensor):
             # 1-D pointer tensor [K_L0,...,K_LN-1, V_L0,...,V_LN-1] → nested list.
             if shape_desc is None or device is None or dtype is None:
@@ -1096,7 +1108,7 @@ def _normalize_lmcache_objects(
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
         chunk_tokens = lmcache_chunk_size
-        if is_mla(engine_kv_format):
+        if _is_mla_format(engine_kv_format):
             chunk_shape: tuple[int, ...] = (nl, chunk_tokens, hs)
         elif _is_fused_kv_format(engine_kv_format):
             # Single plane: hs is the packed 2 * head_size.
@@ -1196,7 +1208,7 @@ def multi_layer_block_kv_transfer(
     blocks_per_object = lmcache_chunk_size // int(shape_desc.bs)
     block_size = int(shape_desc.bs)
 
-    if is_cross_layer(engine_kv_format):
+    if _is_cross_layer_format(engine_kv_format):
         _transfer_cross_layer(
             normalized,
             object_tensors,
@@ -1208,7 +1220,7 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif is_kv_list(engine_kv_format):
+    elif _is_kv_list_format(engine_kv_format):
         _transfer_sglang_mha(
             normalized,
             object_tensors,
@@ -1220,7 +1232,7 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif is_mla(engine_kv_format):
+    elif _is_mla_format(engine_kv_format):
         _transfer_per_layer_mla(
             normalized,
             object_tensors,
