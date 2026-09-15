@@ -159,6 +159,12 @@ contribute to histograms; counters above always count all events.
 
 **What it answers:** How many chunks are being pushed to L2? What fraction fail?
 
+`l2_store_completed` counts *finished* store tasks regardless of outcome, and
+`l2_store_completed_objects` only advances on the success branch.  The failed
+fraction therefore comes from `lmcache_mp.l2_store_failure` (see
+[L2 Failure Metrics](#l2-failure-metrics-lm-291-health-monitoring)), not from
+differencing the two counters above.
+
 ---
 
 ## L2 Prefetch Metrics
@@ -255,8 +261,11 @@ sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
 | OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
 |---|---|---|---|---|---|
 | `lmcache_mp.l2_prefetch_failure` | `lmcache_mp_l2_prefetch_failure_chunks_total` | Counter | `L2_PREFETCH_FAILED` | `+count` per `(reason, model_name)` bucket | `reason` ∈ {`l1_oom`, `not_found`}, `model_name` |
+| `lmcache_mp.l2_store_failure` | `lmcache_mp_l2_store_failure_chunks_total` | Counter | `L2_STORE_COMPLETED` with `failed_count > 0` | `+count` per `(l2_name, model_name)` bucket via `failed_count_per_model` | `l2_name`, `model_name` |
 
-**What it answers:** For keys L2 reported present at lookup but failed to land in L1: was L1 full (`l1_oom`), or did the adapter fail to produce the data (`not_found`)?
+**What it answers:** For keys L2 reported present at lookup but failed to land in L1: was L1 full (`l1_oom`), or did the adapter fail to produce the data (`not_found`)?  And on the store side: which backend is dropping writes, and for which model?
+
+> **Why the store counter reads `L2_STORE_COMPLETED`**: `StoreController._finalize_store` publishes that one event type for both outcomes, so "completed" means *finished*, not *succeeded*.  A failure is identified by `failed_count > 0` rather than by a distinct event type, which keeps the event stream unchanged.  Without this counter a store task that fails contributes nothing anywhere: `l2_store_completed` still increments (it counts finished tasks), and `l2_store_completed_objects` is driven by `key_count_per_salt`, which the failure branch does not populate — so a backend failing *every* write leaves `lmcache_mp_l2_store_completed_objects_chunks_total` absent from `/metrics` entirely rather than flat at zero, and an alert written as `rate(...) == 0` never fires on the missing series.
 
 > **Serde failures**: a third `reason=serde_failure` value will be added as an additive, non-breaking extension once the serde PR lands and L2 adapters distinguish deserialization errors from missing objects. No dashboard migration needed when that happens.
 
