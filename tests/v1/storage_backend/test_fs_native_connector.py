@@ -111,8 +111,8 @@ def test_odirect_read_does_not_split_for_read_ahead(tmp_path) -> None:
         client.close()
 
 
-def test_odirect_fails_for_misaligned_buffer(tmp_path) -> None:
-    """Misaligned buffers should fail instead of hiding O_DIRECT misuse."""
+def test_odirect_falls_back_for_misaligned_buffer_address(tmp_path) -> None:
+    """Address misalignment uses buffered I/O without losing correctness."""
     LMCacheFSClient = _import_fs_client()
     block_size = os.statvfs(tmp_path).f_bsize
     if block_size <= 0:
@@ -121,12 +121,17 @@ def test_odirect_fails_for_misaligned_buffer(tmp_path) -> None:
     size = block_size * 2
     key = "test_model@00000000@fedcba9876543210"
     _source_raw, source = _misaligned_memoryview(size, block_size)
+    _dest_raw, dest = _misaligned_memoryview(size, block_size)
     _fill(source)
 
     client = LMCacheFSClient(str(tmp_path), 1, "", True, 1)
     try:
         store = _submit_and_wait(client, "submit_batch_set", key, source)
-        assert not store[1]
-        assert "O_DIRECT buffer address is not aligned" in store[2]
+        assert store[1], store[2]
+
+        load = _submit_and_wait(client, "submit_batch_get", key, dest)
+        assert load[1], load[2]
+        assert load[3] == [True]
+        assert bytes(dest) == bytes(source)
     finally:
         client.close()
