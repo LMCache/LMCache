@@ -92,8 +92,27 @@ def _declares_slot_compression(spec: KVCacheSpec) -> bool:
 
 
 def _num_states(spec: KVCacheSpec) -> int:
-    """Return the stored states per logical block (``block_size`` on old vLLM)."""
-    return getattr(spec, "num_states", spec.block_size)
+    """Return the stored states per logical block.
+
+    ``spec.num_states`` on current vLLM; older specs declare the packing as
+    ``compress_ratio`` instead, so divide ``block_size`` by it there.
+    """
+    num_states = getattr(spec, "num_states", None)
+    if num_states is not None:
+        return num_states
+    return spec.block_size // getattr(spec, "compress_ratio", 1)
+
+
+def _mla_states_dim(kv_cache: torch.Tensor) -> int:
+    """Return the dim holding the stored states of an MLA cache.
+
+    Rank 3 is ``[NB, states, C]``. Rank 4 puts the single head slot before
+    the states (HND, ``[NB, 1, states, C]``) or after them (NHD,
+    ``[NB, states, 1, C]``).
+    """
+    if kv_cache.ndim == 4 and kv_cache.shape[2] == 1 and kv_cache.shape[1] != 1:
+        return 1
+    return kv_cache.ndim - 2
 
 
 def _leaf_specs(spec: KVCacheSpec) -> list[KVCacheSpec]:
@@ -476,10 +495,11 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
 
     For vLLM 0.26 or later. Covers the rank-3 ``[NB, states, C]`` cache
     (Kimi K3: ``[N * 12, 64, 576]`` -> ``[N, 768, 576]``) and the unified
-    rank-4 ``[NB, 1, states, C]`` cache (GLM-5.3-Flash: sparse MLA at 64 rows
-    and the kpool indexer at 32 rows under a 1152-token block). The target is
-    ``spec.num_states`` (``block_size / tokens_per_state``), so declared slot
-    compression is preserved and the server still derives it from
+    rank-4 cache with one head slot in either order (GLM-5.3-Flash:
+    sparse MLA at 64 rows and the kpool indexer at 32 rows under a
+    1152-token block). The target is ``spec.num_states``
+    (``block_size / tokens_per_state``), so declared slot compression is
+    preserved and the server still derives it from
     ``tokens_per_block / slots_per_block``.
     """
 
@@ -490,7 +510,7 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
             get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MLA_ATTENTION
             and isinstance(kv_cache, torch.Tensor)
             and kv_cache.ndim in (3, 4)
-            and kv_cache.shape[-2] != _num_states(spec)
+            and kv_cache.shape[_mla_states_dim(kv_cache)] != _num_states(spec)
         )
 
     def apply(
@@ -501,9 +521,9 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
     ) -> torch.Tensor:
         """Re-view ``kv_cache`` at logical-block granularity.
 
-        The tensor is kernel-paged as ``(num_kernel_pages, [1,] kernel_rows,
-        content)``; the result is ``(num_blocks, [1,] spec.num_states,
-        content)`` over the same storage.
+        The tensor is kernel-paged with ``kernel_rows`` states per page; the
+        result replaces that dim with ``spec.num_states`` and divides the
+        page count accordingly, over the same storage.
 
         Raises:
             ValueError: If the cache has more than one head slot, the sizes
@@ -512,13 +532,14 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
                 exactly (an undeclared packed layout that must not be edited).
         """
         assert isinstance(kv_cache, torch.Tensor)
-        if kv_cache.ndim == 4 and kv_cache.shape[1] != 1:
+        states_dim = _mla_states_dim(kv_cache)
+        if kv_cache.ndim == 4 and kv_cache.shape[3 - states_dim] != 1:
             raise ValueError(
                 f"MLA cache must have one head slot to re-view, got "
                 f"{tuple(kv_cache.shape)}"
             )
         num_states = _num_states(spec)
-        kernel_rows = kv_cache.shape[-2]
+        kernel_rows = kv_cache.shape[states_dim]
         if num_states % kernel_rows != 0:
             raise ValueError(
                 f"logical states {num_states} is not a multiple of kernel "
@@ -543,9 +564,10 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
                 "kernel-paged MLA cache must be contiguous to re-view as logical pages"
             )
 
-        return kv_cache.view(
-            num_kernel_pages // ratio, *kv_cache.shape[1:-2], num_states, -1
-        )
+        shape = list(kv_cache.shape)
+        shape[0] = num_kernel_pages // ratio
+        shape[states_dim] = num_states
+        return kv_cache.view(shape)
 
 
 # Rule registry, in match priority order.

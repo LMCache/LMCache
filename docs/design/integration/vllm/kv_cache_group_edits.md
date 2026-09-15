@@ -70,7 +70,7 @@ exactly (enforced; see Invariants).
 ### 3. Sub-paged MLA
 
 The same re-paging for MLA-style caches, rank-3 `[NB, states, C]` (Kimi K3)
-or unified rank-4 `[NB, 1, states, C]` (GLM-5.3-Flash: sparse MLA at 64 rows
+or unified rank-4 with one head slot in either order (`[NB, 1, states, C]` or `[NB, states, 1, C]`) (GLM-5.3-Flash: sparse MLA at 64 rows
 and the kpool indexer at 32 rows under a 1152-token block). The target is
 `spec.num_states` (`block_size / tokens_per_state`) rather than `block_size`,
 so a declared slot compression survives the view and the compression path
