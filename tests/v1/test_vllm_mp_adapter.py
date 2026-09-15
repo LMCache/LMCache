@@ -133,8 +133,13 @@ def _patch_transfer_context_factory(
     contexts: list[MagicMock] = []
 
     def fake_create_transfer_context(
-        kv_caches: dict[str, torch.Tensor], mode: str
+        kv_caches: dict[str, torch.Tensor],
+        *,
+        instance_id: int,
+        req_client: RequestClient,
+        mode: str,
     ) -> MagicMock:
+        del kv_caches, instance_id, req_client, mode
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         contexts.append(ctx)
         return ctx
@@ -303,7 +308,7 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     assert transfer_ctx.submit_store.call_args.args[1].request_configs == {
         "lmcache.skip_save": True
     }
-    assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
+    assert transfer_ctx.submit_store.call_args.args[3] == [[0]]
     assert adapter.store_futures["req-1"] is fake_future
 
 
@@ -331,7 +336,7 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
 
     adapter.submit_store_request("req-1", op, event=MagicMock())
 
-    assert transfer_ctx.submit_store.call_args.args[4] == [
+    assert transfer_ctx.submit_store.call_args.args[3] == [
         [0, 1],
         [0, 1],
         [10, 11],
@@ -369,7 +374,7 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     assert transfer_ctx.submit_retrieve.call_args.args[1].request_configs == {
         "lmcache.skip_save": True
     }
-    assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
+    assert transfer_ctx.submit_retrieve.call_args.args[3] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
 
 
@@ -451,8 +456,13 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
     transfer_ctx = MagicMock(name="transfer_ctx")
 
     def create_context(
-        _kv_caches: dict[str, torch.Tensor], mode: str | None
+        _kv_caches: dict[str, torch.Tensor],
+        *,
+        instance_id: int,
+        req_client: RequestClient,
+        mode: str | None,
     ) -> MagicMock:
+        del instance_id, req_client, mode
         calls.append(("create_transfer_context", is_isolated_ipc()))
         return transfer_ctx
 
@@ -831,34 +841,36 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
     stray heartbeat ping can race the closing req_client."""
     adapter, req_client, future = fake_adapter
-    adapter.transfer_ctx = MagicMock()
+    transfer_context = MagicMock()
+    adapter.transfer_ctx = transfer_context
     adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
     heartbeat = FakeHeartbeatThread.instances[0]
 
     stop_state_at_unregister: list[bool] = []
 
-    def record_unregister(_instance_id: int) -> MagicMock:
+    def record_unregister() -> MagicMock:
         stop_state_at_unregister.append(heartbeat.stop_requested)
         return future
 
-    req_client.unregister_kv_cache.side_effect = record_unregister
+    transfer_context.unregister.side_effect = record_unregister
 
     adapter.shutdown()
 
     assert "stop" in heartbeat.calls
     assert stop_state_at_unregister == [True]
+    transfer_context.unregister.assert_called_once_with()
+    req_client.unregister_kv_cache.assert_not_called()
 
 
-def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
+def test_cold_shutdown_skips_unregister(fake_adapter) -> None:
     """shutdown() on an adapter whose heartbeat was never lazily started
-    (cold shutdown before any traffic) still sends UNREGISTER and does
-    not raise."""
+    (cold shutdown before registration) does not send UNREGISTER."""
     adapter, req_client, _future = fake_adapter
 
     adapter.shutdown()
 
     assert FakeHeartbeatThread.instances == []
-    req_client.unregister_kv_cache.assert_called_once_with(adapter.instance_id)
+    req_client.unregister_kv_cache.assert_not_called()
 
 
 def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> None:
@@ -965,7 +977,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
     local_ctx = MagicMock(name="local_transfer_ctx")
     monkeypatch.setattr(
-        adapter_mod, "create_transfer_context", lambda kv, mode: local_ctx
+        adapter_mod, "create_transfer_context", lambda kv, **_kwargs: local_ctx
     )
 
     parallel_strategy = ParallelStrategy(
