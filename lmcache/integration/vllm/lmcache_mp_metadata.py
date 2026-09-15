@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 import enum
 
 # Third Party
@@ -17,6 +17,7 @@ import torch
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
+    extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
@@ -31,11 +32,14 @@ class LMCacheMPRequestState(enum.Enum):
     State machine:
     PREFETCHING -- update_state_after_alloc --> WAITING_FOR_LOAD
     WAITING_FOR_LOAD -- process_loading_requests --> READY
+    READY -- failed async load --> BYPASS_LMCACHE
+    BYPASS_LMCACHE -- update_state_after_alloc --> READY
     """
 
     PREFETCHING = enum.auto()
     WAITING_FOR_LOAD = enum.auto()
     READY = enum.auto()
+    BYPASS_LMCACHE = enum.auto()
 
 
 @dataclass
@@ -69,12 +73,20 @@ class LMCacheMPRequestTracker:
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
     cache_salt: str = ""
+    request_configs: dict[str, Any] | None = None
+    max_offload_tokens: int | None = None
+    lookup_started_at: float | None = None
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
+        self.request_configs = extract_request_configs_from_request(request)
+        self.max_offload_tokens = (self.request_configs or {}).get(
+            "lmcache.max_offload_tokens"
+        )
+        self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
@@ -96,7 +108,11 @@ class LMCacheMPRequestTracker:
         update_stage_after_alloc"""
         return (
             self.num_lmcache_hit_tokens > self.num_vllm_hit_tokens
-            and self.state != LMCacheMPRequestState.READY
+            and self.state
+            not in (
+                LMCacheMPRequestState.READY,
+                LMCacheMPRequestState.BYPASS_LMCACHE,
+            )
         )
 
     def is_ready_for_retrieving(self) -> bool:
@@ -172,6 +188,7 @@ class LMCacheMPRequestMetadata:
     direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
     cache_salt: str = ""
+    request_configs: dict[str, Any] | None = None
 
     @staticmethod
     def GetStoreMetadata(
@@ -234,6 +251,8 @@ class LMCacheMPRequestMetadata:
             allocated_tokens,
             computed_tokens,
         )
+        if tracker.max_offload_tokens is not None:
+            min_available_tokens = min(min_available_tokens, tracker.max_offload_tokens)
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
         num_chunks = num_staging_tokens // lmcache_tokens_per_chunk
 
@@ -259,6 +278,7 @@ class LMCacheMPRequestMetadata:
                 direction="STORE",
                 op=op,
                 cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
             )
 
             # Update the request tracker
@@ -335,6 +355,7 @@ class LMCacheMPRequestMetadata:
                 direction="RETRIEVE",
                 op=op,
                 cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
             )
             return ret
 

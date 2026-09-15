@@ -28,8 +28,15 @@ class MockKVCacheSpec:
 
 
 @dataclass
-class SlidingWindowSpec:
+class AttentionSpec:
+    """Base of the attention-spec doubles: ``get_tokens_per_block`` detects
+    attention groups by this class name, so the doubles must inherit it."""
+
     block_size: int
+
+
+@dataclass
+class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
 
 
@@ -39,16 +46,13 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
 
 @dataclass
-class FullAttentionSpec:
-    block_size: int
+class FullAttentionSpec(AttentionSpec):
     sliding_window: "int | None" = None
 
 
 @dataclass
-class MLAAttentionSpec:
+class MLAAttentionSpec(AttentionSpec):
     """Key-only, one-vector-per-token spec (an MLA index cache)."""
-
-    block_size: int
 
 
 @dataclass
@@ -426,3 +430,40 @@ def test_aux_pools_with_distinct_block_sizes_get_distinct_groups():
     assert aux[0].engine_group_id != aux[1].engine_group_id
     assert {g.tokens_per_block for g in aux} == {16, 32}
     assert {g.extra_object_group_tag for g in aux} == {1, 2}
+
+
+def test_conversion_scales_attention_tokens_per_block_under_dcp():
+    """tokens_per_block sizes each rank's memory object; unscaled it would
+    be dcp times too large."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+        dcp_size=2,
+    )
+
+    # Attention scaled, Mamba (replicated state) untouched.
+    assert [group.tokens_per_block for group in spec] == [32, 16]
+
+
+def test_conversion_tokens_per_block_unscaled_without_dcp():
+    """dcp_size defaults to 1, leaving every group exactly as before."""
+    groups = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+        ]
+    )
+    caches = ["layer.0", "layer.1"]
+
+    default = create_engine_group_infos_from_vllm(groups, _same_shape_caches(caches))
+    explicit = create_engine_group_infos_from_vllm(
+        groups, _same_shape_caches(caches), dcp_size=1
+    )
+
+    assert [g.tokens_per_block for g in default] == [16, 16]
+    assert [g.tokens_per_block for g in explicit] == [16, 16]

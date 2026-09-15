@@ -314,4 +314,4 @@ def test_lmcache_exports_torch_dev_and_torch_device_type() -> None:
     importlib.reload(lmc)
     assert hasattr(lmc, "torch_dev")
     assert isinstance(lmc.torch_device_type, str)
-    assert lmc.torch_device_type in {"cuda", "musa", "xpu", "hpu", "cpu"}
+    assert lmc.torch_device_type in {"cuda", "musa", "xpu", "hpu", "npu", "cpu"}

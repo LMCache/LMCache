@@ -9,7 +9,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 
 def _key(hash_byte: int, salt: str = "") -> ObjectKey:

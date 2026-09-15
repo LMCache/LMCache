@@ -18,6 +18,7 @@ import sys
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
+    WarmupPolicy,
     parse_args_to_config,
 )
 from lmcache.cli.commands.bench.engine_bench.interactive import run_interactive
@@ -161,6 +162,16 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
             "Force generation to run for the full output length by ignoring "
             "the model's EOS token (vLLM sampling extension). Makes decode "
             "throughput reproducible regardless of when the model would stop."
+        ),
+    )
+    parser.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help=(
+            "Skip the warmup phase entirely and start measuring immediately. "
+            "The first requests then pay the engine's first-request cost and "
+            "run against a cold cache, so use it to measure a cold start -- "
+            "not to compare against a warmed run."
         ),
     )
     parser.add_argument(
@@ -509,6 +520,7 @@ def _export_config(
     state.set("kv_cache_volume", config.kv_cache_volume_gb)
     state.set("tokens_per_gb_kvcache", config.tokens_per_gb_kvcache)
     state.set("ignore_eos", config.ignore_eos)
+    state.set("no_warmup", config.warmup_policy is WarmupPolicy.SKIP)
 
     # Workload-specific args from namespace
     for item in state.get_workload_items():
@@ -713,7 +725,7 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
     workload.log_config()
     progress_monitor.start()
     try:
-        workload.run()
+        workload.run(config.warmup_policy)
     finally:
         progress_monitor.stop()
 

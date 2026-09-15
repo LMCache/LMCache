@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Configuration for the multiprocess (ZMQ) server and HTTP frontend.
+Configuration for the multiprocess server and HTTP frontend.
 """
 
 # Standard
@@ -21,13 +21,17 @@ logger = init_logger(__name__)
 
 @dataclass
 class MPServerConfig:
-    """Configuration for the ZMQ-based multiprocess cache server."""
+    """Configuration for the multiprocess cache server."""
+
+    transport: Literal["zmq", "grpc"] = "zmq"
+    """Request transport. gRPC is configurable for forward-compatible test
+    plumbing, but its runtime server is not available yet."""
 
     host: str = "localhost"
-    """ZMQ server host."""
+    """Request server host."""
 
     port: int = 5555
-    """ZMQ server port."""
+    """Request server port."""
 
     chunk_size: int = 256
     """Chunk size for KV cache operations."""
@@ -47,9 +51,8 @@ class MPServerConfig:
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
     engine_type: str = "default"
-    """Cache engine backend type
-    ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
-    """
+    """Cache engine backend type: 'default' for standard prefix caching,
+    'blend' to compose the blend module (non-prefix KV reuse)."""
 
     separate_object_groups: bool = False
     """When True, split kernel groups into one object group per
@@ -62,12 +65,22 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
+    enable_dedup_content: bool = False
+    """engine_type='blend' only: skip fingerprint registration for a chunk whose
+    content is already indexed, so the same text stored behind two prefixes is
+    indexed once. No effect for other engines."""
+
     supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
         "lmcache_driven"
     )
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
+
+    isolated_ipc: bool = False
+    """Whether IPC mechanisms must work across isolated containers (no shared
+    host IPC namespace or /dev/shm); see lmcache/v1/platform/isolated_ipc.py.
+    Must match the engine workers' ``lmcache.mp.isolated_ipc`` setting."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
@@ -254,7 +267,7 @@ def add_mp_server_args(
         The same parser with MP server arguments added.
     """
     mp_group = parser.add_argument_group(
-        "MP Server", "Configuration for the ZMQ multiprocess cache server"
+        "MP Server", "Configuration for the multiprocess cache server"
     )
     mp_group.add_argument(
         "--instance-id",
@@ -266,10 +279,18 @@ def add_mp_server_args(
         "minted at startup.",
     )
     mp_group.add_argument(
+        "--transport",
+        type=str,
+        choices=["zmq", "grpc"],
+        default="zmq",
+        help="Request transport. gRPC is reserved for the upcoming runtime "
+        "implementation. Default is zmq.",
+    )
+    mp_group.add_argument(
         "--host",
         type=str,
         default="localhost",
-        help="Host to bind the ZMQ server. Default is localhost.",
+        help="Host to bind the request server. Default is localhost.",
     )
     mp_group.add_argument(
         "--port",
@@ -316,10 +337,10 @@ def add_mp_server_args(
         "--engine-type",
         type=str,
         default="default",
-        choices=["default", "blend", "blend_legacy"],
+        choices=["default", "blend"],
         help="Cache engine backend type. 'default' uses standard prefix caching; "
-        "'blend' selects CacheBlend V3 (the current implementation); "
-        "'blend_legacy' selects the original CacheBlend. Default is 'default'.",
+        "'blend' composes the blend module for non-prefix KV reuse. "
+        "Default is 'default'.",
     )
     mp_group.add_argument(
         "--supported-transfer-mode",
@@ -331,6 +352,16 @@ def add_mp_server_args(
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
         "or 'auto' to enable both transfer paths. "
         "Default is 'lmcache_driven'.",
+    )
+    mp_group.add_argument(
+        "--isolated-ipc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Assume engine workers and this server run in containers that "
+        "share no host IPC namespace or /dev/shm, and use IPC mechanisms "
+        "that work there (CUDA: timeline-semaphore events instead of "
+        "interprocess event handles). Must match the engine workers' "
+        "lmcache.mp.isolated_ipc setting. (Default is False)",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -398,6 +429,13 @@ def add_mp_server_args(
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
     mp_group.add_argument(
+        "--enable-dedup-content",
+        action="store_true",
+        help="--engine-type blend only: skip fingerprint registration for a "
+        "chunk whose content is already indexed, so the same text stored "
+        "behind different prefixes is indexed once. No effect otherwise.",
+    )
+    mp_group.add_argument(
         "--enable",
         type=str,
         nargs="*",
@@ -430,6 +468,7 @@ def parse_args_to_mp_server_config(
         raise ValueError("--runtime-plugin-config is not valid JSON: %s" % exc) from exc
     return MPServerConfig(
         instance_id=args.instance_id or str(uuid.uuid4()),
+        transport=args.transport,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
@@ -440,7 +479,9 @@ def parse_args_to_mp_server_config(
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
+        enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,
+        isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,

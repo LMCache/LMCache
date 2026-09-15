@@ -115,7 +115,7 @@ never reads. The controller takes it as a dependency instead. Its
 node-local counterpart one scope down is
 `distributed/storage_controllers/eviction_controller.py`.
 
-### CacheUsageManager (`usage_manager.py`)
+### CacheUsageManager (`views/usage_manager.py`)
 
 The byte totals are a **derived view of the global key directory**,
 constructed and maintained in this manager rather than inside the
@@ -220,10 +220,10 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
   ``policy.get_eviction_actions``. Salts without an explicit quota use the
   registry's default limit; while it is unset (``None``) they are skipped
   entirely — see QuotaManager above. No network, no mutation.
-- ``run(registry, http_client, check_interval)`` — the control loop
-  itself, started as an asyncio task by the app lifespan and cancelled on
-  shutdown. ``EVICTION_CHECK_INTERVAL = 0`` disables it (the task is
-  never created).
+- ``run(runtime)`` — the ``Controller`` lifetime hook, an async context
+  manager. Entering creates the loop task; ``EVICTION_CHECK_INTERVAL = 0``
+  creates none. Exiting cancels the loop, then drains the dispatches
+  already sent so a ``DELETE`` the last sweep launched still arrives.
 - ``execute_evictions(registry, http_client)`` — one pass: computes the plan and
   **fire-and-forget** ``DELETE /cache/objects`` to a holder MP server for each
   salt's victims; on confirmed deletion ``on_remove`` drops them from tracking.
