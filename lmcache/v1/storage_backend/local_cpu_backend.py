@@ -293,6 +293,55 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # other backends might still (temporarily) hold the memory object.
         return True
 
+    def _num_local_allocating_ranks(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: Optional[LMCacheMetadata] = None,
+    ) -> int:
+        """
+        Count how many ranks on *this host* each allocate their own full-size
+        local CPU buffer.
+
+        ``max_local_cpu_size`` is a per-rank budget, so the memory this host
+        actually pays is ``max_local_cpu_size * <this number>``. It is 1 only
+        when a single rank stores the cache on behalf of the others
+        (``save_only_first_rank``, which requires MLA); otherwise every rank
+        of the local tensor-parallel group builds its own allocator, so a
+        TP=8 deployment costs the host eight times the configured size.
+
+        Args:
+            config: The LMCache engine configuration
+            metadata: Optional metadata describing the distributed layout
+
+        Returns:
+            The number of allocating ranks on this host (at least 1)
+        """
+        if metadata is None:
+            return 1
+
+        local_world_size = max(1, metadata.local_world_size)
+
+        save_only_first_rank = bool(
+            config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
+        )
+        if not save_only_first_rank:
+            # Every rank initializes its own storage manager and allocator.
+            return local_world_size
+
+        # Only the first rank and any explicitly configured lookup-server
+        # ranks allocate. Count the ones that live on this host: local ranks
+        # are the contiguous range [base, base + local_world_size).
+        allocating = set(
+            config.get_lookup_server_worker_ids(metadata.use_mla, metadata.world_size)
+        )
+        allocating.add(metadata.first_rank)
+        base = metadata.worker_id - metadata.local_worker_id
+        local_allocating = sum(
+            1 for rank in allocating if base <= rank < base + local_world_size
+        )
+        return max(1, local_allocating)
+
     def _calculate_effective_cpu_size(
         self,
         configured_cpu_size: float,
@@ -303,55 +352,68 @@ class LocalCPUBackend(AllocatorBackendInterface):
         Calculate the effective CPU memory size based on system available memory
         and reserve memory configuration.
 
+        ``configured_cpu_size`` is per rank. When several ranks on the same host
+        each allocate a buffer, the host budget is split between them, so that
+        N concurrently initializing ranks cannot collectively overcommit the
+        node. Without this, a TP=8 deployment configured with 512 GB asks the
+        host for 4 TB and is killed by the OOM killer during startup.
+
         Args:
-            configured_cpu_size: The configured CPU memory size in GB
+            configured_cpu_size: The configured CPU memory size in GB, per rank
             config: The LMCache engine configuration
             metadata: Optional metadata for first rank handling
 
         Returns:
-            The effective CPU memory size in GB
+            The effective CPU memory size in GB, per rank
         """
-
-        save_only_first_rank = (
-            metadata is not None
-            and config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
-            and metadata.use_mla
+        num_local_ranks = self._num_local_allocating_ranks(config, metadata)
+        logger.info(
+            "LocalCPUBackend: max_local_cpu_size=%.2f GB per rank x %d "
+            "allocating rank(s) on this host = %.2f GB of host memory",
+            configured_cpu_size,
+            num_local_ranks,
+            configured_cpu_size * num_local_ranks,
         )
-        if not save_only_first_rank:
-            # Do not adjust cpu_size if save_only_first_rank is False for now
-            return configured_cpu_size
 
         # Get the system available memory and calculate effective cpu_size
         system_available_memory_gb = SystemMemoryDetector.get_available_memory_gb()
         # Get reserve memory size from config
         reserve_cpu_size = config.reserve_local_cpu_size
 
-        # TODO(baoloongmao): For disable save_only_first_rank case,
-        #  we need to avoid multi-rank race condition in future.
-        #  But for enable save_only_first_rank case,
-        #  we can handle reserve memory simply since non-first ranks
-        #  do not allocate memory.
-        # Effective memory: min(configured_size, available_memory - reserve_size)
-        if system_available_memory_gb > 0:
-            max_usable_memory = max(0, system_available_memory_gb - reserve_cpu_size)
-            effective_cpu_size = min(configured_cpu_size, max_usable_memory)
-            logger.info(
-                "Adjusted CPU memory size from %.2f GB "
-                "to %.2f GB "
-                "(system available: %.2f GB, "
-                "reserve: %.2f GB)",
-                configured_cpu_size,
-                effective_cpu_size,
-                system_available_memory_gb,
-                reserve_cpu_size,
-            )
-            assert effective_cpu_size > 0
-            return effective_cpu_size
-        else:
+        if system_available_memory_gb <= 0:
             logger.warning(
                 "Could not determine system available memory, using configured cpu_size"
             )
             return configured_cpu_size
+
+        # Effective memory: min(configured_size, (available - reserve) / ranks)
+        max_usable_memory = max(0.0, system_available_memory_gb - reserve_cpu_size)
+        per_rank_budget = max_usable_memory / num_local_ranks
+        if configured_cpu_size <= per_rank_budget:
+            return configured_cpu_size
+
+        if per_rank_budget <= 0:
+            raise ValueError(
+                "No host memory available for the local CPU cache: "
+                f"system available {system_available_memory_gb:.2f} GB, "
+                f"reserve_local_cpu_size {reserve_cpu_size:.2f} GB. "
+                "Lower reserve_local_cpu_size or free memory on the node."
+            )
+
+        logger.warning(
+            "Adjusted CPU memory size from %.2f GB to %.2f GB per rank "
+            "(system available: %.2f GB, reserve: %.2f GB, "
+            "allocating ranks on this host: %d). "
+            "max_local_cpu_size is a *per-rank* budget; set it to at most "
+            "%.2f GB to fit this node.",
+            configured_cpu_size,
+            per_rank_budget,
+            system_available_memory_gb,
+            reserve_cpu_size,
+            num_local_ranks,
+            per_rank_budget,
+        )
+        return per_rank_budget
 
     def initialize_allocator(
         self,

@@ -730,3 +730,191 @@ class TestLocalCPUBackendAllocatorAlignment:
             assert kwargs.get("align_bytes") == 4096
         finally:
             backend.memory_allocator.close()
+
+
+def _metadata(
+    *,
+    world_size: int,
+    local_world_size: int,
+    worker_id: int,
+    local_worker_id: int,
+    use_mla: bool,
+) -> LMCacheMetadata:
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=world_size,
+        local_world_size=local_world_size,
+        worker_id=worker_id,
+        local_worker_id=local_worker_id,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+        use_mla=use_mla,
+    )
+
+
+class TestEffectiveCPUSize:
+    """max_local_cpu_size is a per-rank budget; the host pays it once per
+    allocating rank. These cover the sizing arithmetic that keeps a
+    multi-rank deployment from overcommitting the node at startup."""
+
+    @pytest.mark.parametrize(
+        "use_mla, local_world_size, expected",
+        [
+            # No MLA: every rank of the local TP group allocates.
+            (False, 8, 8),
+            (False, 1, 1),
+            # MLA: save_only_first_rank defaults on, only rank 0 allocates.
+            (True, 8, 1),
+            (True, 1, 1),
+        ],
+    )
+    def test_num_local_allocating_ranks(self, use_mla, local_world_size, expected):
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        config = create_test_config()
+        metadata = _metadata(
+            world_size=local_world_size,
+            local_world_size=local_world_size,
+            worker_id=0,
+            local_worker_id=0,
+            use_mla=use_mla,
+        )
+        assert backend._num_local_allocating_ranks(config, metadata) == expected
+
+    def test_num_local_allocating_ranks_second_node(self):
+        """Ranks on a node that holds no allocating rank still report >= 1."""
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        config = create_test_config()
+        # 16 ranks over two 8-GPU hosts; this is rank 8, local rank 0 of host 1.
+        metadata = _metadata(
+            world_size=16,
+            local_world_size=8,
+            worker_id=8,
+            local_worker_id=0,
+            use_mla=True,
+        )
+        # The only allocating rank (global rank 0) lives on the other host.
+        assert backend._num_local_allocating_ranks(config, metadata) == 1
+
+    def test_num_local_allocating_ranks_no_metadata(self):
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        assert backend._num_local_allocating_ranks(create_test_config(), None) == 1
+
+    def test_tp_group_splits_the_host_budget(self, monkeypatch):
+        """TP=8 with a 512 GB request on a 2 TB node must be clamped, not
+        allowed to ask the host for 4 TB."""
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        config = create_test_config()
+        metadata = _metadata(
+            world_size=8,
+            local_world_size=8,
+            worker_id=0,
+            local_worker_id=0,
+            use_mla=False,
+        )
+        monkeypatch.setattr(
+            local_cpu_backend_module.SystemMemoryDetector,
+            "get_available_memory_gb",
+            staticmethod(lambda: 2048.0),
+        )
+        effective = backend._calculate_effective_cpu_size(512.0, config, metadata)
+        assert effective == pytest.approx(256.0)
+
+    def test_fitting_size_is_left_alone(self, monkeypatch):
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        config = create_test_config()
+        metadata = _metadata(
+            world_size=4,
+            local_world_size=4,
+            worker_id=0,
+            local_worker_id=0,
+            use_mla=False,
+        )
+        monkeypatch.setattr(
+            local_cpu_backend_module.SystemMemoryDetector,
+            "get_available_memory_gb",
+            staticmethod(lambda: 2048.0),
+        )
+        assert backend._calculate_effective_cpu_size(128.0, config, metadata) == 128.0
+
+    def test_mla_keeps_the_full_size(self, monkeypatch):
+        """With save_only_first_rank only one rank allocates, so the
+        configured size is also the host footprint."""
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        config = create_test_config()
+        metadata = _metadata(
+            world_size=8,
+            local_world_size=8,
+            worker_id=0,
+            local_worker_id=0,
+            use_mla=True,
+        )
+        monkeypatch.setattr(
+            local_cpu_backend_module.SystemMemoryDetector,
+            "get_available_memory_gb",
+            staticmethod(lambda: 2048.0),
+        )
+        assert backend._calculate_effective_cpu_size(512.0, config, metadata) == 512.0
+
+    def test_reserve_is_taken_off_the_top(self, monkeypatch):
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            lmcache_instance_id="test_instance",
+            reserve_local_cpu_size=48.0,
+        )
+        metadata = _metadata(
+            world_size=4,
+            local_world_size=4,
+            worker_id=0,
+            local_worker_id=0,
+            use_mla=False,
+        )
+        monkeypatch.setattr(
+            local_cpu_backend_module.SystemMemoryDetector,
+            "get_available_memory_gb",
+            staticmethod(lambda: 1048.0),
+        )
+        # (1048 - 48) / 4 ranks
+        effective = backend._calculate_effective_cpu_size(512.0, config, metadata)
+        assert effective == pytest.approx(250.0)
+
+    def test_unknown_available_memory_keeps_configured_size(self, monkeypatch):
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        config = create_test_config()
+        metadata = _metadata(
+            world_size=8,
+            local_world_size=8,
+            worker_id=0,
+            local_worker_id=0,
+            use_mla=False,
+        )
+        monkeypatch.setattr(
+            local_cpu_backend_module.SystemMemoryDetector,
+            "get_available_memory_gb",
+            staticmethod(lambda: 0.0),
+        )
+        assert backend._calculate_effective_cpu_size(512.0, config, metadata) == 512.0
+
+    def test_no_usable_memory_raises(self, monkeypatch):
+        backend = LocalCPUBackend.__new__(LocalCPUBackend)
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            lmcache_instance_id="test_instance",
+            reserve_local_cpu_size=64.0,
+        )
+        metadata = _metadata(
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            use_mla=False,
+        )
+        monkeypatch.setattr(
+            local_cpu_backend_module.SystemMemoryDetector,
+            "get_available_memory_gb",
+            staticmethod(lambda: 32.0),
+        )
+        with pytest.raises(ValueError, match="No host memory available"):
+            backend._calculate_effective_cpu_size(512.0, config, metadata)
