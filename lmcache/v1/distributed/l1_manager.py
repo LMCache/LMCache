@@ -11,7 +11,7 @@ import threading
 # First Party
 from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
@@ -22,6 +22,14 @@ from lmcache.v1.distributed.memory_manager import (
 )
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
+)
+from lmcache.v1.distributed.memory_manager.reconfiguration import (
+    L1ReconfigureError,
+)
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaState,
+    DevDaxArenaStatus,
+    DevDaxRemoveMode,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -201,11 +209,9 @@ class L1Manager:
         else:
             self._memory_manager = L1MemoryManager(config.memory_config)
 
-        # Precomputed: it derives from config alone and never changes, and
-        # report_status runs under the global L1 lock on a hot polling path.
-        self._configured_capacity_bytes = sum(
-            get_configured_capacity_bytes(config).values()
-        )
+        # CPU and GDS capacity is fixed at boot. Device-DAX overlays its entry
+        # from the live arena pool because devices can be added or drained.
+        self._boot_capacity_bytes_by_backend = get_configured_capacity_bytes(config)
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
 
@@ -847,9 +853,121 @@ class L1Manager:
         """
         return self._memory_manager.get_memory_usage()
 
+    def get_capacity_bytes_by_backend(self) -> dict[L1BackendType, int]:
+        """Return the current declared L1 capacity per backing medium.
+
+        CPU and GDS retain their boot-configured capacity. For Device-DAX,
+        only active arenas count as usable capacity; draining arenas stop
+        accepting allocations and are excluded immediately.
+
+        Returns:
+            A fresh mapping from backing-medium type to usable capacity in
+            bytes, with zero-sized media omitted.
+
+        Note:
+            Device-DAX arena state is snapshotted under the allocator's pool
+            lock. A separate usage query may observe an adjacent topology if
+            reconfiguration is concurrent.
+        """
+        capacities = self._boot_capacity_bytes_by_backend.copy()
+        manager = self._memory_manager
+        if isinstance(manager, DevDaxL1MemoryManager):
+            active_bytes = sum(
+                status.size_in_bytes
+                for status in manager.get_arena_statuses()
+                if status.state is DevDaxArenaState.ACTIVE
+            )
+            if active_bytes > 0:
+                capacities[L1BackendType.DEVDAX] = active_bytes
+            else:
+                capacities.pop(L1BackendType.DEVDAX, None)
+        return capacities
+
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
+
+    def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
+        """Return runtime status for every Device-DAX arena.
+
+        Returns:
+            One status per mapped arena, in pool order.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed.
+        """
+        return self._require_devdax_memory_manager().get_arena_statuses()
+
+    def get_devdax_arena_status(self, device_path: str) -> DevDaxArenaStatus:
+        """Return the status of the Device-DAX arena mapped at ``device_path``.
+
+        Args:
+            device_path: Path (or any alias) of the mapped device.
+
+        Returns:
+            The arena's current status.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed (409) or no
+                arena is mapped at ``device_path`` (404).
+        """
+        return self._require_devdax_memory_manager().get_arena_status(device_path)
+
+    def memory_region_count(self) -> int:
+        """Return how many memory regions back L1 for transfer registration.
+
+        A Device-DAX L1 counts its DRAM tier (hybrid mode) plus every mapped
+        arena, active or draining. Other memory managers expose one buffer.
+
+        Returns:
+            The number of memory regions.
+        """
+        manager = self._memory_manager
+        if isinstance(manager, DevDaxL1MemoryManager):
+            return manager.memory_region_count()
+        return 1
+
+    def add_devdax_device(
+        self,
+        device_path: str,
+        size_in_bytes: int,
+    ) -> DevDaxArenaStatus:
+        """Add a Device-DAX device to the L1 arena pool.
+
+        Args:
+            device_path: Path of the Device-DAX device to map.
+            size_in_bytes: Number of bytes to map.
+
+        Returns:
+            Status of the newly added arena.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed or the request
+                cannot be applied.
+        """
+        return self._require_devdax_memory_manager().add_device(
+            device_path, size_in_bytes
+        )
+
+    def remove_devdax_device(
+        self,
+        device_path: str,
+        mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+    ) -> DevDaxArenaStatus:
+        """Remove a Device-DAX device from the L1 arena pool.
+
+        Args:
+            device_path: Path of the mapped Device-DAX device.
+            mode: Removal strategy. Only drain mode is currently supported.
+
+        Returns:
+            Status of the arena after the removal request.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed or the request
+                cannot be applied.
+        """
+        return self._require_devdax_memory_manager().remove_device(device_path, mode)
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
@@ -876,8 +994,8 @@ class L1Manager:
                 temporary += 1
         used, total = self._memory_manager.get_memory_usage()
         # ``memory_total_bytes`` is what the allocator currently backs (the
-        # grown heap on the lazy tier); this is the declared size. Summed to
-        # fit this dict's flat shape; ``0`` means undeclared.
+        # grown heap on the lazy tier). ``memory_configured_bytes`` is the
+        # current declared capacity, summed to fit this dict's flat shape.
         return {
             "is_healthy": self._memory_manager.memcheck(),
             "total_object_count": len(self._objects),
@@ -886,7 +1004,9 @@ class L1Manager:
             "temporary_count": temporary,
             "memory_used_bytes": used,
             "memory_total_bytes": total,
-            "memory_configured_bytes": self._configured_capacity_bytes,
+            "memory_configured_bytes": sum(
+                self.get_capacity_bytes_by_backend().values()
+            ),
             "memory_usage_ratio": used / total if total > 0 else 0.0,
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,
@@ -934,3 +1054,12 @@ class L1Manager:
             size_bytes=memory_obj.get_size(),
             backend=self._memory_manager.get_backend_type(memory_obj),
         )
+
+    def _require_devdax_memory_manager(self) -> DevDaxL1MemoryManager:
+        """Return the Device-DAX manager or raise a reconfiguration error."""
+        if not isinstance(self._memory_manager, DevDaxL1MemoryManager):
+            raise L1ReconfigureError(
+                409,
+                "L1 is not Device-DAX backed (--l1-devdax-path not set)",
+            )
+        return self._memory_manager

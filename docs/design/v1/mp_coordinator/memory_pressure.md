@@ -23,11 +23,11 @@ translation.
 
 **Declaring capacity** (MP server → coordinator):
 
-1. Something changes: the server registers, or an L2 adapter is added,
-   removed, or reconfigured.
-2. `StorageManager.publish_capacity()` builds the topology —
-   `get_configured_capacity_bytes()` for L1 per medium, each adapter's
-   `get_usage().total_capacity_bytes` for L2 — and publishes
+1. Something changes: the server registers, a Device-DAX L1 arena is added or
+   starts draining, or an L2 adapter is added, removed, or reconfigured.
+2. The `StorageManager` capacity-publication path builds the topology —
+   `L1Manager.get_capacity_bytes_by_backend()` for L1 per medium, each
+   adapter's `get_usage().total_capacity_bytes` for L2 — and publishes
    `SM_CAPACITY_CHANGED` on the observability bus.
 3. `CacheEventSubscriber` turns it into one `config` batch per compartment,
    all stamped with one `capacity_revision`, and flushes them with whatever
@@ -82,16 +82,16 @@ the other consumers, all of which are entries-driven and need no change.
 
 ## Declarations, not deltas
 
-A declaration is always the whole topology. That is what makes a lossy
-channel acceptable: a dropped batch is repaired by the next declaration,
-where a dropped byte delta would be permanent. The emitter also holds an
-unsent declaration across a publish failure.
+A declaration is always the whole topology. A later declaration can repair a
+dropped batch, whereas a dropped byte delta would be permanent.
 
 `(incarnation, capacity_revision)` groups batches: a newer stamp starts a
 fresh set, an equal one extends it, an older one is dropped. **This is what
-retires a compartment** — a declaration that omits it never re-adds it, so a
-deleted L2 adapter stops being reported. Incarnation fencing and seq dedup
-come from the gate; nothing here duplicates them.
+retires a capacity compartment** — a declaration that omits it never re-adds
+it, so a deleted L2 adapter or the last active Device-DAX arena stops being
+declared. Surviving usage for an omitted compartment remains visible with
+unknown capacity. Incarnation fencing and seq dedup come from the gate; nothing
+here duplicates them.
 
 The revision is assigned by the subscriber, beside `seq` and for the same
 reason: the bus drains on one thread, so neither counter needs a lock and a
@@ -106,17 +106,18 @@ Two gotchas:
   `_build_capacities` emits one entry per medium and adapter, so a correct
   producer cannot do it.
 
-## Capacity is the configured size, not the live heap
+## Capacity is the declared usable size, not the live heap
 
-| Manager | `get_memory_usage()[1]` | `get_configured_capacity_bytes()` |
+| Manager | `get_memory_usage()[1]` | Declared capacity |
 | --- | --- | --- |
-| `L1MemoryManager` (default, lazy) | grown heap | `{dram: size_in_bytes}` |
-| `GDSL1MemoryManager` | configured slab | `{gds: size_in_bytes}` |
-| `DevDaxL1MemoryManager` | live arenas | `{devdax: …}` + `{dram: …}` if hybrid |
+| `L1MemoryManager` (default, lazy) | grown heap | configured DRAM size |
+| `GDSL1MemoryManager` | configured slab | configured GDS slab size |
+| `DevDaxL1MemoryManager` | DRAM + active arenas | active Device-DAX arenas + configured DRAM if hybrid |
 
 The lazy allocator's total is the heap it has grown so far, so a freshly
 booted server would report itself nearly full and appear to drain as the pool
-warms. The configured size is stable from boot.
+warms. CPU, GDS, and hybrid DRAM capacities are fixed at startup. Device-DAX
+capacity is the sum of active arenas; draining arenas are excluded.
 
 L1 is declared **per medium** because one tier can span two: a hybrid
 Device-DAX tier backs objects with both `devdax` and `dram`, and each
@@ -135,8 +136,9 @@ So `usage_ratio` is `null` — not `0.0`, not `-1.0`. A number there reads as
 real occupancy, and a fleet view that treats capacity-less backends as empty
 reports "healthy" regardless of what is happening.
 
-Ratios above `1.0` are **not clamped**: a tier holding more than its declared
-cap means the declaration is wrong, and hiding that hides a misconfiguration.
+Ratios above `1.0` are **not clamped**. They can expose a bad declaration, and
+are also expected while a draining Device-DAX arena still holds live bytes that
+no longer count as usable capacity.
 
 ## Shared pools are counted once
 

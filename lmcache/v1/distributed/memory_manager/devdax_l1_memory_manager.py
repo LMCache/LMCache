@@ -10,9 +10,13 @@ from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.memory_manager.l1_memory_manager import L1MemoryManager
+from lmcache.v1.distributed.memory_manager.reconfiguration import (
+    L1ReconfigureError,
+)
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaStatus,
     DevDaxMemoryAllocator,
+    DevDaxNotMappedError,
     DevDaxRemoveMode,
 )
 from lmcache.v1.memory_management import MemoryObj
@@ -60,9 +64,6 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             shm_name=config.shm_name or None,
             align_bytes=config.align_bytes,
         )
-        # Retained so runtime reconfiguration can report the configured topology
-        # alongside the live arena pool.
-        self._config = config
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
 
@@ -115,14 +116,15 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             The status of the newly added arena.
 
         Raises:
-            ValueError: If ``device_path`` is empty, ``size_in_bytes`` is not
-                positive, or the device is already mapped.
-            RuntimeError: If the underlying allocator is closed or the device
-                capacity is smaller than ``size_in_bytes``.
-            OSError: If the device cannot be opened or mapped.
+            L1ReconfigureError: 409 when the request conflicts with the device
+                or pool state (already mapped, alignment violation, capacity
+                exceeded, allocator closed, device not openable).
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
-        return allocator.add_device(device_path, size_in_bytes)
+        try:
+            return allocator.add_device(device_path, size_in_bytes)
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise L1ReconfigureError(409, str(exc)) from exc
 
     def remove_device(
         self,
@@ -146,11 +148,44 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             immediately, otherwise ``DRAINING`` with the live allocation count.
 
         Raises:
-            ValueError: If ``mode`` is unsupported, no arena is mapped at
-                ``device_path``, or the arena is the primary (non-removable) one.
+            L1ReconfigureError: 404 when no arena is mapped at ``device_path``;
+                409 when ``mode`` is unsupported or the arena is primary and
+                non-removable.
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
-        return allocator.remove_device(device_path, mode)
+        try:
+            return allocator.remove_device(device_path, mode)
+        except DevDaxNotMappedError as exc:
+            raise L1ReconfigureError(404, str(exc)) from exc
+        except ValueError as exc:
+            raise L1ReconfigureError(409, str(exc)) from exc
+
+    def get_arena_status(self, device_path: str) -> DevDaxArenaStatus:
+        """Return the status of the Device-DAX arena mapped at ``device_path``.
+
+        Args:
+            device_path: Path (or any alias) of the mapped device.
+
+        Returns:
+            The arena's current status.
+
+        Raises:
+            L1ReconfigureError: 404 when no arena is mapped at ``device_path``.
+        """
+        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        try:
+            return allocator.arena_status(device_path)
+        except DevDaxNotMappedError as exc:
+            raise L1ReconfigureError(404, str(exc)) from exc
+
+    def memory_region_count(self) -> int:
+        """Return the number of memory regions backing L1.
+
+        Returns:
+            One for the DRAM tier of a hybrid configuration, if present, plus
+            one per mapped Device-DAX arena, active or draining.
+        """
+        return cast(DevDaxMemoryAllocator, self._allocator).memory_region_count()
 
     def get_arena_statuses(self) -> list[DevDaxArenaStatus]:
         """Return a status snapshot of every Device-DAX arena in the L1 pool.
