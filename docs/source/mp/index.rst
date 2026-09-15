@@ -5,11 +5,15 @@ Overview
    :hidden:
 
    request_transport
+   shared_l1
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances connect to over ZMQ.  One LMCache server per node can serve
 multiple vLLM pods, providing process isolation, shared caching, and
 independent resource scaling.
+
+For one physical Device-DAX pool shared across MP servers, see the experimental
+:doc:`shared_l1` setup guide.
 
 .. contents::
    :local:

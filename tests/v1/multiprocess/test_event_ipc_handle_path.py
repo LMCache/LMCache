@@ -70,8 +70,17 @@ class _NoopDispatcher:
 class _FakeStorageManager:
     """Minimal storage surface used by the server handle-path test."""
 
+    def __init__(self) -> None:
+        self.uses_shared_l1 = False
+        self.reserved: dict[object, object] = {}
+        self.aborted: list[list[object]] = []
+        self.finished: list[list[object]] = []
+
     def finish_write(self, keys: list[object]) -> None:
-        return None
+        self.finished.append(keys)
+
+    def abort_write(self, keys: list[object]) -> None:
+        self.aborted.append(keys)
 
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
@@ -82,7 +91,7 @@ class _FakeStorageManager:
         layout: object,
         mode: str,
     ) -> dict[object, object]:
-        return {}
+        return self.reserved
 
     @contextmanager
     def read_prefetched_results(self, keys: list[object]) -> Iterator[list[object]]:
@@ -221,12 +230,13 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     )
 
     storage_manager = _FakeStorageManager()
+    stream_events: list[Any] = []
     server_context = SimpleNamespace(
         chunk_size=1,
         storage_manager=storage_manager,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
-            publish_on_stream=lambda stream, event: None,
+            publish_on_stream=lambda stream, event: stream_events.append(event),
             has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
@@ -280,6 +290,106 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     for index, call in enumerate(backend.calls):
         if call[0] == "export":
             assert backend.calls[index - 1][0] == "record"
+
+    # Shared-L1 store: commit is a synchronous boundary — record, then
+    # synchronize the event, then finish_write — so nothing becomes globally
+    # readable before every D2H byte is on the device.
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "all_null_chunk_masks",
+        lambda *args, **kwargs: [[False]],
+    )
+    shared_key = object()
+    storage_manager.uses_shared_l1 = True
+    storage_manager.reserved = {shared_key: SimpleNamespace(get_size=lambda: 64)}
+    server_context.resolve_obj_keys = lambda key, group_ids: [[shared_key]]
+    assert module.store(key, 1, [[0]], b"shared-store") == (
+        b"completion-handle",
+        True,
+    )
+    assert storage_manager.finished == [[shared_key]]
+    assert [call[0] for call in backend.calls[-5:]] == [
+        "import",
+        "wait",
+        "record",
+        "synchronize",
+        "export",
+    ]
+    assert stream_events[-1].metadata["stored_count"] == 1
+    assert stream_events[-1].metadata["total_bytes"] == 64
+
+    def fail_transfer(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("injected D2H failure")
+
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "transfer_kv_per_object_group",
+        fail_transfer,
+    )
+    assert module.store(key, 1, [[0]], b"failed-store") == (
+        b"completion-handle",
+        False,
+    )
+    assert storage_manager.aborted == [[shared_key]]
+
+    record_failure_key = object()
+    storage_manager.reserved = {
+        record_failure_key: SimpleNamespace(get_size=lambda: 64)
+    }
+    server_context.resolve_obj_keys = lambda key, group_ids: [[record_failure_key]]
+    record_event = backend.record_event
+
+    def fail_record(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("injected record failure")
+
+    monkeypatch.setattr(backend, "record_event", fail_record)
+    with pytest.raises(RuntimeError, match="record failure"):
+        module.store(key, 1, [[0]], b"failed-record")
+    assert storage_manager.aborted[-1] == [record_failure_key]
+    monkeypatch.setattr(backend, "record_event", record_event)
+
+    synchronize_key = object()
+    storage_manager.reserved = {synchronize_key: SimpleNamespace(get_size=lambda: 64)}
+    server_context.resolve_obj_keys = lambda key, group_ids: [[synchronize_key]]
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "transfer_kv_per_object_group",
+        lambda *args, **kwargs: None,
+    )
+
+    def fail_synchronize(event: object, device: object) -> None:
+        raise RuntimeError("injected synchronization failure")
+
+    monkeypatch.setattr(backend, "synchronize_event", fail_synchronize)
+    assert module.store(key, 1, [[0]], b"failed-sync") == (
+        b"completion-handle",
+        False,
+    )
+    assert storage_manager.aborted[-1] == [synchronize_key]
+
+
+def test_shared_l1_rejects_tp_above_one_at_registration() -> None:
+    """Shared L1 M0 is TP=1 only: a TP>1 worker cannot register KV caches."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
+
+    storage_manager = _FakeStorageManager()
+    storage_manager.uses_shared_l1 = True
+    module = lmcache_driven_transfer.LMCacheDrivenTransferModule.__new__(
+        lmcache_driven_transfer.LMCacheDrivenTransferModule
+    )
+    module._ctx = cast(Any, SimpleNamespace(storage_manager=storage_manager))
+
+    with pytest.raises(ValueError, match="TP=1"):
+        module.register_kv_cache(
+            instance_id=1,
+            kv_caches=cast(Any, {}),
+            model_name="model",
+            world_size=2,
+            engine_type=cast(Any, None),
+            layout_hints=cast(Any, None),
+            engine_group_infos=[],
+        )
 
 
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
