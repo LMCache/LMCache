@@ -34,10 +34,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-from lmcache.v1.multiprocess.transfer_utils import (  # noqa: F401
-    _HAS_NATIVE_OBJECT_GROUP_TRANSFER,
-    _HAS_TRANSFER_PHASE_TIMING,
-    batched_iteration_with_skip,
+from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
     transfer_kv_per_object_group,
 )
