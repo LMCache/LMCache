@@ -72,13 +72,14 @@ fi
 
 CONNECTOR_CONFIG() {
     # $1 = lmcache mp port
-    echo "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $1, \"lmcache.mp.mq_timeout\": 10}}"
+    echo "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $1, \"lmcache.mp.mq_timeout\": 10}}"
 }
 
 launch_lmcache() {
-    # $1=gpu $2=zmq_port $3=http_port $4=p2p_advertise $5=instance_id $6=logname
+    # $1=gpu $2=request_port $3=http_port $4=p2p_advertise $5=instance_id $6=logname
     CUDA_VISIBLE_DEVICES="$1" \
     lmcache server \
+        --transport "$LMCACHE_REQUEST_TRANSPORT" \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
         --max-workers "$MAX_WORKERS" \
