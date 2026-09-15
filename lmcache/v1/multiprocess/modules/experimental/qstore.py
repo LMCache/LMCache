@@ -28,11 +28,13 @@ from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
-    downsample_and_stage_block_ids,
     get_layout_desc,
-    transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
+from lmcache.v1.multiprocess.object_group_transfer import (
+    downsample_and_stage_block_ids,
+    transfer_kv_per_object_group,
+)
 from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
