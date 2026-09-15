@@ -135,6 +135,42 @@ skips them — they never form their own info. (Placing them in a group would
 duplicate work and, when their block size differs from the group they default
 into, corrupt the per-group block-id counts.)
 
+### Scratch groups
+
+A scratch group is an engine group whose spec vLLM marks
+`prefix_cacheable = False`: one block per request for the request's lifetime,
+addressed by position modulo the block size rather than by token range. vLLM
+never hashes these blocks and its own prefix cache never restores them. Known
+instances, both holding the raw keys of the compression group that is still
+open:
+
+- Qwen3.8-Flash-Next's QSA compressor ring (`CircularBufferSpec`; capacity
+  set by the compression ratio and the speculative lookahead).
+- GLM-5.3-Flash's kpool tail (`KpoolTailSpec`; `block_size = index_kpool`,
+  raw key plus gate score, overwritten in place by `pos % kpool`).
+
+LMCache excludes scratch groups end to end:
+
+- `is_scratch_spec` (`kv_cache_groups.py`) detects the spec by
+  `prefix_cacheable`; specs without the property are token-paged.
+- `get_tokens_per_block` reports `0` for them; `0` is the scratch marker
+  throughout the scheduler-side geometry.
+- Registration skips format discovery for their layers and tags them
+  `EXCLUDED_ENGINE_GROUP`, so they form no info and no kernel group. Since
+  their bytes are never transferred, a scratch tensor whose layout the
+  transfer kernels reject must not fail registration.
+- Every computation over `group_tokens_per_block` (storable-prefix minimum in
+  `GetStoreMetadata`, `slice_block_ids_per_group`, hit alignment, chunk-size
+  validation) skips spans of `0`.
+
+This is correct only because LMCache serves chunk-aligned prefixes. vLLM
+requires the cache block size to be a multiple of the compression group width
+(`compress_ratio`, `index_kpool`) and the chunk size is a multiple of the
+block size, so at every chunk boundary the open compression group is empty
+and the scratch block holds nothing the next step reads. Resuming mid-group (for example a prefill-to-decode handoff at an
+arbitrary prompt length) does need the ring's content, and this path does not
+provide it.
+
 **Store is all-or-nothing (fail-closed):** if the block IDs don't fully cover
 every chunk for every group (e.g. a caller bug), or a copy fails, the whole
 store is skipped and nothing is committed — a later retrieve simply misses and
