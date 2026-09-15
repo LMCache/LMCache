@@ -49,7 +49,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     L1ManagerConfig,
@@ -66,13 +65,6 @@ except ImportError:
     pytest.skip(
         "Skipping because L1 manager cannot be imported", allow_module_level=True
     )
-
-if not torch_dev.is_available():
-    pytest.skip(
-        f"Requires available {torch_device_type} runtime",
-        allow_module_level=True,
-    )
-
 
 # =============================================================================
 # Fixtures
@@ -151,6 +143,81 @@ def make_object_key(chunk_hash: int, model_name: str = "test_model", kv_rank: in
 # =============================================================================
 # Tests for L1Manager.reserve_read()
 # =============================================================================
+
+
+@pytest.mark.no_shared_allocator
+class TestWriteCompletion:
+    """Read visibility requires a successfully completed write."""
+
+    def test_expired_new_write_is_unreadable(
+        self, basic_l1_config: L1ManagerConfig, basic_layout: MemoryLayoutDesc
+    ) -> None:
+        basic_l1_config.write_ttl_seconds = 0
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+        try:
+            assert manager.reserve_write([key], [False], basic_layout)[key][0] == (
+                L1Error.SUCCESS
+            )
+            assert manager.reserve_read([key])[key] == (
+                L1Error.KEY_NOT_READABLE,
+                None,
+            )
+            assert manager.unsafe_read([key])[key] == (
+                L1Error.KEY_NOT_READABLE,
+                None,
+            )
+            assert manager.finish_write([key])[key] == L1Error.KEY_IN_WRONG_STATE
+            assert manager.finish_write_and_reserve_read([key])[key] == (
+                L1Error.KEY_IN_WRONG_STATE,
+                None,
+            )
+            assert manager.reserve_read([key])[key][0] == L1Error.KEY_NOT_READABLE
+            assert manager.delete([key])[key] == L1Error.SUCCESS
+        finally:
+            manager.close()
+
+    @pytest.mark.parametrize(
+        "finish_method", ["finish_write", "finish_write_and_reserve_read"]
+    )
+    def test_expired_update_requires_write_completion(
+        self,
+        basic_l1_config: L1ManagerConfig,
+        basic_layout: MemoryLayoutDesc,
+        finish_method: str,
+    ) -> None:
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+        try:
+            manager.reserve_write([key], [False], basic_layout)
+            assert manager.finish_write([key])[key] == L1Error.SUCCESS
+            assert manager.reserve_read([key])[key][0] == L1Error.SUCCESS
+            manager.finish_read([key])
+
+            update_result = manager.reserve_write(
+                [key], [False], basic_layout, mode="update"
+            )
+            assert update_result[key][0] == L1Error.SUCCESS
+            state = manager.get_object_state(key)
+            assert state is not None
+            # Resetting the public lease models expiry deterministically.
+            state.write_lock.reset()
+            assert manager.reserve_read([key])[key] == (
+                L1Error.KEY_NOT_READABLE,
+                None,
+            )
+            assert manager.unsafe_read([key])[key][0] == L1Error.KEY_NOT_READABLE
+
+            write_result = manager.reserve_write(
+                [key], [False], basic_layout, mode="update"
+            )
+            assert write_result[key][0] == L1Error.SUCCESS
+            completed = getattr(manager, finish_method)([key])
+            assert completed[key] in (L1Error.SUCCESS, write_result[key])
+            assert manager.reserve_read([key])[key] == write_result[key]
+            assert manager.unsafe_read([key])[key] == write_result[key]
+        finally:
+            manager.close()
 
 
 class TestReserveRead:

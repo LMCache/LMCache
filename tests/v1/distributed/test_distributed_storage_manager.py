@@ -11,7 +11,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
@@ -33,12 +32,6 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConf
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from tests.v1.distributed.utils import should_use_lazy_alloc
-
-if not torch_dev.is_available():
-    pytest.skip(
-        f"Requires available {torch_device_type} runtime",
-        allow_module_level=True,
-    )
 
 try:
     # First Party
@@ -223,6 +216,60 @@ class TestStorageManagerBasic:
         storage_manager.finish_write([object_key])
 
         storage_manager.close()
+
+    @pytest.mark.no_shared_allocator
+    def test_expired_store_recovers_after_cleanup(
+        self,
+        basic_storage_manager_config: StorageManagerConfig,
+        basic_layout: MemoryLayoutDesc,
+    ) -> None:
+        """An expired store stays hidden until cleanup and a completed new store."""
+        basic_storage_manager_config.l1_manager_config.write_ttl_seconds = 2
+        storage_manager = StorageManager(basic_storage_manager_config)
+        key = make_object_key(12345)
+        spec = PrefetchRequestSpec([key], {0: basic_layout})
+        try:
+            reserved = storage_manager.reserve_write([key], basic_layout, mode="new")
+            assert key in reserved
+            tensor = reserved[key].tensor
+            assert tensor is not None
+            tensor.fill_(1)
+            handle = storage_manager.submit_prefetch_task(spec)
+            assert wait_for_prefetch_status(storage_manager, handle) == 0
+
+            assert wait_for_condition(
+                lambda: (
+                    storage_manager.report_status()["l1_manager"]["write_locked_count"]
+                    == 0
+                )
+            ), "Write lease did not expire"
+
+            handle = storage_manager.submit_prefetch_task(spec)
+            assert wait_for_prefetch_status(storage_manager, handle) == 0
+            assert storage_manager.unsafe_read([key]) == ([], [])
+            storage_manager.finish_write([key])
+            handle = storage_manager.submit_prefetch_task(spec)
+            assert wait_for_prefetch_status(storage_manager, handle) == 0
+            assert storage_manager.reserve_write([key], basic_layout, mode="new") == {}
+
+            assert storage_manager.delete_l1_keys([key]) == (1, 0)
+            reserved = storage_manager.reserve_write([key], basic_layout, mode="new")
+            assert key in reserved
+            tensor = reserved[key].tensor
+            assert tensor is not None
+            tensor.fill_(7)
+            storage_manager.finish_write([key])
+            handle = storage_manager.submit_prefetch_task(spec)
+            assert wait_for_prefetch_status(storage_manager, handle) == 1
+            with storage_manager.read_prefetched_results([key]) as objects:
+                assert objects is not None
+                assert len(objects) == 1
+                recovered = objects[0].tensor
+                assert recovered is not None
+                torch.testing.assert_close(recovered, torch.full_like(recovered, 7))
+            storage_manager.finish_read_prefetched([key])
+        finally:
+            storage_manager.close()
 
     def test_reserve_write_multiple_keys(
         self, basic_storage_manager_config, basic_layout
