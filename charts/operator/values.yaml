@@ -1,0 +1,130 @@
+# LMCache Operator Helm Chart Values
+#
+# This chart installs the LMCache Kubernetes operator, which automates
+# the deployment and lifecycle management of LMCache multiprocess cache
+# servers.  The operator manages three CRDs: LMCacheEngine, CacheBlendEngine,
+# and LMCacheCoordinator.
+#
+# After installing the operator, create an LMCacheEngine CR to deploy
+# cache server pods.  See the operator documentation:
+#   https://docs.lmcache.ai/mp/operator.html
+
+# -- Install CRDs alongside the operator.  Set to false if you manage CRDs
+# separately (e.g. via a dedicated CRD chart or kubectl apply).
+crdInstall: true
+
+# -- Container image for the operator controller-manager.
+image:
+  repository: lmcache/lmcache-operator
+  tag: v0.1.1
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets for the operator pod (private registries).
+imagePullSecrets: []
+
+# -- Number of operator pods (leader election is enabled by default).
+replicas: 1
+
+# -- Leader election for high-availability deployments (replicas > 1).
+leaderElection:
+  enabled: true
+  # -- Lease duration for leader election (Go duration string).
+  leaseDuration: ""
+  # -- Renew deadline for leader election (Go duration string).
+  renewDeadline: ""
+  # -- Retry period for leader election (Go duration string).
+  retryPeriod: ""
+
+# -- Resource requests and limits for the operator container.
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# -- Pod-level security context for the operator pod.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context for the operator container.
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- Node selector for the operator pod.
+nodeSelector: {}
+
+# -- Tolerations for the operator pod.
+tolerations: []
+
+# -- Affinity rules for the operator pod.
+affinity: {}
+
+# -- Extra labels added to all resources the chart creates.
+commonLabels: {}
+
+# -- Extra labels on the operator pod.
+podLabels: {}
+
+# -- Extra annotations on the operator pod.
+podAnnotations: {}
+
+# -- Termination grace period (seconds) for the operator pod.
+terminationGracePeriodSeconds: 10
+
+# -- Metrics endpoint configuration for the controller-manager.
+metrics:
+  # -- Enable the metrics endpoint.  When enabled, the chart creates a
+  # Service exposing the metrics port and the RBAC needed for
+  # authenticated/authorized metrics access.
+  enabled: true
+  # -- Bind address for the metrics endpoint.  Use ":8443" for HTTPS
+  # (default, secure) or ":8080" for HTTP.
+  bindAddress: ":8443"
+  # -- Use secure (HTTPS) metrics serving.
+  secure: true
+  # -- Service port for the metrics Service.
+  servicePort: 8443
+
+# -- Mutating admission webhook for connection injection.
+# When enabled, the chart creates the MutatingWebhookConfiguration and the
+# webhook Service.  Requires cert-manager to be installed in the cluster.
+webhook:
+  enabled: true
+  # -- Port the webhook server listens on inside the pod.
+  port: 9443
+  # -- Failure policy for the webhook (Ignore or Fail).
+  failurePolicy: Ignore
+
+# -- cert-manager integration for the webhook serving certificate.
+# Requires cert-manager to be installed in the cluster.  When enabled, the
+# chart creates an Issuer and Certificate that provision the TLS cert for the
+# webhook server.  Disable only if you manage the webhook certificate
+# out-of-band.
+certManager:
+  enabled: true
+
+# -- Create the admin, editor, and viewer ClusterRoles for the CRDs.
+# These roles are not used by the operator itself; they help cluster admins
+# delegate permissions to other users.
+crdRoles:
+  enabled: true
+
+# -- Extra environment variables for the operator container.
+env: []
+
+# -- Extra volumes for the operator pod.
+volumes: []
+
+# -- Extra volume mounts for the operator container.
+volumeMounts: []
+
+# -- Extra args appended to the operator container command.
+extraArgs: []
