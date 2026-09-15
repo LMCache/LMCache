@@ -26,9 +26,19 @@ class MPCoordinatorConfig:
         eviction_check_interval: Seconds between eviction sweeps. A value of
             ``0`` disables the eviction loop.
         eviction_ratio: Fraction of tracked keys (by count) to evict per
-            cycle (0.0 to 1.0).
+            cycle (0.0 to 1.0). Used only when ``target_watermark`` is
+            ``0.0`` (legacy fixed-ratio).
         trigger_watermark: Eviction fires when usage reaches this fraction
-            of the quota (0.0 to 1.0).
+            of the quota (0.0 to 1.0). The high watermark of the hysteresis
+            band.
+        target_watermark: Low watermark of the eviction hysteresis band.
+            When set above ``0.0`` (and below ``trigger_watermark``), a
+            sweep that fires at ``trigger_watermark`` evicts down to
+            ``target_watermark * quota`` in one pass instead of a fixed
+            ``eviction_ratio``, so headroom always exists and eviction
+            never falls behind a sustained write burst (the single-
+            watermark behaviour pins usage at the cap under load). ``0.0``
+            (default) keeps the legacy fixed-ratio behaviour.
         chunk_size: Tokens per KV chunk. The single fleet chunk size: it is the
             CacheBlend match unit *and* resolves a pin request's ``token_ids`` to
             object keys. Must equal the MP servers' ``--chunk-size`` or blend
@@ -75,6 +85,7 @@ class MPCoordinatorConfig:
     eviction_check_interval: float = 5.0
     eviction_ratio: float = 0.2
     trigger_watermark: float = 1.0
+    target_watermark: float = 0.0
     chunk_size: int = 256
     hash_algorithm: str = "blake3"
     enable_blend_lookup: bool = False
