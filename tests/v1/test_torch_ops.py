@@ -3017,6 +3017,167 @@ class TestScenarios:
                         )
 
 
+@pytest.mark.parametrize(
+    ("engine_kv_format", "is_two_first"),
+    [
+        (lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS, True),
+        (lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS, False),
+    ],
+)
+@pytest.mark.parametrize("use_tensor_list", [False, True])
+def test_multi_layer_kv_transfer_hnd_round_trip(
+    engine_kv_format: lmcache_native.EngineKVFormat,
+    is_two_first: bool,
+    use_tensor_list: bool,
+) -> None:
+    """Exercise the Python fallback HND transfer path on CPU."""
+
+    device = torch.device("cpu")
+    dtype = torch.float32
+    num_layers = 2
+    num_tokens = 5
+    num_heads = 2
+    head_size = 8
+    hidden_size = num_heads * head_size
+    page_buffer_size = 10
+    block_size = 5
+    slot_mapping = torch.tensor([0, -1, 5, 9, 3], dtype=torch.int64, device=device)
+    valid_token_ids = [
+        idx for idx, slot in enumerate(slot_mapping.tolist()) if slot >= 0
+    ]
+    unused_slot = 1
+
+    def _hnd_value(base: int) -> torch.Tensor:
+        return (base + torch.arange(hidden_size, dtype=dtype)).reshape(
+            num_heads, head_size
+        )
+
+    def _paged_slice(
+        paged_layer: torch.Tensor,
+        kv_idx: int,
+        slot_idx: int,
+    ) -> torch.Tensor:
+        block_idx, block_offset = divmod(slot_idx, block_size)
+        if is_two_first:
+            return paged_layer[kv_idx, block_idx, :, block_offset, :]
+        return paged_layer[block_idx, kv_idx, :, block_offset, :]
+
+    paged_in = [
+        torch.zeros(
+            (2, page_buffer_size // block_size, num_heads, block_size, head_size),
+            dtype=dtype,
+            device=device,
+        )
+        if is_two_first
+        else torch.zeros(
+            (page_buffer_size // block_size, 2, num_heads, block_size, head_size),
+            dtype=dtype,
+            device=device,
+        )
+        for _ in range(num_layers)
+    ]
+    for layer_id, paged_layer in enumerate(paged_in):
+        for slot_idx in range(page_buffer_size):
+            for kv_idx in range(2):
+                value = _hnd_value(kv_idx * 5000 + layer_id * 1000 + slot_idx * 10)
+                _paged_slice(paged_layer, kv_idx, slot_idx).copy_(value)
+
+    key_value = torch.zeros((2, num_layers, num_tokens, hidden_size), dtype=dtype)
+    paged_in_ptrs: Union[list[torch.Tensor], torch.Tensor]
+    if use_tensor_list:
+        paged_in_ptrs = paged_in
+    else:
+        paged_in_ptrs = torch.tensor(
+            [layer.data_ptr() for layer in paged_in],
+            dtype=torch.uint64,
+            device=device,
+        )
+
+    _py_ops.multi_layer_kv_transfer(
+        key_value,
+        paged_in_ptrs,
+        slot_mapping,
+        device,
+        page_buffer_size,
+        lmcache_native.TransferDirection.D2H,
+        engine_kv_format,
+        block_size,
+        head_size,
+    )
+
+    for layer_id in range(num_layers):
+        for token_id in valid_token_ids:
+            slot_idx = int(slot_mapping[token_id].item())
+            for kv_idx in range(2):
+                expected = _hnd_value(kv_idx * 5000 + layer_id * 1000 + slot_idx * 10)
+                torch.testing.assert_close(
+                    key_value[kv_idx, layer_id, token_id],
+                    expected.reshape(-1),
+                )
+
+    for layer_id in range(num_layers):
+        for kv_idx in range(2):
+            torch.testing.assert_close(
+                key_value[kv_idx, layer_id, 1],
+                torch.zeros(hidden_size, dtype=dtype),
+            )
+
+    key_value_h2d = torch.zeros((2, num_layers, num_tokens, hidden_size), dtype=dtype)
+    for layer_id in range(num_layers):
+        for token_id in valid_token_ids:
+            for kv_idx in range(2):
+                key_value_h2d[kv_idx, layer_id, token_id] = (
+                    kv_idx * 7000
+                    + layer_id * 2000
+                    + token_id * 10
+                    + torch.arange(hidden_size, dtype=dtype)
+                )
+
+    paged_out = [torch.zeros_like(layer) for layer in paged_in]
+    paged_out_ptrs: Union[list[torch.Tensor], torch.Tensor]
+    if use_tensor_list:
+        paged_out_ptrs = paged_out
+    else:
+        paged_out_ptrs = torch.tensor(
+            [layer.data_ptr() for layer in paged_out],
+            dtype=torch.uint64,
+            device=device,
+        )
+
+    _py_ops.multi_layer_kv_transfer(
+        key_value_h2d,
+        paged_out_ptrs,
+        slot_mapping,
+        device,
+        page_buffer_size,
+        lmcache_native.TransferDirection.H2D,
+        engine_kv_format,
+        block_size,
+        head_size,
+    )
+
+    for layer_id, paged_layer in enumerate(paged_out):
+        for token_id in valid_token_ids:
+            slot_idx = int(slot_mapping[token_id].item())
+            for kv_idx in range(2):
+                expected = (
+                    kv_idx * 7000
+                    + layer_id * 2000
+                    + token_id * 10
+                    + torch.arange(hidden_size, dtype=dtype)
+                )
+                torch.testing.assert_close(
+                    _paged_slice(paged_layer, kv_idx, slot_idx).reshape(-1),
+                    expected,
+                )
+
+        for kv_idx in range(2):
+            torch.testing.assert_close(
+                _paged_slice(paged_layer, kv_idx, unused_slot),
+                torch.zeros((num_heads, head_size), dtype=dtype),
+            )
+
+
 # ==========================================
 # Allocation page alignment
 # ==========================================
