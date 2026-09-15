@@ -2109,6 +2109,13 @@ def test_retrieve_cleanup_ref_count_and_unpin() -> None:
     engine._process_tokens_internal.return_value = (reordered_chunks, 1024)
     engine._is_sync_pd_backend.return_value = False
 
+    # The pinned object here models a staging buffer, not a hot-cache
+    # resident: residents keep their lookup pin (see #5090).
+    # storage_manager is an instance attribute, absent from the spec'd
+    # mock, so it must be assigned explicitly.
+    engine.storage_manager = MagicMock()
+    engine.storage_manager.is_hot_cache_object.return_value = False
+
     # Mock stats monitor
     engine.stats_monitor = MagicMock()
     mock_stats = MagicMock()
