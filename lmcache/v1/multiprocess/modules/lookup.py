@@ -154,6 +154,11 @@ class LookupModule:
         and registers the job under ``key.request_id`` for later polling
         via query_prefetch_status.
 
+        A prompt shorter than ``chunk_size`` yields no chunk hashes and so
+        submits no prefetch task, but it still records the lookup on the
+        session, leaving a request that ends without a cacheable chunk
+        indistinguishable from any other completed lookup.
+
         Args:
             key: Cache key with request_id embedded.
             tp_size: Legacy wire field; ignored (kept for payload arity).
@@ -203,6 +208,24 @@ class LookupModule:
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
+            # A prompt shorter than one chunk is a *completed* lookup with
+            # nothing to fetch, not a malformed one.  Record it on the session
+            # exactly as the normal path below does: ``query_prefetch_status``
+            # materializes the session anyway to store the zero-hit result, so
+            # returning without it left ``end_session`` holding a session with
+            # no lookup key -- warning once per short request.  From this key
+            # ``end_session`` resolves an empty key set, unless generation
+            # later crosses a chunk boundary and stores.
+            session = self._ctx.session_manager.get_or_create(key.request_id)
+            session.set_tokens(list(key.token_ids))
+            session.begin_lookup(
+                key,
+                tuple(
+                    self._ctx.layout_desc_registry.find_attn_desc(
+                        model_name, world_size
+                    ).num_chunks_in_sw
+                ),
+            )
             self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
@@ -511,6 +534,13 @@ class LookupModule:
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.
 
+        Touches every L1 object the request used, so its chunks age from when
+        the request ended rather than from when each chunk was read or written.
+        Nothing is touched when the request produced no complete chunk; that is
+        the expected outcome for a prompt shorter than ``chunk_size``, not a
+        fault, and it is not warned about. A session that is missing outright,
+        or that never recorded a lookup, still warns.
+
         Args:
             request_id: The request ID whose session should be removed.
         """
@@ -538,6 +568,12 @@ class LookupModule:
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
+        if not chunk_hashes:
+            # Nothing reached a chunk boundary (a sub-chunk prompt that never
+            # grew), so there is no L1 object to mark as accessed. Returning
+            # here keeps an empty key list out of the touch listeners and the
+            # L1_KEYS_ACCESSED event.
+            return
         obj_keys = self._chunk_major_object_keys(session.lookup_ipc_key, chunk_hashes)
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
