@@ -113,9 +113,14 @@ and/or ``EngineDrivenTransferModule`` depending on
 registers handlers for every ``RequestType`` exposed by the loaded
 modules, and blocks in a keep-alive loop.
 
-**``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
+**``modules/blend/``** -- Package that defines ``BlendModule``
+(in ``modules/blend/module.py``), the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
-document paragraphs) on the sparse-prefetch path. KV-cache registration
+document paragraphs) on the sparse-prefetch path. The package is split
+into ``module.py`` (composition + handlers), the mixins ``lookup.py``,
+``registration.py``, ``store.py``, ``retrieve.py``, and the pure helpers
+``matcher.py``, ``rope.py``, ``read_set.py`` (see
+``docs/design/v1/multiprocess/modules/blend.md``). KV-cache registration
 rides the standard ``REGISTER_KV_CACHE``; the module adds only the CB RPCs
 (``CB_REGISTER_ROPE``, ``CB_UNREGISTER_ROPE``,
 ``CB_RETRIEVE_PRE_COMPUTED``, ``CB_UNIFIED_LOOKUP``) and wraps
@@ -575,9 +580,9 @@ Key Source Files
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), and ``blend.py``
-       (``BlendModule``, the paged-aware blend pipeline selected by
-       ``--engine-type blend``).
+       (``EngineDrivenTransferModule``), and the ``blend/`` package
+       (``BlendModule`` in ``blend/module.py``, the paged-aware blend
+       pipeline selected by ``--engine-type blend``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``

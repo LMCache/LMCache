@@ -329,7 +329,8 @@ endpoint is only known in `run_http_server()`. Since `run_http_server()` calls
 ### 3. Blend server
 
 The blend server is not a separate server: `--engine-type blend` composes
-`BlendModule` (`lmcache/v1/multiprocess/modules/blend.py`) into the same
+`BlendModule` (`lmcache/v1/multiprocess/modules/blend/module.py`, part of the
+`lmcache/v1/multiprocess/modules/blend/` package) into the same
 `MPCacheServer`, so the `start_time`, `zmq_endpoint`, and `http_endpoint`
 additions above cover it. `BlendModule.report_status()` only contributes the
 module's own fields.
