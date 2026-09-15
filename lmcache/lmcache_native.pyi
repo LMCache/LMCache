@@ -38,6 +38,13 @@ class TransferDirection(IntEnum):
     H2D = 0
     D2H = 1
 
+class MemObjKVLayout(IntEnum):
+    """Declared layout of the LMCache-side buffer for a fused engine format."""
+
+    UNSPECIFIED = 0
+    SPLIT_KV_2LTD = 1
+    FUSED_PACKED = 2
+
 class PageBufferShapeDesc:
     """Descriptor for one engine page-buffer layout."""
 
