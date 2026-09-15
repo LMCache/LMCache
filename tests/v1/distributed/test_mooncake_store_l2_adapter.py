@@ -408,7 +408,7 @@ class TestMooncakeStoreL1RegistrationFactory:
         monkeypatch.setattr(
             native_connector_l2_adapter,
             "NativeConnectorL2Adapter",
-            lambda client: ("wrapped", client),
+            lambda client, **kwargs: ("wrapped", client),
         )
 
         config = MooncakeStoreL2AdapterConfig.from_dict(
@@ -461,7 +461,7 @@ class TestMooncakeStoreL1RegistrationFactory:
         monkeypatch.setattr(
             native_connector_l2_adapter,
             "NativeConnectorL2Adapter",
-            lambda client: ("wrapped", client),
+            lambda client, **kwargs: ("wrapped", client),
         )
 
         config = MooncakeStoreL2AdapterConfig.from_dict(
@@ -512,7 +512,7 @@ class TestMooncakeStoreL1RegistrationFactory:
         monkeypatch.setattr(
             native_connector_l2_adapter,
             "NativeConnectorL2Adapter",
-            lambda client: ("wrapped", client),
+            lambda client, **kwargs: ("wrapped", client),
         )
 
         config = MooncakeStoreL2AdapterConfig.from_dict(

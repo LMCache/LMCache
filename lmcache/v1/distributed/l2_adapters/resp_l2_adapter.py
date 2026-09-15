@@ -167,7 +167,9 @@ def _create_resp_l2_adapter(
         config.num_workers,
     )
     return NativeConnectorL2Adapter(
-        native_client, max_capacity_gb=config.max_capacity_gb
+        native_client,
+        max_capacity_gb=config.max_capacity_gb,
+        type_name="resp",
     )
 
 
