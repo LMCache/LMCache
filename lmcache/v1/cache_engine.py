@@ -528,7 +528,7 @@ class LMCacheEngine:
                         token_ids=[],
                         block_size=num_tokens,
                         lora_id=None,
-                        medium="cpu",
+                        medium="CPU",
                         lora_name=None,
                     )
                     if tokens is not None:
@@ -537,8 +537,6 @@ class LMCacheEngine:
                             start,
                             end,
                         )
-                        if isinstance(tokens, torch.Tensor):
-                            stored_event.medium = tokens.device
                     elif hashes is not None:
                         stored_event.token_ids = hashes[start : end + 1]
                     logger.debug(
@@ -711,7 +709,7 @@ class LMCacheEngine:
                     token_ids=[],
                     block_size=num_tokens,
                     lora_id=None,
-                    medium="cpu",
+                    medium="CPU",
                     lora_name=None,
                 )
                 if tokens is not None:
@@ -720,8 +718,6 @@ class LMCacheEngine:
                         start,
                         end,
                     )
-                    if isinstance(tokens, torch.Tensor):
-                        stored_event.medium = tokens.device
                 logger.debug(
                     "Added kv cache event '%s' to kv cache events queue",
                     stored_event,
