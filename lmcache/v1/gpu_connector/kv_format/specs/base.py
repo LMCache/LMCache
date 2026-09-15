@@ -31,6 +31,7 @@ import lmcache.lmcache_native as lmcache_native
 _LABELS = {
     "ONE": "1",
     "TWO": "2",
+    "NP": "NP",
     "NBBS": "PBS",
     "NB": "NB",
     "NL": "NL",
@@ -85,7 +86,8 @@ def concrete_shape(
     -> ``32 x [2, 2048, 16, 8, 128]``.
     """
     return _render_shape(
-        fmt, lambda t: _LABELS[t] if t in ("ONE", "TWO") else str(size(_LABELS[t]))
+        fmt,
+        lambda t: _LABELS[t] if t in ("ONE", "TWO", "NP") else str(size(_LABELS[t])),
     )
 
 
