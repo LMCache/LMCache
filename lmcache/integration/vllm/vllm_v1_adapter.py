@@ -40,11 +40,12 @@ from lmcache.integration.vllm.utils import (
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
+from lmcache.utils import CacheStoreEvent, EngineType, _lmcache_nvtx_annotate, cdiv
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
+from lmcache.v1.gpu_connector.kv_format import find_indexer_caches
 from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
@@ -746,6 +747,17 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         logger.info("Registering KV caches")
+        indexer_caches = find_indexer_caches(kv_caches, EngineType.VLLM)
+        if indexer_caches:
+            # The connectors here are sized to the attention layers and cannot
+            # carry these. Dropping them boots, but every KV hit longer than the
+            # indexer top-k then decodes garbage (LMCache/LMCache#5002).
+            raise NotImplementedError(
+                f"{len(indexer_caches)} DSA indexer KV caches registered (e.g. "
+                f"{indexer_caches[0]}); this connector cannot offload them. Use "
+                "LMCacheMPConnector, which stores and restores them (see the GLM "
+                "recipe and https://github.com/LMCache/LMCache/issues/5002)."
+            )
         # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0

@@ -15,7 +15,7 @@ from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
 from lmcache.v1.gpu_connector.kv_format.detectors import get_detector
-from lmcache.v1.gpu_connector.kv_format.specs import describe_shape
+from lmcache.v1.gpu_connector.kv_format.specs import describe_shape, get_spec_class
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 import lmcache.lmcache_native as lmcache_native
 
@@ -70,3 +70,27 @@ def detect_format(
         "Engine KV Format: %s %s", engine_kv_format, describe_shape(engine_kv_format)
     )
     return engine_kv_format, kv_caches
+
+
+def find_indexer_caches(
+    kv_caches: dict[str, torch.Tensor], serving_engine: EngineType
+) -> list[str]:
+    """Return the names in *kv_caches* whose format spec declares ``is_indexer``.
+
+    DSA models (DeepSeek-V3.2, GLM-5.3) register a sparse-attention indexer
+    k-cache per sparse layer beside the attention KV. Each tensor is detected on
+    its own; layouts detection rejects are not indexers.
+    """
+    detector = get_detector(serving_engine)
+    if detector is None:
+        return []
+
+    def is_indexer(kv_cache: torch.Tensor) -> bool:
+        try:
+            view = attempt_permute_to_contiguous_view([kv_cache])
+            fmt, _ = detector.discover(view, {})
+        except ValueError:
+            return False
+        return fmt is not None and get_spec_class(fmt).is_indexer
+
+    return [name for name, t in kv_caches.items() if is_indexer(t)]
