@@ -79,7 +79,7 @@ class MPServerConfig:
 
     isolated_ipc: bool = False
     """Whether IPC mechanisms must work across isolated containers (no shared
-    host IPC namespace or /dev/shm); see lmcache/v1/platform/isolated_ipc.py.
+    host IPC namespace or /dev/shm); see lmcache.v1.platform.ipc_policy.
     Must match the engine workers' ``lmcache.mp.isolated_ipc`` setting."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
