@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.discovery import Registry, discover
-from lmcache.v1.mp_coordinator.views import base
+from lmcache.v1.mp_coordinator.views import base as base
 from lmcache.v1.mp_coordinator.views.base import View
 
 if TYPE_CHECKING:
@@ -43,6 +43,3 @@ def build_views(config: "MPCoordinatorConfig") -> Registry[View]:
         ", ".join(type(view).__name__ for view in built),
     )
     return registry
-
-
-__all__ = ["View", "base", "build_views"]

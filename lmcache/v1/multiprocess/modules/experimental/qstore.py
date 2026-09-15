@@ -33,9 +33,9 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.platform.base.event_ipc import (
-    get_event_ipc_backend,
-)
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
@@ -219,6 +219,7 @@ class QStoreModule(InstanceLivenessTarget):
             self._q_contexts.clear()
         self._release_entries(entries)
 
+    @request_handler(RequestType.REGISTER_Q_CACHE)
     def register_q_cache(
         self,
         instance_id: int,
@@ -296,6 +297,7 @@ class QStoreModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
+    @request_handler(RequestType.UNREGISTER_Q_CACHE)
     def unregister_q_cache(self, instance_id: int) -> None:
         """Unregister the paged Q ring tensors for a given worker instance ID.
 
@@ -315,6 +317,11 @@ class QStoreModule(InstanceLivenessTarget):
         self._release_entries(popped)
         logger.info("Unregistered Q ring for instance ID %d", instance_id)
 
+    @request_handler(
+        RequestType.STORE_Q,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     @_lmcache_nvtx_annotate
     def store_q(
         self,
