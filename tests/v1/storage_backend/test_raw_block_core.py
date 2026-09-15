@@ -1084,6 +1084,7 @@ def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
 class _FakeRawDevice:
     def __init__(self, size_bytes: int = RAW_BLOCK_CI_CAPACITY_BYTES) -> None:
         self._size_bytes = int(size_bytes)
+        self.registered_fixed_buffers: list[tuple[list[int], list[int]]] = []
         self.batched_write_calls: list[
             tuple[list[int], list[int], list[int | None] | None]
         ] = []
@@ -1092,6 +1093,11 @@ class _FakeRawDevice:
 
     def size_bytes(self) -> int:
         return self._size_bytes
+
+    def register_fixed_buffers(
+        self, buffer_ptrs: list[int], buffer_sizes: list[int]
+    ) -> None:
+        self.registered_fixed_buffers.append((buffer_ptrs, buffer_sizes))
 
     def pread_into(self, offset, out, payload_len, total_len=None):
         del offset, total_len
@@ -1129,6 +1135,31 @@ class _FakeRawDevice:
 
     def close(self) -> None:
         return None
+
+
+def test_register_fixed_buffer_region_uses_l1_arena(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    try:
+        core.register_fixed_buffer_region(0x1000, 0x20000)
+
+        assert raw_device.registered_fixed_buffers == [([0x1000], [0x20000])]
+    finally:
+        core.close()
+
+
+def test_register_fixed_buffer_region_is_noop_for_posix(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    core.io_engine = "posix"
+    try:
+        core.register_fixed_buffer_region(0x1000, 0x20000)
+
+        assert raw_device.registered_fixed_buffers == []
+    finally:
+        core.close()
 
 
 def _make_fake_io_uring_core(

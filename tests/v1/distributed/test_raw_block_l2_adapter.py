@@ -13,7 +13,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
@@ -26,6 +26,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.storage_backend.raw_block.core import RawBlockCore
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -202,6 +203,58 @@ def test_raw_block_l2_adapter_config_explicit_io_engine_wins_over_legacy_flag():
 def test_raw_block_l2_adapter_config_validates_iouring_queue_depth():
     with pytest.raises(ValueError, match="iouring_queue_depth"):
         RawBlockL2AdapterConfig.from_dict(_config_dict(iouring_queue_depth=0))
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_registers_l1_arena_for_iouring(tmp_path) -> None:
+    dev_path = tmp_path / "dev.bin"
+    dev_path.write_bytes(b"\x00" * (8 * 1024 * 1024))
+    l1_memory_desc = L1MemoryDesc(ptr=0x1000, size=2 * 1024 * 1024, align_bytes=4096)
+
+    with patch.object(
+        RawBlockCore,
+        "register_fixed_buffer_region",
+        autospec=True,
+    ) as register_fixed_buffer_region:
+        adapter = RawBlockL2Adapter(
+            _make_config(str(dev_path), io_engine="io_uring"),
+            l1_memory_desc,
+        )
+        try:
+            register_fixed_buffer_region.assert_called_once()
+            _, buffer_ptr, buffer_size = register_fixed_buffer_region.call_args.args
+            assert buffer_ptr == l1_memory_desc.ptr
+            assert buffer_size == l1_memory_desc.size
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_fixed_buffer_failure_falls_back(tmp_path) -> None:
+    dev_path = tmp_path / "dev.bin"
+    dev_path.write_bytes(b"\x00" * (8 * 1024 * 1024))
+    l1_memory_desc = L1MemoryDesc(ptr=0x1000, size=2 * 1024 * 1024, align_bytes=4096)
+
+    with (
+        patch.object(
+            RawBlockCore,
+            "register_fixed_buffer_region",
+            autospec=True,
+            side_effect=RuntimeError("registration failed"),
+        ),
+        patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning,
+    ):
+        adapter = RawBlockL2Adapter(
+            _make_config(str(dev_path), io_engine="io_uring"),
+            l1_memory_desc,
+        )
+        try:
+            warning.assert_called_once()
+            assert "Falling back to non-fixed buffer mode" in warning.call_args.args[0]
+        finally:
+            adapter.close()
 
 
 @pytest.mark.parametrize("block_align", [0, -1, 3, 4095])
