@@ -932,7 +932,16 @@ class LMCacheEngine:
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
             else:
-                if memory_obj.is_pinned:
+                # Only unpin transient staging buffers (e.g. disk-prefetch
+                # staging pinned by async loading). Hot-cache-resident
+                # objects may carry a pin from lookup(pin=True) or the
+                # controller that is owned (and later released) elsewhere;
+                # releasing it here makes the subsequent lookup_unpin()
+                # drive pin_count negative.
+                if memory_obj.is_pinned and not (
+                    self.storage_manager is not None
+                    and self.storage_manager.is_hot_cache_object(key, memory_obj)
+                ):
                     memory_obj.unpin()
                 memory_obj.ref_count_down()
 
@@ -1109,9 +1118,14 @@ class LMCacheEngine:
         # has been enqueued (mem_obj_consumer advanced past its sync point).
         # Without this, pin_count stays at 1 forever and the CPU staging pool
         # fills up, causing the next retrieve to deadlock inside allocate().
-        for mem_obj in to_count_down:
-            if mem_obj.is_pinned:
-                mem_obj.unpin()
+        # Skip local-CPU hits: those objects are hot-cache residents, not
+        # staging buffers, and any pin they carry belongs to lookup(pin=True)
+        # and is released via lookup_unpin(); unpinning them here drives
+        # pin_count negative.
+        if location != "LocalCPUBackend":
+            for mem_obj in to_count_down:
+                if mem_obj.is_pinned:
+                    mem_obj.unpin()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
