@@ -12,6 +12,7 @@ import os
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess import posix_shm
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
@@ -76,3 +77,27 @@ def test_open_pool_as_mmap_zero_copy_view():
 def test_munmap_no_op_on_zero_addr():
     # Should not crash; best-effort no-op.
     shm_munmap(0, 4096)
+
+
+def test_munmap_can_retry_after_exported_view_is_released():
+    """A blocked close must keep the mapping reachable for a later retry."""
+    name = _unique_name("retry")
+    addr = shm_create_readwrite(name, 4096)
+    mm = posix_shm._ADDR_TO_MMAP[addr]
+    exported_view = memoryview(mm)
+
+    try:
+        shm_munmap(addr, 4096)
+        assert addr in posix_shm._ADDR_TO_MMAP
+        assert not mm.closed
+
+        exported_view.release()
+        shm_munmap(addr, 4096)
+        assert addr not in posix_shm._ADDR_TO_MMAP
+        assert mm.closed
+    finally:
+        exported_view.release()
+        if not mm.closed:
+            mm.close()
+        posix_shm._ADDR_TO_MMAP.pop(addr, None)
+        shm_unlink(name)
