@@ -40,6 +40,44 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
+def validate_vllm_multimodal_cache_config(vllm_config: "VllmConfig") -> None:
+    """Require reusable multimodal identifiers before initializing a connector.
+
+    When both vLLM's prefix cache and multimodal processor cache are disabled,
+    vLLM replaces content hashes (even user-provided UUIDs) with request-local
+    identifiers. These can repeat across frontend restarts or replicas, so
+    hashing them cannot safely identify KV stored in LMCache.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+
+    Returns:
+        None when the configuration is safe for multimodal cache keying.
+
+    Raises:
+        ValueError: If a multimodal model disables both vLLM caches.
+
+    Notes:
+        Text-only models and older model configs without multimodal settings
+        are unaffected. Validation runs before any connector services start.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    mm_config = getattr(model_config, "multimodal_config", None)
+    if (
+        mm_config is not None
+        and getattr(mm_config, "mm_processor_cache_gb", None) == 0
+        and not vllm_config.cache_config.enable_prefix_caching
+    ):
+        raise ValueError(
+            "LMCache requires stable multimodal identifiers. Disabling both "
+            "vLLM prefix caching and the multimodal processor cache produces "
+            "request-local IDs that can repeat across restarts or replicas, "
+            "causing different media to reuse the same KV cache. Set "
+            "--mm-processor-cache-gb to a positive value, or enable "
+            "--enable-prefix-caching if the model supports it."
+        )
+
+
 def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
     hints: dict[str, str] = {}
