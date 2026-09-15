@@ -748,7 +748,7 @@ class L1Manager:
             )
 
     @l1_mgr_synchronized
-    def clear(self, force: bool = False) -> None:
+    def clear(self, force: bool = False) -> bool:
         """Clear objects from L1 cache.
 
         Args:
@@ -756,6 +756,10 @@ class L1Manager:
                 This may corrupt in-flight store/prefetch operations.
                 If False (default), only clear unlocked objects, keeping
                 write-locked and read-locked objects intact.
+
+        Returns:
+            True when no locked objects remain after the clear, False when
+            locked objects were preserved.
         """
         if force:
             logger.warning(
@@ -781,7 +785,7 @@ class L1Manager:
                 "L1Manager: cleared %d objects, 0 remaining.",
                 len(all_keys),
             )
-            return
+            return True
 
         keys_to_clear: list[ObjectKey] = []
         objs_to_free: list[MemoryObj] = []
@@ -815,6 +819,7 @@ class L1Manager:
             len(keys_to_clear),
             locked_count,
         )
+        return locked_count == 0
 
     def is_key_evictable(self, key: ObjectKey) -> bool:
         """Check if a key is eligible for eviction (not locked).

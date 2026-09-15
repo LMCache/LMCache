@@ -157,6 +157,7 @@ def lookup_all(
     client: RequestClient,
     keys: list[IPCCacheServerKey],
     timeout: float = DEFAULT_TIMEOUT,
+    release_locks: bool = True,
 ) -> int:
     """Lookup all keys individually and return total found count.
 
@@ -174,9 +175,21 @@ def lookup_all(
                 timeout=timeout
             )
             if result is not None:
+                if release_locks:
+                    client.free_lookup_locks(lookup_key, 1).result(timeout=timeout)
                 total += result
                 break
     return total
+
+
+def free_lookup_locks(
+    client: RequestClient,
+    keys: list[IPCCacheServerKey],
+    timeout: float = DEFAULT_TIMEOUT,
+) -> None:
+    """Release read locks acquired by lookup_all(..., release_locks=False)."""
+    for key in keys:
+        client.free_lookup_locks(key.no_worker_id_version(), 1).result(timeout=timeout)
 
 
 #: Exported event objects kept alive for the session: CUDA event handles are
@@ -483,16 +496,21 @@ def test_store_retrieve_verify(
     event_handle = _recorded_event_handle()
 
     # Call look up to ensure the data is ready to be retrieved
-    lookup_result = lookup_all(client, keys)
+    lookup_result = lookup_all(client, keys, release_locks=False)
     assert lookup_result == num_keys
 
-    # Retrieve to a different location in the cache
-    # Use offset of 40 blocks (640 pages total needed: 320 + 320)
-    retrieve_offset = 40 * 16
-    retrieve_block_ids = list(range(retrieve_offset, retrieve_offset + 16 * num_keys))
-    retrieve_result = retrieve_keys(
-        client, keys, registered_instance, retrieve_block_ids, event_handle
-    )
+    try:
+        # Retrieve to a different location in the cache
+        # Use offset of 40 blocks (640 pages total needed: 320 + 320)
+        retrieve_offset = 40 * 16
+        retrieve_block_ids = list(
+            range(retrieve_offset, retrieve_offset + 16 * num_keys)
+        )
+        retrieve_result = retrieve_keys(
+            client, keys, registered_instance, retrieve_block_ids, event_handle
+        )
+    finally:
+        free_lookup_locks(client, keys)
 
     assert len(retrieve_result) == num_keys
     assert all(retrieve_result), "All keys should be retrieved successfully"
@@ -533,24 +551,30 @@ def test_retrieve_partial_miss(
     store_keys(client, stored_keys, registered_instance, store_block_ids, event_handle)
 
     # Lookup to ensure keys are stored
-    lookup_result = lookup_all(client, stored_keys)
+    lookup_result = lookup_all(client, stored_keys, release_locks=False)
     assert lookup_result == num_stored
 
-    # Try to retrieve 60 keys (only first 30 exist)
-    # Total pages needed: 60 * 16 = 960 (< 1024)
-    num_requested = 60
-    all_keys = [create_cache_key(i) for i in range(num_requested)]
-    # Start retrieve at offset 2 keys (32 pages)
-    retrieve_offset_keys = 2
-    retrieve_block_ids = list(
-        range(retrieve_offset_keys * 16, (retrieve_offset_keys + num_requested) * 16)
-    )
+    try:
+        # Try to retrieve 60 keys (only first 30 exist)
+        # Total pages needed: 60 * 16 = 960 (< 1024)
+        num_requested = 60
+        all_keys = [create_cache_key(i) for i in range(num_requested)]
+        # Start retrieve at offset 2 keys (32 pages)
+        retrieve_offset_keys = 2
+        retrieve_block_ids = list(
+            range(
+                retrieve_offset_keys * 16,
+                (retrieve_offset_keys + num_requested) * 16,
+            )
+        )
 
-    event_handle = _recorded_event_handle()
+        event_handle = _recorded_event_handle()
 
-    retrieve_result = retrieve_keys(
-        client, all_keys, registered_instance, retrieve_block_ids, event_handle
-    )
+        retrieve_result = retrieve_keys(
+            client, all_keys, registered_instance, retrieve_block_ids, event_handle
+        )
+    finally:
+        free_lookup_locks(client, stored_keys)
 
     assert len(retrieve_result) == num_requested
     # First 30 keys exist, remaining 30 don't
@@ -560,15 +584,18 @@ def test_retrieve_partial_miss(
     )
 
     # Doing look up again to ensure data is ready
-    lookup_result_2 = lookup_all(client, stored_keys)
+    lookup_result_2 = lookup_all(client, stored_keys, release_locks=False)
     assert lookup_result_2 == num_stored
 
-    # Try to retrieve the first 30 keys only (all exist)
-    retrieve_block_ids_2 = list(range(0, 16 * num_stored))
-    event_handle = _recorded_event_handle()
-    retrieve_result_2 = retrieve_keys(
-        client, stored_keys, registered_instance, retrieve_block_ids_2, event_handle
-    )
+    try:
+        # Try to retrieve the first 30 keys only (all exist)
+        retrieve_block_ids_2 = list(range(0, 16 * num_stored))
+        event_handle = _recorded_event_handle()
+        retrieve_result_2 = retrieve_keys(
+            client, stored_keys, registered_instance, retrieve_block_ids_2, event_handle
+        )
+    finally:
+        free_lookup_locks(client, stored_keys)
     assert len(retrieve_result_2) == num_stored
     assert all(retrieve_result_2), "All stored keys should be retrieved successfully"
 
@@ -615,30 +642,33 @@ def test_multiple_retrieve_operations(
         for batch_idx in range(num_batches)
         for i in range(keys_per_batch)
     ]
-    lookup_result = lookup_all(client, all_keys)
+    lookup_result = lookup_all(client, all_keys, release_locks=False)
     assert lookup_result == num_batches * keys_per_batch, "All stored keys should exist"
 
-    # Retrieve in batches
-    retrieve_offset = 32  # Start retrieving at offset of 32 chunks
-    event_handle = _recorded_event_handle()
-    for batch_idx in range(num_batches):
-        keys = [
-            create_cache_key(batch_idx * keys_per_batch + i)
-            for i in range(keys_per_batch)
-        ]
-        blocks = list(
-            range(
-                (batch_idx * keys_per_batch + retrieve_offset) * pages_per_key,
-                (batch_idx * keys_per_batch + retrieve_offset + keys_per_batch)
-                * pages_per_key,
+    try:
+        # Retrieve in batches
+        retrieve_offset = 32  # Start retrieving at offset of 32 chunks
+        event_handle = _recorded_event_handle()
+        for batch_idx in range(num_batches):
+            keys = [
+                create_cache_key(batch_idx * keys_per_batch + i)
+                for i in range(keys_per_batch)
+            ]
+            blocks = list(
+                range(
+                    (batch_idx * keys_per_batch + retrieve_offset) * pages_per_key,
+                    (batch_idx * keys_per_batch + retrieve_offset + keys_per_batch)
+                    * pages_per_key,
+                )
             )
-        )
 
-        retrieve_result = retrieve_keys(
-            client, keys, registered_instance, blocks, event_handle
-        )
-        assert len(retrieve_result) == keys_per_batch
-        assert all(retrieve_result), "All keys should be retrieved successfully"
+            retrieve_result = retrieve_keys(
+                client, keys, registered_instance, blocks, event_handle
+            )
+            assert len(retrieve_result) == keys_per_batch
+            assert all(retrieve_result), "All keys should be retrieved successfully"
+    finally:
+        free_lookup_locks(client, all_keys)
 
     # Verify correctness
     for layer in range(client_context.num_layers):

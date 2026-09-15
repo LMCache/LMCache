@@ -972,6 +972,31 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ==============================
 
+    def reset_cache(self) -> bool | None:
+        """Reset LMCache MP cache state from the scheduler role.
+
+        vLLM may call this while local prefix-cache reset is already known to
+        have failed because requests still hold blocks. Refuse the external
+        reset in that case so live request trackers remain usable on the next
+        scheduler step.
+
+        Returns:
+            True when the MP servers clear successfully, False when active
+            requests or in-flight server objects prevent a complete reset, and
+            None for worker-role connectors.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return None
+
+        if self.request_trackers:
+            logger.warning(
+                "Skipping LMCache MP reset while %d request tracker(s) are active.",
+                len(self.request_trackers),
+            )
+            return False
+
+        return self.scheduler_adapter.reset_cache()
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind GPU block pool so that we can touch blocks during stores.
         Called by Scheduler after kv_cache_manager is ready."""
