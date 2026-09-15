@@ -156,6 +156,7 @@
         "num_key_value_heads": 4,
         "head_dim": 128
     },
+<<<<<<< HEAD
     "tencent/Hunyuan-0.5B-Instruct": {
         "hidden_size": 1024,
         "num_attention_heads": 16,
@@ -197,5 +198,12 @@
         "num_hidden_layers": 64,
         "num_key_value_heads": 8,
         "cla_share_factor": 2
+    },
+    "Qwen/Qwen3-Coder-480B-A35B-Instruct": {
+        "hidden_size": 6144,
+        "num_attention_heads": 96,
+        "num_hidden_layers": 62,
+        "num_key_value_heads": 8,
+        "head_dim": 128
     }
 }
