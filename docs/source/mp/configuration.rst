@@ -67,12 +67,22 @@ Source: ``lmcache/v1/multiprocess/config.py``
        span (so telemetry and coordinator membership share one id).
        When the flag is not passed, defaults to a random UUID v4
        minted at startup.
+   * - ``--transport``
+     - ``zmq``
+     - Request transport used by the multiprocess cache server. Only
+       ``zmq`` has a runtime today; ``grpc`` is accepted by the parser
+       and reserved for the upcoming gRPC implementation (the schemas
+       and build-time generator now live under
+       ``lmcache/v1/multiprocess/transport/grpc_impl/`` -- see
+       :doc:`request_transport`) but selecting it raises
+       ``NotImplementedError`` at startup. Choices: ``zmq``, ``grpc``.
    * - ``--host``
      - ``localhost``
-     - Host address to bind the ZMQ server.
+     - Host address to bind the request server (currently the ZMQ
+       transport).
    * - ``--port``
      - ``5555``
-     - Port to bind the ZMQ server.
+     - Port to bind the request server (currently the ZMQ transport).
    * - ``--chunk-size``
      - ``256``
      - Chunk size for KV cache operations (in tokens).
