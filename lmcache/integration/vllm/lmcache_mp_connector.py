@@ -474,7 +474,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig | None" = None,
-    ):
+    ) -> None:
         # Older supported vLLM releases allow connectors to omit this value,
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
@@ -920,6 +920,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:
+            # The adapter reports engine-finished IDs even without a STORE.
+            # Consumers never delay frees for saves, but must still poll retrieves.
             val = self.worker_adapter.get_finished(
                 finished_req_ids if self._can_store else set()
             )
