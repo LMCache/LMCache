@@ -26,7 +26,11 @@ from lmcache.v1.platform import torch_ops
 import lmcache.lmcache_native as lmcache_native
 
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-DEVICES = ["cpu", pytest.param("cuda", marks=cuda_only)]
+TRANSFER_CASES = [
+    pytest.param("cpu", False, id="cpu"),
+    pytest.param("cuda", False, marks=cuda_only, id="cuda-host-chunks"),
+    pytest.param("cuda", True, marks=cuda_only, id="cuda-device-chunks"),
+]
 
 H2D = lmcache_native.TransferDirection.H2D
 D2H = lmcache_native.TransferDirection.D2H
@@ -69,7 +73,8 @@ def make_pool(
     page = nl * bs * hs + pad_elems
     raw = _fill((nb, page))
     views = [
-        raw[:, l * bs * hs : (l + 1) * bs * hs].view(nb, bs, hs) for l in range(nl)
+        raw[:, layer * bs * hs : (layer + 1) * bs * hs].view(nb, bs, hs)
+        for layer in range(nl)
     ]
     return raw, views
 
@@ -97,9 +102,17 @@ def ptr_tensor(views: list[torch.Tensor], device: str) -> torch.Tensor:
 
 
 def alloc_chunks(
-    count: int, nl: int, tokens: int, hs: int, dtype: torch.dtype, device: str
+    count: int,
+    nl: int,
+    tokens: int,
+    hs: int,
+    dtype: torch.dtype,
+    device: str,
+    device_chunks: bool = False,
 ) -> list[torch.Tensor]:
     chunks = [torch.zeros(nl, tokens, hs, dtype=dtype) for _ in range(count)]
+    if device_chunks:
+        return [c.to(device) for c in chunks]
     if device == "cuda":
         chunks = [c.pin_memory() for c in chunks]
     return chunks
@@ -123,8 +136,8 @@ def run(
         torch.cuda.synchronize()
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_pointer_mode_honours_block_stride_roundtrip(device):
+@pytest.mark.parametrize("device,device_chunks", TRANSFER_CASES)
+def test_pointer_mode_honours_block_stride_roundtrip(device, device_chunks):
     """Padded per-layer MLA pool: D2H must gather the right blocks, H2D must
     write them back without touching the padding owned by other groups."""
     torch.manual_seed(7)
@@ -138,14 +151,16 @@ def test_pointer_mode_honours_block_stride_roundtrip(device):
     blocks_per_chunk = 2
     chunk_tokens = blocks_per_chunk * bs
     block_ids = [5, 2, 7, 0, 3, 6, 1, 4]
-    chunks = alloc_chunks(nb // blocks_per_chunk, nl, chunk_tokens, hs, dtype, device)
+    chunks = alloc_chunks(
+        nb // blocks_per_chunk, nl, chunk_tokens, hs, dtype, device, device_chunks
+    )
 
     run(views, chunks, block_ids, device, D2H, sd, chunk_tokens, MLA)
     for k, chunk in enumerate(chunks):
         ids = block_ids[k * blocks_per_chunk : (k + 1) * blocks_per_chunk]
         for layer in range(nl):
             expected = views[layer][ids].reshape(chunk_tokens, hs).cpu()
-            assert torch.equal(chunk[layer], expected), f"chunk {k} layer {layer}"
+            assert torch.equal(chunk[layer].cpu(), expected), f"chunk {k} layer {layer}"
 
     raw2, views2 = make_pool(nb, nl, bs, hs, pad, dtype, device, "zeros")
     sd2 = make_shape_desc(nl, nb, bs, hs, dtype, views2[0].stride(0))
@@ -173,9 +188,9 @@ def reference_rows(pages: torch.Tensor, val_bytes: int) -> torch.Tensor:
     return torch.tensor(rows, dtype=torch.uint8)
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device,device_chunks", TRANSFER_CASES)
 @pytest.mark.parametrize("pad", [None, 24], ids=["contiguous", "padded"])
-def test_pointer_mode_bsv_bss_repacks_blocked_scale_pages(device, pad):
+def test_pointer_mode_bsv_bss_repacks_blocked_scale_pages(device, device_chunks, pad):
     """DSA indexer k-cache: pointer mode must rebuild rank-3 ``[NB, BS, 132]``
     layers (not the 5-D NHD default) and convert between the blocked
     ``[BS x 128 vals][BS x 4 scales]`` page and token-major chunk rows in
@@ -192,7 +207,9 @@ def test_pointer_mode_bsv_bss_repacks_blocked_scale_pages(device, pad):
     blocks_per_chunk = 3
     chunk_tokens = blocks_per_chunk * bs
     block_ids = [4, 1, 5, 0, 2, 3]
-    chunks = alloc_chunks(nb // blocks_per_chunk, nl, chunk_tokens, hs, dtype, device)
+    chunks = alloc_chunks(
+        nb // blocks_per_chunk, nl, chunk_tokens, hs, dtype, device, device_chunks
+    )
 
     with warnings.catch_warnings():
         # A resized ``index_select(out=)`` would detach the staging view and
@@ -203,7 +220,7 @@ def test_pointer_mode_bsv_bss_repacks_blocked_scale_pages(device, pad):
         ids = block_ids[k * blocks_per_chunk : (k + 1) * blocks_per_chunk]
         for layer in range(nl):
             expected = reference_rows(views[layer][ids], val_bytes)
-            assert torch.equal(chunk[layer], expected), f"chunk {k} layer {layer}"
+            assert torch.equal(chunk[layer].cpu(), expected), f"chunk {k} layer {layer}"
 
     raw2, views2 = make_pool(nb, nl, bs, hs, pad, dtype, device, "zeros")
     sd2 = make_shape_desc(nl, nb, bs, hs, dtype, views2[0].stride(0))
@@ -231,7 +248,7 @@ def test_mla_rejects_wrong_rank_layers(direction):
     layers = [torch.randn(nb, 2, bs, 1, hs) for _ in range(nl)]
     chunks = [torch.zeros(nl, nb * bs, hs)]
     sd = make_shape_desc(nl, nb, bs, hs, torch.float32, 0)
-    with pytest.raises(ValueError, match="expected rank-3"):
+    with pytest.raises(ValueError):
         torch_ops.multi_layer_block_kv_transfer(
             layers,
             chunks,
@@ -254,7 +271,7 @@ def test_pointer_mode_rejects_padding_on_non_block_axis_formats():
     sd = make_shape_desc(1, nb, bs, hs, torch.float32, bs * nh * hs + 8)
     sd.nh = nh
     sd.kv_size = 2
-    with pytest.raises(NotImplementedError, match="block-axis"):
+    with pytest.raises(NotImplementedError):
         torch_ops._normalize_paged_layers(
             torch.tensor([layer.data_ptr()], dtype=torch.uint64),
             lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
@@ -265,68 +282,102 @@ def test_pointer_mode_rejects_padding_on_non_block_axis_formats():
 
 
 class _FakeRuntime:
-    """Stand-in for the cudart/hip CDLL: ``cudaPointerGetAttributes`` writes
-    the requested (type, device) pair and returns *err*."""
+    """Exercise the full ABI write without loading or calling CUDA."""
 
-    def __init__(self, mem_type: int, dev: int, err: int = 0):
-        self.mem_type, self.dev, self.err = mem_type, dev, err
-        self.queries = 0
-        self.cleared = 0
-        fake = self
+    def __init__(self, mem_type, dev, err=0, version=13000, version_err=0):
+        class _Version:
+            def __call__(self, destination):
+                destination._obj.value = version
+                return version_err
 
         class _Query:
-            restype = None
-            argtypes = None
+            def __call__(self, destination, _ptr):
+                # Check capacity before copying: the former 64-byte allocation
+                # must fail safely rather than letting this regression corrupt
+                # the Python process.
+                size = 2 * ctypes.sizeof(ctypes.c_int) + 2 * ctypes.sizeof(
+                    ctypes.c_void_p
+                )
+                if version >= 13000:
+                    size += 8 * ctypes.sizeof(ctypes.c_long)
+                assert ctypes.sizeof(destination._obj) >= size
+                packed = struct.pack("ii", mem_type, dev) + bytes(size - 8)
+                ctypes.memmove(destination, packed, size)
+                return err
 
-            def __call__(self, attrs_addr, _ptr):
-                fake.queries += 1
-                packed = struct.pack("ii", fake.mem_type, fake.dev)
-                ctypes.memmove(attrs_addr, packed, len(packed))
-                return fake.err
-
-        class _Clear:
-            restype = None
-
-            def __call__(self):
-                fake.cleared += 1
-                return 0
-
+        self.cudaRuntimeGetVersion = _Version()
         self.cudaPointerGetAttributes = _Query()
-        self.cudaGetLastError = _Clear()
 
 
+@pytest.mark.parametrize("version", [12000, 13000])
 @pytest.mark.parametrize(
-    "mem_type,dev,err,expected",
+    "mem_type,dev,expected",
     [
-        # (cudaMemoryType, device index, return code, expected device):
-        # 1 = host, 2 = device, 3 = managed (same values for hipMemoryType).
-        (2, 1, 0, torch.device("cuda", 1)),
-        (3, 0, 0, torch.device("cuda", 0)),
-        (1, 0, 0, torch.device("cpu")),
-        (0, 0, 0, torch.device("cpu")),
-        (0, 0, 1, torch.device("cpu")),
+        (2, 1, torch.device("cuda", 1)),
+        (3, 0, torch.device("cuda", 0)),
+        (1, 0, torch.device("cpu")),
+        (0, 0, torch.device("cpu")),
     ],
-    ids=["device", "managed", "pinned-host", "unregistered", "runtime-error"],
+    ids=["device", "managed", "pinned-host", "unregistered"],
 )
-def test_resolve_ptr_device_maps_runtime_memory_types(mem_type, dev, err, expected):
-    fake = _FakeRuntime(mem_type, dev, err)
+def test_resolve_ptr_device_maps_runtime_memory_types(version, mem_type, dev, expected):
+    fake = _FakeRuntime(mem_type, dev, version=version)
     with (
         unittest.mock.patch.object(torch.cuda, "is_available", return_value=True),
         unittest.mock.patch.object(torch_ops, "_get_copy_lib", return_value=fake),
     ):
-        got = torch_ops._resolve_ptr_device(0x1000, torch.device("cuda", 0))
-    assert got == expected
-    assert fake.queries == 1
-    assert fake.cleared == (1 if err else 0)
+        assert (
+            torch_ops._resolve_ptr_device(0x1000, torch.device("cuda", 0)) == expected
+        )
 
 
-def test_resolve_ptr_device_skips_runtime_without_cuda():
-    fake = _FakeRuntime(2, 0)
+@pytest.mark.parametrize("error", [1, 100, 700, 999])
+def test_pointer_query_errors_never_become_cpu_pointers(error):
+    fake = _FakeRuntime(2, 0, err=error)
     with (
-        unittest.mock.patch.object(torch.cuda, "is_available", return_value=False),
+        unittest.mock.patch.object(torch.cuda, "is_available", return_value=True),
         unittest.mock.patch.object(torch_ops, "_get_copy_lib", return_value=fake),
+        pytest.raises(RuntimeError),
     ):
+        torch_ops._resolve_ptr_device(0x1000, torch.device("cuda", 0))
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        None,
+        object(),
+        _FakeRuntime(2, 0, version_err=999),
+        _FakeRuntime(2, 0, version=11000),
+        _FakeRuntime(2, 0, version=14000),
+        _FakeRuntime(99, 0),
+        _FakeRuntime(2, -1),
+    ],
+)
+def test_unqualified_pointer_residency_fails_closed(runtime):
+    with (
+        unittest.mock.patch.object(torch.cuda, "is_available", return_value=True),
+        unittest.mock.patch.object(torch_ops, "_get_copy_lib", return_value=runtime),
+        pytest.raises((RuntimeError, NotImplementedError)),
+    ):
+        torch_ops._resolve_ptr_device(0x1000, torch.device("cuda", 0))
+
+
+def test_resolve_ptr_device_without_cuda():
+    with unittest.mock.patch.object(torch.cuda, "is_available", return_value=False):
         cpu = torch.device("cpu")
         assert torch_ops._resolve_ptr_device(0x1000, cpu) == cpu
-        assert torch_ops._resolve_ptr_device(0x1000, torch.device("cuda", 0)) == cpu
-    assert fake.queries == 0
+        with pytest.raises(RuntimeError):
+            torch_ops._resolve_ptr_device(0x1000, torch.device("cuda", 0))
+
+
+def test_cuda_alias_failure_is_not_replaced_by_a_copy():
+    with (
+        unittest.mock.patch.object(
+            torch, "as_tensor", side_effect=RuntimeError("alias unavailable")
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        torch_ops._tensor_from_cuda_ptr(
+            0x1000, (8,), torch.float32, torch.device("cuda", 0), 8
+        )

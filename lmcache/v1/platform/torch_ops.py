@@ -8,12 +8,12 @@ package -- consumers go through :class:`DeviceOps`, never this module directly.
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Optional, Tuple
 import ctypes
 import ctypes.util
 import os
-import struct
 import threading
 import warnings
 
@@ -147,7 +147,7 @@ def _tensor_from_ptr(
     # CUDA path                                                          #
     # ------------------------------------------------------------------ #
     if device.type == "cuda":
-        return _tensor_from_cuda_ptr(ptr, shape, dtype, device, numel, total_bytes)
+        return _tensor_from_cuda_ptr(ptr, shape, dtype, device, numel)
 
     # ------------------------------------------------------------------ #
     # MUSA path                                                          #
@@ -191,71 +191,46 @@ def _tensor_from_cuda_ptr(
     dtype: torch.dtype,
     device: torch.device,
     numel: int,
-    total_bytes: int,
 ) -> torch.Tensor:
-    """Zero-copy CUDA tensor from a raw device pointer."""
+    """Construct a write-through CUDA view, never a detached copy."""
+    dtype_to_typestr = {
+        torch.float16: "<f2",
+        torch.float32: "<f4",
+        torch.float64: "<f8",
+        torch.int8: "|i1",
+        torch.int16: "<i2",
+        torch.int32: "<i4",
+        torch.int64: "<i8",
+        torch.uint8: "|u1",
+        torch.bool: "|b1",
+    }
+    is_bf16 = dtype == torch.bfloat16
+    typestr = "<i2" if is_bf16 else dtype_to_typestr.get(dtype)
+    if typestr is None:
+        raise ValueError(f"Unsupported CUDA pointer dtype: {dtype}")
+
+    class _CudaArrayWrapper:
+        def __init__(self):
+            self.__cuda_array_interface__ = {
+                "data": (ptr, False),
+                "shape": (numel,),
+                "typestr": typestr,
+                "version": 3,
+            }
 
     try:
-        _DTYPE_TO_TYPESTR = {
-            torch.float16: "<f2",
-            torch.float32: "<f4",
-            torch.float64: "<f8",
-            torch.int8: "|i1",
-            torch.int16: "<i2",
-            torch.int32: "<i4",
-            torch.int64: "<i8",
-            torch.uint8: "|u1",
-            torch.bool: "|b1",
-        }
-        is_bf16 = dtype == torch.bfloat16
-
-        # Determine the correct typestr, smuggle bfloat16 as int16
-        typestr = "<i2" if is_bf16 else _DTYPE_TO_TYPESTR.get(dtype, "|u1")
-
-        class _CudaArrayWrapper:
-            def __init__(self, ptr_int: int, shape_tuple: tuple, type_str: str):
-                self.__cuda_array_interface__ = {
-                    "data": (ptr_int, False),
-                    "shape": shape_tuple,
-                    "typestr": type_str,
-                    "version": 3,
-                }
-
-        t = torch.as_tensor(_CudaArrayWrapper(ptr, (numel,), typestr), device=device)
-        if is_bf16:
-            t = t.view(torch.bfloat16)
-
-        return t.view(*shape)
-    except Exception:
-        pass
-
-    # Strategy 2: cudaMemcpy Device-to-Device (Fallback)
-    libcudart = _get_copy_lib()
-    if libcudart is None:
-        raise RuntimeError("Failed to load libcudart/libamdhip")
-
-    cudaMemcpy = libcudart.cudaMemcpy
-    cudaMemcpy.restype = ctypes.c_int
-    cudaMemcpy.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_int,
-    ]
-    _MEMCPY_D2D = 3
-
-    dst = torch.empty(numel, dtype=dtype, device=device)
-
-    err = cudaMemcpy(
-        ctypes.c_void_p(dst.data_ptr()),
-        ctypes.c_void_p(ptr),
-        ctypes.c_size_t(total_bytes),
-        ctypes.c_int(_MEMCPY_D2D),
-    )
-    if err != 0:
-        raise RuntimeError(f"cudaMemcpy D2D failed with error code {err}.")
-
-    return dst.view(*shape)
+        tensor = torch.as_tensor(_CudaArrayWrapper(), device=device)
+    except Exception as exc:
+        raise RuntimeError("Cannot construct a CUDA pointer view") from exc
+    if is_bf16:
+        tensor = tensor.view(torch.bfloat16)
+    if (
+        tensor.device.type != "cuda"
+        or tensor.dtype != dtype
+        or (numel and tensor.data_ptr() != ptr)
+    ):
+        raise RuntimeError("CUDA pointer construction did not preserve its alias")
+    return tensor.view(*shape)
 
 
 # ====================================================================== #
@@ -857,67 +832,88 @@ def _tensor_from_ptr_block_strided(
     return torch.as_strided(base, tuple(shape), strides)
 
 
-# cudaMemoryType / hipMemoryType values shared by both runtimes.
+# cudaMemoryType values. HIP/MUSA raw-pointer residency is not inferred from
+# these values; callers on unqualified runtimes must supply tensor objects.
+_MEMORY_TYPE_UNREGISTERED = 0
 _MEMORY_TYPE_HOST = 1
 _MEMORY_TYPE_DEVICE = 2
 _MEMORY_TYPE_MANAGED = 3
 
 
+class _CudaPointerAttributesV12(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("device", ctypes.c_int),
+        ("devicePointer", ctypes.c_void_p),
+        ("hostPointer", ctypes.c_void_p),
+    ]
+
+
+class _CudaPointerAttributesV13(_CudaPointerAttributesV12):
+    # CUDA 13 driver_types.h adds this reserved tail to the CUDA 12 prefix.
+    _fields_ = [("reserved", ctypes.c_long * 8)]
+
+
+@lru_cache(maxsize=4)
+def _cuda_pointer_query(lib):
+    """Bind only a known, correctly aligned CUDA pointer-attribute ABI."""
+    version_query = getattr(lib, "cudaRuntimeGetVersion", None)
+    query = getattr(lib, "cudaPointerGetAttributes", None)
+    if version_query is None or query is None:
+        raise RuntimeError("CUDA pointer residency query is unavailable")
+    version_query.restype = ctypes.c_int
+    version_query.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    version = ctypes.c_int()
+    err = version_query(ctypes.byref(version))
+    if err:
+        raise RuntimeError(f"cudaRuntimeGetVersion failed with error code {err}")
+    if 12000 <= version.value < 13000:
+        attributes = _CudaPointerAttributesV12
+    elif 13000 <= version.value < 14000:
+        attributes = _CudaPointerAttributesV13
+    else:
+        raise NotImplementedError(
+            f"Unqualified CUDA pointer-attribute ABI: {version.value}"
+        )
+    query.restype = ctypes.c_int
+    query.argtypes = [ctypes.POINTER(attributes), ctypes.c_void_p]
+    return query, attributes
+
+
 def _resolve_ptr_device(ptr: int, hint: torch.device) -> torch.device:
-    """Return where a raw pointer handed to the fallback actually lives.
+    """Classify raw chunk pointers without interpreting unknown memory as host.
 
-    The native ``multi_layer_block_kv_transfer`` binding takes
-    ``lmcache_objects_ptrs`` as bare integers and lets the CUDA kernel read
-    them through UVA, so callers pass pinned-host chunk pointers (in-process
-    connectors) and device temp-buffer pointers (multiprocess cache-driven
-    transfers) through the same argument. The torch fallback has to build a
-    tensor on the right device, so ask the runtime (``cudaPointerGetAttributes``
-    / ``hipPointerGetAttributes``) when a GPU is present.
-
-    Args:
-        ptr: Raw pointer.
-        hint: The paged-buffer device of the transfer; used for managed memory
-            (reachable from both sides) and to skip the runtime query on
-            CPU-only processes.
-
-    Returns:
-        ``torch.device("cuda", N)`` for device allocations, *hint* for
-        managed allocations, ``torch.device("cpu")`` for pinned/pageable host
-        memory or when no GPU runtime is available.
+    CPU transfers use CPU pointers. GPU transfers can use host, managed, or
+    device chunks, so CUDA 12/13 must positively identify their residency.
+    Older runtimes' ambiguous invalid-value/pageable-host behavior is not
+    supported. Query failures and other accelerator ABIs fail before access.
     """
     cpu = torch.device("cpu")
-    if hint.type != "cuda" or not torch.cuda.is_available():
+    if hint.type == "cpu":
         return cpu
+    if hint.type != "cuda" or torch.version.hip is not None:
+        raise NotImplementedError("Raw chunk-pointer residency requires CUDA")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA pointer residency requires an available device")
     lib = _get_copy_lib()
     if lib is None:
-        return cpu
-    query = getattr(lib, "cudaPointerGetAttributes", None)
-    clear = getattr(lib, "cudaGetLastError", None)
-    if query is None:
-        query = getattr(lib, "hipPointerGetAttributes", None)
-        clear = getattr(lib, "hipGetLastError", None)
-    if query is None:
-        return cpu
-    # cudaPointerAttributes is {int type; int device; void*; void*} (24 B);
-    # hipPointerAttribute_t appends {int isManaged; unsigned flags} (32 B).
-    # Only the two leading ints are read; the buffer is oversized on purpose.
-    attrs = (ctypes.c_uint8 * 64)()
-    query.restype = ctypes.c_int
-    query.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    err = query(ctypes.addressof(attrs), ctypes.c_void_p(ptr))
-    if err != 0:
-        # Pageable host memory reports cudaErrorInvalidValue on older
-        # runtimes; that error is sticky and must be cleared.
-        if clear is not None:
-            clear.restype = ctypes.c_int
-            clear()
-        return cpu
-    mem_type, dev_index = struct.unpack_from("ii", bytes(attrs))
-    if mem_type == _MEMORY_TYPE_DEVICE:
-        return torch.device("cuda", dev_index)
-    if mem_type == _MEMORY_TYPE_MANAGED:
+        raise RuntimeError("CUDA pointer residency runtime is unavailable")
+    query, attributes = _cuda_pointer_query(lib)
+    attrs = attributes()
+    err = query(ctypes.byref(attrs), ctypes.c_void_p(ptr))
+    if err:
+        # In particular, do not clear an illegal-address/no-device error and
+        # then dereference a possibly-device pointer through a CPU view.
+        raise RuntimeError(f"cudaPointerGetAttributes failed with error code {err}")
+    if attrs.type == _MEMORY_TYPE_DEVICE:
+        if attrs.device < 0:
+            raise RuntimeError("CUDA pointer has an invalid device ordinal")
+        return torch.device("cuda", attrs.device)
+    if attrs.type == _MEMORY_TYPE_MANAGED:
         return hint
-    return cpu
+    if attrs.type in (_MEMORY_TYPE_HOST, _MEMORY_TYPE_UNREGISTERED):
+        return cpu
+    raise RuntimeError(f"Unknown CUDA pointer memory type: {attrs.type}")
 
 
 def _per_layer_paged_shape(
