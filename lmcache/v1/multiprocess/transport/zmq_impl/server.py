@@ -144,11 +144,6 @@ def get_zmq_handler_specs(module: EngineModule) -> list[HandlerSpec]:
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.GET_SERVER_CONFIG,
-                module.get_server_config,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
                 RequestType.GET_EXPERIMENTAL,
                 module.get_experimental,
                 ThreadPoolType.SYNC,

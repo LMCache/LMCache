@@ -16,13 +16,6 @@ message GetChunkSizeResponse {
   int64 chunk_size = 1;
 }
 
-message GetServerConfigRequest {}
-
-message GetServerConfigResponse {
-  bool separate_object_groups = 1;
-  bool supports_null_block_id = 2;
-}
-
 message GetExperimentalRequest {}
 
 message GetExperimentalResponse {
@@ -40,7 +33,6 @@ message PingResponse {
 service ControllerService {
   rpc Clear(ClearRequest) returns (ClearResponse);
   rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
-  rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigResponse);
   rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
   rpc Ping(PingRequest) returns (PingResponse);
 }

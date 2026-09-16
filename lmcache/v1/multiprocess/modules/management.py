@@ -154,21 +154,6 @@ class ManagementModule:
         """
         return list(self._experimental_transfer)
 
-    def get_server_config(self) -> dict[str, bool]:
-        """Return public transfer configuration and supported metadata.
-
-        Returns:
-            ``separate_object_groups`` reports the active server setting;
-            ``supports_null_block_id`` confirms support for per-engine-group
-            null markers, including ``None`` for real block zero. Only these
-            public transfer properties are exposed, with no credentials or
-            storage-backend configuration.
-        """
-        return {
-            "separate_object_groups": self._ctx.separate_object_groups,
-            "supports_null_block_id": True,
-        }
-
     def clear(self) -> None:
         """Clear all stored KV cache data from the storage manager."""
         with self._clear_lock:

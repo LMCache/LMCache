@@ -94,10 +94,6 @@ def native_client() -> Generator[RequestClient, None, None]:
                 continue
         else:
             pytest.fail("MP server did not become ready")
-        assert client.get_server_config().result(TIMEOUT) == {
-            "separate_object_groups": False,
-            "supports_null_block_id": True,
-        }
         yield client
     finally:
         client.close()

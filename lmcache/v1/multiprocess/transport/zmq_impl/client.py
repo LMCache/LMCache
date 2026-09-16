@@ -188,15 +188,6 @@ class ZmqMultiprocessClient(RequestClient):
         """Return the server chunk size."""
         return self._call(RequestType.GET_CHUNK_SIZE)
 
-    def get_server_config(self) -> MessagingFuture[dict[str, bool]]:
-        """Query public transfer settings and capabilities.
-
-        Returns:
-            A future resolving to ``separate_object_groups`` (active setting)
-            and ``supports_null_block_id`` (per-group null-marker support).
-        """
-        return self._call(RequestType.GET_SERVER_CONFIG)
-
     def ping(self, instance_id: int | None) -> MessagingFuture[Any]:
         """Check server health and refresh worker liveness."""
         return self._call(RequestType.PING, instance_id)
