@@ -1,5 +1,9 @@
 # LMCacheRedis KV Connector
 
+> **Deployment mode:** The first quickstart below uses legacy in-process mode.
+> New deployments should use the [MP mode](#mp-mode-multiprocess) section; see
+> the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 The cpp binding is in `csrc/redis/*`.
 
 The key optimization is multi-threading and batching on the C layer and the python side being awoken through the eventfd API where a callback consumes the completion belonging to a non-blocking submission. 

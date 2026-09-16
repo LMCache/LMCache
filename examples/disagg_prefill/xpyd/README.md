@@ -1,5 +1,9 @@
 ## Example of Disaggregated Prefill in vLLM v1
 
+> **Legacy in-process example:** For new deployments, start with the
+> [MP disaggregated-prefill example](../../disagg_prefill_mp/) and consult the
+> [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This example demonstrates how to run LMCache with disaggregated prefill using NIXL on a single node.
 
 ### Prerequisites

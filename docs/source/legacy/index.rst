@@ -8,7 +8,8 @@ Legacy (In-Process Mode)
    These pages document LMCache's original **in-process mode**, where LMCache
    ran *inside* the inference engine process (e.g. via ``LMCacheConnectorV1`` on
    vLLM). In-process mode is **deprecated**; new deployments should use
-   :doc:`Multiprocess (MP) mode <../mp/index>`.
+   :doc:`Multiprocess (MP) mode <../mp/index>`. Existing deployments remain
+   supported; follow :doc:`migration_to_mp` when you are ready to move.
 
 Background
 ----------
@@ -19,15 +20,17 @@ and made an **asynchronous prefetching architecture** the default -- a
 ``LOOKUP`` followed by background L2→L1 loads -- alongside process isolation,
 shared caching across engine instances, and multi-tier (L1/L2) storage.
 
-MP is now the recommended mode and is on track to support essentially
-everything in-process mode did. The pages below are kept for users still on
-in-process mode and as a historical reference while MP closes any remaining
-gaps; where a feature already has an MP equivalent, prefer the MP docs.
+MP is now the recommended mode. The pages below remain available for users who
+need an in-process-only feature or are not ready to migrate. Review the
+:doc:`migration guide <migration_to_mp>` for configuration mappings, current
+feature gaps, verification, and rollback guidance; where a feature has an MP
+equivalent, prefer the MP docs.
 
 .. toctree::
    :hidden:
    :maxdepth: 1
 
+   migration_to_mp
    /getting_started/quickstart/index
    /kv_cache/storage_backends/index
    /kv_cache/async_loading

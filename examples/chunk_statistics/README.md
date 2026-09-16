@@ -1,5 +1,9 @@
 # Chunk Statistics Example
 
+> **Legacy in-process example:** The launch commands below use
+> `LMCacheConnectorV1`. Prefer MP observability for new deployments; see the
+> [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This example demonstrates how to use LMCache's chunk statistics feature to track and analyze KV cache chunk reuse patterns.
 
 ## Overview

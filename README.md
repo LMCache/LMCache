@@ -86,6 +86,9 @@ LMCache is becoming an integral layer in the LLM inference *ecosystem*, with *co
 
 ## Getting Started
 
+New deployments should use LMCache's standalone multiprocess (MP) architecture.
+For an existing in-process deployment, follow the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 To use LMCache, simply install `lmcache` from your package manager, e.g. pip:
 ```bash
 pip install lmcache

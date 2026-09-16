@@ -30,6 +30,7 @@ import torch
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
 from lmcache.banner import print_banner_once
+from lmcache.deprecation import warn_in_process_mode_deprecated
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -450,6 +451,7 @@ class LMCacheConnectorV1Impl:
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
+        warn_in_process_mode_deprecated()
         # Banner from the scheduler role only, so tensor-parallel
         # deployments print it once rather than once per worker.
         if role == KVConnectorRole.SCHEDULER:

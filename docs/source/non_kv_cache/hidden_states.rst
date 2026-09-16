@@ -1,6 +1,12 @@
 Hidden states
 =============
 
+.. warning::
+
+   Hidden-state caching is currently an in-process-only feature. The
+   in-process runtime is deprecated but remains available for this gap; see
+   :doc:`/legacy/migration_to_mp`.
+
 The **HiddenStateStore** caches per-token *hidden-state* tensors
 (intermediate activations from an inference forward pass) alongside
 the KV cache, keyed by the same chunk keys. It exists to support any

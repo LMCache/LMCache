@@ -2,6 +2,11 @@
 
 This directory contains runnable examples organized by use case. The table below describes what each example does, its hardware requirements, and a recommended learning order for infrastructure engineers getting started with LMCache.
 
+> **Deployment mode:** New deployments should use LMCache's standalone
+> multiprocess (MP) server. Examples that use `LMCacheConnectorV1`,
+> `lmcache_server`, or direct `LMCacheEngine` APIs are retained for legacy
+> in-process deployments; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 > **Single-node vs. multi-node:** Examples marked with NIXL or UCX require a
 > high-bandwidth interconnect (NVLink or PCIe Gen4/5). Running them on a
 > single machine with two GPUs is simpler than a true multi-node setup, but
