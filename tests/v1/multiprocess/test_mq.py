@@ -31,7 +31,12 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
-from lmcache.v1.multiprocess.server import add_handler_helper
+from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.transport.zmq_impl.server import (
+    add_handler_helper,
+    get_zmq_handler_specs,
+)
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -56,6 +61,31 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
         end=chunk_size,
         request_id=f"test_request_{index}",
     )
+
+
+def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
+    """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
+
+    class P2PHandlers:
+        @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
+        def lookup(self) -> None:
+            return None
+
+        @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
+        def query(self) -> None:
+            return None
+
+        @request_handler(RequestType.P2P_UNLOCK_OBJECTS, HandlerType.BLOCKING)
+        def unlock(self) -> None:
+            return None
+
+    request_types = {spec.request_type for spec in get_zmq_handler_specs(P2PHandlers())}
+
+    assert request_types == {
+        RequestType.P2P_LOOKUP_AND_LOCK,
+        RequestType.P2P_QUERY_LOOKUP_RESULTS,
+        RequestType.P2P_UNLOCK_OBJECTS,
+    }
 
 
 def _server_process(
@@ -687,6 +717,29 @@ def test_shared_loop_dispatch():
         client_b.close()
         assert ClientPollingLoop._instance is None
     finally:
+        server.close()
+
+
+def test_invalid_outbound_request_does_not_block_later_requests() -> None:
+    """An invalid request fails locally without blocking the outbound queue."""
+    server_url = "tcp://127.0.0.1:16025"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        invalid: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, [123]
+        )
+        healthy: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+
+        with pytest.raises(ValueError, match="Payload count mismatch"):
+            invalid.result(timeout=5)
+        assert healthy.result(timeout=5) == "NOOP_OK"
+    finally:
+        client.close()
         server.close()
 
 

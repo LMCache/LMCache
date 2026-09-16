@@ -12,6 +12,7 @@ interfaces of ``lmcache_mp_connector``.
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import importlib
 
 # Third Party
 import pytest
@@ -33,7 +34,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
 )
-from lmcache.integration.vllm.utils import hex_hash_to_int16  # noqa: E402
+from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
 
 IMAGE_PLACEHOLDER_ID = 99
 
@@ -75,6 +76,8 @@ class _FakeRequest:
         self.sampling_params = _FakeSamplingParams(
             extra_args=sampling_params_extra_args
         )
+        # Read by the version-pinned (vendored) tracker variants only.
+        self.block_hashes: list = []
 
     def append_decode_token(self, token_id: int):
         """Simulate vLLM appending a decode token to the live token list."""
@@ -110,8 +113,8 @@ def test_mm_request_overwrites_placeholder_span():
     tracker = LMCacheMPRequestTracker(
         _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
     )
-    fill = hex_hash_to_int16("0xabcd")
-    assert tracker.get_token_ids() == [1, 2, fill, fill, fill, 3, 4, 5]
+    v = list(mm_hash_to_token_values("0xabcd", 3))
+    assert tracker.get_token_ids() == [1, 2, *v, 3, 4, 5]
 
 
 def test_different_images_produce_different_key_tokens():
@@ -131,8 +134,8 @@ def test_decode_tokens_appended_unchanged():
     tracker = LMCacheMPRequestTracker(request)
     request.append_decode_token(500)
     request.append_decode_token(501)
-    fill = hex_hash_to_int16("0xabcd")
-    assert tracker.get_token_ids() == [1, 2, fill, fill, 3, 500, 501]
+    v = list(mm_hash_to_token_values("0xabcd", 2))
+    assert tracker.get_token_ids() == [1, 2, *v, 3, 500, 501]
 
 
 def test_tracker_extracts_request_configs():
@@ -142,6 +145,7 @@ def test_tracker_extracts_request_configs():
             sampling_params_extra_args={
                 "kv_transfer_params": {
                     "lmcache.skip_save": True,
+                    "lmcache.max_offload_tokens": 4,
                     "lmcache.priority": "high",
                     "temperature": 0.8,
                 }
@@ -151,8 +155,28 @@ def test_tracker_extracts_request_configs():
 
     assert tracker.request_configs == {
         "lmcache.skip_save": True,
+        "lmcache.max_offload_tokens": 4,
         "lmcache.priority": "high",
     }
+    assert tracker.max_offload_tokens == 4
+
+
+def test_tracker_ignores_max_offload_tokens_outside_request_configs():
+    request = _FakeRequest(
+        [1, 2, 3, 4],
+        sampling_params_extra_args={
+            "kv_transfer_params": {
+                "max_offload_tokens": 4,
+                "lmcache.skip_save": True,
+            }
+        },
+    )
+    request.kv_transfer_params = {"lmcache.max_offload_tokens": 4}
+
+    tracker = LMCacheMPRequestTracker(request)
+
+    assert tracker.max_offload_tokens is None
+    assert tracker.request_configs == {"lmcache.skip_save": True}
 
 
 def test_eager_prefetch_forwards_request_configs():
@@ -179,6 +203,7 @@ def test_eager_prefetch_forwards_request_configs():
         cache_salt="",
         request_configs={"lmcache.skip_save": True},
     )
+    assert tracker.lookup_started_at is not None
 
 
 def _prepare_storable_tracker(request: _FakeRequest) -> LMCacheMPRequestTracker:
@@ -200,8 +225,8 @@ def test_store_metadata_uses_mm_adjusted_token_ids():
     )
 
     assert metadata is not None
-    fill = hex_hash_to_int16("0xabcd")
-    assert metadata.op.token_ids == [1, 2, fill, fill, 3, 4, 5, 6]
+    v = list(mm_hash_to_token_values("0xabcd", 2))
+    assert metadata.op.token_ids == [1, 2, *v, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
 
@@ -224,6 +249,32 @@ def test_store_metadata_preserves_request_configs():
     assert metadata.request_configs == {"lmcache.skip_save": True}
 
 
+def test_store_metadata_respects_max_offload_tokens():
+    tracker = _prepare_storable_tracker(
+        _FakeRequest(
+            list(range(8)),
+            sampling_params_extra_args={
+                "kv_transfer_params": {"lmcache.max_offload_tokens": 4}
+            },
+        )
+    )
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, lmcache_tokens_per_chunk=4, group_tokens_per_block=[4]
+    )
+
+    assert metadata is not None
+    assert metadata.op.start == 0
+    assert metadata.op.end == 4
+    assert tracker.num_stored_tokens == 4
+    assert (
+        LMCacheMPRequestMetadata.GetStoreMetadata(
+            tracker, lmcache_tokens_per_chunk=4, group_tokens_per_block=[4]
+        )
+        is None
+    )
+
+
 def test_retrieve_metadata_uses_mm_adjusted_token_ids():
     prompt = [1, 2] + [IMAGE_PLACEHOLDER_ID] * 2 + [3, 4, 5, 6]
     request = _make_mm_request(prompt, identifier="0xabcd", offset=2, length=2)
@@ -237,7 +288,25 @@ def test_retrieve_metadata_uses_mm_adjusted_token_ids():
     )
 
     assert metadata is not None
-    fill = hex_hash_to_int16("0xabcd")
-    assert metadata.op.token_ids == [1, 2, fill, fill, 3, 4, 5, 6]
+    v = list(mm_hash_to_token_values("0xabcd", 2))
+    assert metadata.op.token_ids == [1, 2, *v, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["lmcache_mp_connector_0180", "lmcache_mp_connector_0201"],
+)
+def test_vendored_tracker_variants_substitute_mm_spans(module_name):
+    """The version-pinned MP connector copies embed the same substitution."""
+    mod = importlib.import_module(f"lmcache.integration.vllm.{module_name}")
+    prompt = [1, 2] + [IMAGE_PLACEHOLDER_ID] * 3 + [3, 4, 5]
+    tracker = mod.LMCacheMPRequestTracker(
+        _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
+    )
+    v = list(mm_hash_to_token_values("0xabcd", 3))
+    assert tracker.get_token_ids() == [1, 2, *v, 3, 4, 5]
+
+    text_tracker = mod.LMCacheMPRequestTracker(_FakeRequest(prompt))
+    assert text_tracker.get_token_ids() == prompt

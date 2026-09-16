@@ -8,10 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import argparse
 
+# First Party
+from lmcache.cli.commands.bench.server_bench.cases.base import BenchCase
+
 
 @dataclass(frozen=True)
 class BenchConfig:
-    """Immutable configuration for one server benchmark run.
+    """Immutable client configuration for one server benchmark run.
 
     CLI-only concerns such as profiling stay with the command layer.
 
@@ -28,9 +31,6 @@ class BenchConfig:
         kvcache_shape_spec: LMCache KV shape specification string.
         num_blocks: Fallback number of paged KV blocks.
         block_size: Fallback number of tokens per paged KV block.
-        start: First synthetic sequence number.
-        end: Exclusive final sequence number, or ``None`` to run forever.
-        quiet: Whether progress output is disabled.
     """
 
     rpc_url: str
@@ -43,9 +43,6 @@ class BenchConfig:
     kvcache_shape_spec: str
     num_blocks: int
     block_size: int
-    start: int
-    end: int | None
-    quiet: bool
 
     def __post_init__(self) -> None:
         if self.mode not in ("cpu", "gpu"):
@@ -66,10 +63,9 @@ class BenchConfig:
 
     @property
     def uses_handle_transfer(self) -> bool:
-        """Return whether this run uses REGISTER plus STORE/RETRIEVE.
+        """Return whether this run uses handle-based transfer.
 
-        ``auto`` preserves the existing mapping: GPU uses the handle path,
-        while CPU uses the engine-driven PREPARE/COMMIT path.
+        ``auto`` selects handles for GPU and engine-driven transfer for CPU.
         """
         if self.transfer_mode == "auto":
             return self.is_gpu
@@ -113,16 +109,21 @@ class WorkerSpec:
             )
 
 
-def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
-    """Convert server-bench CLI arguments into an immutable config.
+@dataclass(frozen=True)
+class BenchRunSpec:
+    """Bind one bench case to a concrete client configuration.
 
-    Args:
-        args: Parsed arguments for ``lmcache bench server``.
-
-    Returns:
-        A ``BenchConfig`` with the same defaults and TP clamping used by the
-        existing command path.
+    Attributes:
+        config: Client, Worker, and KV layout configuration.
+        bench_case: Configured bench case to execute.
     """
+
+    config: BenchConfig
+    bench_case: BenchCase
+
+
+def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
+    """Build a config while preserving CLI defaults and TP clamping."""
     return BenchConfig(
         rpc_url=args.rpc_url,
         http_url=args.url,
@@ -134,7 +135,4 @@ def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
         kvcache_shape_spec=args.kvcache_shape_spec,
         num_blocks=args.num_blocks,
         block_size=args.block_size,
-        start=args.start,
-        end=args.end,
-        quiet=bool(getattr(args, "quiet", False)),
     )
