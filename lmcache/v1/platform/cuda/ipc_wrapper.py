@@ -12,14 +12,13 @@ which no legacy IPC handle can express (vLLM's cumem allocator, torch
 
 ``device_type="cuda"`` binds to one of the three via
 :attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`,
-driven by two mutually exclusive process-global switches:
+driven by two process-global policy switches:
 :class:`CudaIPCWrapper` by default, :class:`RawCudaIPCWrapper` under
-``isolated_ipc`` (``lmcache/v1/platform/isolated_ipc.py``), and
+``isolated_ipc``, and
 :class:`VmmCudaIPCWrapper` under ``use_vmm_api``
-(``lmcache/v1/platform/cuda/vmm_ipc.py``). The multiprocess adapter
-dispatches through
-:func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`; the TRT-LLM
-adapter instantiates :class:`RawCudaIPCWrapper` directly.
+(``lmcache.v1.platform.ipc_policy``). The multiprocess adapter
+dispatches through :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`;
+the TRT-LLM adapter instantiates :class:`RawCudaIPCWrapper` directly.
 """
 
 # Future
@@ -44,7 +43,7 @@ from lmcache.v1.platform.cuda.utils import (
     cuda_ipc_handle_from_bytes,
     cuda_ipc_handle_to_bytes,
 )
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc
+from lmcache.v1.platform.ipc_policy import is_isolated_ipc
 
 logger = init_logger(__name__)
 
@@ -234,7 +233,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
     - the MP registration path selects it via
       :attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`
       when the isolated-IPC switch is on
-      (``lmcache/v1/platform/isolated_ipc.py``);
+      (``lmcache.v1.platform.ipc_policy``);
     - the TRT-LLM adapter instantiates it directly for its
       ``cudaMalloc``'d KV pool, which ``_share_cuda_()`` cannot wrap at
       all.
