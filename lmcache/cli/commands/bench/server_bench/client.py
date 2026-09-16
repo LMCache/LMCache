@@ -892,6 +892,15 @@ class ServerBenchClient:
             )
             self._workers.append(worker)
 
+            if (
+                isinstance(transfer_context, EngineDrivenTransferContext)
+                and len(layer_groups) > 1
+            ):
+                raise ValueError(
+                    "engine_driven supports only one KV group; "
+                    "use --transfer-mode lmcache_driven for multiple groups"
+                )
+
             try:
                 transfer_context.register(
                     instance_id,

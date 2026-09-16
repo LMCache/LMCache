@@ -766,6 +766,77 @@ class TestAllocShapeContract:
 class TestClientMultiWorker:
     """Test scheduler LOOKUP and per-rank STORE/RETRIEVE fan-out."""
 
+    @pytest.mark.parametrize(
+        ("mode", "transfer_mode", "num_groups"),
+        [
+            ("cpu", "auto", 2),
+            ("cpu", "engine_driven", 2),
+            ("gpu", "engine_driven", 2),
+            ("cpu", "engine_driven", 1),
+            ("cpu", "lmcache_driven", 2),
+        ],
+    )
+    def test_start_validates_transfer_group_support(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+        transfer_mode: str,
+        num_groups: int,
+    ) -> None:
+        """Reject unsupported groups before registration, including async contexts."""
+        # First Party
+        from lmcache import torch_dev
+        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+        from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
+        from lmcache.cli.commands.bench.server_bench.config import BenchConfig
+        from lmcache.v1.multiprocess import transfer_context as tc
+
+        register = MagicMock()
+        context_type = (
+            tc.AsyncEngineDrivenTransferContext
+            if mode == "gpu"
+            else tc.LMCacheDrivenTransferContext
+        )
+        context = MagicMock(spec=context_type, register=register)
+        monkeypatch.setattr(tc.EngineDrivenTransferContext, "register", register)
+        monkeypatch.setattr(tc, "create_transfer_context", lambda *a, **kw: context)
+        monkeypatch.setattr(torch_dev, "is_available", lambda: True)
+        monkeypatch.setattr(zmq, "Context", MagicMock)
+        monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
+        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
+        monkeypatch.setattr(
+            sv_helpers, "_allocate_kv_cache", lambda **kw: [torch.ones(1)]
+        )
+        bench = ServerBenchClient(
+            BenchConfig(
+                rpc_url="ipc:///tmp/test-bench-group-support",
+                http_url="",
+                mode=mode,
+                transfer_mode=transfer_mode,
+                tp_size=1,
+                use_mla=False,
+                num_tokens=3,
+                kvcache_shape_spec=";".join(
+                    f"(2,16,2,{i + 1},4):float16:1" for i in range(num_groups)
+                ),
+                num_blocks=16,
+                block_size=2,
+            ),
+            lambda message: None,
+        )
+        try:
+            if num_groups > 1 and transfer_mode != "lmcache_driven":
+                with pytest.raises(ValueError, match="one KV group.*lmcache_driven"):
+                    bench.start()
+                register.assert_not_called()
+                if mode == "gpu":
+                    context.close.assert_called_once_with()
+            else:
+                bench.start()
+                register.assert_called_once()
+        finally:
+            bench.close()
+
     def test_start_rolls_back_partial_registration(
         self,
         monkeypatch: pytest.MonkeyPatch,
