@@ -30,7 +30,9 @@ MP integration / SDK / benchmark
 `RequestClient` defines named methods such as `lookup()`, `store()`, and
 `retrieve()`. The ZMQ facade translates each method back to the existing
 `RequestType`, payload order, and response type, so this refactor does not
-change the ZMQ wire protocol.
+change the ZMQ wire protocol. Its low-level sockets, polling loop, multipart
+frames, msgspec codecs, and worker-pool dispatch live in `zmq_impl/mq.py` so
+the shared multiprocess package does not expose ZMQ runtime internals.
 
 `RequestClientFactory` normalizes an endpoint and selects an implementation by
 scheme:

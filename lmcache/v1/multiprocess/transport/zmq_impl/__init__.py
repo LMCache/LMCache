@@ -5,11 +5,11 @@
 from typing import Any
 
 # First Party
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.zmq_impl.client import (
     ZmqMultiprocessClient,
 )
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
 
 
 def create_request_client(

@@ -69,7 +69,7 @@ High-Level Architecture
          |
          | ZMQ (tcp)
          v
-    MessageQueueServer (mq.py)
+    MessageQueueServer (transport/zmq_impl/mq.py)
          |
          | dispatch by RequestType
          v
