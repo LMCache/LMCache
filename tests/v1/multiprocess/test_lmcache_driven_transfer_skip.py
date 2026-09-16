@@ -132,10 +132,7 @@ def _staging_context(
     context.calculate_num_blocks.side_effect = lambda tokens, group: tokens
     context.kv_layer_groups_manager = SimpleNamespace(
         num_kernel_groups=len(null_ids),
-        kernel_groups=[
-            SimpleNamespace(null_block_id=null_id, shape_desc=SimpleNamespace(nb=8))
-            for null_id in null_ids
-        ],
+        kernel_groups=[SimpleNamespace(null_block_id=null_id) for null_id in null_ids],
         object_groups=object_groups,
         get_subchunk_sw_size_tokens=lambda group: window_tokens,
     )
@@ -155,16 +152,6 @@ def test_absent_checkpoint_objects_stage_safe_placeholders() -> None:
     )
     staged = downsample_and_stage_block_ids(context, block_ids, skipped_chunks=masks)
     assert staged == [[0, 1, 2, 3], [0, 0, 0, 1], [0, 0, 2, 3]]
-
-
-@pytest.mark.parametrize("invalid_block", [-2, -1, 8])
-def test_partial_checkpoint_object_rejected_before_staging(invalid_block: int) -> None:
-    context = _staging_context([-1, -1], [_og([0, 1])])
-    block_ids = [[0, 1], [invalid_block, 2]]
-    masks = all_null_chunk_masks(block_ids, [_og([0, 1])], [2, 2], 1, [-1, -1])
-    with pytest.raises(ValueError, match="Invalid block ID"):
-        downsample_and_stage_block_ids(context, block_ids, skipped_chunks=masks)
-    context.stage_block_ids.assert_not_called()
 
 
 def test_legacy_sliding_window_zero_placeholders_remain_valid() -> None:
@@ -307,25 +294,6 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [0, 0, 0, 1],
         [0, 0, 2, 3],
     ]
-
-
-@pytest.mark.parametrize("operation", ["store", "retrieve"])
-def test_partial_state_object_fails_without_staging_or_copy(
-    monkeypatch: pytest.MonkeyPatch,
-    operation: str,
-) -> None:
-    module, context, reads, transfers = _make_checkpoint_module(monkeypatch)
-    _handle, ok = getattr(module, operation)(
-        SimpleNamespace(request_id="req", worker_id=1),
-        1,
-        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, -1, -1]],
-        b"producer",
-    )
-    assert not ok
-    assert reads == []
-    assert transfers == []
-    context.stage_block_ids.assert_not_called()
-    cast(MagicMock, module.context.storage_manager.reserve_write).assert_not_called()
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):

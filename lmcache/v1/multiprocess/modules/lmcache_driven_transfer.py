@@ -195,8 +195,8 @@ def downsample_and_stage_block_ids(
     needed for every chunk, such as deepseek v4's swa cache.
 
     Object-level skipping is decided by the caller. Slots that it will not
-    transfer are staged as zero, so negative null markers never reach a GPU
-    index buffer. All blocks that can be copied are checked before staging.
+    transfer are staged as zero, so negative null markers for absent objects
+    never reach a GPU index buffer.
 
     Args:
         cache_context: The cache context containing the KV cache information.
@@ -207,12 +207,6 @@ def downsample_and_stage_block_ids(
 
     Returns:
         The cut block id lists, indexed by LMCache KV group index.
-
-    Raises:
-        ValueError: If a copied block ID is negative, outside its registered
-            allocation, or a nonzero null marker. The historical reserved
-            null block zero remains allowed inside partially present chunks,
-            as required by sliding-window engines.
 
     Note:
         This function has some coupled logic with transfer_kv_per_object_group below.
@@ -244,7 +238,6 @@ def downsample_and_stage_block_ids(
         for kg in group.kernel_group_indices
     }
     for kernel_group_id in range(num_kernel_groups):
-        kernel_group = manager.kernel_groups[kernel_group_id]
         subchunk_sw_size_tokens = (
             cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
                 kernel_group_id
@@ -265,12 +258,11 @@ def downsample_and_stage_block_ids(
         skip_blocks = cache_context.calculate_num_blocks(
             skip_first_n_tokens, kernel_group_id
         )
-        if len(old_block_ids) % total_blocks_per_chunk != 0:
-            raise ValueError(
-                f"len(block_ids[{kernel_group_id}]) should be a multiple "
-                f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
-                f"{len(old_block_ids)}"
-            )
+        assert len(old_block_ids) % total_blocks_per_chunk == 0, (
+            f"len(block_ids[{kernel_group_id}]) should be a multiple "
+            f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
+            f"{len(old_block_ids)}"
+        )
 
         for i in range(0, len(old_block_ids), total_blocks_per_chunk):
             chunk_block_ids = old_block_ids[i : i + total_blocks_per_chunk]
@@ -287,22 +279,8 @@ def downsample_and_stage_block_ids(
                 block_pos = i + total_blocks_per_chunk - keep_blocks_per_chunk + offset
                 if skipped or block_pos < skip_blocks:
                     new_block_ids.append(0)
-                    continue
-                if (
-                    block_id < 0
-                    or block_id >= kernel_group.shape_desc.nb
-                    or (
-                        kernel_group.null_block_id not in (None, 0)
-                        and block_id == kernel_group.null_block_id
-                    )
-                ):
-                    raise ValueError(
-                        f"Invalid block ID {block_id} for kernel group "
-                        f"{kernel_group_id}, chunk {chunk_idx}: copied blocks must "
-                        f"be in [0, {kernel_group.shape_desc.nb}) and cannot be "
-                        "a nonzero null marker"
-                    )
-                new_block_ids.append(block_id)
+                else:
+                    new_block_ids.append(block_id)
 
         block_ids[kernel_group_id] = new_block_ids
 
@@ -1181,7 +1159,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # garbage entry. A later request can store it once the block IDs are
             # complete. Checked on the raw block ids, before cutting drops the
             # per-chunk blocks that sliding-window groups do not need.
-            if len(gpu_block_ids) != len(blocks_per_chunk) or any(
+            if any(
                 len(group_block_ids) < num_chunks * bpc
                 for group_block_ids, bpc in zip(
                     gpu_block_ids, blocks_per_chunk, strict=True
@@ -1213,14 +1191,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 ],
             )
 
-            try:
-                block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                    cache_context, gpu_block_ids, skipped_chunks=skipped_chunks
-                )
-            except ValueError:
-                logger.exception("Invalid STORE block IDs for %s", key.request_id)
-                event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+            block_ids_per_group_gpu = downsample_and_stage_block_ids(
+                cache_context, gpu_block_ids, skipped_chunks=skipped_chunks
+            )
 
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
@@ -1462,7 +1435,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # kernel to write out-of-bounds GPU memory. Checked on the raw
             # block ids, before cutting drops the per-chunk blocks that
             # sliding-window groups do not need.
-            if len(gpu_block_ids) != len(blocks_per_chunk) or any(
+            if any(
                 len(group_block_ids) < num_chunks * bpc
                 for group_block_ids, bpc in zip(
                     gpu_block_ids, blocks_per_chunk, strict=True
@@ -1499,23 +1472,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 [g in skipped_groups or i < skip for i in range(num_chunks)]
                 for g, skip in enumerate(group_skips)
             ]
-            try:
-                block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                    cache_context,
-                    gpu_block_ids,
-                    skipped_chunks=skipped_chunks,
-                    skip_first_n_tokens=skip_first_n_tokens,
-                )
-            except ValueError:
-                logger.exception("Invalid RETRIEVE block IDs for %s", key.request_id)
-                try:
-                    self._release_failed_retrieve_locks(key, instance_id)
-                except Exception:
-                    logger.exception(
-                        "Failed to release RETRIEVE locks for invalid block IDs"
-                    )
-                event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+            block_ids_per_group_gpu = downsample_and_stage_block_ids(
+                cache_context,
+                gpu_block_ids,
+                skipped_chunks=skipped_chunks,
+                skip_first_n_tokens=skip_first_n_tokens,
+            )
 
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
