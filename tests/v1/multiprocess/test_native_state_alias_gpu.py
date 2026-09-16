@@ -59,7 +59,6 @@ def _serve(port: int) -> None:
             host="127.0.0.1",
             port=port,
             chunk_size=CHUNK,
-            separate_object_groups=True,
         ),
         storage_manager_config=StorageManagerConfig(
             l1_manager_config=L1ManagerConfig(
@@ -96,7 +95,7 @@ def native_client() -> Generator[RequestClient, None, None]:
         else:
             pytest.fail("MP server did not become ready")
         assert client.get_server_config().result(TIMEOUT) == {
-            "separate_object_groups": True,
+            "separate_object_groups": False,
             "supports_null_block_id": True,
         }
         yield client

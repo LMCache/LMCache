@@ -132,7 +132,6 @@ def _groups() -> KVLayerGroupsManager:
             ),
         ],
         lmcache_tokens_per_chunk=CHUNK,
-        separate_object_groups=True,
     )
     assert manager.get_attn_desc().num_chunks_in_sw == [-1, 1]
     assert manager.get_attn_desc().group_kinds == ("attention", "recurrent")

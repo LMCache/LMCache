@@ -524,6 +524,48 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].sw_size_chunks >= 1
         assert attn_desc.num_chunks_in_sw[1] == manager.object_groups[1].sw_size_chunks
 
+    def test_nondefault_null_policy_enables_object_group_separation(self):
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
+        policy_manager = _build_manager(
+            tensors[:2],
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), null_block_id=None),
+                EngineGroupInfo(1, (1,), null_block_id=-1),
+            ],
+        )
+        assert [
+            group.kernel_group_indices for group in policy_manager.object_groups
+        ] == [
+            [0],
+            [1],
+        ]
+
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), null_block_id=None),
+                EngineGroupInfo(
+                    1,
+                    (1,),
+                    sw_size_tokens=32,
+                    recurrent_state=True,
+                    null_block_id=-1,
+                ),
+                EngineGroupInfo(
+                    2,
+                    (2,),
+                    sw_size_tokens=32,
+                    recurrent_state=True,
+                    null_block_id=-1,
+                ),
+            ],
+        )
+        assert manager.num_object_groups == 2
+        assert manager.object_groups[0].kernel_group_indices == [0]
+        assert manager.object_groups[1].kernel_group_indices == [1, 2]
+        assert manager.get_attn_desc().num_chunks_in_sw == [-1, 1]
+        assert manager.get_attn_desc().group_kinds == ("attention", "recurrent")
+
     def test_object_group_separation_aux_group_buckets_alone(self):
         # A tagged extra group (connector-private pool) buckets alone even
         # though its window (-1) matches the full-attention bucket. The rest
