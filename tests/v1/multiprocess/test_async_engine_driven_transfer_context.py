@@ -124,7 +124,7 @@ def _new_context(
 ) -> AsyncEngineDrivenTransferContext:
     monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
     _install_fake_gather(monkeypatch)
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=max_inflight)
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock(), commit_workers=max_inflight)
     ctx._engine_driven_context = (
         _FakeStoreContext(commit_impl=commit_impl)  # type: ignore[assignment]
     )
@@ -139,7 +139,7 @@ def test_submit_store_returns_pending_future_until_gather_and_commit(
         monkeypatch, gather_gate=gather_gate, commit_impl=lambda _c: True
     )
     future = ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
     assert not future.query()
     gather_gate.set()
@@ -155,7 +155,7 @@ def test_create_recorded_event_uses_local_device_event(
     event = fake_torch_dev.Event.return_value
     stream = fake_torch_dev.current_stream.return_value
     monkeypatch.setattr(async_engine_driven, "torch_dev", fake_torch_dev)
-    ctx = AsyncEngineDrivenTransferContext()
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock())
     ctx._engine_driven_context = MagicMock()
 
     assert ctx.create_recorded_event() is event
@@ -176,7 +176,7 @@ def test_submit_store_commit_waits_for_gather_done(
 
     ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
     future = ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
     assert not commit_called.wait(timeout=0.05)
     gather_gate.set()
@@ -196,7 +196,7 @@ def test_close_drains_inflight_async_store(monkeypatch: pytest.MonkeyPatch) -> N
 
     ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
     future = ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
     closed = threading.Event()
 
@@ -225,7 +225,7 @@ def test_commit_failure_sets_false_and_logs(
     monkeypatch.setattr(async_engine_driven.logger, "exception", log_exception)
     ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
     future = ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
     gather_gate.set()
     assert future.result(timeout=1) is False
@@ -259,7 +259,7 @@ def test_sync_engine_driven_context_returns_resolved_future(
     fake = _RecordingTorchDev()
     monkeypatch.setattr(worker_transfer, "torch_dev", fake)
     _install_fake_gather(monkeypatch)
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(1, MagicMock())
     ctx._engine_driven_context = (
         _FakeStoreContext(commit_impl=lambda _c: True)  # type: ignore[assignment]
     )
@@ -267,7 +267,6 @@ def test_sync_engine_driven_context_returns_resolved_future(
     future = ctx.submit_store(
         "r1",
         object(),
-        1,
         {"k": torch.zeros(1)},
         [[0]],
         _FakeEvent(threading.Event()),
@@ -284,7 +283,7 @@ def test_sync_engine_driven_context_returns_resolved_future(
 
 
 def test_sync_engine_driven_context_has_no_async_resources() -> None:
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(1, MagicMock())
     assert not hasattr(ctx, "_copy_stream")
     assert not hasattr(ctx, "_commit_executor")
     assert not hasattr(ctx, "_inflight_semaphore")
@@ -301,12 +300,12 @@ def test_build_engine_driven_context_dispatches_on_capability(
     monkeypatch.setattr(
         async_engine_driven, "torch_dev", _FakeTorchDev(threading.Event())
     )
-    capable = worker_transfer._build_engine_driven_context()
+    capable = worker_transfer._build_engine_driven_context(1, MagicMock())
     assert isinstance(capable, AsyncEngineDrivenTransferContext)
     capable.close()
 
     monkeypatch.setattr(worker_transfer, "_supports_async_primitives", lambda: False)
-    fallback = worker_transfer._build_engine_driven_context()
+    fallback = worker_transfer._build_engine_driven_context(1, MagicMock())
     assert isinstance(fallback, EngineDrivenTransferContext)
     assert not isinstance(fallback, AsyncEngineDrivenTransferContext)
     fallback.close()
@@ -344,13 +343,13 @@ def test_flush_inflight_stores_waits_for_pending_gather(
     )
     _install_fake_gather(monkeypatch)
 
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock(), commit_workers=1)
     ctx._engine_driven_context = (
         _FakeStoreContext(commit_impl=lambda _c: True)  # type: ignore[assignment]
     )
 
     ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
 
     # Wait until the background thread has started (entered stream()), proving
@@ -403,7 +402,6 @@ def test_commit_store_serialized_by_commit_lock(
         ctx.submit_store(
             f"r{i}",
             object(),
-            1,
             {"k": torch.zeros(1)},
             [[0]],
             _FakeEvent(gather_gate),
@@ -444,7 +442,7 @@ def test_prepare_store_runs_on_background_thread_not_forward_thread(
     monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
     _install_fake_gather(monkeypatch)
 
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock(), commit_workers=1)
     ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]
         commit_impl=lambda _c: True,
         prepare_impl=_slow_prepare,
@@ -454,7 +452,7 @@ def test_prepare_store_runs_on_background_thread_not_forward_thread(
 
     def _submit() -> None:
         ctx.submit_store(
-            "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+            "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
         )
         submit_returned.set()
 

@@ -219,7 +219,7 @@ class ZmqMultiprocessClient(RequestClient):
         group_to_cache: list[int],
         group_rot: list[list[int]],
     ) -> MessagingFuture[Any]:
-        """Register CacheBlend RoPE state."""
+        """Register blend RoPE state."""
         return self._call(
             RequestType.CB_REGISTER_ROPE,
             instance_id,
@@ -231,7 +231,7 @@ class ZmqMultiprocessClient(RequestClient):
         )
 
     def cb_unregister_rope(self, instance_id: int) -> MessagingFuture[Any]:
-        """Unregister CacheBlend RoPE state."""
+        """Unregister blend RoPE state."""
         return self._call(RequestType.CB_UNREGISTER_ROPE, instance_id)
 
     def cb_retrieve_pre_computed(
@@ -242,7 +242,7 @@ class ZmqMultiprocessClient(RequestClient):
         instance_id: int,
         event_ipc_handle: bytes,
     ) -> MessagingFuture[Any]:
-        """Retrieve CacheBlend pre-computed blocks."""
+        """Retrieve blend pre-computed blocks."""
         return self._call(
             RequestType.CB_RETRIEVE_PRE_COMPUTED,
             key,
@@ -253,8 +253,12 @@ class ZmqMultiprocessClient(RequestClient):
         )
 
     def cb_unified_lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
-        """Run a CacheBlend unified lookup."""
+        """Run a blend unified lookup."""
         return self._call(RequestType.CB_UNIFIED_LOOKUP, key, tp_size)
+
+    def cb_protocol_handshake(self, client_version: int) -> MessagingFuture[Any]:
+        """Exchange blend protocol versions with the server."""
+        return self._call(RequestType.CB_PROTOCOL_HANDSHAKE, client_version)
 
     def p2p_lookup_and_lock(
         self,
@@ -276,7 +280,7 @@ class ZmqMultiprocessClient(RequestClient):
         """Return the server's experimental capabilities."""
         return self._call(RequestType.GET_EXPERIMENTAL)
 
-    # Compatibility aliases used by older CacheBlend plugins.
+    # Compatibility aliases used by older blend plugins.
     cb_register_rope_v3 = cb_register_rope
     cb_unregister_rope_v3 = cb_unregister_rope
     cb_retrieve_pre_computed_v3 = cb_retrieve_pre_computed
