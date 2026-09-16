@@ -73,8 +73,15 @@ def _group_metadata(chunk_tokens: int = 8) -> EngineDrivenContextMetadata:
     )
 
 
+@pytest.mark.cuda
 def test_shm_strategy_multigroup_store_and_retrieve_roundtrip() -> None:
     """Per-group reserve on store; retrieve misses until every group commits."""
+    # Marked cuda so suites that deselect with -m "not cuda" (the XPU unit
+    # lane) never collect this at all. The runtime check below still covers
+    # plain CUDA-less runs, which do not filter by marker.
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
     # First Party
     from lmcache.v1.distributed.config import (
         EvictionConfig,
@@ -87,9 +94,6 @@ def test_shm_strategy_multigroup_store_and_retrieve_roundtrip() -> None:
         PickleTransferStrategy,
         ShmTransferStrategy,
     )
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
 
     config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
