@@ -59,7 +59,8 @@ class L1ManagerInterface(Protocol):
 
     def finish_write(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
         """Release write locks.
-        Fires ``on_l1_keys_write_finished`` (write-through trigger)."""
+        Fires ``on_l1_keys_write_finished`` for non-temporary objects only
+        (write-through trigger). Temporary buffers remain local staging."""
         ...
 
     def finish_write_and_reserve_read(

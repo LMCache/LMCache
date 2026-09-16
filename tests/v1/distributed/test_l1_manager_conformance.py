@@ -198,6 +198,46 @@ def test_temporary_promote_dropped_after_read(manager):
     assert manager.unsafe_read([k])[k] == (L1Error.KEY_NOT_EXIST, None)
 
 
+def test_temporary_finish_write_is_local_readable_staging(
+    manager: L1ManagerInterface,
+) -> None:
+    """Finishing a temporary write unlocks it without scheduling L2 storage."""
+    key = _key(100)
+    listener = RecordingListener()
+    manager.register_listener(listener)
+    err, obj = manager.reserve_write([key], [True], _LAYOUT, mode="new")[key]
+    assert err == L1Error.SUCCESS
+    assert manager.finish_write([key])[key] == L1Error.SUCCESS
+    assert listener.kinds("write_finished") == []
+    assert manager.unsafe_read([key])[key][0] == L1Error.KEY_NOT_READABLE
+    assert manager.report_status()["read_locked_count"] == 0
+
+    assert manager.reserve_read([key], read_locks=2)[key] == (L1Error.SUCCESS, obj)
+    assert manager.reserve_read([key])[key] == (L1Error.SUCCESS, obj)
+    assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+    assert manager.finish_read([key], read_locks=2)[key] == L1Error.SUCCESS
+    assert manager.unsafe_read([key])[key] == (L1Error.SUCCESS, obj)
+    assert manager.finish_read([key])[key] == L1Error.SUCCESS
+    assert manager.reserve_read([key])[key] == (L1Error.KEY_NOT_EXIST, None)
+
+
+@pytest.mark.parametrize("clear", [False, True])
+def test_temporary_finish_write_can_be_discarded_without_reading(
+    manager: L1ManagerInterface, clear: bool
+) -> None:
+    """An unlocked temporary is reclaimable by delete or non-force clear."""
+    key = _key(101)
+    assert manager.reserve_write([key], [True], _LAYOUT, mode="new")[key][0] == (
+        L1Error.SUCCESS
+    )
+    assert manager.finish_write([key])[key] == L1Error.SUCCESS
+    if clear:
+        manager.clear()
+    else:
+        assert manager.delete([key])[key] == L1Error.SUCCESS
+    assert manager.reserve_read([key])[key] == (L1Error.KEY_NOT_EXIST, None)
+
+
 def test_promote_fires_promote_event(manager):
     """Both backends fire finish_write_and_reserve_read, never write_finished."""
     k = _key(12)

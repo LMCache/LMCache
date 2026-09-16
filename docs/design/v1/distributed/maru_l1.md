@@ -93,7 +93,8 @@ MaruServer RPCs and owns:
 - `_pending_read: dict[ObjectKey, _PendingRead]` — staged reads between
   `reserve_read` and the last `finish_read` (the zero-copy `MemoryObj`, a
   `refcount`, the real server-pin count `pinned`, `is_temporary`, a read-TTL
-  deadline).
+  deadline). A completed temporary write also lives here with `refcount=0`:
+  it is locally readable but has no read hold until `reserve_read` is called.
 - The `MaruMemoryAllocator` (as `self._allocator`), the registered listeners, and a
   daemon TTL sweeper thread.
 
@@ -135,7 +136,7 @@ All three flows run on the stock controllers; `MaruL1Manager` only implements th
 ### Store (write-through)
 
 ```
-StoreController
+StoreController (non-temporary KV data)
   ├─ reserve_write(keys)   allocate a CXL page, stage in _pending_write
   ├─ (D2H copy into the page)
   ├─ finish_write(keys)    create_store_handle + batch_store (register in directory)
@@ -186,14 +187,22 @@ Discard-on-evict is safe because write-through already placed the data in L2.
 
 2. **`pinned` tracks real server pins separately from `refcount`**
    (`0 <= pinned <= refcount`); release paths unpin `pinned`, not `refcount`. A pure
-   temporary stage has `pinned == 0`; a temporary that absorbs an overlapping
-   `reserve_read`'s pins records them so they are released, not leaked. `finish_read`
-   never releases more than it holds.
+   temporary stage has `pinned == 0`. Overlapping temporary reads use the local
+   page and never pin a peer's independently published copy of the same key.
+   `finish_read` never releases more than it holds.
 
 3. **temporary vs retained promote.** The default prefetch policy marks every
-   promote temporary — private staging, never registered, discarded after one read
+   promote temporary — private staging, never registered, discarded after its last read
    (the shared pool is populated only by store write-through). Only a hot-cache
    policy marks a promote retained and registers it in the directory.
+
+   Plain `finish_write` also keeps temporary pages private. It releases the
+   write hold without emitting the write-through notification, leaving an
+   unlocked local page (`refcount=0`). `reserve_read` takes local holds; the last
+   `finish_read` reclaims the page. `delete`, non-force `clear`, and `close` can
+   also reclaim an unread completed temporary. Cleanup such as
+   `finish_write(temp_keys); delete(temp_keys)` therefore never exposes a
+   temporary buffer or deletes a peer's same-key shared copy.
 
 4. **PINNED cross-node retry.** MaruServer refuses to delete a key with
    `pin_count > 0`; `delete` fires the deleted-listener only for keys it actually
@@ -206,7 +215,9 @@ A reserve→finish flow that stalls leaves an orphan the pending dicts cannot
 distinguish from an in-progress one, so time is the only abandonment signal (reusing
 the stock `write_ttl`/`read_ttl` values). A daemon sweeper reclaims both under the
 lock: an expired `_pending_write` page returns to the owner's free-list
-(`abort_alloc`); an expired `_pending_read` unpins its remaining refcount. A late
+(`abort_alloc`); an expired directory read releases its remaining server pins.
+A temporary read or completed unread temporary instead reclaims its private
+page, so abandoning finish-write/delete cleanup does not leak the allocation. A late
 `finish_read`/`unsafe_read` then sees `KEY_NOT_EXIST` and recomputes — the same path
 as a stock TTL expiry.
 

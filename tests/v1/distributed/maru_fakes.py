@@ -237,8 +237,18 @@ class FakeCxlAdapter:
 def make_maru_manager(
     chunk_size: int = 64,
     auto_expand: bool = True,
+    read_ttl_seconds: int = 300,
 ) -> tuple[MaruL1Manager, FakeMaruHandler, FakeCxlAdapter]:
-    """Build a MaruL1Manager wired to fresh fakes (post-init_layout state)."""
+    """Build a manager wired to fresh fakes in post-init_layout state.
+
+    Args:
+        chunk_size: Bytes per simulated CXL page.
+        auto_expand: Whether the manager uses device-wide free capacity.
+        read_ttl_seconds: Lifetime of staged reads and completed temporaries.
+
+    Returns:
+        The manager, its directory fake, and its page allocator fake.
+    """
     cfg = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=0,
@@ -251,7 +261,7 @@ def make_maru_manager(
             ),
         ),
         write_ttl_seconds=600,
-        read_ttl_seconds=300,
+        read_ttl_seconds=read_ttl_seconds,
     )
     manager = MaruL1Manager(cfg)
     handler = FakeMaruHandler(chunk_size)
