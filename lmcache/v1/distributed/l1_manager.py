@@ -533,7 +533,7 @@ class L1Manager:
         )
         return ret
 
-    def _unlock_write_checked(
+    def _try_unlock_write(
         self,
         key: ObjectKey,
         op: str,
@@ -619,7 +619,7 @@ class L1Manager:
         notification_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
-            err, entry = self._unlock_write_checked(key, "finish write")
+            err, entry = self._try_unlock_write(key, "finish write")
             ret[key] = err
             if err != L1Error.SUCCESS or entry is None:
                 continue
@@ -675,9 +675,7 @@ class L1Manager:
         successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
-            err, entry = self._unlock_write_checked(
-                key, "finish_write_and_reserve_read"
-            )
+            err, entry = self._try_unlock_write(key, "finish_write_and_reserve_read")
             if err != L1Error.SUCCESS or entry is None:
                 ret[key] = (err, None)
                 continue
@@ -770,7 +768,7 @@ class L1Manager:
         successful_keys: list[ObjectKey] = []
 
         for key in keys:
-            err, entry = self._unlock_write_checked(key, "finish_write_and_delete")
+            err, entry = self._try_unlock_write(key, "finish_write_and_delete")
             ret[key] = err
             if err != L1Error.SUCCESS or entry is None:
                 continue
