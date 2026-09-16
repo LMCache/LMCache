@@ -30,12 +30,11 @@ Transport schemes
 gRPC schema development
 -----------------------
 
-The protobuf schemas for the planned gRPC transport live under
+The protobuf schemas for the gRPC transport live under
 ``lmcache/v1/multiprocess/transport/grpc_impl/protos``. Package builds generate
-their Python bindings under the sibling ``_proto_gen`` package. Landing these
-schemas and the build-time generator does not enable the gRPC client or server;
-``grpc://`` endpoints remain unavailable until the runtime implementation
-lands.
+their Python bindings under the sibling ``_proto_gen`` package. Each generated
+gRPC method is mapped to a transport-neutral ``RequestType`` at initialization
+so the ZMQ and gRPC clients expose the same named request methods.
 
 After changing a schema, regenerate and validate all bindings with:
 
