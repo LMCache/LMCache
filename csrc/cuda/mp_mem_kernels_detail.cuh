@@ -169,10 +169,16 @@ __device__ inline size_t calculate_lmcache_global_offset(
   size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
   if (shape_desc.kv_interleaved) {
     // L2TD layout: [L, 2, T, D] — per-layer interleaved [K0,V0,K1,V1,...]
+    //
+    // The layer step is normally this kernel group's own per-layer size, but
+    // a layer-major object interleaves the kernel groups, so consecutive
+    // layers of one group sit a whole layer extent apart.
+    // ``scalars_per_layer`` returns the tight form unless the plan supplied
+    // that stride.
     return token_offset_in_lmcache_object * scalars_per_token +
            k_or_v * lmcache_chunk_size * scalars_per_token +
-           layer_idx * shape_desc.kv_size * lmcache_chunk_size *
-               scalars_per_token;
+           layer_idx *
+               shape_desc.scalars_per_layer<ScalarType>(lmcache_chunk_size);
   }
   // 2LTD layout: [2, L, T, D] — K-then-V across all layers
   return token_offset_in_lmcache_object * scalars_per_token +

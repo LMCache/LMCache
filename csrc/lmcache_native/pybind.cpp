@@ -64,7 +64,9 @@ PYBIND11_MODULE(lmcache_native, m) {
       .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
       .def_readwrite("block_stride_elems",
                      &PageBufferShapeDesc::block_stride_elems)
-      .def_readwrite("kv_interleaved", &PageBufferShapeDesc::kv_interleaved);
+      .def_readwrite("kv_interleaved", &PageBufferShapeDesc::kv_interleaved)
+      .def_readwrite("layer_stride_elems",
+                     &PageBufferShapeDesc::layer_stride_elems);
 
   py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
       .def(py::init([](uintptr_t paged_buffer_ptrs,

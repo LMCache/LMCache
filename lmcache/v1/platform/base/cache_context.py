@@ -90,6 +90,52 @@ class BaseCacheContext(ABC):
         """Returns the maximum number of concurrent batches."""
         ...
 
+    def get_temp_layer_buffer(
+        self, batch_idx: int, kernel_group_idx: int, local_layer_idx: int
+    ) -> torch.Tensor:
+        """Returns the staging buffer slice holding one layer's caches.
+
+        Only backends that report :attr:`layer_major` need this; the
+        kernel-group-major path addresses whole groups instead.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not expose per-layer staging buffers"
+        )
+
+    def get_layer_offset_in_object(
+        self, object_group_idx: int, kernel_group_idx: int, local_layer_idx: int
+    ) -> int:
+        """Byte offset of one layer's caches from the start of its object.
+
+        Relative to the object group because that is what an LMCache memory
+        object holds.  Only backends that address staging per layer need
+        this; the kernel-group-major path addresses whole groups instead.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not expose per-layer object offsets"
+        )
+
+    @property
+    def layer_major(self) -> bool:
+        """Whether the staging buffer uses the layer-major KV layout.
+
+        Concrete for a reason: only backends that implement the layout need
+        to say so, and every other backend keeps the kernel-group-major
+        layout that has always been assumed here.
+        """
+        return False
+
+    @property
+    def kernel_groups_contiguous(self) -> bool:
+        """Whether each kernel group is one contiguous staging range.
+
+        Concrete for the same reason as :attr:`layer_major`: the
+        kernel-group-major layout every other backend uses always keeps a
+        group contiguous, so only the backends that can interleave groups
+        by model depth need to answer otherwise.
+        """
+        return True
+
     @abstractmethod
     def close(self) -> None:
         """Release device-specific resources (GDS staging buffers, etc.)."""

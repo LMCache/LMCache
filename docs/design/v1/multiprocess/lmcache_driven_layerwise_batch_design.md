@@ -16,10 +16,12 @@ Key parameters:
 - `N > 1`: batch N consecutive layers per H2D + scatter, one event per
   batch, best balance of event overhead vs. pipeline granularity.
 
-For a model with L total layers and `--layerwise-batch N`,
-the server produces `ceil(L / N)` batches, each covering up to N
-consecutive same-kernel-group layers.  Each batch triggers one IPC
-event and one intermediate response frame to the worker.
+For a model with D model depths and `--layerwise-batch N`, the server
+produces `ceil(D / N)` batches, each covering up to N consecutive model
+depths -- and therefore every cache those depths own, across all kernel
+groups.  Each batch triggers one IPC event and one intermediate response
+frame to the worker.  When every depth owns exactly one cache, D equals
+the cache count that `KernelGroupInfo.num_layers` sums to (see 5.4).
 
 ### 1.1 Supported Scope
 
@@ -91,8 +93,11 @@ deferred until the CUDA path is validated upstream.
 
 ## 3. Pipeline: Streaming ZMQ Partial Frames
 
-With `--layerwise-batch N` and L total layers (ceil(L/N) batches), the per-batch
-flow on the server affinity pool thread is:
+With `--layerwise-batch N` and D model depths (ceil(D/N) batches), the
+per-batch flow on the server affinity pool thread is as follows.  The
+sketch below takes one cache per depth, so a batch is the contiguous layer
+index range `[i, i+N)`; 9.3 covers the frame shape a batch uses when it is
+not:
 
 ```
 Batch 0 (layers 0 .. N-1):
@@ -108,11 +113,11 @@ Batch 1 (layers N .. 2N-1):
   +-- record_event(layer_events[N], server_stream)
   +-- response_channel(pack(N, N, pool_idx=N))
 
-  ... (batches 2 .. ceil(L/N)-2 identical pattern) ...
+  ... (batches 2 .. ceil(D/N)-2 identical pattern) ...
 
-Batch ceil(L/N)-1 (last N layers):
+Batch ceil(D/N)-1 (last N layers):
   +-- H2D + scatter + record_event(pool[last])
-  +-- response_channel(pack((ceil(L/N)-1)*N, N, pool_idx))
+  +-- response_channel(pack((ceil(D/N)-1)*N, N, pool_idx))
 
 Handler returns ([], True)
   +-> done-callback -> output_queue -> final frame
@@ -160,15 +165,17 @@ Per-layer interleaved (kv_interleaved=True, layerwise mode):
   chunk = [K_layer0, V_layer0, K_layer1, V_layer1, ..., K_layerN, V_layerN]
 ```
 
-This interleaved layout is carried by `PageBufferShapeDesc.kv_interleaved`
-(`lmcache/v1/platform/ops_types.py`).
+This interleaved layout is carried by `PageBufferShapeDesc.kv_interleaved`.
+The field is declared in `csrc/kv_transfer_plan_types.h` and bound in
+`csrc/lmcache_native/pybind.cpp`; `lmcache/v1/platform/ops_types.py`
+re-exports the native type and is the import path Python code should use.
 
 The flag is a **deployment-wide invariant**, not a per-call argument: it
 is latched once in `LMCacheLayerwiseTransferModule._ensure_event_pool()`
 on every kernel group's `shape_desc`, guarded by
 `layerwise_batch > 0`.  That runs from the
 `REGISTER_LAYERWISE_IPC_EVENT_POOL` handler, which the worker issues
-immediately after `REGISTER_KV_CACHE` (see 6.1), so it is in place
+immediately after `REGISTER_KV_CACHE` (see 7.1), so it is in place
 before any transfer.  Both the store (D2H) and retrieve (H2D) paths
 then simply read it.  Configuring it at registration — rather than latching
 it on the first store — also keeps cold-start retrieves correct when a process
@@ -210,8 +217,11 @@ When native ops are available and the staging buffer is large enough,
 `transfer_kv_layerwise` uses the N-layer merged path:
 
 1. **StagingCopy per batch N-layer per chunk**: source = `memory_obj.data_ptr +
-   src_layer_offset`, size = `n_in_batch * per_layer_bytes`.  One
-   contiguous memcpy copies N layers from one chunk in a single call.
+   src_layer_offset`, size = the sum of the per-layer sizes in the batch.
+   That is `n_in_batch * per_layer_bytes` only while every layer in the
+   batch belongs to one kernel group; a batch spanning several kernel
+   groups sums their differing per-layer sizes instead.  One contiguous
+   memcpy copies the batch from one chunk in a single call.
 
 2. **Scatter kernel**: `execute_object_group_transfer` with
    `PageBufferShapeDesc(nl=n_in_batch, kv_interleaved=True)`.  The
@@ -224,15 +234,151 @@ When native ops are available and the staging buffer is large enough,
 
 ---
 
-## 5. IPC Event Pool
+## 5. GPU Staging Arena Layout
 
-### 5.1 Motivation
+Section 4 describes the **host** side: how one chunk's bytes are ordered inside
+an LMCache memory object, and why N consecutive layers form one contiguous
+source range.  This section describes the **device** side -- the staging buffer
+those bytes land in.  The two are laid out on different principles, and the
+device addressing rule does not follow from section 4.
+
+### 5.1 The Arena Is Slot-Major
+
+`_TempGPUBuffer` (`lmcache/v1/platform/cuda/cache_context.py`) owns a single
+flat `uint8` tensor of `_get_size_for_single_batch() * max_batch_size` bytes,
+carved by one running offset over a three-level nest:
+
+```
+for batch_idx in range(max_batch_size):              # a slot; one slot = one chunk
+    for object_group_idx in range(num_object_groups):  # one memory object
+        for kernel_group_idx in <this group's kernel groups>   # or depth order (5.2)
+```
+
+Slots are therefore the outermost level:
+
+```
+slot 0 (chunk A)      slot 1 (chunk B)      slot 2 (chunk C)      slot 3
+[og0 | og1 | ...]     [og0 | og1 | ...]     [og0 | og1 | ...]     [...]
+<----- slot_span ---->
+```
+
+The addressing rule is worth stating explicitly, because the natural shorthand
+is wrong:
+
+```
+base(slot, kg) = slot * slot_span + offset_of(kg)
+
+slot_span = _get_size_for_single_batch()    # sum over ALL object groups
+```
+
+`base(0, kg) + slot * n_bytes` is *not* equivalent.  A kernel group's `n_bytes`
+covers only its own layers, so stepping by it from `offset_of(kg)` lands in the
+neighbouring kernel group **inside slot 0** rather than in slot 1.  The two
+rules coincide exactly when one object group holds one kernel group -- then
+`slot_span == n_bytes` -- which is why a single-kernel-group model such as
+Qwen3-32B cannot expose the difference and a hybrid model exposes it on the
+first multi-chunk transfer.
+
+### 5.2 Depth-Major Placement Inside an Object Group
+
+`resolve_layer_major_placements`
+(`lmcache/v1/multiprocess/modules/layer_major_plan.py`) decides, per object
+group, whether that group's inner ordering stays kernel-group-major (the
+per-chunk layout; `placement is None`) or becomes depth-major.  Under
+depth-major, `carve_layer_major_object_group` emits one slice per
+`(kernel group, local layer)` in model-depth order and records each into
+`_offset_map_layer[(batch_idx, kernel_group_idx, local_layer_idx)]`.
+
+This is a **layout** change, not a scheduling one.  Under kernel-group-major
+staging, model depth `d` lives at `kg0_off + d * per_layer(kg0)`,
+`kg3_off + d * per_layer(kg3)`, ... -- several bases with *different* strides,
+since kernel groups differ in `hidden_dim_size`.  A merged H2D needs one
+constant-stride descriptor, so no reordering of launches can produce it; the
+bytes themselves have to be adjacent.  Depth-major staging makes all of one
+depth's caches a single run, so N consecutive depths are a single range.
+
+### 5.3 A Kernel Group May No Longer Be Contiguous
+
+Interleaving by depth is precisely what breaks per-kernel-group contiguity, so
+the buffer publishes the two facts separately:
+
+- `layer_major` -- whether depth order was selected at all.  It follows from
+  the staging gate, not from the model.
+- `kernel_groups_contiguous` -- whether each kernel group is still one run.
+  Always true under kernel-group-major, and true under depth-major as well
+  whenever every model layer owns its caches in a single kernel group, because
+  then the two orders coincide.
+
+When `kernel_groups_contiguous` is false, `_offset_map_kernel_group_only` is
+deliberately left unpopulated and `get_temp_kernel_group_buffer()` raises
+`ValueError`, directing the caller to `get_temp_layer_buffer()`.  Consumers
+that address a whole kernel group fail loudly instead of reading a byte range
+that no longer means what they assume.
+
+Registration logs both, so a deployment can be classified from the server log
+alone:
+
+```
+Layer-major KV staging layout selected for object group(s) [0];
+kernel groups remain contiguous: False
+```
+
+### 5.4 Two Index Spaces: Model Depth vs Registration Ordinal
+
+A "layer" is two different numbers here, and they diverge on exactly the models
+that layer-wise loading targets.
+
+| Name | Index space |
+| --- | --- |
+| `wait_for_layer_load(layer_name)` | model depth |
+| `KernelGroupInfo.model_depths` | model depth |
+| `KernelGroupInfo.layer_indices` | registration ordinal |
+| layer wait map values (`vllm_multi_process_adapter_layerwise.py`) | registration ordinal |
+| `KernelGroupInfo.num_layers` | a count of caches, not of depths |
+
+`layer_indices` are positions in the flat `kv_caches` sequence.  They coincide
+with depth only when each model layer registers exactly one KV cache.  A model
+that registers several caches per layer registers them **type-major**, so
+ordinal order groups by cache type rather than by depth -- which is why
+`model_depths` exists: ordering transfers by depth requires it.
+DeepSeek-V4-Flash registers 167 caches over 43 depths; Qwen3-32B registers 64
+over 64, so the distinction is invisible there.
+
+### 5.5 The `_transfer_object_group` Seam
+
+Both `store()` and `retrieve()` reach the copy through
+`LMCacheDrivenTransferModule._transfer_object_group`, never through
+`transfer_kv_per_object_group` directly.  That single override point is what
+lets the layer-wise module substitute a depth-ordered strategy in both
+directions without duplicating either handler.  New copy sites must route
+through the seam as well -- calling the free function directly silently opts
+that path out of layer-wise staging.
+
+### 5.6 Scope: `separate_object_groups`
+
+Everything above has been exercised with `separate_object_groups=False`, where
+`_detect_object_groups` returns a single object group holding every kernel
+group and the middle loop level runs exactly once.
+
+The separated path is structurally supported rather than special-cased:
+placement, slot span, per-slot base pointers, and the per-layer offset map are
+all parameterized by object group, and the merged H2D path asserts that each
+depth batch tiles one hole-free byte range, aborting rather than transferring
+garbage if it ever did not.  It has not, however, been exercised on hardware.
+Note that this is a server flag, not a model property -- nothing gates it per
+model.
+
+---
+
+## 6. IPC Event Pool
+
+### 6.1 Motivation
 
 Without pooling, each layerwise retrieve creates L events
 (`cudaEventCreate`), exports B handles (`cudaIpcGetEventHandle`), 
 and the worker imports B handles (`cudaIpcOpenEventHandle`). 
 
-### 5.2 Design
+### 6.2 Design
 
 A fixed pool of `EVENT_POOL_SIZE = 256` interprocess events is
 pre-allocated per (context, worker) pair at **registration time**:
@@ -240,7 +386,7 @@ pre-allocated per (context, worker) pair at **registration time**:
 ```
 register_layerwise_ipc_event_pool(instance_id):
   1. pool = _ensure_event_pool(instance_id)     # creates pool on first call:
-     a. assert num_total_layers <= EVENT_POOL_SIZE
+     a. raise ValueError if num_total_layers > EVENT_POOL_SIZE
      b. pool = EventPool(backend, device)        # 256 x cudaEventCreate
      c. pool.handles -> export all 256 events    # 256 x cudaIpcGetEventHandle
   2. return (layerwise_batch, pool.handles)      # REGISTER_LAYERWISE_IPC_EVENT_POOL response
@@ -258,7 +404,7 @@ LMCacheLayerwiseTransferContext.register():
      # 256 x cudaIpcOpenEventHandle — one-time cost at startup
 ```
 
-### 5.3 Per-Request Hot Path (Zero Driver Calls)
+### 6.3 Per-Request Hot Path (Zero Driver Calls)
 
 During retrieve, the server indexes into the pre-allocated pool:
 
@@ -279,7 +425,7 @@ evt = pool.event_at(pool_idx)
 stream.wait_event(evt)
 ```
 
-### 5.4 Wire Encoding
+### 6.4 Wire Encoding
 
 Every frame is a `tuple[bytes, bool, bool]` -- `(payload, is_final,
 succeeded)` -- so intermediate and closing frames share one response class:
@@ -289,7 +435,7 @@ succeeded)` -- so intermediate and closing frames share one response class:
   number of total layers (empty when indices were already reported
   frame by frame), `is_final = True`.
 
-### 5.5 Invariants
+### 6.5 Invariants
 
 - `num_total_layers <= EVENT_POOL_SIZE` — validated at registration; fails
   loudly otherwise.
@@ -300,7 +446,7 @@ succeeded)` -- so intermediate and closing frames share one response class:
 
 ---
 
-## 6. `--layerwise-batch N` Configuration Flow
+## 7. `--layerwise-batch N` Configuration Flow
 
 ```
 --layerwise-batch N
@@ -322,7 +468,7 @@ The two modes are **mutually exclusive per server node**. A node started
 with `N > 0` serves the layer-wise path exclusively and does not serve
 per-chunk retrieves.
 
-### 6.1 Pairing the Worker With the Server
+### 7.1 Pairing the Worker With the Server
 
 The worker's mode is **not** negotiated at registration. It is fixed at
 process start by which connector vLLM imports, so the operator must pair
@@ -359,7 +505,7 @@ Layerwise transfer context registered (batch=N, pool_size=...)
 Notes: Keeping mode off `REGISTER_KV_CACHE` is deliberate: it leaves the
 per-chunk protocol byte-for-byte unchanged when layer-wise is disabled.
 
-### 6.2 Debug Telemetry: `LMCACHE_LAYERWISE_DEBUG`
+### 7.2 Debug Telemetry: `LMCACHE_LAYERWISE_DEBUG`
 
 The layer-wise path is silent by default. Set `LMCACHE_LAYERWISE_DEBUG=1` on
 **both** the vLLM process and the `lmcache server` process to enable telemetry:
@@ -413,8 +559,8 @@ A frame summary sits next to it, covering the same retrieve. This is the
 direct evidence that the reply really is streamed:
 
 ```
-layerwise-frames: 16 frame(s) covering layers 0..63, 3 blocking wait(s);
-arrival +1.24..48.10 ms
+layerwise-frames: 16 frame(s) covering layer idx 0..63, 3 blocking
+wait(s); arrival +1.24..48.10 ms; per-frame (layers@+ms)=4@1.2, 4@4.1, ...
 ```
 
 How to read it:
@@ -448,9 +594,9 @@ behind a module-level flag that is read once at import.
 
 ---
 
-## 7. Layout Uniformity & Mixed-Mode Considerations
+## 8. Layout Uniformity & Mixed-Mode Considerations
 
-### 7.1 Current Invariant
+### 8.1 Current Invariant
 
 Layout is fixed per deployment: a server is uniformly per-layer
 (`kv_interleaved=True`) or uniformly per-chunk
@@ -462,7 +608,7 @@ This works because `layerwise_loading` is a server-level config, not
 a per-request flag.  All chunks stored by this server instance use
 the same interleaving.
 
-### 7.2 Note: Rolling Upgrades & Shared L2
+### 8.2 Note: Rolling Upgrades & Shared L2
 
 If servers sharing persistent L2 storage are upgraded from
 `--layerwise-batch 0` to `N > 0` (or vice versa), stale chunks with
@@ -490,9 +636,9 @@ system self-heal without a manual flush.
 
 ---
 
-## 8. Multi-Frame ZMQ Responses
+## 9. Multi-Frame ZMQ Responses
 
-### 8.1 Protocol Surface
+### 9.1 Protocol Surface
 
 Three additions to the protocol layer; none of them modifies an existing
 definition.
@@ -509,7 +655,7 @@ definition.
 | Request Type | Handler type | Frames / request | Response class |
 |---|---|---|---|
 | `RETRIEVE` | `BLOCKING` | 1 | `tuple[bytes, bool]` |
-| `RETRIEVE_LAYERWISE` | `STREAMING` | ceil(L/N) + 1 | `tuple[bytes, bool, bool]` |
+| `RETRIEVE_LAYERWISE` | `STREAMING` | ceil(D/N) + 1 | `tuple[bytes, bool, bool]` |
 | `REGISTER_LAYERWISE_IPC_EVENT_POOL` | `SYNC` | 1 | `tuple[int, list[bytes]]` |
 
 `RETRIEVE_LAYERWISE` declares exactly the same `payload_classes` as
@@ -523,13 +669,13 @@ One response class is declared per request type, and
 `_call_streaming_handler` encodes *every* frame with.  Intermediate and
 closing frames are therefore the same msgspec type on the wire; the
 transport never learns that some of them are partial.  `is_final` is the
-only field that distinguishes them -- see 8.3.
+only field that distinguishes them -- see 9.3.
 
 `REGISTER_LAYERWISE_IPC_EVENT_POOL` is an ordinary `SYNC` request, kept
 off `REGISTER_KV_CACHE` so registration keeps its plain `None` response
-for every non-layer-wise deployment (see 6.1).
+for every non-layer-wise deployment (see 7.1).
 
-### 8.2 How the Message Queue Stays Neutral
+### 9.2 How the Message Queue Stays Neutral
 
 Both file pairs follow the same shape: the layer-wise module subclasses
 the default one, and is imported only when `--layerwise-batch > 0`.
@@ -548,8 +694,9 @@ the default one, and is imported only when `--layerwise-batch > 0`.
              affinity_key)                  affinity_key,
                                             response_channel)      [+1 kwarg]
 
-  MessageQueueClient
-    .submit_request()          ~   submit_streaming_request(client, .., future)
+  MessageQueueClient             (no subclass; one method added in place)
+    .submit_request()
+    .submit_streaming_request(request_type, payloads, future)      [new]
     .process_inbound()             (reused verbatim; not overridden)
 
 
@@ -566,8 +713,7 @@ the default one, and is imported only when `--layerwise-batch > 0`.
   DeviceMessagingFuture  (sibling: one completion event, per-chunk retrieve)
 ```
 
-`<--` is subclassing, `~` a sibling helper with no inheritance
-relationship.  `server.py` picks the server class at construction:
+`<--` is subclassing.  `server.py` picks the server class at construction:
 
 ```python
 server_cls: type[MessageQueueServer] = MessageQueueServer
@@ -587,8 +733,9 @@ subclass intercepts.
 against the declared `payload_classes`, so a positional
 `response_channel` would fail validation before dispatch.
 
-`mq.py` has no notion of a partial result, and none of its existing
-classes were modified.  Two additions carry the whole mechanism:
+`mq.py` has no notion of a partial result.  Its one change is the
+`submit_streaming_request` method added to `MessageQueueClient`; no
+existing method was modified.  Two additions carry the whole mechanism:
 
 1. **The future re-arms itself.**  `process_inbound` is unchanged: it
    pops the pending entry and calls `future.set_result(...)`, exactly as
@@ -597,8 +744,9 @@ classes were modified.  Two additions carry the whole mechanism:
    pending table under the same uid.  It holds that table because
    `submit_streaming_request` handed it over via `bind_registry` before
    the request reached the polling loop.  Both halves of the multi-frame
-   contract therefore live in the future; `mq.py` is byte-identical to
-   before this feature, and so is `futures.py`.
+   contract therefore live in the future, which is why `mq.py` needs only
+   the one new submit method and `futures.py` is byte-identical to before
+   this feature.
 2. **A handler may answer more than once.**  This lives entirely in
    `mq_streaming.py`, which `mq.py` never imports.
    `StreamingMessageQueueServer` subclasses `MessageQueueServer` and
@@ -611,22 +759,31 @@ classes were modified.  Two additions carry the whole mechanism:
    `server.py` builds the subclass only when `layerwise_batch > 0`; every
    other deployment runs the unmodified server dispatch.
 
-### 8.3 Frame Formats
+### 9.3 Frame Formats
 
-All frames are identical in shape, so no marker byte or length probe is
-needed:
+All frames share one envelope:
 
 ```
 [zmq_identity, request_uid, request_type, msgpack((payload, is_final, succeeded))]
 ```
 
-**Intermediate** (ceil(L/N) of them, one per batch): `is_final = False`,
-`payload = struct.pack("<3i", first_layer, count, pool_index)`.
+**Intermediate** (ceil(D/N) of them, one per batch): `is_final = False`.
+The payload has two shapes, told apart by length, so no version
+negotiation is needed.  The worker decodes the 12-byte header first and
+reads a negative first field as the marker for the longer form:
+
+- **Contiguous run** (12 bytes): `struct.pack("<3i", first_layer, count,
+  pool_index)`, covering layer indices `first_layer` through
+  `first_layer + count - 1`.
+- **Explicit index list** (12 + 4*count bytes): `struct.pack("<3i", -1,
+  count, pool_index) + struct.pack(f"<{count}i", *layer_indices)`.  A
+  batch covers whole model depths, whose caches can sit at registration
+  indices that are not a contiguous range, so they are sent verbatim.
 
 **Closing** (one, emitted after the handler returns): `is_final = True`,
 `payload` empty when the indices were already reported.
 
-### 8.4 Frame Sequence for One Request
+### 9.4 Frame Sequence for One Request
 
 A single `RETRIEVE_LAYERWISE` request produces every frame.  The
 multiplexing is done by reusing the request UID: the server copies the
@@ -698,8 +855,8 @@ into the future's *type*, so it has to be the object handed to the
 polling loop:
 
 ```python
-submit_streaming_request(
-    self._mq_client, RequestType.RETRIEVE_LAYERWISE, payloads,
+self._message_queue_client.submit_streaming_request(
+    RequestType.RETRIEVE_LAYERWISE, payloads,
     layerwise_future.raw_future_,
 )
 ```

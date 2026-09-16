@@ -170,6 +170,26 @@ class MPServerConfig:
                 "--transport zmq, or drop --layerwise-batch to serve "
                 "per-chunk requests."
             )
+        if self.layerwise_batch > 0 and self.enable:
+            # The experimental transfer modules copy with
+            # ``transfer_kv_per_object_group``, which addresses a whole kernel
+            # group as one contiguous staging range. Layer-wise staging orders
+            # slices by model depth instead, so a model whose layers span
+            # several kernel groups interleaves them and no such range exists:
+            # the copy would silently write the wrong order rather than fail.
+            #
+            # Refused for every geometry, not just the interleaved ones. The
+            # combination has never been validated even where the orders
+            # coincide, and failing here names both flags while a
+            # per-registration check could only fire once a ring was built.
+            raise ValueError(
+                "experimental transfer modules "
+                f"({', '.join(sorted(self.enable))}) cannot be combined with "
+                "--layerwise-batch: they address a whole kernel group as one "
+                "contiguous staging range, which layer-wise staging does not "
+                "guarantee. Start this node without --layerwise-batch, or "
+                "without --enable."
+            )
 
 
 @dataclass

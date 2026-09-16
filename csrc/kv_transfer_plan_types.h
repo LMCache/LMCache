@@ -50,6 +50,24 @@ struct PageBufferShapeDesc {
   // [2, L, T, D] (all-K then all-V). The scatter kernel selects the
   // corresponding offset formula.
   bool kv_interleaved = false;
+  // Distance between consecutive layers inside the LMCache object, in
+  // source-dtype element units (same convention as ``block_stride_elems``:
+  // multiply by ``element_size`` to get bytes). 0 means "unset -- the object
+  // is tightly packed for this kernel group, so consecutive layers are
+  // exactly one layer's worth apart".
+  //
+  // Non-zero only for the layer-major object layout, where an object is
+  // ordered by model depth and each layer holds the caches of EVERY kernel
+  // group that layer owns. A given kernel group's layers are then separated
+  // by the whole layer extent, not by that group's own per-layer size, which
+  // is what the tight form assumes. Setting this is what lets several
+  // consecutive layers of one kernel group still be scattered by a single
+  // ``nl > 1`` launch.
+  //
+  // Honoured only by the ``kv_interleaved`` (L2TD) branch: the 2LTD branch
+  // groups all K across layers ahead of all V, an ordering the layer-major
+  // layout does not produce.
+  int64_t layer_stride_elems = 0;
 
   template <typename ScalarType>
   LMC_TRANSFER_PLAN_HD inline size_t scalars_per_head() const {
@@ -75,6 +93,20 @@ struct PageBufferShapeDesc {
                              ? static_cast<size_t>(block_stride_elems)
                              : static_cast<size_t>(bs) * nh * hs;
     return elems * element_size / sizeof(ScalarType);
+  }
+
+  // Per-layer step inside the LMCache object, in ``ScalarType`` element
+  // units. Returns the tight ``kv_size * chunk * scalars_per_token`` unless
+  // ``layer_stride_elems`` overrides it (layer-major objects, see above).
+  template <typename ScalarType>
+  LMC_TRANSFER_PLAN_HD inline size_t scalars_per_layer(
+      int lmcache_chunk_size) const {
+    if (layer_stride_elems > 0) {
+      return static_cast<size_t>(layer_stride_elems) * element_size /
+             sizeof(ScalarType);
+    }
+    return static_cast<size_t>(kv_size) * lmcache_chunk_size *
+           scalars_per_token<ScalarType>();
   }
 };
 

@@ -715,7 +715,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
+                    self._transfer_object_group(
                         cache_context,
                         block_ids_per_group_gpu,
                         memory_objs,
@@ -786,10 +786,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     ) -> None:
         """Enqueue the copy for one object group.
 
-        Every object-group copy inside :meth:`retrieve` routes through here so
-        that subclasses can substitute a different copy strategy. Call this
-        rather than :func:`transfer_kv_per_object_group` directly when adding
-        a new copy site to ``retrieve``.
+        Every object-group copy inside :meth:`store` and :meth:`retrieve`
+        routes through here so that subclasses can substitute a different copy
+        strategy, in either direction. Call this rather than
+        :func:`transfer_kv_per_object_group` directly when adding a new copy
+        site.
         """
         transfer_kv_per_object_group(
             cache_context,

@@ -36,6 +36,12 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
+from lmcache.v1.multiprocess.modules.layer_major_plan import (
+    carve_layer_major_object_group,
+    layer_major_staging_enabled,
+    layer_slices_from_kernel_groups,
+    resolve_layer_major_placements,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
@@ -129,6 +135,17 @@ class _TempGPUBuffer:
         # size of the buffer in bytes)
         self._offset_map_object_group_only: dict[tuple[int, int], tuple[int, int]] = {}
 
+        # (batch_idx, kernel_group_idx, local_layer_idx) -> (byte offset of
+        # that one layer's slice, size in bytes).  Only the layer-wise path
+        # addresses a single layer, so only its subclass fills this in.
+        self._offset_map_layer: dict[tuple[int, int, int], tuple[int, int]] = {}
+
+        # Staging layout of this buffer.  This class only ever produces the
+        # kernel-group-major order below; the layer-wise subclass replaces
+        # both flags when it re-carves the buffer in model-depth order.
+        self._layer_major = False
+        self._kernel_groups_contiguous = True
+
         offset = 0
         for batch_idx in range(max_batch_size):
             for object_group_idx in range(self._kv_groups_manager.num_object_groups):
@@ -171,6 +188,30 @@ class _TempGPUBuffer:
         return self._max_batch_size
 
     @property
+    def layer_major(self) -> bool:
+        """Whether the object groups are staged in model-depth order.
+
+        True for every layer-wise deployment and false for every
+        per-chunk one: the layout follows from the staging gate, not
+        from the model.  It says nothing about whether a kernel group is
+        still contiguous -- see :attr:`kernel_groups_contiguous`.
+        """
+        return self._layer_major
+
+    @property
+    def kernel_groups_contiguous(self) -> bool:
+        """Whether each kernel group is one contiguous run of bytes.
+
+        Always true under the kernel-group-major layout, and true under
+        the layer-major layout as well whenever every model layer owns
+        its caches in a single kernel group -- then depth order and
+        kernel-group-major order coincide.  Only a model whose layers
+        span several kernel groups interleaves them, leaving no
+        per-group range for callers that address a whole group.
+        """
+        return self._kernel_groups_contiguous
+
+    @property
     def buffer(self) -> torch.Tensor:
         """The flat staging tensor (for GDS cuFile registration)."""
         return self._temp_buffer
@@ -192,6 +233,13 @@ class _TempGPUBuffer:
         Raises:
             ValueError: If the batch_idx or kernel_group_idx is out of range.
         """
+        if not self._kernel_groups_contiguous:
+            raise ValueError(
+                "A kernel group is not contiguous for a model whose layers "
+                "span several kernel groups; use get_temp_layer_buffer() "
+                "to address one layer"
+            )
+
         key = (batch_idx, kernel_group_idx)
         if key not in self._offset_map_kernel_group_only:
             raise ValueError(
@@ -201,6 +249,36 @@ class _TempGPUBuffer:
         offset, size = self._offset_map_kernel_group_only[key]
         shape, dtype = self._shape_cache_kernel_group[kernel_group_idx]
         return self._temp_buffer[offset : offset + size].view(dtype).view(shape)
+
+    def get_temp_layer_buffer(
+        self, batch_idx: int, kernel_group_idx: int, local_layer_idx: int
+    ) -> torch.Tensor:
+        """Returns the temp GPU buffer holding a single layer's caches.
+
+        Valid under both layouts, which is what lets callers stay layout
+        agnostic.  The returned view keeps the kernel group's shape with the
+        layer axis pinned to length one.
+
+        Args:
+            batch_idx: Index of the batch (0 <= batch_idx < max_batch_size)
+            kernel_group_idx: Index of the kernel group.
+            local_layer_idx: Position of the layer within that kernel group,
+                i.e. an index into its ``layer_indices`` -- not a model depth.
+
+        Raises:
+            ValueError: If any index is out of range.
+        """
+        key = (batch_idx, kernel_group_idx, local_layer_idx)
+        if key not in self._offset_map_layer:
+            raise ValueError(
+                f"Invalid batch_idx {batch_idx}, kernel_group_idx "
+                f"{kernel_group_idx} or local_layer_idx {local_layer_idx}"
+            )
+
+        offset, size = self._offset_map_layer[key]
+        shape, dtype = self._shape_cache_kernel_group[kernel_group_idx]
+        layer_shape = torch.Size((shape[0], 1, *shape[2:]))
+        return self._temp_buffer[offset : offset + size].view(dtype).view(layer_shape)
 
     def get_temp_object_group_buffer(
         self, batch_idx: int, object_group_idx: int
@@ -256,6 +334,25 @@ class _TempGPUBuffer:
         Returns the cache size per token (in bytes), summed across all kernel groups.
         """
         return self._get_size_for_single_batch() // self._lmcache_tokens_per_chunk
+
+    def get_layer_offset_in_object(
+        self, object_group_idx: int, kernel_group_idx: int, local_layer_idx: int
+    ) -> int:
+        """Byte offset of one layer's caches from the start of its object.
+
+        Layout-agnostic: it reads the same per-layer map both layouts fill,
+        so callers do not have to know which one was selected.  Relative to
+        the object group because that is what an LMCache memory object holds.
+        """
+        entry = self._offset_map_layer.get((0, kernel_group_idx, local_layer_idx))
+        object_group = self._offset_map_object_group_only.get((0, object_group_idx))
+        if entry is None or object_group is None:
+            raise ValueError(
+                "No staging offset for object_group="
+                f"{object_group_idx}, kernel_group={kernel_group_idx}, "
+                f"local_layer={local_layer_idx}"
+            )
+        return entry[0] - object_group[0]
 
     # Helper functions
     def _get_shape_for_kernel_group(
@@ -336,6 +433,113 @@ class _TempGPUBuffer:
         return sum(
             self._get_size_for_object_group(object_group_idx)
             for object_group_idx in range(self._kv_groups_manager.num_object_groups)
+        )
+
+
+class _TempLayerMajorGPUBuffer(_TempGPUBuffer):
+    """Stages each object group in model-depth order.
+
+    Built only when the layer-wise staging gate is on, so the per-chunk
+    deployment never reaches this class and its base keeps the
+    kernel-group-major carve it has always had.  The carve is re-run here
+    rather than parameterised in the base so that the legacy ordering stays
+    one unbroken block of code with no layer-wise branch threaded through
+    it -- the same reason the ZMQ client carries a separate streaming
+    submit instead of a flag on the per-chunk one.
+
+    Re-carving after ``super().__init__`` is safe because the buffer's size
+    comes from :meth:`_get_size_for_single_batch`, which depends on the
+    registered geometry and not on the order the slices are laid out in:
+    both layouts place the same slices in the same number of bytes.
+    """
+
+    def __init__(
+        self,
+        kv_layer_groups_manager: KVLayerGroupsManager,
+        lmcache_tokens_per_chunk: int,
+        device: torch.device,
+        max_batch_size: int = 4,
+    ) -> None:
+        super().__init__(
+            kv_layer_groups_manager,
+            lmcache_tokens_per_chunk,
+            device,
+            max_batch_size,
+        )
+        self._recarve_in_depth_order()
+
+    def _recarve_in_depth_order(self) -> None:
+        """Replaces the base's kernel-group-major offsets with depth order.
+
+        Object groups the layout module declines to place keep the base's
+        ordering, so a deployment can mix the two.
+        """
+        (
+            self._layer_placements,
+            self._layer_major,
+            self._kernel_groups_contiguous,
+        ) = resolve_layer_major_placements(
+            self._kv_groups_manager, self._get_size_for_kernel_group
+        )
+
+        self._offset_map.clear()
+        self._offset_map_kernel_group_only.clear()
+        self._offset_map_object_group_only.clear()
+        self._offset_map_layer.clear()
+
+        offset = 0
+        for batch_idx in range(self._max_batch_size):
+            for object_group_idx in range(self._kv_groups_manager.num_object_groups):
+                object_group_size = 0
+                object_group_start_offset = offset
+                placement = self._layer_placements[object_group_idx]
+
+                if placement is None:
+                    for kernel_group_idx in self._kv_groups_manager.object_groups[
+                        object_group_idx
+                    ].kernel_group_indices:
+                        size = self._get_size_for_kernel_group(kernel_group_idx)
+                        self._offset_map[
+                            (batch_idx, object_group_idx, kernel_group_idx)
+                        ] = (offset, size)
+                        self._offset_map_kernel_group_only[
+                            (batch_idx, kernel_group_idx)
+                        ] = (offset, size)
+
+                        offset += size
+                        object_group_size += size
+                else:
+                    offset, object_group_size = carve_layer_major_object_group(
+                        placement, batch_idx, offset, self._offset_map_layer
+                    )
+                    if self._kernel_groups_contiguous:
+                        # Depth order coincided with kernel-group-major
+                        # order, so each group is still one run of bytes.
+                        # Record it so whole-kernel-group callers keep
+                        # working on the layer-wise path too.
+                        for kernel_group_idx in self._kv_groups_manager.object_groups[
+                            object_group_idx
+                        ].kernel_group_indices:
+                            size = self._get_size_for_kernel_group(kernel_group_idx)
+                            first = self._offset_map_layer[
+                                (batch_idx, kernel_group_idx, 0)
+                            ][0]
+                            self._offset_map[
+                                (batch_idx, object_group_idx, kernel_group_idx)
+                            ] = (first, size)
+                            self._offset_map_kernel_group_only[
+                                (batch_idx, kernel_group_idx)
+                            ] = (first, size)
+
+                self._offset_map_object_group_only[(batch_idx, object_group_idx)] = (
+                    object_group_start_offset,
+                    object_group_size,
+                )
+
+        self._offset_map_layer.update(
+            layer_slices_from_kernel_groups(
+                self._kv_groups_manager, self._offset_map_kernel_group_only
+            )
         )
 
 
@@ -436,12 +640,33 @@ class GPUCacheContext(BaseCacheContext):
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
-        self._temp_buffer = _TempGPUBuffer(
+        temp_buffer_cls: type[_TempGPUBuffer] = (
+            _TempLayerMajorGPUBuffer
+            if layer_major_staging_enabled()
+            else _TempGPUBuffer
+        )
+        self._temp_buffer = temp_buffer_cls(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
             max_batch_size=4,
         )
+
+        # CacheBlend addresses the staging buffer one kernel group at a time
+        # and takes data pointers into those contiguous regions, which a model
+        # whose layers span several kernel groups cannot offer: its groups are
+        # interleaved by depth.  ``full_sw_kv`` is set from ``engine_type ==
+        # "blend"`` when the server context is built, so it is the blend
+        # signal available here.  Refuse the combination up front rather than
+        # let blend read misaddressed bytes.
+        if full_sw_kv and not self._temp_buffer.kernel_groups_contiguous:
+            raise ValueError(
+                "Blending is not supported for models whose layers span "
+                "several kernel groups: their KV staging interleaves the "
+                "groups by model depth, leaving no contiguous "
+                "per-kernel-group region for blend to address. Disable "
+                "blending for this model."
+            )
 
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
@@ -530,6 +755,36 @@ class GPUCacheContext(BaseCacheContext):
     def max_batch_size(self) -> int:
         """Maximum number of chunks processed concurrently in one batch."""
         return self._temp_buffer.max_batch_size
+
+    @property
+    def layer_major(self) -> bool:
+        """Whether the staging buffer uses the layer-major layout."""
+        return self._temp_buffer.layer_major
+
+    @property
+    def kernel_groups_contiguous(self) -> bool:
+        """Whether each kernel group is one contiguous staging range."""
+        return self._temp_buffer.kernel_groups_contiguous
+
+    def get_temp_layer_buffer(
+        self, batch_idx: int, kernel_group_idx: int, local_layer_idx: int
+    ) -> torch.Tensor:
+        """Returns the temporary GPU buffer holding one layer's caches.
+
+        Valid under both layouts; see
+        :meth:`_TempGPUBuffer.get_temp_layer_buffer`.
+        """
+        return self._temp_buffer.get_temp_layer_buffer(
+            batch_idx, kernel_group_idx, local_layer_idx
+        )
+
+    def get_layer_offset_in_object(
+        self, object_group_idx: int, kernel_group_idx: int, local_layer_idx: int
+    ) -> int:
+        """Byte offset of one layer's caches within its object group."""
+        return self._temp_buffer.get_layer_offset_in_object(
+            object_group_idx, kernel_group_idx, local_layer_idx
+        )
 
     def get_temp_object_group_buffer(
         self, batch_idx: int, object_group_idx: int

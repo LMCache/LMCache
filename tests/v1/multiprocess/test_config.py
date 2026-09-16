@@ -324,3 +324,24 @@ def test_layerwise_batch_is_accepted_on_zmq():
 def test_grpc_is_unaffected_when_layerwise_batch_is_off():
     """The per-chunk path over gRPC keeps working; the guard is opt-in only."""
     assert MPServerConfig(transport="grpc").layerwise_batch == 0
+
+
+def test_layerwise_batch_refuses_experimental_transfer_modules():
+    """The experimental modules copy a whole kernel group at a time.
+
+    Layer-wise staging orders slices by model depth, so a model whose layers
+    span several kernel groups leaves no contiguous per-group range and the
+    copy would write the wrong order rather than fail. Refused for every
+    geometry because the combination has never been validated.
+    """
+    with pytest.raises(ValueError, match="cannot be combined with"):
+        MPServerConfig(layerwise_batch=8, enable=["transfer_query"])
+
+
+def test_experimental_transfer_modules_are_accepted_without_layerwise():
+    """The guard is opt-in: the per-chunk path keeps serving them."""
+    assert MPServerConfig(enable=["transfer_query"]).enable == ["transfer_query"]
+
+
+def test_layerwise_batch_is_accepted_without_experimental_modules():
+    assert MPServerConfig(layerwise_batch=8, enable=[]).layerwise_batch == 8

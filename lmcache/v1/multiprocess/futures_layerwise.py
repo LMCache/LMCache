@@ -7,6 +7,7 @@ here, inside the future itself, rather than in the message queue.
 """
 
 # Standard
+from collections.abc import Iterable
 from typing import Any, Optional, TypeVar
 import os
 import queue
@@ -118,7 +119,7 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             self._dbg_requested: set[int] = set()
             self._dbg_logged = False
             self._dbg_blocking_waits = 0
-            self._dbg_frames: list[tuple[int, int, int, float]] = []
+            self._dbg_frames: list[tuple[int, int, int, int, float]] = []
             self._dbg_t0 = time.perf_counter()
         self._partial_queue: "queue.Queue[bytes | None]" = queue.Queue()
         self.raw_future_: LayerwiseRawFuture[T] = LayerwiseRawFuture(
@@ -128,17 +129,31 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
     def _import_partial(self, b_data: bytes) -> None:
         """Import the event described by one intermediate frame."""
         assert self._event_pool is not None
-        first_layer, count, pool_idx = struct.unpack("<3i", b_data)
+        # Two frame shapes, told apart by length so no version negotiation is
+        # needed. The 12-byte form covers a contiguous run of layer indices.
+        # The longer form, marked by a negative first field, carries the
+        # indices explicitly: a layer-major producer batches by model depth,
+        # and one depth's caches can sit at scattered registration indices.
+        first_layer, count, pool_idx = struct.unpack("<3i", b_data[:12])
         evt = self._event_pool.event_at(pool_idx)
-        for i in range(first_layer, first_layer + count):
+        if first_layer < 0:
+            layer_indices: Iterable[int] = struct.unpack(f"<{count}i", b_data[12:])
+        else:
+            layer_indices = range(first_layer, first_layer + count)
+        covered = list(layer_indices)
+        for i in covered:
             self._layer_event_map[i] = evt
         if _LAYERWISE_DEBUG:
             dt = time.perf_counter() - self._dbg_t0
-            self._dbg_frames.append((first_layer, count, pool_idx, dt))
+            # Record the real extent of the frame. A layer-major producer
+            # batches by model depth, whose caches sit at scattered
+            # registration indices, so first+count-1 is not the last index.
+            lo = min(covered) if covered else -1
+            hi = max(covered) if covered else -1
+            self._dbg_frames.append((lo, hi, len(covered), pool_idx, dt))
             logger.debug(
-                "layerwise-frame: layers %d..%d -> ipc event idx %d (+%.2f ms)",
-                first_layer,
-                first_layer + count - 1,
+                "layerwise-frame: layers %s -> ipc event idx %d (+%.2f ms)",
+                covered,
                 pool_idx,
                 dt * 1e3,
             )
@@ -270,14 +285,16 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             frames = self._dbg_frames
             if frames:
                 logger.info(
-                    "layerwise-frames: %d frame(s) covering layers %d..%d, "
-                    "%d blocking wait(s); arrival +%.2f..%.2f ms",
+                    "layerwise-frames: %d frame(s) covering layer idx "
+                    "%d..%d, %d blocking wait(s); arrival +%.2f..%.2f ms; "
+                    "per-frame (layers@+ms)=%s",
                     len(frames),
                     min(f[0] for f in frames),
-                    max(f[0] + f[1] - 1 for f in frames),
+                    max(f[1] for f in frames),
                     self._dbg_blocking_waits,
-                    frames[0][3] * 1e3,
-                    frames[-1][3] * 1e3,
+                    frames[0][4] * 1e3,
+                    frames[-1][4] * 1e3,
+                    ", ".join(f"{f[2]}@{f[4] * 1e3:.1f}" for f in frames),
                 )
             else:
                 logger.info(
