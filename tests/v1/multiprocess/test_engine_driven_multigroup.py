@@ -75,10 +75,6 @@ def _group_metadata(chunk_tokens: int = 8) -> EngineDrivenContextMetadata:
 
 def test_shm_strategy_multigroup_store_and_retrieve_roundtrip() -> None:
     """Per-group reserve on store; retrieve misses until every group commits."""
-    pytest.importorskip(
-        "lmcache.native_storage_ops",
-        reason="real StorageManager requires compiled native storage ops",
-    )
     # First Party
     from lmcache.v1.distributed.config import (
         EvictionConfig,
