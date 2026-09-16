@@ -11,7 +11,7 @@ by SGLang; LMCache accesses them through device-memory and event IPC handles.
 from __future__ import annotations
 
 # Standard
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 import hashlib
 import logging
 import threading
@@ -28,6 +28,11 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     LMCacheStoreOperation,
     SGLangKVComponentGroup,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.futures import MessagingFuture
+    from lmcache.v1.multiprocess.transfer_context import TransferContext
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +304,7 @@ class UnifiedLMCacheMPConnector:
             self._kernel_group_to_engine_group,
         ) = self._build_engine_group_info_specs()
         self._req_client = RequestClientFactory.create(self.server_url)
-        self._transfer_ctx: Any = None
+        self._transfer_ctx: Optional["TransferContext"] = None
         self._event_backend: Any = None
         self._registered = False
         self._closed = False
@@ -524,27 +529,37 @@ class UnifiedLMCacheMPConnector:
             raise RuntimeError("LMCache KV tensors are already registered")
         self._event_backend = get_event_ipc_backend(self.device)
         self._event_backend.check_event_support(self.device)
-        self._transfer_ctx = create_transfer_context(
-            self._kv_caches, mode="lmcache_driven"
+        transfer_ctx = create_transfer_context(
+            self._kv_caches,
+            instance_id=self.instance_id,
+            req_client=self._req_client,
+            mode="lmcache_driven",
         )
+        self._transfer_ctx = transfer_ctx
         engine_group_infos = [
             EngineGroupInfo(**spec) for spec in self._engine_group_info_specs
         ]
         try:
-            self._transfer_ctx.register(
-                self.instance_id,
+            transfer_ctx.register(
                 self._kv_caches,
                 self.model_name,
                 self.kv_world_size,
                 self.blocks_in_chunk,
-                self._req_client,
                 self._mq_timeout,
                 layout_hints={"kv_list_layout": "unified"},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.SGLANG,
             )
         except Exception:
-            self._transfer_ctx.close()
+            try:
+                future = transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except Exception:
+                logger.warning(
+                    "Failed to roll back LMCache KV registration", exc_info=True
+                )
+            transfer_ctx.close()
             self._transfer_ctx = None
             raise
         self._registered = True
@@ -859,16 +874,19 @@ class UnifiedLMCacheMPConnector:
                 start,
                 operation.request_id,
             )
+        future: MessagingFuture[Any] | _ImmediateFuture
         try:
+            transfer_ctx = self._transfer_ctx
+            if transfer_ctx is None:
+                raise RuntimeError("LMCache KV tensors are not registered")
             event = (
                 self._new_event()
                 if producer_stream is None
                 else self._new_event(producer_stream)
             )
-            future = self._transfer_ctx.submit_retrieve(
+            future = transfer_ctx.submit_retrieve(
                 operation.request_id,
                 key,
-                self.instance_id,
                 self._kv_caches,
                 block_ids,
                 event,
@@ -1084,17 +1102,20 @@ class UnifiedLMCacheMPConnector:
             return None
         submitted = False
         event = None
+        future: MessagingFuture[Any] | _ImmediateFuture
         if self.is_kv_writer:
             try:
+                transfer_ctx = self._transfer_ctx
+                if transfer_ctx is None:
+                    raise RuntimeError("LMCache KV tensors are not registered")
                 blocks = self._expand_engine_group_block_ids(engine_group_blocks)
                 key = self._create_key(
                     lookup, start=start, end=aligned_end, worker_id=self.kv_worker_id
                 )
                 event = self._new_event()
-                future = self._transfer_ctx.submit_store(
+                future = transfer_ctx.submit_store(
                     request_id,
                     key,
-                    self.instance_id,
                     self._kv_caches,
                     blocks,
                     event,
@@ -1214,15 +1235,19 @@ class UnifiedLMCacheMPConnector:
         if self._heartbeat_thread is not None:
             self._heartbeat_thread.join(timeout=max(1.0, self._heartbeat_interval))
             self._heartbeat_thread = None
+        transfer_ctx = self._transfer_ctx
         if self._registered:
-            try:
-                self._req_client.unregister_kv_cache(self.instance_id).result(
-                    timeout=self._mq_timeout
-                )
-            except Exception:
-                logger.warning("Failed to unregister LMCache KV tensors", exc_info=True)
+            if transfer_ctx is not None:
+                try:
+                    future = transfer_ctx.unregister()
+                    if future is not None:
+                        future.result(timeout=self._mq_timeout)
+                except Exception:
+                    logger.warning(
+                        "Failed to unregister LMCache KV tensors", exc_info=True
+                    )
             self._registered = False
-        if self._transfer_ctx is not None:
-            self._transfer_ctx.close()
+        if transfer_ctx is not None:
+            transfer_ctx.close()
             self._transfer_ctx = None
         self._req_client.close()

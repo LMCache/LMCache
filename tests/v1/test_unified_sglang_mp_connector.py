@@ -148,6 +148,54 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             all_reduce.call_args_list[1].kwargs["group"], self.connector.pp_group
         )
 
+    def test_register_kv_cache_uses_context_owned_identity_and_client(self):
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._registered = False
+        connector._event_backend = None
+        connector._transfer_ctx = None
+        connector._kv_caches = {"kv_0": torch.empty(1)}
+        connector._engine_group_info_specs = []
+        connector.device = torch.device("cpu")
+        connector.instance_id = 17
+        connector._req_client = Mock()
+        connector.model_name = "test-model"
+        connector.kv_world_size = 2
+        connector.blocks_in_chunk = 4
+        connector._mq_timeout = 5.0
+        event_backend = Mock()
+        transfer_ctx = Mock()
+
+        with (
+            patch(
+                "lmcache.v1.multiprocess.transfer_context.create_transfer_context",
+                return_value=transfer_ctx,
+            ) as create_context,
+            patch(
+                "lmcache.v1.platform.base.event_ipc.get_event_ipc_backend",
+                return_value=event_backend,
+            ),
+        ):
+            connector.register_kv_cache()
+
+        create_context.assert_called_once_with(
+            connector._kv_caches,
+            instance_id=17,
+            req_client=connector._req_client,
+            mode="lmcache_driven",
+        )
+        transfer_ctx.register.assert_called_once_with(
+            connector._kv_caches,
+            "test-model",
+            2,
+            4,
+            5.0,
+            layout_hints={"kv_list_layout": "unified"},
+            engine_group_infos=[],
+            engine_type=EngineType.SGLANG,
+        )
+        self.assertIs(connector._transfer_ctx, transfer_ctx)
+        self.assertTrue(connector._registered)
+
     def test_aligned_empty_lookup_does_not_send_end_session(self):
         self.connector.chunk_size = 8
         self.connector._lookups = {}
@@ -409,7 +457,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertIsNotNone(operation)
         self.assertIn("request", connector._active_sessions)
         self.assertEqual(
-            connector._transfer_ctx.store_args[4],
+            connector._transfer_ctx.store_args[3],
             [[1, 2], [3, 5]],
         )
         self.assertEqual(connector._create_key.call_args.kwargs["worker_id"], 0)
@@ -463,7 +511,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
         self.assertIsNotNone(operation)
         self.assertEqual(
-            connector._transfer_ctx.store_args[4],
+            connector._transfer_ctx.store_args[3],
             [[2, 3], [0, 7]],
         )
 
@@ -544,7 +592,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
         self.assertIsNotNone(operation)
         self.assertEqual(
-            connector._transfer_ctx.store_args[4],
+            connector._transfer_ctx.store_args[3],
             [[1, 2, 3, 4], [0, 0, 3, 4]],
         )
 
@@ -623,7 +671,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
         self.assertIsNotNone(operation)
         self.assertEqual(
-            connector._transfer_ctx.store_args[4],
+            connector._transfer_ctx.store_args[3],
             [list(range(1, 9)), [0, 7]],
         )
 
@@ -667,7 +715,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         )
 
         args, kwargs = connector._transfer_ctx.retrieve_args
-        self.assertEqual(args[4], [[0, 0, 0, 4, 5, 6, 7, 8], [0, 7]])
+        self.assertEqual(args[3], [[0, 0, 0, 4, 5, 6, 7, 8], [0, 7]])
         self.assertEqual(kwargs["skip_first_n_tokens"], 3)
         self.assertEqual(operation.start, 0)
         self.assertEqual(operation.end, 8)
