@@ -86,7 +86,7 @@ def _tensor_from_ptr(
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """
-    Create a tensor view over a raw pointer (zero-copy where possible).
+    Create a non-owning tensor view over a raw pointer.
 
     Supports CPU, CUDA, and MUSA device pointers.
 
@@ -103,14 +103,13 @@ def _tensor_from_ptr(
     Returns:
         A tensor that shares memory with the original pointer.
         For CPU: always zero-copy via ctypes + torch.frombuffer.
-        For CUDA: zero-copy via torch._C._construct_storage_from_data_pointer
-                  (PyTorch >= 2.0) or __cuda_array_interface__, with a
-                  cudaMemcpy D2D fallback.
+        For CUDA: a write-through __cuda_array_interface__ view, or an error
+                  if the requested dtype or alias cannot be preserved.
         For MUSA: a non-owning view created from external device storage.
 
     Raises:
         ValueError: if ptr is 0.
-        RuntimeError: If MUSA cannot construct a non-owning view for ``ptr``.
+        RuntimeError: If CUDA or MUSA cannot construct a non-owning view.
 
     Warning:
         The caller is responsible for keeping the underlying memory alive
