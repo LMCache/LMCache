@@ -14,6 +14,7 @@ vllm_port="${VLLM_PORT:-8000}"
 vllm_baseline_port="${VLLM_BASELINE_PORT:-9000}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+LMCACHE_MQ_TIMEOUT="${LMCACHE_MQ_TIMEOUT:-10}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:?VLLM_TARGET_DEVICE must be exported by the test entry point}"
@@ -257,25 +258,23 @@ PY
 )"
 echo "LMCache KV transfer configuration: ${KV_TRANSFER_CONFIG}"
 
-env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
-    "${VLLM_DEVICE_ENV[@]}" \
-    "${VLLM_ATTENTION_BACKEND_ENV[@]}" \
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
-    PYTHONHASHSEED=0 \
-    vllm serve "$MODEL" \
-        --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
-        $ATTENTION_BACKEND_ARG \
-        --port "$vllm_port" \
-        --no-async-scheduling \
-        $MAX_MODEL_LEN_ARG \
-        $ENFORCE_EAGER_ARG \
-        $GPU_MEMORY_UTIL_ARG \
-        $MAMBA_ARGS \
-        $PREFIX_CACHING_ARG \
-        $MAX_NUM_BATCHED_TOKENS_ARG \
-        > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
+CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
+VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+VLLM_SERVER_DEV_MODE=1 \
+VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
+PYTHONHASHSEED=0 \
+vllm serve "$MODEL" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": $LMCACHE_MQ_TIMEOUT}}" \
+    $ATTENTION_BACKEND_ARG \
+    --port "$vllm_port" \
+    --no-async-scheduling \
+    $MAX_MODEL_LEN_ARG \
+    $ENFORCE_EAGER_ARG \
+    $GPU_MEMORY_UTIL_ARG \
+    $MAMBA_ARGS \
+    $PREFIX_CACHING_ARG \
+    $MAX_NUM_BATCHED_TOKENS_ARG \
+    > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
 VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
