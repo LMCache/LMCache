@@ -40,6 +40,7 @@ shape.
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
+| `GET /cache/pins` | operator/tools | paginated listing of pinned keys with their pin counts, filterable by `cache_salt` / `model_name` |
 | `POST /cache/delete` | operator | delete cached objects on a named server |
 | `GET /instances/usage` | operator/scheduler | fleet memory view: per-server, per-module usage vs declared capacity |
 | `GET /instances/{instance_id}/usage` | operator/scheduler | one server's memory compartments |
@@ -210,7 +211,8 @@ Where the coordinator's fleet-level *doing* lives — the counterpart to
   requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
   mp server (all servers share the backing L2, so one dispatch evicts the
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
-  are excluded from eviction and delete. Reachable as
+  are excluded from eviction and delete; `GET /cache/pins` pages through
+  that table. Reachable as
   `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
 - `views/usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
   up per `cache_salt` (the tenant axis the eviction controller enforces
@@ -268,7 +270,10 @@ path, matches verified token-exact, and eviction exact because it follows
 binding lifecycle. Blend servers query it with `POST
 /directory/blend-lookup` and get `(chunk_hash, old_st, cur_st)` per match,
 which they expand into per-rank object keys with their own model and salt.
-The match window is the fleet chunk size (`CHUNK_SIZE`), probed at
+The query's `model_name`/`cache_salt`/`world_size` scope matches to chunks
+stored in that namespace, so a match always expands into keys that exist.
+The match
+window is the fleet chunk size (`CHUNK_SIZE`), probed at
 `BLEND_PROBE_STRIDE`. See [blend_index.md](blend_index.md).
 
 The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own

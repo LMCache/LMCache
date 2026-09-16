@@ -16,8 +16,12 @@ steps:
                 imagePullPolicy: IfNotPresent
                 resources:
                   requests:
+                    cpu: "8"
+                    memory: 32Gi
                     deviceclass.resource.kubernetes.io/gpu.intel.com: "1"
                   limits:
+                    cpu: "8"
+                    memory: 32Gi
                     deviceclass.resource.kubernetes.io/gpu.intel.com: "1"
                 volumeMounts:
                   - { name: hf-cache, mountPath: /root/.cache/huggingface }
