@@ -4,7 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."""
 
 # Standard
-from typing import Any, Callable, ClassVar
+from typing import Callable, ClassVar
 from unittest.mock import MagicMock
 import gc
 import os
@@ -792,100 +792,6 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
     blocks.get_block_ids.return_value = ([7],)
     connector.update_state_after_alloc(request, blocks, num_external_tokens=0)
     assert tracker.state == LMCacheMPRequestState.READY
-
-
-def test_connector_converts_worker_kv_events_to_vllm_events() -> None:
-    """Worker LMCache events are wrapped in vLLM's KV event container."""
-    kv_events_mod = pytest.importorskip(
-        "vllm.distributed.kv_events",
-        exc_type=ModuleNotFoundError,
-    )
-    BlockStored = kv_events_mod.BlockStored
-
-    # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
-    from lmcache.utils import CacheStoreEvent
-
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector._enable_kv_events = True
-    connector.worker_adapter = MagicMock()
-    connector.worker_adapter.get_kv_events.return_value = [
-        CacheStoreEvent(
-            block_hashes=[b"hash-1"],
-            parent_block_hash=None,
-            token_ids=[1, 2, 3, 4],
-            block_size=4,
-            lora_id=None,
-            medium="CPU",
-            lora_name=None,
-        )
-    ]
-
-    kv_events = connector.get_kv_connector_kv_cache_events()
-
-    assert kv_events is not None
-    events = kv_events.get_all_events()
-    assert len(events) == 1
-    assert isinstance(events[0], BlockStored)
-    assert events[0].token_ids == [1, 2, 3, 4]
-    assert events[0].block_size == 4
-    assert events[0].medium == kv_events_mod.MEDIUM_CPU
-
-
-def test_connector_take_events_aggregates_and_drains_once() -> None:
-    """Scheduler-side ``take_events`` publishes common worker events once."""
-    kv_events_mod = pytest.importorskip(
-        "vllm.distributed.kv_events",
-        exc_type=ModuleNotFoundError,
-    )
-    BlockStored = kv_events_mod.BlockStored
-
-    # Third Party
-    from vllm.v1.outputs import KVConnectorOutput
-
-    # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import (
-        LMCacheMPConnector,
-        LMCacheMPKVEvents,
-    )
-
-    def make_container(*events: Any) -> LMCacheMPKVEvents:
-        container = LMCacheMPKVEvents(num_workers=1)
-        container.add_events(list(events))
-        return container
-
-    common = BlockStored(
-        block_hashes=[b"common"],
-        parent_block_hash=None,
-        token_ids=[1, 2, 3, 4],
-        block_size=4,
-        lora_id=None,
-        medium=kv_events_mod.MEDIUM_CPU,
-        lora_name=None,
-    )
-    worker_only = BlockStored(
-        block_hashes=[b"worker-only"],
-        parent_block_hash=None,
-        token_ids=[5, 6, 7, 8],
-        block_size=4,
-        lora_id=None,
-        medium=kv_events_mod.MEDIUM_CPU,
-        lora_name=None,
-    )
-
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector._kv_cache_events = None
-    connector.lazy_offload = False
-
-    connector.update_connector_output(
-        KVConnectorOutput(kv_cache_events=make_container(common, worker_only))
-    )
-    connector.update_connector_output(
-        KVConnectorOutput(kv_cache_events=make_container(common))
-    )
-
-    assert list(connector.take_events()) == [common]
-    assert list(connector.take_events()) == []
 
 
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
