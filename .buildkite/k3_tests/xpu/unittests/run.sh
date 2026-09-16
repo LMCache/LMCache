@@ -29,10 +29,19 @@ print("torch.xpu.is_available() = True")
 PY
 
 cd "${REPO_ROOT}"
-source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 log "installing job dependencies"
 uv pip install -r requirements/common.txt -r requirements/test.txt
+
+# Includes the mandatory PR-base rebase before installing LMCache.
+export BUILD_WITH_SYCL=1
+source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
+python - <<'PY'
+import lmcache
+import lmcache.xpu_ops
+
+print("LMCache XPU extension installed from source")
+PY
 
 discover_xpu_tests() {
   python - <<'PY'
