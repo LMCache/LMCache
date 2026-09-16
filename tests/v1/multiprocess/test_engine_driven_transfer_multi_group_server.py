@@ -7,6 +7,7 @@ groups with correctly-flattened, correctly-offset results.
 # Standard
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from typing import Any
 from unittest.mock import MagicMock, patch
 import pickle
 import sys
@@ -56,6 +57,11 @@ def _default_key(tokens: int = 8) -> IPCCacheServerKey:
     return IPCCacheServerKey.from_token_ids(
         "m", 1, 0, [1] * tokens, start=0, end=tokens, request_id="req"
     )
+
+
+def _object_key(name: str) -> ObjectKey:
+    """A throwaway ObjectKey distinguished only by its chunk hash."""
+    return ObjectKey(chunk_hash=name.encode(), model_name="m", kv_rank=0)
 
 
 def _hybrid_groups() -> list[EngineGroupInfo]:
@@ -466,7 +472,7 @@ class TestChunkBasedStrategyEntryPoints:
         strategy, _ = self._pickle_strategy()
         context = _pickle_context()
         chunks = [torch.full((2, 2, 8, 16), 3.0), torch.full((2, 2, 8, 16), 4.0)]
-        obj_keys = ["k0", "k1"]
+        obj_keys = [_object_key("k0"), _object_key("k1")]
 
         with patch(
             "lmcache.v1.multiprocess.modules.server_transfer.pickle"
@@ -491,11 +497,11 @@ class TestChunkBasedStrategyEntryPoints:
         results = []
         for use_bytes in (True, False):
             strategy, mock_storage = self._pickle_strategy()
-            kwargs = dict(
+            kwargs: dict[str, Any] = dict(
                 key=_default_key(),
                 instance_id=1,
                 context=_pickle_context(),
-                resolve_obj_keys=lambda _k: ["k0"],
+                resolve_obj_keys=lambda _k: [_object_key("k0")],
             )
             if use_bytes:
                 ok = strategy.commit_store(cpu_data=pickle.dumps(chunks), **kwargs)
@@ -518,7 +524,9 @@ class TestChunkBasedStrategyEntryPoints:
         strategy = PickleTransferStrategy(mock_storage)
 
         response, chunks = strategy.prepare_retrieve_chunks(
-            key=_default_key(), instance_id=1, resolve_obj_keys=lambda _k: ["k0"]
+            key=_default_key(),
+            instance_id=1,
+            resolve_obj_keys=lambda _k: [_object_key("k0")],
         )
 
         assert response.success is True
@@ -539,7 +547,9 @@ class TestChunkBasedStrategyEntryPoints:
         strategy = PickleTransferStrategy(mock_storage)
 
         response, chunks = strategy.prepare_retrieve_chunks(
-            key=_default_key(), instance_id=1, resolve_obj_keys=lambda _k: ["k0"]
+            key=_default_key(),
+            instance_id=1,
+            resolve_obj_keys=lambda _k: [_object_key("k0")],
         )
 
         assert response.success is False
@@ -559,18 +569,18 @@ class TestChunkBasedStrategyEntryPoints:
             fallback_strategy=PickleTransferStrategy(mock_storage),
         )
         key = _default_key()
-        pending_writes[(1, key)] = ["k0"]
+        pending_writes[(1, key)] = [_object_key("k0")]
 
         ok = strategy.commit_store_chunks(
             key=key,
             instance_id=1,
             chunks=[],
             context=_pickle_context(),
-            resolve_obj_keys=lambda _k: ["k0"],
+            resolve_obj_keys=lambda _k: [_object_key("k0")],
         )
 
         assert ok is True
-        mock_storage.finish_write.assert_called_once_with(["k0"])
+        mock_storage.finish_write.assert_called_once_with([_object_key("k0")])
         assert (1, key) not in pending_writes
 
     def test_shm_commit_store_chunks_without_prepare_fails(self) -> None:
@@ -590,7 +600,7 @@ class TestChunkBasedStrategyEntryPoints:
                 instance_id=1,
                 chunks=[],
                 context=_pickle_context(),
-                resolve_obj_keys=lambda _k: ["k0"],
+                resolve_obj_keys=lambda _k: [_object_key("k0")],
             )
             is False
         )
