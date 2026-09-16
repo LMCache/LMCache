@@ -142,6 +142,9 @@ jobs:
   pin-nightly-xpu:
     name: Pin smoke-verified XPU runtime
     needs: [resolve-xpu-nightly, nightly-xpu-wheel]
+    concurrency:
+      group: github-nightly-vllm-pin
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -478,6 +481,9 @@ jobs:
     name: Pin or report vLLM
     needs: nightly-verify-cpu-vllm
     if: always()
+    concurrency:
+      group: github-nightly-vllm-pin
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

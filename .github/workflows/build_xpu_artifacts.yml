@@ -110,12 +110,13 @@ jobs:
                 '
                 python3 - <<'PY'
                 import json
+                import os
                 from pathlib import Path
 
                 metadata_path = Path("dist/xpu-runtime.json")
                 metadata = json.loads(metadata_path.read_text())
-                metadata["image"] = "${{ inputs.xpu_image }}"
-                metadata["lmcache_version"] = "${{ steps.xpu-version.outputs.xpu_version }}"
+                metadata["image"] = os.environ["XPU_IMAGE"]
+                metadata["lmcache_version"] = os.environ["XPU_VERSION"]
                 metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
                 PY
 
