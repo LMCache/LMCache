@@ -65,8 +65,11 @@ def request_handler(
         ValueError: If client affinity is requested for a handler that is not
             ``HandlerType.BLOCKING``.
     """
-    if requires_client_affinity and handler_type is not HandlerType.BLOCKING:
-        raise ValueError("Client affinity requires HandlerType.BLOCKING")
+    if requires_client_affinity and handler_type not in (
+        HandlerType.BLOCKING,
+        HandlerType.STREAMING,
+    ):
+        raise ValueError("Client affinity requires HandlerType.BLOCKING or STREAMING")
 
     options = RequestHandlerOptions(
         request_type=request_type,

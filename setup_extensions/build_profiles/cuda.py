@@ -126,6 +126,7 @@ class CudaProfile(BuildProfile):
             "csrc/cuda/pybind.cpp",
             "csrc/cuda/mem_kernels.cu",
             "csrc/cuda/mp_mem_kernels.cu",
+            "csrc/cuda/mp_mem_kernels_layerwise.cu",
             "csrc/cuda/phase_timing_recorder.cu",
             "csrc/cuda/blend_kernels.cu",
             "csrc/cuda/cal_cdf.cu",

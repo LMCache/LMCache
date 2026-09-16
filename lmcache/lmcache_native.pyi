@@ -51,6 +51,7 @@ class PageBufferShapeDesc:
     element_size: int
     block_stride_elems: int
     dtype: Any
+    kv_interleaved: bool
 
     def __init__(self) -> None: ...
 

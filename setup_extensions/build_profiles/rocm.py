@@ -106,6 +106,7 @@ class RocmProfile(BuildProfile):
                 "pybind.cpp",
                 "mem_kernels.cu",
                 "mp_mem_kernels.cu",
+                "mp_mem_kernels_layerwise.cu",
                 "phase_timing_recorder.cu",
                 "blend_kernels.cu",
                 "cal_cdf.cu",

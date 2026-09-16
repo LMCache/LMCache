@@ -9,6 +9,9 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.base_layerwise import (
+    LayerwiseRequestClient,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
@@ -42,8 +45,15 @@ class _RecordingMessageQueueClient(MessageQueueClient):
 
 
 def test_all_request_types_have_explicit_named_methods() -> None:
+    # The layer-wise pair is declared on ``LayerwiseRequestClient`` instead of
+    # ``RequestClient`` so a transport that never implemented it cannot inherit
+    # an empty ``...`` body; see transport/base_layerwise.py. Every request type
+    # must still name an explicit method on one of the two protocols.
     contract_names = {
-        name for name, value in RequestClient.__dict__.items() if callable(value)
+        name
+        for protocol in (RequestClient, LayerwiseRequestClient)
+        for name, value in protocol.__dict__.items()
+        if callable(value)
     }
     expected_names = {name.lower() for name in RequestType.__members__}
 
@@ -110,6 +120,12 @@ def test_business_callers_create_clients_through_factory() -> None:
         repo_root / "tests/v1/multiprocess/test_mq.py",
         repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
         repo_root / "tests/v1/multiprocess/transport_test_utils.py",
+        # Exercise the queue client itself rather than calling through it.
+        repo_root / "tests/v1/multiprocess/test_streaming_mq_server.py",
+        repo_root / "tests/v1/multiprocess/test_layerwise_retrieve_submit_ordering.py",
+        # Asserts the ZMQ client satisfies the layer-wise protocol, so it has
+        # to name the implementation it is checking.
+        repo_root / "tests/v1/multiprocess/test_layerwise_protocol_signatures.py",
     }
     violations: list[str] = []
     for source_root in (repo_root / "lmcache", repo_root / "tests"):

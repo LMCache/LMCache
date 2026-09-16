@@ -14,6 +14,7 @@ from lmcache.v1.multiprocess.protocols import (
     controller,
     debug,
     engine,
+    layerwise,
     observability,
     p2p,
 )
@@ -34,6 +35,7 @@ _PROTOCOL_MODULES = [
     ("engine", engine),
     ("controller", controller),
     ("debug", debug),
+    ("layerwise", layerwise),
     ("blend", blend),
     ("observability", observability),
     ("p2p", p2p),
