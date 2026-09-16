@@ -1,6 +1,6 @@
 # Examples vLLM + LMCache w. remote backends
 
-> **Legacy in-process examples:** The linked workflows use legacy connector
+> **In-process mode (deprecated):** The linked workflows use legacy connector
 > configuration. Prefer an MP L2 adapter for new deployments where supported;
 > see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

@@ -1,6 +1,6 @@
 # Examples of Cache Controller APIs
 
-> **Legacy in-process examples:** These controller workflows remain available
+> **In-process mode (deprecated):** These controller workflows remain available
 > for existing deployments. Prefer MP for new deployments where the required
 > API is supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

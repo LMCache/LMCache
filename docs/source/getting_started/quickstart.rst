@@ -66,6 +66,7 @@ changing connectors or storage configuration.
             .. code-block:: bash
 
                vllm serve Qwen/Qwen3-8B \
+                   --no-enable-prefix-caching \
                    --port 8000 --kv-transfer-config \
                    '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "localhost", "lmcache.mp.port": 5555}}'
 
@@ -86,6 +87,7 @@ changing connectors or storage configuration.
                  .. code-block:: bash
 
                     vllm serve Qwen/Qwen3-8B \
+                        --no-enable-prefix-caching \
                         --port 8000 --kv-transfer-config \
                         '{"kv_connector":"LMCacheMPConnector", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_role":"kv_both", "kv_connector_extra_config":{"lmcache.mp.host":"localhost", "lmcache.mp.port":5555}}'
 
@@ -94,7 +96,10 @@ changing connectors or storage configuration.
                  into vLLM, so prefer it whenever you are on vLLM 0.20.0 or newer.
 
             **Test** -- open a new terminal and send two requests whose
-            prompts share a prefix:
+            prompts share a prefix. The commands above disable vLLM's own
+            prefix cache so reuse must come from LMCache. After the first
+            request, wait for ``Stored <N> tokens`` in the LMCache server log
+            before sending the second request:
 
             **First request**
 
@@ -246,8 +251,9 @@ changing connectors or storage configuration.
          source .venv/bin/activate
          uv pip install --prerelease=allow lmcache "sglang"
 
-      SGLang selects MP mode when its LMCache YAML contains ``mp_host`` and
-      ``mp_port``. The values must match the standalone server.
+      Use a SGLang revision that selects ``LMCacheMPConnector``. The YAML keys
+      ``mp_host`` and ``mp_port`` set its server address; they do not select
+      the connector mode. The values must match the standalone server.
 
       .. tab-set::
          :sync-group: sglang-mode
@@ -255,11 +261,12 @@ changing connectors or storage configuration.
          .. tab-item:: MP mode (recommended)
             :sync: mp
 
-            Create the client configuration:
+            Create a separate client configuration, preserving any existing
+            in-process YAML:
 
             .. code-block:: bash
 
-               cat > lmcache_config.yaml <<'EOF'
+               cat > lmcache_mp.yaml <<'EOF'
                mp_host: 127.0.0.1
                mp_port: 5556
                EOF
@@ -280,35 +287,67 @@ changing connectors or storage configuration.
                    --model-path Qwen/Qwen3-8B \
                    --host 0.0.0.0 --port 30000 --page-size 32 \
                    --enable-lmcache \
-                   --lmcache-config-file lmcache_config.yaml
+                   --lmcache-config-file lmcache_mp.yaml
 
          .. tab-item:: In-process (deprecated)
             :sync: inproc
 
-            The retained in-process connector is selected when the YAML has no
-            ``mp_host`` or ``mp_port``. Use it only for an existing deployment
-            or an MP feature gap:
+            Keep the SGLang revision and mode selection used by your existing
+            in-process deployment. Removing ``mp_host`` and ``mp_port`` alone
+            does not switch an MP build to in-process mode. The following
+            configuration requires a build that selects the retained
+            ``LMCacheLayerwiseConnector``; see the
+            `SGLang connector instructions
+            <https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/storage/lmcache/README.md>`_
+            for version-specific mode selection and
+            :doc:`../legacy/migration_to_mp` for migration guidance.
 
             .. code-block:: bash
 
-               cat > lmcache_config.yaml <<'EOF'
+               cat > lmcache_inprocess.yaml <<'EOF'
                chunk_size: 32
                local_cpu: true
                max_local_cpu_size: 10
-               use_layerwise: false
+               use_layerwise: true
                EOF
 
                python -m sglang.launch_server \
                    --model-path Qwen/Qwen3-8B \
                    --host 0.0.0.0 --port 30000 --page-size 32 \
                    --enable-lmcache \
-                   --lmcache-config-file lmcache_config.yaml
+                   --lmcache-config-file lmcache_inprocess.yaml
 
-      For an MP cache check, send a request with a prefix longer than one
-      chunk, wait for ``Stored <N> tokens`` in the ``lmcache server`` log, then
-      stop and restart only SGLang before repeating the prefix. Restarting the
-      engine prevents SGLang's own Radix cache from hiding the LMCache
-      retrieval; the server log must then report ``Retrieved <N> tokens``.
+      **Test** -- send a request with a prefix longer than one chunk:
+
+      .. code-block:: bash
+
+         python - <<'PY'
+         import json
+         from urllib.request import Request, urlopen
+
+         request = Request(
+             "http://127.0.0.1:30000/v1/chat/completions",
+             data=json.dumps({
+                 "model": "Qwen/Qwen3-8B",
+                 "messages": [{
+                     "role": "user",
+                     "content": "LMCache verification uses a long shared prefix. " * 160,
+                 }],
+                 "max_tokens": 8,
+                 "temperature": 0,
+             }).encode(),
+             headers={"Content-Type": "application/json"},
+         )
+         print(urlopen(request).read().decode())
+         PY
+
+      In MP mode, wait for ``Stored <N> tokens`` in the ``lmcache server`` log,
+      then stop and restart only SGLang before repeating the request.
+      Restarting the engine prevents SGLang's own Radix cache from hiding the
+      LMCache retrieval; the server log must then report ``Retrieved <N>
+      tokens`` with a nonzero token count. In the retained in-process setup,
+      keep SGLang running and repeat the request; its logs report LMCache hit
+      tokens, although Radix may already hold them on the GPU.
       The complete current example is in
       `examples/sgl_integration/README.md`_, and feature gaps are listed in
       :doc:`../legacy/migration_to_mp`.
@@ -318,11 +357,12 @@ changing connectors or storage configuration.
    .. tab-item:: TensorRT-LLM
 
       .. note::
-         This integration depends on the connector preset registry from
+         The commands below require the connector preset registry from
          `NVIDIA/TensorRT-LLM PR #12626
          <https://github.com/NVIDIA/TensorRT-LLM/pull/12626>`_ and the
-         matching LMCache adapter, neither of which has shipped in a
-         stable release yet. Until they do, install both from source:
+         matching LMCache adapter. TensorRT-LLM 1.2.1 does not provide these
+         presets. Use compatible source revisions when your installed release
+         lacks them:
 
          .. code-block:: bash
 
@@ -334,13 +374,6 @@ changing connectors or storage configuration.
 
             # TensorRT-LLM from source — see NVIDIA's build guide:
             # https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html
-
-         Once both ship in a stable release, the install command will be:
-
-         .. code-block:: bash
-
-            uv pip install lmcache "tensorrt_llm>=<version>" \
-                --extra-index-url https://pypi.nvidia.com
 
       LMCache integrates with TensorRT-LLM via TRT-LLM's
       **KV Cache Connector** API and supports two deployment modes:

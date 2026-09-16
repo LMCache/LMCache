@@ -1,6 +1,6 @@
 # External Connector for LMCache
 
-> **Legacy in-process example:** This workflow uses the legacy connector and
+> **In-process mode (deprecated):** This workflow uses the legacy connector and
 > `remote_url` configuration. Prefer an MP L2 adapter for new deployments where
 > supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

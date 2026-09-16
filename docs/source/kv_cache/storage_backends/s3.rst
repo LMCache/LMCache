@@ -1,6 +1,13 @@
 S3 Backend
 ==========
 
+.. note::
+
+   The YAML ``remote_url`` examples in the first section use deprecated
+   in-process KV-cache mode. For MP, use :doc:`/mp/l2_storage/s3` or the
+   MP Mode Configuration section on this page; see
+   :doc:`/legacy/migration_to_mp` before migrating existing cache data.
+
 Example Configurations
 ----------------------
 

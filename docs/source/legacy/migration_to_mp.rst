@@ -45,15 +45,16 @@ guidance.
 
 Other serving engines use the same server but different client configuration:
 
-* **SGLang:** put ``mp_host`` and ``mp_port`` in its LMCache YAML and pass the
-  file with ``--lmcache-config-file``. The server ``--chunk-size`` must be a
+* **SGLang:** use a revision that selects ``LMCacheMPConnector``, put
+  ``mp_host`` and ``mp_port`` in a new LMCache YAML, and pass the file with
+  ``--lmcache-config-file``. These keys address the server; removing them does
+  not select the legacy connector. The server ``--chunk-size`` must be a
   multiple of SGLang's ``--page-size``. See the SGLang tab in the
   :doc:`quickstart <../getting_started/quickstart>`.
 * **TensorRT-LLM:** select ``connector="lmcache-mp"`` and set
-  ``server_url="tcp://127.0.0.1:5555"``. This integration still requires the
-  matching LMCache and TensorRT-LLM source revisions described in the
-  :doc:`quickstart <../getting_started/quickstart>`; do not treat it as a
-  released stable integration yet.
+  ``server_url="tcp://127.0.0.1:5555"``. This requires a TensorRT-LLM revision
+  with that connector preset and a compatible LMCache adapter, as described
+  in the :doc:`quickstart <../getting_started/quickstart>`.
 
 Map the configuration deliberately
 ----------------------------------
@@ -159,9 +160,10 @@ Check feature and version gaps
        :doc:`../non_kv_cache/encoder_cache`.
    * - SGLang MUSA MLA and layerwise transfer
      - Platform-dependent
-     - MP MUSA supports MHA with separate K/V pools. Multiprocess MLA is not
-       supported; in-process supports non-layerwise MLA and layerwise MHA,
-       while layerwise MLA is unsupported. See
+     - MP MUSA supports MHA with separate K/V pools and requires the opt-in
+       handle-transfer setup. On MUSA, multiprocess MLA is not supported;
+       in-process supports non-layerwise MLA and layerwise MHA, while
+       layerwise MLA is unsupported. See
        :doc:`../developer_guide/integration`.
    * - Hidden-state caching
      - Unverified in MP
@@ -174,12 +176,12 @@ Check feature and version gaps
        :doc:`../kv_cache_optimizations/cacheblend`.
    * - TensorRT-LLM connector presets
      - Version-dependent
-     - Use matching source revisions until the required connector registry and
-       LMCache adapter ship together in stable releases.
+     - Check that the TensorRT-LLM revision provides the ``lmcache-mp`` preset
+       and is compatible with the installed LMCache adapter.
 
-Treat an unlisted integration or feature as unverified until its MP
-documentation and tests establish support. Continuing to use in-process mode
-for a required gap is supported during the deprecation period.
+Check the MP documentation and tests before migrating an unlisted integration
+or feature. The in-process runtime remains available when a required feature
+has no MP equivalent.
 
 Rollback
 --------

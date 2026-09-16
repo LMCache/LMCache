@@ -1,6 +1,6 @@
 # LMCache Health Check
 
-> **Legacy in-process example:** This controller workflow remains available for
+> **In-process mode (deprecated):** This controller workflow remains available for
 > existing deployments. Prefer MP for new deployments; see the
 > [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

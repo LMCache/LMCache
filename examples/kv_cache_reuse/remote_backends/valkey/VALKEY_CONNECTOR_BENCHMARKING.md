@@ -1,6 +1,6 @@
 # ValkeyConnector Benchmarking
 
-> **Legacy benchmark:** The deployment commands in this document use
+> **In-process mode (deprecated):** The deployment commands in this document use
 > `LMCacheConnectorV1`. For current deployments, use the [MP Valkey guide](README.md)
 > and consult the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

@@ -1,7 +1,7 @@
 # Examples vLLM + LMCache w. local backends
 
-> **Legacy in-process examples:** These scripts construct `LMCacheEngine`
-> directly. Prefer MP for new deployments where the required feature is
+> **In-process mode (deprecated):** These scripts select the legacy vLLM
+> connectors. Prefer MP for new deployments where the required feature is
 > supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 
 LMCache should be able to reduce the generation time of the second and following calls.

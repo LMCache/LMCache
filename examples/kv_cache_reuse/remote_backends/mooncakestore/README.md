@@ -1,6 +1,6 @@
 lmcache could use [mooncakestore](https://github.com/kvcache-ai/Mooncake) as a backend storage.
 
-> **Legacy in-process example:** The launch command below uses
+> **In-process mode (deprecated):** The launch command below uses
 > `LMCacheConnectorV1`. Prefer the MP Mooncake Store adapter for new deployments;
 > see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

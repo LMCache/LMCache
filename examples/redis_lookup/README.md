@@ -1,6 +1,6 @@
 # Search LMCache KV Entry in Redis
 
-> **Legacy in-process example:** This workflow uses `LMCacheConnectorV1` and
+> **In-process mode (deprecated):** This workflow uses `LMCacheConnectorV1` and
 > legacy Redis configuration. Prefer the MP RESP adapter for new deployments;
 > see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

@@ -1,8 +1,9 @@
 # LMCache Basic Check Examples
 
-> **Legacy in-process example:** This tool exercises the legacy configuration
-> and storage manager. Prefer MP for new deployments where the required feature
-> is supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+> **Configuration scope:** The `test_remote`, `test_storage_manager`, and `gen`
+> examples below exercise deprecated in-process storage. This tool also has an
+> MP `test_l2_adapter` mode configured with `--l2-adapter`; see the
+> [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 
 This is an introduce of examples for the LMCache Basic Check Tool.
 

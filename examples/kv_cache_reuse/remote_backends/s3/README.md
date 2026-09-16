@@ -1,6 +1,6 @@
 ## LMCache can use [Amazon S3](https://aws.amazon.com/s3/) as a backend storage.
 
-> **Legacy in-process example:** The launch command below uses
+> **In-process mode (deprecated):** The launch command below uses
 > `LMCacheConnectorV1`. Prefer the MP S3 adapter for new deployments; see the
 > [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

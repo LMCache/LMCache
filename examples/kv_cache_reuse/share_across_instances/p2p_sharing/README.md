@@ -1,6 +1,6 @@
 # P2P KV Cache Sharing
 
-> **Legacy in-process example:** This workflow uses the legacy controller and
+> **In-process mode (deprecated):** This workflow uses the legacy controller and
 > `LMCacheConnectorV1`. Prefer MP P2P for new deployments; see the
 > [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

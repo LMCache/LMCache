@@ -50,15 +50,15 @@ When LMCache is integrated with vLLM, the inference pipeline is augmented to loo
 SGLang on MUSA
 --------------
 
-LMCache supports SGLang on Moore Threads MUSA devices. In-process transfers
-use TorchMUSA ``index_select`` and ``index_copy_`` and support:
+LMCache supports SGLang on Moore Threads MUSA devices. The deprecated in-process
+transfers use TorchMUSA ``index_select`` and ``index_copy_`` and support:
 
 * non-layerwise MHA with separate K/V layer pools;
 * non-layerwise MLA; and
 * layerwise MHA.
 
-Layerwise MLA and multiprocess MLA are not supported. For in-process mode,
-configure LMCache without ``mp_host``/``mp_port``:
+Layerwise MLA and multiprocess MLA are not supported. For a SGLang build that
+selects the in-process connector, configure LMCache without MP address keys:
 
 .. code-block:: yaml
 
@@ -66,6 +66,10 @@ configure LMCache without ``mp_host``/``mp_port``:
    local_cpu: true
    max_local_cpu_size: 20
    use_layerwise: true  # MHA only; use false for non-layerwise MHA or MLA
+
+Omitting ``mp_host``/``mp_port`` does not select the in-process connector in
+SGLang. Keep the mode selection required by your serving-engine revision; see
+:doc:`/getting_started/quickstart` and :doc:`/legacy/migration_to_mp`.
 
 When SGLang passes a slot mapping for only the uncached suffix, LMCache applies
 the prefix offset before gathering or scattering rows.

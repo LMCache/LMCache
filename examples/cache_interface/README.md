@@ -1,6 +1,6 @@
 # User Controllable Caching
 
-> **Legacy in-process example:** The launch command below uses
+> **In-process mode (deprecated):** The launch command below uses
 > `LMCacheConnectorV1`. Prefer MP for new deployments where the required feature
 > is supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

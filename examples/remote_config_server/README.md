@@ -1,6 +1,6 @@
 # Remote Config Server Example
 
-> **Legacy in-process example:** This workflow uses legacy engine
+> **In-process mode (deprecated):** This workflow uses legacy engine
 > configuration. Prefer MP for new deployments where the required feature is
 > supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

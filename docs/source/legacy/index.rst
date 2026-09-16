@@ -5,11 +5,16 @@ Legacy (In-Process Mode)
 
 .. warning::
 
-   These pages document LMCache's original **in-process mode**, where LMCache
+   These pages document LMCache's original **in-process KV-cache mode**, where LMCache
    ran *inside* the inference engine process (e.g. via ``LMCacheConnectorV1`` on
-   vLLM). In-process mode is **deprecated**; new deployments should use
-   :doc:`Multiprocess (MP) mode <../mp/index>`. Existing deployments remain
-   supported; follow :doc:`migration_to_mp` when you are ready to move.
+   vLLM). In-process KV-cache mode is **deprecated**; new deployments should use
+   :doc:`Multiprocess (MP) mode <../mp/index>` where the required features are
+   available. Existing in-process configuration continues to work; follow
+   :doc:`migration_to_mp` when you are ready to move.
+
+   The separate :doc:`encoder cache </non_kv_cache/encoder_cache>` is linked
+   here for reference and is outside this KV-cache deprecation. MP sections
+   on pages that cover both modes are also unaffected.
 
 Background
 ----------

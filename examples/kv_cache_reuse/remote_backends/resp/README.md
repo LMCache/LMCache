@@ -1,6 +1,6 @@
 # LMCacheRedis KV Connector
 
-> **Deployment mode:** The first quickstart below uses legacy in-process mode.
+> **Deployment mode:** The first quickstart below uses deprecated in-process mode.
 > New deployments should use the [MP mode](#mp-mode-multiprocess) section; see
 > the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 

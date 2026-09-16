@@ -1,6 +1,6 @@
 # Sharing KV cache across multiple vLLM instances
 
-> **Legacy in-process example:** This workflow uses `lmcache_server` and
+> **In-process mode (deprecated):** This workflow uses `lmcache_server` and
 > `LMCacheConnectorV1`. Prefer the standalone MP server for new deployments;
 > see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
 
