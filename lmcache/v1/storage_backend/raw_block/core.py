@@ -1619,35 +1619,17 @@ class RawBlockCore:
                 total_lens,
             )
 
-        can_batch = all(
-            int(payload_len) == int(total_len)
-            for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
+        batch_id = raw_dev.batched_read(
+            [int(offset) for offset in offsets],
+            list(buffers),
+            [int(total_len) for total_len in total_lens],
         )
-        # batched_read requires aligned buffers when O_DIRECT is enabled
-        # Check alignment before using batched_read
-        if can_batch and all(self._is_buffer_aligned(buf) for buf in buffers):
-            batch_id = raw_dev.batched_read(
-                [int(offset) for offset in offsets],
-                list(buffers),
-                [int(total_len) for total_len in total_lens],
-            )
-            return self._wait_iouring_results(
-                raw_dev,
-                batch_id,
-                len(offsets),
-                "io_uring read",
-            )
-
-        results = []
-        for offset, buf, payload_len, total_len in zip(
-            offsets, buffers, payload_lens, total_lens, strict=True
-        ):
-            try:
-                raw_dev.read_uring(int(offset), buf, int(payload_len), int(total_len))
-                results.append(True)
-            except Exception:
-                results.append(False)
-        return results
+        return self._wait_iouring_results(
+            raw_dev,
+            batch_id,
+            len(offsets),
+            "io_uring read",
+        )
 
     def _wait_iouring_results(
         self,
