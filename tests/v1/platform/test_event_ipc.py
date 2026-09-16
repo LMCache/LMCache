@@ -18,7 +18,7 @@ from lmcache.v1.platform.cuda import CudaDeviceSpec
 from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
     TimelineSemaphoreEventIPCBackend,
 )
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 import lmcache.v1.platform as platform
 
 pytestmark = pytest.mark.skipif(
