@@ -99,6 +99,10 @@ _path_filter_should_skip_for_pipeline() {
                 .buildkite/k3_tests/unit/*|tests/*)
                     return 1
                     ;;
+                .buildkite/k3_tests/*)
+                    # Other suite-local pipeline changes do not affect unit.
+                    return 0
+                    ;;
             esac
             ;;
         integration)
@@ -236,7 +240,7 @@ _path_filter_pipeline_kind() {
         *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/sglang/pipeline.yml) echo sglang ;;
-        *k3_tests/xpu/pipeline.yml) echo xpu ;;
+        *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
         *k3_tests/amd/pipeline.yml) echo amd ;;
         *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
@@ -245,19 +249,27 @@ _path_filter_pipeline_kind() {
 }
 
 _path_filter_load_device_filter() {
-    local pipeline_file="${1:-}"
-    local pipeline_dir filter_script
+    local pipeline_kind="${1:-}"
+    local script_dir repo_root filter_script
 
-    [[ -n "$pipeline_file" ]] || return 0
-    pipeline_dir="$(cd "$(dirname "$pipeline_file")" 2>/dev/null && pwd)" || return 0
-    filter_script="${pipeline_dir}/filter.sh"
+    case "$pipeline_kind" in
+        xpu|amd) ;;
+        *) return 0 ;;
+    esac
 
-    if [[ -f "$filter_script" ]]; then
-        # shellcheck disable=SC1090
-        source "$filter_script"
-        if [[ -n "${FILTER_TRIGGER_CONDITION:-}" ]]; then
-            echo "path-filter: loaded ${filter_script} trigger: ${FILTER_TRIGGER_CONDITION}" >&2
-        fi
+    if [[ -n "${BUILDKITE_BUILD_CHECKOUT_PATH:-}" ]]; then
+        repo_root="$BUILDKITE_BUILD_CHECKOUT_PATH"
+    else
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 0
+        repo_root="$(cd "$script_dir/../../.." 2>/dev/null && pwd)" || return 0
+    fi
+    filter_script="${repo_root}/.buildkite/k3_tests/${pipeline_kind}/filter.sh"
+
+    [[ -f "$filter_script" ]] || return 0
+    # shellcheck disable=SC1090
+    source "$filter_script"
+    if [[ -n "${FILTER_TRIGGER_CONDITION:-}" ]]; then
+        echo "path-filter: loaded ${filter_script} trigger: ${FILTER_TRIGGER_CONDITION}" >&2
     fi
 }
 
@@ -331,7 +343,7 @@ should_skip_ci() {
     fi
 
     pipeline_kind="$(_path_filter_pipeline_kind "$pipeline_file")"
-    _path_filter_load_device_filter "$pipeline_file"
+    _path_filter_load_device_filter "$pipeline_kind"
 
     local has_non_trivial=0
     local has_relevant_change=0
