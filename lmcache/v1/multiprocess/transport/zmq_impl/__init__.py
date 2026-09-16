@@ -32,3 +32,6 @@ def create_request_client(
 
         context = zmq.Context.instance()
     return ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+
+
+__all__ = ["ZmqMultiprocessClient", "create_request_client"]
