@@ -4,6 +4,7 @@ from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
 from unittest.mock import MagicMock
 import multiprocessing as mp
+import socket
 import sys
 import threading
 import time
@@ -977,3 +978,58 @@ def test_start_fails_without_pool_assignment():
         server.start()
 
     server.close()
+
+
+# ==============================================================================
+# IPv6 endpoint tests
+# ==============================================================================
+
+
+def _free_ipv6_port() -> int:
+    """
+    Reserve an ephemeral port on IPv6 loopback and return it.
+    """
+    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    s.bind(("::1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_mq_ipv6_sockopt_set():
+    """
+    Server and client sockets enable zmq.IPV6 when created.
+    """
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 not supported on this host")
+    port = _free_ipv6_port()
+    context = zmq.Context.instance()
+    server = MessageQueueServer(f"tcp://[::1]:{port}", context)
+    try:
+        assert server.socket.getsockopt(zmq.IPV6) == 1
+    finally:
+        server.close()
+
+    context = zmq.Context.instance()
+    client = MessageQueueClient(f"tcp://[::1]:{port}", context)
+    try:
+        assert client.socket.getsockopt(zmq.IPV6) == 1
+    finally:
+        client.close()
+
+
+def test_mq_ipv6_end_to_end():
+    """
+    NOOP round-trip between server and client over an IPv6 endpoint.
+    """
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 not supported on this host")
+    port = _free_ipv6_port()
+    helper = MessageQueueTestHelper(server_url=f"tcp://[::1]:{port}")
+    helper.register_handler(RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    helper.run_test(
+        request_type=RequestType.NOOP,
+        payloads=[],
+        expected_response="NOOP_OK",
+        num_requests=3,
+    )
