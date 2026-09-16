@@ -402,6 +402,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 torch.tensor([4, 5, 6, 7, 8, 9, 10, 11]),
                 torch.tensor([12, 13, 14, 15, 20, 21, 22, 23]),
             ],
+            device_indices_start=0,
             cache_salt="",
         )
 
@@ -412,6 +413,59 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             [[1, 2], [3, 5]],
         )
         self.assertEqual(connector._create_key.call_args.kwargs["worker_id"], 0)
+
+    def test_get_store_start_uses_remote_progress(self):
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.chunk_size = 8
+        connector._store_submitted_tokens = {"request": 12}
+
+        self.assertEqual(connector.get_store_start("request", 24), 8)
+        self.assertEqual(connector.get_store_start("missing", 24), 0)
+        self.assertEqual(connector.get_store_start("request", 4), 0)
+
+    def test_submit_store_accepts_suffix_indices_after_cached_prefix(self):
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector.page_size = 4
+        connector.chunk_size = 8
+        connector.blocks_in_chunk = 2
+        connector.sglang_worker_id = 0
+        connector.kv_worker_id = 0
+        connector.instance_id = 1
+        connector._kv_groups = (
+            SGLangKVComponentGroup("full", (), tokens_per_block=4, slots_per_block=4),
+            SGLangKVComponentGroup(
+                "mamba",
+                (),
+                sliding_window_size=4,
+                tokens_per_block=4,
+                slots_per_block=1,
+                recurrent_state=True,
+            ),
+        )
+        connector._kernel_group_to_engine_group = (0, 1)
+        connector._store_submitted_tokens = {"request": 8}
+        connector._active_sessions = set()
+        connector._kv_caches = {}
+        connector._transfer_ctx = _TransferContext()
+        connector._is_kv_writer = True
+        connector._new_event = lambda: object()
+        connector._create_key = Mock(return_value=object())
+        connector._sync_success = lambda success: success
+        connector._sync_leader_int = lambda value: value
+
+        operation = connector.submit_store(
+            "request",
+            list(range(16)),
+            [torch.arange(8, 16), torch.tensor([0, 7])],
+            device_indices_start=8,
+            cache_salt="",
+        )
+
+        self.assertIsNotNone(operation)
+        self.assertEqual(
+            connector._transfer_ctx.store_args[4],
+            [[2, 3], [0, 7]],
+        )
 
     def test_mla_non_writer_uses_collective_placeholder(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
@@ -438,6 +492,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             "request",
             list(range(8)),
             [torch.tensor([4, 5, 6, 7, 8, 9, 10, 11])],
+            device_indices_start=0,
             cache_salt="",
         )
 
@@ -483,6 +538,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 torch.arange(4, 20),
                 torch.tensor([0] * 8 + list(range(12, 20))),
             ],
+            device_indices_start=0,
             cache_salt="",
         )
 
@@ -519,6 +575,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 torch.arange(4, 12),
                 torch.tensor([0, 0, 0, 0, 12, 13, 14, 15]),
             ],
+            device_indices_start=0,
             cache_salt="",
         )
 
@@ -560,6 +617,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             "request",
             list(range(8)),
             [torch.arange(1, 9), torch.tensor([0, 7])],
+            device_indices_start=0,
             cache_salt="",
         )
 

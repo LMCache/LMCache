@@ -995,19 +995,25 @@ class UnifiedLMCacheMPConnector:
                 return False
         return True
 
+    def get_store_start(self, request_id: str, end: int) -> int:
+        """Return the aligned LMCache suffix start for this request."""
+        aligned_end = end // self.chunk_size * self.chunk_size
+        start = min(self._store_submitted_tokens.get(request_id, 0), aligned_end)
+        return start // self.chunk_size * self.chunk_size
+
     def submit_store(
         self,
         request_id: str,
         token_ids: list[int],
         device_indices: list[torch.Tensor] | torch.Tensor,
         *,
+        device_indices_start: int,
         cache_salt: str,
     ) -> Optional[LMCacheStoreOperation]:
         self._ensure_heartbeat_started()
 
         aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
-        start = min(self._store_submitted_tokens.get(request_id, 0), aligned_end)
-        start = start // self.chunk_size * self.chunk_size
+        start = self.get_store_start(request_id, aligned_end)
         if aligned_end <= start:
             return None
         lookup = LMCacheLookupOperation(
@@ -1016,27 +1022,50 @@ class UnifiedLMCacheMPConnector:
             local_hit_tokens=0,
             cache_salt=cache_salt,
         )
+        if (
+            device_indices_start < 0
+            or device_indices_start > start
+            or device_indices_start % self.chunk_size
+        ):
+            raise ValueError(
+                "LMCache store device_indices_start must be chunk-aligned and "
+                f"within [0, start]: request_id={request_id!r}, "
+                f"device_indices_start={device_indices_start}, start={start}, "
+                f"end={aligned_end}"
+            )
         group_indices = self._normalize_group_indices(device_indices)
+        store_group_indices = []
         for group, indices in zip(self._kv_groups, group_indices, strict=True):
             group_covered_tokens = (
                 int(indices.numel()) * group.tokens_per_block // group.slots_per_block
             )
-            if group_covered_tokens < aligned_end:
+            required_tokens = aligned_end - device_indices_start
+            if group_covered_tokens < required_tokens:
                 raise ValueError(
-                    f"LMCache store group {group.name!r} indices cover "
-                    f"{group_covered_tokens} tokens, expected at least {aligned_end}"
+                    f"LMCache store group {group.name!r} has insufficient "
+                    f"indices: request_id={request_id!r}, start={start}, "
+                    f"end={aligned_end}, indices_start={device_indices_start}, "
+                    f"coverage={group_covered_tokens}, required={required_tokens}"
                 )
-        engine_group_blocks = []
-        for group, indices in zip(self._kv_groups, group_indices, strict=True):
-            start_slot = start * group.slots_per_block // group.tokens_per_block
-            end_slot = aligned_end * group.slots_per_block // group.tokens_per_block
-            engine_group_blocks.append(
-                self._slots_to_blocks(
-                    indices[start_slot:end_slot],
-                    slots_per_block=group.slots_per_block,
-                    allow_dummy_page=True,
-                )
+            start_slot = (
+                (start - device_indices_start)
+                * group.slots_per_block
+                // group.tokens_per_block
             )
+            end_slot = (
+                (aligned_end - device_indices_start)
+                * group.slots_per_block
+                // group.tokens_per_block
+            )
+            store_group_indices.append(indices[start_slot:end_slot])
+        engine_group_blocks = [
+            self._slots_to_blocks(
+                indices,
+                slots_per_block=group.slots_per_block,
+                allow_dummy_page=True,
+            )
+            for group, indices in zip(self._kv_groups, store_group_indices, strict=True)
+        ]
         # Slot/page zero is SGLang's padding sink. FULL attention must always
         # be complete. SWA may legitimately have all-null historical chunks;
         # with --separate-object-groups LMCache skips those chunks and stores
