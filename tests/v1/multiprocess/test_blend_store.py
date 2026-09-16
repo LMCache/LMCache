@@ -160,7 +160,58 @@ def _coord_engine(chunk_size: int = 4):
     eng._event_bus = MagicMock()
     eng._build_global_segments = BlendModule._build_global_segments.__get__(eng)
     eng._poll_coordinator_match = BlendModule._poll_coordinator_match.__get__(eng)
+    eng._submit_coordinator_match = BlendModule._submit_coordinator_match.__get__(eng)
     return eng
+
+
+def test_submit_coordinator_match_sends_this_server_s_namespace():
+    """The query carries the same model, salt, and world size the retrieve
+    path keys with."""
+    # First Party
+    from lmcache.v1.mp_coordinator.api import BlendNamespace
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    eng = _coord_engine(chunk_size=4)
+    coordinator = MagicMock()
+    eng._coordinator = coordinator
+    key = IPCCacheServerKey(
+        model_name="llama",
+        world_size=4,
+        worker_id=None,
+        token_ids=tuple(range(8)),
+        start=0,
+        end=8,
+        request_id="rid",
+        cache_salt="tenant-a",
+    )
+
+    assert eng._submit_coordinator_match(key) is True
+    coordinator.submit_match.assert_called_once_with(
+        "rid",
+        list(range(8)),
+        BlendNamespace(model_name="llama", cache_salt="tenant-a", world_size=4),
+    )
+
+
+def test_submit_coordinator_match_skips_a_query_shorter_than_a_chunk():
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    eng = _coord_engine(chunk_size=4)
+    coordinator = MagicMock()
+    eng._coordinator = coordinator
+    key = IPCCacheServerKey(
+        model_name="llama",
+        world_size=1,
+        worker_id=None,
+        token_ids=(1, 2),
+        start=0,
+        end=2,
+        request_id="rid",
+    )
+
+    assert eng._submit_coordinator_match(key) is False
+    coordinator.submit_match.assert_not_called()
 
 
 def test_build_global_segments_are_retrievable_cbmatchresults():
@@ -327,15 +378,16 @@ def test_register_rope_dual_cache_round_trip():
 
 
 def test_register_rope_rejects_invalid_group_to_cache():
-    """Out-of-range / negative cache indices and a map that does not cover
-    every engine group of the registered model are rejected."""
+    """Out-of-range cache indices and a map that does not cover every engine
+    group of the registered model are rejected. ``-1`` is the rope-less
+    sentinel, so only indices below it are out of range."""
     eng = _rope_registration_engine(engine_group_indices=[0, 1])
     caches = [_unit_rope_cache_ipc(), _unit_rope_cache_ipc()]
 
     with pytest.raises(ValueError, match="outside"):
         eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0, 2])
     with pytest.raises(ValueError, match="outside"):
-        eng.cb_register_rope(1, caches, 8, True, group_to_cache=[-1, 0])
+        eng.cb_register_rope(1, caches, 8, True, group_to_cache=[-2, 0])
     # Model has engine groups {0, 1} but the map only covers group 0.
     with pytest.raises(ValueError, match="engine groups up to index 1"):
         eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0])
@@ -343,6 +395,21 @@ def test_register_rope_rejects_invalid_group_to_cache():
     # cache list is empty (the NoPE form requires an empty map too).
     with pytest.raises(ValueError, match="outside"):
         eng.cb_register_rope(1, [], 8, True, group_to_cache=[0, 0])
+
+
+def test_register_rope_accepts_ropeless_group_sentinel():
+    """``-1`` marks an engine group carrying no rotary content (the
+    recurrent-state and aux planes of a hybrid). Registration accepts it and
+    the group skips re-RoPE, while its rope-bearing peers are unaffected."""
+    eng = _rope_registration_engine(engine_group_indices=[0, 1])
+    caches = [_unit_rope_cache_ipc()]
+
+    eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0, -1])
+
+    state = eng._cb_rope_state[1]
+    assert state.cache_for_group(1) is None
+    assert state.rot_for_group(1) is None
+    assert state.cache_for_group(0) is not None
 
 
 def test_register_rope_accepts_nope_zero_caches():
