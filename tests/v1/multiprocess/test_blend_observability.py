@@ -29,6 +29,7 @@ from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 _CHUNK = 256
 
@@ -181,7 +182,7 @@ class TestPrefixLegNoGpuContext:
             request_id="req-ctx",
             model_name="m",
             world_size=2,
-            token_ids=[1, 2, 3],
+            token_bytes=pack_token_ids([1, 2, 3]),
         )
 
     def test_missing_layout_reports_no_gpu_context(self):
@@ -212,7 +213,7 @@ class TestPrefixLegNoGpuContext:
             )
         )
         eng._ctx = MagicMock()
-        eng._ctx.token_hasher.compute_chunk_hashes.return_value = []
+        eng._ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
 
         handle, _, _, _, _, no_gpu_context = _bind(eng, "_submit_prefix_leg")(
             self._key(), 2, TrimPolicy.PREFIX
@@ -293,7 +294,7 @@ class TestFingerprintJobTuple:
         key = SimpleNamespace(
             request_id="req-store",
             worker_id=0,
-            token_ids=list(range(512)),
+            token_bytes=pack_token_ids(range(512)),
             start=0,
             end=512,
         )

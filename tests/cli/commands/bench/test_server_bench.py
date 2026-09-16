@@ -36,6 +36,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -356,7 +357,7 @@ class TestMakeKey:
         assert key.model_name == "test-model"
         assert key.world_size == 1
         assert key.worker_id is None
-        assert key.token_ids == token_ids
+        assert unpack_token_ids(key.token_bytes) == list(token_ids)
         assert key.start == 0
         assert key.end == len(token_ids)
         assert key.request_id == "req-0-cold"
