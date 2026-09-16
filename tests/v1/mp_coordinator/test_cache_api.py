@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the coordinator ``/cache/*`` REST API (warm-prefetch dispatch).
+"""Tests for the coordinator ``/cache/*`` REST API (warm-prefetch dispatch,
+pins, delete, and move).
 
 Quota writes, usage events, and status reads moved to the ``/quota`` group --
 see ``test_quota_api.py``.
 """
+
+# Standard
+import json
+import time
 
 # Third Party
 from fastapi.testclient import TestClient
@@ -21,6 +26,8 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
+from lmcache.v1.mp_coordinator.controllers.move_controller import MoveController
+from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 
@@ -501,3 +508,323 @@ def test_delete_server_unreachable_returns_502():
         )
         resp = client.post("/cache/delete", json=_delete_body("mp-1"))
         assert resp.status_code == 502
+
+
+# -- Move dispatch (target warm prefetch, then source L1 delete) --------------
+
+_MOVE_SOURCE_IP = "10.0.0.1"
+_MOVE_TARGET_IP = "10.0.0.2"
+
+
+def _move_client() -> TestClient:
+    """A coordinator with a small chunk_size and a fast move poll."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        chunk_size=4,
+        extra_config={"move_poll_interval_s": 0.005},
+    )
+    return TestClient(create_app(config))
+
+
+def _register_pair(client: TestClient) -> None:
+    for instance_id, ip in (("mp-src", _MOVE_SOURCE_IP), ("mp-dst", _MOVE_TARGET_IP)):
+        resp = client.post(
+            "/instances", json={"instance_id": instance_id, "ip": ip, "http_port": 8080}
+        )
+        assert resp.status_code == 200, resp.text
+
+
+def _move_body(
+    source: str = "mp-src", target: str = "mp-dst", salt: str = "alice", **extra: object
+) -> dict[str, object]:
+    body: dict[str, object] = {
+        "source_instance_id": source,
+        "target_instance_id": target,
+        "model_name": "m",
+        "world_size": 1,
+        "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+        "cache_salt": salt,
+    }
+    body.update(extra)
+    return body
+
+
+def _resolve_move(
+    ctx: CoordinatorContext, salt: str = "alice", world_size: int = 1
+) -> list[ObjectKey]:
+    keys, _ = resolve_object_keys(
+        ctx.token_hasher, "m", world_size, [1, 2, 3, 4, 5, 6, 7, 8], salt
+    )
+    return keys
+
+
+def _mock_move_fleet(
+    calls: dict[str, list[dict[str, object]]],
+    missing: list[int],
+    submit_status: int = 202,
+    total: int = 2,
+    submit_raw: bytes | None = None,
+) -> httpx.AsyncClient:
+    """Both MP servers behind one transport: the target accepts a prefetch and
+    reports it complete with ``missing`` of ``total`` keys; the source
+    records deletes. ``submit_raw`` replaces the submit reply body verbatim.
+
+    ``calls`` collects the request bodies seen, under ``"submits"`` (target
+    prefetch submits) and ``"deletes"`` (source deletes).
+    """
+    calls.setdefault("submits", [])
+    calls.setdefault("deletes", [])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host, path, method = request.url.host, request.url.path, request.method
+        if host == _MOVE_TARGET_IP and method == "POST" and path == "/cache/prefetches":
+            calls["submits"].append(json.loads(request.content.decode()))
+            if submit_raw is not None:
+                return httpx.Response(submit_status, content=submit_raw)
+            return httpx.Response(
+                submit_status,
+                json={"request_id": "rid", "chunks": 2, "status": "submitted"},
+            )
+        if (
+            host == _MOVE_TARGET_IP
+            and method == "GET"
+            and path == "/cache/prefetches/rid"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "found_keys": total - len(missing),
+                    "total_keys": total,
+                    "missing_key_indices": missing,
+                },
+            )
+        if host == _MOVE_SOURCE_IP and method == "DELETE" and path == "/cache/objects":
+            body = json.loads(request.content.decode())
+            calls["deletes"].append(body)
+            return httpx.Response(
+                200, json={"deleted": len(body["keys"]), "skipped": 0, "ok": True}
+            )
+        return httpx.Response(404, json={"detail": "not found"})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _poll_move(
+    client: TestClient, move_id: str, timeout: float = 3.0
+) -> dict[str, object]:
+    """Poll the move until it leaves ``pending``; return the terminal body."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = client.get(f"/cache/moves/{move_id}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        if body["status"] != "pending":
+            return body
+        time.sleep(0.005)
+    raise AssertionError("move did not settle in time")
+
+
+def test_move_unknown_instance_returns_404():
+    """Either end unregistered must 404, before any dispatch."""
+    with _move_client() as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-src", "ip": _MOVE_SOURCE_IP, "http_port": 8080},
+        )
+        assert client.post("/cache/moves", json=_move_body()).status_code == 404
+        assert (
+            client.post(
+                "/cache/moves", json=_move_body(source="ghost", target="mp-src")
+            ).status_code
+            == 404
+        )
+
+
+def test_move_same_instance_returns_400():
+    with _move_client() as client:
+        _register_pair(client)
+        resp = client.post("/cache/moves", json=_move_body(target="mp-src"))
+        assert resp.status_code == 400
+
+
+def test_move_unsupported_direction_returns_400():
+    with _move_client() as client:
+        _register_pair(client)
+        resp = client.post("/cache/moves", json=_move_body(target_tier="l2"))
+        assert resp.status_code == 400
+        assert "l1" in resp.json()["detail"]
+
+
+def test_move_invalid_cache_salt_returns_400():
+    with _move_client() as client:
+        _register_pair(client)
+        resp = client.post("/cache/moves", json=_move_body(salt="bad@salt"))
+        assert resp.status_code == 400
+
+
+def test_move_short_sequence_is_noop():
+    """A sub-chunk sequence resolves to nothing: no move, no outbound call."""
+    calls: dict[str, list[dict[str, object]]] = {}
+    with _move_client() as client:
+        _register_pair(client)
+        client.app.state.outbound_client = _mock_move_fleet(calls, missing=[])
+        resp = client.post("/cache/moves", json=_move_body(token_ids=[1, 2]))
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "move_id": "",
+            "source_instance_id": "mp-src",
+            "target_instance_id": "mp-dst",
+            "requested": 0,
+            "status": "noop",
+        }
+        assert calls["submits"] == []
+
+
+def test_move_target_rejecting_submit_returns_502():
+    calls: dict[str, list[dict[str, object]]] = {}
+    with _move_client() as client:
+        _register_pair(client)
+        client.app.state.outbound_client = _mock_move_fleet(
+            calls, missing=[], submit_status=503
+        )
+        resp = client.post("/cache/moves", json=_move_body())
+        assert resp.status_code == 502
+        assert client.get("/cache/moves/anything").status_code == 404
+
+
+def test_move_target_answering_submit_with_non_json_returns_502():
+    """A 200 from the target whose body is not a submit reply is an upstream
+    error, not a coordinator crash, and records no move."""
+    calls: dict[str, list[dict[str, object]]] = {}
+    with _move_client() as client:
+        _register_pair(client)
+        client.app.state.outbound_client = _mock_move_fleet(
+            calls, missing=[], submit_status=200, submit_raw=b"not json"
+        )
+        resp = client.post("/cache/moves", json=_move_body())
+        assert resp.status_code == 502
+        assert "unusable" in resp.json()["detail"]
+        assert client.app.state.ctx.controllers.get(MoveController).in_flight == 0
+
+
+def test_move_rejects_unknown_fields_before_dispatch():
+    """A misspelt field is a 422, not a silently defaulted move: with
+    ``keep_soruce`` ignored the source would have been deleted."""
+    calls: dict[str, list[dict[str, object]]] = {}
+    with _move_client() as client:
+        _register_pair(client)
+        client.app.state.outbound_client = _mock_move_fleet(calls, missing=[])
+        resp = client.post("/cache/moves", json=_move_body(keep_soruce=True))
+        assert resp.status_code == 422
+        assert "keep_soruce" in resp.text
+        assert calls["submits"] == []
+        assert calls["deletes"] == []
+
+
+def test_move_submits_then_status_reports_transfer_and_source_delete():
+    """Submit relays a move_id; the coordinator drives the target's prefetch
+    and deletes from the source exactly the keys the target loaded; the
+    terminal status stays readable afterwards."""
+    calls: dict[str, list[dict[str, object]]] = {}
+    with _move_client() as client:
+        _register_pair(client)
+        ctx = client.app.state.ctx
+        client.app.state.outbound_client = _mock_move_fleet(calls, missing=[1])
+        keys = _resolve_move(ctx)
+        assert len(keys) == 2  # 2 chunks (chunk_size=4, 8 tokens) x world_size 1
+
+        resp = client.post("/cache/moves", json=_move_body())
+        assert resp.status_code == 200, resp.text
+        submitted = resp.json()
+        assert submitted["status"] == "submitted"
+        assert submitted["requested"] == 2
+        move_id = submitted["move_id"]
+        assert move_id
+
+        body = _poll_move(client, move_id)
+        assert body == {
+            "move_id": move_id,
+            "source_instance_id": "mp-src",
+            "target_instance_id": "mp-dst",
+            "status": "completed",
+            "phase": "delete",
+            "requested": 2,
+            "loaded": 1,
+            "missing": 1,
+            "deleted": 1,
+            "skipped": 0,
+            "error": "",
+        }
+        # The target got the tokens verbatim; the source got one L1 delete
+        # holding only the key the target loaded (position 0).
+        assert calls["submits"] == [
+            {
+                "model_name": "m",
+                "world_size": 1,
+                "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+                "cache_salt": "alice",
+            }
+        ]
+        assert len(calls["deletes"]) == 1
+        assert calls["deletes"][0]["tier"] == "l1"
+        assert calls["deletes"][0]["force"] is False
+        assert [k["chunk_hash_hex"] for k in calls["deletes"][0]["keys"]] == [
+            keys[0].chunk_hash.hex()
+        ]
+        # The terminal status is retained: a second read sees the same body.
+        again = client.get(f"/cache/moves/{move_id}")
+        assert again.status_code == 200
+        assert again.json() == body
+
+
+def test_move_world_size_two_counts_per_rank_keys():
+    """``requested`` counts chunks; the other counts are per-rank keys in
+    chunk-major order, so a sparse ``missing_key_indices`` maps to exactly
+    the right keys on the source."""
+    calls: dict[str, list[dict[str, object]]] = {}
+    with _move_client() as client:
+        _register_pair(client)
+        ctx = client.app.state.ctx
+        # 2 chunks x 2 ranks = 4 keys; the target loaded positions 0 and 3.
+        client.app.state.outbound_client = _mock_move_fleet(
+            calls, missing=[1, 2], total=4
+        )
+        keys = _resolve_move(ctx, world_size=2)
+        assert len(keys) == 4
+
+        resp = client.post("/cache/moves", json=_move_body(world_size=2))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["requested"] == 2
+        body = _poll_move(client, resp.json()["move_id"])
+        assert body["status"] == "completed"
+        assert (body["requested"], body["loaded"], body["missing"]) == (2, 2, 2)
+        assert body["deleted"] == 2
+        assert [k["chunk_hash_hex"] for k in calls["deletes"][0]["keys"]] == [
+            keys[0].chunk_hash.hex(),
+            keys[3].chunk_hash.hex(),
+        ]
+        assert [k["kv_rank"] for k in calls["deletes"][0]["keys"]] == [
+            keys[0].kv_rank,
+            keys[3].kv_rank,
+        ]
+
+
+def test_move_keep_source_skips_the_source_delete():
+    calls: dict[str, list[dict[str, object]]] = {}
+    with _move_client() as client:
+        _register_pair(client)
+        client.app.state.outbound_client = _mock_move_fleet(calls, missing=[])
+        move_id = client.post("/cache/moves", json=_move_body(keep_source=True)).json()[
+            "move_id"
+        ]
+        body = _poll_move(client, move_id)
+        assert body["status"] == "completed"
+        assert (body["loaded"], body["deleted"]) == (2, 0)
+        assert calls["deletes"] == []
+
+
+def test_move_status_unknown_returns_404():
+    with _move_client() as client:
+        assert client.get("/cache/moves/does-not-exist").status_code == 404

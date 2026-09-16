@@ -10,12 +10,13 @@ This module holds HTTP models only.
 """
 
 # Standard
-from typing import Annotated
+from typing import Annotated, Literal
 import base64
 
 # Third Party
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     StringConstraints,
     field_validator,
@@ -26,7 +27,7 @@ import numpy as np
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
 from lmcache.v1.distributed.api import Tier
-from lmcache.v1.mp_coordinator.api import CacheEventBatch
+from lmcache.v1.mp_coordinator.api import CacheEventBatch, MovePhase, MoveStatus
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
 
 
@@ -686,3 +687,121 @@ class DeleteResponse(BaseModel):
     affected: int = 0
     skipped: int = 0
     status: str
+
+
+class MoveRequest(BaseModel):
+    """Body of ``POST /cache/moves`` on the coordinator.
+
+    Relocates a token sequence's chunks from one MP server's L1 to another's.
+    The target pulls the bytes -- an MP server never writes into a peer -- and
+    once it reports which keys it loaded, deletion of those source keys is
+    requested unless ``keep_source`` is set. Locked source keys are skipped. See
+    ``docs/design/v1/mp_coordinator/cache_move.md``.
+
+    Attributes:
+        source_instance_id: MP server whose L1 holds the chunks (must be
+            registered).
+        target_instance_id: MP server to move them to (must be registered and
+            differ from the source).
+        model_name: Model whose layout the target uses to allocate L1 buffers.
+        world_size: World size selecting the layout and the per-rank fan-out.
+        token_ids: Prompt tokens whose complete chunks should be moved.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+        source_tier: Tier the chunks leave. Only ``l1`` is supported today;
+            the field exists so the contract need not change when other
+            directions land.
+        target_tier: Tier the chunks arrive in. Only ``l1`` is supported today.
+        keep_source: When ``True`` the source keeps its chunks: a copy, not
+            a move.
+
+    Unknown fields are rejected (422): a misspelt ``keep_source`` would
+    otherwise silently turn a copy into a move.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_instance_id: str
+    target_instance_id: str
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+    source_tier: Tier = Field(
+        default=Tier.L1, description="Tier the chunks leave; only 'l1' today."
+    )
+    target_tier: Tier = Field(
+        default=Tier.L1, description="Tier the chunks arrive in; only 'l1' today."
+    )
+    keep_source: bool = Field(
+        default=False,
+        description="Keep the source's copy after the target loads (a copy, "
+        "not a move).",
+    )
+
+
+class MoveResponse(BaseModel):
+    """Reply to ``POST /cache/moves`` on the coordinator.
+
+    Attributes:
+        move_id: Id to poll via ``GET /cache/moves/{move_id}``. Empty when
+            ``status`` is ``"noop"``.
+        source_instance_id: The server the chunks leave.
+        target_instance_id: The server the chunks arrive at.
+        requested: Number of whole chunks the token sequence resolved to.
+        status: ``"submitted"`` (the move is in flight) or ``"noop"`` (the
+            sequence was shorter than one chunk).
+    """
+
+    move_id: str = ""
+    source_instance_id: str
+    target_instance_id: str
+    requested: int = Field(
+        default=0, description="Whole chunks the token sequence resolved to."
+    )
+    status: Literal["submitted", "noop"]
+
+
+class MoveStatusResponse(BaseModel):
+    """Reply to ``GET /cache/moves/{move_id}`` on the coordinator.
+
+    Built straight from the controller's ``MoveOutcome``. Key counts are
+    per-rank keys (chunks times the per-rank fan-out), like
+    ``DeleteResponse.affected``; ``requested`` counts chunks.
+
+    Attributes:
+        move_id: The move polled.
+        source_instance_id: The server the chunks leave.
+        target_instance_id: The server the chunks arrive at.
+        status: ``pending`` while the move runs, then ``completed`` (the
+            target reported, and the source delete -- if any -- was
+            acknowledged) or ``failed`` (see ``phase`` and ``error``).
+        phase: ``load`` until the target reports -- the source is untouched
+            -- then ``delete``. For a failed move, the phase it failed in.
+        requested: Number of whole chunks the token sequence resolved to.
+        loaded: Keys the target reported loading into its L1 -- what the
+            prefetch loaded, not proof they are still resident.
+        missing: Keys the target could not load -- not found on any source it
+            can read, or already resident there. Never deleted from the source.
+        deleted: Keys whose removal the source acknowledged (``0`` for a
+            copy). A delete whose reply was lost may have removed more.
+        skipped: Keys the source refused to delete because they were locked.
+        error: Why the move failed, for a human; empty unless ``status`` is
+            ``failed``.
+
+    A terminal status stays readable for the coordinator's
+    ``move_result_ttl_s`` (default 600 s), bounded by ``move_result_limit``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    move_id: str
+    source_instance_id: str
+    target_instance_id: str
+    status: MoveStatus
+    phase: MovePhase
+    requested: int = 0
+    loaded: int = 0
+    missing: int = 0
+    deleted: int = 0
+    skipped: int = 0
+    error: str = ""

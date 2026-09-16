@@ -967,16 +967,27 @@ reports progress; the first poll that observes completion drops the job
 
 .. code-block:: json
 
-    {"status": "completed", "found_keys": 12, "total_keys": 12}
+    {"status": "completed", "found_keys": 12, "total_keys": 12, "missing_key_indices": []}
 
-``found_keys`` / ``total_keys`` count only chunks **loaded from L2** by this
-request; chunks already resident in L1 are skipped at ``reserve_write`` and not
-counted, so a partially-resident warm undercounts by the resident chunk count
-(a cold request loads and counts everything). The warm uses the gap-tolerant
-``SPARSE`` trim policy, so an already-resident chunk does not stop the rest from
-loading — it loads every not-yet-resident chunk and reports that count. Not
-counting the resident chunks is deliberate: an already-present entry may be a
+Counts are per-rank object keys. ``total_keys`` counts every key the request
+resolved to; ``found_keys`` counts the keys **this request loaded** into L1.
+A key already in L1 when the warm started is neither re-loaded nor counted
+(so a partially-resident warm undercounts by that many), and a key no adapter
+holds is not loaded at all. The warm uses the gap-tolerant ``SPARSE`` trim
+policy, so a resident or absent key does not stop the rest from loading. Not
+counting prior hits is deliberate: an already-present entry may be a
 transient temporary from another lookup, so claiming it as warmed could mislead.
+
+``missing_key_indices`` lists, ascending, the positions of the keys this
+request did **not** load -- the complement of the loaded set, so its length is
+``total_keys - found_keys`` -- for a caller that acts per key rather than
+on the aggregate counts. Positions index the request's resolved key
+order: chunk-major, then rank (chunk 0's ranks ``0..world_size-1``, then
+chunk 1's, and so on), the same order every node and the coordinator resolve a
+token sequence to keys in. Under the counting rule above, a prior L1 hit
+appears here alongside genuine misses. These fields describe what the request
+loaded; they are not a residency snapshot and nothing prevents a later
+eviction.
 
 **HTTP status codes:**
 
@@ -990,7 +1001,7 @@ transient temporary from another lookup, so claiming it as warmed could mislead.
 .. code-block:: bash
 
     curl -s http://localhost:8080/cache/prefetches/abc123
-    # -> {"status": "completed", "found_keys": 1, "total_keys": 1}
+    # -> {"status": "completed", "found_keys": 1, "total_keys": 1, "missing_key_indices": []}
 
 .. _mp-http-quota-api:
 

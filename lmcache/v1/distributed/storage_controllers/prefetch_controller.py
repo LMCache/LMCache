@@ -464,15 +464,19 @@ class PrefetchController(StorageControllerInterface):
         """
         Query the result of a prefetch request.
 
-        Thread-safe. Returns the retained-key bitmap if the request
+        Thread-safe. Returns the completion bitmap if the request
         has completed, None if still in progress. Each result can only
-        be retrieved once (subsequent calls return None).
+        be retrieved once (subsequent calls return None). For a ``WARM``
+        request the bitmap names only the keys the request loaded itself;
+        keys already resident in L1 when it started are not in it.
 
         Args:
             request_id: The request ID from submit_prefetch_request.
 
         Returns:
-            Number of prefix hits, or None if not yet complete.
+            The retained-key bitmap for LOOKUP, or that bitmap excluding
+            prior L1 hits for WARM. Returns None if the request is still
+            running, unknown, or its result has already been consumed.
 
         Note:
             This function will pop the completed lookup results as well.
@@ -1297,7 +1301,9 @@ class PrefetchController(StorageControllerInterface):
         4. Fold loaded ∪ locked keys to the final hit length / retained set.
         5. Unlock everything outside the retained set (e.g. out of the
            final sliding window).
-        6. Report the hit if no earlier step did, then the retained bitmap.
+        6. Report the lookup-phase hit if no earlier step did, then the
+           completion bitmap: retained keys for LOOKUP, or retained keys
+           excluding prior L1 hits for WARM.
 
         End state (sliding-window view; loaded keys in the in L2-hit sw
         segment, L1 locks elsewhere)::
@@ -1394,16 +1400,22 @@ class PrefetchController(StorageControllerInterface):
             request.attn_desc,
         )
         if request.mode is PrefetchMode.WARM:
-            if request.l1_readlocks.popcount() > 0:
+            # Prior L1 hits may be temporaries owned by another lookup:
+            # release our read locks on them and leave them out of the WARM
+            # result, which names only what this request loaded.
+            prior_hits = request.l1_readlocks
+            if prior_hits.popcount() > 0:
                 l1_mgr.finish_read(
-                    request.l1_readlocks.gather(request.keys),
+                    prior_hits.gather(request.keys),
                     read_locks=request.num_kv_readers,
                 )
                 request.l1_readlocks = Bitmap(num_keys)
+            completed = retained & (~prior_hits)
         else:
             released = (result_bitmap & (~retained)).gather(request.keys)
             if released:
                 l1_mgr.finish_read(released, read_locks=request.num_kv_readers)
+            completed = retained
 
         # LRU: the retained keys are the ones this request actually serves;
         # touch them (locking/unlocking never refreshes recency).
@@ -1417,7 +1429,7 @@ class PrefetchController(StorageControllerInterface):
         if not request.hit_reported:
             self._report_lookup_hit(request, hit_length)
 
-        self._complete_request(request.request_id, retained)
+        self._complete_request(request.request_id, completed)
 
     # =========================================================================
     # Unlock helpers

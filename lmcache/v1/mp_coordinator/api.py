@@ -2,7 +2,9 @@
 """Cross-module contract vocabulary for the MP coordinator.
 
 The cache-event types both sides of the event stream speak: emitted by
-MP servers, consumed by the coordinator's key directory.
+MP servers, consumed by the coordinator's key directory. And the states a
+coordinator-driven cache move reports, shared by the controller that drives
+it and the HTTP schema that exposes it.
 Encoding-level checks (key convertibility,
 hex validity) belong to the HTTP envelopes in :mod:`schemas`.
 """
@@ -215,3 +217,28 @@ class CacheEventBatch:
             )
         if self.ts < 0.0:
             raise ValueError(f"ts must be >= 0 (got {self.ts})")
+
+
+class MoveStatus(str, Enum):
+    """Where a coordinator-driven cache move stands.
+
+    ``PENDING`` while the coordinator drives it, then ``COMPLETED`` (the
+    target reported, and the source delete -- if any -- was acknowledged)
+    or ``FAILED``; never back.
+    """
+
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class MovePhase(str, Enum):
+    """Which half of a move the coordinator is in, or was in when it failed.
+
+    ``LOAD`` until the target reports which keys it loaded: the source is
+    untouched. ``DELETE`` from then on: what remains, if anything, is the
+    source delete, so a failure here may have removed keys.
+    """
+
+    LOAD = "load"
+    DELETE = "delete"
