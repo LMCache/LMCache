@@ -11,7 +11,7 @@ from typing import ClassVar as _ClassVar, Optional as _Optional
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class IpcCacheServerKey(_message.Message):
-    __slots__ = ("model_name", "world_size", "worker_id", "token_ids", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "num_kv_readers")
+    __slots__ = ("model_name", "world_size", "worker_id", "token_ids", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "num_kv_readers", "encoded_null_chunk_mask")
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     WORLD_SIZE_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
@@ -22,6 +22,7 @@ class IpcCacheServerKey(_message.Message):
     CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
     ENCODED_REQUEST_CONFIGS_FIELD_NUMBER: _ClassVar[int]
     NUM_KV_READERS_FIELD_NUMBER: _ClassVar[int]
+    ENCODED_NULL_CHUNK_MASK_FIELD_NUMBER: _ClassVar[int]
     model_name: str
     world_size: int
     worker_id: int
@@ -32,7 +33,8 @@ class IpcCacheServerKey(_message.Message):
     cache_salt: str
     encoded_request_configs: bytes
     num_kv_readers: int
-    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_ids: _Optional[_Iterable[int]] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., num_kv_readers: _Optional[int] = ...) -> None: ...
+    encoded_null_chunk_mask: bytes
+    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_ids: _Optional[_Iterable[int]] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., num_kv_readers: _Optional[int] = ..., encoded_null_chunk_mask: _Optional[bytes] = ...) -> None: ...
 
 class EventIpcHandleResult(_message.Message):
     __slots__ = ("event_ipc_handle", "success")
@@ -40,7 +42,7 @@ class EventIpcHandleResult(_message.Message):
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
     event_ipc_handle: bytes
     success: bool
-    def __init__(self, event_ipc_handle: _Optional[bytes] = ..., success: bool = ...) -> None: ...
+    def __init__(self, event_ipc_handle: _Optional[bytes] = ..., success: _Optional[bool] = ...) -> None: ...
 
 class BlockIdGroup(_message.Message):
     __slots__ = ("block_ids",)
@@ -68,4 +70,4 @@ class EngineGroupInfo(_message.Message):
     sw_size_tokens: int
     extra_object_group_tag: int
     recurrent_state: bool
-    def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: bool = ...) -> None: ...
+    def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: _Optional[bool] = ...) -> None: ...

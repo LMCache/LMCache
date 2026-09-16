@@ -690,7 +690,7 @@ class TestAttnWindowDescDerivation:
         attn_desc = mock_register.call_args.kwargs["attn_desc"]
         assert attn_desc.num_chunks_in_sw == [2]
 
-    def test_extra_tagged_group_is_standalone(self) -> None:
+    def test_extra_tagged_group_is_aux(self) -> None:
         groups = [
             EngineGroupInfo(
                 engine_group_id=0, layer_indices=(0, 1), tokens_per_block=4
@@ -705,7 +705,7 @@ class TestAttnWindowDescDerivation:
         with ExitStack() as stack:
             mock_register = self._register(stack, groups)
         attn_desc = mock_register.call_args.kwargs["attn_desc"]
-        assert attn_desc.group_kinds == ("attention", "standalone")
+        assert attn_desc.group_kinds == ("attention", "aux")
 
     def test_windows_stay_parallel_to_group_layouts(self) -> None:
         """Order matters: consumers index ``num_chunks_in_sw`` and

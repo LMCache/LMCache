@@ -18,6 +18,9 @@ message RegisterKvCacheEngineDrivenContextRequest {
   string dtype_str = 7;
   bool use_mla = 8;
   optional int64 num_physical_slots = 9;
+  repeated EngineGroupInfo engine_group_infos = 10;
+  // msgpack-encoded ``list[int]``; absent means None.
+  optional bytes encoded_group_hidden_dim_sizes = 11;
 }
 
 message RegisterKvCacheEngineDrivenContextResponse {
