@@ -151,6 +151,12 @@ Limits and troubleshooting
 
 * Use ``noop`` eviction. Clear/delete operations do not reclaim shared extents.
   An exhausted pool requires the coordinated reset below.
+* Pending writes have a fixed experimental 60-second TTL. Replacement is lazy:
+  a later reservation uses a fresh extent if its entire batch fits. There is no
+  background cleanup guarantee. Expired finish/abort calls fail; old bytes remain
+  consumed and ``used_bytes`` never decreases. Committed objects do not expire.
+  This is not a hardware-qualified timeout: legitimate slow writes may be
+  rejected. Expiry does not revoke GPU mappings or recover a fenced client.
 * L2 adapters, hybrid DRAM/DAX, GDS L1, MP P2P, CacheBlend, QStore, engine-driven
   transfer, and trace replay are unsupported and rejected.
 * A contract mismatch means identity, capacity, alignment, or layout differs.

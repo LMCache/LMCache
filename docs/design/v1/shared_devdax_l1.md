@@ -56,9 +56,9 @@ ABSENT --reserve--> WRITING --D2H complete, publish, finish--> VALID
                        +--abort--> ABSENT (allocated bytes stay consumed)
 ```
 
-1. Reserve an entire batch. One writer wins each absent key. Existing or
-   in-flight keys return no grant. If the absent keys do not all fit, nothing
-   is allocated.
+1. Reserve an entire batch. One writer wins each absent or expired pending key.
+   Committed and unexpired pending keys return no grant. If the new allocations
+   cannot all fit, nothing is changed.
 2. The producer copies GPU KV into its CUDA-registered DAX view. It waits for
    D2H completion, then publishes each exact range through the visibility ABI.
 3. Only then does it finish the batch with the granted write tokens. The
@@ -76,8 +76,16 @@ index. A pending write has a token; a committed object has no write token.
 
 The allocator only advances. A committed extent is never overwritten or reused.
 Aborted writes discard metadata but still consume space. This avoids distributed
-read pins, lease expiry, and stale readers accessing reused bytes in this first
-implementation. It also means a crashed writer can strand a key and consume space.
+read pins and stale readers accessing reused bytes in this first implementation.
+
+Pending reservations expire after a fixed, experimental 60-second monotonic TTL.
+A later reservation lazily replaces expired metadata at a fresh offset with a
+new token/generation, only if the whole batch fits. There is no background cleanup
+guarantee. Late finish and abort fail, even before replacement. Old bytes remain
+consumed; `used_bytes` never decreases. Committed objects do not expire.
+This timeout is proposed for review, not hardware-qualified or tied to HTTP
+timeouts. A legitimate write exceeding it can be rejected. Expiry neither revokes
+GPU mappings nor recovers a fenced client.
 
 Pool pressure requires a coordinated reset, not eviction. `used_bytes` is the
 allocation high-water mark, including alignment gaps and abandoned extents.
@@ -170,6 +178,12 @@ The workload used four repeated, nested document prefixes, 256-token chunks,
 16) had 16 measured requests after a separate warmup. Every cell visited all
 eight P/D pairs. The table shows concurrency 16 only. Throughput is total output
 tokens divided by cell wall time. TTFT is median time to first nonempty output.
+
+These aligned warm-cache results do not characterize unaligned-tail overhead.
+MP transfers complete chunks; the D worker computes the uncached tail.
+Interference with ongoing decoding depends on scheduling and must be measured
+with overlapping decodes on that same worker. This is distinct from the
+connector's existing last-token recomputation on a full-prompt cache hit.
 
 | Layout | Input | MP output tok/s | Maru + fixes output tok/s | MP gain | MP TTFT ms | Maru TTFT ms |
 |---|---:|---:|---:|---:|---:|---:|

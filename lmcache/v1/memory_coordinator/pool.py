@@ -2,6 +2,7 @@
 """Atomic metadata for one immutable region; aborted extents are never reused."""
 
 # Standard
+from time import monotonic
 import threading
 import uuid
 
@@ -25,17 +26,20 @@ from .api import (
 )
 
 _MAX_GENERATION = (1 << 64) - 1
+# Experimental metadata policy, not a GPU-quiescence deadline.
+_RESERVATION_TTL_SECONDS = 60.0
 
 
 class _ObjectRecord:
     """Mutable per-object state private to the pool."""
 
-    __slots__ = ("handle", "layout", "write_token")
+    __slots__ = ("handle", "layout", "write_token", "expires_at")
 
-    def __init__(self, grant: WriteGrant) -> None:
+    def __init__(self, grant: WriteGrant, expires_at: float) -> None:
         self.handle = grant.handle
         self.layout = grant.layout
         self.write_token: str | None = grant.token
+        self.expires_at = expires_at
 
 
 class MemoryPool:
@@ -44,7 +48,8 @@ class MemoryPool:
     ``region_id`` names the shared region; ``layout_id`` identifies its immutable
     layout. ``capacity_bytes`` is its size and ``alignment_bytes`` its
     power-of-two allocation alignment. Invalid settings raise ValueError.
-    Batches validate before mutation; reuse requires all mapped workers to stop.
+    Batches validate before mutation; extent reuse requires all mapped workers
+    to stop.
     """
 
     def __init__(
@@ -89,8 +94,10 @@ class MemoryPool:
         self,
         items: list[WriteReserveItem],
     ) -> list[WriteGrant | None]:
-        """Return grants for absent key/layout ``items``, None for existing keys.
+        """Reserve key/layout ``items`` at fresh offsets, replacing expired writes.
 
+        Committed and unexpired pending keys return None. Expired records are
+        replaced only after the whole batch fits; old extents remain consumed.
         Duplicate keys or invalid layouts raise ValueError. Insufficient capacity
         raises OutOfSpaceError. Every failure leaves the whole batch unchanged.
         """
@@ -102,11 +109,15 @@ class MemoryPool:
             raise ValueError("write layouts must describe a positive size")
 
         with self._lock:
+            now = monotonic()
             cursor = self._next_offset
             generation = self._next_generation
             result: list[WriteGrant | None] = []
             for item, canonical, length in zip(items, canonicals, lengths, strict=True):
-                if canonical in self._objects:
+                record = self._objects.get(canonical)
+                if record is not None and (
+                    record.write_token is None or now < record.expires_at
+                ):
                     result.append(None)
                     continue
                 if generation > _MAX_GENERATION:
@@ -133,7 +144,9 @@ class MemoryPool:
 
             for reserved in result:
                 if reserved is not None:
-                    self._objects[reserved.key] = _ObjectRecord(reserved)
+                    self._objects[reserved.key] = _ObjectRecord(
+                        reserved, now + _RESERVATION_TTL_SECONDS
+                    )
             self._next_offset = cursor
             self._next_generation = generation
             return result
@@ -141,7 +154,8 @@ class MemoryPool:
     def finish_writes(self, reservations: list[ReservationRef]) -> None:
         """Atomically publish token-bearing ``reservations`` as VALID.
 
-        Invalid or duplicate tokens raise InvalidReservationError without change.
+        Invalid, duplicate or expired tokens raise InvalidReservationError.
+        The entire batch remains unchanged on failure.
         """
         with self._lock:
             for record in self._validate_writes(reservations):
@@ -150,7 +164,8 @@ class MemoryPool:
     def abort_writes(self, reservations: list[ReservationRef]) -> None:
         """Abort token-bearing ``reservations`` without reusing their extents.
 
-        Invalid or duplicate tokens raise InvalidReservationError without change.
+        Invalid, duplicate or expired tokens raise InvalidReservationError.
+        The entire batch remains unchanged on failure.
         """
         with self._lock:
             self._validate_writes(reservations)
@@ -194,13 +209,18 @@ class MemoryPool:
         self,
         reservations: list[ReservationRef],
     ) -> list[_ObjectRecord]:
+        now = monotonic()
         tokens = [reservation.token for reservation in reservations]
         if len(tokens) != len(set(tokens)):
             raise InvalidReservationError("duplicate write reservation")
         records = []
         for reservation in reservations:
             record = self._objects.get(canonical_key(reservation.key))
-            if record is None or record.write_token != reservation.token:
+            if (
+                record is None
+                or record.write_token != reservation.token
+                or now >= record.expires_at
+            ):
                 raise InvalidReservationError("reservation does not own the write")
             records.append(record)
         return records
