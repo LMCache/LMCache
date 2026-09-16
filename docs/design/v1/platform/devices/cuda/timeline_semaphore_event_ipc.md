@@ -134,7 +134,7 @@ exists. Two empirically verified requirements for reviving it:
 
 `CudaDeviceSpec.event_ipc_backend` returns this backend when the
 process-global isolated-IPC switch is on (see
-`lmcache/v1/platform/isolated_ipc.py`; off by default until the
+`lmcache.v1.platform.ipc_policy`; off by default until the
 integrations listed below migrate), and `DefaultEventIPCBackend`
 otherwise. The switch is set at process initialization — before the first
 backend resolution, which caches the choice — from `lmcache.mp.isolated_ipc`

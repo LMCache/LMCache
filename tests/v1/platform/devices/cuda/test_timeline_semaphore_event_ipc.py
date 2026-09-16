@@ -25,7 +25,7 @@ from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
     TimelineSemaphoreEventIPCBackend,
 )
 from lmcache.v1.platform.devices.cuda.utils import cuda_ipc_handle_to_bytes
-from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import set_isolated_ipc
 
 pytestmark = [
     pytest.mark.cuda,

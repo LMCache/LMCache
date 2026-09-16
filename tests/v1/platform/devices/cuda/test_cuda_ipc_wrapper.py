@@ -24,7 +24,7 @@ from lmcache.v1.platform.devices.cuda.ipc_wrapper import (
     CudaIPCWrapper,
     RawCudaIPCWrapper,
 )
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 
 pytestmark = [
     pytest.mark.cuda,

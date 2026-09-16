@@ -27,8 +27,13 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform.devices.cuda.vmm_ipc import is_use_vmm_api, set_use_vmm_api
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import (
+    is_isolated_ipc,
+    is_use_vmm_api,
+    set_ipc_policy,
+    set_isolated_ipc,
+    set_use_vmm_api,
+)
 
 
 class FakeCudaEvent:
@@ -446,12 +451,19 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
     fake_adapter, restore_isolated_ipc, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Backend selection sees isolated IPC before transfer registration."""
-    calls: list[tuple[str, bool]] = []
-    original_set_isolated_ipc = adapter_mod.set_isolated_ipc
+    calls: list[tuple[str, bool, bool | str | None]] = []
+    original_set_ipc_policy = adapter_mod.set_ipc_policy
 
-    def record_isolated_ipc(enabled: bool) -> None:
-        original_set_isolated_ipc(enabled)
-        calls.append(("set_isolated_ipc", is_isolated_ipc()))
+    def record_ipc_policy(
+        *,
+        isolated_ipc: bool | None = None,
+        use_vmm_api: bool | None = None,
+    ) -> None:
+        original_set_ipc_policy(
+            isolated_ipc=isolated_ipc,
+            use_vmm_api=use_vmm_api,
+        )
+        calls.append(("set_ipc_policy", is_isolated_ipc(), use_vmm_api))
 
     transfer_ctx = MagicMock(name="transfer_ctx")
 
@@ -462,19 +474,20 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
         req_client: RequestClient,
         mode: str | None,
     ) -> MagicMock:
-        del instance_id, req_client, mode
-        calls.append(("create_transfer_context", is_isolated_ipc()))
+        del instance_id, req_client
+        calls.append(("create_transfer_context", is_isolated_ipc(), mode))
         return transfer_ctx
 
-    monkeypatch.setattr(adapter_mod, "set_isolated_ipc", record_isolated_ipc)
+    monkeypatch.setattr(adapter_mod, "set_ipc_policy", record_ipc_policy)
     monkeypatch.setattr(adapter_mod, "create_transfer_context", create_context)
 
+    set_ipc_policy(isolated_ipc=False, use_vmm_api=False)
     adapter = _make_worker_adapter(extra_config={"lmcache.mp.isolated_ipc": True})
     adapter.register_kv_caches({"layer.0": torch.zeros(1)})
 
     assert calls == [
-        ("set_isolated_ipc", True),
-        ("create_transfer_context", True),
+        ("set_ipc_policy", True, False),
+        ("create_transfer_context", True, None),
     ]
     transfer_ctx.register.assert_called_once()
 

@@ -38,7 +38,7 @@ silently reorder elements).
 ## Selection
 
 `CudaDeviceSpec.ipc_wrapper_cls` consults the process-global
-isolated-IPC switch (`lmcache/v1/platform/isolated_ipc.py`) via the
+isolated-IPC switch (`lmcache.v1.platform.ipc_policy`) via the
 module-level `_select_ipc_wrapper_cls()`: on → `RawCudaIPCWrapper`,
 off → `CudaIPCWrapper`. The same switch selects the event backend, so
 one goal-named knob (`lmcache.mp.isolated_ipc` / `--isolated-ipc`)
