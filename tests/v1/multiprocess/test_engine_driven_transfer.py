@@ -1658,6 +1658,10 @@ def test_server_prepare_store_includes_chunk_indices(
     assert response_context.get("chunk_indices") == [1]
 
 
+@pytest.mark.skipif(
+    not (torch_device_type == "xpu" and torch_dev.is_available()),
+    reason="null-chunk engine-driven regression tests require an available XPU",
+)
 def test_server_prepare_store_excludes_null_masked_chunk(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
@@ -1710,6 +1714,10 @@ def test_server_prepare_store_excludes_null_masked_chunk(
     assert response_context.get("chunk_indices") == [1]
 
 
+@pytest.mark.skipif(
+    not (torch_device_type == "xpu" and torch_dev.is_available()),
+    reason="null-chunk engine-driven regression tests require an available XPU",
+)
 def test_server_commit_store_slices_chunks_for_null_masked_group(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,

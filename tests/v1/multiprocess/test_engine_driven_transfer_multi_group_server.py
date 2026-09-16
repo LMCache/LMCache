@@ -18,6 +18,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -33,6 +34,12 @@ from lmcache.v1.multiprocess.modules.server_transfer import (
     ShmTransferStrategy,
 )
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
+
+
+pytestmark = pytest.mark.skipif(
+    not (torch_device_type == "xpu" and torch_dev.is_available()),
+    reason="engine-driven multi-group tests require an available XPU",
+)
 
 
 def _pickle_context() -> EngineDrivenContextMetadata:

@@ -14,6 +14,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -30,6 +31,12 @@ from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     null_chunk_mask_from_groups,
+)
+
+
+pytestmark = pytest.mark.skipif(
+    not (torch_device_type == "xpu" and torch_dev.is_available()),
+    reason="engine-driven multi-group tests require an available XPU",
 )
 
 
