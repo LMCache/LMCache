@@ -101,19 +101,6 @@ class _RecordingUringCmdRawDevice:
         self.waited_batch_id = batch_id
         return self._batch_results.pop(batch_id), []
 
-    def read_uring(
-        self,
-        offset: int,
-        target: memoryview,
-        payload_len: int,
-        total_len: int,
-    ) -> None:
-        del offset, payload_len
-        self.read_buffers.append(target)
-        end = self.read_cursor + total_len
-        target[:total_len] = self.read_data[self.read_cursor : end]
-        self.read_cursor = end
-
 
 class _RecordingNativeRawDevice:
     """Record read batches while forwarding every I/O to the real Rust device."""

@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
@@ -79,6 +80,7 @@ class _QueryLookupHitsHandler:
         self.result = result
         self.request_id: str | None = None
 
+    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
     def query_prefetch_lookup_hits(self, request_id: str) -> int | None:
         """Record the request ID and return the configured result."""
         self.request_id = request_id
@@ -91,7 +93,7 @@ def test_query_prefetch_lookup_hits_request_transport(
     request_transport: RequestTransport,
     expected: int | None,
 ) -> None:
-    """Lookup-hit results round-trip over each enabled request transport."""
+    """Lookup-hit results round-trip over every request transport."""
     handler = _QueryLookupHitsHandler(expected)
     port = 15575 if request_transport == "zmq" else 15576
     server_url = request_server_url(request_transport, port)
