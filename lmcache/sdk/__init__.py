@@ -21,7 +21,7 @@ def connect(
     Args:
         kind: Which cache to connect to (``LMCacheSDKCacheKind.KV`` or
             ``LMCacheSDKCacheKind.QUERY``).
-        url: ZMQ endpoint URL for the LMCache message queue.
+        url: Multiprocess request endpoint. Its scheme selects ZMQ or gRPC.
         http_url: HTTP endpoint URL for fetching server configuration.
         model_name: Model name used by the running LMCache server instance.
         timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.

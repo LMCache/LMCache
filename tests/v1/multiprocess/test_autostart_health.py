@@ -21,7 +21,7 @@ def test_autostart_health_real_transport(start_server: bool) -> None:
         import sys
         import zmq
         from lmcache.integration.vllm.mp_server_launcher import is_mp_server_healthy
-        from lmcache.v1.multiprocess.mq import MessageQueueServer
+        from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
         from lmcache.v1.multiprocess.protocol import (
             RequestType, get_handler_type, get_payload_classes,
         )
