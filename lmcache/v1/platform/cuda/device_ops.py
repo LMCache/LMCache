@@ -30,10 +30,24 @@ class CudaDeviceOps(DeviceOps):
         try:
             # First Party
             import lmcache.cuda_ops as native
-        except ImportError:
+        except ModuleNotFoundError:
             logger.warning(
                 "lmcache.cuda_ops compiled extension not found; "
                 "CudaDeviceOps stays on the torch baseline for all ops."
+            )
+            return
+        except ImportError as exc:
+            # The .so is present but the dynamic loader rejected it -- almost
+            # always a torch/CUDA ABI mismatch between the wheel's build
+            # environment and the running torch. Say so: "not found" would
+            # send operators looking for a missing file instead of a version
+            # skew.
+            logger.warning(
+                "lmcache.cuda_ops compiled extension is present but failed to "
+                "load (%s); CudaDeviceOps stays on the torch baseline for all "
+                "ops. Check that the wheel was built against the installed "
+                "torch/CUDA versions.",
+                exc,
             )
             return
         self.bind_native(native)

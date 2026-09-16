@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import ctypes
 import ctypes.util
 import os
+import struct
 import threading
 import warnings
 
@@ -810,6 +811,115 @@ def _is_ptr_tensor(x: object) -> bool:
     )
 
 
+def _is_block_axis_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when dim-0 of every per-layer tensor is exactly the block axis.
+
+    Mirrors ``lmcache.v1.gpu_connector.utils._BLOCK_AXIS_FORMATS``: the
+    per-layer MLA formats whose only leading axis is ``NB`` (``[NB, BS, HS]``),
+    i.e. ``NL_X_NB_BS_HS`` and its blocked-scale twin ``NL_X_NB_BSV_BSS``.
+    These are the formats for which ``PageBufferShapeDesc.block_stride_elems``
+    carries a physical dim-0 step (vLLM blocks-first pools).
+    """
+    fmt = int(engine_kv_format)
+    return fmt in (
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NB_BSV_BSS),
+    )
+
+
+def _is_blocked_scale_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for the DSA indexer k-cache page layout ``[BSxVALS][BSxSCALES]``."""
+    return int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BSV_BSS)
+
+
+def _tensor_from_ptr_block_strided(
+    ptr: int,
+    shape: tuple[int, ...],
+    block_stride_elems: int,
+    dtype: torch.dtype,
+    device: torch.device | str,
+) -> torch.Tensor:
+    """Zero-copy view over a dim-0-padded per-layer buffer.
+
+    ``shape[0]`` is the block axis; block ``b`` lives at element offset
+    ``b * block_stride_elems`` and the inner dims are tightly packed. Only
+    the bytes actually addressed by the view are mapped: the last block's
+    trailing padding is not part of the span, so a pool whose final page is
+    not fully padded is never over-read.
+    """
+    nb = int(shape[0])
+    inner = 1
+    for d in shape[1:]:
+        inner *= int(d)
+    span = (nb - 1) * block_stride_elems + inner if nb > 0 else 0
+    base = _tensor_from_ptr(ptr, (span,), dtype, device)
+    strides = (block_stride_elems,) + _contiguous_element_strides(tuple(shape[1:]))
+    return torch.as_strided(base, tuple(shape), strides)
+
+
+# cudaMemoryType / hipMemoryType values shared by both runtimes.
+_MEMORY_TYPE_HOST = 1
+_MEMORY_TYPE_DEVICE = 2
+_MEMORY_TYPE_MANAGED = 3
+
+
+def _resolve_ptr_device(ptr: int, hint: torch.device) -> torch.device:
+    """Return where a raw pointer handed to the fallback actually lives.
+
+    The native ``multi_layer_block_kv_transfer`` binding takes
+    ``lmcache_objects_ptrs`` as bare integers and lets the CUDA kernel read
+    them through UVA, so callers pass pinned-host chunk pointers (in-process
+    connectors) and device temp-buffer pointers (multiprocess cache-driven
+    transfers) through the same argument. The torch fallback has to build a
+    tensor on the right device, so ask the runtime (``cudaPointerGetAttributes``
+    / ``hipPointerGetAttributes``) when a GPU is present.
+
+    Args:
+        ptr: Raw pointer.
+        hint: The paged-buffer device of the transfer; used for managed memory
+            (reachable from both sides) and to skip the runtime query on
+            CPU-only processes.
+
+    Returns:
+        ``torch.device("cuda", N)`` for device allocations, *hint* for
+        managed allocations, ``torch.device("cpu")`` for pinned/pageable host
+        memory or when no GPU runtime is available.
+    """
+    cpu = torch.device("cpu")
+    if hint.type != "cuda" or not torch.cuda.is_available():
+        return cpu
+    lib = _get_copy_lib()
+    if lib is None:
+        return cpu
+    query = getattr(lib, "cudaPointerGetAttributes", None)
+    clear = getattr(lib, "cudaGetLastError", None)
+    if query is None:
+        query = getattr(lib, "hipPointerGetAttributes", None)
+        clear = getattr(lib, "hipGetLastError", None)
+    if query is None:
+        return cpu
+    # cudaPointerAttributes is {int type; int device; void*; void*} (24 B);
+    # hipPointerAttribute_t appends {int isManaged; unsigned flags} (32 B).
+    # Only the two leading ints are read; the buffer is oversized on purpose.
+    attrs = (ctypes.c_uint8 * 64)()
+    query.restype = ctypes.c_int
+    query.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    err = query(ctypes.addressof(attrs), ctypes.c_void_p(ptr))
+    if err != 0:
+        # Pageable host memory reports cudaErrorInvalidValue on older
+        # runtimes; that error is sticky and must be cleared.
+        if clear is not None:
+            clear.restype = ctypes.c_int
+            clear()
+        return cpu
+    mem_type, dev_index = struct.unpack_from("ii", bytes(attrs))
+    if mem_type == _MEMORY_TYPE_DEVICE:
+        return torch.device("cuda", dev_index)
+    if mem_type == _MEMORY_TYPE_MANAGED:
+        return hint
+    return cpu
+
+
 def _per_layer_paged_shape(
     engine_kv_format: EngineKVFormat,
     nb: int,
@@ -833,7 +943,13 @@ def _per_layer_paged_shape(
     fmt = int(engine_kv_format)
     if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
         return (nb * bs, 1, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
+    if fmt in (
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NB_BSV_BSS),
+    ):
+        # Per-layer MLA and the DSA indexer k-cache both register as
+        # [NB, BS, HS]; the blocked-scale page layout only changes how the
+        # bytes inside a block are read, not the tensor geometry.
         return (nb, bs, hs)
     if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
         return (2, nb, nh, bs, hs)
@@ -1034,12 +1150,33 @@ def _normalize_paged_layers(
         hs = int(shape_desc.hs)
         per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0) or 0)
-        if block_stride and block_stride != bs * nh * hs:
-            raise NotImplementedError(
-                "Non-tight per-block strides (vLLM blocks-first pools) are "
-                "not supported when reconstructing paged tensors from raw "
-                "pointers in the non-CUDA fallback."
-            )
+        tight_stride = bs * nh * hs
+        if block_stride and block_stride != tight_stride:
+            if not _is_block_axis_format(engine_kv_format):
+                raise NotImplementedError(
+                    "Non-tight per-block strides are only supported for the "
+                    "block-axis MLA formats (NL_X_NB_BS_HS, NL_X_NB_BSV_BSS) "
+                    "when reconstructing paged tensors from raw pointers in "
+                    f"the non-CUDA fallback; got {engine_kv_format!r} with "
+                    f"block_stride_elems={block_stride}, tight={tight_stride}."
+                )
+            if block_stride < tight_stride:
+                raise ValueError(
+                    f"block_stride_elems={block_stride} is smaller than the "
+                    f"tight per-block stride {tight_stride}; blocks would overlap."
+                )
+            # vLLM blocks-first pools (e.g. DeepSeek V4 indexer / compressor
+            # caches sharing a page with larger groups) register each layer
+            # as a dim-0-padded view: block ``b`` starts at
+            # ``b * block_stride_elems``, only the first ``bs * hs`` elements
+            # of each page belong to this layer. Rebuild exactly that view so
+            # reads hit the right block and writes never touch the padding.
+            return [
+                _tensor_from_ptr_block_strided(
+                    int(p.item()), per_shape, block_stride, dtype, device
+                )
+                for p in paged_buffer_ptrs_tensor
+            ]
         return [
             _tensor_from_ptr(int(p.item()), per_shape, dtype, device)
             for p in paged_buffer_ptrs_tensor
@@ -1062,13 +1199,19 @@ def _normalize_lmcache_objects(
     lmcache_chunk_size: "int | None" = None,
     engine_kv_format: "EngineKVFormat | None" = None,
     dtype: "torch.dtype | None" = None,
+    device: "torch.device | str | None" = None,
 ) -> list[torch.Tensor]:
     """Normalize LMCache object inputs to chunk tensors.
 
-    Accepts either a list of chunk tensors or a ``list[int]`` of raw CPU pointers.
+    Accepts either a list of chunk tensors or a ``list[int]`` of raw pointers.
     When a pointer list is provided *shape_desc*, *lmcache_chunk_size*,
     *engine_kv_format*, and *dtype* must be supplied so the tensors can be
-    reconstructed via :func:`_tensor_from_ptr` on the CPU.
+    reconstructed via :func:`_tensor_from_ptr`. Each pointer is placed on the
+    device it really lives on (see :func:`_resolve_ptr_device`): pinned-host
+    chunk memory from in-process connectors stays on the CPU, device temp
+    buffers from the multiprocess cache-driven path become device tensors.
+    *device* is the paged-buffer device of the transfer and is only used as
+    the residency hint.
     """
     if not isinstance(lmcache_objects_ptrs, list):
         raise TypeError(
@@ -1080,7 +1223,7 @@ def _normalize_lmcache_objects(
     if isinstance(lmcache_objects_ptrs[0], torch.Tensor):
         return lmcache_objects_ptrs  # type: ignore[return-value]
     if isinstance(lmcache_objects_ptrs[0], int):
-        # Pointer mode: reconstruct chunk tensors (always on CPU).
+        # Pointer mode: reconstruct chunk tensors where they actually live.
         if (
             shape_desc is None
             or lmcache_chunk_size is None
@@ -1103,8 +1246,9 @@ def _normalize_lmcache_objects(
             chunk_shape = (nl, chunk_tokens, nh * hs)
         else:
             chunk_shape = (2, nl, chunk_tokens, nh * hs)
+        hint = torch.device("cpu") if device is None else torch.device(device)
         return [
-            _tensor_from_ptr(ptr, chunk_shape, dtype, "cpu")
+            _tensor_from_ptr(ptr, chunk_shape, dtype, _resolve_ptr_device(ptr, hint))
             for ptr in lmcache_objects_ptrs
         ]
     raise TypeError(
@@ -1187,6 +1331,7 @@ def multi_layer_block_kv_transfer(
         lmcache_chunk_size=lmcache_chunk_size,
         engine_kv_format=engine_kv_format,
         dtype=kv_dtype,
+        device=device,
     )
     n_block_ids = (
         int(block_ids.numel())
@@ -1554,6 +1699,85 @@ def _transfer_per_layer_kv_tuple(
                     layer_t.index_copy_(0, eff_idx, src_blocks)
 
 
+def _check_mla_layers(
+    layer_tensors: list[torch.Tensor],
+    block_size: int,
+    is_flat: bool,
+    engine_kv_format: EngineKVFormat,
+) -> int:
+    """Validate the per-layer MLA geometry and return the shared hidden size.
+
+    Every layer must be rank 3 (``[NB, BS, HS]``, or ``[NB*BS, 1, HS]`` when
+    the block axis is folded) with one hidden size across the group. This is
+    checked up front because the transfer body gathers into pre-shaped views
+    (``index_select(out=)``) and scatters with ``index_copy_``: a mismatched
+    layer would either be silently resized away from the staging buffer
+    (D2H) or fail deep inside torch with a rank error (H2D).
+    """
+    hidden_size = int(layer_tensors[0].shape[-1])
+    expected_dim1 = 1 if is_flat else block_size
+    for layer_idx, layer in enumerate(layer_tensors):
+        if (
+            layer.ndim != 3
+            or int(layer.shape[1]) != expected_dim1
+            or int(layer.shape[-1]) != hidden_size
+        ):
+            raise ValueError(
+                f"{engine_kv_format!r} layer {layer_idx} has shape "
+                f"{tuple(layer.shape)}; expected rank-3 "
+                f"[{'NB*BS' if is_flat else 'NB'}, {expected_dim1}, {hidden_size}]"
+            )
+    return hidden_size
+
+
+# Per-token scale width of the DSA indexer k-cache page (fp32 scale).
+_BLOCKED_SCALE_BYTES = 4
+
+
+def _blocked_scale_split(hidden_size: int, dtype: torch.dtype) -> tuple[int, int]:
+    """Return ``(value_bytes, scale_bytes)`` of one token row for BSV_BSS."""
+    row_bytes = hidden_size * dtype.itemsize
+    if row_bytes <= _BLOCKED_SCALE_BYTES or row_bytes % 4 != 0:
+        raise ValueError(
+            "NL_X_NB_BSV_BSS rows must be a multiple of 4 bytes wider than "
+            f"the {_BLOCKED_SCALE_BYTES}-byte scale; got hidden_size="
+            f"{hidden_size} dtype={dtype} ({row_bytes} bytes)"
+        )
+    return row_bytes - _BLOCKED_SCALE_BYTES, _BLOCKED_SCALE_BYTES
+
+
+def _blocked_scale_pages_to_rows(pages: torch.Tensor) -> torch.Tensor:
+    """``[N, BS, HS]`` engine pages -> ``[N*BS, HS]`` token-major chunk rows.
+
+    An engine page stores all ``BS`` value vectors first, then all ``BS``
+    scales: ``[BS x val_bytes][BS x 4]``. The LMCache chunk keeps one
+    ``[val_bytes | 4]`` row per token, which is what the native kernel writes
+    and what every consumer of the chunk (offload, blend, compressor) reads.
+    """
+    n, bs, hs = pages.shape
+    val_bytes, scale_bytes = _blocked_scale_split(hs, pages.dtype)
+    row_bytes = val_bytes + scale_bytes
+    page_bytes = pages.contiguous().view(torch.uint8).reshape(n, bs * row_bytes)
+    vals = page_bytes[:, : bs * val_bytes].reshape(n, bs, val_bytes)
+    scales = page_bytes[:, bs * val_bytes :].reshape(n, bs, scale_bytes)
+    rows = torch.cat([vals, scales], dim=2).reshape(n * bs, row_bytes)
+    return rows.view(pages.dtype)
+
+
+def _blocked_scale_rows_to_pages(rows: torch.Tensor, bs: int) -> torch.Tensor:
+    """Inverse of :func:`_blocked_scale_pages_to_rows`: ``[N*BS, HS]`` ->
+    ``[N, BS, HS]``."""
+    hs = int(rows.shape[-1])
+    val_bytes, scale_bytes = _blocked_scale_split(hs, rows.dtype)
+    n = rows.shape[0] // bs
+    row_bytes = rows.contiguous().view(torch.uint8)
+    row_bytes = row_bytes.reshape(n, bs, val_bytes + scale_bytes)
+    vals = row_bytes[:, :, :val_bytes].reshape(n, bs * val_bytes)
+    scales = row_bytes[:, :, val_bytes:].reshape(n, bs * scale_bytes)
+    pages = torch.cat([vals, scales], dim=1)
+    return pages.view(rows.dtype).reshape(n, bs, hs)
+
+
 def _transfer_per_layer_mla(
     layer_tensors: list[torch.Tensor],
     object_tensors: list[torch.Tensor],
@@ -1565,11 +1789,22 @@ def _transfer_per_layer_mla(
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
-    """Handle MLA per-layer formats: [NB, BS, HS]."""
+    """Handle MLA per-layer formats: [NB, BS, HS].
+
+    Layers may be dim-0-padded views (vLLM blocks-first pools); gathers and
+    scatters go through ``index_select`` / ``index_copy_`` on dim 0, which
+    honour the view's strides, so padding is never read or written.
+    ``NL_X_NB_BSV_BSS`` pages are additionally repacked between the blocked
+    ``[BS x vals][BS x scales]`` page layout and token-major chunk rows.
+    """
     if not layer_tensors or not object_tensors:
         return
 
     is_flat = _is_pbs_fused_format(engine_kv_format)
+    is_blocked_scale = _is_blocked_scale_format(engine_kv_format)
+    hidden_size = _check_mla_layers(
+        layer_tensors, block_size, is_flat, engine_kv_format
+    )
     target_device = layer_tensors[0].device
     if is_flat:
         token_offsets = torch.arange(block_size, dtype=torch.long, device=target_device)
@@ -1595,7 +1830,6 @@ def _transfer_per_layer_mla(
             ).reshape(-1)
 
         if is_d2h:
-            hidden_size = layer_tensors[0].shape[-1]
             chunk_gpu = torch.empty(
                 len(layer_tensors),
                 n_valid * block_size,
@@ -1609,6 +1843,9 @@ def _transfer_per_layer_mla(
                         n_valid * block_size, 1, hidden_size
                     )
                     torch.index_select(layer, 0, token_indices, out=dst)
+                elif is_blocked_scale:
+                    pages = layer.index_select(0, eff_idx)
+                    chunk_gpu[layer_idx].copy_(_blocked_scale_pages_to_rows(pages))
                 else:
                     dst = chunk_gpu[layer_idx].view(n_valid, block_size, hidden_size)
                     torch.index_select(layer, 0, eff_idx, out=dst)
@@ -1619,10 +1856,13 @@ def _transfer_per_layer_mla(
             )
             for layer_idx, layer in enumerate(layer_tensors):
                 src = chunk_gpu[layer_idx]
-                hidden_size = layer.shape[-1]
                 if is_flat:
                     src_tokens = src.reshape(n_valid * block_size, 1, hidden_size)
                     layer.index_copy_(0, token_indices, src_tokens)
+                elif is_blocked_scale:
+                    layer.index_copy_(
+                        0, eff_idx, _blocked_scale_rows_to_pages(src, block_size)
+                    )
                 else:
                     src_blocks = src.reshape(n_valid, block_size, hidden_size)
                     layer.index_copy_(0, eff_idx, src_blocks)
