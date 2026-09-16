@@ -6,6 +6,7 @@ concatenation across LMCache groups.
 
 # Standard
 from contextlib import nullcontext
+from typing import Any
 from unittest.mock import MagicMock
 
 # Third Party
@@ -127,7 +128,7 @@ class TestGroupChunkShape:
         layout_desc = MemoryLayoutDesc(
             shapes=[torch.Size([2, 4, 64, 16])], dtypes=[torch.float16]
         )
-        shape = worker_transfer._group_chunk_shape(None, layout_desc, 4)
+        shape = worker_transfer._group_chunk_shape(None, layout_desc, 4, 16, {}, None)
         assert shape == torch.Size([2, 4, 64, 16])
 
     def test_substitutes_group_layer_count(self) -> None:
@@ -137,7 +138,10 @@ class TestGroupChunkShape:
             shapes=[torch.Size([2, 24, 64, 16])], dtypes=[torch.float16]
         )
         group = EngineGroupInfo(engine_group_id=0, layer_indices=tuple(range(6)))
-        shape = worker_transfer._group_chunk_shape(group, layout_desc, 24)
+        group_kv_caches = _make_kv_caches(6, num_heads=2, head_size=8)
+        shape = worker_transfer._group_chunk_shape(
+            group, layout_desc, 24, 16, group_kv_caches, None
+        )
         assert shape == torch.Size([2, 6, 64, 16])
 
     def test_substitutes_group_layer_count_mla_shape(self) -> None:
@@ -147,7 +151,10 @@ class TestGroupChunkShape:
             shapes=[torch.Size([24, 64, 16])], dtypes=[torch.float16]
         )
         group = EngineGroupInfo(engine_group_id=1, layer_indices=tuple(range(6, 24)))
-        shape = worker_transfer._group_chunk_shape(group, layout_desc, 24)
+        group_kv_caches = _make_kv_caches(18, num_heads=2, head_size=8)
+        shape = worker_transfer._group_chunk_shape(
+            group, layout_desc, 24, 16, group_kv_caches, None
+        )
         assert shape == torch.Size([18, 64, 16])
 
 
@@ -165,7 +172,7 @@ class TestBuildGroupTransferPlans:
             shapes=[torch.Size([2, 2, 8, 16])], dtypes=[torch.float32]
         )
         plans = worker_transfer._build_group_transfer_plans(
-            [], kv_caches, 2, 4, layout_desc, 2, None
+            [], kv_caches, 2, 4, layout_desc, 2, 16, None
         )
         assert len(plans) == 1
         assert plans[0].group_info is None
@@ -190,7 +197,7 @@ class TestBuildGroupTransferPlans:
             shapes=[torch.Size([2, 4, 8, 16])], dtypes=[torch.float32]
         )
         plans = worker_transfer._build_group_transfer_plans(
-            groups, kv_caches, 2, 4, layout_desc, 4, None
+            groups, kv_caches, 2, 4, layout_desc, 4, 16, None
         )
         assert len(plans) == 2
         assert list(plans[0].select_kv_caches(kv_caches).keys()) == [
@@ -218,7 +225,7 @@ class TestBuildGroupTransferPlans:
             shapes=[torch.Size([2, 4, 8, 16])], dtypes=[torch.float32]
         )
         plans = worker_transfer._build_group_transfer_plans(
-            groups, kv_caches, 2, 4, layout_desc, 4, None
+            groups, kv_caches, 2, 4, layout_desc, 4, 16, None
         )
         assert [p.engine_kv_format for p in plans] == [
             worker_transfer._detect_group_kv_format(p.select_kv_caches(kv_caches), None)
@@ -250,7 +257,7 @@ class TestBuildGroupTransferPlans:
         )
         with pytest.raises(ValueError, match="must be a multiple of"):
             worker_transfer._build_group_transfer_plans(
-                groups, kv_caches, 4, 16, layout_desc, 2, None
+                groups, kv_caches, 4, 16, layout_desc, 2, 16, None
             )
 
 
@@ -269,14 +276,12 @@ class TestIterTransferGroups:
         future.result.return_value = RegisterEngineDrivenContextResponse()
         req_client = MagicMock()
         req_client.register_kv_cache_engine_driven_context.return_value = future
-        ctx = EngineDrivenTransferContext()
+        ctx = EngineDrivenTransferContext(instance_id=1, req_client=req_client)
         ctx.register(
-            instance_id=1,
             kv_caches=kv_caches,
             model_name="m",
             world_size=1,
             blocks_in_chunk=2,
-            req_client=req_client,
             mq_timeout=1.0,
         )
         return ctx
@@ -284,7 +289,7 @@ class TestIterTransferGroups:
     def test_without_cached_plans_derives_single_group_fallback(self) -> None:
         """A context wired up without register() (as some transport tests do)
         must still transfer via the single-group fallback."""
-        ctx = EngineDrivenTransferContext()
+        ctx = EngineDrivenTransferContext(instance_id=1, req_client=MagicMock())
         ctx._engine_driven_context = _FakeEngineDrivenContext()  # type: ignore[assignment]
         kv_caches = _make_kv_caches(2)
         result = list(ctx.iter_transfer_groups(kv_caches, [[0, 1]], 2))
@@ -407,14 +412,12 @@ def _register_context(
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
 
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(instance_id=1, req_client=req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=kv_caches,
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
         engine_group_infos=_two_groups(),
     )
@@ -436,13 +439,11 @@ def test_register_forwards_engine_group_infos_to_server(
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
 
-    EngineDrivenTransferContext().register(
-        instance_id=1,
+    EngineDrivenTransferContext(instance_id=1, req_client=req_client).register(
         kv_caches=_make_kv_caches(4, num_blocks=8),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
         engine_group_infos=_two_groups(),
     )
@@ -466,13 +467,11 @@ def test_register_without_groups_sends_empty_group_infos(
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
 
-    EngineDrivenTransferContext().register(
-        instance_id=1,
+    EngineDrivenTransferContext(instance_id=1, req_client=req_client).register(
         kv_caches=_make_kv_caches(4, num_blocks=8),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
     )
 
@@ -492,7 +491,6 @@ def test_submit_store_concatenates_chunks_group_major(
     future = ctx.submit_store(
         "req",
         MagicMock(),
-        1,
         kv_caches,
         [[0, 1], [4, 5]],
         MagicMock(),
@@ -529,16 +527,18 @@ def test_submit_store_attaches_null_chunk_mask_for_recurrent_group(
     class _KeyCapturingContext(_FakeEngineDrivenContext):
         def __init__(self) -> None:
             super().__init__()
-            self.prepare_store_key: object = None
-            self.commit_store_key: object = None
+            self.prepare_store_key: IPCCacheServerKey | None = None
+            self.commit_store_key: IPCCacheServerKey | None = None
 
         def prepare_store(self, key: object, _instance_id: int) -> None:
+            assert isinstance(key, IPCCacheServerKey)
             self.prepare_store_key = key
             return None
 
         def commit_store(
             self, key: object, instance_id: int, chunks: list[torch.Tensor]
         ) -> bool:
+            assert isinstance(key, IPCCacheServerKey)
             self.commit_store_key = key
             return super().commit_store(key, instance_id, chunks)
 
@@ -551,14 +551,12 @@ def test_submit_store_attaches_null_chunk_mask_for_recurrent_group(
     future.result.return_value = RegisterEngineDrivenContextResponse()
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(instance_id=1, req_client=req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=kv_caches,
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
         engine_group_infos=_recurrent_and_attention_groups(),
     )
@@ -569,10 +567,12 @@ def test_submit_store_attaches_null_chunk_mask_for_recurrent_group(
     # Group 0 (recurrent): chunk 0 is all null (both blocks 0), chunk 1 has
     # the one live snapshot (block 7). Group 1 (attention): both chunks real.
     future_result = ctx.submit_store(
-        "req", key, 1, kv_caches, [[0, 0, 0, 7], [4, 5, 6, 7]], MagicMock(), 2
+        "req", key, kv_caches, [[0, 0, 0, 7], [4, 5, 6, 7]], MagicMock(), 2
     )
 
     assert future_result.result() is True
+    assert fake_context.prepare_store_key is not None
+    assert fake_context.commit_store_key is not None
     sent_mask = fake_context.prepare_store_key.null_chunk_mask
     # Group 1 (full attention: block ids never null) computes an all-False
     # mask -- every group's chunks are checked the same, unconditional way.
@@ -601,7 +601,7 @@ def test_submit_store_omits_null_chunk_mask_without_recurrent_group(
     )
 
     future = ctx.submit_store(
-        "req", key, 1, kv_caches, [[0, 1], [4, 5]], MagicMock(), blocks_in_chunk=2
+        "req", key, kv_caches, [[0, 1], [4, 5]], MagicMock(), blocks_in_chunk=2
     )
 
     assert future.result() is True
@@ -618,9 +618,10 @@ def test_submit_store_attaches_null_chunk_mask_for_sliding_window_group(
     class _KeyCapturingContext(_FakeEngineDrivenContext):
         def __init__(self) -> None:
             super().__init__()
-            self.prepare_store_key: object = None
+            self.prepare_store_key: IPCCacheServerKey | None = None
 
         def prepare_store(self, key: object, _instance_id: int) -> None:
+            assert isinstance(key, IPCCacheServerKey)
             self.prepare_store_key = key
             return None
 
@@ -633,14 +634,12 @@ def test_submit_store_attaches_null_chunk_mask_for_sliding_window_group(
     future.result.return_value = RegisterEngineDrivenContextResponse()
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(instance_id=1, req_client=req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=kv_caches,
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
         engine_group_infos=[
             EngineGroupInfo(
@@ -660,10 +659,11 @@ def test_submit_store_attaches_null_chunk_mask_for_sliding_window_group(
     # Group 0 (sliding window): chunk 0 nulled by vLLM (both blocks 0), chunk
     # 1 in-window (block 7). Group 1 (full attention): both chunks real.
     future_result = ctx.submit_store(
-        "req", key, 1, kv_caches, [[0, 0, 0, 7], [4, 5, 6, 7]], MagicMock(), 2
+        "req", key, kv_caches, [[0, 0, 0, 7], [4, 5, 6, 7]], MagicMock(), 2
     )
 
     assert future_result.result() is True
+    assert fake_context.prepare_store_key is not None
     assert fake_context.prepare_store_key.null_chunk_mask == (
         (True, False),
         (False, False),
@@ -685,7 +685,9 @@ class TestNullChunkMaskFromGroups:
             engine_kv_format=None,
         )
         # 3 chunks: null, null, live (block 9 in the last position).
-        transfer_groups = [(plan, {}, [0, 0, 0, 0, 0, 9])]
+        transfer_groups: list[
+            tuple[worker_transfer.GroupTransferPlan, Any, list[int]]
+        ] = [(plan, {}, [0, 0, 0, 0, 0, 9])]
 
         assert null_chunk_mask_from_groups(transfer_groups) == ((True, True, False),)
 
@@ -705,7 +707,9 @@ class TestNullChunkMaskFromGroups:
         )
         # 3 chunks: null, null, live (block 9 in the last position) -- same
         # shape as a recurrent group's mask.
-        transfer_groups = [(plan, {}, [0, 0, 0, 0, 0, 9])]
+        transfer_groups: list[
+            tuple[worker_transfer.GroupTransferPlan, Any, list[int]]
+        ] = [(plan, {}, [0, 0, 0, 0, 0, 9])]
 
         assert null_chunk_mask_from_groups(transfer_groups) == ((True, True, False),)
 
@@ -720,7 +724,9 @@ class TestNullChunkMaskFromGroups:
             chunk_shape=torch.Size([1]),
             engine_kv_format=None,
         )
-        transfer_groups = [(plan, {}, [1, 2, 3, 4])]
+        transfer_groups: list[
+            tuple[worker_transfer.GroupTransferPlan, Any, list[int]]
+        ] = [(plan, {}, [1, 2, 3, 4])]
 
         assert null_chunk_mask_from_groups(transfer_groups) == ((False, False),)
 
@@ -734,7 +740,9 @@ class TestNullChunkMaskFromGroups:
             chunk_shape=torch.Size([1]),
             engine_kv_format=None,
         )
-        transfer_groups = [(plan, {}, [1, 2, 3, 4])]
+        transfer_groups: list[
+            tuple[worker_transfer.GroupTransferPlan, Any, list[int]]
+        ] = [(plan, {}, [1, 2, 3, 4])]
 
         assert null_chunk_mask_from_groups(transfer_groups) == ((False, False),)
 
@@ -751,14 +759,14 @@ def test_submit_retrieve_scatters_chunks_group_major(
     # First populate fake_context.retrieve_chunks with a real gather so the
     # scatter step has valid data to round-trip.
     store_future = ctx.submit_store(
-        "req", MagicMock(), 1, kv_caches, [[0, 1], [4, 5]], MagicMock(), 2
+        "req", MagicMock(), kv_caches, [[0, 1], [4, 5]], MagicMock(), 2
     )
     assert store_future.result() is True
     fake_context.retrieve_chunks = fake_context.committed_chunks
 
     destination = {name: torch.zeros_like(tensor) for name, tensor in kv_caches.items()}
     retrieve_future = ctx.submit_retrieve(
-        "req", MagicMock(), 1, destination, [[2, 3], [6, 7]], MagicMock(), 2
+        "req", MagicMock(), destination, [[2, 3], [6, 7]], MagicMock(), 2
     )
 
     assert retrieve_future.result() is True
@@ -786,9 +794,10 @@ def test_submit_retrieve_attaches_null_chunk_mask_for_recurrent_group(
     class _KeyCapturingContext(_FakeEngineDrivenContext):
         def __init__(self) -> None:
             super().__init__()
-            self.prepare_retrieve_key: object = None
+            self.prepare_retrieve_key: IPCCacheServerKey | None = None
 
         def prepare_retrieve(self, key: object, _instance_id: int):
+            assert isinstance(key, IPCCacheServerKey)
             self.prepare_retrieve_key = key
             return self.retrieve_chunks
 
@@ -801,14 +810,12 @@ def test_submit_retrieve_attaches_null_chunk_mask_for_recurrent_group(
     future.result.return_value = RegisterEngineDrivenContextResponse()
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(instance_id=1, req_client=req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=kv_caches,
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
         engine_group_infos=_recurrent_and_attention_groups(),
     )
@@ -824,10 +831,11 @@ def test_submit_retrieve_attaches_null_chunk_mask_for_recurrent_group(
     destination = {name: torch.zeros_like(tensor) for name, tensor in kv_caches.items()}
 
     future_result = ctx.submit_retrieve(
-        "req", key, 1, destination, [[0, 0, 0, 7], [4, 5, 6, 7]], MagicMock(), 2
+        "req", key, destination, [[0, 0, 0, 7], [4, 5, 6, 7]], MagicMock(), 2
     )
 
     assert future_result.result() is True
+    assert fake_context.prepare_retrieve_key is not None
     sent_mask = fake_context.prepare_retrieve_key.null_chunk_mask
     assert sent_mask == ((True, False), (False, False))
     # Original key's identity fields must be untouched by the copy.
@@ -843,7 +851,9 @@ def test_submit_retrieve_skips_null_chunk_when_scattering(
     blocks -- a length mismatch here previously masked itself as a
     server-side cache miss (result=False) on every masked retrieve."""
     fake_context = _FakeEngineDrivenContext()
-    kv_caches = _make_kv_caches(4, num_blocks=10, block_size=4, num_heads=2, head_size=8)
+    kv_caches = _make_kv_caches(
+        4, num_blocks=10, block_size=4, num_heads=2, head_size=8
+    )
     monkeypatch.setattr(
         worker_transfer, "create_engine_driven_context", lambda *a, **k: fake_context
     )
@@ -851,14 +861,12 @@ def test_submit_retrieve_skips_null_chunk_when_scattering(
     future.result.return_value = RegisterEngineDrivenContextResponse()
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(instance_id=1, req_client=req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=kv_caches,
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
         engine_group_infos=_recurrent_and_attention_groups(),
     )
@@ -878,7 +886,7 @@ def test_submit_retrieve_skips_null_chunk_when_scattering(
     )
 
     retrieve_future = ctx.submit_retrieve(
-        "req", key, 1, destination, [[0, 0, 0, 0, 0, 9], [4, 5]], MagicMock(), 2
+        "req", key, destination, [[0, 0, 0, 0, 0, 9], [4, 5]], MagicMock(), 2
     )
 
     assert retrieve_future.result() is True
@@ -920,7 +928,7 @@ def test_submit_store_narrows_shm_out_buffers_to_group_chunk_count(
     )
 
     result = ctx.submit_store(
-        "req", MagicMock(), 1, kv_caches, [[0, 1], [4, 5]], MagicMock(), 2
+        "req", MagicMock(), kv_caches, [[0, 1], [4, 5]], MagicMock(), 2
     )
 
     assert result.result() is True
@@ -966,7 +974,7 @@ def test_submit_store_skips_group_with_no_selected_chunks(
     )
 
     result = ctx.submit_store(
-        "req", MagicMock(), 1, kv_caches, [[0, 1], [4, 5]], MagicMock(), 2
+        "req", MagicMock(), kv_caches, [[0, 1], [4, 5]], MagicMock(), 2
     )
 
     assert result.result() is True
@@ -1025,14 +1033,14 @@ def _new_async_context(
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
 
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx = AsyncEngineDrivenTransferContext(
+        instance_id=1, req_client=req_client, commit_workers=1
+    )
     ctx.register(
-        instance_id=1,
         kv_caches=kv_caches,
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
         engine_group_infos=_two_groups(),
     )
@@ -1050,7 +1058,7 @@ def test_async_submit_store_gathers_every_group(
 
     try:
         future = ctx.submit_store(
-            "req", MagicMock(), 1, kv_caches, [[0, 1], [4, 5]], _FakeAsyncEvent(), 2
+            "req", MagicMock(), kv_caches, [[0, 1], [4, 5]], _FakeAsyncEvent(), 2
         )
         assert future.result(timeout=10) is True
     finally:
@@ -1080,9 +1088,10 @@ def test_async_submit_store_attaches_null_chunk_mask_for_recurrent_group(
     class _KeyCapturingContext(_FakeEngineDrivenContext):
         def __init__(self) -> None:
             super().__init__()
-            self.prepare_store_key: object = None
+            self.prepare_store_key: IPCCacheServerKey | None = None
 
         def prepare_store(self, key: object, _instance_id: int) -> None:
+            assert isinstance(key, IPCCacheServerKey)
             self.prepare_store_key = key
             return None
 
@@ -1098,14 +1107,14 @@ def test_async_submit_store_attaches_null_chunk_mask_for_recurrent_group(
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
 
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx = AsyncEngineDrivenTransferContext(
+        instance_id=1, req_client=req_client, commit_workers=1
+    )
     ctx.register(
-        instance_id=1,
         kv_caches=kv_caches,
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
         engine_group_infos=_recurrent_and_attention_groups(),
     )
@@ -1115,12 +1124,13 @@ def test_async_submit_store_attaches_null_chunk_mask_for_recurrent_group(
 
     try:
         future_result = ctx.submit_store(
-            "req", key, 1, kv_caches, [[0, 0, 0, 7], [4, 5, 6, 7]], _FakeAsyncEvent(), 2
+            "req", key, kv_caches, [[0, 0, 0, 7], [4, 5, 6, 7]], _FakeAsyncEvent(), 2
         )
         assert future_result.result(timeout=10) is True
     finally:
         ctx.close()
 
+    assert fake_context.prepare_store_key is not None
     assert fake_context.prepare_store_key.null_chunk_mask == (
         (True, False),
         (False, False),
@@ -1137,7 +1147,9 @@ def test_release_staging_buckets_mixed_shapes(
     layer counts have differing chunk shapes, which must be filed under
     their own pool keys rather than all under the first chunk's shape."""
     monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeAsyncTorchDev())
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx = AsyncEngineDrivenTransferContext(
+        instance_id=1, req_client=MagicMock(), commit_workers=1
+    )
     try:
         small = torch.zeros(2, 2, 8, 16)
         large = torch.zeros(2, 6, 8, 16)

@@ -583,7 +583,8 @@ def _build_group_transfer_plans(
         ValueError: If a group's ``tokens_per_block`` does not divide the
             LMCache chunk size (see :func:`_blocks_per_chunk_for_group`).
     """
-    group_infos: Sequence[EngineGroupInfo | None] = engine_group_infos or [None]
+    none_group: list[EngineGroupInfo | None] = [None]
+    group_infos: Sequence[EngineGroupInfo | None] = engine_group_infos or none_group
     plans: list[GroupTransferPlan] = []
     for group_info in group_infos:
         group_kv_caches = _kv_caches_for_group(kv_caches, group_info)
@@ -1228,7 +1229,6 @@ class EngineDrivenTransferContext(TransferContext):
         # same way the pre-cache path did.
         plan = self._group_plans[0]
         yield plan, plan.select_kv_caches(kv_caches), _single_group_block_ids(block_ids)
-
 
     def register(
         self,

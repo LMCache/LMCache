@@ -2,7 +2,7 @@
 """Engine-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 import pickle
 import threading
@@ -24,9 +24,9 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     RegisterEngineDrivenContextPayload,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
@@ -425,6 +425,18 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """
         return [obj_key for group_keys in per_group_keys for obj_key in group_keys]
 
+    @staticmethod
+    def _const_obj_keys(
+        obj_keys: list[ObjectKey],
+    ) -> Callable[[IPCCacheServerKey], list[ObjectKey]]:
+        """Return a ``resolve_obj_keys`` callback that ignores its key and
+        always returns ``obj_keys``.
+
+        The per-group keys are already resolved by the time a strategy call
+        needs this callback, so the callback itself is a constant lookup.
+        """
+        return lambda _key: obj_keys
+
     def _make_attn_window_desc(
         self, engine_group_infos: Sequence[EngineGroupInfo]
     ) -> AttnWindowDesc:
@@ -458,7 +470,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             # Extra (connector-private) pools are standalone; otherwise the
             # group is recurrent state or ordinary attention KV.
             if group_info.extra_object_group_tag != 0:
-                kinds.append("standalone")
+                kinds.append("aux")
             elif group_info.recurrent_state:
                 kinds.append("recurrent")
             else:
@@ -696,7 +708,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 key=key,
                 instance_id=instance_id,
                 context=context,
-                resolve_obj_keys=lambda _key, keys=keys_to_reserve: keys,
+                resolve_obj_keys=self._const_obj_keys(keys_to_reserve),
             )
             group_context = group_response.context
             if "slots" in group_context:
@@ -716,9 +728,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         # Keyed by token range, not a fixed name: chunks of one request
         # commit interleaved, so a shared key would let one chunk's
         # commit_store pop another's timestamp.
-        session.extras[("store_start_time", key.start, key.end)] = (
-            time.perf_counter()
-        )
+        session.extras[f"store_start_time:{key.start}:{key.end}"] = time.perf_counter()
         if not saw_slots_key:
             return PrepareStoreResponse(context={})
         return PrepareStoreResponse(
@@ -763,7 +773,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         per_group_keys = self._resolve_per_group_obj_keys(key, len(contexts))
         per_group_keys = _masked_per_group_keys(per_group_keys, key.null_chunk_mask)
         session = self._ctx.session_manager.get_or_create(key.request_id)
-        st = session.extras.pop(("store_start_time", key.start, key.end), None)
+        st = session.extras.pop(f"store_start_time:{key.start}:{key.end}", None)
 
         if not cpu_data:
             # SHM mode: the worker wrote chunks straight into the reserved
@@ -774,7 +784,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 instance_id=instance_id,
                 chunks=[],
                 context=contexts[0],
-                resolve_obj_keys=lambda _key: flat_obj_keys,
+                resolve_obj_keys=self._const_obj_keys(flat_obj_keys),
             )
         else:
             # Pickle mode: cpu_data is the worker's flat, group-major list
@@ -793,7 +803,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                     instance_id=instance_id,
                     chunks=group_chunks,
                     context=context,
-                    resolve_obj_keys=lambda _key, keys=group_obj_keys: keys,
+                    resolve_obj_keys=self._const_obj_keys(group_obj_keys),
                 )
                 result = result and group_ok
 
@@ -848,7 +858,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             group_response, group_chunks = strategy.prepare_retrieve_chunks(
                 key=key,
                 instance_id=instance_id,
-                resolve_obj_keys=lambda _key, keys=group_obj_keys: keys,
+                resolve_obj_keys=self._const_obj_keys(group_obj_keys),
             )
             if not group_response.success:
                 # A miss in any one group fails the whole retrieve.
@@ -861,7 +871,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         # Keyed by this call's token range for the same reason as
         # prepare_store's store_start_time: concurrent chunks of the same
         # request can interleave their prepare/commit calls.
-        retrieve_time_key = ("retrieve_start_time", key.start, key.end)
+        retrieve_time_key = f"retrieve_start_time:{key.start}:{key.end}"
         session.extras[retrieve_time_key] = time.perf_counter()
         if not success:
             # Groups before the miss may have accumulated read locks under
@@ -901,7 +911,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """
         _entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
-        st = session.extras.pop(("retrieve_start_time", key.start, key.end), None)
+        st = session.extras.pop(f"retrieve_start_time:{key.start}:{key.end}", None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         if st is not None:
             logger.info(
