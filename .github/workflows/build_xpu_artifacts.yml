@@ -12,8 +12,8 @@ name: Build XPU Artifacts
 # - install LMCache wheel with --no-deps to preserve pinned torch/oneAPI stack.
 #
 # Uploaded as the `release-xpu-artifacts` GHA artifact. The XPU wheel uses the
-# base LMCache release version and is published to a dedicated v{tag}-xpu
-# GitHub Release (not PyPI).
+# LMCache release version with a +xpu local version suffix and is published to
+# a dedicated v{tag}-xpu GitHub Release (not PyPI).
 on:
     workflow_call:
       inputs:
