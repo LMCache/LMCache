@@ -1130,6 +1130,10 @@ class TestClientMultiWorker:
         class FakeContext:
             terminated = False
 
+            def setsockopt(self, option: int, value: int) -> None:
+                """Accept socket defaults without creating a real socket."""
+                pass
+
             def term(self) -> None:
                 self.terminated = True
 
@@ -1253,6 +1257,10 @@ class TestClientMultiWorker:
             return None
 
         class FakeContext:
+            def setsockopt(self, option: int, value: int) -> None:
+                """Accept socket defaults without creating a real socket."""
+                pass
+
             def term(self) -> None:
                 pass
 

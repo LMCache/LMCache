@@ -52,8 +52,6 @@ class RequestClientFactory:
         Raises:
             ValueError: If the URL is empty, malformed, or uses an unsupported
                 scheme.
-            NotImplementedError: If the selected transport is recognized but
-                its implementation is not available yet.
         """
         scheme, normalized_url = _normalize_server_url(server_url)
         if scheme in _ZMQ_SCHEMES:
