@@ -18,15 +18,23 @@ def create_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
 ) -> MessageQueueServer:
-    """Create the ZMQ request server used by the multiprocess runtime.
+    """Create the configured request server used by the multiprocess runtime.
 
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration.
 
     Returns:
-        Configured, but not yet started, ZMQ message queue server.
+        Configured, but not yet started, request server.
+
+    Raises:
+        NotImplementedError: If the selected transport runtime is not available.
     """
+    if mp_config.transport != "zmq":
+        raise NotImplementedError(
+            f"Request transport {mp_config.transport!r} is not available yet"
+        )
+
     # First Party
     from lmcache.v1.multiprocess.transport.zmq_impl.server import (
         build_zmq_request_server,
