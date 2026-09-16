@@ -49,6 +49,8 @@ class DeviceOps:
     LaunchVar = ops_types.LaunchVar
     BatchStep = ops_types.BatchStep
     KernelGroupSpec = ops_types.KernelGroupSpec
+    DirectCopyGroupSpec = ops_types.DirectCopyGroupSpec
+    DirectCopyObject = ops_types.DirectCopyObject
 
     # Bound from the native module by bind_native (declared for static analysis).
     TransferDirection: type[lmcache_native.TransferDirection]
@@ -236,6 +238,14 @@ class DeviceOps:
 
     def batched_memcpy(self, src_ptrs, dst_ptrs, sizes):
         return torch_ops.batched_memcpy(src_ptrs, dst_ptrs, sizes)
+
+    def batch_memcpy_supported(self) -> bool:
+        return torch_ops.batch_memcpy_supported()
+
+    def direct_copy_format_supported(
+        self, engine_kv_format: lmcache_native.EngineKVFormat
+    ) -> bool:
+        return torch_ops.direct_copy_format_supported(engine_kv_format)
 
     def get_gpu_pci_bus_id(self, device_id=0):
         return torch_ops.get_gpu_pci_bus_id(device_id)
