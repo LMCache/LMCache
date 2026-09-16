@@ -217,6 +217,9 @@ class KernelGroupInfo:
     """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
+    null_block_id: int | None = 0
+    """Engine block ID denoting absent data, or ``None`` when zero is valid
+    and there is no null block. Defaults to the historical null block zero."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -235,6 +238,7 @@ class KernelGroupInfo:
             f"tokens_per_block={self.tokens_per_block}, "
             f"slots_per_block={self.slots_per_block}, "
             f"engine_group_idx={self.engine_group_idx}, "
+            f"null_block_id={self.null_block_id}, "
             f"sw_size_tokens={self.sw_size_tokens})"
         )
 
@@ -462,6 +466,7 @@ class KVLayerGroupsManager:
                     recurrent_state=(
                         info.recurrent_state if info is not None else False
                     ),
+                    null_block_id=info.null_block_id if info is not None else 0,
                 )
             )
 

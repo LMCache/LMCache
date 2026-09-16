@@ -98,6 +98,15 @@ class RequestClient(Protocol):
 
     def get_chunk_size(self) -> MessagingFuture[Any]: ...
 
+    def get_server_config(self) -> MessagingFuture[dict[str, bool]]:
+        """Return public transfer settings and capabilities.
+
+        Returns:
+            A future resolving to ``separate_object_groups`` (active setting)
+            and ``supports_null_block_id`` (per-group null-marker support).
+        """
+        ...
+
     def ping(self, instance_id: int | None) -> MessagingFuture[Any]: ...
 
     def report_block_allocation(

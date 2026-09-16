@@ -69,6 +69,18 @@ class TestKVLayerGroupsManager:
         assert group.shape_desc.nb == 32
         assert group.shape_desc.bs == 256
         assert group.dtype == torch.float16
+        assert group.null_block_id == 0
+
+    @pytest.mark.parametrize("null_block_id", [None, -1, 0])
+    def test_build_propagates_null_block_policy(
+        self, null_block_id: int | None
+    ) -> None:
+        tensors = [torch.empty(2, 8, 256, 1, 8)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[EngineGroupInfo(0, (0,), null_block_id=null_block_id)],
+        )
+        assert manager.kernel_groups[0].null_block_id == null_block_id
 
     def test_build_mixed_formats_per_group(self):
         """Mixed-format shape: a K+V group and a key-only MLA group are shaped

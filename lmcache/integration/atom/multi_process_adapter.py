@@ -199,6 +199,16 @@ class AtomMPSchedulerAdapter:
         self._pending_lookups: set[str] = set()
         self._lookup_results: dict[str, int] = {}
 
+    def get_server_config(self) -> dict[str, bool]:
+        """Read the server's public transfer settings and capabilities.
+
+        Returns:
+            Flags including ``separate_object_groups`` and
+            ``supports_null_block_id``. Uses the configured MQ timeout;
+            transport errors propagate so callers can fail closed.
+        """
+        return self._client.get_server_config().result(timeout=self._mq_timeout)
+
     def maybe_submit_lookup_request(
         self,
         request_id: str,
@@ -362,6 +372,16 @@ class AtomMPWorkerAdapter:
         self._shutdown_complete = threading.Event()
         self._health_event = threading.Event()
         self._heartbeat: _HeartbeatThread | None = None
+
+    def get_server_config(self) -> dict[str, bool]:
+        """Read the server's public transfer settings and capabilities.
+
+        Returns:
+            Flags including ``separate_object_groups`` and
+            ``supports_null_block_id``. Uses the configured MQ timeout;
+            transport errors propagate so callers can fail closed.
+        """
+        return self._client.get_server_config().result(timeout=self._mq_timeout)
 
     @property
     def is_healthy(self) -> bool:

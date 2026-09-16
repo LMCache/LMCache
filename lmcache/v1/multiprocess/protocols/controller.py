@@ -6,6 +6,7 @@ This module defines the protocol for:
 - CLEAR: Clear all caches in the server
 - GET_CHUNK_SIZE: Get the chunk size configuration from the server
 - GET_EXPERIMENTAL: Get the enabled experimental intermediate tensor transfer
+- GET_SERVER_CONFIG: Get public transfer configuration and capabilities
 """
 
 # First Party
@@ -17,6 +18,7 @@ REQUEST_NAMES = [
     "GET_CHUNK_SIZE",
     "GET_EXPERIMENTAL",
     "PING",
+    "GET_SERVER_CONFIG",
 ]
 
 
@@ -42,6 +44,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "GET_CHUNK_SIZE": ProtocolDefinition(
             payload_classes=[],
             response_class=int,
+            handler_type=HandlerType.SYNC,
+        ),
+        "GET_SERVER_CONFIG": ProtocolDefinition(
+            payload_classes=[],
+            response_class=dict[str, bool],
             handler_type=HandlerType.SYNC,
         ),
         # Ping

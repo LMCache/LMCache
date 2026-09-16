@@ -91,6 +91,8 @@ class RequestType(enum.Enum):
 
     CB_PROTOCOL_HANDSHAKE = enum.auto()
 
+    GET_SERVER_CONFIG = enum.auto()
+
     # Deprecated aliases.
     CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
     CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE

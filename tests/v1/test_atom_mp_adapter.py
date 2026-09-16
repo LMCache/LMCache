@@ -172,6 +172,42 @@ def _mock_client(worker: AtomMPWorkerAdapter) -> MagicMock:
     return cast(MagicMock, worker._client)
 
 
+@pytest.mark.parametrize("adapter_kind", ["scheduler", "worker"])
+@pytest.mark.parametrize("separate_object_groups", [False, True])
+def test_public_server_config_query(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_kind: str,
+    separate_object_groups: bool,
+) -> None:
+    client = MagicMock()
+    flags = {
+        "separate_object_groups": separate_object_groups,
+        "supports_null_block_id": True,
+    }
+    client.get_server_config.return_value.result.return_value = flags
+    _patch_request_client_factory(monkeypatch, client)
+    monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
+    adapter = _make_adapter(adapter_kind)
+    assert adapter.get_server_config() == flags
+    client.get_server_config.return_value.result.assert_called_once_with(
+        timeout=atom_adapter.DEFAULT_MQ_TIMEOUT
+    )
+
+
+@pytest.mark.parametrize("adapter_kind", ["scheduler", "worker"])
+def test_server_config_query_propagates_connection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_kind: str,
+) -> None:
+    client = MagicMock()
+    client.get_server_config.return_value.result.side_effect = RuntimeError("offline")
+    _patch_request_client_factory(monkeypatch, client)
+    monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
+    adapter = _make_adapter(adapter_kind)
+    with pytest.raises(RuntimeError, match="offline"):
+        adapter.get_server_config()
+
+
 def test_atom_lookup_submits_valid_reader_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
