@@ -837,111 +837,77 @@ class TestClientMultiWorker:
         finally:
             bench.close()
 
+    @pytest.mark.parametrize("transfer_mode", ["lmcache_driven", "engine_driven"])
     def test_start_rolls_back_partial_registration(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        transfer_mode: str,
     ) -> None:
+        """Clean up acknowledged and timed-out registrations after startup fails."""
         # Standard
-        import gc
-        import weakref
+        from unittest.mock import call
 
         # First Party
         from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import transfer_context as transfer_context_module
+        from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
-        unregistered: list[int] = []
 
-        class FakeZmqContext:
-            terminated = False
-
-            def term(self) -> None:
-                self.terminated = True
-
-        class FakeClient:
-            closed = False
-
-            def unregister_kv_cache(self, instance_id: int) -> SimpleNamespace:
-                unregistered.append(instance_id)
-                return SimpleNamespace(result=lambda timeout=None: None)
-
-            def close(self) -> None:
-                self.closed = True
-
-        class FakeTransferContext:
-            def __init__(self, register_fails: bool) -> None:
-                self.register_fails = register_fails
-                self.closed = False
-
-            def register(self, *_args: Any, **_kwargs: Any) -> None:
-                if self.register_fails:
-                    raise TimeoutError
-
-            def flush_inflight_stores(self) -> None:
-                pass
-
-            def close(self) -> None:
-                self.closed = True
-
-        contexts: list[FakeTransferContext] = []
-        context = FakeZmqContext()
-        transport = FakeClient()
-
-        def fake_allocate(*, groups: Any, device: Any) -> list[torch.Tensor]:
-            del groups, device
-            tensor = torch.ones(1)
+        def fake_allocate(**kwargs: Any) -> list[torch.Tensor]:
+            tensor = torch.ones(2, 64, 16, 1, 4, dtype=torch.float16)
             tensor_refs.append(weakref.ref(tensor))
             return [tensor]
 
-        def fake_create_transfer_context(
-            *_args: Any, **_kwargs: Any
-        ) -> FakeTransferContext:
-            context_index = len(contexts)
-            transfer_context = FakeTransferContext(register_fails=context_index == 1)
-            contexts.append(transfer_context)
-            return transfer_context
-
+        ready: MessagingFuture[None] = MessagingFuture()
+        ready.set_result(None)
+        timed_out = MagicMock()
+        timed_out.result.side_effect = TimeoutError
+        transport = MagicMock()
+        register = (
+            transport.register_kv_cache
+            if transfer_mode == "lmcache_driven"
+            else transport.register_kv_cache_engine_driven_context
+        )
+        unregister = (
+            transport.unregister_kv_cache
+            if transfer_mode == "lmcache_driven"
+            else transport.unregister_kv_cache_engine_driven_context
+        )
+        register.side_effect = [ready, timed_out]
+        unregister.return_value = ready
+        context = MagicMock()
         monkeypatch.setattr(zmq, "Context", lambda: context)
-        monkeypatch.setattr(
-            RequestClientFactory,
-            "create",
-            lambda *_args, **_kwargs: transport,
-        )
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda _client: 16)
+        monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
+        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 16)
         monkeypatch.setattr(sv_helpers, "_allocate_kv_cache", fake_allocate)
-        monkeypatch.setattr(
-            transfer_context_module,
-            "create_transfer_context",
-            fake_create_transfer_context,
-        )
-
+        monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", MagicMock())
+        monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda caches: [])
         bench_client = ServerBenchClient(
             BenchConfig(
                 rpc_url="ipc:///tmp/test-runtime-rollback",
                 http_url="",
                 mode="cpu",
-                transfer_mode="lmcache_driven",
+                transfer_mode=transfer_mode,
                 tp_size=2,
                 use_mla=False,
                 num_tokens=31,
-                kvcache_shape_spec="(2,64,16,1,1):float16:1",
+                kvcache_shape_spec="(2,64,16,1,4):float16:1",
                 num_blocks=64,
                 block_size=16,
             ),
-            lambda _message: None,
+            lambda message: None,
         )
 
         with pytest.raises(RuntimeError, match="rank 1"):
             bench_client.start()
+        bench_client.close()  # Cleanup remains idempotent after failed startup.
 
+        assert unregister.call_args_list == [call(1000), call(1001)]
+        transport.close.assert_called_once_with()
+        context.term.assert_called_once_with()
         gc.collect()
-        assert unregistered == [1000]
-        assert transport.closed
-        assert context.terminated
-        assert len(contexts) == 2
-        assert all(transfer_context.closed for transfer_context in contexts)
         assert all(ref() is None for ref in tensor_refs)
 
     def _run(
@@ -974,6 +940,10 @@ class TestClientMultiWorker:
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
 
         class FakeContext:
+            def setsockopt(self, option: int, value: int) -> None:
+                """Accept socket defaults without creating a real socket."""
+                pass
+
             def term(self) -> None:
                 pass
 
@@ -1013,12 +983,15 @@ class TestClientMultiWorker:
                 pass
 
         class FakeTransferContext:
-            def __init__(self) -> None:
-                self.instance_id: int | None = None
-
-            def register(self, instance_id: int, *_args: Any, **_kwargs: Any) -> None:
+            def __init__(self, instance_id: int, req_client: FakeClient) -> None:
                 self.instance_id = instance_id
-                transfer_calls.append(("register", (instance_id,)))
+                self.req_client = req_client
+
+            def register(self, *_args: Any, **_kwargs: Any) -> None:
+                transfer_calls.append(("register", (self.instance_id,)))
+
+            def unregister(self) -> SimpleNamespace:
+                return self.req_client.unregister_kv_cache(self.instance_id)
 
             def create_recorded_event(self) -> None:
                 return None
@@ -1038,9 +1011,14 @@ class TestClientMultiWorker:
                 pass
 
         class FakeEngineDrivenTransferContext(FakeTransferContext):
-            def __init__(self) -> None:
-                super().__init__()
+            def __init__(self, instance_id: int, req_client: FakeClient) -> None:
+                super().__init__(instance_id, req_client)
                 transfer_calls.append(("sync_context", ()))
+
+            def unregister(self) -> SimpleNamespace:
+                return self.req_client.unregister_kv_cache_engine_driven_context(
+                    self.instance_id
+                )
 
         def fake_allocate(*, groups: Any, device: Any) -> list[torch.Tensor]:
             del groups, device
@@ -1049,10 +1027,14 @@ class TestClientMultiWorker:
             return [tensor]
 
         def fake_create_transfer_context(
-            kv_caches: dict[str, torch.Tensor], mode: str
+            kv_caches: dict[str, torch.Tensor],
+            *,
+            instance_id: int,
+            req_client: FakeClient,
+            mode: str,
         ) -> FakeTransferContext:
             transfer_calls.append(("factory", (kv_caches, mode)))
-            return FakeTransferContext()
+            return FakeTransferContext(instance_id, req_client)
 
         monkeypatch.setattr(sv_helpers, "_allocate_kv_cache", fake_allocate)
         monkeypatch.setattr(zmq, "Context", FakeContext)
@@ -1146,9 +1128,12 @@ class TestClientMultiWorker:
         factories = [call for call in transfer_calls if call[0] == "factory"]
         # MLA: rank 0 only.
         assert len(stores) == 1, "MLA tp=2 should STORE once (rank 0)"
-        # submit_store payload is request_id, key, instance_id, ...
-        store_key, store_iid = stores[0][1][1], stores[0][1][2]
-        assert store_iid == 1000  # _INSTANCE_ID_BASE + 0
+        # Worker identity is bound at context construction, not per transfer.
+        store_key = stores[0][1][1]
+        assert [call[1][0] for call in transfer_calls if call[0] == "register"] == [
+            1000,
+            1001,
+        ]
         # MLA folds all TP ranks into kv_worker_id 0 with kv_world_size 1
         # -- must match ParallelStrategy.kv_worker_id / .kv_world_size
         # or LOOKUP expands to kv_ranks the STORE never wrote and every
@@ -1187,7 +1172,9 @@ class TestClientMultiWorker:
         retrieves = [call for call in transfer_calls if call[0] == "retrieve"]
         # Non-MLA: every rank stores.
         assert len(stores) == 2
-        instance_ids = sorted(call[1][2] for call in stores)
+        instance_ids = sorted(
+            call[1][0] for call in transfer_calls if call[0] == "register"
+        )
         assert instance_ids == [1000, 1001]
         # Non-MLA: each rank stores under its own kv_worker_id, with
         # kv_world_size == tp_size.

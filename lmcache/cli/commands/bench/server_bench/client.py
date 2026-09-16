@@ -159,7 +159,6 @@ class ServerBenchClient:
         self._zmq_context: Any | None = None
         self._req_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
-        self._registered_instance_ids: list[int] = []
         self._started = False
 
         self._chunk_size = 0
@@ -355,7 +354,6 @@ class ServerBenchClient:
             future = worker.transfer_context.submit_store(
                 request.request_id,
                 key,
-                worker.spec.instance_id,
                 worker.kv_caches,
                 block_ids_per_group,
                 event,
@@ -455,7 +453,6 @@ class ServerBenchClient:
             future = worker.transfer_context.submit_retrieve(
                 request.request_id,
                 key,
-                worker.spec.instance_id,
                 worker.kv_caches,
                 block_ids_per_group,
                 event,
@@ -627,16 +624,10 @@ class ServerBenchClient:
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _DEFAULT_RPC_TIMEOUT_S,
         )
-        from lmcache.v1.multiprocess.transfer_context import (
-            EngineDrivenTransferContext,
-        )
 
-        registered_ids = set(self._registered_instance_ids)
         if self._req_client is not None:
             for worker in self._workers:
                 instance_id = worker.spec.instance_id
-                if instance_id not in registered_ids:
-                    continue
                 try:
                     worker.transfer_context.flush_inflight_stores()
                 except Exception as exc:
@@ -645,18 +636,10 @@ class ServerBenchClient:
                         % (instance_id, exc)
                     )
                 try:
-                    future = (
-                        self._req_client.unregister_kv_cache_engine_driven_context(
-                            instance_id
-                        )
-                        if isinstance(
-                            worker.transfer_context,
-                            EngineDrivenTransferContext,
-                        )
-                        else self._req_client.unregister_kv_cache(instance_id)
-                    )
-                    future.result(timeout=_DEFAULT_RPC_TIMEOUT_S)
-                    self._log("[iid %d] UNREGISTER_KV_CACHE: OK" % instance_id)
+                    future = worker.transfer_context.unregister()
+                    if future is not None:
+                        future.result(timeout=_DEFAULT_RPC_TIMEOUT_S)
+                        self._log("[iid %d] UNREGISTER_KV_CACHE: OK" % instance_id)
                 except Exception as exc:
                     self._log(
                         "  [warning] UNREGISTER_KV_CACHE failed for "
@@ -690,7 +673,6 @@ class ServerBenchClient:
             finally:
                 self._zmq_context = None
 
-        self._registered_instance_ids.clear()
         self._workers.clear()
         self._started = False
 
@@ -740,6 +722,7 @@ class ServerBenchClient:
             % (config.rpc_url, config.mode)
         )
         self._zmq_context = zmq.Context()
+        self._zmq_context.setsockopt(zmq.LINGER, 0)
         self._req_client = RequestClientFactory.create(
             config.rpc_url,
             context=self._zmq_context,
@@ -871,11 +854,15 @@ class ServerBenchClient:
             # made device-aware.
             transfer_context: TransferContext
             if not use_gpu and config.transfer_mode in ("auto", "engine_driven"):
-                transfer_context = EngineDrivenTransferContext()
+                transfer_context = EngineDrivenTransferContext(
+                    instance_id, self._req_client
+                )
             else:
                 transfer_context = create_transfer_context(
                     kv_caches,
                     mode=config.transfer_mode,
+                    instance_id=instance_id,
+                    req_client=self._req_client,
                 )
 
             worker = WorkerContext(
@@ -903,12 +890,10 @@ class ServerBenchClient:
 
             try:
                 transfer_context.register(
-                    instance_id,
                     kv_caches,
                     _MODEL_NAME,
                     self._kv_world_size,
                     self._blocks_in_chunk,
-                    self._req_client,
                     _DEFAULT_RPC_TIMEOUT_S,
                     layout_hints=layout_hints,
                     engine_group_infos=engine_group_infos,
@@ -920,7 +905,6 @@ class ServerBenchClient:
                     % (rank, instance_id)
                 ) from None
             self._log("[rank %d] REGISTER_KV_CACHE: OK" % rank)
-            self._registered_instance_ids.append(instance_id)
 
         self._log("")
 
