@@ -138,11 +138,12 @@ def all_null_chunk_masks(
     object_groups: Sequence[ObjectGroupInfo],
     blocks_per_chunk: Sequence[int],
     num_chunks: int,
+    null_block_ids: Sequence[int | None] | None = None,
 ) -> list[list[bool]]:
     """Mark, per object group, the chunks whose engine block ids are all null.
 
-    A chunk is null for an object group when every block id of every kernel
-    group in that group is 0 (the vLLM null block). Align-mode Mamba/linear
+    A chunk is null for an object group when every block ID of every kernel
+    group equals that group's null marker. Align-mode Mamba/linear
     layers produce such chunks: only the block holding the last recurrent state
     is real, so every earlier chunk is null. These chunks must not be stored --
     the null block carries no valid KV, and object keys are content hashes, so
@@ -155,6 +156,9 @@ def all_null_chunk_masks(
         blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
             kernel-group index.
         num_chunks: Number of chunks in the request.
+        null_block_ids: Null marker per kernel group. ``None`` entries mean
+            that group has no null block; omitting the sequence preserves the
+            historical null marker zero for every group.
 
     Returns:
         ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
@@ -166,7 +170,10 @@ def all_null_chunk_masks(
             is_null = True
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                if any(block_ids[kg][i * bpc : (i + 1) * bpc]):
+                null_id = null_block_ids[kg] if null_block_ids is not None else 0
+                if null_id is None or any(
+                    block != null_id for block in block_ids[kg][i * bpc : (i + 1) * bpc]
+                ):
                     is_null = False
                     break
             chunk_null.append(is_null)
@@ -177,6 +184,9 @@ def all_null_chunk_masks(
 def downsample_and_stage_block_ids(
     cache_context: BaseCacheContext,
     block_ids: list[list[int]],
+    *,
+    skipped_chunks: Sequence[Sequence[bool]] | None = None,
+    skip_first_n_tokens: int = 0,
 ) -> list[torch.Tensor]:
     """Cut the block id lists to skip the unneeded blocks in a chunk and
     stage it into GPU tensors for later use.
@@ -184,11 +194,16 @@ def downsample_and_stage_block_ids(
     This mainly targets the case where a portion of the blocks are not
     needed for every chunk, such as deepseek v4's swa cache.
 
-    Note that the we do NOT do any object-level skipping here.
+    Object-level skipping is decided by the caller. Slots that it will not
+    transfer are staged as zero, so negative null markers for absent objects
+    never reach a GPU index buffer.
 
     Args:
         cache_context: The cache context containing the KV cache information.
         block_ids: The original block id lists, indexed by LMCache KV group index.
+        skipped_chunks: Optional per-object-group masks marking chunks that
+            the caller will not transfer (all-null stores or retrieve windows).
+        skip_first_n_tokens: Initial tokens excluded from the transfer.
 
     Returns:
         The cut block id lists, indexed by LMCache KV group index.
@@ -215,7 +230,13 @@ def downsample_and_stage_block_ids(
           [13, 14, 17, 18], # swa attention group only needs the last 2 block per chunk
         ]
     """
-    num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
+    manager = cache_context.kv_layer_groups_manager
+    num_kernel_groups = manager.num_kernel_groups
+    object_group_by_kernel = {
+        kg: og
+        for og, group in enumerate(manager.object_groups)
+        for kg in group.kernel_group_indices
+    }
     for kernel_group_id in range(num_kernel_groups):
         subchunk_sw_size_tokens = (
             cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
@@ -234,6 +255,9 @@ def downsample_and_stage_block_ids(
 
         new_block_ids = []
         old_block_ids = block_ids[kernel_group_id]
+        skip_blocks = cache_context.calculate_num_blocks(
+            skip_first_n_tokens, kernel_group_id
+        )
         assert len(old_block_ids) % total_blocks_per_chunk == 0, (
             f"len(block_ids[{kernel_group_id}]) should be a multiple "
             f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
@@ -242,7 +266,21 @@ def downsample_and_stage_block_ids(
 
         for i in range(0, len(old_block_ids), total_blocks_per_chunk):
             chunk_block_ids = old_block_ids[i : i + total_blocks_per_chunk]
-            new_block_ids.extend(chunk_block_ids[-keep_blocks_per_chunk:])
+            chunk_idx = i // total_blocks_per_chunk
+            chunk_mask = (
+                skipped_chunks[object_group_by_kernel[kernel_group_id]]
+                if skipped_chunks is not None
+                else None
+            )
+            skipped = chunk_mask is not None and (
+                chunk_idx >= len(chunk_mask) or chunk_mask[chunk_idx]
+            )
+            for offset, block_id in enumerate(chunk_block_ids[-keep_blocks_per_chunk:]):
+                block_pos = i + total_blocks_per_chunk - keep_blocks_per_chunk + offset
+                if skipped or block_pos < skip_blocks:
+                    new_block_ids.append(0)
+                else:
+                    new_block_ids.append(block_id)
 
         block_ids[kernel_group_id] = new_block_ids
 
@@ -1147,10 +1185,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 cache_context.kv_layer_groups_manager.object_groups,
                 blocks_per_chunk,
                 num_chunks,
+                [
+                    group.null_block_id
+                    for group in cache_context.kv_layer_groups_manager.kernel_groups
+                ],
             )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
+                cache_context, gpu_block_ids, skipped_chunks=skipped_chunks
             )
 
             producer_event = event_backend.import_event(
@@ -1411,15 +1453,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
-            # Cut and stage all block_ids to GPU once before the transfer
-            block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
-            )
-            producer_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
-            event_backend.wait_event(producer_event, cache_context.stream)
-
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
@@ -1435,6 +1468,22 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 0 if window < 0 else max(0, num_chunks - window)
                 for window in attn_desc.num_chunks_in_sw
             ]
+            skipped_chunks = [
+                [g in skipped_groups or i < skip for i in range(num_chunks)]
+                for g, skip in enumerate(group_skips)
+            ]
+            block_ids_per_group_gpu = downsample_and_stage_block_ids(
+                cache_context,
+                gpu_block_ids,
+                skipped_chunks=skipped_chunks,
+                skip_first_n_tokens=skip_first_n_tokens,
+            )
+
+            producer_event = event_backend.import_event(
+                event_ipc_handle, cache_context.device
+            )
+            event_backend.wait_event(producer_event, cache_context.stream)
+
             expected_retained = sum(
                 num_chunks - skip
                 for g, skip in enumerate(group_skips)

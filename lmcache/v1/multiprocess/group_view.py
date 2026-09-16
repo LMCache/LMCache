@@ -64,6 +64,12 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     KV; the one-block window reflects restore semantics and blend full-window
     forcing must not widen it. Defaulted field: wire-compatible."""
 
+    null_block_id: int | None = 0
+    """Block ID denoting absent data in this group's address space. ``None``
+    means every nonnegative block ID, including zero, can hold data. Negative
+    sentinels (e.g. ``-1`` for absent state checkpoints) are never copied.
+    Defaults to vLLM's reserved null block zero for older IPC payloads."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).

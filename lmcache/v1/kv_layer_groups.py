@@ -209,14 +209,17 @@ class KernelGroupInfo:
     ``-1`` means the layers are not sliding-window attention."""
     extra_object_group_tag: int = 0
     """Connector-private extra-group tag. ``0`` = a regular group, bucketed
-    by (recurrent, window) under ``separate_object_groups``; ``> 0`` = an
-    extra group (e.g. the blend fused-aux pool) that buckets by tag —
-    groups sharing a tag share an object group, and extras always sort
+    by (recurrent, window, null policy) when object-group separation is active;
+    ``> 0`` = an extra group (e.g. the blend fused-aux pool) that buckets by
+    tag — groups sharing a tag share an object group, and extras always sort
     after the regular groups."""
     recurrent_state: bool = False
     """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
+    null_block_id: int | None = 0
+    """Engine block ID denoting absent data, or ``None`` when zero is valid
+    and there is no null block. Defaults to the historical null block zero."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -235,6 +238,7 @@ class KernelGroupInfo:
             f"tokens_per_block={self.tokens_per_block}, "
             f"slots_per_block={self.slots_per_block}, "
             f"engine_group_idx={self.engine_group_idx}, "
+            f"null_block_id={self.null_block_id}, "
             f"sw_size_tokens={self.sw_size_tokens})"
         )
 
@@ -266,16 +270,18 @@ KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
 
 
 class _ObjectBucket(NamedTuple):
-    """Object-group bucket key under ``separate_object_groups``.
+    """Object-group bucket key when object-group separation is active.
 
-    Regular groups (``extra_tag == 0``) bucket by ``(recurrent, sw_chunks)``;
-    tagged extras bucket by ``extra_tag`` (their other fields ride along for
-    bookkeeping but extras never mix with regular groups).
+    Regular groups (``extra_tag == 0``) bucket by recurrent policy, sliding
+    window, and null-block policy. Tagged extras bucket by ``extra_tag`` (their
+    other fields ride along for bookkeeping but extras never mix with regular
+    groups).
     """
 
     extra_tag: int
     recurrent: bool
     sw_chunks: int
+    null_block_id: int | None
 
 
 @dataclass
@@ -353,10 +359,11 @@ class KVLayerGroupsManager:
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
-            separate_object_groups: When True, split kernel groups
-                into one object group per sliding-window size; when False
-                (default), all kernel groups share a single full-attention
-                object group.
+            separate_object_groups: When True, split kernel groups by their
+                recurrent/window/null policies. When False (default), groups
+                normally share one full-attention object, but a non-default
+                null-block policy still enables separation because sparse
+                groups cannot safely share object presence with dense groups.
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -462,6 +469,7 @@ class KVLayerGroupsManager:
                     recurrent_state=(
                         info.recurrent_state if info is not None else False
                     ),
+                    null_block_id=info.null_block_id if info is not None else 0,
                 )
             )
 
@@ -667,11 +675,13 @@ class KVLayerGroupsManager:
         """Bucket kernel groups into object groups.
 
         Puts all kernel groups into a single object group when object-group
-        separation is disabled (the default). Otherwise groups the kernel
-        groups by (recurrent, sliding-window chunks), except that tagged
-        extra groups (``extra_object_group_tag``, connector-private) bucket
-        by tag — and always sort after the regular groups, so the shared
-        group ids match a registration without any extras.
+        separation is disabled (the default) and every group uses the legacy
+        null block zero. A non-default null policy enables separation
+        automatically, because sparse groups cannot share object presence with
+        dense groups. Separated groups bucket by recurrent policy, sliding
+        window, and null policy; tagged extra groups
+        (``extra_object_group_tag``, connector-private) also bucket by tag and
+        sort after the regular groups.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -679,7 +689,10 @@ class KVLayerGroupsManager:
         Returns:
             One :class:`ObjectGroupInfo` per object group.
         """
-        if not self._separate_object_groups:
+        requires_null_policy_separation = any(
+            group.null_block_id != 0 for group in self._kernel_groups
+        )
+        if not self._separate_object_groups and not requires_null_policy_separation:
             return [
                 ObjectGroupInfo(
                     kernel_group_indices=list(range(len(self._kernel_groups)))
@@ -700,6 +713,7 @@ class KVLayerGroupsManager:
                 extra_tag=group.extra_object_group_tag,
                 recurrent=group.recurrent_state,
                 sw_chunks=sw_size_chunks,
+                null_block_id=group.null_block_id,
             )
             groups_by_bucket[bucket].append(kernel_group_idx)
             bucket_sw_size[bucket] = sw_size_chunks
