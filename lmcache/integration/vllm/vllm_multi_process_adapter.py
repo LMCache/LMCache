@@ -12,6 +12,7 @@ import time
 import uuid
 
 # Third Party
+from prometheus_client import Counter, Gauge
 import torch
 import zmq
 
@@ -51,6 +52,24 @@ if TYPE_CHECKING:
     from lmcache.integration.vllm.experimental import Dispatcher
 
 logger = init_logger(__name__)
+
+# Export through vLLM's multiprocess Prometheus registry, independently of drains.
+_KV_EVENTS_BUFFERED = Gauge(
+    "vllm:lmcache_mp_kv_events_buffered",
+    "Completed MP store events waiting for vLLM to drain them.",
+    ["model_name", "worker_id"],
+    multiprocess_mode="livesum",
+)
+_KV_EVENTS_GENERATED = Counter(
+    "vllm:lmcache_mp_kv_events_generated_total",
+    "Completed MP store events added to the worker buffer.",
+    ["model_name", "worker_id"],
+)
+_KV_EVENTS_DRAINED = Counter(
+    "vllm:lmcache_mp_kv_events_drained_total",
+    "MP store events drained from the worker buffer by vLLM.",
+    ["model_name", "worker_id"],
+)
 
 
 class ExtraConfigDefault(enum.Enum):
@@ -1339,6 +1358,12 @@ class LMCacheMPWorkerAdapter:
         )
         self._pending_store_kv_events: dict[str, list[CacheStoreEvent]] = {}
         self._kv_events: list[CacheStoreEvent] = []
+        if enable_kv_events:
+            labels = (model_name, parallel_strategy.vllm_worker_id)
+            self._kv_events_buffered = _KV_EVENTS_BUFFERED.labels(*labels)
+            self._kv_events_generated = _KV_EVENTS_GENERATED.labels(*labels)
+            self._kv_events_drained = _KV_EVENTS_DRAINED.labels(*labels)
+            self._kv_events_buffered.set(0)
         if lmcache_tokens_per_chunk % vllm_block_size != 0:
             raise ValueError(
                 f"LMCache chunk size {lmcache_tokens_per_chunk} must be a "
@@ -1958,9 +1983,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
             else:
-                self._kv_events.extend(
-                    self._pending_store_kv_events.pop(request_id, [])
-                )
+                self._publish_store_kv_events(request_id)
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
@@ -2089,9 +2112,7 @@ class LMCacheMPWorkerAdapter:
                 )
                 self._failed_store_requests.add(request_id)
             else:
-                self._kv_events.extend(
-                    self._pending_store_kv_events.pop(request_id, [])
-                )
+                self._publish_store_kv_events(request_id)
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
@@ -2162,6 +2183,8 @@ class LMCacheMPWorkerAdapter:
             return []
         events = self._kv_events
         self._kv_events = []
+        self._kv_events_drained.inc(len(events))
+        self._kv_events_buffered.set(0)
         return events
 
     def get_failed_store_requests(self) -> set[str] | None:
@@ -2294,6 +2317,14 @@ class LMCacheMPWorkerAdapter:
         self.request_telemetry.close()
 
     # Helper functions
+    def _publish_store_kv_events(self, request_id: str) -> None:
+        """Buffer successful store events and update metrics without a drain."""
+        events = self._pending_store_kv_events.pop(request_id, [])
+        if events:
+            self._kv_events.extend(events)
+            self._kv_events_generated.inc(len(events))
+            self._kv_events_buffered.set(len(self._kv_events))
+
     def _update_and_get_finished_store(
         self,
     ) -> set[str]:

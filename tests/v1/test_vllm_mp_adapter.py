@@ -13,6 +13,7 @@ import time
 import weakref
 
 # Third Party
+from prometheus_client import REGISTRY
 import pytest
 import torch
 
@@ -458,6 +459,74 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
     assert adapter.get_completed_store_requests() is None
     assert adapter.get_failed_store_requests() == (None if store_result else {"req-1"})
     assert adapter.get_failed_store_requests() is None
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+@pytest.mark.parametrize("enable_kv_events", [False, True])
+def test_kv_event_buffer_metrics(
+    fake_adapter: object,
+    lazy_offload: bool,
+    enable_kv_events: bool,
+) -> None:
+    """A stalled drain is visible; failed/pending stores do not count as events."""
+    adapter = _make_worker_adapter(
+        extra_config={"lmcache.mp.lazy_offload": lazy_offload},
+        enable_kv_events=enable_kv_events,
+    )
+    adapter.transfer_ctx = MagicMock()
+    future = adapter.transfer_ctx.submit_store.return_value
+    future.result.return_value = True
+    chunk_size = adapter.lmcache_tokens_per_chunk
+    op = LoadStoreOp(
+        token_ids=list(range(chunk_size * 2)),
+        block_ids=[[0, 1]],
+        start=0,
+        end=chunk_size * 2,
+    )
+
+    def metrics() -> tuple[float, ...]:
+        return tuple(
+            REGISTRY.get_sample_value(
+                f"vllm:lmcache_mp_kv_events_{name}",
+                {"model_name": "test-model", "worker_id": "0"},
+            )
+            or 0
+            for name in ("buffered", "generated_total", "drained_total")
+        )
+
+    def finish() -> None:
+        if lazy_offload:
+            adapter.get_finished_with_lazy_offload()
+        else:
+            adapter.get_finished(set())
+
+    buffered, generated, drained = metrics()
+    count = 0
+    for request_id in ("first", "second"):
+        future.query.return_value = False
+        adapter.submit_store_request(request_id, op, event=None)
+        finish()
+        assert metrics() == (buffered + count, generated + count, drained)
+        future.query.return_value = True
+        finish()
+        count += 2 if enable_kv_events else 0
+        assert metrics() == (buffered + count, generated + count, drained)
+
+    future.result.return_value = False
+    adapter.submit_store_request("failed", op, event=None)
+    finish()
+    assert metrics() == (buffered + count, generated + count, drained)
+
+    future.query.return_value = False
+    adapter.submit_store_request("interrupted", op, event=None)
+    FakeHeartbeatThread.instances[-1].health_event.clear()
+    finish()
+    assert metrics() == (buffered + count, generated + count, drained)
+
+    assert len(adapter.get_kv_events()) == count
+    assert metrics() == (buffered, generated + count, drained + count)
+    assert adapter.get_kv_events() == []
+    assert metrics() == (buffered, generated + count, drained + count)
 
 
 def test_store_kv_events_use_hash_algorithm_extra_config(
