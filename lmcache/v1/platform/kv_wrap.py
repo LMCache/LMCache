@@ -32,7 +32,17 @@ def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
     so this call site stays free of if/elif chains and external accelerators
     can provide their wrapper from an installed device-plugin wheel.
     """
-    return resolve_kv_wrapper_factory(tensor.device.type)(tensor)
+    # First Party
+    from lmcache.v1.gpu_connector.utils import get_device
+
+    return resolve_kv_wrapper_factory(get_device(tensor).type)(tensor)
+
+
+def _layer_shape_and_dtype(value: Any) -> tuple[object, str]:
+    """Shape/dtype summary for a layer value (tensor or plane sequence)."""
+    if isinstance(value, torch.Tensor):
+        return tuple(value.shape), str(value.dtype)
+    return tuple(tuple(p.shape) for p in value), str(value[0].dtype)
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
@@ -48,8 +58,8 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # verify the exact layer set & tensor geometry being shipped to the
     # LMCache server, then the low-noise count of handles being wrapped.
     kept_summary = [
-        (name, tuple(tensor.shape), str(tensor.dtype))
-        for name, tensor in kv_caches.items()
+        (name, *_layer_shape_and_dtype(value))
+        for name, value in kv_caches.items()
     ]
     logger.debug(
         "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",

@@ -325,3 +325,57 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
     # the aux group is read by NOBODY and transferred by nobody.
     assert read_calls == [["g0c2"], [f"g1c{c}" for c in range(3)]]
     assert [g for g, _ in transfer_calls] == [0, 1]
+
+
+# ------------------------------------------------------------------ #
+#  downsample_and_stage_block_ids (DSv4 sub-chunk SWA)
+# ------------------------------------------------------------------ #
+
+
+def _dsv4_swa_cache_context(chunk_tokens: int, sw_tokens: int, tpb: int):
+    """Fake context: slots_per_block == tpb so calculate_num_blocks = tokens/tpb."""
+
+    def calculate_num_blocks(num_tokens: int, kernel_group_idx: int) -> int:
+        del kernel_group_idx
+        return num_tokens // tpb
+
+    kgm = SimpleNamespace(
+        num_kernel_groups=1,
+        get_subchunk_sw_size_tokens=lambda kg: sw_tokens,
+    )
+    ctx = SimpleNamespace(
+        kv_layer_groups_manager=kgm,
+        lmcache_tokens_per_chunk=chunk_tokens,
+        calculate_num_blocks=calculate_num_blocks,
+        stage_block_ids=lambda ids: ids,
+    )
+    return ctx
+
+
+@pytest.mark.no_shared_allocator
+def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
+    """DSv4 SWA: chunk 4096, window 128, tpb 32 → keep last 4 block ids / chunk."""
+    chunk, sw, tpb, n_chunks = 4096, 128, 32, 19
+    ctx = _dsv4_swa_cache_context(chunk, sw, tpb)
+    bpc = chunk // tpb  # 128
+    keep = sw // tpb  # 4
+    original = list(range(n_chunks * bpc))
+    out = mod.downsample_and_stage_block_ids(ctx, [list(original)])
+    assert len(out[0]) == n_chunks * keep
+    for c in range(n_chunks):
+        src = original[c * bpc : (c + 1) * bpc]
+        got = out[0][c * keep : (c + 1) * keep]
+        assert got == src[-keep:]
+    # Retrieve of the last object uses start_object_idx = n_chunks-1.
+    start = (n_chunks - 1) * keep
+    assert out[0][start:] == original[-keep:]
+
+
+@pytest.mark.no_shared_allocator
+def test_downsample_full_attention_keeps_every_block():
+    chunk, tpb, n_chunks = 4096, 128, 19
+    ctx = _dsv4_swa_cache_context(chunk, sw_tokens=chunk, tpb=tpb)
+    bpc = chunk // tpb
+    raw = [list(range(n_chunks * bpc))]
+    out = mod.downsample_and_stage_block_ids(ctx, [list(raw[0])])
+    assert out[0] == raw[0]
