@@ -449,6 +449,11 @@ L3 on this host (facebook/opt-125m, `--num-gpu-blocks-override 256`,
 | lmcache hot (cold cache) | 64 | 71 | 0 | – |
 | lmcache replay | 64 | 0 | 0 | 0.91 of prompt tokens |
 
+The same ladder against the engine-driven transfer mode (2 repeats, 95 to
+103 preemptions per hot pass, 0.92 replay hit fraction) passed with one
+request diverging at output token 49 to the reference's runner-up at a
+top-1/top-2 gap of 0.008 nats, classified as a near-tie.
+
 Oracle note: with **random-token** prompts the same setup showed 1/64 A/A
 and 3/64 LMCache divergences, all at near-ties in a flat next-token
 distribution. Real-text prompts plus the top-2 logprob classifier
