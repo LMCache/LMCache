@@ -7,9 +7,8 @@ from typing import List, Optional, Union
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.memory_management import (
     AddressManager,
     MemoryAllocatorInterface,

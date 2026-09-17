@@ -1620,7 +1620,7 @@ class LMCacheEngine:
                 logger.info("Closing hidden_state_store...")
                 self.hidden_state_store.close()
             except Exception as e:
-                logger.error(f"Error closing hidden_state_store: {e}")
+                logger.error("Error closing hidden_state_store: %s", e)
 
         if self.lmcache_worker is not None:
             try:

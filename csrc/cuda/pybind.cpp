@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
+#include "phase_timing_recorder.cuh"
 #include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
@@ -33,18 +34,19 @@ PYBIND11_MODULE(cuda_ops, m) {
          const torch::Tensor& slot_mapping,
          const torch::Device& paged_memory_device, const int page_buffer_size,
          int direction, int engine_kv_format, const int block_size = 0,
-         const int head_size = 0, const int skip_prefix_n_tokens = 0) {
+         const int head_size = 0, const int skip_prefix_n_tokens = 0,
+         const int64_t block_stride_elems = 0) {
         return multi_layer_kv_transfer(
             key_value, key_value_ptrs, slot_mapping, paged_memory_device,
             page_buffer_size, static_cast<TransferDirection>(direction),
             static_cast<EngineKVFormat>(engine_kv_format), block_size,
-            head_size, skip_prefix_n_tokens);
+            head_size, skip_prefix_n_tokens, block_stride_elems);
       },
       py::arg("key_value"), py::arg("key_value_ptrs"), py::arg("slot_mapping"),
       py::arg("paged_memory_device"), py::arg("page_buffer_size"),
       py::arg("direction"), py::arg("engine_kv_format"),
       py::arg("block_size") = 0, py::arg("head_size") = 0,
-      py::arg("skip_prefix_n_tokens") = 0,
+      py::arg("skip_prefix_n_tokens") = 0, py::arg("block_stride_elems") = 0,
       py::call_guard<py::gil_scoped_release>());
   m.def("multi_layer_kv_transfer_unilateral",
         [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
@@ -174,16 +176,38 @@ PYBIND11_MODULE(cuda_ops, m) {
       [](int direction, const torch::Device& device,
          size_t host_buffer_alignment,
          const std::vector<KernelGroupSpec>& kernel_group_specs,
-         const std::vector<BatchStep>& batch_steps) {
+         const std::vector<BatchStep>& batch_steps, bool phase_timing_enabled,
+         const std::string& session_id) {
         return execute_object_group_transfer(
             static_cast<TransferDirection>(direction), device,
-            host_buffer_alignment, kernel_group_specs, batch_steps);
+            host_buffer_alignment, kernel_group_specs, batch_steps,
+            phase_timing_enabled, session_id);
       },
       py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
       py::arg("kernel_group_specs"), py::arg("batch_steps"),
+      py::arg("phase_timing_enabled") = false, py::arg("session_id") = "",
       py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "pop_completed_phase_timings",
+      []() {
+        std::vector<PhaseTimingSample> samples;
+        {
+          py::gil_scoped_release release;
+          samples = pop_completed_phase_timings();
+        }
+        py::list out;
+        for (const auto& s : samples) {
+          out.append(py::make_tuple(s.phase, s.direction, s.device_index,
+                                    s.elapsed_ms, s.nbytes, s.session_id,
+                                    s.start_time_s, s.end_time_s));
+        }
+        return out;
+      },
+      "Pop completed (phase, direction, device_index, elapsed_ms, nbytes, "
+      "session_id, start_time_s, end_time_s) samples recorded by "
+      "execute_object_group_transfer.");
   // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side
-  // (blend_v3.cb_retrieve_pre_computed) and consumed by
+  // (blend.cb_retrieve_pre_computed) and consumed by
   // execute_cb_retrieve_plan_flat.
   py::class_<CBGroupSpec>(m, "CBGroupSpec")
       .def(

@@ -202,7 +202,7 @@ ratio is the fraction of tokens requested by a lookup that were served from
 either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
 vLLM-owned and not observable from LMCache.
 
-Both counters carry `model_name` and `cache_salt` OTel attributes (captured
+All of these counters carry `model_name` and `cache_salt` OTel attributes (captured
 at lookup time from `IPCCacheServerKey`), enabling per-model and per-tenant
 slicing of the hit rate.  `cache_salt` can be high-cardinality; drop it at
 scrape time with `metric_relabel_configs` if storage cost matters.
@@ -211,6 +211,10 @@ scrape time with `metric_relabel_configs` if storage cost matters.
 |---|---|---|---|---|
 | `lmcache_mp.lookup_requested` | `lmcache_mp_lookup_requested_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+requested_tokens` |
 | `lmcache_mp.lookup_hit` | `lmcache_mp_lookup_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
+| `lmcache_mp.lookup_hit_l1` | `lmcache_mp_lookup_hit_l1_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_tokens` (0 if absent) |
+| `lmcache_mp.lookup_hit_l2` | `lmcache_mp_lookup_hit_l2_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_tokens` (0 if absent); `l1 + l2 == lookup_hit` per event |
+| `lmcache_mp.lookups` | `lmcache_mp_lookups_requests_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+1` per completed lookup |
+| `lmcache_mp.lookup_early_exit` | `lmcache_mp_lookup_early_exit_requests_total` | Counter (attrs: `model_name`, `cache_salt`, `reason` ∈ {`no_gpu_context`, `empty_chunk_hashes`, `no_group_layout_descs`}) | `MP_LOOKUP_PREFETCH_END` | `+1` when `early_exit_reason != ""` |
 
 **What it answers:** What fraction of tokens requested by a lookup were served from cache (L1 or L2)?
 
@@ -224,9 +228,22 @@ sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
 / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
 ```
 
-> **Note:** Both counters are driven by the *same* event, so they always
+**Per-tier split and early exits:**
+
+```promql
+# Share of hit tokens that L1 could serve on its own:
+rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
+/ rate(lmcache_mp_lookup_hit_tokens_total[5m])
+
+# Fraction of lookups that early-exited, by reason:
+sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
+/ sum(rate(lmcache_mp_lookups_requests_total[5m]))
+```
+
+> **Note:** All lookup counters are driven by the *same* event, so they always
 > advance together per completed lookup.  Early-exit lookups (no GPU
-> context matches, empty `chunk_hashes`) contribute `0` to both, and
+> context matches, empty `chunk_hashes`) contribute `0` tokens to all four
+> token counters and `+1` to `lookups` and `lookup_early_exit{reason}`, and
 > abandoned lookups (client never polls `query_prefetch_status`)
 > contribute to neither.  See
 > [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
@@ -273,8 +290,12 @@ Per-request throughput of GPU↔CPU copies via
 `L0L1ThroughputSubscriber`. Correlates `MP_{STORE,RETRIEVE}_START` → `MP_{STORE,RETRIEVE}_END`
 pairs by `session_id`, computes `total_bytes / (end_ts - start_ts)` in GB/s.
 Every request contributes one sample (no sampling).
-START/END events fire on the GPU cupy stream (`publish_on_stream`), so
-timestamps reflect true GPU-stream copy time — not Python/lock overhead.
+START/END events fire on the GPU cupy stream (`publish_on_stream`).
+Caveat: on the store path, `reserve_write` runs on the CPU after
+`MP_STORE_START` is already enqueued, so the store denominator includes
+that CPU share. It was measured at well under 1% of the window
+(~0.4 ms against a hundreds-of-ms window at CONC=128), so no separate
+metric or correction is provided.
 
 All throughput histograms carry `engine_id` (vLLM worker instance id),
 `device` (e.g. `"cuda:3"`), and `model_name` OTel attributes, enabling
@@ -283,12 +304,140 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GBs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
-| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GBs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GB_per_second` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
 Are some workers or GPUs underperforming?
+
+---
+
+## Transfer Phase Throughput Histograms (gather vs DMA)
+
+The composite `l0_l1_*` histograms span two serialized GPU phases: the
+gather/scatter kernel (paged blocks ↔ GPU staging buffer, occupies SMs)
+and the DMA staging copy (GPU staging buffer ↔ pinned host memory,
+occupies copy engines).  The native plan executor brackets each phase
+with CUDA event pairs when the caller requests it: the transfer module
+passes `phase_timing_enabled` per executor call, true only when the bus
+is enabled and something subscribes to `MP_TRANSFER_PHASE_SAMPLES` (this
+metrics subscriber and/or the tracing consumer described in `EVENTS.md` /
+`docs/design/observability/request-event-span.md`), so recording is off
+with `--disable-observability` and costs nothing in processes that never
+initialize observability.  `TransferPhaseSampler`
+pops finished pairs on `MP_STORE_END` / `MP_RETRIEVE_END` and publishes them
+as `MP_TRANSFER_PHASE_SAMPLES`.
+
+Labels: `device_index` (e.g. `"0"`), `direction` (`"h2d"` / `"d2h"`);
+the counters additionally carry `phase` (`"kernel"` / `"staging"`).
+The label keeps the bare `"kernel"`, mirroring the `TransferPhase` enum
+shared with the C++ side, while the corresponding trace span is named
+`transfer.kernel_interval`: a label is read next to its metric's
+documentation, a span name is read alone on a waterfall bar and has to
+carry the caveat itself.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.transfer_staging_throughput` | `lmcache_mp_transfer_staging_throughput_GB_per_second` | Histogram | `MP_TRANSFER_PHASE_SAMPLES` | `nbytes / elapsed_ms * 1e3 / 1e9` per batch step |
+| `lmcache_mp.transfer_phase_bytes` | `lmcache_mp_transfer_phase_bytes_total` | Counter | `MP_TRANSFER_PHASE_SAMPLES` | `+nbytes` per batch step, per `phase` |
+| `lmcache_mp.transfer_phase_elapsed` | `lmcache_mp_transfer_phase_elapsed_seconds_total` | Counter | `MP_TRANSFER_PHASE_SAMPLES` | `+elapsed_ms / 1e3` per batch step, per `phase`. The section's stream interval: for `phase="staging"` that is the transfer, for `phase="kernel"` it is mostly the wait for the engine to release the SMs |
+
+**What it answers:** Is the host<->device path healthy, and how much KV is
+actually moving?  `transfer_staging_throughput` is the DMA rate: compare it
+against a measured pinned-copy baseline on this host (never the PCIe spec
+figure) -- it drops when host buffers stop being pinned, when the link
+renegotiates to fewer lanes or an older generation, or when the buffers land
+on a remote NUMA node, and it caps the whole cache's throughput.
+`transfer_phase_bytes` gives volume for capacity planning.  For a byte-weighted
+aggregate DMA rate use
+`rate(lmcache_mp_transfer_phase_bytes_total{phase="staging"}[1m]) /
+rate(lmcache_mp_transfer_phase_elapsed_seconds_total{phase="staging"}[1m])`
+(a mean over the per-step histogram samples is not byte-weighted).
+
+Do **not** form the same ratio for `phase="kernel"`.  Its elapsed is dominated
+by waiting for the co-resident inference engine to release the SMs, not by the
+kernel, so the ratio reports contention -- see the caveats below.  The kernel
+phase's counters are kept because the samples carry both phases, not because
+that ratio is meaningful.  When a transfer looks slow, open a trace: the
+`transfer.kernel_interval` / `transfer.staging` span pair shows the split for that one
+transfer, and a long kernel bar there reads as "this transfer met a busy
+engine", which is the useful statement.
+
+**Caveats:** each section's `nbytes` is exact — staged payload for the
+staging phase, skip-aware launch bytes for the kernel phase — so the two
+phases' byte counters can legitimately differ, and the difference is the
+payload skipped by `skip_prefix_n_blocks` (e.g. sliding windows).
+
+A section's elapsed is the interval between two CUDA events on the transfer
+stream, which is **not** the same as the time that section's work spent
+running.  A stream's ordering guarantee says op N+1 starts after op N, not
+that the device is serving this stream in between.  The gather/scatter kernel
+needs SMs, and LMCache runs beside an inference engine that holds them, so a
+kernel section's interval is mostly the wait for the engine's kernels to
+retire.  Profiled on one box with both processes traced: the kernel executes
+in ~21 us while its section reads ~1280 us, and the 1104 us gap ahead of it is
+100 % engine kernels (4-5 of them).  That is why there is no
+`transfer_kernel_throughput`: a bytes/elapsed ratio there reads ~50x low, and
+differs 7x between directions for reasons that have nothing to do with the
+kernel.  The wait is also not a cost worth charging to the transfer — for
+stores it overlaps the prefill the request is waiting on anyway, and for
+retrieves it measured 119 us against a ~186 ms TTFT.
+
+Staging is exempt: DMA rides the copy engine, which a compute-bound engine
+never touches, so its sections wait 0.4-6 us and `transfer_staging_throughput`
+is the real link rate.  Compare it against a measured pinned-copy baseline on
+the host, never the PCIe spec figure.  The kernel's section time is still
+carried by the `transfer.kernel_interval` span under tracing (off by default), where it
+is read as "this transfer met a busy engine" rather than as a rate.
+
+---
+
+## MP Transfer Counters (in-flight GPU copies)
+
+Submitted/finished counter pairs for the LMCache-driven GPU transfers, via
+`MPTransferCountersSubscriber`.  The SUBMITTED events are published
+CPU-synchronously right before the copy is enqueued; the END events are
+published *from* the device stream once the copy has run.  Subtracting the
+two gives the number of transfers currently in flight on each GPU:
+
+```promql
+lmcache_mp_num_submitted_stores_total - lmcache_mp_num_finished_stores_total
+```
+
+All four counters carry exactly one attribute, `device` (e.g. `"cuda:3"`).
+This is deliberate: `MP_STORE_SUBMITTED` / `MP_RETRIEVE_SUBMITTED` carry no
+`engine_id` or `model_name` (see [EVENTS.md](EVENTS.md)), so labeling the END
+side more richly would force a PromQL aggregation to line the two label sets
+back up before subtracting them.  Slice by `engine_id` / `model_name` using
+the L0↔L1 throughput histograms or `lmcache_mp.num_chunks_loaded` instead.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.num_submitted_stores` | `lmcache_mp_num_submitted_stores_total` | Counter (attr: `device`) | `MP_STORE_SUBMITTED` | +1 per event |
+| `lmcache_mp.num_finished_stores` | `lmcache_mp_num_finished_stores_total` | Counter (attr: `device`) | `MP_STORE_END` | +1 per event |
+| `lmcache_mp.num_submitted_retrieves` | `lmcache_mp_num_submitted_retrieves_total` | Counter (attr: `device`) | `MP_RETRIEVE_SUBMITTED` | +1 per event |
+| `lmcache_mp.num_finished_retrieves` | `lmcache_mp_num_finished_retrieves_total` | Counter (attr: `device`) | `MP_RETRIEVE_END` | +1 per event |
+
+**What it answers:** How many GPU KV copies is each device carrying right
+now?  Is a worker's copy queue backing up (submitted climbing while finished
+lags), or is the device keeping pace?  The counters also give store/retrieve
+*rates* per device via `rate(...[1m])`.
+
+"Finished" counts a transfer leaving the device stream, not its success: a
+store that committed nothing (`stored_count == 0`) and a retrieve that
+missed both increment.  Counting only successes would strand a phantom
+in-flight transfer in the subtraction forever.
+
+> **Caveat — RETRIEVE block-id underflow.** `retrieve()` publishes
+> `MP_RETRIEVE_SUBMITTED` *before* its fail-closed block-id underflow check,
+> and that check returns early without publishing `MP_RETRIEVE_END`.  A
+> request hitting that path (logged at ERROR by the transfer module, and
+> also leaving the tracing subscriber's span open) permanently adds 1 to the
+> derived in-flight retrieve count.  It should never fire in healthy
+> operation; a steadily rising in-flight floor alongside those ERROR logs is
+> the signature.  The store path publishes its SUBMITTED sentinel *after*
+> the equivalent check, so it is unaffected.
 
 ---
 
@@ -487,6 +636,9 @@ MP mode `lmcache_mp.` namespace).  On Prometheus, `.` becomes `_` and counters g
 | `lmcache_blend.lookup_requests` | `lmcache_blend_lookup_requests_total` | Counter | `CB_LOOKUP_START` | +1 per event |
 | `lmcache_blend.lookup_requested_tokens` | `lmcache_blend_lookup_requested_tokens_total` | Counter | `CB_LOOKUP_END` | `+requested_tokens` |
 | `lmcache_blend.lookup_hit_tokens` | `lmcache_blend_lookup_hit_tokens_total` | Counter | `CB_LOOKUP_END` | `+hit_tokens` |
+| `lmcache_blend.lookup_prefix_hit_tokens` | `lmcache_blend_lookup_prefix_hit_tokens_total` | Counter | `CB_LOOKUP_END` | `+prefix_hit_tokens` |
+| `lmcache_blend.lookup_segmented_prefix_hit_tokens` | `lmcache_blend_lookup_segmented_prefix_hit_tokens_total` | Counter | `CB_LOOKUP_END` | `+segmented_prefix_hit_tokens` |
+| `lmcache_blend.lookup_non_prefix_hit_tokens` | `lmcache_blend_lookup_non_prefix_hit_tokens_total` | Counter | `CB_LOOKUP_END` | `+non_prefix_hit_tokens` |
 | `lmcache_blend.lookup_fingerprint_hits` | `lmcache_blend_lookup_fingerprint_hits_total` | Counter | `CB_LOOKUP_END` | `+fingerprint_hits` |
 | `lmcache_blend.lookup_storage_hits` | `lmcache_blend_lookup_storage_hits_total` | Counter | `CB_LOOKUP_END` | `+storage_hits` |
 | `lmcache_blend.lookup_stale_chunks` | `lmcache_blend_lookup_stale_chunks_total` | Counter | `CB_LOOKUP_END` | `+stale_chunks` |
@@ -501,6 +653,16 @@ rate(lmcache_blend_lookup_hit_tokens_total[5m])
 / rate(lmcache_blend_lookup_requested_tokens_total[5m])
 ```
 
+The numerator splits into three disjoint paths that sum to
+`hit_tokens`: `prefix_hit_tokens` (contiguous prefix, pure load),
+`segmented_prefix_hit_tokens` (post-gap, original positions), and
+`non_prefix_hit_tokens` (cross-context, re-RoPE'd).
+
+**Note on `no_gpu_context`:** V2 zeroes the token counts here, V3 reports the
+real `requested_tokens` — so a server with no registered CB KV cache shows a
+growing denominator against a flat numerator, and
+`lookup_no_gpu_context_errors` says why.
+
 ### CB Retrieve Metrics
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
@@ -508,37 +670,88 @@ rate(lmcache_blend_lookup_hit_tokens_total[5m])
 | `lmcache_blend.retrieve_requests` | `lmcache_blend_retrieve_requests_total` | Counter | `CB_RETRIEVE_START` | +1 per event |
 | `lmcache_blend.retrieve_chunks` | `lmcache_blend_retrieve_chunks_total` | Counter | `CB_RETRIEVE_START` | `+num_chunks` |
 | `lmcache_blend.retrieve_failures` | `lmcache_blend_retrieve_failures_total` | Counter | `CB_RETRIEVE_END` | +1 when `success=False` |
+| `lmcache_blend.retrieve_noops` | `lmcache_blend_retrieve_noops_total` | Counter | `CB_RETRIEVE_NOOP` | +1 per event, labeled `reason` |
 
 **What it answers:** How often is CB retrieval invoked? How many chunks are retrieved per call? What is the failure rate?
 
-### CB Store Pre-computed Metrics
+**No-op retrieves are the "CB engaged but was not faster" signal.** A no-op
+returns *success* without scattering anything, so the request silently falls
+back to a full recompute and no failure counter moves.  Only counted when reuse
+was actually lost, under a fixed `reason` — `beyond_slot_bound` (matches lay
+past the allocated slots; expect a second retrieve after full block allocation)
+or `no_object_keys` (nothing resolved; never benign).
 
-| OTel metric name | Prometheus name | Type | Source event | Calculation |
-|---|---|---|---|---|
-| `lmcache_blend.store_pre_computed_requests` | `lmcache_blend_store_pre_computed_requests_total` | Counter | `CB_STORE_PRE_COMPUTED_START` | +1 per event |
-| `lmcache_blend.store_pre_computed_chunks` | `lmcache_blend_store_pre_computed_chunks_total` | Counter | `CB_STORE_PRE_COMPUTED_END` | `+stored_chunks` |
-| `lmcache_blend.store_pre_computed_failures` | `lmcache_blend_store_pre_computed_failures_total` | Counter | `CB_STORE_PRE_COMPUTED_END` | +1 when `success=False` |
+A no-op returns before the GPU work, so it does **not** increment
+`retrieve_requests`; the two are disjoint and the attempt total is their sum:
 
-**What it answers:** How often is pre-computed CB storage invoked? How many chunks are written? What is the failure rate?
+```
+rate(lmcache_blend_retrieve_noops_total[5m])
+/ (rate(lmcache_blend_retrieve_noops_total[5m])
+   + rate(lmcache_blend_retrieve_requests_total[5m]))
+```
 
-### CB Store Final Metrics
-
-| OTel metric name | Prometheus name | Type | Source event | Calculation |
-|---|---|---|---|---|
-| `lmcache_blend.store_final_requests` | `lmcache_blend_store_final_requests_total` | Counter | `CB_STORE_FINAL_START` | +1 per event |
-| `lmcache_blend.store_final_chunks` | `lmcache_blend_store_final_chunks_total` | Counter | `CB_STORE_FINAL_END` | `+stored_chunks` |
-| `lmcache_blend.store_final_failures` | `lmcache_blend_store_final_failures_total` | Counter | `CB_STORE_FINAL_END` | +1 when `success=False` |
-
-**What it answers:** How often is final CB storage invoked? How many chunks are committed? What is the failure rate?
+The blend server has no store RPCs of its own: stores ride the standard `STORE`
+path (counted under the `lmcache_mp.` metrics) and the blend module only
+registers the stored chunks as fingerprints (below).
 
 ### CB Fingerprint Table Metrics
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_blend.fingerprints_registered` | `lmcache_blend_fingerprints_registered_total` | Counter | `CB_FINGERPRINTS_REGISTERED` | `+num_chunks` |
+| `lmcache_blend.fingerprints_registered` | `lmcache_blend_fingerprints_registered_total` | Counter | `CB_FINGERPRINTS_REGISTERED` | `+num_chunks` (chunks newly indexed; re-stores of known content add 0) |
 | `lmcache_blend.chunks_evicted` | `lmcache_blend_chunks_evicted_total` | Counter | `CB_CHUNKS_EVICTED` | `+num_chunks` |
 
 **What it answers:** How many chunks are indexed into the fingerprint table? How many stale entries are evicted?
+
+### CB Phase Metrics
+
+Each `*_duration` histogram pairs its leg's START/END events by
+`(session, worker_id)` and measures the interval the same-named trace span
+covers (see [blend_observability.md](blend_observability.md)) — but is
+always on, where traces are sampled.  The lookup legs run once per request
+(`worker_id=None`); at TP>1 each rank's retrieve/scatter is its own sample, so
+`retrieve_duration` and `scatter_duration` record one observation per rank.
+(The tracing subscriber still pairs those two spans by session only, so at
+TP>1 its `cb.retrieve` / `cb.scatter` spans do not yet match these histograms —
+known follow-up.)
+
+| OTel metric name | Prometheus name | Type | Source events | Calculation |
+|---|---|---|---|---|
+| `lmcache_blend.lookup_duration` | `lmcache_blend_lookup_duration_milliseconds` | Histogram | `CB_LOOKUP_START/END` | end − start, ms |
+| `lmcache_blend.fingerprint_match_duration` | `lmcache_blend_fingerprint_match_duration_milliseconds` | Histogram | `CB_FINGERPRINT_MATCH_START/END` | end − start, ms |
+| `lmcache_blend.prefix_lookup_duration` | `lmcache_blend_prefix_lookup_duration_milliseconds` | Histogram | `CB_PREFIX_LOOKUP_START/END` | end − start, ms |
+| `lmcache_blend.coordinator_match_duration` | `lmcache_blend_coordinator_match_duration_milliseconds` | Histogram | `CB_COORDINATOR_MATCH_START/END` | end − start, ms |
+| `lmcache_blend.sparse_prefetch_duration` | `lmcache_blend_sparse_prefetch_duration_milliseconds` | Histogram | `CB_SPARSE_PREFETCH_START/END` | end − start, ms |
+| `lmcache_blend.retrieve_duration` | `lmcache_blend_retrieve_duration_milliseconds` | Histogram | `CB_RETRIEVE_START/END` | end − start, ms |
+| `lmcache_blend.scatter_duration` | `lmcache_blend_scatter_duration_milliseconds` | Histogram | `CB_SCATTER_START/END` | end − start, ms |
+| `lmcache_blend.fingerprint_matches` | `lmcache_blend_fingerprint_matches_total` | Counter | `CB_FINGERPRINT_MATCH_END` | `+matches` |
+| `lmcache_blend.coordinator_matches` | `lmcache_blend_coordinator_matches_total` | Counter | `CB_COORDINATOR_MATCH_END` | `+matches` |
+| `lmcache_blend.coordinator_match_timeouts` | `lmcache_blend_coordinator_match_timeouts_total` | Counter | `CB_COORDINATOR_MATCH_END` | +1 when `timed_out=True` |
+| `lmcache_blend.sparse_prefetch_l2_keys` | `lmcache_blend_sparse_prefetch_l2_keys_total` | Counter | `CB_SPARSE_PREFETCH_START` | `+l2_keys` |
+| `lmcache_blend.sparse_prefetch_found_keys` | `lmcache_blend_sparse_prefetch_found_keys_total` | Counter | `CB_SPARSE_PREFETCH_END` | `+found_keys` |
+| `lmcache_blend.scatter_tokens` | `lmcache_blend_scatter_tokens_total` | Counter | `CB_SCATTER_START` | `+scattered_tokens` |
+| `lmcache_blend.scatter_prefix_chunks` | `lmcache_blend_scatter_prefix_chunks_total` | Counter | `CB_SCATTER_START` | `+n_prefix` |
+| `lmcache_blend.scatter_shifted_chunks` | `lmcache_blend_scatter_shifted_chunks_total` | Counter | `CB_SCATTER_START` | `+n_shifted` |
+| `lmcache_blend.scatter_dropped_chunks` | `lmcache_blend_scatter_dropped_chunks_total` | Counter | `CB_SCATTER_START` | `+dropped` |
+
+**What it answers:** Where CB lookup latency goes (prefix leg, sparse L2
+prefetch, fingerprint match, or poll-wait), how much of the retrieve is the GPU
+scatter, and how much reuse is re-RoPE'd vs loaded as-is.
+
+Caveats:
+
+- `lookup_duration` covers the poll waits between re-issues, so it far exceeds
+  the sum of its legs.  That gap is the L2-load wait.
+- `sparse_prefetch_*` only covers lookups that actually read L2 (the event pair
+  is skipped when every match is L1-resident), so its denominator is smaller
+  than `lookup_requests`.
+- `found_keys` counts every resident key, `l2_keys` only those needing a read —
+  not a subset, so don't divide them.
+- `retrieve_duration` and `scatter_duration` come from stream callbacks; a pair
+  that inverts against a CPU timestamp is dropped, never recorded negative.
+- Unmatched STARTs (abandoned lookups) are evicted from a bounded LRU; the
+  first eviction logs one warning per subscriber.  A steady stream of evictions
+  means some phase is not publishing its END.
 
 ---
 

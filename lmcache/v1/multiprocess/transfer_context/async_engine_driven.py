@@ -19,6 +19,7 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     IPCEvent,
     _single_group_block_ids,
 )
+from lmcache.v1.multiprocess.transport.base import RequestClient
 
 logger = init_logger(__name__)
 
@@ -66,16 +67,20 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
     def __init__(
         self,
+        instance_id: int,
+        req_client: RequestClient,
         commit_workers: int = DEFAULT_ENGINE_DRIVEN_COMMIT_WORKERS,
     ) -> None:
         """Initialize the async context and create its async resources.
 
         Args:
+            instance_id: Worker process instance identifier.
+            req_client: Transport client for this worker.
             commit_workers: Number of background threads used to run commit
                 (CPU->server) work. >1 so a slow gather for one store does not
                 block the commit of another whose gather is already done.
         """
-        super().__init__()
+        super().__init__(instance_id, req_client)
         self._commit_workers = max(1, int(commit_workers))
         self._copy_stream: Any = torch_dev.Stream()
         self._commit_executor: ThreadPoolExecutor = ThreadPoolExecutor(
@@ -151,14 +156,32 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         with self._inflight_lock:
             self._staging_pool.setdefault(key, []).extend(chunks)
 
+    def create_recorded_event(self) -> IPCEvent:
+        """Create a local event that orders compute before the copy stream.
+
+        Returns:
+            A local device event recorded on the current stream. The event is
+            never exported across processes.
+
+        Raises:
+            RuntimeError: If :meth:`register` has not completed.
+        """
+        if self._engine_driven_context is None:
+            raise RuntimeError(
+                "Async engine-driven transfer context is not registered. "
+                "Call register() before creating transfer events."
+            )
+        event = torch_dev.Event()
+        event.record(torch_dev.current_stream())
+        return event
+
     def submit_store(
         self,
         _request_id: str,
         key: Any,
-        instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent,
+        _event: IPCEvent | None,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
         """Three-phase async store (prepare, gather and commit all in background).
@@ -172,7 +195,6 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         Args:
             _request_id: External request identifier (used for logging).
             key: LMCache key object for the store range.
-            instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
             block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
             _event: Synchronization event; ``wait()`` is called in background.
@@ -189,6 +211,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             raise RuntimeError(
                 "Engine-driven transfer context is not registered. "
                 "Call register() before submit_store()."
+            )
+        if _event is None:
+            raise RuntimeError(
+                "Async engine-driven transfer requires a local ordering event."
             )
         completion: MessagingFuture[bool] = MessagingFuture()
         engine_driven_context = self._engine_driven_context
@@ -217,7 +243,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     # --- Phase 1: prepare_store ---
                     # In pickle mode this is the costliest step (sync RPC
                     # round-trip).  Running it here keeps the forward thread free.
-                    result = engine_driven_context.prepare_store(key, instance_id)
+                    result = engine_driven_context.prepare_store(key, self._instance_id)
                     out_buffers, chunk_indices = (
                         result if result is not None else (None, None)
                     )
@@ -285,7 +311,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     # --- Phase 3: commit ---
                     with self._commit_lock:
                         ok = engine_driven_context.commit_store(
-                            key, instance_id, gather_target
+                            key, self._instance_id, gather_target
                         )
 
                     if not ok:

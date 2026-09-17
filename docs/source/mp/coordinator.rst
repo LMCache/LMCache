@@ -101,6 +101,15 @@ keeps the default below.
      - (empty)
      - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
        is stored in. Empty means that state is lost on restart.
+   * - ``--extra-config``
+     - (empty)
+     - JSON object of settings the core flags do not name, read by whichever
+       view or controller looks for them. Two keys are read by the
+       coordinator itself: ``controller_packages``, a list of importable
+       paths to load out-of-tree controllers from, and
+       ``disabled_controllers``, a list of class names to leave unbuilt --
+       which is how one of those takes a built-in controller's place
+       instead of running beside it.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
@@ -117,6 +126,98 @@ keeps the default below.
      - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
        mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
        local ``/metrics`` endpoint returns 404.
+
+Loading your own controllers
+----------------------------
+
+A **controller** gives the coordinator behaviour of its own — fleet-wide L2
+eviction is one, warm-prefetch dispatch is another. Add yours by putting it in
+any importable package and naming that package in ``--extra-config``. The
+package imports from lmcache; nothing in lmcache imports it.
+
+.. code-block:: python
+
+    # acme_controllers/reaper.py
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from fastapi import APIRouter
+    from lmcache.v1.mp_coordinator.controllers.base import Controller
+    from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+
+
+    class ReaperController(Controller):
+        @classmethod
+        def from_config(cls, config, views):
+            obj = cls()
+            obj.registry = views.get(InstanceRegistry)                  # a shared view
+            obj.interval = config.extra_config.get("acme.interval", 30.0)
+            obj.last_seen = 0
+            return obj
+
+        @asynccontextmanager
+        async def run(self, runtime):                    # background work
+            task = asyncio.create_task(self._sweep())    # 1. start
+            try:
+                yield                                    # 2. serve
+            finally:
+                task.cancel()                            # 3. stop
+
+        def get_routers(self):                           # your endpoints
+            router = APIRouter()
+
+            @router.get("/acme/reaper")
+            async def status():
+                return {"last_seen": self.last_seen}
+
+            return (router,)
+
+        async def _sweep(self):
+            while True:
+                await asyncio.sleep(self.interval)
+                self.last_seen = len(self.registry.all_instances())
+
+``run`` is an async context manager and must do three things, in order:
+
+1. **Start** the background work.
+2. ``yield`` **exactly once** — the coordinator serves for the duration of
+   that yield.
+3. **Stop** the work in a ``finally``, so teardown runs whether shutdown was
+   clean or an exception unwound the stack.
+
+The same JSON names the package and carries the controller's own settings:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "acme.interval": 10
+    }'
+
+    curl -s http://localhost:9300/acme/reaper
+    # -> {"last_seen": 2}
+
+Every hook is optional: write only ``run``, only ``get_routers``, or add
+``consume`` to receive the cache-event stream and ``get_durable_components`` to
+have your state checkpointed. Name a package — scanned entire, so a controller
+that outgrows one file can be a directory — or a single module. A name that
+does not import raises at startup; a controller that raises while starting is
+logged and skipped. Views cannot be added this way: they are the coordinator's
+own shared state, which your controller reads.
+
+**Disabling a built-in controller.** Name its class in
+``disabled_controllers`` and it is not built, taking its endpoints with it —
+which is how a controller of your own replaces one rather than running beside
+it:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "disabled_controllers": ["FleetEvictionController"]
+    }'
+
+A name matching no discovered controller raises at startup.
 
 Coordinator metrics export
 --------------------------
@@ -194,6 +295,9 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
   named server (warm prefetch, pin/unpin, and delete, with more to come).
+- **Fleet memory** -- the ``/instances/usage`` endpoints: how full each
+  server's memory compartments are, joining event-derived usage against the
+  capacity each server declares on the same event stream. Read-only.
 - **CacheBlend fragment lookup** -- ``POST /directory/blend-lookup``: finds
   cached chunk content anywhere inside a query sequence, using the blend index
   derived from the key directory's token bindings. Server-to-coordinator only;
@@ -202,6 +306,15 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
 types live in ``lmcache/v1/mp_coordinator/schemas.py``.
+
+.. tip::
+
+   The read-only endpoints below can be read without ``curl`` and ``jq``.
+   ``lmcache query coordinator --api NAME`` fetches one of them — ``usage``,
+   ``instances``, ``health``, ``directory``, ``keys``, ``quota``,
+   ``quota-config``, ``prefetch``, or ``metrics`` — and prints it as an
+   aligned table with byte counts and ratios already formatted. See
+   :doc:`/cli/query`.
 
 Fleet membership and health
 ---------------------------
@@ -247,7 +360,6 @@ startup.
      - int
      - Optional (default ``0``). ZMQ message-queue port P2P peers send
        lookup/unlock RPCs to; ``0`` when P2P is disabled.
-
 **Response** (``200 OK``):
 
 .. code-block:: json
@@ -719,7 +831,8 @@ List cached keys and their placements, one page at a time.
               "shared": false
             }
           ],
-          "num_tokens": 256
+          "num_tokens": 256,
+          "access_count": 7
         }
       ]
     }
@@ -729,8 +842,9 @@ List cached keys and their placements, one page at a time.
 placements**. ``num_tokens`` reports how many token ids the directory knows for
 the key's chunk (``0`` = unknown) -- fetch the actual tokens via
 ``POST /directory/lookup``, which exists precisely so listing pages stay
-small. Pages of a changing directory may skip or repeat keys (snapshot
-semantics).
+small. ``access_count`` is the number of ``access`` events applied to the key
+since the directory first saw it. Pages of a changing directory may skip or
+repeat keys (snapshot semantics).
 
 **HTTP status codes:**
 
@@ -806,7 +920,8 @@ forms -- supply exactly one:
             {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
              "backend": "dram", "size_bytes": 8388608, "shared": false}
           ],
-          "token_ids": [15496, 11, 995]
+          "token_ids": [15496, 11, 995],
+          "access_count": 7
         }
       ]
     }
@@ -816,7 +931,8 @@ the number of keys requested); ``results`` has one entry per resolved key, in
 request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
 is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
-on, or not yet re-reported after an event gap).
+on, or not yet re-reported after an event gap). ``access_count`` is the number
+of ``access`` events applied to the key, ``0`` for unknown keys.
 
 **HTTP status codes:**
 
@@ -1090,15 +1206,67 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
         }'
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
 
-**Delete (removing cache by token sequence).** Delete a token sequence's cache
-on one named server, addressed by token ids. The coordinator resolves the tokens
-to object keys locally (like pin) and issues a single key-addressed
-``DELETE /cache/objects`` to the named server, which removes them from the
-requested tier(s). The ``tier`` field selects the tier(s): ``l1`` deletes only
-the named server's L1, ``l2`` only L2, ``all`` both. When the tier includes L2,
-the coordinator first drops any key it is protecting with an L2 pin from the
-delete set unless ``force`` is set — so a pinned key is retained in every tier
-the delete would have touched; ``force`` deletes them and drops those pins.
+``GET /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+List the keys currently pinned in the L2 eviction plan.
+
+**Query parameters** (all optional):
+
+.. list-table::
+   :header-rows: 1
+   :width: 100%
+   :widths: 18 16 66
+
+   * - Parameter
+     - Type
+     - Description
+   * - ``cache_salt``
+     - string
+     - Only keys with this salt. Default: all salts.
+   * - ``model_name``
+     - string
+     - Only keys for this model. Default: all models.
+   * - ``offset``
+     - int
+     - Matching keys to skip (``>= 0``). Default ``0``.
+   * - ``limit``
+     - int
+     - Maximum keys to return (``1``-``10000``). Default ``1000``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "total": 12,
+      "pins": [
+        {
+          "key": {
+            "chunk_hash_hex": "aa12...",
+            "model_name": "Qwen/Qwen3-8B",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": "user-a"
+          },
+          "pin_count": 2
+        }
+      ]
+    }
+
+``total`` is the number of pinned keys matching the filters; ``pins`` is the
+requested page in first-pinned order, each with its current ``pin_count``.
+
+**HTTP status codes:**
+
+- ``200``: listed.
+- ``422``: ``offset`` or ``limit`` out of range.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s 'http://localhost:9300/cache/pins?cache_salt=user-a&limit=100'
 
 ``POST /cache/delete``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1148,6 +1316,118 @@ sequence returns ``status`` ``"noop"``.
         }'
     # -> {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
 
+Fleet memory
+------------
+
+The ``/instances/usage`` endpoints report how full each MP server's memory
+compartments are. A **compartment** is one thing that owns bytes: the L1 pool
+of a backing medium, or one L2 adapter. It is identified by
+``(tier, backend)`` -- the same pair cache events tag placements with.
+
+Two inputs are joined, and both ride the cache-event stream. **Usage** is
+derived from the events the servers already publish. **Capacity** arrives as
+a capacity report on the same stream -- once at startup, then whenever an
+adapter is added, removed, or reconfigured. Both are automatic; there is
+nothing to configure beyond pointing servers at a coordinator and leaving
+event reporting enabled.
+
+.. note::
+
+   Capacity travels on the event stream, so disabling event reporting
+   disables both halves together: every ``usage_ratio`` reads ``null``
+   (*unknown*) rather than a ratio against a stale declaration.
+
+These endpoints are read-only. The coordinator never evicts or throttles based
+on them.
+
+.. note::
+
+   ``usage_ratio`` is ``null`` whenever the server declared no capacity for a
+   compartment, and this is common: the ``fs``, ``mooncake``, ``p2p``, and
+   ``sagemaker`` adapters expose no capacity setting at all, and ``s3`` /
+   ``raw_block`` report one only when you set ``max_capacity_gb`` /
+   ``capacity_bytes``. A ``null`` means *unknown*, never *empty* -- do not
+   treat it as ``0``.
+
+   Ratios above ``1.0`` are reported as-is rather than capped. A compartment
+   holding more than its declared capacity means the declaration is wrong, and
+   that is worth seeing.
+
+``GET /instances/usage``
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The whole fleet: every server's compartments, plus the shared pools.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "instances": [
+        {
+          "instance_id": "server-1",
+          "registered": true,
+          "declared_capacity": true,
+          "modules": [
+            {"tier": "l1", "backend": "dram", "shared": false,
+             "used_bytes": 10737418240, "capacity_bytes": 42949672960,
+             "usage_ratio": 0.25},
+            {"tier": "l2", "backend": "fs", "shared": false,
+             "used_bytes": 7516192768, "capacity_bytes": 0,
+             "usage_ratio": null}
+          ]
+        }
+      ],
+      "shared_modules": [
+        {"tier": "l2", "backend": "s3", "shared": true,
+         "used_bytes": 4398046511104, "capacity_bytes": 17592186044416,
+         "usage_ratio": 0.25}
+      ]
+    }
+
+``shared_modules`` holds storage several servers mount -- one S3 bucket, one
+CXL region. These are counted **once for the fleet** and appear in no
+instance's ``modules``. Summing them per mounting server would multiply both
+the bytes and the capacity by the number of mounts.
+
+A server appears when it is registered, when it still holds bytes, or when it
+declared capacity. ``registered: false`` therefore means a departed server
+whose L2 data outlived it; its L1 bytes are dropped when it goes.
+
+**Example:**
+
+.. code-block:: bash
+
+    # Which servers are most heavily loaded?
+    curl -s http://localhost:9300/instances/usage | jq -r '
+      .instances[] | .instance_id as $i | .modules[]
+      | select(.usage_ratio != null)
+      | "\($i) \(.tier)/\(.backend) \((.usage_ratio*100|floor))%"'
+    # -> server-1 l1/dram 25%
+    # -> server-2 l1/dram 81%
+
+``GET /instances/{instance_id}/usage``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One server's compartments, in the same shape as an entry of ``instances``
+above.
+
+**HTTP status codes:**
+
+- ``200``: found.
+- ``404``: the coordinator knows nothing about this id -- it is not
+  registered, holds no bytes, and declared no capacity.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/instances/server-1/usage
+
+A server whose L1 pool uses the default lazy allocator grows its heap on
+demand. Capacity here is the **configured** size, not the grown heap, so a
+freshly started server correctly reads near ``0``\% rather than near full.
+
 CacheBlend fragment lookup
 --------------------------
 
@@ -1166,7 +1446,9 @@ only). Matching is chunked at the coordinator's ``--chunk-size`` — which must
 equal the MP servers' ``--chunk-size`` — probing every
 ``--blend-probe-stride`` positions.
 
-**Request body:**
+**Request body** — the query tokens plus the caller's identity, which names
+the namespace matches are scoped to. ``model_name`` is not optional: without
+it there is no namespace to scope to.
 
 .. list-table::
    :header-rows: 1
@@ -1178,7 +1460,24 @@ equal the MP servers' ``--chunk-size`` — probing every
    * - ``tokens_b64``
      - string
      - Query tokens packed as base64 little-endian ``uint32`` (see
-       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``).
+       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``). Required.
+   * - ``model_name``
+     - string
+     - Model the caller retrieves under. Required.
+   * - ``world_size``
+     - int
+     - The caller's world size (TP x PP), selecting its rank fan-out.
+       Defaults to ``1``.
+   * - ``cache_salt``
+     - string
+     - The caller's per-tenant isolation salt. Defaults to ``""``.
+
+``model_name`` / ``world_size`` / ``cache_salt`` are the same three fields
+``/directory/lookup``'s tokens form carries, but serve a different purpose
+here: prefix lookup uses them to *build* the keys it resolves, while a
+fragment match already names a stored chunk hash and uses them to stay in
+the namespace the caller can retrieve from. The token encodings differ
+between the two endpoints for now.
 
 **Response** (``200 OK``):
 
@@ -1199,10 +1498,17 @@ position in the query (re-RoPE target). Matches are sorted ascending by
 them resolves overlaps itself. A query shorter than one chunk, or a coordinator
 without ``--enable-blend-lookup``, returns ``{"matches": []}``.
 
+Only chunks some instance stored under the request's
+``model_name`` / ``cache_salt`` / ``world_size`` are returned. A chunk hash
+names content and prefix only, so an unscoped match could name KV under
+another model or tenant, which the caller's own key expansion could never
+retrieve. Content held solely by another namespace therefore returns no
+match rather than one that misses at prefetch.
+
 **HTTP status codes:**
 
 - ``200``: lookup completed (an empty match list is not an error).
 - ``422``: ``tokens_b64`` is not valid base64 or not a whole number of
-  ``uint32`` tokens.
+  ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.

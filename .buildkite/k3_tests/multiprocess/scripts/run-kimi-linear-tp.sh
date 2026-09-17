@@ -58,7 +58,7 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1500}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 # Readiness timeout per vLLM launch. This is owned by the test (a 48B TP-shard
 # load is slow) and deliberately does NOT reuse MAX_WAIT_SECONDS, which
-# run-single-test.sh pre-exports to 300s -- that would shadow the value here.
+# run-single-test.sh pre-exports to 600s -- that would shadow the value here.
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-900}"
 # Seconds to wait for vLLM's GPU memory to be released after a restart before
 # relaunching (avoids an OOM racing the dying process).
@@ -129,7 +129,7 @@ launch_vllm() {
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --port "$saved_port" \
         --block-size 944 \
-        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
+        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
     echo "$VLLM_PID" >> "$PID_FILE"
@@ -184,10 +184,14 @@ stop_vllm() {
     fi
     # Free the serving port in case a child socket lingers.
     fuser -k "${VLLM_PORT}/tcp" 2>/dev/null || true
-    # GPU 1 is used exclusively by vLLM (the LMCache server pins its CUDA
-    # context on GPU 0), so its memory dropping to near-idle is a clean signal
-    # that the old vLLM (and its TP workers) are fully gone.
+    # TP=2 puts a vLLM rank on GPU 0 and GPU 1, so both have to come back
+    # before the relaunch sizes its KV cache -- waiting on GPU 1 alone let a
+    # rank-0 allocation that outlived the process shrink the relaunch's budget
+    # ("Free memory on device cuda:0 ... less than desired GPU memory
+    # utilization"). GPU 1 is vLLM's alone; GPU 0 also carries the LMCache
+    # server, so it is measured against the pre-vLLM baseline.
     wait_for_gpu_release 1 2000
+    wait_for_gpu_release 0 $(( GPU0_BASELINE_MIB + 2000 ))
 }
 
 # Send one greedy completion request and write the generated text to a file.
@@ -238,6 +242,7 @@ count_retrieves() {
 # ── 1. Launch LMCache MP server (kept alive across the vLLM restart) ──
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT) ==="
 lmcache server \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --host localhost \
     --port "$LMCACHE_PORT" \
     --chunk-size "$CHUNK_SIZE" \
@@ -250,6 +255,13 @@ LMCACHE_PID=$!
 echo "$LMCACHE_PID" >> "$PID_FILE"
 echo "LMCache MP server started (PID=$LMCACHE_PID)"
 sleep 10
+
+# Everything on GPU 0 that is not vLLM (the LMCache server's CUDA context and
+# its buffers). stop_vllm waits for GPU 0 to come back to this, so the wait
+# does not depend on guessing the server's footprint.
+GPU0_BASELINE_MIB=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
+    -i 0 2>/dev/null | tr -d ' ' || echo 0)
+echo "GPU 0 baseline before vLLM: ${GPU0_BASELINE_MIB} MiB"
 
 # ── 2. Build a long, deterministic prompt, then ask for a summary ──
 # A ~7-8k word document (well over the several-thousand-token span needed for

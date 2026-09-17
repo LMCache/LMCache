@@ -8,7 +8,7 @@ sites.
 """
 
 # Standard
-from typing import Literal, TypedDict, Union
+from typing import Literal, TypedDict, Union, get_args
 
 # Third Party
 import torch
@@ -21,6 +21,9 @@ import torch
 # containers (e.g. vLLM's ``dict[str, torch.Tensor]``) are responsible
 # for unwrapping to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
+
+KVLayoutName = Literal["NHD", "HND", "BLHNC", "BLNHC"]
+KV_LAYOUT_NAMES: tuple[str, ...] = get_args(KVLayoutName)
 
 
 class LayoutHints(TypedDict, total=False):
@@ -35,18 +38,24 @@ class LayoutHints(TypedDict, total=False):
             ``"NHD"`` -- heads after block-size (default for most
             vLLM builds).
             ``"HND"`` -- heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
+            ``"BLHNC"`` / ``"BLNHC"`` -- blocks outermost, all layers
+            packed per block (vLLM standardized layouts).
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (to
             reshape its pool tensor) and by SGLang MHA (to split the
             folded ``page_buffer_size`` dimension into separate
-            ``num_blocks`` and ``block_size``). Presence of this field
-            on a SGLang registration is what triggers the daemon-side
-            depth-1 -> depth-2 un-flatten + 3-D -> 4-D reshape.
+            ``num_blocks`` and ``block_size``).
+        kv_list_layout: Outer SGLang KV-cache list organization. ``"k_v"``
+            identifies a flat registration containing equal K and V layer
+            halves; combined with ``tokens_per_block``, it triggers
+            daemon-side un-flattening and 3-D to 4-D reshaping even when
+            tensor parallelism leaves one KV head per rank.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
-    kv_layout: Literal["NHD", "HND"]
+    kv_layout: KVLayoutName
     num_kv_heads: int
     tokens_per_block: int
+    kv_list_layout: Literal["k_v"]
     head_dim: int
