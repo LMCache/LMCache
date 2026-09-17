@@ -32,8 +32,8 @@ from lmcache.v1.multiprocess.modules.layer_major_plan import (
     set_layer_major_staging_enabled,
     uniform_stride_runs,
 )
-from lmcache.v1.platform.cuda.cache_context import (
-    _TempGPUBuffer,
+from lmcache.v1.platform.cuda.cache_context import _TempGPUBuffer
+from lmcache.v1.platform.cuda.cache_context_layerwise import (
     _TempLayerMajorGPUBuffer,
 )
 import lmcache.lmcache_native as lmcache_native
