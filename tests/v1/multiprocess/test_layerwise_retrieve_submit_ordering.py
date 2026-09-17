@@ -25,6 +25,7 @@ import pytest
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.futures_layerwise import LayerwiseRawFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq_streaming import StreamingMessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.transfer_context import worker_transfer_layerwise
 from lmcache.v1.multiprocess.transfer_context.worker_transfer_layerwise import (
@@ -52,7 +53,7 @@ class _RecordingClient:
 
     def submit_streaming_request(self, request_type, request_payloads, future):
         """Real streaming submit, driven against this stub's plumbing."""
-        return MessageQueueClient.submit_streaming_request(
+        return StreamingMessageQueueClient.submit_streaming_request(
             self, request_type, request_payloads, future
         )
 
@@ -133,7 +134,7 @@ def _make_context(client: _RecordingClient) -> LMCacheLayerwiseTransferContext:
     # ``Any`` so the stub collaborators below can stand in for the concrete
     # client/backend/pool types the context annotates.
     ctx: Any = object.__new__(LMCacheLayerwiseTransferContext)
-    ctx._req_client = ZmqMultiprocessClient(cast(MessageQueueClient, client))
+    ctx._req_client = ZmqMultiprocessClient(cast(StreamingMessageQueueClient, client))
     ctx._instance_id = 7
     ctx._device = 0
     ctx._event_backend = _StubEventBackend()
@@ -254,7 +255,7 @@ def test_partial_frame_re_registers_the_future():
 def test_streaming_submit_matches_the_base_client():
     """The streaming helper must build the same request as ``submit_request``.
 
-    ``MessageQueueClient.submit_streaming_request`` duplicates the
+    ``StreamingMessageQueueClient.submit_streaming_request`` duplicates the
     request-building half of ``submit_request`` so that the per-chunk path
     carries nothing about streaming.  This pins the two together: the comparison is
     driven by ``dataclasses.fields``, so a field added to ``WrappedRequest``
@@ -267,7 +268,7 @@ def test_streaming_submit_matches_the_base_client():
     base_request = base_client.input_queue.get_nowait()
 
     stream_client = _make_bare_client()
-    MessageQueueClient.submit_streaming_request(
+    StreamingMessageQueueClient.submit_streaming_request(
         stream_client,
         RequestType.RETRIEVE_LAYERWISE,
         ["payload", 7],

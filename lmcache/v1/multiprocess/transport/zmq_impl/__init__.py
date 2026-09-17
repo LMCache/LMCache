@@ -5,7 +5,7 @@
 from typing import Any
 
 # First Party
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq_streaming import StreamingMessageQueueClient
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.zmq_impl.client import (
     ZmqMultiprocessClient,
@@ -31,7 +31,9 @@ def create_request_client(
         import zmq
 
         context = zmq.Context.instance()
-    return ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+    # The streaming subclass only adds the multi-frame submit path; every
+    # inherited request type behaves exactly as on the plain client.
+    return ZmqMultiprocessClient(StreamingMessageQueueClient(server_url, context))
 
 
 __all__ = ["ZmqMultiprocessClient", "create_request_client"]

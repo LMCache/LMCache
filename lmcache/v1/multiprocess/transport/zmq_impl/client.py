@@ -6,7 +6,7 @@ from typing import Any
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq_streaming import StreamingMessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_response_class,
@@ -24,14 +24,15 @@ class ZmqMultiprocessClient(LayerwiseRequestClient, RequestClient):
     """Expose named multiprocess RPC methods over the existing ZMQ client.
 
     The wrapper changes only the Python call surface. Every method delegates to
-    :class:`MessageQueueClient` with the existing ``RequestType`` and positional
-    payload list, so the ZMQ wire protocol and server remain unchanged.
+    :class:`StreamingMessageQueueClient` with the existing ``RequestType``
+    and positional payload list, so the ZMQ wire protocol and server remain
+    unchanged.
 
     Args:
         message_queue_client: Existing ZMQ message queue client to wrap.
     """
 
-    def __init__(self, message_queue_client: MessageQueueClient) -> None:
+    def __init__(self, message_queue_client: StreamingMessageQueueClient) -> None:
         self._message_queue_client = message_queue_client
 
     def register_layerwise_ipc_event_pool(

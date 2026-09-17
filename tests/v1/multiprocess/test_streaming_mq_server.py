@@ -2,7 +2,7 @@
 """Runtime tests for the layer-wise streaming message queue path.
 
 These exercise the real wire: a :class:`StreamingMessageQueueServer` bound to
-loopback, a real :class:`MessageQueueClient`, and msgspec encoding of the
+loopback, a real :class:`StreamingMessageQueueClient`, and msgspec encoding of the
 actual ``RETRIEVE_LAYERWISE`` response class.  The other layer-wise tests only
 introspect signatures, so without these the streaming dispatch, the
 ``response_channel`` keyword forwarding and the multi-frame framing never
@@ -24,10 +24,10 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures_layerwise import LayerwiseRawFuture
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
-    MessageQueueClient,
     MessageQueueServer,
 )
 from lmcache.v1.multiprocess.mq_streaming import (
+    StreamingMessageQueueClient,
     StreamingMessageQueueServer,
     StreamingRequestHandler,
 )
@@ -99,7 +99,9 @@ def streaming_pair():
     """Yield a live (server, client, url) triple on loopback."""
     created: list[Any] = []
 
-    def _build(handler) -> tuple[StreamingMessageQueueServer, MessageQueueClient]:
+    def _build(
+        handler,
+    ) -> tuple[StreamingMessageQueueServer, StreamingMessageQueueClient]:
         url = _free_url()
         context = zmq.Context.instance()
         server = StreamingMessageQueueServer(url, context)
@@ -111,7 +113,7 @@ def streaming_pair():
         )
         server.add_affinity_thread_pool([REQUEST_TYPE], max_workers=2)
         server.start()
-        client = MessageQueueClient(url, context)
+        client = StreamingMessageQueueClient(url, context)
         created.append((server, client))
         return server, client
 
@@ -122,7 +124,9 @@ def streaming_pair():
         server.close()
 
 
-def _submit(client: MessageQueueClient) -> tuple[LayerwiseRawFuture, queue.Queue]:
+def _submit(
+    client: StreamingMessageQueueClient,
+) -> tuple[LayerwiseRawFuture, queue.Queue]:
     partials: queue.Queue = queue.Queue()
     raw: LayerwiseRawFuture = LayerwiseRawFuture(partials)
     client.submit_streaming_request(REQUEST_TYPE, _payloads(), raw)

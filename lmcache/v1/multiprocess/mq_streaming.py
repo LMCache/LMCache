@@ -16,13 +16,14 @@ built as :class:`StreamingMessageQueueServer` can route one.
 
 # Standard
 from concurrent.futures import Future
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
+    MessageQueueClient,
     MessageQueueServer,
     RequestHandlerBase,
     ResponseType,
@@ -34,6 +35,10 @@ from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_response_class,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.futures_layerwise import LayerwiseRawFuture
 
 logger = init_logger(__name__)
 
@@ -163,3 +168,54 @@ class StreamingMessageQueueServer(MessageQueueServer):
             self.add_streaming_handler(request_type, payload_clss, handler)
             return
         super().add_handler(request_type, payload_clss, handler_type, handler)
+
+
+class StreamingMessageQueueClient(MessageQueueClient):
+    """Client counterpart of :class:`StreamingMessageQueueServer`.
+
+    Adds the submit path for a request whose reply arrives as several frames.
+    The base client is left untouched, so a deployment that never issues a
+    streaming request keeps its dispatch and its request table unchanged.
+    """
+
+    def submit_streaming_request(
+        self,
+        request_type: RequestType,
+        request_payloads: list[Any],
+        future: "LayerwiseRawFuture",
+    ) -> "LayerwiseRawFuture":
+        """Submit a request whose reply arrives as several frames.
+
+        The streaming counterpart of
+        :meth:`~lmcache.v1.multiprocess.mq.MessageQueueClient.submit_request`.
+        The only difference is that the future is supplied by the caller and
+        bound to the pending-request table first, so it can re-arm itself
+        between frames. Binding must happen before the request reaches the
+        polling loop, because a reply can land the moment it does.
+
+        The request-building below deliberately mirrors ``submit_request``;
+        the two are pinned together by
+        ``test_streaming_submit_matches_the_base_client`` so this copy cannot
+        silently fall behind.
+
+        Args:
+            request_type: The type of the request.
+            request_payloads: The payloads of the request.
+            future: The future to complete, created by the caller so that
+                per-layer state is attached before any frame can arrive.
+
+        Returns:
+            The same future, now registered with the polling loop.
+        """
+        request_uid = next(self._request_counter)
+        future.bind_registry(self.pending_futures, request_uid)
+        self.input_queue.put(
+            MessageQueueClient.WrappedRequest(
+                request_uid=request_uid,
+                future=future,
+                request_type=request_type,
+                request_payloads=request_payloads,
+            )
+        )
+        self._polling_loop.notify()
+        return future
