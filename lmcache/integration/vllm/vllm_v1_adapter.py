@@ -35,6 +35,7 @@ from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
     extract_request_configs_from_sampling_params,
+    is_rswa_model,
     lmcache_get_or_create_config,
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
@@ -449,7 +450,23 @@ class LMCacheConnectorV1Impl:
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
-    ):
+        kv_cache_config: Any | None = None,
+    ) -> None:
+        # vLLM's built-in LMCacheConnectorV1 instantiates this adapter
+        # directly. Keep the safety check in this common entry point so every
+        # in-process path fails before starting services or creating a cache
+        # engine. External wrappers may pass the resolved KV groups; vLLM's
+        # built-in wrapper falls back to the model-level R-SWA marker.
+        if is_rswa_model(vllm_config, kv_cache_config):
+            raise ValueError(
+                "LMCacheConnectorV1 does not support Reference Sliding Window "
+                "Attention (R-SWA). Use the LMCache-shipped LMCacheMPConnector "
+                "with kv_connector_module_path="
+                "'lmcache.integration.vllm.lmcache_mp_connector'; it caches "
+                "only the immutable prompt. Alternatively, disable LMCache "
+                "for this model."
+            )
+
         # Banner from the scheduler role only, so tensor-parallel
         # deployments print it once rather than once per worker.
         if role == KVConnectorRole.SCHEDULER:
