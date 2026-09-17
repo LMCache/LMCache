@@ -605,9 +605,9 @@ class LocalDiskBackend(StorageBackendInterface):
         )
         for key in keys:
             with self.disk_lock:
-                assert (
-                    key in self.dict
-                ), f"Key {key} not found in disk cache after pinning"
+                assert key in self.dict, (
+                    f"Key {key} not found in disk cache after pinning"
+                )
 
                 path = self.dict[key].path
                 dtype = self.dict[key].dtype

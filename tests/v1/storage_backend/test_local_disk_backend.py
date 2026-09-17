@@ -643,9 +643,9 @@ class TestBatchedGetBlocking:
 
         assert all(r is not None for r in results)
         # With 4 keys and 4 threads, we should see more than 1 unique thread.
-        assert (
-            len(set(thread_ids)) > 1
-        ), f"Expected multiple threads, got {set(thread_ids)}"
+        assert len(set(thread_ids)) > 1, (
+            f"Expected multiple threads, got {set(thread_ids)}"
+        )
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_empty_keys_list(self, local_disk_backend: LocalDiskBackend) -> None:
