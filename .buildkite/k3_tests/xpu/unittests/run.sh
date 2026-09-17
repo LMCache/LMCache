@@ -18,7 +18,9 @@ fail() {
 [ -f /opt/intel/oneapi/setvars.sh ] || fail "/opt/intel/oneapi/setvars.sh not found"
 # shellcheck disable=SC1091
 log "enable Intel XPU runtime environment"
+set +u
 source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+set -u
 
 log "checking torch.xpu and xpu h/w availability"
 python - <<'PY'

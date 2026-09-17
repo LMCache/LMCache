@@ -103,7 +103,7 @@ fi
 PINNED_XPU_IMAGE="${PINNED_XPU_IMAGE:-}"
 USE_PINNED_XPU_RUNTIME="${USE_PINNED_XPU_RUNTIME:-true}"
 LMCACHE_XPU_RUNTIME_HISTORY_URL="${LMCACHE_XPU_RUNTIME_HISTORY_URL:-https://raw.githubusercontent.com/LMCache/LMCache/buildkite_latest_tested_vllm/tested_runtimes.jsonl}"
-XPU_RELEASE_IMAGE="${XPU_RELEASE_IMAGE:-vllm/vllm-openai-xpu:v0.29.0}"
+XPU_RELEASE_IMAGE="${XPU_RELEASE_IMAGE:-vllm/vllm-openai-xpu:v0.26.0}"
 
 latest_xpu_image_from_history() {
     local history="$1"
