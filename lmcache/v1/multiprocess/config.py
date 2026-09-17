@@ -13,6 +13,10 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.server_module import (
+    ServerModuleSpec,
+    parse_server_module_specs,
+)
 
 logger = init_logger(__name__)
 
@@ -135,6 +139,9 @@ class MPServerConfig:
     """Engine block ID that denotes absent KV data. The default ``0`` keeps
     compatibility with vLLM; engines where block zero is valid can select a
     different sentinel, for example ``-1``."""
+
+    server_modules: list[ServerModuleSpec] = field(default_factory=list)
+    """Out-of-tree server-module factories to load after built-in modules."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -537,6 +544,16 @@ def add_mp_server_args(
         "Options: transfer_query (see lmcache.v1.multiprocess.modules."
         "experimental.__init___.py).",
     )
+    mp_group.add_argument(
+        "--server-module",
+        action="append",
+        default=[],
+        help="JSON object describing an out-of-tree server-module factory. "
+        "Repeat to load multiple modules. Example: "
+        '\'{"module_path":"my_pkg.server_module",'
+        '"factory_name":"build_server_modules",'
+        '"config":{"name":"demo"}}\'.',
+    )
     return parser
 
 
@@ -589,6 +606,7 @@ def parse_args_to_mp_server_config(
         session_ttl_seconds=args.session_ttl_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
+        server_modules=parse_server_module_specs(args.server_module or []),
     )
 
 
