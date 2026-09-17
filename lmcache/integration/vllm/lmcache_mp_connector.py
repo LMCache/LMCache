@@ -474,7 +474,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig | None" = None,
-    ):
+    ) -> None:
         # Older supported vLLM releases allow connectors to omit this value,
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
@@ -494,6 +494,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
+        self._can_store = vllm_config.kv_transfer_config.is_kv_producer
 
         self._eager_prefetch: bool = bool(
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -919,7 +920,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:
-            val = self.worker_adapter.get_finished(finished_req_ids)
+            # The adapter reports engine-finished IDs even without a STORE.
+            # Consumers never delay frees for saves, but must still poll retrieves.
+            val = self.worker_adapter.get_finished(
+                finished_req_ids if self._can_store else set()
+            )
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
@@ -1334,7 +1339,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
-        return True, (return_params or None)
+        return self._can_store, (return_params or None)
 
     def request_finished_all_groups(
         self,
@@ -1454,6 +1459,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
+            if not self._can_store:
+                continue
+
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
                 lmcache_tokens_per_chunk,
@@ -1486,6 +1494,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # stay consistent with _process_new_requests.
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+
+            if not self._can_store:
+                continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
