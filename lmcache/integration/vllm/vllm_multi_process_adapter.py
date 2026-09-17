@@ -1293,6 +1293,10 @@ class LMCacheMPWorkerAdapter:
         # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         self._dropped_retrieves: set[str] = set()
 
+        # Engine-finished requests the scheduler-side connector told vLLM to
+        # free itself (no forward pass ran in their current generation).
+        # They must never be reported in finished_sending.
+        self._skip_finished_sending: set[str] = set()
         # The store requests that have finished execution in LMCache
         self.finished_stores: set[str] = set()
         # The finished request ids that are passed via vLLM and also
@@ -1835,9 +1839,19 @@ class LMCacheMPWorkerAdapter:
     ) -> set[str]:
         """Merge LMCache-side and engine-side finished store info."""
         self.finished_stores.update(finished_req_ids_from_lmcache)
+        # Stores of requests we already reported (or were told to skip) can
+        # still complete later; they must not linger in finished_stores.
+        self.finished_stores.difference_update(self._returned_finished)
         ret_stores = set()
         for req_id in finished_req_ids_from_engine:
             if req_id in self._returned_finished:
+                continue
+            if req_id in self._skip_finished_sending:
+                # vLLM frees these blocks itself; reporting the id would make
+                # the scheduler free them twice.
+                self._skip_finished_sending.discard(req_id)
+                self._returned_finished.add(req_id)
+                self.finished_stores.discard(req_id)
                 continue
             if req_id in self.finished_stores or req_id in self.store_futures:
                 self.previously_finished.add(req_id)
@@ -2159,8 +2173,46 @@ class LMCacheMPWorkerAdapter:
         if not self.is_healthy or self.transfer_ctx is None:
             return
         self.transfer_ctx.flush_inflight_stores()
+        self._wait_for_outstanding_stores()
         # Force device sync here, compare to preemption, perf panelty is trivial
         torch_dev.synchronize()
+
+    def _wait_for_outstanding_stores(self) -> None:
+        """Block until every submitted store has finished reading GPU blocks.
+
+        On the LMCache-driven path the server copies the KV blocks on its
+        own stream after the forward pass that produced them; vLLM never
+        waits for that copy.  When the scheduler preempts a request it frees
+        those blocks immediately and may hand them to another request in the
+        same step, whose forward pass would then overwrite blocks the server
+        is still reading, committing the wrong KV under the preempted
+        request's keys.  Waiting on the store futures here (their device
+        event fires when the server's copy is done) closes that window; it
+        only runs on steps the scheduler flagged as having preempted or
+        resumed requests.  A timeout is logged and skipped rather than raised
+        so a slow server degrades to a possible stale store instead of a
+        crashed engine.
+        """
+        for request_id, future in list(self.store_futures.items()):
+            if future.query():
+                continue
+            try:
+                completed = future.wait(timeout=self._mq_timeout)
+            except Exception:
+                logger.exception(
+                    "Failed waiting for the outstanding store of request %s "
+                    "before a preemption-affected forward pass",
+                    request_id,
+                )
+                continue
+            if not completed:
+                logger.warning(
+                    "Store of request %s did not complete within %.1fs before a "
+                    "preemption-affected forward pass; its KV blocks may be "
+                    "overwritten while the server is still reading them",
+                    request_id,
+                    self._mq_timeout,
+                )
 
     def shutdown(self) -> None:
         """
@@ -2198,6 +2250,21 @@ class LMCacheMPWorkerAdapter:
         self.request_telemetry.close()
 
     # Helper functions
+    def skip_finished_sending(self, request_ids: set[str]) -> None:
+        """Record engine-finished requests that must not be reported as sent.
+
+        The scheduler-side connector returned ``delay_free=False`` for these
+        requests (their current generation never ran a forward pass, so no
+        STORE reads their blocks) and vLLM frees their blocks itself.  A
+        later ``finished_sending`` for them would trip the scheduler's
+        double-free assertion.
+
+        Args:
+            request_ids: Ids from this step's ``finished_without_store``
+                connector metadata.
+        """
+        self._skip_finished_sending.update(request_ids)
+
     def _update_and_get_finished_store(
         self,
     ) -> set[str]:

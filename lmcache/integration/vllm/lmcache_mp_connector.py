@@ -606,6 +606,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            # Finished requests whose blocks vLLM frees itself; drained into
+            # the next step's connector metadata (see request_finished).
+            self._finished_without_store: set[str] = set()
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -884,6 +887,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # NOTE2: preemption hint is managed by KVConnectorRole.SCHEDULER,
     #        that's why here we have to judge preemption by
     #        need_flush_before_forward flag which is set by SCHEDULER.
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        """Bind this step's metadata and forward scheduler decisions to the worker.
+
+        Args:
+            connector_metadata: Metadata produced by the scheduler-side
+                connector for this step.
+        """
+        super().bind_connector_metadata(connector_metadata)
+        worker_adapter = getattr(self, "worker_adapter", None)
+        if self.role != KVConnectorRole.WORKER or worker_adapter is None:
+            return
+        if (
+            isinstance(connector_metadata, LMCacheMPConnectorMetadata)
+            and connector_metadata.finished_without_store
+        ):
+            worker_adapter.skip_finished_sending(
+                connector_metadata.finished_without_store
+            )
+
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         """Flush async engine-driven stores only when scheduler metadata requests it.
 
@@ -1029,10 +1051,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connectivity issues or eviction), those tokens must not be taken
             into account.
         """
+        # A resumed (PREEMPTED) request gets a fresh tracker and a fresh
+        # lookup over all of its tokens (prompt + generated so far), so the
+        # KV it stored before preemption can be loaded back instead of being
+        # recomputed.  See docs/design/integration/vllm/mp_preemption_correctness.md.
         tracker = self._get_or_create_request_tracker(request)
-        # TODO: support loading KV for preempted requests in the future
-        if request.status == RequestStatus.PREEMPTED:
-            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1099,12 +1122,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if ret == 0:
             return 0, False
 
-        assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
+        if ret % self.scheduler_adapter.lmcache_tokens_per_chunk != 0:
+            raise ValueError(
+                f"LMCache hit {ret} for request {request.request_id} is not a "
+                f"multiple of the chunk size "
+                f"{self.scheduler_adapter.lmcache_tokens_per_chunk}"
+            )
 
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
-
-        tracker.num_lmcache_hit_tokens = ret
+        # The scheduler polls this method again, without an intervening
+        # update_state_after_alloc(), whenever allocate_slots() fails (common
+        # under the memory pressure that causes preemption).  The adapter
+        # caches the lookup result, so record the hit idempotently rather than
+        # accumulating it: the tokens LMCache already holds are exactly ``ret``.
+        tracker.set_lookup_hit(ret)
 
         need_to_load = max(0, ret - num_computed_tokens)
 
@@ -1243,6 +1273,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
+        # These ids appear in this same SchedulerOutput's finished_req_ids, so
+        # the worker sees the skip instruction together with the finish signal.
+        metadata.finished_without_store = self._finished_without_store
+        self._finished_without_store = set()
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1320,6 +1354,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        # Whether this generation of the request ever ran a forward pass
+        # (and therefore may have STORE ops reading its current blocks).
+        tracker = self.request_trackers.get(request.request_id)
+        had_forward = tracker is not None and tracker.num_scheduled_tokens > 0
+
+        # A lookup whose hit was reported but never consumed by
+        # update_state_after_alloc() (the request finished or was aborted
+        # while still waiting, e.g. while PREEMPTED) still holds the server's
+        # prefetch read locks.  Release them here; nothing else will.
+        self._release_unconsumed_lookup_locks(request.request_id)
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
@@ -1339,6 +1384,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
+
+        if not had_forward:
+            # No forward pass ran for this generation, so no STORE can be
+            # reading its blocks.  Let vLLM free them (immediately, or on
+            # finished_recving if an async load is still in flight) and tell
+            # the worker not to report finished_sending for this id: vLLM
+            # asserts on a finished_sending id it no longer tracks, which is
+            # exactly what happened for requests aborted or failed while in
+            # WAITING_FOR_REMOTE_KVS.
+            self._finished_without_store.add(request.request_id)
+            return False, (return_params or None)
         return self._can_store, (return_params or None)
 
     def request_finished_all_groups(
@@ -1584,7 +1640,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: "Request"
     ) -> LMCacheMPRequestTracker:
         request_id = request.request_id
-        # Remove the old trackers that is created before the preemption
+        # A preempted request lost all of its GPU blocks and will be
+        # re-admitted like a new request (vLLM resets num_computed_tokens to
+        # 0 and re-runs the APC lookup over prompt + generated tokens).  Drop
+        # the previous generation's tracker so the request gets a fresh
+        # lookup, fresh block list and fresh store cursor.
         if (
             request.status == RequestStatus.PREEMPTED
             and request_id in self.request_trackers
@@ -1611,6 +1671,38 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
+
+    def _release_unconsumed_lookup_locks(self, request_id: str) -> None:
+        """Free prefetch read locks for a lookup hit that was never admitted.
+
+        Locks taken by a lookup are normally released by
+        ``update_state_after_alloc`` (the part vLLM already has) and by the
+        retrieve (the rest).  A request that leaves while its tracker is still
+        ``PREFETCHING`` with a recorded hit went through neither.
+
+        Args:
+            request_id: The finishing request.
+        """
+        tracker = self.request_trackers.get(request_id)
+        if tracker is None:
+            return
+        if tracker.state != LMCacheMPRequestState.PREFETCHING:
+            return
+        if tracker.num_lmcache_hit_tokens <= 0:
+            return
+        self.scheduler_adapter.free_lookup_locks(
+            token_ids=tracker.get_token_ids(),
+            start=0,
+            end=tracker.num_lmcache_hit_tokens,
+            request_id=request_id,
+            cache_salt=tracker.cache_salt,
+            request_configs=tracker.request_configs,
+        )
+        logger.debug(
+            "Released unconsumed lookup locks for tokens 0-%d of request %s",
+            tracker.num_lmcache_hit_tokens,
+            request_id,
+        )
 
     def _cleanup_request_tracker(self, request_id: str) -> None:
         """

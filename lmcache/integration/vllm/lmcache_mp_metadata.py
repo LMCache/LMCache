@@ -135,6 +135,30 @@ class LMCacheMPRequestTracker:
         """
         self.num_stored_tokens += num_new_tokens
 
+    def set_lookup_hit(self, num_hit_tokens: int) -> None:
+        """Record the LMCache lookup hit for this tracker generation.
+
+        Idempotent: the scheduler may re-poll the connector for the same
+        request before admitting it, and the cached lookup answer must not be
+        counted twice.  The hit both seeds ``num_stored_tokens`` (those tokens
+        are already in LMCache and must not be re-stored) and sets
+        ``num_lmcache_hit_tokens``.
+
+        Args:
+            num_hit_tokens: Chunk-aligned number of leading tokens LMCache holds.
+
+        Raises:
+            ValueError: If called while stores for this generation were already
+                emitted, which would move the store cursor backwards.
+        """
+        if self.num_stored_tokens not in (0, self.num_lmcache_hit_tokens):
+            raise ValueError(
+                f"request {self.request_id}: lookup hit {num_hit_tokens} recorded "
+                f"after {self.num_stored_tokens} tokens were already stored"
+            )
+        self.num_stored_tokens = num_hit_tokens
+        self.num_lmcache_hit_tokens = num_hit_tokens
+
     def append_block_ids(
         self,
         new_block_ids: tuple[list[int], ...],
@@ -367,6 +391,12 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
+        # Requests that finished without a forward pass in their current
+        # generation (aborted while waiting, failed async load, ...).  The
+        # scheduler-side connector told vLLM to free their blocks itself, so
+        # the worker must never report them in ``finished_sending``: vLLM
+        # asserts on a finished_sending id it no longer tracks.
+        self.finished_without_store: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)

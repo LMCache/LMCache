@@ -19,6 +19,9 @@ import torch
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.experimental.dispatcher import Dispatcher
+from lmcache.integration.vllm.lmcache_mp_metadata import (
+    LMCacheMPConnectorMetadata,
+)
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     HeartbeatThread,
     LMCacheMPWorkerAdapter,
@@ -1119,3 +1122,127 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok
+
+
+# ---------------------------------------------------------------------------
+# Preemption support: waiting for outstanding stores, and never reporting
+# finished_sending for requests vLLM frees itself.
+# ---------------------------------------------------------------------------
+
+
+def _pending_store_future(name: str) -> MagicMock:
+    """A store future whose device event has not fired yet."""
+    future = MagicMock(name=name)
+    future.query.return_value = False
+    future.wait.return_value = True
+    return future
+
+
+def test_handle_preemptions_waits_for_outstanding_stores(fake_adapter, monkeypatch):
+    """Every unfinished store future is waited on before the forward pass."""
+    adapter, _send_mock, _future = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock(name="transfer_ctx")
+    pending = _pending_store_future("pending")
+    done = MagicMock(name="done")
+    done.query.return_value = True
+    transfer_ctx.submit_store.side_effect = [pending, done]
+    adapter.transfer_ctx = transfer_ctx
+
+    adapter.submit_store_request("r-pending", _op([[0]]), FakeCudaEvent())
+    adapter.submit_store_request("r-done", _op([[1]]), FakeCudaEvent())
+
+    adapter.handle_preemptions(need_flush_before_forward=True)
+
+    transfer_ctx.flush_inflight_stores.assert_called_once()
+    pending.wait.assert_called_once()
+    done.wait.assert_not_called()
+
+
+def test_handle_preemptions_without_flag_does_not_wait(fake_adapter, monkeypatch):
+    adapter, _send_mock, _future = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock(name="transfer_ctx")
+    pending = _pending_store_future("pending")
+    transfer_ctx.submit_store.return_value = pending
+    adapter.transfer_ctx = transfer_ctx
+    adapter.submit_store_request("r", _op([[0]]), FakeCudaEvent())
+
+    adapter.handle_preemptions(need_flush_before_forward=False)
+
+    transfer_ctx.flush_inflight_stores.assert_not_called()
+    pending.wait.assert_not_called()
+
+
+def test_handle_preemptions_survives_store_wait_failure(fake_adapter, monkeypatch):
+    """A slow or failed store must degrade to a log line, not an engine crash."""
+    adapter, _send_mock, _future = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock(name="transfer_ctx")
+    pending = _pending_store_future("pending")
+    pending.wait.side_effect = TimeoutError("server is slow")
+    transfer_ctx.submit_store.return_value = pending
+    adapter.transfer_ctx = transfer_ctx
+    adapter.submit_store_request("r", _op([[0]]), FakeCudaEvent())
+
+    adapter.handle_preemptions(need_flush_before_forward=True)
+
+    pending.wait.assert_called_once()
+
+
+def test_skipped_requests_are_never_reported_as_finished_sending(fake_adapter):
+    """An engine-finished id in the skip set is consumed silently."""
+    adapter, _send_mock, _future = fake_adapter
+
+    adapter.skip_finished_sending({"aborted-while-loading"})
+    finished_sending, _finished_recving = adapter.get_finished(
+        {"aborted-while-loading", "normal"}
+    )
+
+    # The normal request had no store, so it is reported at once; the
+    # skipped one is not, now or on any later call.
+    assert finished_sending == {"normal"}
+    later, _ = adapter.get_finished({"aborted-while-loading"})
+    assert later == set()
+
+
+def test_skipped_request_with_straggler_store_does_not_leak(fake_adapter, monkeypatch):
+    """A previous-generation store completing later is dropped, not reported."""
+    adapter, _send_mock, _future = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock(name="transfer_ctx")
+    straggler = _pending_store_future("straggler")
+    transfer_ctx.submit_store.return_value = straggler
+    adapter.transfer_ctx = transfer_ctx
+    adapter.submit_store_request("r", _op([[0]]), FakeCudaEvent())
+
+    adapter.skip_finished_sending({"r"})
+    assert adapter.get_finished({"r"})[0] == set()
+
+    # The old store finishes on a later step.
+    straggler.query.return_value = True
+    straggler.result.return_value = True
+    assert adapter.get_finished(set())[0] == set()
+    assert "r" not in adapter.store_futures
+    assert "r" not in adapter.finished_stores
+
+
+def test_connector_forwards_skip_set_when_binding_metadata(fake_adapter):
+    """The worker-role connector hands the skip set to the adapter on bind."""
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+
+    adapter, _send_mock, _future = fake_adapter
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._role = KVConnectorRole.WORKER
+    connector._connector_metadata = None
+    connector.worker_adapter = adapter
+
+    metadata = LMCacheMPConnectorMetadata()
+    metadata.finished_without_store = {"a", "b"}
+    connector.bind_connector_metadata(metadata)
+
+    assert adapter.get_finished({"a", "b", "c"})[0] == {"c"}
