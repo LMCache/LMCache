@@ -21,6 +21,10 @@ from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
     iter_request_handlers,
 )
+from lmcache.v1.multiprocess.server_module import (
+    TransportServiceRegistrar,
+    register_grpc_services,
+)
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
@@ -169,12 +173,19 @@ class GrpcMultiprocessServer(RequestServer):
         """Return the TCP port selected by gRPC, including for port zero."""
         return self._bound_port
 
-    def add_modules(self, modules: Sequence[object]) -> None:
+    def add_modules(
+        self,
+        modules: Sequence[object],
+        *,
+        service_registrars: Sequence[TransportServiceRegistrar] = (),
+    ) -> None:
         """Register decorated module methods as generated gRPC services.
 
         Args:
             modules: Ordered business modules. A later module overrides an
                 earlier handler for the same request type.
+            service_registrars: Out-of-tree gRPC service registrars returned
+                by server-module factories.
 
         Raises:
             TypeError: If a module handler does not match its protocol types.
@@ -187,6 +198,7 @@ class GrpcMultiprocessServer(RequestServer):
 
         for binding in get_service_bindings().values():
             self._add_generated_service(binding, handlers_by_operation)
+        register_grpc_services(modules, self._server, service_registrars)
 
     def _add_generated_service(
         self,
@@ -255,12 +267,16 @@ class GrpcMultiprocessServer(RequestServer):
 def build_grpc_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
+    *,
+    service_registrars: Sequence[TransportServiceRegistrar] = (),
 ) -> GrpcMultiprocessServer:
     """Build a gRPC request server for the supplied business modules.
 
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration.
+        service_registrars: Out-of-tree gRPC service registrars returned by
+            server-module factories.
 
     Returns:
         Configured, but not yet started, gRPC request server.
@@ -271,5 +287,5 @@ def build_grpc_request_server(
         max_cpu_workers=mp_config.max_cpu_workers,
         grpc_server_workers=mp_config.grpc_server_workers,
     )
-    server.add_modules(modules)
+    server.add_modules(modules, service_registrars=service_registrars)
     return server
