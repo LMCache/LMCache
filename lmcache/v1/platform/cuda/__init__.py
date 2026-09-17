@@ -11,8 +11,7 @@ from typing import TYPE_CHECKING, Any
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
-from lmcache.v1.platform.cuda.vmm_ipc import is_use_vmm_api
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc
+from lmcache.v1.platform.ipc_policy import get_ipc_policy
 
 if TYPE_CHECKING:
     # First Party
@@ -34,10 +33,10 @@ def _select_event_ipc_backend(device_type: str) -> "EventIPCBackend":
 
     Returns:
         The timeline-semaphore backend when isolated IPC is enabled (see
-        ``lmcache/v1/platform/isolated_ipc.py``), otherwise the CUDA
+        ``lmcache.v1.platform.ipc_policy``), otherwise the CUDA
         interprocess event handle backend.
     """
-    if is_isolated_ipc():
+    if get_ipc_policy().isolated_ipc:
         # First Party
         from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
             TimelineSemaphoreEventIPCBackend,
@@ -77,16 +76,17 @@ def _select_ipc_wrapper_cls() -> "type[DeviceIPCWrapper]":
         The wrapper class for the current switch settings.
     """
 
-    # First Party
-    from lmcache.v1.platform.cuda.ipc_wrapper import (
-        CudaIPCWrapper,
-        RawCudaIPCWrapper,
-        VmmCudaIPCWrapper,
-    )
+    policy = get_ipc_policy()
+    if policy.use_vmm_api:
+        # First Party
+        from lmcache.v1.platform.cuda.ipc_wrapper import VmmCudaIPCWrapper
 
-    if is_use_vmm_api():
         return VmmCudaIPCWrapper
-    return RawCudaIPCWrapper if is_isolated_ipc() else CudaIPCWrapper
+
+    # First Party
+    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper, RawCudaIPCWrapper
+
+    return RawCudaIPCWrapper if policy.isolated_ipc else CudaIPCWrapper
 
 
 # ---------------------------------------------------------------------------

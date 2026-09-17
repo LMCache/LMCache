@@ -96,6 +96,11 @@ def test_shared_manager_write_read_and_abort(
     )
     entry = manager.get_object_state(key)
     assert entry is not None
+    with pytest.raises(RuntimeError, match="write-and-delete"):
+        manager.finish_write_and_delete([key])
+    assert manager.get_object_state(key) is entry and entry.write_lock.is_locked()
+    backend.finish_write.assert_not_called()
+    backend.abort_write.assert_not_called()
     assert manager.finish_write([key])[key] == L1Error.SUCCESS
     listener.on_l1_keys_write_finished.assert_called_once_with([key])
     assert manager.reserve_read([key])[key] == (L1Error.SUCCESS, read_obj)
