@@ -548,7 +548,7 @@ class TestConfigKeys:
         ids=["native", "strings-from-json"],
     )
     def test_tunables_are_read_from_their_documented_keys(
-        self, horizon: object, cap: object, deferral: object
+        self, horizon: str | float, cap: str | int, deferral: str | float
     ) -> None:
         config = EvictionAwarePolicyConfig.from_configs(
             {

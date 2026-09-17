@@ -50,14 +50,10 @@ class TestEvictionAwareConfig:
         config = EvictionAwarePolicyConfig()
         assert (config.horizon_steps, config.max_deferral_seconds) == (2.5, 0.0)
 
-    @pytest.mark.parametrize(
-        "field,value",
-        [
-            ("horizon_steps", 0),
-            ("max_drain_per_step", 0),
-            ("max_deferral_seconds", -1.0),
-        ],
-    )
-    def test_out_of_range_tunables_are_rejected(self, field: str, value: float) -> None:
-        with pytest.raises(ValueError, match=field):
-            EvictionAwarePolicyConfig(**{field: value})
+    def test_out_of_range_tunables_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match="horizon_steps"):
+            EvictionAwarePolicyConfig(horizon_steps=0)
+        with pytest.raises(ValueError, match="max_drain_per_step"):
+            EvictionAwarePolicyConfig(max_drain_per_step=0)
+        with pytest.raises(ValueError, match="max_deferral_seconds"):
+            EvictionAwarePolicyConfig(max_deferral_seconds=-1.0)
