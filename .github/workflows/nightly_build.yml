@@ -120,11 +120,11 @@ jobs:
   # never be mistaken for a release.
   nightly-rocm-wheel:
     name: Build ROCm nightly wheel
-    uses: ./.github/workflows/build_artifacts.yml
+    uses: ./.github/workflows/build_rocm_artifacts.yml
     with:
-      targets: '["rocm"]'
       dev_version: true
-    secrets: inherit
+    secrets:
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
   publish-nightly-rocm:
     name: Publish ROCm nightly wheel
@@ -139,42 +139,35 @@ jobs:
           disable-sudo-and-containers: false
           egress-policy: audit
 
-      - name: Fetch ROCm nightly artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Publish nightly artifacts
+        uses: ./.github/actions/publish-artifacts
         with:
-          name: release-rocm-artifacts
-          path: dist/rocm
+          artifact_name: release-rocm-artifacts
+          artifact_path: dist/rocm
+          release_tag: nightly-rocm
+          release_title: "Nightly {{date}} · ROCm 7.2 (gfx942, gfx950)"
+          release_notes: |
+            Nightly ROCm 7.2 wheels built from `dev` on {{date}},
+            for AMD Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X),
+            ABI-matched to the upstream `vllm/vllm-openai-rocm` image (torch 2.11, cp312).
 
-      - name: Publish ROCm wheels to rolling nightly-rocm release
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          ROCM_VERSION: ${{ needs.nightly-rocm-wheel.outputs.version }}
-        run: |
-          gh release delete nightly-rocm --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
-          gh release create nightly-rocm \
-            --repo ${{ github.repository }} \
-            --title "Nightly $(date +'%Y-%m-%d') · ROCm 7.2 (gfx942, gfx950)" \
-            --notes "Nightly ROCm 7.2 wheels built from \`dev\` on $(date +'%Y-%m-%d'),
-          for AMD Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X),
-          ABI-matched to the upstream \`vllm/vllm-openai-rocm\` image
-          (torch 2.11, cp312).
-
-          Install into an upstream vLLM ROCm container:
-          \`\`\`
-          pip install lmcache==${ROCM_VERSION} --no-deps \\
-            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-rocm
-          \`\`\`" \
-            --prerelease \
-            dist/rocm/*.whl
+            Install into an upstream vLLM ROCm container:
+            ```
+            pip install lmcache==${{ needs.nightly-rocm-wheel.outputs.rocm_version }} --no-deps \
+              --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-rocm
+            ```
+          asset_glob: dist/rocm/*.whl
 
   # MUSA nightly uses the same public-image build and smoke check as the
   # release workflow, but receives a unique development version and is
   # published to a rolling GitHub Release rather than PyPI.
   nightly-musa-wheel:
     name: Build MUSA nightly wheel
-    uses: ./.github/workflows/build_artifacts.yml
+    uses: ./.github/workflows/build_musa_artifacts.yml
     with:
-      targets: '["musa"]'
       dev_version: true
 
   publish-nightly-musa:
@@ -190,34 +183,29 @@ jobs:
           disable-sudo-and-containers: false
           egress-policy: audit
 
-      - name: Fetch MUSA nightly artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Publish nightly artifacts
+        uses: ./.github/actions/publish-artifacts
         with:
-          name: release-musa-artifacts
-          path: dist/musa
+          artifact_name: release-musa-artifacts
+          artifact_path: dist/musa
+          release_tag: nightly-musa
+          release_title: "Nightly {{date}} · Moore Threads MUSA"
+          release_notes: |
+            Nightly MUSA wheel for LMCache, built from `dev` on {{date}}.
 
-      - name: Publish MUSA wheels to rolling nightly-musa release
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          MUSA_VERSION: ${{ needs.nightly-musa-wheel.outputs.version }}
-        run: |
-          gh release delete nightly-musa --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
-          gh release create nightly-musa \
-            --repo ${{ github.repository }} \
-            --title "Nightly $(date +'%Y-%m-%d') · Moore Threads MUSA" \
-            --notes "Nightly MUSA wheel for LMCache, built from \`dev\` on $(date +'%Y-%m-%d').
+            Built and smoke-tested in the validated public MUSA image. TorchMUSA,
+            the MUSA SDK, and device drivers remain host-owned and are not bundled
+            in the wheel.
 
-          Built and smoke-tested in the validated public MUSA image. TorchMUSA,
-          the MUSA SDK, and device drivers remain host-owned and are not bundled
-          in the wheel.
-
-          Install inside the matching MUSA runtime image:
-          \`\`\`bash
-          pip install lmcache==${MUSA_VERSION} --no-deps \\
-            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-musa
-          \`\`\`" \
-            --prerelease \
-            dist/musa/*.whl
+            Install inside the matching MUSA runtime image:
+            ```bash
+            pip install lmcache==${{ needs.nightly-musa-wheel.outputs.musa_version }} --no-deps \
+              --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-musa
+            ```
+          asset_glob: dist/musa/*.whl
 
   nightly-build:
     name: Build image
@@ -382,7 +370,8 @@ jobs:
       nightly_verify: true
     # HF_TOKEN for the e2e model pulls; reusable workflows get no secrets
     # otherwise.
-    secrets: inherit
+    secrets:
+      hf_token: ${{ secrets.HF_TOKEN }}
     permissions:
       contents: read
       pull-requests: read

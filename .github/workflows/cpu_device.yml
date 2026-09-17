@@ -15,6 +15,10 @@ on:
           nightly-aggregate-vllm-verify.sh can decide what to pin.
         type: boolean
         default: false
+    secrets:
+      hf_token:
+        description: Hugging Face token used to download gated test models.
+        required: false
   workflow_dispatch:
   pull_request:
     branches:
@@ -262,7 +266,7 @@ jobs:
       - name: vLLM e2e — Engine-driven (pickle)
         if: matrix.model.run_engine_driven_e2e
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.hf_token }}
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=pickle \
           LMCACHE_HTTP_PORT_E2E=18082 \
@@ -277,7 +281,7 @@ jobs:
       - name: vLLM e2e — Engine-driven (shm)
         if: matrix.model.run_engine_driven_e2e
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.hf_token }}
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=shm \
           LMCACHE_HTTP_PORT_E2E=18083 \
@@ -293,7 +297,7 @@ jobs:
       # but nothing covered it end-to-end through vLLM.
       - name: vLLM e2e — LMCache-driven
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.hf_token }}
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_E2E=18084 \

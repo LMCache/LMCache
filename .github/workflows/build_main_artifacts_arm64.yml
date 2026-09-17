@@ -1,0 +1,67 @@
+name: Build Main Artifacts (arm64)
+
+# Reusable workflow that builds the aarch64 CUDA wheel via cibuildwheel on a
+# native arm64 runner (ubuntu-24.04-arm). Mirrors build_main_artifacts.yml.
+# Also `workflow_dispatch`-able so contributors can validate the arm64 build
+# in their fork without the `full` PR label.
+#
+# Uploaded as the `release-artifacts-arm64` GHA artifact.
+
+on:
+    workflow_call:
+    workflow_dispatch:
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-artifacts-arm64:
+        name: Build artifacts (arm64)
+        runs-on: ubuntu-24.04-arm
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                free_disk_space: "true"
+                python_version: "3.13"
+                pip_packages: build cibuildwheel
+
+            - name: Pin release version from tag (setuptools-scm)
+              if: startsWith(github.ref, 'refs/tags/v')
+              run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+            - name: Clean up release artifacts
+              run: rm -rf dist/
+
+            - name: Build CUDA aarch64 wheels with cibuildwheel
+              # arch-specific config (manylinux-aarch64-image, --plat) lives in
+              # pyproject.toml; CIBW_BUILD narrows the selector to aarch64 so this
+              # job never accidentally emits an x86 wheel.
+              env:
+                CIBW_BUILD: "cp3*-manylinux_aarch64"
+                CIBW_TEST_COMMAND: "python -c 'import lmcache.cuda_ops'"
+              run: python -m cibuildwheel --output-dir dist
+
+            - name: Upload release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-artifacts-arm64
+                path: dist/
