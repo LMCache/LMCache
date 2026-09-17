@@ -518,8 +518,9 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 # compressor / indexer caches sharing a KV pool with larger attn
 # groups).
 #
-# ``NL_X_NP_X_NB_BS_ONE_HS`` (vLLM-Ascend MLA/DSA plane tuples;
-# NP = 1 latent-only, 2 MLA, 3 DSA, HS possibly differing per plane)
+# ``NL_X_NP_X_NB_BS_ONE_HS`` (vLLM-Ascend MLA/DSA plane tuples; NP
+# means num_planes, NP = 1 latent-only, 2 MLA, 3 DSA, HS possibly
+# differing per plane)
 #
 # ``NL_X_NB_TWO_BS_NH_HS`` *could* in principle also be the block
 # axis on dim-0, but no real serving engine emits a padded layout of
