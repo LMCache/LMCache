@@ -360,6 +360,39 @@ class L2AdapterInterface(ABC):
         """Register a listener to receive L2 adapter events."""
         self._listeners.append(listener)
 
+    def seed_existing_keys(
+        self,
+        keys: list[ObjectKey],
+        sizes: list[int],
+    ) -> None:
+        """Seed byte accounting for entries recovered before startup.
+
+        This method deliberately does not publish events or notify listeners.
+        A recovering adapter must replay the recovered snapshot to each
+        listener when that listener registers.
+
+        Args:
+            keys: Existing keys not yet counted by this adapter instance.
+            sizes: On-disk byte size corresponding to each key.
+
+        Raises:
+            ValueError: If a size is negative or the list lengths differ.
+        """
+        bytes_by_salt: dict[str, int] = {}
+        total_bytes = 0
+        for key, size in zip(keys, sizes, strict=True):
+            if size < 0:
+                raise ValueError("existing key size must be non-negative")
+            bytes_by_salt[key.cache_salt] = bytes_by_salt.get(key.cache_salt, 0) + size
+            total_bytes += size
+
+        with self._usage_lock:
+            self._total_bytes_used += total_bytes
+            for cache_salt, size in bytes_by_salt.items():
+                self._bytes_by_cache_salt[cache_salt] = (
+                    self._bytes_by_cache_salt.get(cache_salt, 0) + size
+                )
+
     def set_backend_identity(self, name: str, shared: bool = False) -> None:
         """Set the identity used to tag this adapter's cache events.
 

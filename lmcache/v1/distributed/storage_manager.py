@@ -35,7 +35,10 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
-from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    get_type_name_for_config,
+)
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
@@ -79,6 +82,7 @@ class StorageManager:
         # size is a pure function of it.
         self._l1_config = config.l1_manager_config
         self._event_bus = get_event_bus()
+        self._striped_placement = config.store_policy == "striped"
 
         # L1 eviction controller
         self._eviction_controller = L1EvictionController(
@@ -1017,15 +1021,32 @@ class StorageManager:
 
         Returns:
             The stable id assigned to the new adapter.
+
+        Raises:
+            ValueError: If the adapter is incompatible with the active storage
+                policies or makes their adapter set invalid.
         """
         with self._lifecycle_lock:
+            type_name = get_type_name_for_config(config)
+            if self._striped_placement and type_name != "fs_native":
+                raise ValueError(
+                    "striped placement currently supports only fs_native "
+                    f"runtime adapters; got {type_name!r}"
+                )
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
             with self._adapters_lock:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
-            self._store_controller.add_adapter(adapter_id, adapter, descriptor)
+            try:
+                self._store_controller.add_adapter(adapter_id, adapter, descriptor)
+            except ValueError:
+                with self._adapters_lock:
+                    self._l2_adapters.pop(adapter_id, None)
+                    self._adapter_descriptors.pop(adapter_id, None)
+                adapter.close()
+                raise
             self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
             if self._should_enable_l2_eviction(adapter, config.eviction_config):
                 assert config.eviction_config is not None  # make linter happy
