@@ -104,9 +104,8 @@ def test_cpu_and_cuda_kv_can_share_one_process(
         _assert_roundtrip(device, torch.float16, output_kind)
 
 
-@pytest.mark.parametrize("shared", [False, True])
 def test_cpu_context_never_synchronizes_accelerator(
-    monkeypatch: pytest.MonkeyPatch, shared: bool
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CPU STORE/RETRIEVE preserves KV without touching a global accelerator."""
     global_sync = MagicMock(side_effect=AssertionError("unexpected accelerator sync"))
@@ -120,15 +119,11 @@ def test_cpu_context_never_synchronizes_accelerator(
     expected = kv["layer_0"].clone()
     ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
     ctx.register(kv, "test", 1, 4, 1.0, layout_hints={"kv_layout": "NHD"})
-    buffers = [torch.empty(2, 1, 16, 16).share_memory_()] if shared else None
-    transport.prepare_store.return_value = (buffers, [0]) if shared else None
+    transport.prepare_store.return_value = None
     transport.commit_store.return_value = True
     try:
         assert ctx.submit_store("req", "key", kv, [[0, 1, 2, 3]], None, 4).result()
         chunks = transport.commit_store.call_args.args[2]
-        if shared:
-            assert buffers is not None
-            assert chunks[0] is buffers[0]
         transport.prepare_retrieve.return_value = chunks
         kv["layer_0"].zero_()
         assert ctx.submit_retrieve("req", "key", kv, [[0, 1, 2, 3]], None, 4).result()

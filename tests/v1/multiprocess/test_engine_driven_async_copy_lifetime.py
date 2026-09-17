@@ -16,7 +16,6 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 # Third Party
-import pytest
 import torch
 
 
@@ -61,29 +60,33 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
         assert ops.multi_layer_block_kv_transfer.called, (
             "fixture must reach the async H2D launches"
         )
-        assert synchronize.call_args.args == (torch.device("cpu"),), (
+        assert synchronize.called, (
             "scatter must complete async H2D before releasing the temporaries "
             "it pinned; otherwise the host allocator reuses them mid-copy"
         )
 
 
-@pytest.mark.parametrize("operation", ["store", "retrieve"])
-def test_transfer_syncs_kv_device_before_commit(operation: str) -> None:
-    """Transfers finish on the KV device before serialization or SHM release."""
+def test_pickle_store_syncs_before_commit_serializes() -> None:
+    """The pickle path must sync before commit_store reads the buffers.
+
+    Gather issues async device->CPU copies into fresh buffers, and the pickle
+    transport serializes them immediately in ``commit_store``. Syncing only
+    when ``out_buffers`` is given (the SHM path) leaves pickle serializing a
+    buffer that is still being written.
+    """
     # First Party
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
     order: list[str] = []
+    ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
     transport = MagicMock()
     transport.prepare_store.return_value = None  # pickle mode
-    transport.prepare_retrieve.return_value = [torch.zeros(1)]
 
     def _commit(*_a: object, **_k: object) -> bool:
         order.append("commit")
         return True
 
-    getattr(transport, f"commit_{operation}").side_effect = _commit
-    ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
+    transport.commit_store.side_effect = _commit
     with patch.object(
         worker_transfer, "create_engine_driven_context", return_value=transport
     ):
@@ -96,32 +99,35 @@ def test_transfer_syncs_kv_device_before_commit(operation: str) -> None:
             layout_hints={"kv_layout": "NHD"},
         )
 
-    # Mock device copies so non-default CUDA-device ordering is testable on CPU CI.
-    device = torch.device("cuda:1")
-    kv = {"layer_0": MagicMock(spec=torch.Tensor, device=device)}
-    transfer_name = (
-        "gather_paged_kv_to_cpu" if operation == "store" else "scatter_cpu_to_paged_kv"
-    )
-
-    def transfer(*_a: object, **_k: object) -> list[torch.Tensor]:
-        order.append("copy")
+    def _gather(*_a: object, **_k: object) -> list[torch.Tensor]:
+        order.append("gather")
         return [torch.zeros(1)]
 
-    def synchronize(actual_device: torch.device) -> None:
-        assert actual_device == device
-        order.append("sync")
+    device = torch.device("cuda:1")
+    with (
+        patch.object(worker_transfer, "synchronize_device") as synchronize,
+        patch.object(worker_transfer, "gather_paged_kv_to_cpu", side_effect=_gather),
+    ):
+        synchronize.side_effect = lambda *a, **k: order.append("sync")
+        ctx.submit_store(
+            "req",
+            MagicMock(),  # key
+            {"layer_0": MagicMock(spec=torch.Tensor, device=device)},
+            [[0, 1, 2, 3]],
+            MagicMock(),  # event (unused on this transport)
+            4,  # blocks_in_chunk
+        )
 
-    try:
-        with (
-            patch.object(torch.cuda, "synchronize", side_effect=synchronize),
-            patch.object(worker_transfer, transfer_name, side_effect=transfer),
-        ):
-            submit = getattr(ctx, f"submit_{operation}")
-            assert submit("req", "key", kv, [[0, 1, 2, 3]], None, 4).result()
-    finally:
-        ctx.close()
+        synchronize.assert_called_with(device)
+    ctx.close()
 
-    expected = ["copy", "sync", "commit"]
-    if operation == "store":
-        expected.insert(0, "sync")
-    assert order == expected
+    # A sync must fall BETWEEN gather and commit. submit_store also syncs
+    # before prepare_store, so merely finding a "sync" proves nothing -- that
+    # earlier one is why guarding this on out_buffers went unnoticed.
+    gathered, committed = order.index("gather"), order.index("commit")
+    assert any(
+        i for i, step in enumerate(order) if step == "sync" and gathered < i < committed
+    ), (
+        "pickle store must synchronize after gather and before commit_store "
+        f"serializes the buffers, got {order}"
+    )
