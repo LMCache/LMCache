@@ -4,6 +4,7 @@
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
 #              | restart_recovery | lazy_offload | gds_smoke_test
+#              | eviction_aware_lazy_offload
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -85,6 +86,19 @@ elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
     # model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to DeepSeek-V4-Flash.
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+elif [ "$TEST_NAME" = "eviction_aware_lazy_offload" ]; then
+    export LMCACHE_MP_LAZY_OFFLOAD=true
+    export LMCACHE_MP_LAZY_OFFLOAD_POLICY=EVICTION_AWARE
+    # This policy ranks GPU blocks by how close they are to the free queue's
+    # eviction head and never drains on an idle engine, so the test is only
+    # meaningful over a pool small enough that its workload turns it over.
+    # 2048 blocks of vLLM's default 16 tokens is a 32768-token pool, and
+    # run-eviction-aware-lazy-offload.sh sends twice that.
+    export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-2048}"
+    # Pin the context rather than letting "auto" derive it from the overridden
+    # pool; the workload's documents are 8000 tokens.
+    export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
@@ -203,6 +217,9 @@ case "$TEST_NAME" in
     lazy_offload)
         exec_script="${SCRIPT_DIR}/run-lazy-offload.sh"
         ;;
+    eviction_aware_lazy_offload)
+        exec_script="${SCRIPT_DIR}/run-eviction-aware-lazy-offload.sh"
+        ;;
     p2p)
         exec_script="${SCRIPT_DIR}/run-p2p.sh"
         ;;
@@ -220,7 +237,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, lazy_offload, eviction_aware_lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac

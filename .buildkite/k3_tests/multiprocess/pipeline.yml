@@ -312,6 +312,18 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      # Real GPU MP integration: vLLM is launched with EVICTION_AWARE lazy
+      # offload over a pinned 2048-block KV pool. An idle engine must hold
+      # every store; a workload twice the pool must drain them.
+      - label: ":compression: eviction_aware_lazy_offload / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh eviction_aware_lazy_offload
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: http_api / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
         matrix: *request-transport-matrix
