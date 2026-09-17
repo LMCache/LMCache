@@ -10,6 +10,8 @@
 #include <fcntl.h>
 #include <cstring>            // for strerror
 #include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
+#include <mutex>
+#include <unordered_map>
 #include "mem_alloc.h"
 
 static constexpr size_t HUGEPAGE_SIZE = 2UL * 1024 * 1024;  // MAP_HUGE_2MB
@@ -232,4 +234,87 @@ void free_shm_pinned_ptr(uintptr_t ptr, size_t size,
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
   shm_unlink(shm_name.c_str());
+}
+
+// ── PCIe BAR IO-memory allocator ─────────────────────────────────────────
+// Maps a sysfs PCIe BAR resource file into the process VA space and
+// registers it with CUDA as non-cached IO memory.  cudaHostGetDevicePointer()
+// then returns a GPU VA that resolves to the BAR physical address, so CUDA
+// kernel stores go directly over PCIe without ever touching host DRAM.
+
+static std::unordered_map<uintptr_t, int> g_bar_fds;
+static std::mutex                         g_bar_fds_mu;
+
+uintptr_t alloc_pcie_bar_ptr(const std::string& bar_path, size_t size,
+                              size_t bar_offset) {
+  const long ps = sysconf(_SC_PAGESIZE);
+  if (bar_offset % static_cast<size_t>(ps) != 0)
+    throw std::runtime_error(
+        "alloc_pcie_bar_ptr: bar_offset must be a multiple of the page size");
+
+  // Open the sysfs BAR resource file.
+  // O_SYNC prevents speculative CPU prefetches into IO space.
+  int fd = open(bar_path.c_str(), O_RDWR | O_SYNC);
+  if (fd < 0)
+    throw std::runtime_error(std::string("alloc_pcie_bar_ptr: open failed: ") +
+                             strerror(errno) + "  path=" + bar_path);
+
+  // MAP_SHARED is mandatory for MMIO regions; MAP_PRIVATE creates a CoW copy
+  // in DRAM which defeats the purpose entirely.
+  void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                   static_cast<off_t>(bar_offset));
+  if (ptr == MAP_FAILED) {
+    int err = errno;
+    close(fd);
+    throw std::runtime_error(std::string("alloc_pcie_bar_ptr: mmap failed: ") +
+                             strerror(err));
+  }
+
+  // Register as CUDA IO memory so the driver maps the BAR PA into the GPU UVA
+  // space.  cudaHostRegisterMapped  allows cudaHostGetDevicePointer().
+  // cudaHostRegisterIoMemory tells the driver the region is uncached IO, not
+  // DRAM; it skips page-pinning and sets up the IOMMU mapping directly.
+  cudaError_t st = cudaHostRegister(
+      ptr, size, cudaHostRegisterMapped | cudaHostRegisterIoMemory);
+  if (st != cudaSuccess) {
+    munmap(ptr, size);
+    close(fd);
+    throw std::runtime_error(
+        std::string("alloc_pcie_bar_ptr: cudaHostRegister(IoMemory) failed: ") +
+        cudaGetErrorString(st));
+  }
+
+  uintptr_t key = reinterpret_cast<uintptr_t>(ptr);
+  {
+    std::lock_guard<std::mutex> lk(g_bar_fds_mu);
+    g_bar_fds[key] = fd;
+  }
+  return key;
+}
+
+void free_pcie_bar_ptr(uintptr_t ptr, size_t size) {
+  void* p = reinterpret_cast<void*>(ptr);
+
+  // Unregister before unmap; ignore errors to avoid leaking the mmap.
+  cudaError_t st = cudaHostUnregister(p);
+  if (st != cudaSuccess)
+    fprintf(stderr,
+            "free_pcie_bar_ptr: cudaHostUnregister failed (ignored): %s\n",
+            cudaGetErrorString(st));
+
+  if (munmap(p, size) != 0)
+    fprintf(stderr, "free_pcie_bar_ptr: munmap failed (ignored): %s\n",
+            strerror(errno));
+
+  int fd = -1;
+  {
+    std::lock_guard<std::mutex> lk(g_bar_fds_mu);
+    auto it = g_bar_fds.find(ptr);
+    if (it != g_bar_fds.end()) {
+      fd = it->second;
+      g_bar_fds.erase(it);
+    }
+  }
+  if (fd >= 0)
+    close(fd);
 }

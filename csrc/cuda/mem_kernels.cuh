@@ -58,6 +58,26 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           size_t host_buffer_offset,
                           size_t host_buffer_alignments);
 
+// Asynchronous DeviceToDevice copy between a PCIe BAR-backed CPU-side pointer
+// and a regular GPU device pointer, using cudaHostGetDevicePointer() to obtain
+// the GPU VA for the BAR region.  Both transfers (H2D and D2H) use
+// cudaMemcpyDeviceToDevice because the BAR VA already lives in the GPU UVA
+// space after cudaHostRegister(IoMemory|Mapped).
+//
+// This avoids the cudaMemcpyHostToDevice / cudaMemcpyDeviceToHost paths that
+// may not work reliably for IO-registered memory regions.
+//
+// The copy runs on the current CUDA stream (non-blocking with respect to the
+// CPU thread).
+//
+// Parameters:
+//   bar_cpu_ptr  – CPU virtual address of the BAR region (from alloc_pcie_bar_ptr).
+//   gpu_ptr      – Regular CUDA device pointer.
+//   nbytes       – Number of bytes to transfer.
+//   direction    – H2D: BAR → GPU device memory; D2H: GPU device memory → BAR.
+void bar_memcpy_async(uintptr_t bar_cpu_ptr, uintptr_t gpu_ptr, size_t nbytes,
+                      TransferDirection direction);
+
 // deprecated / unused except in unit tests
 void load_and_reshape_flash(torch::Tensor& key_value, torch::Tensor& key_cache,
                             torch::Tensor& value_cache,

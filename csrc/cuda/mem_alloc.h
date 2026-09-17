@@ -25,3 +25,29 @@ uintptr_t alloc_hugepage_pinned_numa_ptr(size_t size, int node);
 
 void free_hugepage_pinned_ptr(uintptr_t ptr, size_t size);
 void free_hugepage_pinned_numa_ptr(uintptr_t ptr, size_t size);
+
+// PCIe BAR IO-memory allocator.
+//
+// Opens a sysfs BAR resource file (e.g.
+// /sys/bus/pci/devices/0000:XX:XX.X/resourceN), maps it MAP_SHARED with
+// mmap(2), and registers the region with CUDA using
+// cudaHostRegisterMapped | cudaHostRegisterIoMemory so that
+// cudaHostGetDevicePointer() returns a GPU VA that aliases the BAR physical
+// address.  Kernel writes to that VA generate PCIe Write TLPs that land
+// directly in the BAR (CXL/NVMe CMB / FPGA SRAM) without staging through
+// host DRAM.
+//
+// Constraints the caller must satisfy:
+//   - Linux only, IOMMU disabled (intel_iommu=off) or in passthrough mode.
+//   - bar_offset must be a multiple of the system page size.
+//   - size must not exceed the actual BAR window size.
+//   - The CUDA context must be active on the target GPU before calling.
+//
+// Returns the CPU virtual address of the mapped region.
+// A companion fd is stored internally; free_pcie_bar_ptr releases it.
+uintptr_t alloc_pcie_bar_ptr(const std::string& bar_path, size_t size,
+                              size_t bar_offset);
+
+// Releases a region allocated by alloc_pcie_bar_ptr:
+//   cudaHostUnregister → munmap → close(fd).
+void free_pcie_bar_ptr(uintptr_t ptr, size_t size);

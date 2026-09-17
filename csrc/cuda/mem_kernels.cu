@@ -1363,6 +1363,31 @@ void single_layer_kv_transfer_sgl(
  * @param host_buffer_alignments the alignment (i.e., cudaHostRegister
  * granularity) requirement of the host buffer. Must be power of two.
  */
+void bar_memcpy_async(uintptr_t bar_cpu_ptr, uintptr_t gpu_ptr, size_t nbytes,
+                      TransferDirection direction) {
+  // Obtain the GPU VA that aliases the BAR physical address.
+  // This works only if bar_cpu_ptr was registered with
+  // cudaHostRegisterMapped | cudaHostRegisterIoMemory.
+  void* bar_dev_ptr = nullptr;
+  CHECK_CUDA_CALL(cudaHostGetDevicePointer(
+      &bar_dev_ptr, reinterpret_cast<void*>(bar_cpu_ptr), 0));
+
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  if (direction == TransferDirection::H2D) {
+    // BAR → GPU: both pointers are in GPU UVA, use DeviceToDevice.
+    CHECK_CUDA_CALL(cudaMemcpyAsync(reinterpret_cast<void*>(gpu_ptr),
+                                    bar_dev_ptr, nbytes,
+                                    cudaMemcpyDeviceToDevice, stream));
+  } else {
+    // GPU → BAR: same reasoning, DeviceToDevice avoids the unreliable
+    // cudaMemcpyDeviceToHost path for IO-registered memory.
+    CHECK_CUDA_CALL(cudaMemcpyAsync(bar_dev_ptr,
+                                    reinterpret_cast<const void*>(gpu_ptr),
+                                    nbytes, cudaMemcpyDeviceToDevice, stream));
+  }
+}
+
 void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           TransferDirection direction,
                           size_t host_buffer_offset,

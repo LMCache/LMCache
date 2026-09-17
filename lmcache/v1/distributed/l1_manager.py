@@ -942,6 +942,10 @@ class L1Manager:
         """
         return self._staging_bytes
 
+    def region_of(self, memory_obj: MemoryObj) -> str:
+        """Return the region name that owns ``memory_obj``."""
+        return self._memory_manager.region_of(memory_obj)
+
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()

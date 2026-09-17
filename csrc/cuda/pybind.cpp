@@ -123,6 +123,23 @@ PYBIND11_MODULE(cuda_ops, m) {
         py::arg("dst_ptrs"), py::arg("sizes"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
+  // PCIe BAR IO-memory allocator.
+  m.def("alloc_pcie_bar_ptr", &alloc_pcie_bar_ptr,
+        py::arg("bar_path"), py::arg("size"), py::arg("bar_offset") = 0UL,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("free_pcie_bar_ptr", &free_pcie_bar_ptr,
+        py::arg("ptr"), py::arg("size"),
+        py::call_guard<py::gil_scoped_release>());
+  // Async DeviceToDevice memcpy between a BAR region and a GPU device pointer.
+  m.def("bar_memcpy_async",
+        [](uintptr_t bar_cpu_ptr, uintptr_t gpu_ptr, size_t nbytes,
+           int direction) {
+          return bar_memcpy_async(bar_cpu_ptr, gpu_ptr, nbytes,
+                                  static_cast<TransferDirection>(direction));
+        },
+        py::arg("bar_cpu_ptr"), py::arg("gpu_ptr"), py::arg("nbytes"),
+        py::arg("direction"),
+        py::call_guard<py::gil_scoped_release>());
   // The KV-format / transfer enums now live in ``lmcache_native``. We accept
   // the underlying integer values here and cast to the C++ enums so this module
   // no longer needs to register the enums (which would shadow the canonical
@@ -150,11 +167,11 @@ PYBIND11_MODULE(cuda_ops, m) {
   // Python side and consumed by execute_object_group_transfer.
   py::class_<StagingCopy>(m, "StagingCopy")
       .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
-                       size_t host_offset) {
-             return StagingCopy{dest, src, nbytes, host_offset};
+                       size_t host_offset, bool is_bar) {
+             return StagingCopy{dest, src, nbytes, host_offset, is_bar};
            }),
            py::arg("dest"), py::arg("src"), py::arg("nbytes"),
-           py::arg("host_offset"));
+           py::arg("host_offset"), py::arg("is_bar") = false);
   py::class_<LaunchVar>(m, "LaunchVar")
       .def(
           py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,

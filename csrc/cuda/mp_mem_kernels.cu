@@ -536,8 +536,14 @@ void execute_object_group_transfer(
 
   const auto do_staging = [&](const std::vector<StagingCopy>& staging) {
     for (const auto& copy : staging) {
-      lmcache_memcpy_async(copy.dest, copy.src, copy.nbytes, direction,
-                           copy.host_offset, host_buffer_alignment);
+      if (copy.is_bar) {
+        uintptr_t bar_ptr = is_h2d ? copy.src : copy.dest;
+        uintptr_t gpu_ptr = is_h2d ? copy.dest : copy.src;
+        bar_memcpy_async(bar_ptr, gpu_ptr, copy.nbytes, direction);
+      } else {
+        lmcache_memcpy_async(copy.dest, copy.src, copy.nbytes, direction,
+                             copy.host_offset, host_buffer_alignment);
+      }
     }
   };
 

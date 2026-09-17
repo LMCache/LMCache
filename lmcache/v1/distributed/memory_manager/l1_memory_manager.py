@@ -12,6 +12,11 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.virtual_memory_allocator import (
+    VirtualMemoryAllocator,
+    build_regions_from_descriptors,
+    choose_allocation_policy,
+)
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
@@ -41,6 +46,39 @@ def _unlink_stale_shm(shm_name: str) -> None:
         )
 
 
+def _resolve_pcie_bar_allocator(
+    config: L1MemoryManagerConfig,
+) -> VirtualMemoryAllocator | None:
+    """Build a VirtualMemoryAllocator backed by PCIe BAR regions.
+
+    Checks the manifest path first, then falls back to PCIE_BAR_DEVICES env var.
+    Returns None when no PCIe BAR configuration is found.
+    """
+    from lmcache.v1.resource_manifest import (
+        parse_pcie_bar_env_vars,
+        resolve_manifest_from_path,
+    )
+
+    if config.resource_manifest:
+        manifest = resolve_manifest_from_path(config.resource_manifest)
+    else:
+        manifest = parse_pcie_bar_env_vars(config.size_in_bytes / 1024**3)
+
+    if manifest is None:
+        return None
+
+    def make_dram(size_bytes: int) -> MixedMemoryAllocator:
+        return MixedMemoryAllocator(size_bytes, align_bytes=config.align_bytes)
+
+    regions = build_regions_from_descriptors(manifest.resources, make_dram)
+    if not regions:
+        return None
+
+    policy_name = manifest.allocation_policy or "auto"
+    policy = choose_allocation_policy(regions, policy_name)
+    return VirtualMemoryAllocator(regions, policy)
+
+
 def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInterface:
     """
     Create a memory allocator based on the provided configuration.
@@ -51,6 +89,11 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
+    pcie_bar_allocator = _resolve_pcie_bar_allocator(config)
+    if pcie_bar_allocator is not None:
+        logger.info("Using PCIe BAR memory allocator: %s", pcie_bar_allocator)
+        return pcie_bar_allocator
+
     if config.use_lazy:
         logger.debug(
             "use lazy memory allocator, init size is %d bytes, "
@@ -100,7 +143,10 @@ class L1MemoryManager:
 
     def __init__(self, config: L1MemoryManagerConfig):
         self._allocator = create_memory_allocator(config)
-        self._size_in_bytes = config.size_in_bytes
+        if isinstance(self._allocator, VirtualMemoryAllocator):
+            self._size_in_bytes = self._allocator.total_size_bytes
+        else:
+            self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
 
     def allocate(
@@ -145,6 +191,12 @@ class L1MemoryManager:
         self._allocator.batched_free(mem_objs)
         return L1Error.SUCCESS
 
+    def region_of(self, memory_obj: MemoryObj) -> str:
+        """Return the region name that owns ``memory_obj``."""
+        if isinstance(self._allocator, VirtualMemoryAllocator):
+            return self._allocator.region_of(memory_obj)
+        return "dram"
+
     def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``.
 
@@ -152,8 +204,12 @@ class L1MemoryManager:
             memory_obj: An object allocated by this manager.
 
         Returns:
-            ``L1BackendType.DRAM`` — the CPU tier is pinned DRAM only.
+            ``L1BackendType.DRAM`` for DRAM-backed objects,
+            ``L1BackendType.PCIE_BAR`` for PCIe BAR-backed objects.
         """
+        if isinstance(self._allocator, VirtualMemoryAllocator):
+            if self._allocator.is_bar_backed(memory_obj):
+                return L1BackendType.PCIE_BAR
         return L1BackendType.DRAM
 
     def get_memory_usage(self) -> tuple[int, int]:
@@ -194,12 +250,26 @@ class L1MemoryManager:
         """
         Return an L1MemoryDesc describing the underlying memory buffer.
 
+        For VirtualMemoryAllocator (PCIe BAR), returns the DRAM region's desc
+        if one exists. L2 adapters that require a single registerable region are
+        blocked by ``l1_exposes_single_memory_region()`` when PCIe BAR is active.
+
         Returns:
             L1MemoryDesc: Pointer, size, and alignment of the L1 buffer.
 
         Raises:
             NotImplementedError: If the allocator type does not support this operation.
         """
+        if isinstance(self._allocator, VirtualMemoryAllocator):
+            for region in self._allocator.regions:
+                if isinstance(region.allocator, MixedMemoryAllocator):
+                    buffer = region.allocator.buffer
+                    return L1MemoryDesc(
+                        ptr=buffer.data_ptr(),
+                        size=region.size_bytes,
+                        align_bytes=self._align_bytes,
+                    )
+            return None
         if isinstance(self._allocator, MixedMemoryAllocator):
             buffer = self._allocator.buffer
         elif isinstance(self._allocator, LazyMemoryAllocator):
