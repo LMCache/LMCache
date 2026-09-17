@@ -123,6 +123,21 @@ if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
     MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
 fi
 
+# Pin the KV block pool (in blocks) on both servers. Used by the preemption
+# tests so the pool size does not depend on the GPU model: a workload whose
+# total KV demand exceeds NUM_GPU_BLOCKS_OVERRIDE * block_size is guaranteed
+# to preempt. Empty -> vLLM sizes the pool from --gpu-memory-utilization.
+NUM_GPU_BLOCKS_OVERRIDE_ARG=""
+if [ -n "${NUM_GPU_BLOCKS_OVERRIDE:-}" ]; then
+    NUM_GPU_BLOCKS_OVERRIDE_ARG="--num-gpu-blocks-override ${NUM_GPU_BLOCKS_OVERRIDE}"
+fi
+
+# Max concurrently running sequences. Empty -> vLLM default.
+MAX_NUM_SEQS_ARG=""
+if [ -n "${MAX_NUM_SEQS:-}" ]; then
+    MAX_NUM_SEQS_ARG="--max-num-seqs ${MAX_NUM_SEQS}"
+fi
+
 # Split kernel groups into one object group per sliding-window size at
 # KV-cache registration. Required for hybrid models (e.g. gemma-4's
 # sliding-window + full-attention groups have different block sizes); without
@@ -272,6 +287,8 @@ env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
         $MAX_MODEL_LEN_ARG \
         $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
+        $NUM_GPU_BLOCKS_OVERRIDE_ARG \
+        $MAX_NUM_SEQS_ARG \
         $MAMBA_ARGS \
         $PREFIX_CACHING_ARG \
         $MAX_NUM_BATCHED_TOKENS_ARG \
@@ -302,6 +319,8 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
             $MAX_MODEL_LEN_ARG \
             $ENFORCE_EAGER_ARG \
             $GPU_MEMORY_UTIL_ARG \
+            $NUM_GPU_BLOCKS_OVERRIDE_ARG \
+            $MAX_NUM_SEQS_ARG \
             $PREFIX_CACHING_ARG \
             > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 

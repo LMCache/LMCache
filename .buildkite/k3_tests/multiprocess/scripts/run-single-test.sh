@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
+#   test_name: lm_eval | lm_eval_preemption | preemption_correctness
+#              | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
 #              | restart_recovery | lazy_offload | gds_smoke_test
 #
@@ -170,6 +171,9 @@ case "$TEST_NAME" in
         export LM_EVAL_VERIFY_MODE=preemption
         exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
+    preemption_correctness)
+        exec_script="${SCRIPT_DIR}/run-preemption-correctness.sh"
+        ;;
     hma_lm_eval_gemma4)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
@@ -217,7 +221,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
+        echo "Valid tests: lm_eval, lm_eval_preemption, preemption_correctness, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac

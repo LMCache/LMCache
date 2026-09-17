@@ -119,6 +119,37 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log"]
 
+      # Preemption correctness ladder (T0-T3): both servers pinned to a
+      # 2048-block KV pool so a 64-way workload preempts by arithmetic;
+      # token-id equality vs. the baseline for the hot pass and for a warm
+      # replay served from LMCache, with vLLM's preemption counter as the
+      # witness.
+      - label: ":compression: preemption_correctness / {{matrix.mode}}"
+        command: |
+          case "{{matrix.mode}}" in
+            lmcache_driven) ;;
+            engine_driven)
+              export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+              export L1_USE_LAZY="false"
+              ;;
+          esac
+          .buildkite/k3_tests/multiprocess/run.sh preemption_correctness
+        matrix:
+          setup:
+            mode:
+              - "lmcache_driven"
+              - "engine_driven"
+        timeout_in_minutes: 40
+        env:
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          NUM_GPU_BLOCKS_OVERRIDE: "2048"
+          MAX_NUM_SEQS: "128"
+          MAX_MODEL_LEN: "4096"
+          CHUNK_SIZE: "256"
+          MAX_WAIT_SECONDS: "600"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
       - label: ":compression: long_doc_qa / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         matrix: *request-transport-matrix

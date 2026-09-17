@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Multiprocess test entrypoint for K8s pods.
 # Usage: run.sh <test_name>
-#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
+#   test_name: lm_eval | lm_eval_preemption | preemption_correctness
+#              | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
 #              | restart_recovery | gds_smoke_test | p2p | kimi_linear_tp
 #              | dsv4_flash_tp | lazy_offload
@@ -9,7 +10,7 @@
 # No Docker -- all processes run natively in the pod.
 set -euo pipefail
 
-TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|lm_eval_preemption|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|long_doc_qa_l2|fault_tolerance|deadlock|restart_recovery|cache_stats|lazy_offload|http_api|p2p|kimi_linear_tp|dsv4_flash_tp)}"
+TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|lm_eval_preemption|preemption_correctness|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|long_doc_qa_l2|fault_tolerance|deadlock|restart_recovery|cache_stats|lazy_offload|http_api|p2p|kimi_linear_tp|dsv4_flash_tp)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
