@@ -78,11 +78,11 @@ def test_transfer_syncs_kv_device_before_commit(operation: str) -> None:
     transport.prepare_store.return_value = None  # pickle mode
     transport.prepare_retrieve.return_value = [torch.zeros(1)]
 
-    def commit(*args: object, **kwargs: object) -> bool:
+    def _commit(*_a: object, **_k: object) -> bool:
         order.append("commit")
         return True
 
-    getattr(transport, f"commit_{operation}").side_effect = commit
+    getattr(transport, f"commit_{operation}").side_effect = _commit
     ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
     with patch.object(
         worker_transfer, "create_engine_driven_context", return_value=transport
@@ -103,7 +103,7 @@ def test_transfer_syncs_kv_device_before_commit(operation: str) -> None:
         "gather_paged_kv_to_cpu" if operation == "store" else "scatter_cpu_to_paged_kv"
     )
 
-    def transfer(*args: object, **kwargs: object) -> list[torch.Tensor]:
+    def transfer(*_a: object, **_k: object) -> list[torch.Tensor]:
         order.append("copy")
         return [torch.zeros(1)]
 
