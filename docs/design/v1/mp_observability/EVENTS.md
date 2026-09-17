@@ -184,15 +184,33 @@ to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `int`, `int` |
-| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `str`, `int`, `int` |
+| `MP_STORE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `int`, `int`, `str` |
+| `MP_TRANSFER_PHASE_SAMPLES` | `samples`, `ended_transfer_key` | `list[tuple[int, int, int, float, int, str, float, float]]` — `(phase, direction, device_index, elapsed_ms, nbytes, session_id, start_time_s, end_time_s)` per finished executor section, plus the `transfer_key` (`str`) of the transfer whose END published this event -- its authoritative completion signal, present even when `samples` is empty; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value, the `session_id` slot carries the `transfer_key` of the store/retrieve operation (see `next_transfer_key`), `start_time_s`/`end_time_s` its bounds on the EventRecorder wall clock (empty / `0.0` only if the call's anchor event could not be recorded) |
+| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `model_name`, `cache_salt` | `int`, `int`, `int`, `str`, `str` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+
+### `MP_TRANSFER_PHASE_SAMPLES`
+
+Published by `TransferPhaseSampler` while dispatching `MP_STORE_END` /
+`MP_RETRIEVE_END`: those are stream-published, so every section of the
+ending transfer has completed and `device_ops.pop_completed_phase_timings()`
+returns its full sample set (plus any other transfer's sections that have
+finished meanwhile). Each sample carries its own `session_id`,
+`device_index` and `direction`.
+
+Timing is on when the bus is enabled and this event has a subscriber
+(`EventBus.has_subscribers`), i.e. with metrics or tracing on. Besides the per-section event pairs the
+executor records one anchor event per call plus a host callback stamping the
+EventRecorder wall clock, which gives each sample its `session_id` and
+`start_time_s`/`end_time_s`. `TransferPhaseTracingSubscriber` folds them into
+per-transfer `transfer.kernel_interval` / `transfer.staging` child spans (see
+`docs/design/observability/request-event-span.md`, Example 3).
 
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
 
@@ -213,6 +231,29 @@ know `chunk_size`:
   empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
+- `l1_hit_tokens` and `l2_hit_tokens` split `hit_tokens` by the tier that
+  served it.  `l1_hit_tokens` comes from `PrefetchHandle.l1_hit_chunks` —
+  the prefix L1 alone could serve under each object group's attention
+  window rule — so a chunk whose out-of-window keys were never fetched is
+  still an L1 hit.  `l2_hit_tokens` is the remainder: how much further
+  `found_count` reached once L2 completed.  **Invariant:
+  `l1_hit_tokens + l2_hit_tokens == hit_tokens`, exactly, on every path**,
+  so a dashboard summing the two can never exceed 100%.
+- `early_exit_reason` names the branch of `lookup()` that returned before a
+  prefetch task was submitted.  Always present; `""` on the normal path.
+  Vocabulary:
+
+  | Value | Meaning | Operator action |
+  |---|---|---|
+  | `""` | Normal path (including a genuine cold miss) | None — inspect the hit rate |
+  | `no_gpu_context` | No layout registered for this model / world size | Configuration or registration bug; also logged at `error` |
+  | `empty_chunk_hashes` | Prompt shorter than one chunk | None — a workload property, not a cache failure |
+  | `no_group_layout_descs` | No per-object-group layouts registered for this model / world size | Configuration or registration bug; also logged at `error` |
+
+  Without it `found_count == 0` conflates a cold miss with every early
+  exit.  Extensions are additive: a new value may be added without a
+  dashboard migration, as with the `L2_PREFETCH_FAILED` `reason`
+  vocabulary.
 - `model_name` and `cache_salt` are captured at lookup time from
   `IPCCacheServerKey` and surface as OTel attributes on the
   `lmcache_mp.lookup_*_tokens` counters so the hit rate can be sliced

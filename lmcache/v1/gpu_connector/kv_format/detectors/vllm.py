@@ -26,16 +26,17 @@ import lmcache.lmcache_native as lmcache_native
 def resolve_vllm_kv_layout(
     layout_hints: LayoutHints, cpu_attention_backend: bool
 ) -> str:
-    """Validate the ``kv_layout`` hint and apply the CPU-backend override."""
-    kv_layout = layout_hints.get("kv_layout", "NHD")
+    """Validate an explicit ``kv_layout`` hint or choose a legacy default."""
+    kv_layout = layout_hints.get("kv_layout")
+    if kv_layout is None:
+        # Registrations predating layout hints relied on the CPU backend's HND
+        # allocation and the NHD default everywhere else.
+        return "HND" if cpu_attention_backend else "NHD"
     if kv_layout not in KV_LAYOUT_NAMES:
         raise ValueError(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
             f"expected one of {', '.join(KV_LAYOUT_NAMES)}."
         )
-    # The CPU attention backend allocates HND but hints NHD.
-    if cpu_attention_backend and kv_layout in ("NHD", "HND"):
-        return "HND"
     return kv_layout
 
 

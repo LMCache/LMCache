@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc
+from lmcache.v1.platform.ipc_policy import get_ipc_policy
 
 if TYPE_CHECKING:
     # First Party
@@ -33,10 +33,10 @@ def _select_event_ipc_backend(device_type: str) -> "EventIPCBackend":
 
     Returns:
         The timeline-semaphore backend when isolated IPC is enabled (see
-        ``lmcache/v1/platform/isolated_ipc.py``), otherwise the CUDA
+        ``lmcache.v1.platform.ipc_policy``), otherwise the CUDA
         interprocess event handle backend.
     """
-    if is_isolated_ipc():
+    if get_ipc_policy().isolated_ipc:
         # First Party
         from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
             TimelineSemaphoreEventIPCBackend,
@@ -57,19 +57,36 @@ def _select_event_ipc_backend(device_type: str) -> "EventIPCBackend":
 
 
 def _select_ipc_wrapper_cls() -> "type[DeviceIPCWrapper]":
-    """Return the KV-cache IPC wrapper class for the current
-    isolated-IPC setting.
+    """Return the KV-cache IPC wrapper class for the current switches.
+
+    Three modes, one wrapper each:
+
+    - ``use_vmm_api`` on: :class:`VmmCudaIPCWrapper` (the engine
+      allocates KV through the CUDA VMM API; legacy IPC handles do not
+      exist for such memory). Composes with ``isolated_ipc``: the
+      fabric kind is isolation-clean (inline blob, IMEX channel device
+      injection, no shared filesystem), while a POSIX-fd allocation is
+      rejected at wrap time -- fd passing needs a shared path, which
+      the zero-share isolated model rules out.
+    - ``isolated_ipc`` alone: :class:`RawCudaIPCWrapper` (driver-level
+      CUDA IPC mem handles, no shared ``/dev/shm`` assumed).
+    - default: :class:`CudaIPCWrapper` (PyTorch storage IPC).
 
     Returns:
-        :class:`RawCudaIPCWrapper` (driver-level CUDA IPC mem handles,
-        no shared ``/dev/shm`` assumed) when isolated IPC is enabled,
-        otherwise :class:`CudaIPCWrapper` (PyTorch storage IPC).
+        The wrapper class for the current switch settings.
     """
+
+    policy = get_ipc_policy()
+    if policy.use_vmm_api:
+        # First Party
+        from lmcache.v1.platform.cuda.ipc_wrapper import VmmCudaIPCWrapper
+
+        return VmmCudaIPCWrapper
 
     # First Party
     from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper, RawCudaIPCWrapper
 
-    return RawCudaIPCWrapper if is_isolated_ipc() else CudaIPCWrapper
+    return RawCudaIPCWrapper if policy.isolated_ipc else CudaIPCWrapper
 
 
 # ---------------------------------------------------------------------------

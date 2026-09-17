@@ -9,13 +9,13 @@ import argparse
 import pytest
 
 # First Party
+from lmcache.cli.commands.bench.server_bench.client import (
+    LookupResult,
+    TransferResult,
+)
 from lmcache.cli.commands.bench.server_bench.config import (
     WorkerSpec,
     parse_args_to_config,
-)
-from lmcache.cli.commands.bench.server_bench.runtime import (
-    LookupResult,
-    TransferResult,
 )
 
 
