@@ -235,7 +235,9 @@ class RetrieveMixin:
                 engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
                 page_buffer_size=group.shape_desc.nb * group_bs,
                 block_size=group_bs,
-                head_size=rope_state.head_size,
+                # The group's per-head row width: packed CS for fused K/V, HS
+                # otherwise (the scatter kernel's contract, not the rope's).
+                head_size=group.shape_desc.hs,
                 slot_mapping_base=0,
                 slot_mapping_capacity=0,
                 is_neox=rope_state.is_neox_style,

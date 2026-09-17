@@ -54,6 +54,7 @@ class DeviceOps:
     TransferDirection: type[lmcache_native.TransferDirection]
     EngineKVFormat: type[lmcache_native.EngineKVFormat]
     GPUKVFormat: type[lmcache_native.EngineKVFormat]
+    MemObjKVLayout: type[lmcache_native.MemObjKVLayout]
 
     def __init__(self) -> None:
         self._native_bound: bool = False

@@ -52,6 +52,11 @@ PYBIND11_MODULE(lmcache_native, m) {
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H);
 
+  py::enum_<MemObjKVLayout>(m, "MemObjKVLayout")
+      .value("UNSPECIFIED", MemObjKVLayout::UNSPECIFIED)
+      .value("SPLIT_KV_2LTD", MemObjKVLayout::SPLIT_KV_2LTD)
+      .value("FUSED_PACKED", MemObjKVLayout::FUSED_PACKED);
+
   py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc", py::dynamic_attr())
       .def(py::init<>())
       .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
