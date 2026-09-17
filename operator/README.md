@@ -16,6 +16,8 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 > [!IMPORTANT]
 > By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `NVIDIA_VISIBLE_DEVICES=all` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. On most clusters that is enough; on some, the engine cannot see the GPUs unless the pod is also privileged. Set `spec.privileged: true` to run the engine container in privileged mode (default `false`). When it is enabled, clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
 >
+> On GPU Operator CDI+NRI clusters there is often no `RuntimeClass` object. Set `spec.runtimeClassName: ""` and put the management CDI annotation on `spec.podAnnotations` (see [lmcache_v1alpha1_lmcacheengine_nri.yaml](config/samples/lmcache_v1alpha1_lmcacheengine_nri.yaml)). Empty `runtimeClassName` omits the field only; it does not inject CDI.
+>
 > On AMD ROCm clusters, `spec.gpuVendor: amd` omits `runtimeClassName` and skips NVIDIA-specific env vars.
 
 > [!WARNING]

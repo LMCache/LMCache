@@ -14,13 +14,19 @@ x-flaky-retry: &flaky-retry
     - exit_status: "*"
       limit: 2
 
-# Keep request transport as a shared matrix dimension so gRPC can be enabled
-# later with a small matrix-only change. For now, only ZMQ jobs are scheduled.
-# Worker-side KV transfer modes remain separate matrix dimensions below.
+# Most scenarios exercise transport-independent behavior, so keep their PR
+# coverage on the default ZMQ transport.
 x-request-transport-matrix: &request-transport-matrix
   setup:
     request_transport:
       - "zmq"
+
+# Retain gRPC only for the representative GPU E2E and restart-recovery smokes.
+x-request-transport-smoke-matrix: &request-transport-smoke-matrix
+  setup:
+    request_transport:
+      - "zmq"
+      - "grpc"
 
 # Keep the regular 1-GPU pod anchor available after the two lm_eval steps are
 # merged; engine_driven still needs its separate /dev/shm pod below.
@@ -93,7 +99,7 @@ steps:
     steps:
       - label: ":compression: vllm_bench / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-        matrix: *request-transport-matrix
+        matrix: *request-transport-smoke-matrix
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -261,7 +267,7 @@ steps:
 
       - label: ":compression: restart_recovery / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
-        matrix: *request-transport-matrix
+        matrix: *request-transport-smoke-matrix
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -375,15 +381,16 @@ steps:
 
   # Canary path for VERIFY_AND_PIN_VLLM=true: skips every real test group
   # above (each group's `if` evaluates to false) and instead runs vllm_bench
-  # across the enabled request-transport matrix. The matrix currently contains
-  # only ZMQ; gRPC can be added once its request-server runtime is available.
+  # across both request transports. The pin is published only after both
+  # matrix jobs pass, preventing one successful transport from pinning a
+  # nightly that failed the other transport.
   - label: ":test_tube: Verify vLLM nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
       python3 -c 'import vllm; print(vllm.__version__)' \
         > "verified_vllm_{{matrix.request_transport}}.txt"
-    matrix: *request-transport-matrix
+    matrix: *request-transport-smoke-matrix
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     timeout_in_minutes: 30
     agents: { queue: "k8s" }
@@ -408,8 +415,9 @@ steps:
   - label: ":pushpin: Pin verified vLLM nightly"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
-      buildkite-agent artifact download "verified_vllm_zmq.txt" .
-      VLLM_VERSION="$(cat verified_vllm_zmq.txt)" \
+      buildkite-agent artifact download "verified_vllm_*.txt" .
+      diff -u verified_vllm_zmq.txt verified_vllm_grpc.txt
+      VLLM_VERSION="$(cat verified_vllm_grpc.txt)" \
         bash .github/scripts/pin-tested-vllm.sh
     timeout_in_minutes: 10
     agents: { queue: "k8s" }
