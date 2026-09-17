@@ -1,4 +1,4 @@
-0.29.1rc1.dev189+g961c5b6b7
-short_sha=961c5b6b7
-full_sha=961c5b6b7ea98b765a6d436434d18ef945596f32
-archive_index_url=https://wheels.vllm.ai/961c5b6b7ea98b765a6d436434d18ef945596f32/cu130
+0.29.0
+short_sha=
+full_sha=
+archive_index_url=
