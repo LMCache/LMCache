@@ -8,10 +8,13 @@ CPU allocation, byte copying, and the priority executor stay on the path
 under test.
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional, Union
+from typing import TYPE_CHECKING, Callable, Literal, Optional, Union
 import asyncio
 
 # Third Party
@@ -27,11 +30,6 @@ from lmcache.v1.memory_allocators.tensor_memory_allocator import (
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, TensorMemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.connector import redis_connector
-from lmcache.v1.storage_backend.connector.redis_connector import (
-    RedisClusterConnector,
-    RedisConnector,
-)
 
 # Local
 from ..utils import (
@@ -43,7 +41,15 @@ from ..utils import (
 
 ConnectorKind = Literal["redis", "redis-cluster"]
 ReadResponse = bytes | Exception | None
-RedisConnectorUnderTest = RedisConnector | RedisClusterConnector
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.storage_backend.connector.redis_connector import (
+        RedisClusterConnector,
+        RedisConnector,
+    )
+
+    RedisConnectorUnderTest = RedisConnector | RedisClusterConnector
 
 _PAYLOADS = (b"payload0", b"payload1", b"payload2")
 _REMOTE_SHAPE = torch.Size([2, 2, 2])
@@ -196,6 +202,16 @@ def _create_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> RedisConnectorUnderTest:
     """Construct the selected real connector with only redis-py boundaries faked."""
+    # Import after the autouse Redis fixtures have patched redis-py. Importing
+    # during collection would cache the real RedisCluster before those patches
+    # and make other connector tests attempt real network connections.
+    # First Party
+    from lmcache.v1.storage_backend.connector import redis_connector
+    from lmcache.v1.storage_backend.connector.redis_connector import (
+        RedisClusterConnector,
+        RedisConnector,
+    )
+
     if connector_kind == "redis":
         pool = object()
         monkeypatch.setattr(
