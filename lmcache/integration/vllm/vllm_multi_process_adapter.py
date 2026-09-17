@@ -96,8 +96,8 @@ class ExtraConfigDefault(enum.Enum):
     use_vmm_api = False
 
 
-# Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
-# entry point, which still passes these as positional/keyword args.
+# Backward-compatible aliases for callers that still pass these as
+# positional/keyword args.
 DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.default
 DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.default
 
