@@ -25,7 +25,10 @@ import threading
 import xml.etree.ElementTree as ET
 
 if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
+    from lmcache.v1.memory_management import MemoryObj
 
 # Third Party
 from awscrt import auth, io, s3
@@ -33,14 +36,9 @@ from awscrt.http import HttpHeaders, HttpRequest
 from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import (
-    KeyEntry,
-    KeyListPage,
-    MemoryLayoutDesc,
-    ObjectKey,
-)
+from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -53,7 +51,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -599,7 +596,7 @@ class S3L2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         with self._lock:
             task_id = self._next_task_id

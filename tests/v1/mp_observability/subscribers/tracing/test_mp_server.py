@@ -13,6 +13,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.tracing import (
@@ -39,6 +40,33 @@ def subscriber(registry, bus):
     sub = MPServerTracingSubscriber(registry)
     bus.register_subscriber(sub)
     return sub
+
+
+@pytest.fixture
+def exporter():
+    """Real OTel provider with in-memory exporter; patches the module tracer.
+
+    Span attributes are only recorded by a real ``TracerProvider``.
+    ``_HAS_OTEL`` is forced True so the handlers don't early-return.
+    """
+    exp = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exp))
+    real_tracer = provider.get_tracer("lmcache_mp.server")
+    with (
+        patch.object(mp_server_module, "_tracer", real_tracer),
+        patch.object(mp_server_module, "_HAS_OTEL", True),
+    ):
+        yield exp
+    exp.shutdown()
+
+
+def _root_span(exporter: InMemorySpanExporter, sid: str):
+    """Return the finished root span for *sid*, or None."""
+    for span in exporter.get_finished_spans():
+        if span.name == "request" and span.attributes.get("session_id") == sid:
+            return span
+    return None
 
 
 class TestMPServerTracingSubscriber:
@@ -149,7 +177,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should still be open (store in flight)
         assert registry.get(sid, "request") is not None
-        assert sid in subscriber._deferred_session_end_ts
+        assert sid in subscriber._deferred_session_ends
 
         # Now GPU store completes
         bus.publish(
@@ -157,7 +185,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -165,7 +193,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.050,
-                metadata={"stored_count": 2, "device": "cuda:0"},
+                metadata={"stored_count": 2, "device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -173,7 +201,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should now be closed
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
         assert sid not in subscriber._pending_store_count
 
     # ------------------------------------------------------------------
@@ -224,7 +252,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -232,7 +260,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.030,
-                metadata={"stored_count": 1, "device": "cuda:0"},
+                metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -244,7 +272,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.040,
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -252,7 +280,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.060,
-                metadata={"stored_count": 1, "device": "cuda:0"},
+                metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -283,7 +311,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.001,
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -295,7 +323,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.020,
-                metadata={"stored_count": 3, "device": "cuda:0"},
+                metadata={"stored_count": 3, "device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -347,7 +375,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should still be open (retrieve in flight)
         assert registry.get(sid, "request") is not None
-        assert sid in subscriber._deferred_session_end_ts
+        assert sid in subscriber._deferred_session_ends
 
         # Now GPU retrieve completes
         bus.publish(
@@ -355,7 +383,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -363,7 +391,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id=sid,
                 timestamp=now + 0.050,
-                metadata={"retrieved_count": 4, "device": "cuda:0"},
+                metadata={"retrieved_count": 4, "device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -371,7 +399,7 @@ class TestMPServerTracingSubscriber:
 
         # Root should now be closed
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
         assert sid not in subscriber._pending_retrieve_count
 
     def test_session_end_deferred_until_both_store_and_retrieve_finish(
@@ -421,7 +449,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -429,7 +457,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.030,
-                metadata={"stored_count": 1, "device": "cuda:0"},
+                metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -441,7 +469,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=sid,
                 timestamp=now + 0.040,
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -449,14 +477,14 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id=sid,
                 timestamp=now + 0.060,
-                metadata={"retrieved_count": 2, "device": "cuda:0"},
+                metadata={"retrieved_count": 2, "device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
         bus.stop()
 
         assert registry.get(sid, "request") is None
-        assert sid not in subscriber._deferred_session_end_ts
+        assert sid not in subscriber._deferred_session_ends
 
     # ------------------------------------------------------------------
     # Child spans registered in shared registry for sub-span parenting
@@ -473,7 +501,7 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id="req-reg",
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -488,14 +516,14 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id="req-reg2",
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id="req-reg2",
-                metadata={"device": "cuda:0", "retrieved_count": 1},
+                metadata={"device": f"{torch_device_type}:0", "retrieved_count": 1},
             )
         )
         time.sleep(0.15)
@@ -512,14 +540,14 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_STORE_START,
                 session_id="req-1",
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.MP_STORE_END,
                 session_id="req-1",
-                metadata={"device": "cuda:0", "stored_count": 5},
+                metadata={"device": f"{torch_device_type}:0", "stored_count": 5},
             )
         )
         time.sleep(0.15)
@@ -532,14 +560,14 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id="req-2",
-                metadata={"device": "cuda:1"},
+                metadata={"device": f"{torch_device_type}:1"},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id="req-2",
-                metadata={"device": "cuda:1", "retrieved_count": 3},
+                metadata={"device": f"{torch_device_type}:1", "retrieved_count": 3},
             )
         )
         time.sleep(0.15)
@@ -571,7 +599,7 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_STORE_END,
                 session_id="orphan",
-                metadata={"stored_count": 1, "device": "cuda:0"},
+                metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -584,7 +612,7 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_STORE_START,
                 session_id="leaked",
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         time.sleep(0.15)
@@ -599,7 +627,7 @@ class TestMPServerTracingSubscriber:
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=f"req-{i}",
-                    metadata={"device": "cuda:0"},
+                    metadata={"device": f"{torch_device_type}:0"},
                 )
             )
         for i in range(5):
@@ -607,7 +635,7 @@ class TestMPServerTracingSubscriber:
                 Event(
                     event_type=EventType.MP_STORE_END,
                     session_id=f"req-{i}",
-                    metadata={"device": "cuda:0", "stored_count": i},
+                    metadata={"device": f"{torch_device_type}:0", "stored_count": i},
                 )
             )
         time.sleep(0.15)
@@ -618,32 +646,9 @@ class TestMPServerTracingSubscriber:
 class TestHitRateAttributes:
     """Verify hit_tokens / requested_tokens / hit_rate are set on the root span.
 
-    Uses a real OTel TracerProvider backed by InMemorySpanExporter so that span
-    attributes are actually recorded.  The module-level ``_tracer`` is patched
-    for the duration of each test; ``_HAS_OTEL`` is forced True so that the
-    handlers don't early-return.
+    Uses the module-level ``exporter`` fixture so span attributes are actually
+    recorded by a real TracerProvider.
     """
-
-    @pytest.fixture
-    def exporter(self):
-        """Real OTel provider with in-memory exporter; patches module tracer."""
-        exp = InMemorySpanExporter()
-        provider = TracerProvider()
-        provider.add_span_processor(SimpleSpanProcessor(exp))
-        real_tracer = provider.get_tracer("lmcache_mp.server")
-        with (
-            patch.object(mp_server_module, "_tracer", real_tracer),
-            patch.object(mp_server_module, "_HAS_OTEL", True),
-        ):
-            yield exp
-        exp.shutdown()
-
-    def _root_span(self, exporter: InMemorySpanExporter, sid: str):
-        """Return the finished root span for *sid*, or None."""
-        for span in exporter.get_finished_spans():
-            if span.name == "request" and span.attributes.get("session_id") == sid:
-                return span
-        return None
 
     def test_hit_rate_attrs_set_on_root_span(self, exporter):
         """LP_END with hit_tokens=512, requested_tokens=1024 → hit_rate=0.5."""
@@ -673,6 +678,9 @@ class TestHitRateAttributes:
                     "hit_tokens": 512,
                     "requested_tokens": 1024,
                     "found_count": 2,
+                    "l1_hit_tokens": 512,
+                    "l2_hit_tokens": 0,
+                    "early_exit_reason": "",
                 },
             )
         )
@@ -686,7 +694,7 @@ class TestHitRateAttributes:
         time.sleep(0.15)
         bus.stop()
 
-        root = self._root_span(exporter, sid)
+        root = _root_span(exporter, sid)
         assert root is not None
         assert root.attributes["hit_tokens"] == 512
         assert root.attributes["requested_tokens"] == 1024
@@ -716,7 +724,14 @@ class TestHitRateAttributes:
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"hit_tokens": 0, "requested_tokens": 0, "found_count": 0},
+                metadata={
+                    "hit_tokens": 0,
+                    "requested_tokens": 0,
+                    "found_count": 0,
+                    "l1_hit_tokens": 0,
+                    "l2_hit_tokens": 0,
+                    "early_exit_reason": "",
+                },
             )
         )
         bus.publish(
@@ -729,7 +744,7 @@ class TestHitRateAttributes:
         time.sleep(0.15)
         bus.stop()
 
-        root = self._root_span(exporter, sid)
+        root = _root_span(exporter, sid)
         assert root is not None
         assert root.attributes["hit_tokens"] == 0
         assert root.attributes["requested_tokens"] == 0
@@ -754,7 +769,7 @@ class TestHitRateAttributes:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.001,
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -762,7 +777,7 @@ class TestHitRateAttributes:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.020,
-                metadata={"stored_count": 3, "device": "cuda:0"},
+                metadata={"stored_count": 3, "device": f"{torch_device_type}:0"},
             )
         )
         bus.publish(
@@ -775,7 +790,90 @@ class TestHitRateAttributes:
         time.sleep(0.15)
         bus.stop()
 
-        root = self._root_span(exporter, sid)
+        root = _root_span(exporter, sid)
         assert root is not None
         assert "hit_tokens" not in root.attributes
         assert "hit_rate" not in root.attributes
+
+
+class TestTierAttributionAttributes:
+    """Verify the per-tier hit split and early-exit reason on the root span."""
+
+    def _root_span_for(self, exporter, sid: str, end_metadata: dict):
+        """Run a REQUEST/LP_START/LP_END/REQUEST_END cycle for ``sid``.
+
+        Args:
+            exporter: In-memory span exporter from the ``exporter`` fixture.
+            sid: Session ID correlating the four events.
+            end_metadata: Metadata for the ``MP_LOOKUP_PREFETCH_END`` event.
+
+        Returns:
+            The finished root span for ``sid``, or None.
+        """
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        bus.register_subscriber(MPServerTracingSubscriber(SpanRegistry()))
+        bus.start()
+        now = time.time()
+        for event_type, offset, metadata in (
+            (EventType.MP_REQUEST_START, 0.0, {}),
+            (EventType.MP_LOOKUP_PREFETCH_START, 0.001, {}),
+            (EventType.MP_LOOKUP_PREFETCH_END, 0.010, end_metadata),
+            (EventType.MP_REQUEST_END, 0.020, {}),
+        ):
+            bus.publish(
+                Event(
+                    event_type=event_type,
+                    session_id=sid,
+                    timestamp=now + offset,
+                    metadata=metadata,
+                )
+            )
+        time.sleep(0.15)
+        bus.stop()
+        return _root_span(exporter, sid)
+
+    def test_tier_attributes_on_normal_path(self, exporter):
+        """768 hit tokens split 512/256 of 1024 requested."""
+        root = self._root_span_for(
+            exporter,
+            "req-tier-normal",
+            {
+                "found_count": 3,
+                "requested_tokens": 1024,
+                "hit_tokens": 768,
+                "l1_hit_tokens": 512,
+                "l2_hit_tokens": 256,
+                "early_exit_reason": "",
+            },
+        )
+
+        assert root is not None
+        assert root.attributes["l1_hit_tokens"] == 512
+        assert root.attributes["l2_hit_tokens"] == 256
+        assert root.attributes["l1_hit_rate"] == pytest.approx(0.5)
+        assert root.attributes["l2_hit_rate"] == pytest.approx(0.25)
+        assert root.attributes["early_exit_reason"] == ""
+        # Typed, unlike the generic child-span loop that stringifies metadata.
+        assert isinstance(root.attributes["l1_hit_tokens"], int)
+        assert isinstance(root.attributes["l1_hit_rate"], float)
+
+    @pytest.mark.parametrize("reason", ["no_gpu_context", "empty_chunk_hashes"])
+    def test_early_exit_reason_and_zero_rates(self, exporter, reason):
+        """An early exit names itself; a zero denominator yields 0.0 rates."""
+        root = self._root_span_for(
+            exporter,
+            f"req-early-{reason}",
+            {
+                "found_count": 0,
+                "requested_tokens": 0,
+                "hit_tokens": 0,
+                "l1_hit_tokens": 0,
+                "l2_hit_tokens": 0,
+                "early_exit_reason": reason,
+            },
+        )
+
+        assert root is not None
+        assert root.attributes["early_exit_reason"] == reason
+        assert root.attributes["l1_hit_rate"] == 0.0
+        assert root.attributes["l2_hit_rate"] == 0.0

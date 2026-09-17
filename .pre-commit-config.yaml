@@ -7,16 +7,24 @@ repos:
     entry: python tools/check_spdx_header.py
     language: python
     types: [python]
-  - id: ban-torch-device
+  - id: ban-direct-torch-device
     name: Ban direct torch device usage
     entry: >-
       bash -c '
-      matches=$(grep -rHnE "torch\.(cuda|xpu|hpu)" "$@");
+      pattern=$(find lmcache/v1/platform -mindepth 1 -maxdepth 1 -type d \
+        -exec basename {} \; | grep -v "^__" | grep -v "^base$" | sort | paste -sd "|");
+      if [ -z "$pattern" ]; then
+        echo "WARNING: no platform dirs found, skipping check";
+        exit 0;
+      fi;
+      echo "Detected platforms: ${pattern//|/, }";
+      echo "Ban pattern: torch.($pattern)";
+      matches=$(grep -rHnE "torch\.($pattern)" "$@");
       if [ -n "$matches" ]; then
         echo "";
         echo "========================================";
-        echo "  BANNED: direct torch device usage found";
-        echo "  Fix: use torch_dev/torch_device_type";
+        echo "  BANNED: Direct torch device API usage";
+        echo "  Use lmcache.v1.platform abstractions instead";
         echo "========================================";
         echo "";
         echo "$matches";
@@ -27,9 +35,53 @@ repos:
     files: ^lmcache/
     exclude: |
       (?x)^(
-        lmcache/__init__\.py|
-        lmcache/.*/gpu_connector/.*
+        lmcache/.*/gpu_connector/.*|
+        lmcache/v1/platform/.*
       )$
+  - id: ban-cuda-host-register
+    name: Ban cudaHostRegister/Unregister outside platform
+    entry: >-
+      bash -c '
+      matches=$(grep -rHnE "\.cudaHost(Register|Unregister)" "$@");
+      if [ -n "$matches" ]; then
+        echo "";
+        echo "=======================================================================";
+        echo "  BANNED: .cudaHostRegister/Unregister usage found outside platform dir";
+        echo "  Fix 1: They are only allowed in the platform directory";
+        echo "  Fix 2: use current_device_spec.pin_memory/unpin_memory instead";
+        echo "=======================================================================";
+        echo "";
+        echo "$matches";
+        exit 1;
+      fi' --
+    language: system
+    types: [python]
+    files: ^lmcache/
+    exclude: |
+      (?x)^(
+        lmcache/.*/gpu_connector/.*|
+        lmcache/v1/platform/.*
+      )$
+  - id: ban-raw-timeout-error
+    name: Ban raw raise of builtin TimeoutError
+    entry: >-
+      bash -c '
+      matches=$(grep -rHnE "raise[[:space:]]+(asyncio\.)?TimeoutError\b" "$@");
+      if [ -n "$matches" ]; then
+        echo "";
+        echo "========================================";
+        echo "  BANNED: raw raise of builtin TimeoutError";
+        echo "  Fix: raise LMCacheTimeoutError from";
+        echo "       lmcache.v1.mp_observability.errors so the timeout";
+        echo "       is reported to MP observability (OTel).";
+        echo "========================================";
+        echo "";
+        echo "$matches";
+        exit 1;
+      fi' --
+    language: system
+    types: [python]
+    files: ^lmcache/
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:

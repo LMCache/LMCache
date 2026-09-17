@@ -99,7 +99,7 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: envtestScheme})
 	Expect(err).NotTo(HaveOccurred())
 
-	By("starting a manager that serves the PodInjector webhook")
+	By("starting a manager that serves the CacheBlendPodInjector webhook")
 	wio := &testEnv.WebhookInstallOptions
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  envtestScheme,
@@ -118,7 +118,7 @@ var _ = BeforeSuite(func() {
 	// informer cache sync — the production wiring uses mgr.GetClient().
 	directClient, err := client.New(cfg, client.Options{Scheme: envtestScheme})
 	Expect(err).NotTo(HaveOccurred())
-	mgr.GetWebhookServer().Register("/mutate--v1-pod", &webhook.Admission{Handler: &PodInjector{
+	mgr.GetWebhookServer().Register("/mutate--v1-pod", &webhook.Admission{Handler: &CacheBlendPodInjector{
 		Client:  directClient,
 		Decoder: admission.NewDecoder(mgr.GetScheme()),
 	}})

@@ -1,17 +1,19 @@
 .. _recipe_qwen3_5:
 
-Qwen3.5 / Qwen3.6 series
-========================
+Qwen3.5 / Qwen3.6 / Qwen3.8 series
+==================================
 
 A hybrid architecture interleaving Mamba / Gated-DeltaNet (GDN) linear-attention
-layers with full-attention layers, shared by the **Qwen3.5 and Qwen3.6**
-series. LMCache reinterprets the recurrent state caches as opaque pages at
-registration time; see :doc:`../mp/hybrid_models` for the general handling of
-Mamba / linear-attention models.
+layers with full-attention layers, shared by the **Qwen3.5, Qwen3.6 and
+Qwen3.8** series (all use the ``Qwen3_5ForConditionalGeneration``
+architecture). LMCache reinterprets the recurrent state caches as opaque pages
+at registration time; see :doc:`../mp/hybrid_models` for the general handling
+of Mamba / linear-attention models.
 
 Validated models
 ----------------
 
+- `Qwen/Qwen3.8-27B <https://huggingface.co/Qwen/Qwen3.8-27B>`_ (1 GPU)
 - `Qwen/Qwen3.6-27B <https://huggingface.co/Qwen/Qwen3.6-27B>`_ (1 GPU)
 - `Qwen/Qwen3.5-0.8B <https://huggingface.co/Qwen/Qwen3.5-0.8B>`_ (1 GPU)
 
@@ -39,6 +41,9 @@ Validated models
          * - Model
            - Unified block size ``N``
            - GPUs
+         * - ``Qwen/Qwen3.8-27B``
+           - 784
+           - 1
          * - ``Qwen/Qwen3.6-27B``
            - 784
            - 1
@@ -47,15 +52,18 @@ Validated models
            - 1
 
       Set the LMCache server's ``--chunk-size`` to that ``N`` (or a multiple of
-      it), and vLLM's ``--max-num-batched-tokens`` to ``2N-1`` (the largest value
-      below ``2N``). ``N`` is also valid but serializes prefill under load — see
-      the note below.
+      it) and enable ``--separate-object-groups``, then set vLLM's
+      ``--max-num-batched-tokens`` to at least ``N``. Keeping it below ``2N``
+      (e.g. ``2N-1``) snapshots the Mamba state at every block boundary for the
+      finest cache reuse; larger values raise prefill throughput at coarser
+      reuse — see the note below.
 
       **Qwen3.6-27B** (1 GPU, ``N = 784`` → ``2N-1 = 1567``):
 
       .. code-block:: bash
 
-         lmcache server --chunk-size 784 --l1-size-gb 100 --eviction-policy LRU
+         lmcache server --chunk-size 784 --separate-object-groups \
+             --l1-size-gb 100 --eviction-policy LRU
 
       .. code-block:: bash
 
@@ -68,27 +76,37 @@ Validated models
 
       |
 
+      **Qwen3.8-27B** (1 GPU, ``N = 784`` → ``2N-1 = 1567``): same block size as
+      Qwen3.6-27B, so the commands above apply unchanged apart from the model
+      id.
+
+      |
+
       **Qwen3.5-0.8B** (1 GPU, ``N = 544`` → ``2N-1 = 1087``): identical to the
       above, with ``--chunk-size 544`` and ``--max-num-batched-tokens 1087``.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the
-      ``all`` mode). ``--max-num-batched-tokens`` must be in ``[N, 2N)`` (at
-      least the unified block size and below twice it) — LMCache raises at
-      engine startup otherwise. ``align`` snapshots the Mamba state at
-      scheduler-step ends on a block boundary, and the scheduler splits prefills
-      into whole ``N``-token blocks. **Prefer the maximum, ``2N-1``:** a single
-      request still advances exactly one block per step (``2N-1 < 2N``), so the
-      per-block snapshot LMCache stores is preserved, *and* the spare ``N-1``
-      budget lets decodes co-schedule with a prefill block. Setting it to exactly
-      ``N`` makes the per-step budget equal to one block, so once any request is
+      ``all`` mode). ``--separate-object-groups`` (server) is required for
+      hybrid models so the Mamba layers get their own cache objects; it is also
+      what lets ``--max-num-batched-tokens`` exceed ``2N``.
+      ``--max-num-batched-tokens`` must be **at least** ``N``: ``align``
+      snapshots the Mamba state at scheduler-step ends on a block boundary, and
+      the scheduler splits prefills into whole ``N``-token blocks. Within
+      ``[N, 2N)`` every step advances exactly one block, so LMCache snapshots
+      *every* block boundary (finest reuse); **prefer ``2N-1``**, whose spare
+      ``N-1`` budget lets decodes co-schedule with a prefill block. Setting it to
+      exactly ``N`` makes the per-step budget one block, so once any request is
       decoding (consuming ≥1 token of the budget) no new request can start
       prefill — execution serializes to one request at a time. (Benchmarked on
       Qwen3.6-27B: at ``N`` a cold / low-hit run ran ~7× slower with GPU batch
       stuck at 1; ``2N-1`` restored full batching. With a warm LMCache cache
       (~97 % hit) the gap is small since little prefill remains, but ``2N-1`` is
-      the safe default.) If vLLM reports *"max_num_seqs exceeds available Mamba
-      cache blocks"* at ``2N-1``, lower ``--max-num-seqs`` to ≤ that count (each
-      decode sequence needs one Mamba block) or raise ``--gpu-memory-utilization``.
+      the safe default.) Values ``≥ 2N`` raise prefill throughput with larger
+      steps but snapshot only the last block of each step, so cached prefixes
+      align to step boundaries rather than every block. If vLLM reports
+      *"max_num_seqs exceeds available Mamba cache blocks"*, lower
+      ``--max-num-seqs`` to ≤ that count (each decode sequence needs one Mamba
+      block) or raise ``--gpu-memory-utilization``.
 
       For the generic LMCache + vLLM wiring (ports, remote hosts), see
       :doc:`../getting_started/quickstart`.
@@ -132,6 +150,7 @@ Caveats
   shared across engines with different attention backends or kernel block
   sizes.
 - vLLM's Mamba prefix caching in ``align`` mode is experimental.
-- ``Qwen/Qwen3.6-27B`` is a vision-language model (it loads a vision tower);
-  the LMCache validation covers **text** generation (the ``hma_lm_eval_qwen3_5``
-  gsm8k store-vs-retrieve gate). Caching of image/video KV is not validated.
+- ``Qwen/Qwen3.6-27B`` and ``Qwen/Qwen3.8-27B`` are vision-language models
+  (they load a vision tower); the LMCache validation covers **text**
+  generation (the ``hma_lm_eval_qwen3_5`` gsm8k store-vs-retrieve gate runs on
+  Qwen3.5 / Qwen3.6). Caching of image/video KV is not validated.

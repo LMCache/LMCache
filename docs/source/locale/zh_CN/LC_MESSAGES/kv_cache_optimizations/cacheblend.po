@@ -46,14 +46,12 @@ msgid ""
 "requires ``--supported-transfer-mode`` to be ``lmcache_driven`` or "
 "``auto`` (the default). See :doc:`/mp/configuration` for the related "
 "server flags."
-msgstr ""
-"``blend`` 引擎将 ``BlendModule`` 组合到服务器中，并要求 ``--supported-transfer-mode`` 设置为 ``lmcache_driven`` 或 ``auto``\\ （默认值）。有关相关服务器标志，请参见 :doc:`/mp/configuration`。"
+msgstr "``blend`` 引擎将 ``BlendModule`` 组合到服务器中，并要求 ``--supported-transfer-mode`` 设置为 ``lmcache_driven`` 或 ``auto``\\ （默认值）。有关相关服务器标志，请参见 :doc:`/mp/configuration`。"
 
 #: ../../source/kv_cache_optimizations/cacheblend.rst:24
 msgid ""
 "The in-process CacheBlend documentation -- configuration knobs such as "
 "``LMCACHE_ENABLE_BLENDING`` and an end-to-end example -- is preserved in "
 "the Legacy section: :doc:`/kv_cache_optimizations/blending`."
-msgstr ""
-"进程内 CacheBlend 文档——包括配置项（如 ``LMCACHE_ENABLE_BLENDING``\\ ）及端到端示例——已保留在旧版章节中： :doc:`/kv_cache_optimizations/blending`。"
+msgstr "进程内 CacheBlend 文档——包括配置项（如 ``LMCACHE_ENABLE_BLENDING``\\ ）及端到端示例——已保留在旧版章节中： :doc:`/kv_cache_optimizations/blending`。"
 

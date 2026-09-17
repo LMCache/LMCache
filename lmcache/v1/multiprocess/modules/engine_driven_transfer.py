@@ -21,17 +21,14 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
 # Local
@@ -96,46 +93,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
-
-    def get_handlers(self) -> list[HandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            A list of HandlerSpec entries mapping request types to
-            their handler callables and thread pool assignments.
-        """
-        return [
-            HandlerSpec(
-                RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
-                self.register_kv_cache_engine_driven_context,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
-                self.unregister_kv_cache,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.PREPARE_STORE,
-                self.prepare_store,
-                ThreadPoolType.AFFINITY,
-            ),
-            HandlerSpec(
-                RequestType.COMMIT_STORE,
-                self.commit_store,
-                ThreadPoolType.AFFINITY,
-            ),
-            HandlerSpec(
-                RequestType.PREPARE_RETRIEVE,
-                self.prepare_retrieve,
-                ThreadPoolType.AFFINITY,
-            ),
-            HandlerSpec(
-                RequestType.COMMIT_RETRIEVE,
-                self.commit_retrieve,
-                ThreadPoolType.AFFINITY,
-            ),
-        ]
 
     def report_status(self) -> dict:
         """Return non-GPU transfer module status information.
@@ -297,6 +254,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         non-GPU transfers."""
         return self._ctx.resolve_obj_keys(key, [0])[0]
 
+    @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
     def register_kv_cache_engine_driven_context(
         self,
         payload: RegisterEngineDrivenContextPayload,
@@ -306,7 +264,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Args:
             payload: Struct containing all registration fields
                 (instance_id, model_name, world_size, block_size,
-                num_layers, hidden_dim_size, dtype_str, use_mla).
+                num_layers, hidden_dim_size, dtype_str, use_mla,
+                num_physical_slots).
 
         Raises:
             ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
@@ -335,13 +294,23 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
             )
 
+        num_physical_slots = payload.num_physical_slots
+        if num_physical_slots is None:
+            # Compatibility with clients from before the physical-slot field
+            # was added. Those clients require one slot per logical token.
+            num_physical_slots = self._ctx.chunk_size
+        elif num_physical_slots <= 0:
+            raise ValueError(
+                f"num_physical_slots must be positive, got {num_physical_slots}"
+            )
+
         shape = (
             torch.Size(
-                [payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+                [payload.num_layers, num_physical_slots, payload.hidden_dim_size]
             )
             if payload.use_mla
             else torch.Size(
-                [2, payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+                [2, payload.num_layers, num_physical_slots, payload.hidden_dim_size]
             )
         )
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
@@ -387,6 +356,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             shm_name=shm_name, pool_size=pool_size
         )
 
+    @request_handler(RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister a non-GPU KV cache context for the given instance ID.
 
@@ -407,6 +377,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         self._release_entry(instance_id, entry)
         logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
 
+    @request_handler(
+        RequestType.PREPARE_STORE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     @_lmcache_nvtx_annotate
     def prepare_store(
         self,
@@ -433,6 +408,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         session.extras["store_start_time"] = time.perf_counter()
         return response
 
+    @request_handler(
+        RequestType.COMMIT_STORE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     @_lmcache_nvtx_annotate
     def commit_store(
         self,
@@ -475,6 +455,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
         return result
 
+    @request_handler(
+        RequestType.PREPARE_RETRIEVE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     @_lmcache_nvtx_annotate
     def prepare_retrieve(
         self,
@@ -504,6 +489,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         session.extras["retrieve_start_time"] = time.perf_counter()
         return response
 
+    @request_handler(
+        RequestType.COMMIT_RETRIEVE,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     @_lmcache_nvtx_annotate
     def commit_retrieve(
         self,

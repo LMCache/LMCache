@@ -41,6 +41,20 @@ LMCache ships several L2 storage backends, grouped by medium under
 :doc:`Supported Backends <supported_storages>`. Select one or more with the
 ``--l2-adapter`` flag.
 
+Every adapter accepts, alongside its type-specific keys, the common
+``"shared": true`` option. Set it when the adapter mounts a storage
+domain that several LMCache instances share (one S3 bucket, one NFS
+export): with :doc:`coordinator event reporting <../coordinator>`
+enabled, the coordinator's key directory then identifies the pool by
+the adapter's type name — keep **one pool per adapter type** across the
+fleet — deduplicates its placements across instances, and keeps them
+across instance restarts (the bytes outlive any single reporter).
+Storage private to the instance (the default, ``false``) needs nothing.
+
+.. code-block:: bash
+
+    --l2-adapter '{"type": "fs", "base_path": "/mnt/nfs/lmcache", "shared": true}'
+
 .. toctree::
    :maxdepth: 2
 
@@ -179,7 +193,10 @@ policy evicts a fraction of the least-recently-used keys.
      - Description
    * - ``--eviction-policy``
      - *(required)*
-     - Policy name: ``LRU`` or ``noop``.
+     - Policy name: ``LRU``, ``IsolatedLRU``, or ``noop``. ``IsolatedLRU``
+       maintains one LRU list per ``cache_salt`` and relies on per-salt
+       quotas registered via the ``/quota`` HTTP endpoints; see
+       :doc:`/mp/configuration` for the full description.
    * - ``--eviction-trigger-watermark``
      - ``0.8``
      - L1 usage fraction [0, 1] above which eviction is triggered.

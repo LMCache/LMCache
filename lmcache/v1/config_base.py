@@ -176,7 +176,7 @@ def _from_json(cls, json_str: str):
         config_dict = json.loads(json_str)
         return cls.from_dict(config_dict)
     except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON input: {e}")
+        logger.error("Invalid JSON input: %s", e)
         raise
 
 
@@ -195,7 +195,7 @@ def _resolve_config_aliases(
     for key, value in config_dict.items():
         if key in deprecated_configs:
             # Log deprecation warning
-            logger.warning(f"{deprecated_configs[key]} (source: {source})")
+            logger.warning("%s (source: %s)", deprecated_configs[key], source)
 
             # Map to new key if alias exists
             if key in config_aliases:
@@ -209,7 +209,7 @@ def _resolve_config_aliases(
             resolved[key] = value
         else:
             # Unknown configuration key
-            logger.warning(f"Unknown configuration key: {key} (source: {source})")
+            logger.warning("Unknown configuration key: %s (source: %s)", key, source)
 
     return resolved
 
@@ -521,7 +521,7 @@ def create_singleton_config(
                         _config_instance = config_class.from_env()
                     else:
                         config_file = os.environ[config_env_var]
-                        logger.info(f"Loading config file {config_file}")
+                        logger.info("Loading config file %s", config_file)
                         _config_instance = config_class.from_file(config_file)
                         # Update config from environment variables
                         _config_instance.update_config_from_env()

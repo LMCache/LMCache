@@ -11,8 +11,8 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
     MemoryFormat,
     MemoryObj,
     TensorMemoryObj,
@@ -184,9 +184,9 @@ class TestAuditConnector:
         print(log_capture.get_logs())
 
         init_logs = [
-            r.msg
+            r.getMessage()
             for r in log_capture.get_records()
-            if "[REMOTE_AUDIT]" in r.msg and "INITIALIZED" in r.msg
+            if "[REMOTE_AUDIT]" in r.getMessage() and "INITIALIZED" in r.getMessage()
         ]
 
         assert len(init_logs) > 0, (
@@ -212,11 +212,13 @@ class TestAuditConnector:
         print("\nCaptured logs:")
         print(log_capture.get_logs())
 
-        init_logs = [r for r in log_capture.get_records() if "INITIALIZED" in r.msg]
+        init_logs = [
+            r for r in log_capture.get_records() if "INITIALIZED" in r.getMessage()
+        ]
         assert len(init_logs) > 0, (
             f"Expected INITIALIZED log. Got logs: {log_capture.get_logs()}"
         )
-        assert "Calc Checksum:True" in init_logs[0].msg
+        assert "Calc Checksum:True" in init_logs[0].getMessage()
 
     def test_initialization_with_excluded_cmds(self, mock_connector, log_capture):
         """Test initialization with excluded commands"""
@@ -235,11 +237,13 @@ class TestAuditConnector:
         print("\nCaptured logs:")
         print(log_capture.get_logs())
 
-        init_logs = [r for r in log_capture.get_records() if "INITIALIZED" in r.msg]
+        init_logs = [
+            r for r in log_capture.get_records() if "INITIALIZED" in r.getMessage()
+        ]
         assert len(init_logs) > 0, (
             f"Expected INITIALIZED log. Got logs: {log_capture.get_logs()}"
         )
-        assert "Excluded Cmds:" in init_logs[0].msg
+        assert "Excluded Cmds:" in init_logs[0].getMessage()
 
     def test_put_and_get_with_audit_log(
         self, mock_connector, local_cpu_backend, event_loop, log_capture
@@ -266,13 +270,13 @@ class TestAuditConnector:
             put_logs = [
                 r
                 for r in log_capture.get_records()
-                if "PUT" in r.msg and "SUCCESS" in r.msg
+                if "PUT" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(put_logs) > 0, (
                 f"Expected PUT audit log. Got logs: {log_capture.get_logs()}"
             )
-            assert "Cost:" in put_logs[0].msg
-            assert "Size:" in put_logs[0].msg
+            assert "Cost:" in put_logs[0].getMessage()
+            assert "Size:" in put_logs[0].getMessage()
 
             log_capture.clear()
 
@@ -286,12 +290,12 @@ class TestAuditConnector:
             get_logs = [
                 r
                 for r in log_capture.get_records()
-                if "GET" in r.msg and "SUCCESS" in r.msg
+                if "GET" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(get_logs) > 0, (
                 f"Expected GET audit log. Got logs: {log_capture.get_logs()}"
             )
-            assert "Cost:" in get_logs[0].msg
+            assert "Cost:" in get_logs[0].getMessage()
 
         event_loop.run_until_complete(run_test())
 
@@ -320,12 +324,12 @@ class TestAuditConnector:
             exists_logs = [
                 r
                 for r in log_capture.get_records()
-                if "EXISTS" in r.msg and "SUCCESS" in r.msg
+                if "EXISTS" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(exists_logs) > 0, (
                 f"Expected EXISTS audit log. Got logs: {log_capture.get_logs()}"
             )
-            assert "Cost:" in exists_logs[0].msg
+            assert "Cost:" in exists_logs[0].getMessage()
 
         event_loop.run_until_complete(run_test())
 
@@ -357,13 +361,13 @@ class TestAuditConnector:
             put_logs = [
                 r
                 for r in log_capture.get_records()
-                if "PUT" in r.msg and "SUCCESS" in r.msg
+                if "PUT" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(put_logs) > 0, (
                 f"Expected PUT audit log. Got logs: {log_capture.get_logs()}"
             )
-            assert "Checksum:" in put_logs[0].msg
-            assert "Checksum:N/A" not in put_logs[0].msg
+            assert "Checksum:" in put_logs[0].getMessage()
+            assert "Checksum:N/A" not in put_logs[0].getMessage()
 
         event_loop.run_until_complete(run_test())
 
@@ -391,7 +395,7 @@ class TestAuditConnector:
             put_logs = [
                 r
                 for r in log_capture.get_records()
-                if "PUT" in r.msg and "SUCCESS" in r.msg
+                if "PUT" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(put_logs) > 0, "Expected PUT audit log with keyword arguments."
 
@@ -403,7 +407,7 @@ class TestAuditConnector:
             get_logs = [
                 r
                 for r in log_capture.get_records()
-                if "GET" in r.msg and "SUCCESS" in r.msg
+                if "GET" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(get_logs) > 0, "Expected GET audit log with keyword arguments."
 
@@ -435,7 +439,7 @@ class TestAuditConnector:
             exists_logs = [
                 r
                 for r in log_capture.get_records()
-                if "EXISTS" in r.msg and "SUCCESS" in r.msg
+                if "EXISTS" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(exists_logs) == 0, (
                 f"Excluded command should not log. Got logs: {log_capture.get_logs()}"
@@ -470,7 +474,7 @@ class TestAuditConnector:
             put_logs = [
                 r
                 for r in log_capture.get_records()
-                if "PUT" in r.msg and "SUCCESS" in r.msg
+                if "PUT" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(put_logs) > 0, (
                 f"Non-excluded command should log. Got logs: {log_capture.get_logs()}"
@@ -494,8 +498,10 @@ class TestAuditConnector:
         print("\nAfter @NotAudit methods:")
         print(log_capture.get_logs())
 
-        operation_logs = [r for r in log_capture.get_records() if "POST_INIT" in r.msg]
-        operation_logs = [r for r in operation_logs if "SUCCESS" in r.msg]
+        operation_logs = [
+            r for r in log_capture.get_records() if "POST_INIT" in r.getMessage()
+        ]
+        operation_logs = [r for r in operation_logs if "SUCCESS" in r.getMessage()]
         assert len(operation_logs) == 0, (
             f"@NotAudit methods should not generate operation audit logs. "
             f"Got logs: {log_capture.get_logs()}"
@@ -531,12 +537,12 @@ class TestAuditConnector:
             batched_logs = [
                 r
                 for r in log_capture.get_records()
-                if "BATCHED_GET" in r.msg and "SUCCESS" in r.msg
+                if "BATCHED_GET" in r.getMessage() and "SUCCESS" in r.getMessage()
             ]
             assert len(batched_logs) > 0, (
                 f"Expected BATCHED_GET audit log. Got logs: {log_capture.get_logs()}"
             )
-            assert "Cost:" in batched_logs[0].msg
+            assert "Cost:" in batched_logs[0].getMessage()
 
         event_loop.run_until_complete(run_test())
 
@@ -570,13 +576,14 @@ class TestAuditConnector:
             batched_logs = [
                 r
                 for r in log_capture.get_records()
-                if "BATCHED_ASYNC_CONTAINS" in r.msg and "SUCCESS" in r.msg
+                if "BATCHED_ASYNC_CONTAINS" in r.getMessage()
+                and "SUCCESS" in r.getMessage()
             ]
             assert len(batched_logs) > 0, (
                 f"Expected BATCHED_ASYNC_CONTAINS audit log. "
                 f"Got logs: {log_capture.get_logs()}"
             )
-            assert "Cost:" in batched_logs[0].msg
+            assert "Cost:" in batched_logs[0].getMessage()
 
         event_loop.run_until_complete(run_test())
 
@@ -613,12 +620,12 @@ class TestAuditConnector:
         exists_sync_logs = [
             r
             for r in log_capture.get_records()
-            if "EXISTS_SYNC" in r.msg and "SUCCESS" in r.msg
+            if "EXISTS_SYNC" in r.getMessage() and "SUCCESS" in r.getMessage()
         ]
         assert len(exists_sync_logs) > 0, (
             f"Expected EXISTS_SYNC audit log. Got logs: {log_capture.get_logs()}"
         )
-        assert "Cost:" in exists_sync_logs[0].msg
+        assert "Cost:" in exists_sync_logs[0].getMessage()
 
     def test_exists_sync_excluded_no_audit_log(self, mock_connector, log_capture):
         """Test that excluded exists_sync doesn't generate audit logs"""
@@ -643,7 +650,7 @@ class TestAuditConnector:
         exists_sync_logs = [
             r
             for r in log_capture.get_records()
-            if "EXISTS_SYNC" in r.msg and "SUCCESS" in r.msg
+            if "EXISTS_SYNC" in r.getMessage() and "SUCCESS" in r.getMessage()
         ]
         assert len(exists_sync_logs) == 0, (
             f"Excluded exists_sync should not log. Got logs: {log_capture.get_logs()}"

@@ -154,5 +154,23 @@ func validateL2BackendSpec(b *L2BackendSpec) field.ErrorList {
 		}
 	}
 
+	if b.Serde != nil {
+		serdePath := l2Path.Child("serde")
+		if b.Serde.AESGCM == nil {
+			errs = append(errs, field.Required(serdePath, "exactly one serde type must be set"))
+		} else if b.Serde.AESGCM.MasterKeySecretRef.Name == "" {
+			errs = append(errs, field.Required(serdePath.Child("aesgcm", "masterKeySecretRef", "name"), "must be non-empty"))
+		}
+		// A raw adapter spec may already carry a hand-written "serde"
+		// config; combining it with the serde field would silently
+		// overwrite one of the two.
+		if b.Raw != nil {
+			if _, ok := b.Raw.Config["serde"]; ok {
+				errs = append(errs, field.Invalid(serdePath, "",
+					"cannot be combined with a raw adapter that sets a 'serde' config key"))
+			}
+		}
+	}
+
 	return errs
 }

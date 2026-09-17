@@ -13,7 +13,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -251,7 +251,8 @@ class TestBigtableEmulatorIntegration:
         """Verify writing a chunk larger than max_chunk_size_mb is skipped
         without failure.
         """
-        config = create_test_config()  # Max size is 5.0 MB
+        # Max size is 5.0 MB, sharding disabled
+        config = create_test_config(extra_overrides={"bigtable_layer_group_size": 0})
         metadata = create_test_metadata()
 
         backend = RemoteBackend(

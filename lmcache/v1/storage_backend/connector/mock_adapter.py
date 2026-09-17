@@ -24,7 +24,7 @@ class MockConnectorAdapter(ConnectorAdapter):
         # Local
         from .mock_connector import MockConnector
 
-        logger.info(f"Creating Mock connector for URL: {context.url}")
+        logger.info("Creating Mock connector for URL: %s", context.url)
 
         parsed = urlparse(context.url)
         # capacity is provided as the netloc in URLs like: mock://100/?...

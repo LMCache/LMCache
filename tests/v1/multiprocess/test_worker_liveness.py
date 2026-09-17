@@ -57,10 +57,24 @@ def _bare_non_gpu_module() -> EngineDrivenTransferModule:
     return module
 
 
+def _stub_gpu_registration_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub Event IPC lookup for liveness tests unrelated to event handling."""
+    monkeypatch.setattr(
+        gpu_mod,
+        "get_event_ipc_backend",
+        MagicMock(return_value=MagicMock(name="event_backend")),
+    )
+
+
 def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     """register_kv_cache inserts an entry that is not yet ping-proven."""
+    _stub_gpu_registration_backend(monkeypatch)
     monkeypatch.setattr(
-        gpu_mod, "create_cache_context", lambda *a, **kw: MagicMock(num_layers=2)
+        gpu_mod,
+        "create_cache_context",
+        lambda *a, **kw: MagicMock(
+            num_layers=2, **{"kv_layer_groups_manager.num_object_groups": 1}
+        ),
     )
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
@@ -75,7 +89,12 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
 def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
     """Re-registering a known instance refreshes last_seen but does not
     rebuild the context or latch the ping-proven flag."""
-    create = MagicMock(return_value=MagicMock(num_layers=2))
+    _stub_gpu_registration_backend(monkeypatch)
+    create = MagicMock(
+        return_value=MagicMock(
+            num_layers=2, **{"kv_layer_groups_manager.num_object_groups": 1}
+        )
+    )
     monkeypatch.setattr(gpu_mod, "create_cache_context", create)
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
@@ -275,13 +294,13 @@ def test_management_report_status_summarizes_liveness() -> None:
 def test_blend_drop_instance_state_drops_rope_state() -> None:
     """drop_instance_state pops the reaped instance's CB rope state.
 
-    The GPU context is no longer mirrored in BlendV3Module (reaping the GPU
+    The GPU context is no longer mirrored in BlendModule (reaping the GPU
     entry frees it directly), so only the rope state is dropped here.
     """
     # First Party
-    from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
+    from lmcache.v1.multiprocess.modules.blend import BlendModule
 
-    module = BlendV3Module.__new__(BlendV3Module)
+    module = BlendModule.__new__(BlendModule)
     module._cb_rope_state = {5: MagicMock()}
 
     module.drop_instance_state(5)

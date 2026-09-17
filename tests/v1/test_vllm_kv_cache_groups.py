@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.group_view import (
     get_engine_group_indices,
     num_engine_groups,
 )
+import lmcache.lmcache_native as lmcache_native
 
 # Test doubles for the vLLM KV cache spec classes. Unit tests must run
 # without vLLM installed; sliding-window specs are detected by class name,
@@ -27,8 +28,15 @@ class MockKVCacheSpec:
 
 
 @dataclass
-class SlidingWindowSpec:
+class AttentionSpec:
+    """Base of the attention-spec doubles: ``get_tokens_per_block`` detects
+    attention groups by this class name, so the doubles must inherit it."""
+
     block_size: int
+
+
+@dataclass
+class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
 
 
@@ -38,9 +46,21 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
 
 @dataclass
-class FullAttentionSpec:
-    block_size: int
+class FullAttentionSpec(AttentionSpec):
     sliding_window: "int | None" = None
+
+
+@dataclass
+class MLAAttentionSpec(AttentionSpec):
+    """Key-only, one-vector-per-token spec (an MLA index cache)."""
+
+
+@dataclass
+class MambaSpec:
+    """Align-mode Mamba/linear-attention spec (detected by class name)."""
+
+    block_size: int
+    mamba_cache_mode: str = "align"
 
 
 @dataclass
@@ -62,6 +82,11 @@ class MockKVCacheConfig:
 
 def _same_shape_caches(names: list[str]) -> dict[str, torch.Tensor]:
     return {n: torch.randn(2, 32, 16, 8, 64, dtype=torch.float16) for n in names}
+
+
+def _mla_caches(names: list[str]) -> dict[str, torch.Tensor]:
+    """Key-only rank-3 caches (num_blocks, block_size, head_size), MLA layout."""
+    return {n: torch.randn(32, 16, 128, dtype=torch.bfloat16) for n in names}
 
 
 def test_conversion_defaults_to_single_group_without_config():
@@ -179,6 +204,40 @@ def test_conversion_defaults_sliding_window_for_non_sw_spec():
     assert [group.sw_size_tokens for group in spec] == [-1]
 
 
+def test_conversion_resolves_mamba_align_window():
+    """An align-mode Mamba group carries a one-block cross-chunk window
+    (sw_size_tokens == block_size), so it becomes a 1-chunk sliding window
+    downstream; full attention stays -1."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1, 16]
+
+
+def test_conversion_mamba_non_align_not_windowed():
+    """Only align mode keeps a reusable per-block snapshot; other Mamba cache
+    modes are not treated as a sliding window."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["layer.0"], MambaSpec(block_size=16, mamba_cache_mode="none")
+                ),
+            ]
+        ),
+        _same_shape_caches(["layer.0"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1]
+
+
 def test_conversion_uniform_type_specs_resolve_per_layer():
     """Inside a UniformTypeKVCacheSpecs group, per-layer specs decide the
     window. SW layers with a distinct transfer identity get their own group
@@ -221,3 +280,190 @@ def test_conversion_mixed_window_layers_in_one_group_rejected():
             ),
             _same_shape_caches(["layer.0", "layer.1"]),
         )
+
+
+def test_conversion_mixed_kv_and_mla_groups():
+    """Mixed-format shape: a K+V FullAttentionSpec group plus a key-only MLA index
+    group are detected per engine group and kept as separate LMCache groups with
+    the correct membership and per-group token packing."""
+    caches = {
+        **_same_shape_caches(["main.0", "main.1"]),
+        **_mla_caches(["idx.0", "idx.1"]),
+    }
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["main.0", "main.1"], FullAttentionSpec(block_size=16)
+                ),
+                MockKVCacheGroup(["idx.0", "idx.1"], MLAAttentionSpec(block_size=128)),
+            ]
+        ),
+        caches,
+    )
+
+    assert num_engine_groups(spec) == 2
+    assert [group.engine_group_id for group in spec] == [0, 1]
+    assert [group.layer_indices for group in spec] == [(0, 1), (2, 3)]
+    assert [group.tokens_per_block for group in spec] == [16, 128]
+
+
+def test_conversion_uniform_group_mixes_kv_and_mla_layouts():
+    """vLLM can coalesce a rank-5 K+V group and a rank-3 key-only indexer group
+    into ONE ``UniformTypeKVCacheSpecs`` group, not two. Detection must split it
+    by layout so the indexer gets the rank-3 format instead of inheriting the
+    K/V format; the two land in separate LMCache groups sharing one block-id
+    space."""
+    caches = {
+        **_same_shape_caches(["main.0", "main.1"]),  # rank-5 K+V
+        **_mla_caches(["idx.0", "idx.1"]),  # rank-3 indexer (key-only)
+    }
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=128,
+        kv_cache_specs={
+            "main.0": FullAttentionSpec(block_size=128),
+            "main.1": FullAttentionSpec(block_size=128),
+            "idx.0": MLAAttentionSpec(block_size=128),
+            "idx.1": MLAAttentionSpec(block_size=128),
+        },
+    )
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["main.0", "main.1", "idx.0", "idx.1"], uniform_spec)
+            ]
+        ),
+        caches,
+    )
+
+    # One vLLM engine group, but two LMCache groups split by per-layer format.
+    assert num_engine_groups(spec) == 1
+    assert [group.engine_group_id for group in spec] == [0, 0]
+    assert [group.layer_indices for group in spec] == [(0, 1), (2, 3)]
+    # Both LMCache groups share the unified block-id space (tokens_per_block).
+    assert [group.tokens_per_block for group in spec] == [128, 128]
+
+
+def test_group_layers_by_identity_uses_per_layer_format():
+    """A per-layer Engine KV format gives the K+V layer kv_size=2 and the MLA
+    layer kv_size=1, splitting them into separate identities -- the per-group
+    distinction the single global format cannot express."""
+    # First Party
+    from lmcache.v1.kv_layer_groups import group_layers_by_identity
+
+    kv_caches = [
+        torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
+        torch.randn(32, 16, 128, dtype=torch.bfloat16),  # MLA key-only (rank-3)
+    ]
+    per_layer_format = [
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+    ]
+    groups = group_layers_by_identity(
+        kv_caches,
+        per_layer_format,
+        per_layer_engine_group_idx=[0, 1],
+    )
+
+    kv_size_by_group = {
+        identity.engine_group_idx: identity.kv_size for identity, _ in groups
+    }
+    num_heads_by_group = {
+        identity.engine_group_idx: identity.num_heads for identity, _ in groups
+    }
+    assert kv_size_by_group == {0: 2, 1: 1}
+    # The MLA group collapses heads to 1; the K+V group keeps its head count.
+    assert num_heads_by_group == {0: 8, 1: 1}
+
+
+def test_group_layers_by_identity_rejects_group_idx_length_mismatch():
+    """per_layer_engine_group_idx must hold one entry per layer."""
+    # First Party
+    from lmcache.v1.kv_layer_groups import group_layers_by_identity
+
+    kv_caches = [torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16)]
+    # One layer (one format) but two engine-group ids.
+    with pytest.raises(ValueError, match="per_layer_engine_group_idx"):
+        group_layers_by_identity(
+            kv_caches,
+            [lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
+            per_layer_engine_group_idx=[0, 1],
+        )
+
+
+def test_aux_pools_with_one_block_size_share_engine_and_kernel_group():
+    """Same-shape pools sharing a block size fold into ONE group.
+
+    The block-size bucket puts them in one engine group; identity grouping
+    then merges the shape-identical tensors into one kernel group.
+    """
+    caches = _same_shape_caches(["layer.0", "layer.1"])
+    caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
+    caches["cb.aux_pool.16.b"] = torch.randn(4, 16, 8, dtype=torch.float16)
+
+    spec = create_engine_group_infos_from_vllm(None, caches)
+
+    aux = [g for g in spec if g.extra_object_group_tag]
+    assert len(aux) == 1
+    assert aux[0].layer_indices == (2, 3)
+    assert aux[0].tokens_per_block == 16
+    assert aux[0].extra_object_group_tag == 1
+    # The regular layers keep engine group 0; the pool group comes after.
+    assert aux[0].engine_group_id > max(
+        g.engine_group_id for g in spec if not g.extra_object_group_tag
+    )
+
+
+def test_aux_pools_with_distinct_block_sizes_get_distinct_groups():
+    """Different block sizes are different paged address spaces: no sharing."""
+    caches = _same_shape_caches(["layer.0"])
+    caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
+    caches["cb.aux_pool.32"] = torch.randn(4, 16, 8, dtype=torch.float16)
+
+    spec = create_engine_group_infos_from_vllm(None, caches)
+
+    aux = sorted(
+        (g for g in spec if g.extra_object_group_tag),
+        key=lambda g: g.engine_group_id,
+    )
+    assert len(aux) == 2
+    assert aux[0].engine_group_id != aux[1].engine_group_id
+    assert {g.tokens_per_block for g in aux} == {16, 32}
+    assert {g.extra_object_group_tag for g in aux} == {1, 2}
+
+
+def test_conversion_scales_attention_tokens_per_block_under_dcp():
+    """tokens_per_block sizes each rank's memory object; unscaled it would
+    be dcp times too large."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+        dcp_size=2,
+    )
+
+    # Attention scaled, Mamba (replicated state) untouched.
+    assert [group.tokens_per_block for group in spec] == [32, 16]
+
+
+def test_conversion_tokens_per_block_unscaled_without_dcp():
+    """dcp_size defaults to 1, leaving every group exactly as before."""
+    groups = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+        ]
+    )
+    caches = ["layer.0", "layer.1"]
+
+    default = create_engine_group_infos_from_vllm(groups, _same_shape_caches(caches))
+    explicit = create_engine_group_infos_from_vllm(
+        groups, _same_shape_caches(caches), dcp_size=1
+    )
+
+    assert [g.tokens_per_block for g in default] == [16, 16]
+    assert [g.tokens_per_block for g in explicit] == [16, 16]

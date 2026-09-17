@@ -11,7 +11,7 @@ and produces a load plan mapping each adapter to the key indices it should load.
 from abc import ABC, abstractmethod
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,

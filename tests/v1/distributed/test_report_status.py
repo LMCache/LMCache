@@ -10,6 +10,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -23,6 +24,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2AdapterConfig,
 )
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
     # First Party
@@ -32,14 +34,11 @@ except ImportError:
         "Skipping because StorageManager cannot be imported", allow_module_level=True
     )
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
-
-def should_use_lazy_alloc() -> bool:
-    return torch.cuda.is_available()
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 
 # =============================================================================

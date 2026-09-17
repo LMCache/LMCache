@@ -25,19 +25,19 @@ follow this pattern:
      - Endpoint
      - Method
      - Description
-   * - ``root_api.py``
+   * - ``info_api.py``
      - ``/``
      - GET
      - Basic liveness check
-   * - ``healthcheck_api.py``
+   * - ``info_api.py``
      - ``/healthcheck``
      - GET
      - Kubernetes probe endpoint
    * - ``cache_api.py``
-     - ``/clear-cache``
+     - ``/cache/clear``
      - POST
      - Force-clear the L1 cache
-   * - ``status_api.py``
+   * - ``info_api.py``
      - ``/status``
      - GET
      - Internal status report

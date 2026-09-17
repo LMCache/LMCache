@@ -41,7 +41,7 @@ class RuntimePluginLauncher:
         """Launch plugins from specified location"""
         path = Path(loc)
         if not path.exists():
-            logger.warning(f"Runtime plugin location {loc} does not exist")
+            logger.warning("Runtime plugin location %s does not exist", loc)
             return
 
         files = []
@@ -132,14 +132,18 @@ class RuntimePluginLauncher:
                 text=True,
             )
             self.plugin_processes.append(proc)
-            logger.info(f"Launched runtime plugin: {file} with {interpreter}")
+            logger.info(
+                "Launched runtime plugin: %s with %s",
+                file,
+                interpreter,
+            )
 
             # Start thread to capture output continuously
             threading.Thread(
                 target=self._capture_plugin_output, args=(proc, str(file)), daemon=True
             ).start()
         except Exception as e:
-            logger.error(f"Failed to launch plugin {file}: {e}")
+            logger.error("Failed to launch plugin %s: %s", file, e)
 
     def _get_interpreter(self, file: Path) -> str:
         """Get interpreter from first line comment"""
@@ -153,8 +157,10 @@ class RuntimePluginLauncher:
                     interpreters.append(interpreter_str)
         except Exception as e:
             logger.error(
-                f"Error reading interpreter from runtime plugin file {file} - "
-                f"using default interpreters: {e}"
+                "Error reading interpreter from runtime plugin file %s - "
+                "using default interpreters: %s",
+                file,
+                e,
             )
             pass
 
@@ -186,14 +192,16 @@ class RuntimePluginLauncher:
                 line = proc.stdout.readline()
                 if not line:
                     break
-                logger.info(f"[{plugin_name}] {line.strip()}")
+                logger.info("[%s] %s", plugin_name, line.strip())
 
             proc.wait()
             logger.info(
-                f"Runtime plugin {plugin_name} exited with code {proc.returncode}"
+                "Runtime plugin %s exited with code %d",
+                plugin_name,
+                proc.returncode,
             )
         except Exception as e:
-            logger.error(f"Error capturing output for {plugin_name}: {e}")
+            logger.error("Error capturing output for %s: %s", plugin_name, e)
 
     def stop_plugins(self):
         """Terminate all plugin processes.

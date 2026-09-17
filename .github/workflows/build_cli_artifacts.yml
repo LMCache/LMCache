@@ -84,11 +84,11 @@ jobs:
                 python -c "import lmcache"
 
                 # Native CUDA ops must be unreachable from the slim wheel.
-                if python -c "import lmcache.c_ops" 2>/dev/null; then
-                  echo "::error::CLI wheel can import lmcache.c_ops; native ops must be absent from the pure-Python wheel"
+                if python -c "import lmcache.cuda_ops" 2>/dev/null; then
+                  echo "::error::CLI wheel can import lmcache.cuda_ops; native ops must be absent from the pure-Python wheel"
                   exit 1
                 fi
-                echo "OK: lmcache.c_ops is not importable from the CLI wheel"
+                echo "OK: lmcache.cuda_ops is not importable from the CLI wheel"
 
                 lmcache --help
 

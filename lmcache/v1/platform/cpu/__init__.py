@@ -1,35 +1,92 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-specific platform primitives.
 
-Importing this package self-registers the POSIX-SHM KV-cache wrapper
-factory with :mod:`lmcache.v1.platform._registry`, so the dispatch
-in :mod:`lmcache.integration.vllm.vllm_multi_process_adapter` can
-pick the right wrapper based on ``tensor.device.type`` without any
-if/elif chain.
+Defines :class:`CpuDeviceSpec` for the device registry.  The spec's
+:attr:`~CpuDeviceSpec.ipc_wrapper_cls` binds
+:class:`~lmcache.v1.platform.cpu.shm.CpuShmTensorWrapper` to the
+``"cpu"`` device, so the multiprocess adapter can dispatch by
+``tensor.device.type`` without any if/elif chain.
+
+:class:`CpuDeviceSpec` also participates in the ``DeviceSpec`` registry so
+callers can resolve the CPU cache-context implementation via
+:func:`lmcache.v1.platform.get_device_spec`. It intentionally reports
+``is_available() == False`` so that ``_detect_device`` never picks it
+up during auto-detection -- CPU is exclusively reached through the
+``StubCPUDevice`` fallback path.
 """
 
-# Standard
-from typing import Any
+# Future
+from __future__ import annotations
 
-# Third Party
-import torch
+# Standard
+from typing import TYPE_CHECKING, Any
 
 # First Party
-from lmcache.v1.platform._registry import register_kv_wrapper
+from lmcache.v1.platform.base.device_spec import DeviceSpec
 
-
-def _kv_wrapper_factory(tensor: torch.Tensor) -> Any:
-    """Indirect-dispatch wrapper.
-
-    Defers loading :mod:`lmcache.v1.platform.cpu.shm` (which pulls in
-    ``multiprocess.custom_types``) until first use, so importing this
-    package during ``lmcache/__init__.py``'s bootstrap does not race
-    other imports that touch ``torch_dev``.
-    """
+if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.cpu.shm import migrate_to_shm_and_wrap
+    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
-    return migrate_to_shm_and_wrap(tensor)
 
+class CpuDeviceSpec(DeviceSpec):
+    """CPU device specification for the detection registry.
 
-register_kv_wrapper("cpu", _kv_wrapper_factory)
+    Keeps ``device_type="cpu"`` aligned with the accelerator-specific
+    resolution path by exposing an :attr:`ipc_wrapper_cls` binding, so
+    callers dispatching on ``tensor.device.type`` never fall through
+    to the bare :class:`DeviceSpec` fallback when the CPU backend is
+    installed.
+
+    Also used for ``get_device_spec("cpu")`` lookups (e.g. by
+    :func:`lmcache.v1.platform.cache_context.create_cache_context`).
+    """
+
+    _event_backend_cache: "EventIPCBackend | None" = None
+
+    @property
+    def device_type(self) -> str:
+        return "cpu"
+
+    @property
+    def torch_module_name(self) -> str:
+        return "cpu"
+
+    @property
+    def event_ipc_backend(self) -> "EventIPCBackend":
+        """Return the stub-backed CPU event IPC backend."""
+        backend = self._event_backend_cache
+        if backend is None:
+            # First Party
+            from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
+            from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
+
+            backend = DefaultEventIPCBackend(
+                event_module=StubCPUDevice("cpu"),
+                device_type=self.device_type,
+            )
+            self._event_backend_cache = backend
+        return backend
+
+    @property
+    def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
+        # First Party
+        from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
+
+        return CpuShmTensorWrapper
+
+    def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
+        # First Party
+        from lmcache.v1.platform.cpu.cache_context import CPUCacheContext
+
+        return CPUCacheContext(*args, **kwargs)
+
+    @property
+    def ops_cls(self) -> type[DeviceOps]:
+        # First Party
+        from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
+
+        return CpuDeviceOps

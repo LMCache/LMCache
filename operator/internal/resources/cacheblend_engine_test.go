@@ -111,13 +111,26 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 
 	podSpec := ds.Spec.Template.Spec
 
-	// hostIPC required for CUDA IPC with the node-local engine.
-	if !podSpec.HostIPC {
-		t.Fatal("expected HostIPC=true")
+	// CUDA IPC with the node-local engine is wired via the /dev/shm hostPath
+	// mount by default; hostIPC is opt-in via spec.hostIPC.
+	if podSpec.HostIPC {
+		t.Fatal("expected HostIPC=false by default")
+	}
+	foundShm := false
+	for _, v := range podSpec.Volumes {
+		if v.Name == devShmVolumeName && v.HostPath != nil && v.HostPath.Path == devShmPath {
+			foundShm = true
+		}
+	}
+	if !foundShm {
+		t.Fatal("expected the lmcache-dev-shm hostPath volume by default")
 	}
 	// runtimeClassName=nvidia for the default (nvidia) vendor.
 	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != nvidiaRuntimeClass {
 		t.Fatalf("expected RuntimeClassName=nvidia, got %v", podSpec.RuntimeClassName)
+	}
+	if _, ok := ds.Spec.Template.Annotations["nvidia.cdi.k8s.io/container."+engineContainerName]; ok {
+		t.Fatal("default nvidia RuntimeClass should not set the NRI/CDI annotation")
 	}
 
 	if len(podSpec.Containers) != 1 {
@@ -125,9 +138,9 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	}
 	c := podSpec.Containers[0]
 
-	// privileged: true.
-	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
-		t.Fatal("expected privileged=true")
+	// privileged defaults to false (opt-in via spec.privileged).
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || *c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=false by default")
 	}
 
 	// NVIDIA env exposes all GPUs without a device-plugin claim.
@@ -146,6 +159,18 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	// Blend args present on the container.
 	assertArg(t, c.Args, "--engine-type", "blend")
 	assertArg(t, c.Args, "--l1-align-bytes", "16777216")
+}
+
+func TestBuildCBEngineDaemonSet_PrivilegedEnabled(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.Privileged = ptr(true)
+	ds := BuildCBEngineDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	// spec.privileged=true threads through to the container security context.
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=true when spec.privileged=true")
+	}
 }
 
 func TestBuildCBEngineDaemonSet_NoGPUResourceClaim(t *testing.T) {
@@ -204,9 +229,29 @@ func TestBuildCBEngineDaemonSet_AMDNoRuntimeClass(t *testing.T) {
 	if podSpec.RuntimeClassName != nil {
 		t.Fatalf("expected nil RuntimeClassName for AMD, got %q", *podSpec.RuntimeClassName)
 	}
-	// Still privileged + hostIPC.
-	if !podSpec.HostIPC {
-		t.Fatal("expected HostIPC=true even for AMD")
+	// The HIP IPC path is unverified without a shared IPC namespace, so AMD
+	// deployments opt into hostIPC explicitly (privileged stays at its default
+	// false here since the fixture does not opt in).
+	engine.Spec.HostIPC = ptr(true)
+	ds = BuildCBEngineDaemonSet(engine)
+	if !ds.Spec.Template.Spec.HostIPC {
+		t.Fatal("expected HostIPC=true when spec.hostIPC=true for AMD")
+	}
+}
+
+func TestBuildCBEngineDaemonSet_RuntimeClassNameEmptyOmitsWithoutCDI(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.RuntimeClassName = ptr("")
+
+	ds := BuildCBEngineDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if podSpec.RuntimeClassName != nil {
+		t.Fatalf("expected nil RuntimeClassName when spec.runtimeClassName is empty, got %q", *podSpec.RuntimeClassName)
+	}
+	wantCDI := "nvidia.cdi.k8s.io/container." + engineContainerName
+	if _, ok := ds.Spec.Template.Annotations[wantCDI]; ok {
+		t.Fatal("empty runtimeClassName must not auto-add the NRI/CDI annotation")
 	}
 }
 
@@ -335,6 +380,39 @@ func TestBuildCBConnectionConfigMap_CustomBlendAndPort(t *testing.T) {
 	}
 }
 
+func TestBuildCBConnectionConfigMap_PartialBucket(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.Blend = &lmcachev1alpha1.BlendSpec{
+		PartialBucket: ptr(int32(4096)),
+	}
+
+	cm := BuildCBConnectionConfigMap(engine)
+	_, extra := parseCBConnectionConfig(t, cm)
+
+	if extra["cb.partial_bucket"] != float64(4096) {
+		t.Fatalf("expected cb.partial_bucket=4096, got %v", extra["cb.partial_bucket"])
+	}
+	// The auto-generated keys are still present (defaults: blend was replaced
+	// wholesale, so the builder falls back to checkLayer=1, recompRatio=0.15).
+	if extra["cb.check_layer"] != float64(1) {
+		t.Fatalf("expected cb.check_layer=1, got %v", extra["cb.check_layer"])
+	}
+	if extra["cb.recomp_ratio"] != 0.15 {
+		t.Fatalf("expected cb.recomp_ratio=0.15, got %v", extra["cb.recomp_ratio"])
+	}
+}
+
+func TestBuildCBConnectionConfigMap_PartialBucketOmittedWhenUnset(t *testing.T) {
+	engine := minimalCBEngine()
+
+	cm := BuildCBConnectionConfigMap(engine)
+	_, extra := parseCBConnectionConfig(t, cm)
+
+	if _, present := extra["cb.partial_bucket"]; present {
+		t.Fatalf("expected cb.partial_bucket omitted when unset, got %v", extra["cb.partial_bucket"])
+	}
+}
+
 // TestBuildCBConnectionConfigMap_PortMatchesEngineArgs asserts the connection
 // ConfigMap's lmcache.mp.port and the engine DaemonSet's --port never drift, for
 // both the default and a user-set port.
@@ -365,9 +443,103 @@ func TestBuildCBConnectionConfigMap_PortMatchesEngineArgs(t *testing.T) {
 	}
 }
 
+func TestBuildCBConnectionConfigMap_PDPrefiller(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+	cm := BuildCBConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigPrefillerDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if config["kv_connector"] != "MultiConnector" {
+		t.Fatalf("expected kv_connector=MultiConnector, got %v", config["kv_connector"])
+	}
+	if config["kv_role"] != kvRoleProducer {
+		t.Fatalf("expected kv_role=kv_producer, got %v", config["kv_role"])
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	connectors := outer["connectors"].([]any)
+	if len(connectors) != 2 {
+		t.Fatalf("expected 2 inner connectors, got %d", len(connectors))
+	}
+
+	nixl := connectors[0].(map[string]any)
+	if nixl["kv_connector"] != nixlConnectorName {
+		t.Fatalf("first connector must be NixlConnector, got %v", nixl["kv_connector"])
+	}
+	if nixl["kv_role"] != kvRoleProducer {
+		t.Fatalf("NixlConnector role must be kv_producer, got %v", nixl["kv_role"])
+	}
+
+	cb := connectors[1].(map[string]any)
+	if cb["kv_connector"] != "CBKVConnector" {
+		t.Fatalf("second connector must be CBKVConnector, got %v", cb["kv_connector"])
+	}
+	if cb["kv_connector_module_path"] != "lmcache_cacheblend.connector" {
+		t.Fatalf("expected CBKVConnector module path, got %v", cb["kv_connector_module_path"])
+	}
+	if cb["kv_role"] != kvRoleBoth {
+		t.Fatalf("CBKVConnector role must be kv_both, got %v", cb["kv_role"])
+	}
+	cbExtra := cb["kv_connector_extra_config"].(map[string]any)
+	if cbExtra["cb.check_layer"] != float64(1) {
+		t.Fatalf("expected cb.check_layer=1 on the inner CBKVConnector, got %v", cbExtra["cb.check_layer"])
+	}
+	if cbExtra["lmcache.mp.port"] != "5555" {
+		t.Fatalf("expected lmcache.mp.port=5555, got %v", cbExtra["lmcache.mp.port"])
+	}
+}
+
+func TestBuildCBConnectionConfigMap_PDDecoderIsBareNixl(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+	cm := BuildCBConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigDecoderDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	// The decoder does not blend: it must be a bare NixlConnector, not a
+	// MultiConnector wrapping a CBKVConnector.
+	if config["kv_connector"] != nixlConnectorName {
+		t.Fatalf("expected kv_connector=NixlConnector, got %v", config["kv_connector"])
+	}
+	if config["kv_role"] != kvRoleConsumer {
+		t.Fatalf("expected kv_role=kv_consumer, got %v", config["kv_role"])
+	}
+	if config["kv_load_failure_policy"] != "fail" {
+		t.Fatalf("expected kv_load_failure_policy=fail, got %v", config["kv_load_failure_policy"])
+	}
+	if _, ok := config["kv_connector_module_path"]; ok {
+		t.Fatal("decoder config must not carry a connector module path")
+	}
+	if extra, ok := config["kv_connector_extra_config"].(map[string]any); ok {
+		if _, hasConnectors := extra["connectors"]; hasConnectors {
+			t.Fatal("decoder config must not nest inner connectors")
+		}
+	}
+}
+
+func TestBuildCBConnectionConfigMap_PDFallbackUnchanged(t *testing.T) {
+	engine := minimalCBEngine()
+	pdEngine := minimalCBEngine()
+	pdEngine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+
+	nonPD := BuildCBConnectionConfigMap(engine).Data["kv-transfer-config.json"]
+	fallback := BuildCBConnectionConfigMap(pdEngine).Data["kv-transfer-config.json"]
+
+	if nonPD != fallback {
+		t.Fatalf("PD fallback config must equal the non-PD config:\nnon-PD: %s\nfallback: %s", nonPD, fallback)
+	}
+}
+
 // TestBuildCBEngine_ChunkSizeConsistency asserts the engine's chunk-size is 256
-// (the only value CacheBlend supports — block_size 64 * 4), matching the locked
-// CacheBlendChunkSize constant, so it cannot drift from the injected --block-size.
+// (the only value CacheBlend supports), matching the locked CacheBlendChunkSize
+// constant.
 func TestBuildCBEngine_ChunkSizeConsistency(t *testing.T) {
 	engine := minimalCBEngine()
 	args := BuildCBEngineArgs(&engine.Spec)

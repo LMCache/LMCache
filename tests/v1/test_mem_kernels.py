@@ -8,44 +8,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.memory_management import PinMemoryAllocator
-
-if not torch.cuda.is_available():
-    pytest.skip(
-        "CUDA is not available, skipping the test",
-        allow_module_level=True,
-    )
-
-# First Party
-if torch.cuda.is_available():
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except ImportError:
-        lmc_ops = None
-else:
-    lmc_ops = None
-
-# Mock c_ops when not available
-if lmc_ops is None:
-
-    class MockEngineKVFormat:
-        NL_X_TWO_NB_BS_NH_HS = 0
-        NL_X_NB_TWO_BS_NH_HS = 1
-        NL_X_NB_BS_HS = 2
-        NL_X_TWO_NB_NH_BS_HS = 3
-        NL_X_NB_TWO_NH_BS_HS = 4
-
-    class MockTransferDirection:
-        H2D = 0
-        D2H = 1
-
-    class MockCOps:
-        EngineKVFormat = MockEngineKVFormat
-        GPUKVFormat = MockEngineKVFormat
-        TransferDirection = MockTransferDirection
-
-    lmc_ops = MockCOps()
+from lmcache import torch_dev, torch_device_type
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+import lmcache.lmcache_native as lmcache_native
 
 # Local
 from .utils import (
@@ -54,6 +19,20 @@ from .utils import (
     generate_kv_cache_paged,
     generate_kv_cache_paged_list_tensors,
 )
+
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
+
+try:
+    # First Party
+    import lmcache.cuda_ops as cuda_ops
+except ImportError:
+    cuda_ops = None
 
 
 def _tuple_kv_to_blob(
@@ -93,7 +72,7 @@ def _slice_kv_at(
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_extract_and_load_back(num_tokens):
-    device = "cuda"
+    device = torch_device_type
 
     num_blocks = 1000
     block_size = 16
@@ -113,8 +92,8 @@ def test_extract_and_load_back(num_tokens):
     kv_tuple_list = []
     memory_obj_old_list = []
     chunk_size = 256
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     for layer_id in range(num_layers):
         key_cache = kv_cache[layer_id][0].reshape(-1, num_heads, head_size)
@@ -138,14 +117,14 @@ def test_extract_and_load_back(num_tokens):
             )
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
     # New extract (zero-copy kernels)
     memory_obj_new_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -155,7 +134,7 @@ def test_extract_and_load_back(num_tokens):
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(num_layers):
-            lmc_ops.load_and_reshape_flash(
+            cuda_ops.load_and_reshape_flash(
                 memory_obj_new.tensor,
                 kv_cache[layer_id][0],
                 kv_cache[layer_id][1],
@@ -165,7 +144,7 @@ def test_extract_and_load_back(num_tokens):
         memory_obj_new_list.append(memory_obj_new)
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
     check_mem_obj_equal(
@@ -180,7 +159,7 @@ def test_extract_and_load_back(num_tokens):
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
         for layer_id in range(num_layers):
-            lmc_ops.reshape_and_cache_back_flash(
+            cuda_ops.reshape_and_cache_back_flash(
                 memory_obj_new.tensor,
                 kv_cache_new[layer_id][0],
                 kv_cache_new[layer_id][1],
@@ -200,12 +179,14 @@ def test_extract_and_load_back(num_tokens):
 @pytest.mark.parametrize(
     "engine_kv_format",
     [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
+        # vLLM non-MLA flash attention
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        # vLLM non-MLA flash infer
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ],
 )
 def test_multi_layer_kernel(num_tokens, engine_kv_format):
-    device = "cuda"
+    device = torch_device_type
 
     num_blocks = 1000
     block_size = 16
@@ -218,7 +199,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         num_blocks, device, block_size, dtype, engine_kv_format=engine_kv_format
     )
     # old deprecated kernels only handle vllm non-MLA flash attention format
-    if engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
+    if engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
         kv_cache_force_old = [
             kv_layer.clone().permute(1, 0, 2, 3, 4).contiguous()
             for kv_layer in kv_cache
@@ -235,8 +216,8 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
     # layer by layer extract
     memory_obj_old_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -246,7 +227,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(num_layers):
-            lmc_ops.load_and_reshape_flash(
+            cuda_ops.load_and_reshape_flash(
                 memory_obj_old.tensor,
                 kv_cache_force_old[layer_id][0],
                 kv_cache_force_old[layer_id][1],
@@ -256,7 +237,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
@@ -268,8 +249,8 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -278,13 +259,13 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers,
             slot_mapping_temp,
             kv_cache[0].device,
             page_buffer_size,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             engine_kv_format,
             block_size,
         )
@@ -292,7 +273,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
 
@@ -314,13 +295,13 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers_new,
             slot_mapping_temp,
             kv_cache_new[0].device,
             page_buffer_size,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             engine_kv_format,
             block_size,
         )
@@ -339,10 +320,10 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 @pytest.mark.parametrize("head_size", [576, 66])  # Use 68 for dsv32 (132x int8)
 @pytest.mark.parametrize(
     "engine_kv_format",
-    [lmc_ops.EngineKVFormat.NL_X_NB_BS_HS],  # vllm MLA
+    [lmcache_native.EngineKVFormat.NL_X_NB_BS_HS],  # vllm MLA
 )
 def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
-    device = "cuda"
+    device = torch_device_type
 
     num_blocks = 1000
     block_size = 64
@@ -367,8 +348,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
 
     # layer by layer extract
     memory_obj_old_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -389,7 +370,7 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
@@ -401,21 +382,21 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         mem_obj_shape = torch.Size([1, num_layers, len(slot_mapping_temp), head_size])
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers,
             slot_mapping_temp,
             kv_cache[0].device,
             0,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             engine_kv_format,
             block_size,
         )
@@ -423,7 +404,7 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
 
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
 
@@ -457,13 +438,13 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers_new,
             slot_mapping_temp,
             kv_cache_new[0].device,
             0,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             engine_kv_format,
             block_size,
         )
@@ -489,12 +470,14 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
 @pytest.mark.parametrize(
     "engine_kv_format",
     [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
+        # vLLM non-MLA flash attention
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        # vLLM non-MLA flash infer
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ],
 )
 def test_single_layer_kernel(num_tokens, token_major, engine_kv_format):
-    device = "cuda"
+    device = torch_device_type
 
     num_layers = 32
     num_blocks = 1000
@@ -522,19 +505,19 @@ def test_single_layer_kernel(num_tokens, token_major, engine_kv_format):
         )
 
     for layer_id in range(num_layers):
-        lmc_ops.single_layer_kv_transfer(
+        cuda_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache[layer_id],
             slot_mapping,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             engine_kv_format,
             token_major,
         )
-        lmc_ops.single_layer_kv_transfer(
+        cuda_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache_new[layer_id],
             slot_mapping,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             engine_kv_format,
             token_major,
         )
@@ -551,13 +534,13 @@ def test_single_layer_kernel(num_tokens, token_major, engine_kv_format):
 @pytest.mark.parametrize(
     "engine_kv_format",
     [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # vllm HND flash attention
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,  # vllm HND flash infer
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # vllm HND flash attention
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,  # vllm HND flash infer
     ],
 )
 def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
     """Round-trip test for HND multi-layer kernel: D2H then H2D."""
-    device = "cuda"
+    device = torch_device_type
 
     num_blocks = 200
     block_size = 16
@@ -598,19 +581,19 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
             [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
         )
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping_temp,
             kv_cache[0].device,
             page_buffer_size,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             engine_kv_format,
             block_size,
             head_size=head_size,
         )
         memory_obj_list.append(memory_obj)
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # H2D: write back into a fresh paged cache
     kv_cache_new = generate_kv_cache_paged_list_tensors(
@@ -629,18 +612,18 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
         kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             memory_obj_list[chunk_id].tensor,
             kv_cache_pointers_new,
             slot_mapping_temp,
             kv_cache_new[0].device,
             page_buffer_size,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             engine_kv_format,
             block_size,
             head_size=head_size,
         )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     check_paged_kv_cache_equal(
         kv_cache,
@@ -656,13 +639,13 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
 @pytest.mark.parametrize(
     "engine_kv_format",
     [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # vllm HND flash attention
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,  # vllm HND flash infer
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # vllm HND flash attention
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,  # vllm HND flash infer
     ],
 )
 def test_single_layer_kernel_hnd(num_tokens, token_major, engine_kv_format):
     """Round-trip test for HND single-layer kernel: D2H then H2D per layer."""
-    device = "cuda"
+    device = torch_device_type
 
     num_layers = 4
     num_blocks = 200
@@ -703,19 +686,19 @@ def test_single_layer_kernel_hnd(num_tokens, token_major, engine_kv_format):
         )
 
     for layer_id in range(num_layers):
-        lmc_ops.single_layer_kv_transfer(
+        cuda_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache[layer_id],
             slot_mapping,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             engine_kv_format,
             token_major,
         )
-        lmc_ops.single_layer_kv_transfer(
+        cuda_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache_new[layer_id],
             slot_mapping,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             engine_kv_format,
             token_major,
         )
@@ -739,7 +722,7 @@ def test_lmcache_memcpy_async():
         elements_per_chunk * num_chunks, dtype=dtype, device="cpu"
     )
     big_gpu_tensor = torch.rand(
-        elements_per_chunk * num_chunks, dtype=dtype, device="cuda"
+        elements_per_chunk * num_chunks, dtype=dtype, device=torch_device_type
     )
 
     def check_gpu_and_cpu_equal(
@@ -759,13 +742,13 @@ def test_lmcache_memcpy_async():
     # Launch default cuda copy
     with pytest.raises(RuntimeError):
         big_gpu_tensor.copy_(big_cpu_tensor, non_blocking=True)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
     # Launc default cuda copy for a small page
     big_gpu_tensor[: elements_per_chunk // 2].copy_(
         big_cpu_tensor[: elements_per_chunk // 2], non_blocking=True
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     check_gpu_and_cpu_equal(
         big_gpu_tensor[: elements_per_chunk // 2],
@@ -794,15 +777,15 @@ def test_lmcache_memcpy_async():
                 big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             )
 
-        lmc_ops.lmcache_memcpy_async(
+        cuda_ops.lmcache_memcpy_async(
             big_gpu_tensor.data_ptr() + start,
             big_cpu_tensor.data_ptr() + start,
             end - start,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             start,
             chunk_size,
         )
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         check_gpu_and_cpu_equal(
             big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
@@ -811,7 +794,7 @@ def test_lmcache_memcpy_async():
 
     # Reset the data in gpu
     big_gpu_tensor = torch.rand(
-        elements_per_chunk * num_chunks, dtype=dtype, device="cuda"
+        elements_per_chunk * num_chunks, dtype=dtype, device=torch_device_type
     )
     # D2H copy
     for start, end in zip(starts, ends, strict=False):
@@ -822,15 +805,15 @@ def test_lmcache_memcpy_async():
                 big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             )
 
-        lmc_ops.lmcache_memcpy_async(
+        cuda_ops.lmcache_memcpy_async(
             big_cpu_tensor.data_ptr() + start,
             big_gpu_tensor.data_ptr() + start,
             end - start,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             start,
             chunk_size,
         )
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         check_gpu_and_cpu_equal(
             big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
@@ -867,7 +850,7 @@ def test_lmcache_memcpy_async_int8_hidden132():
     total_elements = total_bytes  # int8: 1 byte per element
 
     cpu_tensor = torch.randint(-128, 127, (total_elements,), dtype=dtype, device="cpu")
-    gpu_tensor = torch.zeros(total_elements, dtype=dtype, device="cuda")
+    gpu_tensor = torch.zeros(total_elements, dtype=dtype, device=torch_device_type)
 
     rt = torch.cuda.cudart()
 
@@ -916,15 +899,15 @@ def test_lmcache_memcpy_async_int8_hidden132():
         gpu_tensor[start_bytes:end_bytes].zero_()
 
         # H2D copy
-        lmc_ops.lmcache_memcpy_async(
+        cuda_ops.lmcache_memcpy_async(
             gpu_tensor.data_ptr() + start_bytes,
             cpu_tensor.data_ptr() + start_bytes,
             nbytes,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             start_bytes,
             chunk_size,
         )
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         check_equal(
             gpu_tensor[start_bytes:end_bytes],
@@ -932,7 +915,9 @@ def test_lmcache_memcpy_async_int8_hidden132():
         )
 
     # D2H copy: write known values to GPU, copy back to CPU, verify
-    gpu_src = torch.randint(-128, 127, (total_elements,), dtype=dtype, device="cuda")
+    gpu_src = torch.randint(
+        -128, 127, (total_elements,), dtype=dtype, device=torch_device_type
+    )
     cpu_dst = torch.zeros(total_elements, dtype=dtype, device="cpu")
 
     # Register cpu_dst for D2H
@@ -946,15 +931,15 @@ def test_lmcache_memcpy_async_int8_hidden132():
 
         cpu_dst[start_bytes:end_bytes].zero_()
 
-        lmc_ops.lmcache_memcpy_async(
+        cuda_ops.lmcache_memcpy_async(
             cpu_dst.data_ptr() + start_bytes,
             gpu_src.data_ptr() + start_bytes,
             nbytes,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             start_bytes,
             chunk_size,
         )
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         check_equal(
             gpu_src[start_bytes:end_bytes],

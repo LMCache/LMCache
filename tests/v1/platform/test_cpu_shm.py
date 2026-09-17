@@ -49,6 +49,32 @@ def test_migrate_to_shm_and_wrap_zero_copy_view():
         shm_unlink(wrapper.shm_name)
 
 
+def test_migrate_normalizes_layout_in_place_on_caller_tensor():
+    """Layout normalization must not detach migration from the caller's tensor.
+
+    ``attempt_permute_to_contiguous_view`` returns a *new view* object; the
+    migration must still re-point the caller's tensor (its storage, and its
+    shape/stride to the stride-truthful layout) and key the unlink finalizer
+    on it. Regression for the premature-unlink bug where the finalizer was
+    attached to the temporary view and the segment vanished on return.
+    """
+    # Torch-contiguous, but the size-1 dims hide the true inner extent:
+    # the stride-truthful layout is (8, 32, 1, 1).
+    src = torch.zeros(8 * 32, dtype=torch.float32).as_strided(
+        (8, 1, 1, 32), (32, 1, 1, 1)
+    )
+    wrapper = migrate_to_shm_and_wrap(src)
+    try:
+        assert tuple(src.shape) == (8, 32, 1, 1)
+        assert wrapper.shape == (8, 32, 1, 1)
+        # Writes via the caller's tensor land in the SHM segment.
+        src.add_(3.0)
+        view = wrapper.to_tensor()
+        assert torch.equal(view, src)
+    finally:
+        shm_unlink(wrapper.shm_name)
+
+
 def test_migrate_handles_empty_tensor():
     """Empty tensors must not call ``mmap`` (length 0 is EINVAL).
 
@@ -210,10 +236,10 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
     the failed batch.
     """
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter
+    from lmcache.v1.platform import kv_wrap
     from lmcache.v1.platform.cpu.shm import shm_map_readwrite
 
-    real_wrap = adapter.wrap_one_kv_cache
+    real_wrap = kv_wrap.wrap_one_kv_cache
     state = {"n": 0, "first_name": None}
 
     def flaky_wrap(tensor):
@@ -224,17 +250,121 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
         state["first_name"] = w.shm_name
         return w
 
-    monkeypatch.setattr(adapter, "wrap_one_kv_cache", flaky_wrap)
+    monkeypatch.setattr(kv_wrap, "wrap_one_kv_cache", flaky_wrap)
 
     t1 = torch.zeros((2, 2), dtype=torch.float32)
     t2 = torch.zeros((2, 2), dtype=torch.float32)
     with pytest.raises(RuntimeError, match="simulated migration failure"):
-        adapter.wrap_kv_caches({"a": t1, "b": t2})
+        kv_wrap.wrap_kv_caches({"a": t1, "b": t2})
 
     # The first iteration's SHM segment must no longer be openable.
     nbytes = t1.numel() * t1.element_size()
     with pytest.raises(OSError):
         shm_map_readwrite(state["first_name"], nbytes)
+
+
+def test_migrate_shares_one_segment_across_views_of_one_storage():
+    """Views of one backing buffer share a single SHM segment.
+
+    Engines may register every KV layer as a strided view into one
+    shared allocation (nonzero ``storage_offset``): migration must key
+    on the backing storage so every view lands in one segment, keeps
+    its own offset, and stays aliased to the same bytes. Regression
+    for the storage_offset assert crash in ``cpu_e2e_validation
+    (server_copy)``.
+    """
+    layers, layer_numel = 4, 1024
+    base = torch.zeros(layers * layer_numel, dtype=torch.bfloat16)
+    views = [
+        base[i * layer_numel : (i + 1) * layer_numel].view(4, 16, 16)
+        for i in range(layers)
+    ]
+
+    wrappers = [migrate_to_shm_and_wrap(v) for v in views]
+    try:
+        # One segment for all views, each keeping its own offset.
+        names = {w.shm_name for w in wrappers}
+        assert len(names) == 1
+        segment_nbytes = layers * layer_numel * base.element_size()
+        for i, w in enumerate(wrappers):
+            assert w.storage_offset == i * layer_numel
+            assert w.nbytes == segment_nbytes
+
+        # All migrated views share the SHM-backed storage.
+        storages = {id(v.untyped_storage()) for v in views}
+        assert len(storages) == 1
+
+        # Aliasing survives the round-trip in both directions.
+        views[2].fill_(3.0)
+        rebuilt = wrappers[2].to_tensor()
+        assert torch.equal(rebuilt, views[2])
+        rebuilt.add_(1.0)
+        assert views[2].float().max().item() == 4.0
+        # Sibling views are untouched (offsets do not overlap).
+        assert views[1].float().abs().sum().item() == 0.0
+    finally:
+        shm_unlink(wrappers[0].shm_name)
+
+
+def test_migrate_preserves_nonzero_storage_offset_roundtrip():
+    """A lone offset view wraps, ships its offset, and round-trips data."""
+    base = torch.arange(300, dtype=torch.float32)
+    view = base[100:200]
+    w = migrate_to_shm_and_wrap(view)
+    try:
+        assert w.storage_offset == 100
+        assert w.nbytes == 300 * 4  # whole backing storage
+        rebuilt = w.to_tensor()
+        assert torch.equal(rebuilt, torch.arange(100, 200, dtype=torch.float32))
+    finally:
+        shm_unlink(w.shm_name)
+
+
+def test_migrate_is_idempotent_across_sibling_views():
+    """Wrapping sibling views (or re-wrapping one) reuses the segment."""
+    base = torch.zeros(2 * 64, dtype=torch.float32)
+    v1, v2 = base[:64], base[64:]
+    w1 = migrate_to_shm_and_wrap(v1)
+    try:
+        w2 = migrate_to_shm_and_wrap(v2)
+        w1_again = migrate_to_shm_and_wrap(v1)
+        assert w1.shm_name == w2.shm_name == w1_again.shm_name
+    finally:
+        shm_unlink(w1.shm_name)
+
+
+def test_migrate_segment_unlinks_only_after_last_view_dies():
+    """The shared segment must outlive every view, not just the first."""
+    # Standard
+    import gc
+
+    # First Party
+    from lmcache.v1.platform.cpu.shm import shm_map_readwrite, shm_munmap
+
+    base = torch.zeros(2 * 64, dtype=torch.float32)
+    v1, v2 = base[:64], base[64:]
+    w1 = migrate_to_shm_and_wrap(v1)
+    w2 = migrate_to_shm_and_wrap(v2)
+    name, nbytes = w1.shm_name, w1.nbytes
+
+    del base, v1, w1, w2
+    gc.collect()
+    # v2 still holds the SHM-backed storage: the segment must survive.
+    addr = shm_map_readwrite(name, nbytes)
+    shm_munmap(addr, nbytes)
+
+    del v2
+    gc.collect()
+    with pytest.raises(OSError):
+        shm_map_readwrite(name, nbytes)
+
+
+def test_wrapper_rejects_view_larger_than_segment():
+    """A view whose end lies past the declared segment must be refused."""
+    base = torch.zeros(200, dtype=torch.float32)
+    view = base[100:200]
+    with pytest.raises(ValueError, match="segment"):
+        CpuShmTensorWrapper(view, "/lmcache_test_never_created", segment_nbytes=100 * 4)
 
 
 def test_migrate_ignores_stale_entry_from_id_reuse():

@@ -69,7 +69,7 @@ dataclass instances to dicts while handling non-serializable
 fields (e.g. `pathlib.Path`) by falling back to `str()`.
 `safe_asdict` operates on dataclass instances; `make_json_safe`
 recursively sanitizes arbitrary values (dicts, lists, tuples,
-primitives) and is also reused by the `/conf` HTTP endpoint.
+primitives) and is also reused by the `/config` HTTP endpoint.
 
 ### `RuntimePluginLauncher` (base)
 

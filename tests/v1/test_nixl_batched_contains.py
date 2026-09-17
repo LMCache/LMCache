@@ -10,6 +10,7 @@ dependencies (NIXL agent, memory allocators) are replaced by mocks.
 # Standard
 from typing import List
 from unittest.mock import Mock
+import asyncio
 
 # Third Party
 import pytest
@@ -22,6 +23,7 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.nixl_storage_backend import (
     NixlDynamicStorageAgent,
     NixlDynamicStorageBackend,
+    NixlStaticStorageBackend,
 )
 
 # ---------------------------------------------------------------------------
@@ -61,6 +63,10 @@ def _mock_backend(**overrides) -> Mock:
         side_effect=lambda key: f"formatted_{key.chunk_hash}"
     )
     backend.agent.batched_nixl_desc_exists = Mock(return_value=0)
+    # batched_contains() reads self.path to pass it to the agent; the value
+    # is unused here (the agent is mocked), but Mock(spec=...) raises on the
+    # unset instance attribute without it.
+    backend.path = None
     for k, v in overrides.items():
         setattr(backend, k, v)
     return backend
@@ -113,6 +119,51 @@ class TestBatchedNixlDescExists:
         agent = self._make_agent()
         agent.nixl_agent.query_memory.side_effect = RuntimeError("boom")
         assert self._call(agent, [(0, 0, 0, "k1")]) == 0
+
+    # -- FILE backend: resolves via os.path.exists, not query_memory --------
+
+    @staticmethod
+    def _make_file_agent() -> Mock:
+        agent = Mock(spec=NixlDynamicStorageAgent)
+        agent.nixl_agent = Mock()
+        agent.backend = "POSIX"
+        agent.mem_type = "FILE"
+        return agent
+
+    def test_file_all_exist(self) -> None:
+        agent = self._make_file_agent()
+        agent.nixl_desc_exists.return_value = True
+        reg_list = [(0, 0, 0, "k1"), (0, 0, 0, "k2"), (0, 0, 0, "k3")]
+        assert (
+            NixlDynamicStorageAgent.batched_nixl_desc_exists(agent, reg_list, "/dir")
+            == 3
+        )
+        # FILE must not use query_memory (it only answers for object stores)
+        agent.nixl_agent.query_memory.assert_not_called()
+        agent.nixl_desc_exists.assert_any_call("k1", "/dir")
+
+    def test_file_consecutive_then_miss(self) -> None:
+        agent = self._make_file_agent()
+        agent.nixl_desc_exists.side_effect = [True, True, False, True]
+        reg_list = [(0, 0, 0, f"k{i}") for i in range(4)]
+        assert (
+            NixlDynamicStorageAgent.batched_nixl_desc_exists(agent, reg_list, "/dir")
+            == 2
+        )
+
+    def test_file_first_missing(self) -> None:
+        agent = self._make_file_agent()
+        agent.nixl_desc_exists.side_effect = [False, True]
+        reg_list = [(0, 0, 0, "k1"), (0, 0, 0, "k2")]
+        assert (
+            NixlDynamicStorageAgent.batched_nixl_desc_exists(agent, reg_list, "/dir")
+            == 0
+        )
+
+    def test_file_requires_path(self) -> None:
+        agent = self._make_file_agent()
+        with pytest.raises(ValueError, match="path must be provided"):
+            NixlDynamicStorageAgent.batched_nixl_desc_exists(agent, [(0, 0, 0, "k1")])
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +391,80 @@ class TestBatchedContains:
         backend._exists_in_put_tasks_or_cache.return_value = (False, False)
         backend.agent.batched_nixl_desc_exists.return_value = 0
         assert self._call(backend, _make_keys(1)) == 0
+
+
+# ---------------------------------------------------------------------------
+# NixlStaticStorageBackend.batched_async_contains (regression)
+# ---------------------------------------------------------------------------
+class TestStaticBatchedAsyncContains:
+    """Regression tests for ``NixlStaticStorageBackend.batched_async_contains``.
+
+    The method only depends on single-key ``contains``, so it is exercised on a
+    lightweight stub that borrows the unbound method — no full backend needed.
+    """
+
+    class _StubBackend:
+        # Borrow the method under test (it uses only ``self.contains``).
+        batched_async_contains = NixlStaticStorageBackend.batched_async_contains
+
+        def __init__(self, present: List[CacheEngineKey]) -> None:
+            self._present = set(present)
+            self.pinned: List[CacheEngineKey] = []
+
+        def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
+            hit = key in self._present
+            if hit and pin:
+                self.pinned.append(key)
+            return hit
+
+        def unpin(self, key: CacheEngineKey) -> bool:
+            # Mirrors NixlStaticStorageBackend.unpin: release a pinned key.
+            if key in self.pinned:
+                self.pinned.remove(key)
+                return True
+            return False
+
+    @staticmethod
+    def _run(
+        present: List[CacheEngineKey], keys: List[CacheEngineKey], pin: bool = False
+    ):
+        backend = TestStaticBatchedAsyncContains._StubBackend(present)
+        # mypy: the stub deliberately borrows the unbound method, so ``self`` is
+        # typed NixlStaticStorageBackend rather than _StubBackend. The method
+        # only touches ``self.contains``, which the stub provides.
+        coro = backend.batched_async_contains(  # type: ignore[misc]
+            "lookup", keys, pin=pin
+        )
+        count = asyncio.run(coro)
+        return count, backend
+
+    def test_empty_keys_returns_zero(self) -> None:
+        count, _ = self._run([], [])
+        assert count == 0
+
+    def test_all_present(self) -> None:
+        keys = _make_keys(5)
+        count, _ = self._run(keys, keys)
+        assert count == 5
+
+    def test_stops_at_first_miss(self) -> None:
+        keys = _make_keys(5)
+        count, _ = self._run(keys[:3], keys)  # keys[3] absent
+        assert count == 3
+
+    def test_pin_pins_each_hit(self) -> None:
+        keys = _make_keys(3)
+        count, backend = self._run(keys, keys, pin=True)
+        assert count == 3
+        assert backend.pinned == keys
+
+    def test_unpin_releases_pinned_keys(self) -> None:
+        # pin=True pins every hit; the matching unpin() releases them with no
+        # leak. (In production the StorageManager unpins the chunk-rounding
+        # tail and the retrieve path unpins the rest.)
+        keys = _make_keys(3)
+        _, backend = self._run(keys, keys, pin=True)
+        assert backend.pinned == keys
+        for k in keys:
+            assert backend.unpin(k) is True
+        assert backend.pinned == []

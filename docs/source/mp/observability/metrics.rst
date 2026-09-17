@@ -1,14 +1,45 @@
 Metrics
 =======
 
-Metrics are collected via OpenTelemetry counters and exported through an
-in-process **Prometheus** ``/metrics`` HTTP endpoint (default port 9090).
-When ``--otlp-endpoint`` is set, metrics are also pushed to the OTel
-collector.
+Metrics are collected via OpenTelemetry and made available to Prometheus in
+one of two ways, depending on whether ``--otlp-endpoint`` is set:
+
+- **Pull mode (default, no collector).** When ``--otlp-endpoint`` is *not*
+  set, the server publishes a Prometheus ``/metrics`` endpoint that Prometheus
+  scrapes directly.
+
+  .. important::
+
+     For ``lmcache server``, ``/metrics`` is served by the **HTTP frontend**
+     on ``--http-port`` (default **8080**), e.g.
+     ``http://<host>:8080/metrics`` — **not** on ``--prometheus-port``.
+     ``--prometheus-port`` is *ignored* by ``lmcache server``: the standalone
+     Prometheus HTTP server is disabled because the HTTP frontend already
+     serves ``/metrics``. The frontend-less entrypoints
+     (``python -m lmcache.v1.multiprocess.server`` and ``lmcache trace
+     replay``) have no HTTP frontend, so *they* serve ``/metrics`` on
+     ``--prometheus-port`` (default 9090). See
+     :ref:`mp-obs-metrics-endpoint` for the full breakdown. Either way,
+     ``/metrics`` is empty until the first store/retrieve — drive some
+     traffic before you go looking.
+
+     The MP Coordinator follows the same embedded-HTTP pattern. In pull mode,
+     ``lmcache coordinator`` exposes ``/metrics`` on ``--port`` (default
+     **9300**) and never starts a separate Prometheus server. Use the
+     coordinator's ``--disable-metrics`` flag to disable metrics.
+
+- **Push mode (OTLP).** When ``--otlp-endpoint`` is set, metrics are pushed to
+  an OpenTelemetry Collector, which re-exposes them for Prometheus to scrape.
+  See :doc:`index` for the bundled Collector + Prometheus + Grafana stack.
+
+  The Coordinator also accepts ``--otlp-endpoint``. Its local ``/metrics``
+  route returns 404 in push mode, as it does when metrics are disabled.
 
 All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,
 dots are converted to underscores and counters get a ``_total`` suffix
-(e.g. ``lmcache_mp_l1_read_chunks_total``).
+(e.g. ``lmcache_mp_l1_read_chunks_total``); histograms gain a unit suffix
+plus ``_sum`` / ``_count`` / ``_bucket`` (e.g.
+``lmcache_mp_l2_store_throughput_GB_per_second_sum``).
 
 .. _mp-observability-resource:
 
@@ -256,10 +287,26 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens found in L1 or L2 during lookup (numerator of the
        L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
+   * - ``lmcache_mp.lookup_hit_l1``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Of ``lookup_hit``: tokens L1 could serve on its own under each
+       object group's attention-window rule.
+   * - ``lmcache_mp.lookup_hit_l2``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix.
+       ``l1 + l2 == lookup_hit`` per event.
+   * - ``lmcache_mp.lookups``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Completed lookups (denominator for ``lookup_early_exit``).
+   * - ``lmcache_mp.lookup_early_exit``
+     - Counter (attrs: ``model_name``, ``cache_salt``, ``reason``)
+     - Lookups that exited before a cache probe; ``reason`` is one of
+       ``no_gpu_context``, ``empty_chunk_hashes``, ``no_group_layout_descs``.
 
-Both counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
+All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
-contribute ``0`` to both, and abandoned lookups contribute to neither.
+contribute ``0`` tokens to all four token counters and ``+1`` to
+``lookups`` / ``lookup_early_exit``, and abandoned lookups contribute to neither.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
 time from ``IPCCacheServerKey`` so dashboards can compute per-model or
@@ -278,6 +325,14 @@ per tenant or isolation domain); drop it at scrape time with
     # Per-model:
     sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
     / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
+
+    # Share of hit tokens L1 could serve on its own:
+    rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
+    / rate(lmcache_mp_lookup_hit_tokens_total[5m])
+
+    # Fraction of lookups that early-exited, by reason:
+    sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
+    / sum(rate(lmcache_mp_lookups_requests_total[5m]))
 
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -341,6 +396,176 @@ Prometheus (e.g.
      - Histogram
      - CPU→GPU (L1→L0) load throughput in GB/s per request.
 
+.. note::
+
+   On the store path the window opens before ``reserve_write`` runs on the
+   CPU, so the store histogram also contains that CPU share. It was measured
+   at well under 1% of the window, so no separate metric or correction is
+   provided.
+
+.. _mp-obs-transfer-phase:
+
+Transfer Phase Metrics (gather kernel vs DMA)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The L0↔L1 histograms above give one number per request. A GPU↔CPU
+transfer, however, is two serialized GPU phases per batch step:
+
+- **kernel** — the gather/scatter kernel moving paged KV blocks ↔ GPU
+  staging buffers (occupies SMs, bounded by GPU memory bandwidth);
+- **staging** — the DMA copies moving GPU staging buffers ↔ pinned host
+  memory (occupies copy engines, bounded by PCIe).
+
+The native plan executor brackets each phase of each batch step with a
+pair of CUDA events on the transfer stream (no GPU-side synchronization);
+when a transfer ends the completed pairs are popped onto the event bus and
+``TransferPhaseMetricsSubscriber`` turns them into the metrics below. Recording
+is on whenever metrics or tracing consume the samples and costs nothing
+otherwise (``--disable-metrics`` without ``--enable-tracing``, or
+``--disable-observability``).
+
+There is deliberately **no kernel throughput histogram**: a kernel
+section's elapsed is mostly the wait for the co-resident inference
+engine's SMs, so ``bytes / elapsed`` there reports contention, not a
+transfer rate (full rationale: ``docs/design/v1/mp_observability/METRICS.md``).
+
+All three metrics carry ``device_index`` (e.g. ``"0"``) and ``direction``
+(``"d2h"`` for stores, ``"h2d"`` for retrieves); the two counters
+additionally carry ``phase`` (``"kernel"`` / ``"staging"``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.transfer_staging_throughput``
+     - Histogram
+     - DMA staging throughput in GB/s, one sample per batch step.
+   * - ``lmcache_mp.transfer_phase_bytes``
+     - Counter (attr: ``phase``)
+     - Cumulative bytes moved per phase. Kernel-phase bytes are derived
+       from the launches, so blocks skipped via ``skip_prefix_n_blocks``
+       (sliding windows, partial prefix hits) are not counted as moved;
+       the staging phase counts the whole staged payload. The difference
+       between the two is the payload that crossed PCIe without being
+       consumed by the kernel.
+   * - ``lmcache_mp.transfer_phase_elapsed``
+     - Counter (attr: ``phase``)
+     - Cumulative stream interval per phase: for ``staging`` the DMA
+       itself, for ``kernel`` mostly the wait for the engine's SMs.
+
+**What it answers:** is the DMA side (PCIe / pinned memory) healthy, and
+where does a slow transfer's time go? Use the counters for aggregate
+answers, because a mean over per-step histogram samples is not
+byte-weighted:
+
+.. code-block:: promql
+
+    # Byte-weighted aggregate DMA rate (bytes/s) -- staging only; the same
+    # ratio for phase="kernel" reports SM contention, not a transfer rate:
+    rate(lmcache_mp_transfer_phase_bytes_total{phase="staging"}[1m])
+    / rate(lmcache_mp_transfer_phase_elapsed_seconds_total{phase="staging"}[1m])
+
+    # Time share of each phase (stream seconds per wall-clock second):
+    rate(lmcache_mp_transfer_phase_elapsed_seconds_total[1m])
+
+    # Per-step p95 of the staging phase:
+    histogram_quantile(0.95,
+      sum by (le) (rate(lmcache_mp_transfer_staging_throughput_GB_per_second_bucket[1m])))
+
+.. note::
+
+   A phase's elapsed time is stream-clocked from section start to end, so
+   it includes any stream idle while the CPU enqueues that section's work.
+   Samples are popped when the transfer's ``MP_*_END`` event is dispatched,
+   i.e. shortly after the copy has actually finished on the GPU.
+
+MP Transfer Counters (in-flight GPU copies)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Submitted / finished counter pairs for the LMCache-driven GPU transfers,
+via ``MPTransferCountersSubscriber``. The ``MP_{STORE,RETRIEVE}_SUBMITTED``
+events are published CPU-synchronously right before a copy is enqueued;
+the ``MP_{STORE,RETRIEVE}_END`` events are published *from* the GPU cupy
+stream once the copy has actually run. Subtracting the two gives the
+number of transfers currently in flight on each GPU.
+
+All four counters carry exactly one attribute, ``device`` (e.g.
+``"cuda:3"``). This is deliberate: the ``SUBMITTED`` events carry no
+``engine_id`` or ``model_name``, so labeling the ``END`` side more richly
+would force a PromQL aggregation to line the two label sets back up
+before subtracting them. To slice GPU transfer activity by worker or
+model, use the L0 ↔ L1 throughput histograms or
+``lmcache_mp.num_chunks_loaded`` instead.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 25 35
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.num_submitted_stores``
+     - Counter (attr: ``device``)
+     - GPU→CPU store transfers enqueued on the device stream, +1 per
+       ``store()`` call that reaches the copy.
+   * - ``lmcache_mp.num_finished_stores``
+     - Counter (attr: ``device``)
+     - GPU→CPU store transfers completed on the device stream, +1 per
+       completion.
+   * - ``lmcache_mp.num_submitted_retrieves``
+     - Counter (attr: ``device``)
+     - CPU→GPU retrieve transfers enqueued on the device stream, +1 per
+       ``retrieve()`` call that reaches the copy.
+   * - ``lmcache_mp.num_finished_retrieves``
+     - Counter (attr: ``device``)
+     - CPU→GPU retrieve transfers completed on the device stream, +1 per
+       completion.
+
+**PromQL for in-flight GPU copies:**
+
+.. code-block:: promql
+
+    # Stores currently on the device stream, per GPU:
+    lmcache_mp_num_submitted_stores_total
+    - lmcache_mp_num_finished_stores_total
+
+    # Retrieves currently on the device stream, per GPU:
+    lmcache_mp_num_submitted_retrieves_total
+    - lmcache_mp_num_finished_retrieves_total
+
+    # Store / retrieve rates per GPU (ops/sec):
+    rate(lmcache_mp_num_submitted_stores_total[1m])
+    rate(lmcache_mp_num_submitted_retrieves_total[1m])
+
+**What it answers:** how many GPU KV copies is each device carrying right
+now? A submitted count that climbs while finished lags means the copy
+queue is backing up on that GPU; the two tracking together means the
+device is keeping pace.
+
+.. note::
+
+   "Finished" counts a transfer *leaving* the device stream, not its
+   success. A store that committed nothing (``stored_count == 0``) and a
+   retrieve that missed both increment the finished counter. Counting only
+   successes would strand a phantom in-flight transfer in the subtraction
+   forever. Use ``lmcache_mp.num_chunks_loaded`` and the L0 ↔ L1
+   throughput histograms to measure what actually moved.
+
+.. warning::
+
+   The derived in-flight retrieve count can drift upward on one fail-closed
+   path. ``retrieve()`` publishes ``MP_RETRIEVE_SUBMITTED`` *before* its
+   block-id underflow check, and that check returns early without
+   publishing ``MP_RETRIEVE_END``, so each request hitting it permanently
+   adds 1 to the difference. That path should never fire in healthy
+   operation and logs at ERROR when it does — an in-flight floor that
+   ratchets up alongside those log lines is the signature, not a stuck GPU.
+   The store path publishes its sentinel *after* the equivalent check and
+   is unaffected.
+
 L1 ↔ L2 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -377,6 +602,29 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
    * - ``lmcache_mp.l2_load_throughput``
      - Histogram
      - L2→L1 load throughput in GB/s per (request, adapter) pair.
+
+**PromQL for average throughput (GB/s), per backend:**
+
+.. code-block:: promql
+
+    # L1 -> L2 store throughput, averaged over the last minute, per l2_name:
+    sum by (l2_name) (rate(lmcache_mp_l2_store_throughput_GB_per_second_sum[1m]))
+    / sum by (l2_name) (rate(lmcache_mp_l2_store_throughput_GB_per_second_count[1m]))
+
+    # L2 -> L1 load throughput (same shape):
+    sum by (l2_name) (rate(lmcache_mp_l2_load_throughput_GB_per_second_sum[1m]))
+    / sum by (l2_name) (rate(lmcache_mp_l2_load_throughput_GB_per_second_count[1m]))
+
+.. note::
+
+   ``l2_store_throughput`` populates whenever chunks are written to L2.
+   ``l2_load_throughput`` only populates when chunks are read **from L2 into
+   L1** — i.e. on a prefetch load after the entry has aged out of L1. If your
+   working set fits entirely in L1 (common with small models or a large
+   ``--l1-size-gb``), lookups are served from L1 and the load histogram stays
+   empty even though store throughput is non-zero. Drive enough distinct data
+   to force L1 eviction, or restart the server between store and load passes,
+   to exercise the L2 load path.
 
 Engine Counters
 ~~~~~~~~~~~~~~~
@@ -521,12 +769,18 @@ each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Add the LMCache server as a Prometheus scrape target:
+In **pull mode** (no ``--otlp-endpoint``), point Prometheus at the server's
+HTTP-frontend port — ``--http-port``, default **8080** — not at
+``--prometheus-port``:
 
 .. code-block:: yaml
 
     scrape_configs:
       - job_name: "lmcache-mp"
         static_configs:
-          - targets: ["<lmcache-host>:9090"]
+          - targets: ["<lmcache-host>:8080"]   # --http-port, NOT --prometheus-port
 
+In **push mode** (``--otlp-endpoint`` set), the server does not expose
+``/metrics`` itself; scrape the OpenTelemetry Collector's Prometheus exporter
+instead. The bundled stack in ``examples/observability/`` wires this up for
+you — see :doc:`index`.

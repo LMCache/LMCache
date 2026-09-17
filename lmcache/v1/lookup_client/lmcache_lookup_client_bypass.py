@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
-
-# Third Party
-import torch
+from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.metadata import LMCacheMetadata
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -25,8 +28,8 @@ class LMCacheBypassLookupClient(LookupClientInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheMetadata,
-        lmcache_engine: LMCacheEngine,
+        metadata: "LMCacheMetadata",
+        lmcache_engine: "LMCacheEngine",
     ):
         """
         Initialize the bypass lookup client.
@@ -51,7 +54,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
 
     def lookup(
         self,
-        token_ids: Union[torch.Tensor, list[int]],
+        token_ids: Union["torch.Tensor", list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
@@ -88,7 +91,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
             return result
 
         except Exception as e:
-            logger.error(f"Error in bypass lookup: {e}")
+            logger.error("Error in bypass lookup: %s", e)
             return 0
 
     def supports_producer_reuse(self) -> bool:

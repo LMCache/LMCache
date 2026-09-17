@@ -3,6 +3,11 @@
 Example: Disaggregated prefill
 ==============================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/disaggregated_prefill`.
+
+
 With LMCache as a KV cache transfer library, we can run disaggregated prefill with vLLM.
 Right now, LMCache uses NIXL as a transport layer to enable fast KV cache transfer via NVLink, RDMA, or TCP.
 
@@ -115,7 +120,7 @@ Step-by-Step Setup
 
    c. Launch a proxy server to coordinate between prefiller and decoder:
 
-      The code for the proxy server is available `in vLLM repo <https://github.com/vllm-project/vllm/blob/main/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py>`_.
+      The code for the proxy server is available `in vLLM repo <https://github.com/vllm-project/vllm/blob/releases/v0.20.0/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py>`_.
 
       .. code-block:: bash
 

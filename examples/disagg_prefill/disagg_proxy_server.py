@@ -714,6 +714,14 @@ async def handle_chat_completions(request: Request):
                         json_str = chunk_str[6:].strip()  # Remove 'data: ' prefix
                         if json_str:
                             completion_data = json.loads(json_str)
+                            # Decoder can emit non-token chunks (usage, final
+                            # metadata, keepalives) with an empty choices list.
+                            # Those aren't chat-completion deltas, so pass the
+                            # original chunk through unchanged instead of
+                            # indexing into an empty list.
+                            if not completion_data.get("choices"):
+                                yield chunk
+                                continue
                             chat_completion_data = {
                                 "id": completion_data["id"],
                                 "object": "chat.completion.chunk",

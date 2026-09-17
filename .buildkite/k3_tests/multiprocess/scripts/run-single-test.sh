@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | hma_lm_eval_gemma4 | vllm_bench | long_doc_qa
-#              | long_doc_qa_l2 | fault_tolerance | deadlock | restart_recovery
-#              | gds_smoke_test
+#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
+#              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
+#              | restart_recovery | lazy_offload | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -20,8 +20,22 @@ source .buildkite/k3_tests/common_scripts/helpers.sh
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
-export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
+# Keep this aligned with wait-for-servers.sh. Large-model startup can exceed
+# five minutes on cold or contended CI nodes before the service is unhealthy.
+export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
+export DEFAULT_MODEL="${DEFAULT_MODEL:-Qwen/Qwen3-14B}"
+export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+    zmq) export LMCACHE_REQUEST_SCHEME="tcp" ;;
+    grpc) export LMCACHE_REQUEST_SCHEME="grpc" ;;
+    *)
+        echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'"
+        echo "Valid values: zmq, grpc"
+        exit 1
+        ;;
+esac
 
 # gds_smoke_test enables the GDS L1 NVMe-slab tier
 GDS_SCRATCH="${GDS_SCRATCH:-/scratch}"
@@ -59,8 +73,28 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     export BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
     export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
     export LIMIT="${LIMIT:-300}"
+elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
+    # Self-contained test: run-kimi-linear-tp.sh owns the server lifecycle and
+    # all launch flags (TP=2, trust-remote-code, align, chunk/batch sizes). Only
+    # the model name is declared here so the banner and the script's ${MODEL:-}
+    # fallback both resolve to Kimi-Linear rather than the generic default below.
+    export MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
+elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
+    # Self-contained test: run-dsv4-flash-tp.sh owns the server lifecycle and
+    # all launch flags (TP=4, fp8_ds_mla, deepseek_v4 tokenizer). Only the
+    # model name is declared here so the banner and the script's ${MODEL:-}
+    # fallback both resolve to DeepSeek-V4-Flash.
+    export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+elif [ "$TEST_NAME" = "lazy_offload" ]; then
+    # The shared GPU launcher includes these values in the real vLLM
+    # kv-transfer configuration only for this integration test.
+    export LMCACHE_MP_LAZY_OFFLOAD=true
+    # vLLM's default paged-block size is 16 tokens. Matching it keeps this
+    # test's expected LMCache chunk counts exact and small.
+    export CHUNK_SIZE="${CHUNK_SIZE:-16}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else
-    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 fi
 export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 export MAX_WORKERS="${MAX_WORKERS:-4}"
@@ -78,19 +112,24 @@ echo "============================================"
 echo "Build ID: $BUILD_ID"
 echo "Model: $MODEL"
 echo "LMCache port: $LMCACHE_PORT"
+echo "Request transport: $LMCACHE_REQUEST_TRANSPORT"
 echo "vLLM port: $VLLM_PORT"
 echo "vLLM baseline port: $VLLM_BASELINE_PORT"
 echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock p2p "
+SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
+# Respect an explicit environment override from a device-specific wrapper
+# before applying the default baseline heuristic below.
 BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
-if [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
+if [ -n "${LAUNCH_BASELINE:-}" ]; then
+    export LAUNCH_BASELINE
+elif [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
     export LAUNCH_BASELINE=true
 else
     export LAUNCH_BASELINE=false
@@ -127,6 +166,10 @@ case "$TEST_NAME" in
     lm_eval)
         exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
+    lm_eval_preemption)
+        export LM_EVAL_VERIFY_MODE=preemption
+        exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
+        ;;
     hma_lm_eval_gemma4)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
@@ -154,8 +197,17 @@ case "$TEST_NAME" in
     cache_stats)
         exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
         ;;
+    lazy_offload)
+        exec_script="${SCRIPT_DIR}/run-lazy-offload.sh"
+        ;;
     p2p)
         exec_script="${SCRIPT_DIR}/run-p2p.sh"
+        ;;
+    kimi_linear_tp)
+        exec_script="${SCRIPT_DIR}/run-kimi-linear-tp.sh"
+        ;;
+    dsv4_flash_tp)
+        exec_script="${SCRIPT_DIR}/run-dsv4-flash-tp.sh"
         ;;
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
@@ -165,7 +217,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac

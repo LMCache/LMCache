@@ -49,12 +49,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
     # First Party
@@ -65,15 +67,11 @@ except ImportError:
         "Skipping because L1 manager cannot be imported", allow_module_level=True
     )
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
-
-def should_use_lazy_alloc() -> bool:
-    """Determine if lazy allocation should be used based on CUDA availability."""
-    return torch.cuda.is_available()
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 
 # =============================================================================
@@ -282,8 +280,8 @@ class TestReserveRead:
 
         manager.close()
 
-    def test_reserve_read_with_extra_count(self, basic_l1_config, basic_layout):
-        """Test reserve_read(extra_count=N) acquires 1+N locks."""
+    def test_reserve_read_with_multiple_read_locks(self, basic_l1_config, basic_layout):
+        """Test reserve_read(read_locks=N) acquires N locks."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -291,8 +289,8 @@ class TestReserveRead:
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # Reserve with extra_count=2 -> total 3 locks
-        result = manager.reserve_read([key], extra_count=2)
+        # Reserve with read_locks=3 -> 3 locks
+        result = manager.reserve_read([key], read_locks=3)
         assert result[key][0] == L1Error.SUCCESS
         assert result[key][1] is not None
 
@@ -314,10 +312,10 @@ class TestReserveRead:
 
         manager.close()
 
-    def test_reserve_read_extra_count_default_is_zero(
+    def test_reserve_read_default_is_single_read_lock(
         self, basic_l1_config, basic_layout
     ):
-        """Default extra_count=0 acquires exactly 1 lock."""
+        """Default read_locks=1 acquires exactly 1 lock."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -677,10 +675,10 @@ class TestFinishRead:
 
         manager.close()
 
-    def test_finish_read_with_extra_count_releases_multiple(
+    def test_finish_read_with_multiple_read_locks_releases_multiple(
         self, basic_l1_config, basic_layout
     ):
-        """finish_read(extra_count=2) releases 3 locks at once."""
+        """finish_read(read_locks=3) releases 3 locks at once."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -688,11 +686,11 @@ class TestFinishRead:
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # Acquire 3 read locks (1 + extra_count=2)
-        manager.reserve_read([key], extra_count=2)
+        # Acquire 3 read locks (read_locks=3)
+        manager.reserve_read([key], read_locks=3)
 
         # Release all 3 at once
-        result = manager.finish_read([key], extra_count=2)
+        result = manager.finish_read([key], read_locks=3)
         assert result[key] == L1Error.SUCCESS
 
         state = manager.get_object_state(key)
@@ -701,26 +699,24 @@ class TestFinishRead:
 
         manager.close()
 
-    def test_finish_read_extra_count_partial_release(
-        self, basic_l1_config, basic_layout
-    ):
-        """Partial extra_count release leaves remaining locks."""
+    def test_finish_read_partial_read_lock_release(self, basic_l1_config, basic_layout):
+        """Partial read-lock release leaves remaining locks."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # 3 locks total (1 + extra_count=2)
-        manager.reserve_read([key], extra_count=2)
+        # 3 locks total (read_locks=3)
+        manager.reserve_read([key], read_locks=3)
 
-        # Release 2 of 3 (1 + extra_count=1)
-        manager.finish_read([key], extra_count=1)
+        # Release 2 of 3 (read_locks=2)
+        manager.finish_read([key], read_locks=2)
         state = manager.get_object_state(key)
         assert state is not None
         assert state.read_lock.is_locked()
 
-        # Release last one (1 + extra_count=0)
+        # Release last one (read_locks=1)
         manager.finish_read([key])
         state = manager.get_object_state(key)
         assert state is not None
@@ -728,10 +724,10 @@ class TestFinishRead:
 
         manager.close()
 
-    def test_finish_read_extra_count_deletes_temporary(
+    def test_finish_read_all_read_locks_deletes_temporary(
         self, basic_l1_config, basic_layout
     ):
-        """Temp objects deleted when extra_count releases all."""
+        """Temp objects deleted when the release covers all read locks."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -739,36 +735,36 @@ class TestFinishRead:
         manager.reserve_write([key], [True], basic_layout)
         manager.finish_write([key])
 
-        # Acquire 3 read locks at once (1 + extra_count=2)
-        manager.reserve_read([key], extra_count=2)
+        # Acquire 3 read locks at once (read_locks=3)
+        manager.reserve_read([key], read_locks=3)
         assert manager.get_object_state(key) is not None
 
         # Release all 3 at once -> temp deleted
-        result = manager.finish_read([key], extra_count=2)
+        result = manager.finish_read([key], read_locks=3)
         assert result[key] == L1Error.SUCCESS
         assert manager.get_object_state(key) is None
 
         manager.close()
 
-    def test_finish_read_extra_count_temp_survives_partial(
+    def test_finish_read_temp_survives_partial_read_locks(
         self, basic_l1_config, basic_layout
     ):
-        """Temp object survives partial extra_count release."""
+        """Temp object survives a partial share release."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         manager.reserve_write([key], [True], basic_layout)
         manager.finish_write([key])
 
-        # 4 locks total (1 + extra_count=3)
-        manager.reserve_read([key], extra_count=3)
+        # 4 locks total (read_locks=4)
+        manager.reserve_read([key], read_locks=4)
 
         # Release 2 of 4 -> still locked
-        manager.finish_read([key], extra_count=1)
+        manager.finish_read([key], read_locks=2)
         assert manager.get_object_state(key) is not None
 
         # Release remaining 2 -> deleted
-        manager.finish_read([key], extra_count=1)
+        manager.finish_read([key], read_locks=2)
         assert manager.get_object_state(key) is None
 
         manager.close()
@@ -1295,6 +1291,43 @@ class TestDelete:
 
         manager.close()
 
+    def test_force_delete_removes_write_locked_key(self, basic_l1_config, basic_layout):
+        """force=True deletes a write-locked key that non-force refuses."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout)  # write-locked
+
+        assert manager.delete([key]) == {key: L1Error.KEY_IS_LOCKED}
+        assert manager.delete([key], force=True) == {key: L1Error.SUCCESS}
+        assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_force_delete_removes_read_locked_key(self, basic_l1_config, basic_layout):
+        """force=True deletes a read-locked key that non-force refuses."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_read([key])  # read-locked
+
+        assert manager.delete([key]) == {key: L1Error.KEY_IS_LOCKED}
+        assert manager.delete([key], force=True) == {key: L1Error.SUCCESS}
+        assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_force_delete_missing_key_still_key_not_exist(
+        self, basic_l1_config, basic_layout
+    ):
+        """force does not invent keys: a missing key still reports KEY_NOT_EXIST."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(999)
+
+        assert manager.delete([key], force=True) == {key: L1Error.KEY_NOT_EXIST}
+
+        manager.close()
+
 
 # =============================================================================
 # Tests for L1Manager.get_object_state()
@@ -1563,33 +1596,32 @@ class TestStateMachineTransitions:
 
         manager.close()
 
-    def test_multi_reader_lifecycle_with_extra_count(
+    def test_multi_reader_lifecycle_with_shared_key(
         self, basic_l1_config, basic_layout
     ):
-        """Full lifecycle using extra_count (MLA TP>1 scenario).
+        """Full lifecycle of a shared key (MLA TP>1 scenario).
 
         Simulates multiple workers sharing the same key:
-        reserve_read(extra_count=N-1) acquires N locks,
-        finish_read(extra_count=N-1) releases them all.
+        reserve_read(read_locks=N) acquires N locks,
+        finish_read(read_locks=N) releases them all.
         """
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
-        extra = 3  # total locks = 1 + 3 = 4
+        read_locks = 4
 
         # write -> ready
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # reserve_read with extra_count
-        result = manager.reserve_read([key], extra_count=extra)
+        result = manager.reserve_read([key], read_locks=read_locks)
         assert result[key][0] == L1Error.SUCCESS
 
         # unsafe_read should work while read-locked
         ur = manager.unsafe_read([key])
         assert ur[key][0] == L1Error.SUCCESS
 
-        # finish_read with same extra_count
-        fr = manager.finish_read([key], extra_count=extra)
+        # finish_read releasing the whole reservation
+        fr = manager.finish_read([key], read_locks=read_locks)
         assert fr[key] == L1Error.SUCCESS
 
         # All locks released -> writable again
@@ -1600,18 +1632,18 @@ class TestStateMachineTransitions:
         manager.close()
 
     def test_temp_object_multi_reader_deletion(self, basic_l1_config, basic_layout):
-        """Temporary object deleted after extra_count release."""
+        """Temporary object deleted after all read locks are released."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
-        extra = 2  # total locks = 1 + 2 = 3
+        read_locks = 3
 
         manager.reserve_write([key], [True], basic_layout)
         manager.finish_write([key])
 
-        manager.reserve_read([key], extra_count=extra)
+        manager.reserve_read([key], read_locks=read_locks)
         assert manager.get_object_state(key) is not None
 
-        manager.finish_read([key], extra_count=extra)
+        manager.finish_read([key], read_locks=read_locks)
         assert manager.get_object_state(key) is None
 
         manager.close()
@@ -1914,7 +1946,7 @@ class TestIsKeyEvictable:
     def test_key_with_multiple_read_locks_not_evictable(
         self, basic_l1_config, basic_layout
     ):
-        """A key with extra_count read locks should not be evictable
+        """A key with multiple read locks should not be evictable
         until all locks are released."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(1)
@@ -1923,16 +1955,16 @@ class TestIsKeyEvictable:
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # Reserve read with extra_count=2 (total 3 locks)
-        manager.reserve_read([key], extra_count=2)
+        # Reserve read with read_locks=3
+        manager.reserve_read([key], read_locks=3)
         assert manager.is_key_evictable(key) is False
 
-        # Release only 1 lock (extra_count=0) -> still locked
-        manager.finish_read([key], extra_count=0)
+        # Release only 1 read lock -> still locked
+        manager.finish_read([key], read_locks=1)
         assert manager.is_key_evictable(key) is False
 
-        # Release remaining 2 locks (extra_count=1)
-        manager.finish_read([key], extra_count=1)
+        # Release the remaining 2 read locks
+        manager.finish_read([key], read_locks=2)
         assert manager.is_key_evictable(key) is True
 
         manager.close()

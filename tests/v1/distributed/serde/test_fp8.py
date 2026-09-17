@@ -15,11 +15,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.fp8 import (
     Fp8QuantizationDeserializer,
     Fp8QuantizationSerializer,
 )
+
+_TEST_KEY = ObjectKey(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
 
 
 @dataclass
@@ -73,12 +75,12 @@ def test_roundtrip_bfloat16_preserves_structure() -> None:
     temp = _FakeMemoryObj(tensor=torch.zeros(original.numel(), dtype=torch.uint8))
 
     serializer = Fp8QuantizationSerializer()
-    n = serializer.serialize(src, temp)  # type: ignore[arg-type]
+    n = serializer.serialize(src, temp, _TEST_KEY)  # type: ignore[arg-type]
     assert n == original.numel()
 
     # Round-trip: deserialize into a fresh buffer with the original shape.
     recovered = _FakeMemoryObj(tensor=torch.zeros(shape, dtype=torch.bfloat16))
-    Fp8QuantizationDeserializer().deserialize(temp, recovered)  # type: ignore[arg-type]
+    Fp8QuantizationDeserializer().deserialize(temp, recovered, _TEST_KEY)  # type: ignore[arg-type]
 
     assert recovered.tensor is not None
     corr = torch.corrcoef(
@@ -93,7 +95,7 @@ def test_serialize_raises_on_missing_tensor() -> None:
     src = _FakeMemoryObj(tensor=None)
     dst = _FakeMemoryObj(tensor=torch.zeros(4, dtype=torch.uint8))
     with pytest.raises(ValueError):
-        serializer.serialize(src, dst)  # type: ignore[arg-type]
+        serializer.serialize(src, dst, _TEST_KEY)  # type: ignore[arg-type]
 
 
 def test_deserialize_raises_on_missing_tensor() -> None:
@@ -101,4 +103,4 @@ def test_deserialize_raises_on_missing_tensor() -> None:
     src = _FakeMemoryObj(tensor=torch.zeros(4, dtype=torch.uint8))
     dst = _FakeMemoryObj(tensor=None)
     with pytest.raises(ValueError):
-        deserializer.deserialize(src, dst)  # type: ignore[arg-type]
+        deserializer.deserialize(src, dst, _TEST_KEY)  # type: ignore[arg-type]

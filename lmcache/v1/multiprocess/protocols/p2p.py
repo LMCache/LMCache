@@ -3,7 +3,7 @@
 P2P protocol definitions for peer lookup-and-lock operations.
 
 This module defines the protocol for:
-- P2P_LOOKUP_AND_LOCK: Look up and read-lock the locally cached prefix
+- P2P_LOOKUP_AND_LOCK: Look up and read-lock the locally cached keys
 - P2P_QUERY_LOOKUP_RESULTS: Poll the transfer addresses of a lookup
 - P2P_UNLOCK_OBJECTS: Release the read locks held by a peer
 """
@@ -29,13 +29,15 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         Dictionary mapping request names to their protocol definitions
     """
     return {
-        # Look up and read-lock the locally cached prefix of the given keys
+        # Look up and read-lock the L1-resident subset of the given keys
+        # (sparse; gaps allowed)
         # Payload:
         #   - keys: list[ObjectKey] - Object keys to look up and lock
-        #   - layout_desc: MemoryLayoutDesc - Memory layout of the objects
+        #   - group_layout_descs: dict[int, MemoryLayoutDesc] - Memory layout
+        #     of the objects, per object group
         # Returns: int - Task id for querying the lookup status later
         "P2P_LOOKUP_AND_LOCK": ProtocolDefinition(
-            payload_classes=[list[ObjectKey], MemoryLayoutDesc],
+            payload_classes=[list[ObjectKey], dict[int, MemoryLayoutDesc]],
             response_class=int,
             handler_type=HandlerType.BLOCKING,
         ),

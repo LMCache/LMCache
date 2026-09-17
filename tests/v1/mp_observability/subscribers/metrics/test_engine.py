@@ -9,6 +9,7 @@ import time
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.engine import (
@@ -30,7 +31,7 @@ def _retrieve_end(
     engine_id: int = 0,
     model_name: str = "test-model",
     cache_salt: str = "",
-    device: str = "cuda:0",
+    device: str = f"{torch_device_type}:0",
 ) -> Event:
     return Event(
         event_type=EventType.MP_RETRIEVE_END,

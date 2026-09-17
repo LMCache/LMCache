@@ -1,24 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-
 # Standard
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 import threading
 import time
-
-# Third Party
-import torch
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.record_strategies import (
     AsyncRecorder,
-    RecordStrategy,
     create_record_strategy,
 )
-from lmcache.v1.metadata import LMCacheMetadata
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.lookup_client.record_strategies import RecordStrategy
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -29,8 +31,8 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
     def __init__(
         self,
         actual_lookup_client: LookupClientInterface,
-        config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheMetadata] = None,
+        config: "LMCacheEngineConfig",
+        metadata: Optional["LMCacheMetadata"] = None,
     ) -> None:
         self.actual_lookup_client = actual_lookup_client
         self.config = config
@@ -50,7 +52,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         self.enable_auto_exit = (
             self.timeout_hours > 0.0 or self.target_unique_chunks > 0
         )
-        strategy: RecordStrategy = create_record_strategy(config)
+        strategy: "RecordStrategy" = create_record_strategy(config)
         self.recorder = AsyncRecorder(
             strategy=strategy,
             queue_capacity=config.get_extra_config_value(
@@ -120,7 +122,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
 
     def lookup(
         self,
-        token_ids: Union[torch.Tensor, list[int]],
+        token_ids: Union["torch.Tensor", list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
