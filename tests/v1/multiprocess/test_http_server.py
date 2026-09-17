@@ -360,7 +360,7 @@ class TestHealthAndMiscEndpoints:
         """200 and engine.clear() called."""
         resp = client_with_engine.post("/cache/clear", json={"tier": "l1"})
         assert resp.status_code == 200
-        mock_engine.clear.assert_called_once()
+        mock_engine.clear.assert_called_once_with(force=False)
 
     def test_status_no_engine(self, client_no_engine):
         """503 when engine is not set."""
