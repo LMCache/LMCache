@@ -11,6 +11,7 @@ torch storage path cannot do or what only the raw path must get right
 # Standard
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+import threading
 
 # Third Party
 import pytest
@@ -102,6 +103,33 @@ def test_raw_wrapper_records_interior_offset() -> None:
         interior_wrapper._alloc_offset - base_wrapper._alloc_offset  # noqa: SLF001
     )
     assert offset_delta == 4096 * base.element_size()
+
+
+def test_raw_wrapper_constructs_on_a_fresh_thread() -> None:
+    """Regression: the MP heartbeat re-registers the KV caches from its own
+    thread after a server restart. A fresh thread has no current CUDA context,
+    and the driver call in ``RawCudaIPCWrapper`` used to fail there with
+    ``CUDA_ERROR_INVALID_CONTEXT`` on every retry.
+    """
+    base = torch.ones(1024, device=DEVICE, dtype=torch.float32)
+    view = base[256:512]
+    result: dict[str, object] = {}
+
+    def construct() -> None:
+        try:
+            result["wrapper"] = RawCudaIPCWrapper(view)
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=construct)
+    thread.start()
+    thread.join()
+
+    assert "error" not in result, result.get("error")
+    wrapper = result["wrapper"]
+    assert isinstance(wrapper, RawCudaIPCWrapper)
+    assert wrapper.shape == (256,)
+    assert wrapper._nbytes == 256 * 4  # noqa: SLF001
 
 
 def test_raw_wrapper_rejects_unpermutable_noncontiguous() -> None:
