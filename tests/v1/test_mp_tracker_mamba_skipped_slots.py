@@ -20,6 +20,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 
 BLOCK = 100
 ATTN, MAMBA = 0, 1
+NUM_SPECULATIVE_BLOCKS = 4
 
 
 def _tracker() -> LMCacheMPRequestTracker:
@@ -47,12 +48,12 @@ def test_relocated_speculative_block_is_nulled():
     tail and reports [12, 16]. Chunk 2 must not be stored from block 12.
     """
     tracker = _tracker()
-    tracker.append_block_ids(([50, 51], [10, 11, 12, 13, 14]))
+    tracker.append_block_ids(([50, 51], [10, 11, 12, 13, 14]), NUM_SPECULATIVE_BLOCKS)
     tracker.increase_num_scheduled_tokens(100)
-    tracker.append_block_ids(([52], [15]))
+    tracker.append_block_ids(([52], [15]), NUM_SPECULATIVE_BLOCKS)
     tracker.increase_num_scheduled_tokens(100)
     assert _store_blocks(tracker) == [[50, 51], [10, 11]]
-    tracker.append_block_ids(([53, 54], [12, 16]))
+    tracker.append_block_ids(([53, 54], [12, 16]), NUM_SPECULATIVE_BLOCKS)
     tracker.increase_num_scheduled_tokens(137)
     assert tracker.allocated_block_ids[MAMBA] == [10, 11, 0, 13, 14, 15, 12, 16]
     assert tracker.allocated_block_ids[ATTN] == [50, 51, 52, 53, 54]
