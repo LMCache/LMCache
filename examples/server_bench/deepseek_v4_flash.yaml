@@ -1,0 +1,5 @@
+model: {preset: deepseek_v4_flash}
+parallel: {tp_size: 8}
+allocation: {num_blocks: 257}
+layout: {mode: vllm, kv_cache_dtype: fp8_ds_mla}
+# 256-token server chunks; capacity includes all groups and null block 0.

@@ -162,10 +162,12 @@ def _make_key(
     worker_id: int | None = None,
     world_size: int = _WORLD_SIZE,
     num_kv_readers: int = 1,
+    model_name: str = _MODEL_NAME,
+    request_configs: dict[str, Any] | None = None,
 ) -> IPCCacheServerKey:
     """Build an IPCCacheServerKey."""
     return IPCCacheServerKey(
-        model_name=_MODEL_NAME,
+        model_name=model_name,
         world_size=world_size,
         num_kv_readers=num_kv_readers,
         worker_id=worker_id,
@@ -173,6 +175,7 @@ def _make_key(
         start=start,
         end=end if end > 0 else len(token_ids),
         request_id=request_id,
+        request_configs=request_configs,
     )
 
 
@@ -383,7 +386,7 @@ def _compute_client_checksums(
             # uint8 reinterpret works after slice).
             block_dim = 0 if _tensor_is_mla(t) else 1
             view = t.narrow(block_dim, start_b, end_b - start_b).contiguous()
-            h.update(view.view(torch.uint8).numpy().tobytes())
+            h.update(view.view(torch.uint8).cpu().numpy().tobytes())
         checksums.append(h.hexdigest())
     return checksums
 

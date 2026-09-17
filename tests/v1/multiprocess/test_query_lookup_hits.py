@@ -18,7 +18,10 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    SKIP_L2_REQUEST_CONFIG_KEY,
+    IPCCacheServerKey,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -311,3 +314,28 @@ def test_lookup_single_group_matches_single_group_layout():
 
     expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
     assert keys == expected
+
+
+def test_lookup_can_skip_l2_via_request_config():
+    """An L1 visibility probe must not launch an L2 prefetch."""
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.event_bus.has_subscribers.return_value = False
+    ctx.layout_desc_registry.find.return_value = MagicMock()
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1]
+    )
+    ctx.token_hasher.compute_chunk_hashes.return_value = [b"c0"]
+    key = IPCCacheServerKey.from_token_ids(
+        model_name="m",
+        world_size=1,
+        worker_id=None,
+        token_ids=[0],
+        request_id="l1-only",
+        request_configs={SKIP_L2_REQUEST_CONFIG_KEY: True},
+    )
+
+    LookupModule(ctx).lookup(key, tp_size=1)
+
+    assert ctx.storage_manager.submit_prefetch_task.call_args.kwargs["skip_l2"] is True
