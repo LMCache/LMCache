@@ -30,7 +30,11 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
+from lmcache.v1.platform import (
+    get_device_spec,
+    resolve_kv_wrapper_factory,
+    synchronize_device,
+)
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
@@ -200,7 +204,7 @@ def _get_kv_device(kv_caches: dict[str, torch.Tensor]) -> torch.device:
         ValueError: If ``kv_caches`` is empty.
     """
     if not kv_caches:
-        raise ValueError("LMCache-driven transfer requires at least one KV cache")
+        raise ValueError("Transfer requires at least one KV cache")
     return get_device(next(iter(kv_caches.values())))
 
 
@@ -843,7 +847,7 @@ class EngineDrivenTransferContext(TransferContext):
         """Return no event for the synchronous engine-driven transfer path.
 
         Returns:
-            ``None`` because store and retrieve synchronize the active device
+            ``None`` because store and retrieve synchronize the KV tensor device
             before accessing or releasing KV-cache buffers.
 
         Raises:
@@ -871,7 +875,8 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
 
-        torch_dev.synchronize()
+        device = _get_kv_device(kv_caches)
+        synchronize_device(device)
         result = self._engine_driven_context.prepare_store(key, self._instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
         # All chunks already in cache — nothing to gather or commit.
@@ -893,7 +898,7 @@ class EngineDrivenTransferContext(TransferContext):
         # commit_store serializes immediately. Either way the copies must be
         # complete first, so this is unconditional -- guarding it on out_buffers
         # left the pickle path serializing a buffer still being written.
-        torch_dev.synchronize()
+        synchronize_device(device)
         ok = self._engine_driven_context.commit_store(
             key, self._instance_id, cpu_chunks
         )
@@ -918,6 +923,7 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
+        device = _get_kv_device(kv_caches)
         src_buffers = self._engine_driven_context.prepare_retrieve(
             key, self._instance_id
         )
@@ -938,7 +944,7 @@ class EngineDrivenTransferContext(TransferContext):
                 ok = False
             # SHM path: ensure all device writes are complete before releasing
             # the SHM slot (server may immediately reuse it after commit_retrieve).
-            torch_dev.synchronize()
+            synchronize_device(device)
         self._engine_driven_context.commit_retrieve(key, self._instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()

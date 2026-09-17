@@ -16,6 +16,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 # Third Party
+import pytest
 import torch
 
 
@@ -50,7 +51,7 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
     # check real, and substitute only the platform resolver's selected ops.
     ops = MagicMock()
     with (
-        patch.object(base, "torch_dev") as dev,
+        patch.object(base, "synchronize_device") as synchronize,
         patch.object(base, "resolve_device_ops", return_value=ops),
     ):
         # cast: the mocks stand in for tensors on purpose (see above).
@@ -60,61 +61,67 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
         assert ops.multi_layer_block_kv_transfer.called, (
             "fixture must reach the async H2D launches"
         )
-        assert dev.synchronize.called, (
+        assert synchronize.call_args.args == (torch.device("cpu"),), (
             "scatter must complete async H2D before releasing the temporaries "
             "it pinned; otherwise the host allocator reuses them mid-copy"
         )
 
 
-def test_pickle_store_syncs_before_commit_serializes() -> None:
-    """The pickle path must sync before commit_store reads the buffers.
-
-    Gather issues async device->CPU copies into fresh buffers, and the pickle
-    transport serializes them immediately in ``commit_store``. Syncing only
-    when ``out_buffers`` is given (the SHM path) leaves pickle serializing a
-    buffer that is still being written.
-    """
+@pytest.mark.parametrize("operation", ["store", "retrieve"])
+def test_transfer_syncs_kv_device_before_commit(operation: str) -> None:
+    """Transfers finish on the KV device before serialization or SHM release."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
     order: list[str] = []
-    ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
-    ctx._engine_driven_context = MagicMock()
-    ctx._engine_driven_context.prepare_store.return_value = None  # pickle mode
+    transport = MagicMock()
+    transport.prepare_store.return_value = None  # pickle mode
+    transport.prepare_retrieve.return_value = [torch.zeros(1)]
 
-    def _commit(*_a: object, **_k: object) -> bool:
+    def commit(*args: object, **kwargs: object) -> bool:
         order.append("commit")
         return True
 
-    ctx._engine_driven_context.commit_store.side_effect = _commit
-    ctx._layout_hints = None
-    ctx._engine_kv_format = None
-
-    def _gather(*_a: object, **_k: object) -> list[torch.Tensor]:
-        order.append("gather")
-        return [torch.zeros(1)]
-
-    with (
-        patch.object(worker_transfer, "torch_dev") as dev,
-        patch.object(worker_transfer, "gather_paged_kv_to_cpu", side_effect=_gather),
+    getattr(transport, f"commit_{operation}").side_effect = commit
+    ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
+    with patch.object(
+        worker_transfer, "create_engine_driven_context", return_value=transport
     ):
-        dev.synchronize.side_effect = lambda *a, **k: order.append("sync")
-        ctx.submit_store(
-            "req",
-            MagicMock(),  # key
+        ctx.register(
             {"layer_0": torch.zeros(2, 4, 4, 2, 8)},
-            [[0, 1, 2, 3]],
-            MagicMock(),  # event (unused on this transport)
-            4,  # blocks_in_chunk
+            "test",
+            1,
+            4,
+            1.0,
+            layout_hints={"kv_layout": "NHD"},
         )
 
-    # A sync must fall BETWEEN gather and commit. submit_store also syncs
-    # before prepare_store, so merely finding a "sync" proves nothing -- that
-    # earlier one is why guarding this on out_buffers went unnoticed.
-    gathered, committed = order.index("gather"), order.index("commit")
-    assert any(
-        i for i, step in enumerate(order) if step == "sync" and gathered < i < committed
-    ), (
-        "pickle store must synchronize after gather and before commit_store "
-        f"serializes the buffers, got {order}"
+    # Mock device copies so non-default CUDA-device ordering is testable on CPU CI.
+    device = torch.device("cuda:1")
+    kv = {"layer_0": MagicMock(spec=torch.Tensor, device=device)}
+    transfer_name = (
+        "gather_paged_kv_to_cpu" if operation == "store" else "scatter_cpu_to_paged_kv"
     )
+
+    def transfer(*args: object, **kwargs: object) -> list[torch.Tensor]:
+        order.append("copy")
+        return [torch.zeros(1)]
+
+    def synchronize(actual_device: torch.device) -> None:
+        assert actual_device == device
+        order.append("sync")
+
+    try:
+        with (
+            patch.object(torch.cuda, "synchronize", side_effect=synchronize),
+            patch.object(worker_transfer, transfer_name, side_effect=transfer),
+        ):
+            submit = getattr(ctx, f"submit_{operation}")
+            assert submit("req", "key", kv, [[0, 1, 2, 3]], None, 4).result()
+    finally:
+        ctx.close()
+
+    expected = ["copy", "sync", "commit"]
+    if operation == "store":
+        expected.insert(0, "sync")
+    assert order == expected
