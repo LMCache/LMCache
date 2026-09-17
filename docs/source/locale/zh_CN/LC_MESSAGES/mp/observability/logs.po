@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -87,54 +87,98 @@ msgid "``MP retrieve end: session=... retrieved_count=...``"
 msgstr "``MP retrieve end: session=... retrieved_count=...``"
 
 #: ../../source/mp/observability/logs.rst:36
+msgid "GC Monitoring (garbage-collection pauses)"
+msgstr ""
+
+#: ../../source/mp/observability/logs.rst:38
+msgid ""
+"A full (generation-2) collection is stop-the-world and walks the whole "
+"heap, so it lands inside request handling as tail latency that nothing "
+"else in the server accounts for. Opt in to time collections and log the "
+"slow ones:"
+msgstr ""
+
+#: ../../source/mp/observability/logs.rst:51
+#: ../../source/mp/observability/logs.rst:90
+msgid "Notes:"
+msgstr "注意："
+
+#: ../../source/mp/observability/logs.rst:53
+msgid ""
+"``--gc-monitor-min-pause-ms`` (default ``1.0``) drops faster collections."
+" ``0`` logs everything, including the sub-millisecond gen-0 sweeps "
+"CPython runs roughly every 700 net container allocations."
+msgstr ""
+
+#: ../../source/mp/observability/logs.rst:56
+msgid ""
+"``--gc-monitor-top-objects`` shows *what* the collector is walking, but "
+"scans the whole generation on **every** collection (O(heap), can itself "
+"cost hundreds of ms). Debugging only."
+msgstr ""
+
+#: ../../source/mp/observability/logs.rst:59
+msgid ""
+"Non-zero ``uncollectable`` means CPython found garbage it could not free "
+"— a reference-cycle leak worth chasing."
+msgstr ""
+
+#: ../../source/mp/observability/logs.rst:61
+msgid ""
+"The monitor logs directly instead of publishing events, so it is "
+"independent of the ``--disable-observability`` / ``--disable-metrics`` / "
+"``--disable-logging`` flags."
+msgstr ""
+
+#: ../../source/mp/observability/logs.rst:66
 msgid "Extra Logging (periodic transfer stats)"
 msgstr "额外日志记录（定期传输统计信息）"
 
-#: ../../source/mp/observability/logs.rst:38
+#: ../../source/mp/observability/logs.rst:68
 msgid ""
 "Opt-in periodic INFO-level stats, aimed at watching a running server from"
 " its logs without a metrics stack:"
 msgstr "选择性地记录周期性 INFO 级别的统计信息，旨在通过日志监控正在运行的服务器，而无需使用指标堆栈："
 
-#: ../../source/mp/observability/logs.rst:45
+#: ../../source/mp/observability/logs.rst:75
 msgid ""
 "Every interval, the server logs — per GPU — the L0<->L1 store/retrieve "
 "activity of the last window and the cumulative totals since start "
 "(operation count, tokens, size in GB, and average copy throughput in "
 "GB/s):"
-msgstr "每个时间间隔，服务器日志 — 每个 GPU — 记录最后窗口的 L0<->L1 存取活动和自启动以来的累计总数（操作计数、令牌、大小（GB）和平均复制吞吐量（GB/s）："
+msgstr ""
+"每个时间间隔，服务器日志 — 每个 GPU — 记录最后窗口的 L0<->L1 "
+"存取活动和自启动以来的累计总数（操作计数、令牌、大小（GB）和平均复制吞吐量（GB/s）："
 
-#: ../../source/mp/observability/logs.rst:54
+#: ../../source/mp/observability/logs.rst:84
 msgid "The eviction loop also reports L1 memory usage at the same interval:"
 msgstr "逐出循环还会在相同的时间间隔报告 L1 内存使用情况："
 
-#: ../../source/mp/observability/logs.rst:60
-msgid "Notes:"
-msgstr "注意："
-
-#: ../../source/mp/observability/logs.rst:62
+#: ../../source/mp/observability/logs.rst:92
 msgid ""
 "Transfer-stat lines are only emitted for windows with activity; the L1 "
 "memory usage line is emitted every interval regardless of load."
 msgstr "仅在有活动的窗口中发出传输状态行；L1 内存使用情况行在每个时间间隔内发出，无论负载如何。"
 
-#: ../../source/mp/observability/logs.rst:64
+#: ../../source/mp/observability/logs.rst:94
 msgid ""
 "``avg_copy`` measures throughput of the GPU-stream copy time only (not "
 "wall clock), and shows ``n/a`` when no timed operation completed in the "
 "window."
 msgstr "``avg_copy`` 仅测量 GPU 流复制时间的吞吐量（不是实际时间），当窗口内没有完成计时操作时显示 ``n/a``。"
 
-#: ../../source/mp/observability/logs.rst:67
+#: ../../source/mp/observability/logs.rst:97
 msgid ""
 "``--extra-logging-interval`` values below ``1.0`` are limited by the 1 Hz"
 " internal heartbeat."
 msgstr "``--extra-logging-interval`` 小于 ``1.0`` 的值受限于 1 Hz 的内部心跳。"
 
-#: ../../source/mp/observability/logs.rst:69
+#: ../../source/mp/observability/logs.rst:99
 msgid ""
 "``--enable-extra-logging`` works even with ``--disable-logging``, but "
 "conflicts with ``--disable-observability`` (the server raises a "
 "``ValueError`` at startup)."
-msgstr "``--enable-extra-logging`` 即使在 ``--disable-logging`` 的情况下也能工作，但与 ``--disable-observability`` 冲突（服务器在启动时会引发 ``ValueError``）。"
+msgstr ""
+"``--enable-extra-logging`` 即使在 ``--disable-logging`` 的情况下也能工作，但与 "
+"``--disable-observability`` 冲突（服务器在启动时会引发 ``ValueError``）。"
 

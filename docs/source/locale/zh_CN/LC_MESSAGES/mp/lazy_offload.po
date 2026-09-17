@@ -1,0 +1,198 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/lazy_offload.rst:2
+msgid "Lazy KV Cache Offload"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:4
+msgid ""
+"Lazy offload lets the vLLM ``LMCacheMPConnector`` defer GPU-to-LMCache "
+"store operations and submit finished requests in FIFO batches. It moves "
+"store work out of the normal per-step path, which can improve serving "
+"throughput when immediate cache availability is less important than "
+"reducing per-request offload overhead."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:10
+msgid ""
+"This feature is disabled by default and is available only with vLLM and "
+"``LMCacheMPConnector``. The LMCache server needs no additional flags."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:14
+msgid "Enable Lazy Offload"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:16
+msgid ""
+"Pass the lazy-offload options in vLLM's ``kv_connector_extra_config``. "
+"For example, the following configuration starts offloading after 20 "
+"requests have finished and selects up to 10 requests per FIFO batch:"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:26
+msgid "The options are:"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:32
+msgid "Key"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:33
+msgid "Default"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:34
+msgid "Description"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:35
+msgid "``lmcache.mp.lazy_offload``"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:36
+msgid "``false``"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:37
+msgid "Enable deferred, batched store submission."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:38
+msgid "``lmcache.mp.lazy_offload_policy``"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:39
+msgid "``FIFO``"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:40
+msgid ""
+"Select finished requests in insertion order. ``FIFO`` is currently the "
+"only supported policy."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:42
+msgid "``lmcache.mp.lazy_offload_threshold``"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:43
+msgid "``100``"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:44
+msgid ""
+"Number of finished pending requests required to make a batch eligible for"
+" offload."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:46
+msgid "``lmcache.mp.lazy_offload_select_count``"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:47
+msgid "``10``"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:48
+msgid ""
+"Maximum number of finished requests selected each time the threshold is "
+"met."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:52
+msgid "How It Works"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:54
+msgid ""
+"Lazy offload changes when stores are submitted, but it uses the same "
+"LMCache server store path as the default eager behavior:"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:77
+msgid ""
+"Before a request is selected, lazy offload does not pin its GPU blocks. "
+"vLLM may reuse those blocks for other requests. The connector records "
+"each block's hash when it buffers the store metadata and checks the hash "
+"again before offload. If a block has been reused, the connector logs a "
+"warning and skips the stale store metadata instead of caching incorrect "
+"KV data. A later lookup for the missing data therefore becomes a cache "
+"miss and vLLM recomputes the tokens; inference correctness is unaffected."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:85
+msgid ""
+"The trigger is evaluated only on scheduling steps that process at least "
+"one token. Pending requests below the threshold, or the remaining tail "
+"after traffic becomes idle, are not flushed automatically. Lazy offload "
+"is therefore best suited to continuous serving workloads rather than jobs"
+" that require every request's KV cache to be persisted immediately."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:91
+msgid ""
+"Selected requests are removed from the ready count. For example, with a "
+"threshold of 20 and a select count of 10, the first trigger submits 10 "
+"requests and leaves 10 ready. Another 10 requests must finish before the "
+"count reaches 20 and triggers the next batch. Configure both values as "
+"positive integers."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:97
+msgid "Tuning"
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:99
+msgid ""
+"Lower ``lmcache.mp.lazy_offload_threshold`` when caches must become "
+"reusable sooner or when traffic arrives in short bursts. This causes more"
+" frequent offload batches."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:102
+msgid ""
+"Raise the threshold to defer more store work, accepting a longer delay "
+"and a greater chance that vLLM reuses a pending GPU block before it is "
+"offloaded."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:104
+msgid ""
+"Raise ``lmcache.mp.lazy_offload_select_count`` to drain more requests per"
+" trigger. Larger values create larger store bursts; smaller values spread"
+" the work across more threshold crossings."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:107
+msgid ""
+"Use ``lmcache.mp.lazy_offload_threshold=1`` for the earliest eligibility,"
+" while remembering that submission still needs a later non-empty "
+"scheduling step."
+msgstr ""
+
+#: ../../source/mp/lazy_offload.rst:111
+msgid ""
+"To confirm that the connector enabled lazy offload, check the vLLM log "
+"for a message similar to:"
+msgstr ""
+

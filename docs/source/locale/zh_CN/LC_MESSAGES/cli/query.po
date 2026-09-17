@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-01 10:55+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -25,23 +25,29 @@ msgstr "lmcache query"
 
 #: ../../source/cli/query.rst:4
 msgid ""
-"The ``lmcache query`` command sends a single OpenAI-compatible inference "
-"request and reports token and latency metrics. It has two targets:"
-msgstr "``lmcache query`` 命令发送一个单一的兼容 OpenAI 的推理请求，并报告令牌和延迟指标。它有两个目标："
+"The ``lmcache query`` command runs a single, read-only query and reports "
+"the result as a metrics report. It has three targets:"
+msgstr "``lmcache query`` 命令运行一个单一的只读查询，并将结果报告为指标报告。它有三个目标："
 
 #: ../../source/cli/query.rst:11
-msgid "``engine`` — send one request to a serving engine's HTTP API."
-msgstr "``engine`` — 向服务引擎的 HTTP API 发送一个请求。"
+msgid ""
+"``engine`` — send one OpenAI-compatible inference request to a serving "
+"engine's HTTP API and report token and latency metrics."
+msgstr "``engine`` — 向服务引擎的 HTTP API 发送一个兼容 OpenAI 的推理请求，并报告令牌和延迟指标。"
 
-#: ../../source/cli/query.rst:12
+#: ../../source/cli/query.rst:13
+msgid "``coordinator`` — read one of the MP coordinator's read-only HTTP APIs."
+msgstr "``coordinator`` — 读取 MP 协调器的只读 HTTP API 之一。"
+
+#: ../../source/cli/query.rst:14
 msgid "``kvcache`` — query KV-cache endpoints (not implemented yet)."
 msgstr "``kvcache`` — 查询 KV Cache 端点（尚未实现）。"
 
-#: ../../source/cli/query.rst:16
+#: ../../source/cli/query.rst:18
 msgid "query engine"
 msgstr "查询引擎"
 
-#: ../../source/cli/query.rst:18
+#: ../../source/cli/query.rst:20
 #, python-brace-format
 msgid ""
 "The ``query engine`` subcommand sends one request to the engine API and "
@@ -50,129 +56,665 @@ msgid ""
 " with ``--documents NAME=PATH``. The prompt token count is taken directly"
 " from the usage data reported by the engine (``stream_options: "
 "{include_usage: true}``)."
-msgstr "``query engine`` 子命令向引擎 API 发送一个请求并报告指标。 ``--prompt`` 支持占位符： ``{lmcache}`` 加载 ``lmcache/cli/documents/lmcache.txt``\\ ，并且可以通过 ``--documents NAME=PATH`` 传递自定义文档。提示的令牌计数直接来自引擎报告的使用数据 (``stream_options: {include_usage: true}``)。"
+msgstr ""
+"``query engine`` 子命令向引擎 API 发送一个请求并报告指标。 ``--prompt`` 支持占位符： "
+"``{lmcache}`` 加载 ``lmcache/cli/documents/lmcache.txt``\\ ，并且可以通过 "
+"``--documents NAME=PATH`` 传递自定义文档。提示的令牌计数直接来自引擎报告的使用数据 (``stream_options:"
+" {include_usage: true}``)。"
 
-#: ../../source/cli/query.rst:45
+#: ../../source/cli/query.rst:47 ../../source/cli/query.rst:374
 msgid "Options"
 msgstr "选项"
 
-#: ../../source/cli/query.rst:51
+#: ../../source/cli/query.rst:53 ../../source/cli/query.rst:380
 msgid "Flag"
 msgstr "标志"
 
-#: ../../source/cli/query.rst:52
+#: ../../source/cli/query.rst:54 ../../source/cli/query.rst:381
 msgid "Required"
 msgstr "必需的"
 
-#: ../../source/cli/query.rst:53
+#: ../../source/cli/query.rst:55 ../../source/cli/query.rst:382
 msgid "Description"
 msgstr "描述"
 
-#: ../../source/cli/query.rst:54
+#: ../../source/cli/query.rst:56 ../../source/cli/query.rst:388
 msgid "``--url URL``"
 msgstr "``--url URL``"
 
-#: ../../source/cli/query.rst:55 ../../source/cli/query.rst:58
+#: ../../source/cli/query.rst:57 ../../source/cli/query.rst:60
+#: ../../source/cli/query.rst:384
 msgid "Yes"
 msgstr "是"
 
-#: ../../source/cli/query.rst:56
+#: ../../source/cli/query.rst:58
 msgid "Serving engine base URL (e.g. ``http://localhost:8000/v1``)."
 msgstr "服务引擎基础 URL（例如 ``http://localhost:8000/v1``\\ ）。"
 
-#: ../../source/cli/query.rst:57
+#: ../../source/cli/query.rst:59
 msgid "``--prompt TEXT``"
 msgstr "``--prompt TEXT``"
 
-#: ../../source/cli/query.rst:59
+#: ../../source/cli/query.rst:61
 #, python-brace-format
 msgid ""
 "Prompt text with optional ``{name}`` placeholders. ``{lmcache}`` expands "
 "to the bundled sample document."
 msgstr "带有可选 ``{name}`` 占位符的提示文本。 ``{lmcache}`` 展开为捆绑的示例文档。"
 
-#: ../../source/cli/query.rst:61
+#: ../../source/cli/query.rst:63
 msgid "``--model ID``"
 msgstr "``--model ID``"
 
-#: ../../source/cli/query.rst:62 ../../source/cli/query.rst:66
-#: ../../source/cli/query.rst:69 ../../source/cli/query.rst:72
-#: ../../source/cli/query.rst:76 ../../source/cli/query.rst:79
-#: ../../source/cli/query.rst:83 ../../source/cli/query.rst:86
-#: ../../source/cli/query.rst:89
+#: ../../source/cli/query.rst:64 ../../source/cli/query.rst:68
+#: ../../source/cli/query.rst:71 ../../source/cli/query.rst:74
+#: ../../source/cli/query.rst:78 ../../source/cli/query.rst:81
+#: ../../source/cli/query.rst:85 ../../source/cli/query.rst:88
+#: ../../source/cli/query.rst:91 ../../source/cli/query.rst:389
+#: ../../source/cli/query.rst:393 ../../source/cli/query.rst:397
+#: ../../source/cli/query.rst:401 ../../source/cli/query.rst:404
+#: ../../source/cli/query.rst:407 ../../source/cli/query.rst:411
+#: ../../source/cli/query.rst:415
 msgid "No"
 msgstr "不"
 
-#: ../../source/cli/query.rst:63
+#: ../../source/cli/query.rst:65
 msgid ""
 "Model ID for the serving engine. Auto-detected from the engine's reported"
 " usage if omitted."
 msgstr "服务引擎的模型 ID。如果省略，将根据引擎报告的使用情况自动检测。"
 
-#: ../../source/cli/query.rst:65
+#: ../../source/cli/query.rst:67
 msgid "``--max-tokens N``"
 msgstr "``--max-tokens N``"
 
-#: ../../source/cli/query.rst:67
+#: ../../source/cli/query.rst:69
 msgid "Maximum completion tokens (default: 128)."
 msgstr "最大完成令牌数（默认：128）。"
 
-#: ../../source/cli/query.rst:68
+#: ../../source/cli/query.rst:70
 msgid "``--timeout SECS``"
 msgstr "``--timeout SECS``"
 
-#: ../../source/cli/query.rst:70
+#: ../../source/cli/query.rst:72
 msgid "HTTP timeout in seconds (default: 30)."
 msgstr "HTTP 超时（单位：秒，默认值：30）。"
 
-#: ../../source/cli/query.rst:71
+#: ../../source/cli/query.rst:73
 msgid "``--documents NAME=PATH``"
 msgstr "``--documents NAME=PATH``"
 
-#: ../../source/cli/query.rst:73
+#: ../../source/cli/query.rst:75
 #, python-brace-format
 msgid ""
 "Load file text for ``{NAME}`` in ``--prompt``. Accepts one or more "
 "``NAME=PATH`` values."
 msgstr "在 ``--prompt`` 中加载 ``{NAME}`` 的文件文本。接受一个或多个 ``NAME=PATH`` 值。"
 
-#: ../../source/cli/query.rst:75
+#: ../../source/cli/query.rst:77
 msgid "``--completions``"
 msgstr "``--completions``"
 
-#: ../../source/cli/query.rst:77
+#: ../../source/cli/query.rst:79
 msgid "Use ``POST /v1/completions`` only."
 msgstr "仅使用 ``POST /v1/completions``\\ 。"
 
-#: ../../source/cli/query.rst:78
+#: ../../source/cli/query.rst:80
 msgid "``--chat-first``"
 msgstr "``--chat-first``"
 
-#: ../../source/cli/query.rst:80
+#: ../../source/cli/query.rst:82
 msgid "Try ``/v1/chat/completions`` first, then fall back to ``/v1/completions``."
 msgstr "首先尝试 ``/v1/chat/completions``\\ ，然后回退到 ``/v1/completions``\\ 。"
 
-#: ../../source/cli/query.rst:82
+#: ../../source/cli/query.rst:84 ../../source/cli/query.rst:406
 msgid "``--format``"
 msgstr "``--format``"
 
-#: ../../source/cli/query.rst:84
+#: ../../source/cli/query.rst:86
 msgid "Output format: ``terminal`` (default) or ``json``."
 msgstr "输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
 
-#: ../../source/cli/query.rst:85
+#: ../../source/cli/query.rst:87 ../../source/cli/query.rst:410
 msgid "``--output PATH``"
 msgstr "``--output PATH``"
 
-#: ../../source/cli/query.rst:87
+#: ../../source/cli/query.rst:89
 msgid "Save metrics to a file (format follows ``--format``)."
 msgstr "将指标保存到文件中（格式遵循 ``--format``\\ ）。"
 
-#: ../../source/cli/query.rst:88
+#: ../../source/cli/query.rst:90 ../../source/cli/query.rst:414
 msgid "``-q`` / ``--quiet``"
 msgstr "``-q`` / ``--quiet``"
 
-#: ../../source/cli/query.rst:90
+#: ../../source/cli/query.rst:92
 msgid "Suppress stdout output. Exit code only."
 msgstr "抑制标准输出。仅返回退出代码。"
+
+#: ../../source/cli/query.rst:96
+msgid "query coordinator"
+msgstr "查询协调器"
+
+#: ../../source/cli/query.rst:98
+msgid ""
+"The ``query coordinator`` subcommand reads one of the MP coordinator's "
+"read-only HTTP APIs and renders the reply as a metrics report — the same "
+"information ``curl`` returns, but aligned into columns and with byte "
+"counts and ratios already formatted. Pick the API with ``--api``; "
+"everything else is optional."
+msgstr "``query coordinator`` 子命令读取 MP 协调器的只读 HTTP API 之一，并将回复呈现为指标报告——与 ``curl`` 返回的信息相同，但已对齐为列，并且字节计数和比例已格式化。使用 ``--api`` 选择 API；其他所有内容都是可选的。"
+
+#: ../../source/cli/query.rst:108
+msgid ""
+"Only reads are exposed. The coordinator's mutating routes are either "
+"server-to-coordinator plumbing (``POST /events``, ``POST /instances``, "
+"heartbeats) or belong to a command that owns the action — quotas are "
+"written with :doc:`lmcache quota <quota>`. See :doc:`/mp/coordinator` for"
+" the HTTP surface itself and the meaning of each field."
+msgstr "仅公开读取操作。协调器的变更路由要么是服务器到协调器的管道（``POST /events``、``POST /instances``、心跳），要么属于拥有该操作的命令——配额通过 :doc:`lmcache quota <quota>` 进行写入。有关 HTTP 接口本身及每个字段的含义，请参见 :doc:`/mp/coordinator`。"
+
+#: ../../source/cli/query.rst:114
+msgid ""
+"The default ``--url`` is ``http://127.0.0.1:9300``, matching the "
+"coordinator's default port. A URL without a scheme is assumed to be "
+"``http://``, and a trailing slash is ignored, so ``coordinator:9300`` and"
+" ``http://coordinator:9300/`` are both accepted."
+msgstr "默认的 ``--url`` 是 ``http://127.0.0.1:9300``，与协调器的默认端口相匹配。没有方案的 URL 被假定为 ``http://``，并且尾部斜杠会被忽略，因此 ``coordinator:9300`` 和 ``http://coordinator:9300/`` 都是被接受的。"
+
+#: ../../source/cli/query.rst:120
+msgid "APIs"
+msgstr "API"
+
+#: ../../source/cli/query.rst:126
+msgid "``--api``"
+msgstr "``--api``"
+
+#: ../../source/cli/query.rst:127
+msgid "Reads"
+msgstr "读取"
+
+#: ../../source/cli/query.rst:128
+msgid "Extra flags"
+msgstr "额外标志"
+
+#: ../../source/cli/query.rst:129
+msgid "Reports"
+msgstr "报告"
+
+#: ../../source/cli/query.rst:130
+msgid "``usage``"
+msgstr "``usage``"
+
+#: ../../source/cli/query.rst:131
+#, python-brace-format
+msgid "``/instances/usage``, or ``/instances/{id}/usage`` with ``--instance``"
+msgstr "``/instances/usage``，或 ``/instances/{id}/usage`` 与 ``--instance``"
+
+#: ../../source/cli/query.rst:133
+msgid "``--instance`` (optional)"
+msgstr "``--instance`` （可选）"
+
+#: ../../source/cli/query.rst:134
+msgid "Per-compartment occupancy against declared capacity, busiest first."
+msgstr "每个隔间的占用情况与声明的容量相比，最繁忙的优先显示。"
+
+#: ../../source/cli/query.rst:135
+msgid "``instances``"
+msgstr "``instances``"
+
+#: ../../source/cli/query.rst:136
+msgid "``/instances``"
+msgstr "``/instances``"
+
+#: ../../source/cli/query.rst:137 ../../source/cli/query.rst:141
+#: ../../source/cli/query.rst:145 ../../source/cli/query.rst:158
+#: ../../source/cli/query.rst:166
+msgid "—"
+msgstr "—"
+
+#: ../../source/cli/query.rst:138
+msgid "Registered MP servers with their addresses and P2P URLs."
+msgstr "已注册的 MP 服务器及其地址和 P2P URL。"
+
+#: ../../source/cli/query.rst:139
+msgid "``health``"
+msgstr "``health``"
+
+#: ../../source/cli/query.rst:140
+msgid "``/healthz``"
+msgstr "``/healthz``"
+
+#: ../../source/cli/query.rst:142
+msgid "Coordinator liveness."
+msgstr "协调器存活状态。"
+
+#: ../../source/cli/query.rst:143
+msgid "``directory``"
+msgstr "``directory``"
+
+#: ../../source/cli/query.rst:144
+msgid "``/directory/stats``"
+msgstr "``/directory/stats``"
+
+#: ../../source/cli/query.rst:146
+msgid "Key-directory size and blend-index counts."
+msgstr "键目录大小和混合索引计数。"
+
+#: ../../source/cli/query.rst:147
+msgid "``keys``"
+msgstr "``keys``"
+
+#: ../../source/cli/query.rst:148
+msgid "``/directory/keys``"
+msgstr "``/directory/keys``"
+
+#: ../../source/cli/query.rst:149
+msgid "``--limit`` (default: 20)"
+msgstr "``--limit``（默认值：20）"
+
+#: ../../source/cli/query.rst:150
+msgid "A page of directory keys and where each one is placed."
+msgstr "一页目录键及其放置位置。"
+
+#: ../../source/cli/query.rst:151
+msgid "``quota``"
+msgstr "``quota``"
+
+#: ../../source/cli/query.rst:152
+#, python-brace-format
+msgid "``/quota``, or ``/quota/{salt}`` with ``--cache-salt``"
+msgstr "``/quota``，或 ``/quota/{salt}`` 与 ``--cache-salt``"
+
+#: ../../source/cli/query.rst:154
+msgid "``--cache-salt`` (optional)"
+msgstr "``--cache-salt``（可选）"
+
+#: ../../source/cli/query.rst:155
+msgid "Per-salt L2 usage against quota."
+msgstr "每个盐的 L2 使用量与配额的比较。"
+
+#: ../../source/cli/query.rst:156
+msgid "``quota-config``"
+msgstr "``quota-config``"
+
+#: ../../source/cli/query.rst:157
+msgid "``/quota/config``"
+msgstr "``/quota/config``"
+
+#: ../../source/cli/query.rst:159
+msgid "The default limit applied to salts with no explicit quota."
+msgstr "对没有明确配额的盐应用的默认限制。"
+
+#: ../../source/cli/query.rst:160
+msgid "``prefetch``"
+msgstr "``prefetch``"
+
+#: ../../source/cli/query.rst:161
+#, python-brace-format
+msgid "``/cache/prefetches/{instance}/{request_id}``"
+msgstr "``/cache/prefetches/{instance}/{request_id}``"
+
+#: ../../source/cli/query.rst:162
+msgid "``--instance`` **and** ``--request-id`` (required)"
+msgstr "``--instance`` **和** ``--request-id``（必需）"
+
+#: ../../source/cli/query.rst:163
+msgid "One warm-prefetch request's progress."
+msgstr "一个预热预取请求的进度。"
+
+#: ../../source/cli/query.rst:164
+msgid "``metrics``"
+msgstr "``metrics``"
+
+#: ../../source/cli/query.rst:165
+msgid "``/metrics``"
+msgstr "``/metrics``"
+
+#: ../../source/cli/query.rst:167
+msgid "Prometheus text, passed through verbatim."
+msgstr "Prometheus 文本，逐字传递。"
+
+#: ../../source/cli/query.rst:170
+msgid "Fleet memory"
+msgstr "舰队内存"
+
+#: ../../source/cli/query.rst:172
+msgid ""
+"``--api usage`` is the everyday view: one row per memory compartment "
+"(``tier/backend``) per server, sorted so the fullest compartment is "
+"first."
+msgstr "``--api usage`` 是日常视图：每个服务器每个内存区（``tier/backend``）一行，按最满的内存区优先排序。"
+
+#: ../../source/cli/query.rst:188
+msgid "Reading the table:"
+msgstr "读取表格："
+
+#: ../../source/cli/query.rst:190
+msgid ""
+"A capacity of ``--`` and a ratio of ``unknown`` mean the server never "
+"declared a capacity for that compartment — an unmeasured tier, not an "
+"empty one. A ``0`` would be misleading, so it is never printed there."
+msgstr "``--`` 的容量和 ``unknown`` 的比例意味着服务器从未为该隔间声明容量——这是一个未测量的层，而不是一个空的层。``0`` 会产生误导，因此不会在此处打印。"
+
+#: ../../source/cli/query.rst:193
+msgid ""
+"A compartment shared by the whole fleet (e.g. one S3 bucket behind every "
+"server) is attributed to ``(fleet-shared)`` rather than to any one "
+"server."
+msgstr "由整个车队共享的一个隔间（例如，每个服务器后面的一个 S3 存储桶）被归因于 ``(fleet-shared)`` 而不是任何一台服务器。"
+
+#: ../../source/cli/query.rst:195
+msgid "Numeric columns are right-aligned so sizes line up on the decimal point."
+msgstr "数字列右对齐，以便大小在小数点上对齐。"
+
+#: ../../source/cli/query.rst:197
+msgid ""
+"Add ``--instance`` to narrow the report to one server. The instance id "
+"must be known to the coordinator — registered, holding bytes, or having "
+"declared capacity — otherwise the coordinator answers ``404`` and the "
+"command exits ``1``:"
+msgstr "添加 ``--instance`` 以将报告缩小到一台服务器。实例 ID 必须为协调器所知——已注册、占用字节或声明了容量——否则协调器将返回 ``404``，并且命令退出 ``1``："
+
+#: ../../source/cli/query.rst:214
+msgid "Fleet membership"
+msgstr "舰队成员资格"
+
+#: ../../source/cli/query.rst:227
+msgid ""
+"``--`` marks a value the server did not advertise (no MQ port, no P2P "
+"URL), kept distinct from ``0`` and from an empty string."
+msgstr "``--`` 标记了服务器未宣传的值（没有 MQ 端口，没有 P2P URL），与 ``0`` 和空字符串区分开。"
+
+#: ../../source/cli/query.rst:231
+msgid "Quota and usage"
+msgstr "配额和使用情况"
+
+#: ../../source/cli/query.rst:233
+msgid "With no ``--cache-salt``, the fleet-wide listing:"
+msgstr "没有 ``--cache-salt`` 时，整个车队的列表："
+
+#: ../../source/cli/query.rst:247
+msgid ""
+"``(default)`` is the un-salted (empty-string) tenant. ``quota set`` is "
+"``no`` when no explicit quota exists for that salt — such a salt is "
+"governed by ``--api quota-config`` instead, so a ``0.00`` quota column "
+"there does not mean \"zero bytes allowed\"."
+msgstr "``(default)`` 是未加盐（空字符串）租户。当没有该盐的显式配额时，``quota set`` 为 ``no`` — 这样的盐由 ``--api quota-config`` 管理，因此那里 ``0.00`` 的配额列并不意味着“允许零字节”。"
+
+#: ../../source/cli/query.rst:252
+msgid "With ``--cache-salt``, one tenant:"
+msgstr "使用 ``--cache-salt``，一个租户："
+
+#: ../../source/cli/query.rst:267
+msgid ""
+"To address the un-salted tenant, pass the sentinel the HTTP API uses: "
+"``--cache-salt _default``. An empty ``--cache-salt ''`` builds the path "
+"``/quota/``, which does not address the empty salt."
+msgstr "要处理未加盐的租户，请传递哨兵使用的 HTTP API：``--cache-salt _default``。一个空的 ``--cache-salt ''`` 会构建路径 ``/quota/``，这并不处理空盐。"
+
+#: ../../source/cli/query.rst:271
+msgid "The default limit for salts with no explicit quota:"
+msgstr "没有显式配额的盐的默认限制："
+
+#: ../../source/cli/query.rst:281
+msgid ""
+"``none (exempt)`` means the default is unset, so unquota'd salts are "
+"exempt from eviction. That is distinct from a default of ``0.0``, which "
+"makes every byte under an unquota'd salt evictable. See "
+":doc:`/mp/coordinator` for why a freshly restarted coordinator starts out"
+" exempt."
+msgstr "``none (exempt)`` 表示默认值未设置，因此未配额的盐是免于逐出的。这与默认值 ``0.0`` 不同，后者使得未配额盐下的每个字节都可以被逐出。有关新启动的协调器为何一开始是免于逐出的，请参见 :doc:`/mp/coordinator`。"
+
+#: ../../source/cli/query.rst:287
+msgid "Key directory"
+msgstr "密钥目录"
+
+#: ../../source/cli/query.rst:289
+msgid "Directory size, and how much of it is fragment-matchable by CacheBlend:"
+msgstr "目录大小，以及 CacheBlend 可以匹配的碎片数量："
+
+#: ../../source/cli/query.rst:306
+msgid ""
+"``Claims`` counts ``(chunk, namespace)`` pairs and ``Namespaces`` the "
+"distinct ``(model, salt, world size)`` triples holding indexed content. A"
+" match is only offered to a requester whose namespace claims the chunk, "
+"so ``Claims`` above ``Chunks`` means tenants are sharing content — the "
+"signal ``Chunks`` alone cannot give."
+msgstr "``Claims`` 计数 ``(块, 命名空间)`` 对和 ``Namespaces`` 计数持有索引内容的不同 ``(模型, 盐, 世界大小)`` 三元组。只有当请求者的命名空间声称该块时，才会提供匹配，因此 ``Claims`` 在 ``Chunks`` 之上意味着租户正在共享内容 — 单独的信号 ``Chunks`` 无法提供。"
+
+#: ../../source/cli/query.rst:312
+msgid ""
+"A page of keys and their placements. ``--limit`` sets the page size "
+"(default 20; the endpoint accepts 1–10000, and a value outside that range"
+" is rejected by the coordinator and exits ``1``):"
+msgstr "一页键及其位置。``--limit`` 设置页面大小（默认 20；该端点接受 1–10000，超出该范围的值将被协调器拒绝并退出 ``1``）："
+
+#: ../../source/cli/query.rst:328
+msgid ""
+"``Matching keys`` is the total in the directory, not the number of rows "
+"shown. The chunk hash is truncated to 12 hex characters — enough to "
+"correlate with a log line, without pushing the placements column off the "
+"terminal. A placement with no owning instance (a fleet-shared backend) "
+"reads as ``(shared)``. The directory is a live structure, so successive "
+"pages may skip or repeat keys."
+msgstr "``Matching keys`` 是目录中的总数，而不是显示的行数。块哈希被截断为 12 个十六进制字符——足以与日志行关联，而不会使放置列超出终端。没有拥有实例的放置（共享后端）显示为 ``(shared)``。目录是一个动态结构，因此连续的页面可能会跳过或重复键。"
+
+#: ../../source/cli/query.rst:335
+msgid "Prefetch progress"
+msgstr "预取进度"
+
+#: ../../source/cli/query.rst:337
+msgid ""
+"``--api prefetch`` polls a warm prefetch submitted earlier via ``POST "
+"/cache/prefetches``. Both ``--instance`` and ``--request-id`` are "
+"required; omitting either exits ``2`` without issuing a request."
+msgstr "``--api prefetch`` 会轮询通过 ``POST /cache/prefetches`` 提交的热预取。 ``--instance`` 和 ``--request-id`` 都是必需的；省略任一项将导致退出代码 ``2``，而不发出请求。"
+
+#: ../../source/cli/query.rst:351
+msgid ""
+"While the load is still running, only ``Status: pending`` is reported. "
+"The labels come from the reply itself, so a server that adds fields will "
+"show them without a CLI change."
+msgstr "在负载仍在运行时，仅报告 ``Status: pending``。标签来自回复本身，因此添加字段的服务器将显示它们，而无需更改 CLI。"
+
+#: ../../source/cli/query.rst:357
+msgid ""
+"The first poll that observes completion drops the job on the MP server. "
+"Polling the same ``--request-id`` again returns ``404`` and exits ``1``."
+msgstr "第一个观察到完成的轮询会在 MP 服务器上删除该任务。再次轮询相同的 ``--request-id`` 会返回 ``404`` 并退出 ``1``。"
+
+#: ../../source/cli/query.rst:361
+msgid "Prometheus metrics"
+msgstr "Prometheus 指标"
+
+#: ../../source/cli/query.rst:363
+msgid ""
+"``--api metrics`` is the one API that is not a metrics report: the "
+"coordinator's ``/metrics`` body is written to stdout unchanged, so it can"
+" be piped to other tools. ``--format``, ``--output``, and ``--quiet`` do "
+"not apply to it."
+msgstr "``--api metrics`` 是唯一一个不是指标报告的 API：协调器的 ``/metrics`` 内容未做更改地写入标准输出，因此可以通过管道传递给其他工具。 ``--format``、``--output`` 和 ``--quiet`` 不适用于它。"
+
+#: ../../source/cli/query.rst:383
+msgid "``--api NAME``"
+msgstr "``--api NAME``"
+
+#: ../../source/cli/query.rst:385
+msgid ""
+"Which API to read. One of ``usage``, ``instances``, ``health``, "
+"``directory``, ``keys``, ``quota``, ``quota-config``, ``prefetch``, "
+"``metrics``."
+msgstr "要读取的 API。可以是 ``usage``、``instances``、``health``、``directory``、``keys``、``quota``、``quota-config``、``prefetch``、``metrics`` 之一。"
+
+#: ../../source/cli/query.rst:390
+msgid ""
+"Coordinator base URL (default: ``http://127.0.0.1:9300``). The scheme may"
+" be omitted."
+msgstr "协调器基本 URL（默认：``http://127.0.0.1:9300``）。可以省略方案。"
+
+#: ../../source/cli/query.rst:392
+msgid "``--instance ID``"
+msgstr "``--instance ID``"
+
+#: ../../source/cli/query.rst:394
+msgid ""
+"Instance id. Narrows ``--api usage`` to one server; required by ``--api "
+"prefetch``."
+msgstr "实例 ID。将 ``--api usage`` 限制为一个服务器；``--api prefetch`` 所必需。"
+
+#: ../../source/cli/query.rst:396
+msgid "``--cache-salt SALT``"
+msgstr "``--cache-salt SALT``"
+
+#: ../../source/cli/query.rst:398
+msgid ""
+"Narrows ``--api quota`` to one tenant. Use ``_default`` for un-salted "
+"traffic."
+msgstr "将 ``--api quota`` 限制为一个租户。使用 ``_default`` 处理未加盐的流量。"
+
+#: ../../source/cli/query.rst:400
+msgid "``--request-id ID``"
+msgstr "``--request-id ID``"
+
+#: ../../source/cli/query.rst:402
+msgid "Prefetch request id. Required by ``--api prefetch``."
+msgstr "预取请求 ID。``--api prefetch`` 所需。"
+
+#: ../../source/cli/query.rst:403
+msgid "``--limit N``"
+msgstr "``--limit N``"
+
+#: ../../source/cli/query.rst:405
+msgid "Rows to request for ``--api keys`` (default: 20)."
+msgstr "请求的行数用于 ``--api keys`` （默认：20）。"
+
+#: ../../source/cli/query.rst:408
+msgid ""
+"Output format: ``terminal`` (default) or ``json``. Ignored by ``--api "
+"metrics``."
+msgstr "输出格式：``terminal``（默认）或 ``json``。被 ``--api metrics`` 忽略。"
+
+#: ../../source/cli/query.rst:412
+msgid ""
+"Save the report to a file (format follows ``--format``). Ignored by "
+"``--api metrics``."
+msgstr "将报告保存到文件中（格式遵循 ``--format``）。忽略 ``--api metrics``。"
+
+#: ../../source/cli/query.rst:416
+msgid "Suppress stdout output. Exit code only. Ignored by ``--api metrics``."
+msgstr "抑制标准输出。仅返回退出代码。``--api metrics`` 被忽略。"
+
+#: ../../source/cli/query.rst:419
+msgid "JSON output"
+msgstr "JSON 输出"
+
+#: ../../source/cli/query.rst:421
+msgid ""
+"``--format json`` renders the same report as a JSON object. Table APIs "
+"become a list of row objects under the table's key:"
+msgstr "``--format json`` 以 JSON 对象的形式呈现相同的报告。表格 API 变成在表格键下的行对象列表："
+
+#: ../../source/cli/query.rst:465
+msgid ""
+"Table rows carry **display strings**, not raw numbers: ``\"48.00 GB\"``, "
+"``\"75.0%\"``, ``\"12.50\"``, ``\"yes\"``, and the placeholders "
+"``\"--\"`` / ``\"unknown\"``. They are meant for reading and for "
+"grepping, not for arithmetic. For machine-readable values, ``curl`` the "
+"endpoint directly:"
+msgstr "表格行携带 **显示字符串**，而不是原始数字： ``\\\"48.00 GB\\\"``、``\\\"75.0%\\\"``、``\\\"12.50\\\"``、``\\\"yes\\\"``，以及占位符 ``\\\"--\\\"`` / ``\\\"unknown\\\"``。它们用于阅读和 grep，而不是用于算术运算。要获取机器可读的值，请直接使用 ``curl`` 访问端点："
+
+#: ../../source/cli/query.rst:476
+msgid "Exit codes"
+msgstr "退出代码"
+
+#: ../../source/cli/query.rst:482
+msgid "Code"
+msgstr "代码"
+
+#: ../../source/cli/query.rst:483
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/cli/query.rst:484
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/cli/query.rst:485
+msgid "Success."
+msgstr "成功。"
+
+#: ../../source/cli/query.rst:486
+msgid "``1``"
+msgstr "``1``"
+
+#: ../../source/cli/query.rst:487
+msgid ""
+"The coordinator was unreachable, returned a non-2xx status (e.g. an "
+"unknown instance id or prefetch request), or replied with something that "
+"was not JSON."
+msgstr "协调器无法访问，返回了非 2xx 状态（例如，未知实例 ID 或预取请求），或回复的内容不是 JSON。"
+
+#: ../../source/cli/query.rst:490
+msgid "``2``"
+msgstr "``2``"
+
+#: ../../source/cli/query.rst:491
+msgid ""
+"Usage error: a required flag for the chosen ``--api`` is missing (e.g. "
+"``--api prefetch`` without ``--request-id``). No request is sent."
+msgstr "使用错误：所选的 ``--api`` 缺少必需的标志（例如，``--api prefetch`` 未提供 ``--request-id``）。未发送请求。"
+
+#: ../../source/cli/query.rst:494
+msgid "This makes the command usable as a readiness check:"
+msgstr "这使得该命令可以用作就绪检查："
+
+#: ../../source/cli/query.rst:501
+msgid "Common patterns"
+msgstr "常见模式"
+
+#: ../../source/cli/query.rst:503
+msgid "**Find the fullest server before pinning work to it:**"
+msgstr "**在将工作固定到服务器之前，找到最满的服务器：**"
+
+#: ../../source/cli/query.rst:509
+msgid "**Watch a fleet fill up:**"
+msgstr "**观察一个集群的填充情况：**"
+
+#: ../../source/cli/query.rst:515
+msgid "**Check one tenant against its budget:**"
+msgstr "**检查一个租户的预算：**"
+
+#: ../../source/cli/query.rst:522
+msgid "**Point at a coordinator in Kubernetes:**"
+msgstr "**指向 Kubernetes 中的协调器：**"
+
+#: ../../source/cli/query.rst:530
+msgid "Limitations"
+msgstr "限制"
+
+#: ../../source/cli/query.rst:532
+msgid ""
+"Reports are a formatted subset of each reply, not the whole thing. "
+"``--api usage`` does not surface the ``registered`` flag, so a server "
+"that deregistered while its L2 bytes survive appears in the table like "
+"any other; cross-check with ``--api instances``. ``--api directory`` "
+"omits the per-instance L1 key counts, and ``--api keys`` omits each key's"
+" token count."
+msgstr "报告是每个回复的格式化子集，而不是全部内容。``--api usage`` 不会显示 ``registered`` 标志，因此在其 L2 字节存活的情况下，注销的服务器在表中看起来与其他服务器一样；请与 ``--api instances`` 进行交叉检查。``--api directory`` 省略了每个实例的 L1 键计数，而 ``--api keys`` 省略了每个键的令牌计数。"
+
+#: ../../source/cli/query.rst:537
+msgid ""
+"``--api keys`` requests a page size only. The endpoint's ``tier``, "
+"``instance_id``, ``backend``, and ``offset`` filters are not exposed — "
+"``curl`` ``/directory/keys`` for those."
+msgstr "``--api keys`` 仅请求页面大小。该端点的 ``tier``、``instance_id``、``backend`` 和 ``offset`` 过滤器未公开 — 使用 ``curl`` ``/directory/keys`` 获取这些信息。"
+
+#: ../../source/cli/query.rst:540
+msgid ""
+"``--api quota`` reports the L2 tier, which is the tier quotas are "
+"enforced on. The endpoint's ``tier`` parameter is not exposed."
+msgstr "``--api quota`` 报告 L2 层级，这是实施配额的层级。该端点的 ``tier`` 参数未公开。"
+
+#~ msgid "``engine`` — send one request to a serving engine's HTTP API."
+#~ msgstr "``engine`` — 向服务引擎的 HTTP API 发送一个请求。"
 
