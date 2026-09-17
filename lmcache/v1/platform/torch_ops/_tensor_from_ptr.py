@@ -14,6 +14,7 @@ __all__ = [
     "_tensor_from_cpu_ptr",
     "_tensor_from_cuda_ptr",
     "_tensor_from_musa_ptr",
+    "_tensor_from_npu_ptr",
     "_contiguous_element_strides",
     "_copy_bytes_with_tensor",
 ]
@@ -57,7 +58,7 @@ def _tensor_from_ptr(
     """
     Create a tensor view over a raw pointer (zero-copy where possible).
 
-    Supports CPU, CUDA, and MUSA device pointers.
+    Supports CPU, CUDA, MUSA, and NPU device pointers.
 
     Args:
         ptr:    Raw memory pointer as int (must be non-zero).
@@ -67,7 +68,9 @@ def _tensor_from_ptr(
                 - None / "cpu" / torch.device("cpu")  → CPU pointer
                 - "cuda" / "cuda:N" / torch.device("cuda", N) → CUDA pointer
                 - "musa" / "musa:N" / torch.device("musa", N) → MUSA pointer
-                  If None and ptr looks like a CUDA/MUSA ptr, pass device explicitly.
+                - "npu" / "npu:N" / torch.device("npu", N) → NPU pointer
+                  If None and ptr looks like a CUDA/MUSA/NPU ptr, pass device
+                  explicitly.
 
     Returns:
         A tensor that shares memory with the original pointer.
@@ -76,10 +79,12 @@ def _tensor_from_ptr(
                   (PyTorch >= 2.0) or __cuda_array_interface__, with a
                   cudaMemcpy D2D fallback.
         For MUSA: a non-owning view created from external device storage.
+        For NPU: a non-owning view created from external device storage.
 
     Raises:
         ValueError: if ptr is 0.
-        RuntimeError: If MUSA cannot construct a non-owning view for ``ptr``.
+        RuntimeError: If MUSA/NPU cannot construct a non-owning view for
+            ``ptr``.
 
     Warning:
         The caller is responsible for keeping the underlying memory alive
@@ -124,8 +129,15 @@ def _tensor_from_ptr(
     if device.type == "musa":
         return _tensor_from_musa_ptr(ptr, shape, dtype, device, total_bytes)
 
+    # ------------------------------------------------------------------ #
+    # NPU path                                                           #
+    # ------------------------------------------------------------------ #
+    if device.type == "npu":
+        return _tensor_from_npu_ptr(ptr, shape, dtype, device, total_bytes)
+
     raise ValueError(
-        f"Unsupported device type: {device.type!r}. Expected 'cpu', 'cuda', or 'musa'."
+        f"Unsupported device type: {device.type!r}. Expected 'cpu', 'cuda', "
+        "'musa', or 'npu'."
     )
 
 
@@ -263,6 +275,37 @@ def _tensor_from_musa_ptr(
     except Exception as exc:
         raise RuntimeError(
             "TorchMUSA failed to construct a non-owning tensor from a device pointer"
+        ) from exc
+
+
+# ====================================================================== #
+#  NPU implementation                                                    #
+# ====================================================================== #
+def _tensor_from_npu_ptr(
+    ptr: int,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+    total_bytes: int,
+) -> torch.Tensor:
+    """Create a non-owning NPU tensor from a raw device pointer.
+
+    The returned tensor aliases ``ptr``. A copy fallback is intentionally not
+    provided because writes through a copied tensor would not update the
+    original paged buffer.
+    """
+    try:
+        storage = torch._C._construct_storage_from_data_pointer(
+            ptr,
+            device,
+            total_bytes,
+        )
+        tensor = torch.empty(0, dtype=dtype, device=storage.device)
+        tensor.set_(storage, 0, shape, _contiguous_element_strides(shape))
+        return tensor
+    except Exception as exc:
+        raise RuntimeError(
+            "TorchNPU failed to construct a non-owning tensor from a device pointer"
         ) from exc
 
 
