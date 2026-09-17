@@ -19,6 +19,9 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
+from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
+    LazyOffloadActions,
+)
 from lmcache.integration.vllm.lmcache_connector_v1 import (  # noqa: E402
     LMCacheConnectorV1Dynamic,
 )
@@ -122,6 +125,7 @@ def _lookup_connector(
     connector._hit_alignment_tokens = 16
     connector._eager_prefetch = eager_prefetch
     connector._connector_stats = LMCacheMPConnectorStats()
+    connector.lazy_offload = False
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     return connector
@@ -354,11 +358,7 @@ def test_uncacheable_rswa_request_does_not_submit_lookup(preempted: bool) -> Non
         request.status = RequestStatus.PREEMPTED
     adapter = MagicMock()
 
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector._prompt_only_cache = True
-    connector.request_trackers = {}
-    connector.scheduler_adapter = adapter
-
+    connector = _lookup_connector(adapter)
     assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
     adapter.maybe_submit_lookup_request.assert_not_called()
     adapter.check_lookup_result.assert_not_called()
@@ -636,31 +636,35 @@ def test_rswa_allocation_telemetry_keeps_decode_tail_tokens() -> None:
     assert records[0].new_token_ids == list(range(384, 512))
 
 
-@pytest.mark.parametrize("has_pending_store", [False, True])
+@pytest.mark.parametrize("session_ready", [False, True])
 def test_lazy_offload_finish_handles_requests_without_store_metadata(
-    has_pending_store: bool,
+    session_ready: bool,
 ) -> None:
-    """A bypassed or sub-chunk request has no lazy item to mark finished."""
+    """The manager alone decides when a cached request's session can end."""
     request = _FakeRequest(prompt_tokens=128, total_tokens=128)
     tracker = LMCacheMPRequestTracker(request, prompt_only=True)
-    pending_store = MagicMock()
-    pending_store.has_pending_request.return_value = has_pending_store
+    manager = MagicMock()
+    manager.on_request_finished.return_value = LazyOffloadActions(
+        sessions_to_end=[request.request_id] if session_ready else []
+    )
 
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.request_trackers = {request.request_id: tracker}
     connector.scheduler_adapter = MagicMock()
     connector.lazy_offload = True
-    connector._pending_store = pending_store
+    connector._lazy_offload_manager = manager
 
     delay_free, return_params = connector.request_finished(request, [])
 
     assert delay_free is False
     assert return_params is None
-    pending_store.has_pending_request.assert_called_once_with(request.request_id)
-    if has_pending_store:
-        pending_store.mark_req_finished.assert_called_once_with(request.request_id)
+    manager.on_request_finished.assert_called_once_with(request.request_id)
+    if session_ready:
+        connector.scheduler_adapter.end_session.assert_called_once_with(
+            request.request_id
+        )
     else:
-        pending_store.mark_req_finished.assert_not_called()
+        connector.scheduler_adapter.end_session.assert_not_called()
     assert request.request_id not in connector.request_trackers
 
 
@@ -668,14 +672,13 @@ def test_lazy_offload_finish_skips_session_for_bypassed_request() -> None:
     """A cap-zero request has neither a pending item nor a server session."""
     request = _FakeRequest(prompt_tokens=128, total_tokens=128, resumable=True)
     tracker = LMCacheMPRequestTracker(request, prompt_only=True)
-    pending_store = MagicMock()
-    pending_store.has_pending_request.return_value = False
+    manager = MagicMock()
 
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.request_trackers = {request.request_id: tracker}
     connector.scheduler_adapter = MagicMock()
     connector.lazy_offload = True
-    connector._pending_store = pending_store
+    connector._lazy_offload_manager = manager
 
     delay_free, return_params = connector.request_finished(request, [])
 
@@ -685,7 +688,7 @@ def test_lazy_offload_finish_skips_session_for_bypassed_request() -> None:
     connector.scheduler_adapter.cleanup_lookup_result.assert_called_once_with(
         request.request_id
     )
-    pending_store.mark_req_finished.assert_not_called()
+    manager.on_request_finished.assert_not_called()
 
 
 def test_uncacheable_request_uses_non_lazy_finished_handshake() -> None:
@@ -719,14 +722,16 @@ def test_request_finished_tolerates_early_abort_without_tracker(
 ) -> None:
     """An abort before lookup/tracker creation still completes cleanly."""
     request = _FakeRequest(prompt_tokens=128, total_tokens=128)
-    pending_store = MagicMock()
-    pending_store.has_pending_request.return_value = False
+    manager = MagicMock()
+    manager.on_request_finished.return_value = LazyOffloadActions(
+        sessions_to_end=[request.request_id]
+    )
 
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.request_trackers = {}
     connector.scheduler_adapter = MagicMock()
     connector.lazy_offload = lazy_offload
-    connector._pending_store = pending_store
+    connector._lazy_offload_manager = manager
 
     delay_free, return_params = connector.request_finished(request, [])
 
@@ -737,10 +742,9 @@ def test_request_finished_tolerates_early_abort_without_tracker(
         request.request_id
     )
     if lazy_offload:
-        pending_store.has_pending_request.assert_called_once_with(request.request_id)
+        manager.on_request_finished.assert_called_once_with(request.request_id)
     else:
-        pending_store.has_pending_request.assert_not_called()
-    pending_store.mark_req_finished.assert_not_called()
+        manager.on_request_finished.assert_not_called()
 
 
 def test_uncacheable_request_skips_allocation_telemetry() -> None:
@@ -782,6 +786,7 @@ def test_rswa_preemption_replaces_stale_tracker_and_stays_prompt_only() -> None:
     connector._prompt_only_cache = True
     connector.request_trackers = {request.request_id: stale_tracker}
     connector.scheduler_adapter = adapter
+    connector.lazy_offload = False
 
     assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
     fresh_tracker = connector.request_trackers[request.request_id]

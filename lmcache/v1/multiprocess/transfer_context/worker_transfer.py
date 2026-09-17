@@ -5,8 +5,9 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import Enum
-from typing import Any, Protocol, cast
+from typing import Any, Callable, Protocol, cast
 import os
+import threading
 
 # Third Party
 import torch
@@ -83,7 +84,10 @@ def _supports_async_primitives() -> bool:
     return True
 
 
-def _build_engine_driven_context() -> "TransferContext":
+def _build_engine_driven_context(
+    instance_id: int,
+    req_client: RequestClient,
+) -> "TransferContext":
     """Build the engine-driven context, async when device-capable else sync.
 
     Routes the ``ENGINE_DRIVEN`` and AUTO branches through a single capability
@@ -102,10 +106,10 @@ def _build_engine_driven_context() -> "TransferContext":
         )
 
         logger.info("Using AsyncEngineDrivenTransferContext for store path")
-        return AsyncEngineDrivenTransferContext()
+        return AsyncEngineDrivenTransferContext(instance_id, req_client)
 
     logger.info("Using EngineDrivenTransferContext (sync) for store path")
-    return EngineDrivenTransferContext()
+    return EngineDrivenTransferContext(instance_id, req_client)
 
 
 class MPTransferMode(str, Enum):
@@ -143,7 +147,11 @@ def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
         ) from exc
 
 
-def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
+def _build_lmcache_driven_context(
+    device_type: str,
+    instance_id: int,
+    req_client: RequestClient,
+) -> "TransferContext":
     """Build a :class:`LMCacheDrivenTransferContext` after capability check."""
     try:
         resolve_kv_wrapper_factory(device_type)
@@ -160,7 +168,7 @@ def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
             "%r: required platform capability checks failed. "
             "Use mode 'engine_driven' or 'auto' instead." % device_type
         )
-    return LMCacheDrivenTransferContext()
+    return LMCacheDrivenTransferContext(instance_id, req_client)
 
 
 class IPCEvent(Protocol):
@@ -205,15 +213,62 @@ class TransferContext(ABC):
     gather/scatter synchronously and return already-resolved futures.
     """
 
+    def __init__(self, instance_id: int, req_client: RequestClient) -> None:
+        """Bind this context to a single worker and request client.
+
+        Args:
+            instance_id: Worker process instance identifier used by all
+                context-owned transport requests.
+            req_client: Transport-neutral client used by this context. The
+                adapter retains ownership and closes it after the context.
+        """
+        self._instance_id = instance_id
+        self._req_client = req_client
+        self._registration_request_sent = False
+        self._closed = False
+        self._lifecycle_lock = threading.Lock()
+
+    def _submit_registration(
+        self, submit: Callable[[], MessagingFuture[Any]]
+    ) -> MessagingFuture[Any]:
+        """Submit REGISTER before allowing a concurrent UNREGISTER.
+
+        If shutdown won the race before the request was sent, registration is
+        rejected. Once submission begins, unregistration remains available even
+        if waiting for the registration response times out.
+        """
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("Transfer context is closed.")
+            self._registration_request_sent = True
+            return submit()
+
+    def _submit_unregistration(
+        self, submit: Callable[[], MessagingFuture[Any]]
+    ) -> MessagingFuture[Any] | None:
+        """Submit UNREGISTER only after this context sent REGISTER."""
+        with self._lifecycle_lock:
+            if not self._registration_request_sent:
+                return None
+            return submit()
+
+    def _is_closed(self) -> bool:
+        """Return whether adapter shutdown closed this context."""
+        with self._lifecycle_lock:
+            return self._closed
+
+    def _mark_closed(self) -> None:
+        """Prevent future registration requests from a racing caller."""
+        with self._lifecycle_lock:
+            self._closed = True
+
     @abstractmethod
     def register(
         self,
-        instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
@@ -222,12 +277,10 @@ class TransferContext(ABC):
         """Register KV caches with the server and wait for ACK.
 
         Args:
-            instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
             model_name: Model name used by cache keys.
             world_size: KV world size.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
-            req_client: Transport-neutral client used for server requests.
             mq_timeout: Timeout in seconds for synchronous request wait.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -243,28 +296,39 @@ class TransferContext(ABC):
             RuntimeError: If a concrete context cannot initialize.
         """
 
+    @abstractmethod
+    def unregister(self) -> MessagingFuture[Any] | None:
+        """Start unregistering this context's server-side KV-cache state.
+
+        Concrete contexts select the unregister RPC that matches the protocol
+        used by :meth:`register`. The returned future lets the caller apply
+        its own lifecycle timeout policy before :meth:`close` releases local
+        state.
+
+        Returns:
+            A future that resolves when the server acknowledges unregistration,
+            or ``None`` when no registration request was sent.
+
+        """
+
     def register_q(
         self,
-        instance_id: int,
         q_caches: dict[str, torch.Tensor],
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
         """Register the paged Q ring with the server under the same worker
-        instance_id but different model_name (model_name##query).
+        instance ID but different model_name (model_name##query).
 
         Args:
-            instance_id: Worker process instance identifier.
             q_caches: Worker Q cache tensors keyed by layer name.
             model_name: Model name used by cache keys (model_name##query).
             world_size: KV world size.
             blocks_in_chunk: Number of Q ring blocks per LMCache chunk.
-            req_client: Transport-neutral client used for server requests.
             mq_timeout: Timeout in seconds for synchronous request wait.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -298,7 +362,6 @@ class TransferContext(ABC):
         self,
         request_id: str,
         key: Any,
-        instance_id: int,
         q_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent,
@@ -309,7 +372,6 @@ class TransferContext(ABC):
         Args:
             request_id: External request identifier.
             key: LMCache key for the Q store range (query-specific model_name).
-            instance_id: Worker process instance identifier (shared with KV).
             q_caches: Q ring tensors keyed by layer name.
             block_ids: Q ring block IDs to store, indexed by LMCache KV group id.
             event: Synchronization event object.
@@ -332,7 +394,6 @@ class TransferContext(ABC):
         self,
         request_id: str,
         key: Any,
-        instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent | None,
@@ -343,7 +404,6 @@ class TransferContext(ABC):
         Args:
             request_id: External request identifier.
             key: LMCache key object for the store range.
-            instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
             block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
             event: Synchronization event object, or ``None`` when the concrete
@@ -362,7 +422,6 @@ class TransferContext(ABC):
         self,
         request_id: str,
         key: Any,
-        instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent | None,
@@ -374,7 +433,6 @@ class TransferContext(ABC):
         Args:
             request_id: External request identifier.
             key: LMCache key object for the retrieve range.
-            instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
             block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
                 group id.
@@ -414,19 +472,23 @@ class LMCacheDrivenTransferContext(TransferContext):
     performs direct device-side data transfer.
     """
 
-    def __init__(self) -> None:
-        self._req_client: RequestClient | None = None
+    def __init__(self, instance_id: int, req_client: RequestClient) -> None:
+        """Initialize a handle-path context bound to one worker.
+
+        Args:
+            instance_id: Worker process instance identifier.
+            req_client: Transport client for this worker.
+        """
+        super().__init__(instance_id, req_client)
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
 
     def register(
         self,
-        instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
-        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
@@ -435,12 +497,10 @@ class LMCacheDrivenTransferContext(TransferContext):
         """Register the worker KV cache with the LMCache server.
 
         Args:
-            instance_id: Worker process instance identifier.
             kv_caches: Worker KV-cache tensors keyed by layer name.
             model_name: Model identifier used by the server.
             world_size: Tensor-parallel world size.
             _blocks_in_chunk: Engine blocks per LMCache chunk.
-            req_client: Transport-neutral client used for server requests.
             mq_timeout: Timeout for the registration response.
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
@@ -454,17 +514,20 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
 
-        self._req_client = req_client
-        future = req_client.register_kv_cache(
-            instance_id,
-            wrap_kv_caches(kv_caches),
-            model_name,
-            world_size,
-            engine_type,
-            layout_hints,
-            list(engine_group_infos),
+        future = self._submit_registration(
+            lambda: self._req_client.register_kv_cache(
+                self._instance_id,
+                wrap_kv_caches(kv_caches),
+                model_name,
+                world_size,
+                engine_type,
+                layout_hints,
+                list(engine_group_infos),
+            )
         )
         future.result(timeout=mq_timeout)
+        if self._is_closed():
+            return
         self._device = device
         self._event_backend = event_backend
 
@@ -486,21 +549,29 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._event_backend.record_event(event, torch_dev.current_stream())
         return cast(IPCEvent, event)
 
+    def unregister(self) -> MessagingFuture[Any] | None:
+        """Start handle-path unregistration for this worker instance.
+
+        Returns:
+            A future for the server's unregister acknowledgement.
+
+        """
+        return self._submit_unregistration(
+            lambda: self._req_client.unregister_kv_cache(self._instance_id)
+        )
+
     def register_q(
         self,
-        instance_id: int,
         q_caches: dict[str, torch.Tensor],
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
-        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
-        self._req_client = req_client
-        future = req_client.register_q_cache(
-            instance_id,
+        future = self._req_client.register_q_cache(
+            self._instance_id,
             wrap_kv_caches(q_caches),
             model_name,
             world_size,
@@ -514,7 +585,6 @@ class LMCacheDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent | None,
@@ -525,7 +595,6 @@ class LMCacheDrivenTransferContext(TransferContext):
         Args:
             _request_id: External request identifier (unused by this transport).
             key: LMCache key for the store range.
-            instance_id: Worker process instance identifier.
             _kv_caches: Worker KV-cache tensors accepted for interface
                 consistency; the registered device is reused.
             block_ids: Engine block IDs indexed by LMCache KV group.
@@ -539,11 +608,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             RuntimeError: If the context is not registered or event IPC is
                 unsupported.
         """
-        if (
-            self._req_client is None
-            or self._device is None
-            or self._event_backend is None
-        ):
+        if self._device is None or self._event_backend is None:
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_store()."
@@ -552,7 +617,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._req_client.store(
-            key, instance_id, block_ids, event_ipc_handle
+            key, self._instance_id, block_ids, event_ipc_handle
         ).to_device_future(
             device=self._device,
             event_backend=self._event_backend,
@@ -562,24 +627,19 @@ class LMCacheDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        instance_id: int,
         _q_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
-        if (
-            self._req_client is None
-            or self._device is None
-            or self._event_backend is None
-        ):
+        if self._device is None or self._event_backend is None:
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_q_store()."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._req_client.store_q(
-            key, instance_id, block_ids, event_ipc_handle
+            key, self._instance_id, block_ids, event_ipc_handle
         ).to_device_future(
             device=self._device,
             event_backend=self._event_backend,
@@ -589,7 +649,6 @@ class LMCacheDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent | None,
@@ -601,7 +660,6 @@ class LMCacheDrivenTransferContext(TransferContext):
         Args:
             _request_id: External request identifier (unused by this transport).
             key: LMCache key for the retrieve range.
-            instance_id: Worker process instance identifier.
             _kv_caches: Worker KV-cache tensors accepted for interface
                 consistency; the registered device is reused.
             block_ids: Engine block IDs indexed by LMCache KV group.
@@ -616,11 +674,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             RuntimeError: If the context is not registered or event IPC is
                 unsupported.
         """
-        if (
-            self._req_client is None
-            or self._device is None
-            or self._event_backend is None
-        ):
+        if self._device is None or self._event_backend is None:
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_retrieve()."
@@ -630,7 +684,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._req_client.retrieve(
             key,
-            instance_id,
+            self._instance_id,
             block_ids,
             event_ipc_handle,
             skip_first_n_tokens,
@@ -641,7 +695,7 @@ class LMCacheDrivenTransferContext(TransferContext):
 
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""
-        self._req_client = None
+        self._mark_closed()
         self._device = None
         self._event_backend = None
 
@@ -657,7 +711,14 @@ class EngineDrivenTransferContext(TransferContext):
     message-queue, and the server side persists/rehydrates from storage.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, instance_id: int, req_client: RequestClient) -> None:
+        """Initialize an engine-driven context bound to one worker.
+
+        Args:
+            instance_id: Worker process instance identifier.
+            req_client: Transport client for this worker.
+        """
+        super().__init__(instance_id, req_client)
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
@@ -677,12 +738,10 @@ class EngineDrivenTransferContext(TransferContext):
 
     def register(
         self,
-        instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        req_client: RequestClient,
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
@@ -724,20 +783,24 @@ class EngineDrivenTransferContext(TransferContext):
         dtype = getattr(torch, dtype_str)
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
 
-        future = req_client.register_kv_cache_engine_driven_context(
-            RegisterEngineDrivenContextPayload(
-                instance_id=instance_id,
-                model_name=model_name,
-                world_size=world_size,
-                block_size=block_size,
-                num_layers=num_layers,
-                hidden_dim_size=hidden_dim_size,
-                dtype_str=dtype_str,
-                use_mla=use_mla_flag,
-                num_physical_slots=blocks_in_chunk * block_size,
+        future = self._submit_registration(
+            lambda: self._req_client.register_kv_cache_engine_driven_context(
+                RegisterEngineDrivenContextPayload(
+                    instance_id=self._instance_id,
+                    model_name=model_name,
+                    world_size=world_size,
+                    block_size=block_size,
+                    num_layers=num_layers,
+                    hidden_dim_size=hidden_dim_size,
+                    dtype_str=dtype_str,
+                    use_mla=use_mla_flag,
+                    num_physical_slots=blocks_in_chunk * block_size,
+                )
             )
         )
         response = future.result(timeout=mq_timeout)
+        if self._is_closed():
+            return
         shm_name = ""
         pool_size = 0
         if isinstance(response, RegisterEngineDrivenContextResponse):
@@ -751,7 +814,7 @@ class EngineDrivenTransferContext(TransferContext):
         )
         self._engine_driven_context = create_engine_driven_context(
             metadata,
-            req_client,
+            self._req_client,
             mq_timeout,
             shm_name=shm_name,
             pool_size=pool_size,
@@ -759,8 +822,21 @@ class EngineDrivenTransferContext(TransferContext):
         supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
         logger.info(
             "Worker non-GPU transfer context registered (instance_id=%d, mode=%s)",
-            instance_id,
+            self._instance_id,
             supported_transfer_mode,
+        )
+
+    def unregister(self) -> MessagingFuture[Any] | None:
+        """Start engine-driven unregistration for this worker instance.
+
+        Returns:
+            A future for the server's unregister acknowledgement.
+
+        """
+        return self._submit_unregistration(
+            lambda: self._req_client.unregister_kv_cache_engine_driven_context(
+                self._instance_id
+            )
         )
 
     def create_recorded_event(self) -> IPCEvent | None:
@@ -784,7 +860,6 @@ class EngineDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         _event: IPCEvent | None,
@@ -797,7 +872,7 @@ class EngineDrivenTransferContext(TransferContext):
             )
 
         torch_dev.synchronize()
-        result = self._engine_driven_context.prepare_store(key, instance_id)
+        result = self._engine_driven_context.prepare_store(key, self._instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
         # All chunks already in cache — nothing to gather or commit.
         if chunk_indices is not None and len(chunk_indices) == 0:
@@ -819,7 +894,9 @@ class EngineDrivenTransferContext(TransferContext):
         # complete first, so this is unconditional -- guarding it on out_buffers
         # left the pickle path serializing a buffer still being written.
         torch_dev.synchronize()
-        ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
+        ok = self._engine_driven_context.commit_store(
+            key, self._instance_id, cpu_chunks
+        )
 
         future = MessagingFuture()
         future.set_result(ok)
@@ -829,7 +906,6 @@ class EngineDrivenTransferContext(TransferContext):
         self,
         _request_id: str,
         key: Any,
-        instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         _event: IPCEvent | None,
@@ -842,7 +918,9 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
-        src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
+        src_buffers = self._engine_driven_context.prepare_retrieve(
+            key, self._instance_id
+        )
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
@@ -861,13 +939,14 @@ class EngineDrivenTransferContext(TransferContext):
             # SHM path: ensure all device writes are complete before releasing
             # the SHM slot (server may immediately reuse it after commit_retrieve).
             torch_dev.synchronize()
-        self._engine_driven_context.commit_retrieve(key, instance_id)
+        self._engine_driven_context.commit_retrieve(key, self._instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
         return future
 
     def close(self) -> None:
+        self._mark_closed()
         if self._engine_driven_context is not None:
             self._engine_driven_context.close()
             self._engine_driven_context = None
@@ -878,6 +957,9 @@ class EngineDrivenTransferContext(TransferContext):
 
 def create_transfer_context(
     kv_caches: dict[str, torch.Tensor],
+    *,
+    instance_id: int,
+    req_client: RequestClient,
     mode: "str | MPTransferMode | None" = None,
     **_kwargs: Any,
 ) -> TransferContext:
@@ -889,6 +971,9 @@ def create_transfer_context(
 
     Args:
         kv_caches: Worker KV cache tensors keyed by layer name.
+        instance_id: Worker process instance identifier bound to the context.
+        req_client: Transport client bound to the context. The caller retains
+            ownership and must close it after the context.
         mode: Optional routing override. When ``None`` the value of
             ``LMCACHE_MP_TRANSFER_MODE`` is consulted, defaulting to
             :attr:`MPTransferMode.AUTO`.
@@ -917,10 +1002,10 @@ def create_transfer_context(
         resolved_mode.value,
     )
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
-        return _build_lmcache_driven_context(device_type)
+        return _build_lmcache_driven_context(device_type, instance_id, req_client)
     if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
-        return _build_engine_driven_context()
+        return _build_engine_driven_context(instance_id, req_client)
     # AUTO: dispatch by device type (CUDA -> handle path, else -> data path).
     if device_type == "cuda":
-        return LMCacheDrivenTransferContext()
-    return _build_engine_driven_context()
+        return LMCacheDrivenTransferContext(instance_id, req_client)
+    return _build_engine_driven_context(instance_id, req_client)

@@ -47,9 +47,14 @@ Validated models
              --no-enable-prefix-caching \
              --mm-processor-cache-gb 4 \
              --kv-transfer-config \
-             '{"kv_connector":"LMCacheMPConnector", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_role":"kv_both"}'
+             '{"kv_connector":"LMCacheMPConnector", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_role":"kv_both", "kv_connector_extra_config":{"lmcache.mp.lazy_offload":false}}'
 
       |
+
+      Keep ``lmcache.mp.lazy_offload`` disabled. Both lazy-offload policies
+      require vLLM prefix caching, which Unlimited-OCR's model configuration
+      disables. This recipe uses immediate offload; enabling lazy offload
+      fails at connector startup even if prefix caching was requested.
 
       ``--mm-processor-cache-gb`` must remain positive. Do **not** copy the
       ``0`` value from the baseline vLLM recipe: with both prefix caching and

@@ -42,6 +42,8 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
     _CBRopeState,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
@@ -531,6 +533,11 @@ class RetrieveMixin:
             submit_callback_to_stream(stream, "finish_read_prefetched", release_keys)
         return len(release_keys)
 
+    @request_handler(
+        RequestType.CB_RETRIEVE_PRE_COMPUTED,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     def cb_retrieve_pre_computed(
         self,
         key: IPCCacheServerKey,
