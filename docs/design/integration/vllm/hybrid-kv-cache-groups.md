@@ -138,38 +138,33 @@ into, corrupt the per-group block-id counts.)
 ### Scratch groups
 
 A scratch group is an engine group whose spec vLLM marks
-`prefix_cacheable = False`: one block per request for the request's lifetime,
-addressed by position modulo the block size rather than by token range. vLLM
-never hashes these blocks and its own prefix cache never restores them. Known
-instances, both holding the raw keys of the compression group that is still
-open:
+`prefix_cacheable = False`: vLLM never hashes its blocks and its own prefix
+cache never restores them, so they carry no token range LMCache could store.
+The instances LMCache has validated are per-request rings. Every
+sparse-attention layer keeps one ring tensor, vLLM puts them in one engine
+group, and the group holds one block per request for the request's lifetime,
+addressed by position modulo the block size. The ring holds the raw keys of
+the compression group that is still open:
 
-- Qwen3.8-Flash-Next's QSA compressor ring (`CircularBufferSpec`; capacity
-  set by the compression ratio and the speculative lookahead).
-- GLM-5.3-Flash's kpool tail (`KpoolTailSpec`; `block_size = index_kpool`,
-  raw key plus gate score, overwritten in place by `pos % kpool`).
+- Qwen3.8-Flash-Next's QSA compressor ring (`CircularBufferSpec`).
+- GLM-5.3-Flash's kpool tail (`KpoolTailSpec`, `block_size = index_kpool`).
 
-LMCache excludes scratch groups end to end:
-
-- `is_scratch_spec` (`kv_cache_groups.py`) detects the spec by
-  `prefix_cacheable`; specs without the property are token-paged.
-- `get_tokens_per_block` reports `0` for them; `0` is the scratch marker
-  throughout the scheduler-side geometry.
-- Registration skips format discovery for their layers and tags them
-  `EXCLUDED_ENGINE_GROUP`, so they form no info and no kernel group. Since
-  their bytes are never transferred, a scratch tensor whose layout the
-  transfer kernels reject must not fail registration.
-- Every computation over `group_tokens_per_block` (storable-prefix minimum in
-  `GetStoreMetadata`, `slice_block_ids_per_group`, hit alignment, chunk-size
-  validation) skips spans of `0`.
+LMCache treats a scratch group as covering no tokens. `is_scratch_spec`
+(`kv_cache_groups.py`) reads `prefix_cacheable` (absent on older vLLM means
+prefix-cacheable) and the group's `tokens_per_block` is reported as `0`.
+Everything downstream follows from that: the scheduler-side geometry
+(storable prefix, block-id slicing, hit alignment, chunk-size validation)
+ignores `0` spans, and registration skips format discovery for the group's
+layers and forms no info or kernel group for them, so a ring layout the
+transfer kernels cannot serve never fails registration.
 
 This is correct only because LMCache serves chunk-aligned prefixes. vLLM
 requires the cache block size to be a multiple of the compression group width
 (`compress_ratio`, `index_kpool`) and the chunk size is a multiple of the
 block size, so at every chunk boundary the open compression group is empty
-and the scratch block holds nothing the next step reads. Resuming mid-group (for example a prefill-to-decode handoff at an
-arbitrary prompt length) does need the ring's content, and this path does not
-provide it.
+and the ring holds nothing the next step reads. Resuming mid-group (for
+example a prefill-to-decode handoff at an arbitrary prompt length) does need
+the ring's content, and this path does not provide it.
 
 **Store is all-or-nothing (fail-closed):** if the block IDs don't fully cover
 every chunk for every group (e.g. a caller bug), or a copy fails, the whole

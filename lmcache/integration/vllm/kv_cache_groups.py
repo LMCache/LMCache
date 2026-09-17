@@ -33,19 +33,19 @@ def _is_attention_spec(spec: Any) -> bool:
 
 
 def is_scratch_spec(spec: Any) -> bool:
-    """Return whether the spec is a per-request scratch buffer.
+    """Return whether vLLM marks the spec ``prefix_cacheable = False``.
 
-    A scratch group holds one block per request, addressed by position modulo
-    the block size rather than by token range; vLLM marks it
-    ``prefix_cacheable = False`` and never restores it. Specs without the
-    property (older vLLM) are token-paged. ``UniformTypeKVCacheSpecs`` is
+    vLLM never hashes or restores the blocks of such a scratch group, so they
+    carry no token range LMCache could store (e.g. the per-request rings
+    ``CircularBufferSpec`` and ``KpoolTailSpec``). Specs without the property
+    (older vLLM) are prefix-cacheable. ``UniformTypeKVCacheSpecs`` is
     unwrapped first.
 
     Args:
         spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
 
     Returns:
-        ``True`` for a scratch spec, ``False`` for any token-paged spec.
+        ``True`` for a scratch spec, ``False`` for a prefix-cacheable one.
     """
     inner = getattr(spec, "kv_cache_specs", None)
     if isinstance(inner, dict) and inner:
