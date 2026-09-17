@@ -123,6 +123,14 @@ if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
     MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
 fi
 
+# GPU KV block pool size. Empty -> vLLM sizes it from free memory. The
+# eviction-aware lazy offload test pins it so its workload provably turns the
+# pool over, which is the pressure that policy reacts to.
+NUM_GPU_BLOCKS_ARG=""
+if [ -n "${NUM_GPU_BLOCKS_OVERRIDE:-}" ]; then
+    NUM_GPU_BLOCKS_ARG="--num-gpu-blocks-override ${NUM_GPU_BLOCKS_OVERRIDE}"
+fi
+
 # Split kernel groups into one object group per sliding-window size at
 # KV-cache registration. Required for hybrid models (e.g. gemma-4's
 # sliding-window + full-attention groups have different block sizes); without
@@ -214,12 +222,15 @@ echo "Port: $vllm_port"
 
 # Lazy offload settings are configurable so benchmarks can trade immediate
 # cache availability for batched store throughput without changing this script.
+# The policy is selectable too; it stays FIFO unless a test asks otherwise.
 KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
     LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    LMCACHE_MP_LAZY_OFFLOAD_POLICY="${LMCACHE_MP_LAZY_OFFLOAD_POLICY:-FIFO}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
+    LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-2.5}" \
     python3 - <<'PY'
 import json
 import os
@@ -230,18 +241,27 @@ extra_config = {
     "lmcache.mp.mq_timeout": 10,
 }
 if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
-    extra_config.update(
-        {
-            "lmcache.mp.lazy_offload": True,
-            "lmcache.mp.lazy_offload_policy": "FIFO",
-            "lmcache.mp.lazy_offload_threshold": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
-            ),
-            "lmcache.mp.lazy_offload_select_count": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
-            ),
-        }
-    )
+    policy = os.environ["LMCACHE_MP_LAZY_OFFLOAD_POLICY"]
+    extra_config["lmcache.mp.lazy_offload"] = True
+    extra_config["lmcache.mp.lazy_offload_policy"] = policy
+    if policy == "FIFO":
+        extra_config.update(
+            {
+                "lmcache.mp.lazy_offload_threshold": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
+                ),
+                "lmcache.mp.lazy_offload_select_count": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
+                ),
+            }
+        )
+    else:
+        # EVICTION_AWARE ignores those two and reads its own tunables. Only
+        # the horizon is set here: it is what decides how early a buffered
+        # store comes due ahead of its blocks reaching the eviction head.
+        extra_config["lmcache.mp.lazy_offload_horizon_steps"] = float(
+            os.environ["LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS"]
+        )
 
 print(
     json.dumps(
@@ -275,6 +295,7 @@ env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
         $MAMBA_ARGS \
         $PREFIX_CACHING_ARG \
         $MAX_NUM_BATCHED_TOKENS_ARG \
+        $NUM_GPU_BLOCKS_ARG \
         > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
 VLLM_PID=$!
