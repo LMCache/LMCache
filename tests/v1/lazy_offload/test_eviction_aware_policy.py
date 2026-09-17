@@ -8,8 +8,11 @@ current hash. Config validation lives in ``test_policy_selection.py``.
 """
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
+import logging
 
 # Third Party
 import pytest
@@ -574,12 +577,42 @@ class TestConfigKeys:
             )
 
 
+@contextmanager
+def capture_log_lines() -> Iterator[list[str]]:
+    """Collect the policy logger's INFO lines, without pytest's ``caplog``.
+
+    ``init_logger`` sets ``propagate = False``, so these records never reach
+    the root logger that ``caplog`` installs its handler on. ``caplog`` sees
+    them only because pytest also walks the loggers that are already
+    non-propagating when it starts capturing and attaches there too -- which
+    pytest documents as best-effort, and which does not hold when the whole
+    repo suite runs in one process. Attaching here depends on none of that,
+    and on nothing an earlier test left behind on the logger.
+    """
+    lines: list[str] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.append(record.getMessage())
+
+    logger = eviction_aware.logger
+    handler = _Collector(logging.INFO)
+    previous_level, previously_disabled = logger.level, logger.disabled
+    logger.setLevel(logging.INFO)
+    logger.disabled = False
+    logger.addHandler(handler)
+    try:
+        yield lines
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+        logger.disabled = previously_disabled
+
+
 class TestCounterLedger:
     """The ledger log line, which is the counters' only public surface."""
 
-    def test_final_stats_report_the_whole_ledger(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_final_stats_report_the_whole_ledger(self) -> None:
         pool = FakeBlockPool()
         pool.seed_free([1, 2])
         queue = make_queue(pool)
@@ -587,21 +620,15 @@ class TestCounterLedger:
         add_op(queue, pool, "r2", [2], end_tokens=256)
         drain(queue, new_blocks=1)
 
-        with caplog.at_level("INFO", logger=eviction_aware.logger.name):
+        with capture_log_lines() as lines:
             queue.log_final_stats()
 
-        (line,) = [
-            r.getMessage()
-            for r in caplog.records
-            if "final counters:" in r.getMessage()
-        ]
+        (line,) = [line for line in lines if "final counters:" in line]
         assert "admitted=2" in line
         assert f"emitted={counters(queue).emitted}" in line
         assert f"pending={pending_ops(queue)}" in line
 
-    def test_periodic_ledger_lines_are_throttled(
-        self, clock: FakeClock, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_periodic_ledger_lines_are_throttled(self, clock: FakeClock) -> None:
         """One line per interval, not one per drain: the drain runs on the scheduler's
         hot path.
         """
@@ -610,14 +637,11 @@ class TestCounterLedger:
         queue = make_queue(pool)
         clock.now = 1000.0
 
-        def ledger_lines() -> list[str]:
-            return [
-                r.getMessage()
-                for r in caplog.records
-                if "Lazy offload counters:" in r.getMessage()
-            ]
+        with capture_log_lines() as lines:
 
-        with caplog.at_level("INFO", logger=eviction_aware.logger.name):
+            def ledger_lines() -> list[str]:
+                return [line for line in lines if "Lazy offload counters:" in line]
+
             add_op(queue, pool, "r1", [1], end_tokens=256)
             drain(queue, new_blocks=1)
             assert len(ledger_lines()) == 1
