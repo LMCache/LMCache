@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace lmcache {
 namespace connector {
@@ -146,15 +147,30 @@ static bool try_enable_odirect(int& flags, const void* buf, size_t len,
 // FSConnector
 // ---------------------------------------------------------------
 
+// No pool, no budget.  A pool with no figure gets the default.
+static size_t effective_read_budget(int depth, size_t budget) {
+  if (depth <= 0) {
+    return 0;
+  }
+  return budget == 0 ? kDefaultReadMaxBytesInFlight : budget;
+}
+
 FSConnector::FSConnector(std::string base_path, int num_workers,
                          std::string relative_tmp_dir, bool use_odirect,
-                         size_t read_ahead_size)
+                         size_t read_ahead_size, int read_io_depth,
+                         size_t read_max_bytes_in_flight)
     : ConnectorBase(num_workers),
       base_path_(std::move(base_path)),
       relative_tmp_dir_(std::move(relative_tmp_dir)),
       use_odirect_(use_odirect),
       disk_block_size_(0),
-      read_ahead_size_(read_ahead_size) {
+      read_ahead_size_(read_ahead_size),
+      read_max_bytes_in_flight_(
+          effective_read_budget(read_io_depth, read_max_bytes_in_flight)) {
+  if (read_io_depth < 0) {
+    throw std::runtime_error("read_io_depth must be >= 0");
+  }
+
   // Create base directory
   std::filesystem::create_directories(base_path_);
 
@@ -172,7 +188,15 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
     }
   }
 
-  start_workers();  // IMPORTANT: call at END of constructor
+  // Readers first.  On failure join whatever started: the destructor does
+  // not run for a half-built object.
+  try {
+    start_read_pool(read_io_depth);
+    start_workers();  // IMPORTANT: call at END of constructor
+  } catch (...) {
+    close();
+    throw;
+  }
 }
 
 FSConnector::~FSConnector() { close(); }
@@ -300,6 +324,147 @@ bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
   auto file_path = conn.base_path / filename;
   std::error_code ec;
   return std::filesystem::remove(file_path, ec);
+}
+
+// ---------------------------------------------------------------
+// Read pool
+// ---------------------------------------------------------------
+
+size_t FSConnector::read_budget_bytes() const {
+  return read_max_bytes_in_flight_;
+}
+
+size_t FSConnector::choose_num_tiles(Op op, size_t num_items) const {
+  if (op != Op::BATCH_TILE_GET || read_threads_.empty()) {
+    return ConnectorBase::choose_num_tiles(op, num_items);
+  }
+  return 1;
+}
+
+void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
+  if (read_threads_.empty()) {
+    ConnectorBase::do_batch_get(conn, req);
+    return;
+  }
+  do_batch_get_pooled(req);
+}
+
+void FSConnector::on_workers_stopped() { stop_read_pool(); }
+
+void FSConnector::do_batch_get_pooled(const Request& req) {
+  const size_t num_keys = req.keys.size();
+  ReadTile tile;
+  tile.ok.assign(num_keys, 1);
+  tile.remaining = num_keys;
+  // Allocated before anything is published, so nothing below can throw
+  // while readers hold pointers into this frame.
+  std::vector<ReadTask> tasks(num_keys);
+
+  {
+    std::unique_lock<std::mutex> lk(read_mu_);
+    for (size_t i = 0; i < num_keys; ++i) {
+      const size_t len = req.buf_lens[i];
+      // An object larger than the whole budget goes when nothing else is
+      // in flight, or it could never be read.
+      read_done_cv_.wait(lk, [this, len] {
+        return read_bytes_in_flight_ == 0 ||
+               read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
+      });
+      read_bytes_in_flight_ += len;
+      tasks[i] = ReadTask{&req, i, &tile, nullptr};
+      if (read_queue_tail_ != nullptr) {
+        read_queue_tail_->next = &tasks[i];
+      } else {
+        read_queue_head_ = &tasks[i];
+      }
+      read_queue_tail_ = &tasks[i];
+      read_cv_.notify_one();
+    }
+    read_done_cv_.wait(lk, [&tile] { return tile.remaining == 0; });
+  }
+
+  for (size_t i = 0; i < num_keys; ++i) {
+    req.batch->per_key_results[req.start_idx + i] = tile.ok[i];
+  }
+}
+
+// Connections are built here so a failure surfaces in the constructor.
+void FSConnector::start_read_pool(int read_io_depth) {
+  if (read_io_depth <= 0) {
+    return;
+  }
+  const size_t depth = static_cast<size_t>(read_io_depth);
+  read_conns_.reserve(depth);
+  for (size_t i = 0; i < depth; ++i) {
+    read_conns_.push_back(create_connection());
+  }
+  read_threads_.reserve(depth);
+  for (size_t i = 0; i < depth; ++i) {
+    read_threads_.emplace_back(
+        [this, i] { this->read_thread_main(read_conns_[i]); });
+  }
+}
+
+// Only after the workers are joined; see on_workers_stopped().
+void FSConnector::stop_read_pool() {
+  {
+    std::lock_guard<std::mutex> lk(read_mu_);
+    read_stop_ = true;
+  }
+  read_cv_.notify_all();
+  for (auto& t : read_threads_) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+  read_threads_.clear();
+  read_conns_.clear();
+}
+
+void FSConnector::read_thread_main(WorkerFSConn& conn) {
+  for (;;) {
+    ReadTask* task = nullptr;
+    {
+      std::unique_lock<std::mutex> lk(read_mu_);
+      read_cv_.wait(
+          lk, [this] { return read_stop_ || read_queue_head_ != nullptr; });
+      if (read_queue_head_ == nullptr) {
+        return;  // the predicate admits an empty queue only on stop
+      }
+      task = read_queue_head_;
+      read_queue_head_ = task->next;
+      if (read_queue_head_ == nullptr) {
+        read_queue_tail_ = nullptr;
+      }
+    }
+
+    uint8_t ok = 1;
+    const Request& req = *task->req;
+    const std::string& key = req.keys[task->index];
+    try {
+      do_single_get(conn, key, req.buf_ptrs[task->index],
+                    req.buf_lens[task->index], req.batch_chunk_num_bytes);
+    } catch (const std::exception& e) {
+      ok = 0;
+      fprintf(stderr, "[LMCache GET] key %s failed: %s\n", key.c_str(),
+              e.what());
+    } catch (...) {
+      ok = 0;
+      fprintf(stderr, "[LMCache GET] key %s failed: unknown exception\n",
+              key.c_str());
+    }
+
+    // The submitting worker may destroy `task` and its tile as soon as it
+    // takes read_mu_ and sees remaining == 0, so nothing touches them
+    // after this block.
+    {
+      std::lock_guard<std::mutex> lk(read_mu_);
+      task->tile->ok[task->index] = ok;
+      --task->tile->remaining;
+      read_bytes_in_flight_ -= req.buf_lens[task->index];
+      read_done_cv_.notify_all();
+    }
+  }
 }
 
 }  // namespace connector
