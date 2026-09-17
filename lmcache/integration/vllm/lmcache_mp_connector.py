@@ -470,6 +470,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       enters vLLM's waiting queue. Disabled by default.
     """
 
+    # Tail block slots vLLM may relocate for one request; 0 means vLLM only
+    # appends. The scheduler role sets it from the vLLM config.
+    _mamba_relocation_window: int = 0
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -606,6 +610,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+
+            # Align-mode Mamba keeps one speculative block per draft token at
+            # the tail of a request's block list.
+            mamba_cache_mode = getattr(
+                vllm_config.cache_config, "mamba_cache_mode", "none"
+            )
+            spec_config = vllm_config.speculative_config
+            self._mamba_relocation_window = (
+                spec_config.num_speculative_tokens or 0
+                if mamba_cache_mode == "align" and spec_config is not None
+                else 0
+            )
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -1173,7 +1189,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             existing = existing_counts.get(engine_group_idx, 0)
             new_block_ids.append(list(group_blocks[existing:]))
         if any(new_block_ids):
-            tracker.append_block_ids(tuple(new_block_ids))
+            tracker.append_block_ids(
+                tuple(new_block_ids), self._mamba_relocation_window
+            )
 
         # Update the state of the tracker
         if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
@@ -1481,7 +1499,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Update block ids
             new_block_ids = cached_reqs.new_block_ids[idx] or ()
             if request_id not in cached_reqs.resumed_req_ids:
-                request_tracker.append_block_ids(new_block_ids)
+                request_tracker.append_block_ids(
+                    new_block_ids, self._mamba_relocation_window
+                )
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.

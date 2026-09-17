@@ -184,8 +184,11 @@ end. The connector only receives the blocks added at the end, so the tracker
 would still show the moved block at its old position and store it as the
 chunk's Mamba state, which no kernel ever wrote.
 
-A block is never listed twice for one request, so when a reported id is
-already in the tracker's list, `append_block_ids` sets the old position to 0.
+vLLM only moves blocks out of the last `num_speculative_tokens` positions, and
+a block is never listed twice for one request. So when a reported id is
+already in those last positions of the tracker's list, `append_block_ids` sets
+the old position to 0. Without align-mode Mamba and speculative decoding the
+window is 0 and ids are appended as-is.
 The server then sees an all-zero chunk for the Mamba group and skips it, and
 the next hit ends one chunk earlier. Needs `--separate-object-groups` and
 chunk size equal to the Mamba block size.

@@ -138,26 +138,40 @@ class LMCacheMPRequestTracker:
     def append_block_ids(
         self,
         new_block_ids: tuple[list[int], ...],
+        relocation_window: int = 0,
     ) -> None:
         """Append the block ids vLLM reported for this request in one step.
 
-        vLLM never lists the same block at two slots of a request. An id that
-        is already in the list therefore means vLLM took it out of its old
-        slot (relocated an align-mode Mamba speculative block, or freed and
-        reallocated it) and wrote the null block there without reporting it.
-        Do the same here.
+        In align mode with speculative decoding, vLLM may move a speculative
+        Mamba block from one of the last ``relocation_window`` slots to the
+        tail, writing the null block into the old slot without reporting it
+        (``MambaManager.allocate_new_blocks``). vLLM never lists a block at
+        two slots of a request, so an id reported again from that window is
+        such a move; its old slot is set to the null block here as well.
 
         Args:
             new_block_ids: Block ids appended this step, one list per engine
                 group.
+            relocation_window: Number of tail slots vLLM may relocate; 0
+                appends the ids as-is.
         """
         for engine_group_idx, group_block_ids in enumerate(new_block_ids):
             if not group_block_ids:
                 continue
             block_ids = self.allocated_block_ids.setdefault(engine_group_idx, [])
+            if relocation_window == 0:
+                block_ids.extend(group_block_ids)
+                continue
+            prev_len = len(block_ids)
+            window_start = max(0, prev_len - relocation_window)
+            # A relocated block keeps its id: only its slot changes. An id seen
+            # again within the window is that block, so null its old slot.
             for block_id in group_block_ids:
-                if block_id != 0 and block_id in block_ids:
-                    block_ids[block_ids.index(block_id)] = 0
+                if block_id != 0:
+                    for slot in range(window_start, prev_len):
+                        if block_ids[slot] == block_id:
+                            block_ids[slot] = 0
+                            break
                 block_ids.append(block_id)
 
     def num_allocated_blocks(self) -> dict[int, int]:
