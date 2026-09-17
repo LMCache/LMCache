@@ -120,17 +120,16 @@ def test_worker_exports_events_through_platform_backend(
     client.store.return_value = MessagingFuture()
     client.retrieve.return_value = MessagingFuture()
 
-    context = worker_transfer.LMCacheDrivenTransferContext()
+    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
     kv_caches = {"layer_0": torch.empty(1)}
     context.register(
-        1,
         kv_caches,
         "model",
         1,
         1,
-        client,
         1.0,
     )
+    unregister_future = context.unregister()
     stream = MagicMock(name="current_stream")
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
     event = context.create_recorded_event()
@@ -138,7 +137,6 @@ def test_worker_exports_events_through_platform_backend(
     store_future = context.submit_store(
         "request",
         "key",
-        1,
         kv_caches,
         [[0]],
         event,
@@ -147,7 +145,6 @@ def test_worker_exports_events_through_platform_backend(
     retrieve_future = context.submit_retrieve(
         "request",
         "key",
-        1,
         kv_caches,
         [[0]],
         event,
@@ -157,6 +154,8 @@ def test_worker_exports_events_through_platform_backend(
 
     assert isinstance(store_future, DeviceMessagingFuture)
     assert isinstance(retrieve_future, DeviceMessagingFuture)
+    assert unregister_future is client.unregister_kv_cache.return_value
+    client.unregister_kv_cache.assert_called_once_with(1)
     client.store.assert_called_once_with("key", 1, [[0]], b"completion-handle")
     client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2)
     assert [call[0] for call in backend.calls] == [

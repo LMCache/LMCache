@@ -748,6 +748,13 @@ All connector-level options are passed through
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.nonblocking_lookup_status``
+     - ``true``
+     - Poll lookup-status replies without blocking the scheduler by default.
+       Set to ``false`` to wait for each status RPC reply in the current
+       callback, for example when long prefill steps delay observation of an
+       already-ready reply. LOOKUP acknowledgement polling
+       remains asynchronous. Available with the current ``LMCacheMPConnector``.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,
@@ -779,23 +786,6 @@ All connector-level options are passed through
        endpoint. If multiple auto-started MP servers run on the same host, pass
        distinct ``--http-port`` values here to avoid HTTP frontend port
        conflicts.
-   * - ``lmcache.mp.lazy_offload``
-     - ``false``
-     - Defer store operations and submit finished requests in FIFO batches.
-       Available only with vLLM and ``LMCacheMPConnector``. See
-       :doc:`lazy_offload` for behavior, limitations, and tuning guidance.
-   * - ``lmcache.mp.lazy_offload_policy``
-     - ``FIFO``
-     - Policy used to select finished pending requests. ``FIFO`` is currently
-       the only supported value. Used only when lazy offload is enabled.
-   * - ``lmcache.mp.lazy_offload_threshold``
-     - ``100``
-     - Number of finished pending requests required before a lazy-offload
-       batch becomes eligible for submission.
-   * - ``lmcache.mp.lazy_offload_select_count``
-     - ``10``
-     - Maximum number of finished requests selected each time the
-       lazy-offload threshold is met.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
@@ -826,6 +816,43 @@ All connector-level options are passed through
        otherwise). Composes with ``lmcache.mp.isolated_ipc`` for
        fabric-exportable pools; a POSIX-fd-only pool under isolated IPC
        is rejected at registration.
+   * - ``lmcache.mp.lazy_offload``
+     - ``false``
+     - Buffer stores on the scheduler and submit them according to the
+       selected lazy-offload policy. Requires vLLM prefix caching. See
+       :doc:`lazy_offload` for behavior, limitations, and tuning guidance.
+   * - ``lmcache.mp.lazy_offload_policy``
+     - ``EVICTION_AWARE``
+     - Lazy drain policy. ``EVICTION_AWARE`` drains blocks near the GPU free
+       queue's eviction head. Set ``FIFO`` explicitly to keep the
+       count-triggered behavior.
+   * - ``lmcache.mp.lazy_offload_horizon_steps``
+     - ``2.5``
+     - ``EVICTION_AWARE`` only: estimated scheduler steps of block
+       consumption treated as imminent eviction. Must be greater than zero.
+       Larger values store earlier and reduce eviction losses, but may store
+       GPU-resident hot content and increase lower-tier eviction pressure.
+   * - ``lmcache.mp.lazy_offload_max_drain_per_step``
+     - ``64``
+     - ``EVICTION_AWARE`` only: maximum store operations emitted per
+       scheduler step. A value below the concurrent prefill admission rate
+       can lose buffered operations to eviction.
+   * - ``lmcache.mp.lazy_offload_max_deferral_seconds``
+     - ``0.0``
+     - ``EVICTION_AWARE`` only: how long a buffered operation may wait before
+       it is emitted regardless of eviction pressure. Not a hard bound: no
+       drain runs on a step that schedules no tokens, a request whose store
+       is already in flight is skipped, and due operations that do not fit
+       in ``max_drain_per_step`` wait for a later step. Zero leaves emission
+       entirely to the danger window. Set it below the reuse interval the
+       workload has to beat.
+   * - ``lmcache.mp.lazy_offload_threshold``
+     - ``100``
+     - ``FIFO`` only: number of finished buffered requests that triggers a
+       drain.
+   * - ``lmcache.mp.lazy_offload_select_count``
+     - ``10``
+     - ``FIFO`` only: maximum finished requests emitted by one drain.
 
 To let vLLM worker 0 start a local MP server automatically:
 

@@ -14,10 +14,7 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
     mla_enabled,
 )
-from lmcache.utils import (
-    check_interprocess_event_support,
-    init_logger as lmcache_init_logger,
-)
+from lmcache.utils import init_logger as lmcache_init_logger
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -331,7 +328,7 @@ class LMCacheMPRequestMetadata:
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
-        # TODO: This should be checked everytime we update the num_stored_blocks
+        # TODO: This should be checked every time we update the num_stored_blocks
         #
         # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
         #
@@ -504,9 +501,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
-
-        # fast-fail if interprocess is not supported
-        check_interprocess_event_support()
 
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(

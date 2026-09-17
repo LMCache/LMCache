@@ -44,10 +44,7 @@ try:
     import zmq  # noqa: F401  # availability probe; used by command.py
 
     # First Party
-    from lmcache.utils import (
-        EngineType,
-        check_interprocess_event_support,
-    )
+    from lmcache.utils import EngineType
     from lmcache.v1.kv_layer_groups import (
         DTYPE_MAP,
         KVLayerGroupInfo,
@@ -65,6 +62,7 @@ try:
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
     from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,
@@ -144,16 +142,26 @@ _TIMEOUT = object()
 def _wait_for_result(
     future: MessagingFuture[Any],
     timeout_s: float = _DEFAULT_RPC_TIMEOUT_S,
+    retain_refs: tuple[object, ...] = (),
 ) -> Any:
     """Wait for an RPC future and convert a timeout to ``_TIMEOUT``.
 
     Returns the decoded response (possibly ``None`` for void replies)
-    on success, or the sentinel ``_TIMEOUT`` on RPC timeout.
+    on success, or the sentinel ``_TIMEOUT`` on RPC timeout. Objects in
+    ``retain_refs`` stay owned by the raw future until the transport
+    finishes with the request, including timeout paths where the reply may
+    still arrive later.
     """
+    for ref in retain_refs:
+        future.retain_reference(ref)
     try:
-        return future.result(timeout=timeout_s)
+        result = future.result(timeout=timeout_s)
     except TimeoutError:
         return _TIMEOUT
+    release_references = getattr(future, "release_references", None)
+    if callable(release_references):
+        release_references()
+    return result
 
 
 # ------------------------------------------------------------------ #
@@ -567,19 +575,24 @@ def _poll_prefetch_status(
     return None
 
 
-def _make_event_handle(use_gpu: bool = True) -> bytes:
-    """Create a CUDA event IPC handle for GPU mode.
+def _make_exported_event(
+    event_backend: EventIPCBackend | None,
+    use_gpu: bool = True,
+) -> tuple[object | None, bytes]:
+    """Create and export the producer event for handle-mode bench requests.
 
     CPU mode does not need a cross-process event (SHM mappings are
     coherent without device-side sync), so an empty handle is
     returned and the server treats it as a no-op.
     """
     if not use_gpu:
-        return b""
-    check_interprocess_event_support()
-    event = torch_dev.Event(interprocess=True)
-    event.record()
-    return event.ipc_handle()
+        return None, b""
+    if event_backend is None:
+        raise RuntimeError("GPU handle mode requires an initialized event backend")
+    device = torch_dev.current_device()
+    event = event_backend.create_event(device)
+    event_backend.record_event(event, None)
+    return event, event_backend.export_event(event, device)
 
 
 def _build_server_slot_views(
@@ -790,6 +803,7 @@ def _send_store(
     chunk_size: int = 0,
     server_pool: "mmap.mmap | None" = None,
     instance_id: int = _INSTANCE_ID,
+    event_backend: EventIPCBackend | None = None,
 ) -> str:
     """Store KV cache blocks. Returns status string.
 
@@ -809,13 +823,17 @@ def _send_store(
         num_tokens = key.end - key.start
         num_blocks = num_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
+        event, event_handle = _make_exported_event(event_backend, use_gpu)
+        future = client.store(
+            key,
+            instance_id,
+            [block_ids] * num_engine_group_infos,
+            event_handle,
+        )
+        retain_refs = (event,) if event is not None else ()
         result = _wait_for_result(
-            client.store(
-                key,
-                instance_id,
-                [block_ids] * num_engine_group_infos,
-                _make_event_handle(),
-            )
+            future,
+            retain_refs=retain_refs,
         )
         if result is _TIMEOUT:
             return "timeout"
@@ -861,6 +879,7 @@ def _send_retrieve(
     client_tensors: list["torch.Tensor"] | None = None,
     server_pool: "mmap.mmap | None" = None,
     instance_id: int = _INSTANCE_ID,
+    event_backend: EventIPCBackend | None = None,
 ) -> str:
     """Retrieve KV cache blocks. Returns status.
 
@@ -880,14 +899,18 @@ def _send_retrieve(
         hit_tokens = hit_chunks * chunk_size
         num_blocks = hit_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
+        event, event_handle = _make_exported_event(event_backend, use_gpu)
+        future = client.retrieve(
+            key,
+            instance_id,
+            [block_ids] * num_engine_group_infos,
+            event_handle,
+            0,  # skip_first_n_tokens
+        )
+        retain_refs = (event,) if event is not None else ()
         result = _wait_for_result(
-            client.retrieve(
-                key,
-                instance_id,
-                [block_ids] * num_engine_group_infos,
-                _make_event_handle(),
-                0,  # skip_first_n_tokens
-            )
+            future,
+            retain_refs=retain_refs,
         )
         if result is _TIMEOUT:
             return "timeout"

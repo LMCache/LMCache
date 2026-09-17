@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """MPCacheServer compositor and unified cache server entry point."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 import argparse
 import shutil
 import signal
 import sys
 import time
-
-# Third Party
-import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -45,12 +45,7 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    EngineModule,
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
+from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
@@ -62,14 +57,10 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
-from lmcache.v1.multiprocess.mq import MessageQueueServer
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-    get_payload_classes,
-)
+from lmcache.v1.multiprocess.transport.base import RequestServer
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
-from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import set_isolated_ipc
 
 logger = init_logger(__name__)
 
@@ -153,26 +144,6 @@ class MPCacheServer:
         raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
 
 
-def add_handler_helper(
-    server: MessageQueueServer, request_type: RequestType, handler_function
-):
-    """Register a handler with the message queue server.
-
-    Args:
-        server: The message queue server.
-        request_type: The request type to handle.
-        handler_function: The handler callable.
-    """
-    payload_classes = get_payload_classes(request_type)
-    handler_type = get_handler_type(request_type)
-    server.add_handler(
-        request_type,
-        payload_classes,
-        handler_type,
-        handler_function,
-    )
-
-
 def _build_modules(
     ctx: MPCacheServerContext,
     mp_config: MPServerConfig,
@@ -199,6 +170,7 @@ def _build_modules(
         mp_config.p2p_config,
         coordinator_config,
         mp_config.instance_id,
+        mp_config.transport,
     )
 
     # Build the transfer and blend modules first so the ManagementModule can
@@ -327,11 +299,11 @@ def run_cache_server(
     return_engine: bool = False,
     start_prometheus_http_server: bool = True,
     coordinator_config: CoordinatorConfig = DEFAULT_COORDINATOR_CONFIG,
-) -> tuple[MessageQueueServer, MPCacheServer] | None:
-    """Run the LMCache cache server with ZMQ message queue.
+) -> tuple[RequestServer, MPCacheServer] | None:
+    """Run the LMCache cache server with the selected request transport.
 
     Args:
-        mp_config: Configuration for the ZMQ multiprocess server.
+        mp_config: Configuration for the multiprocess server.
         storage_manager_config: Configuration for the storage manager.
         obs_config: Configuration for the observability stack.
         coordinator_config: Coordinator connection used by the P2P controller
@@ -344,7 +316,7 @@ def run_cache_server(
             ``/metrics`` to avoid port conflicts or redundant servers.
 
     Returns:
-        If return_engine is True: tuple of (MessageQueueServer, MPCacheServer).
+        If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
     # Before any event IPC backend is resolved (KV-cache registration), so
@@ -413,36 +385,12 @@ def run_cache_server(
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
-    zmq_context = zmq.Context.instance()
-    server = MessageQueueServer(
-        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
-        context=zmq_context,
-    )
-
-    all_specs: list[HandlerSpec] = []
-    for module in modules:
-        all_specs.extend(module.get_handlers())
-
-    for spec in all_specs:
-        add_handler_helper(server, spec.request_type, spec.handler)
-
-    affinity_types = [
-        s.request_type for s in all_specs if s.pool == ThreadPoolType.AFFINITY
-    ]
-    normal_types = [
-        s.request_type for s in all_specs if s.pool == ThreadPoolType.NORMAL
-    ]
-    if affinity_types:
-        server.add_affinity_thread_pool(
-            affinity_types, max_workers=mp_config.max_gpu_workers
-        )
-    if normal_types:
-        server.add_normal_thread_pool(
-            normal_types, max_workers=mp_config.max_cpu_workers
-        )
+    transport = mp_config.transport
+    server: RequestServer = create_request_server(modules, mp_config)
 
     logger.info(
-        "LMCache ZMQ cache server is running on tcp://%s:%d",
+        "LMCache %s cache server is running on %s:%d",
+        transport,
         mp_config.host,
         mp_config.port,
     )
@@ -480,9 +428,7 @@ def parse_args():
     Returns:
         Parsed arguments namespace.
     """
-    parser = argparse.ArgumentParser(
-        description="LMCache ZMQ Cache Server (without HTTP)"
-    )
+    parser = argparse.ArgumentParser(description="LMCache Cache Server (without HTTP)")
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
     add_observability_args(parser)
