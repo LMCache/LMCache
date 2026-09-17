@@ -66,11 +66,11 @@ def resolve_object_keys(
             f"too many token_ids in a single request "
             f"(limit={MAX_TOKEN_IDS}, got={len(token_ids)})"
         )
-    ipc_key = IPCCacheServerKey(
+    ipc_key = IPCCacheServerKey.from_token_ids(
         model_name=model_name,
         world_size=world_size,
         worker_id=None,
-        token_ids=tuple(token_ids),
+        token_ids=token_ids,
         start=0,
         end=len(token_ids),
         request_id="",

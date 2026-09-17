@@ -29,6 +29,7 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _narrow_attn_desc,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
@@ -178,7 +179,7 @@ def test_submit_coordinator_match_sends_this_server_s_namespace():
         model_name="llama",
         world_size=4,
         worker_id=None,
-        token_ids=tuple(range(8)),
+        token_bytes=pack_token_ids(range(8)),
         start=0,
         end=8,
         request_id="rid",
@@ -204,7 +205,7 @@ def test_submit_coordinator_match_skips_a_query_shorter_than_a_chunk():
         model_name="llama",
         world_size=1,
         worker_id=None,
-        token_ids=(1, 2),
+        token_bytes=pack_token_ids([1, 2]),
         start=0,
         end=2,
         request_id="rid",

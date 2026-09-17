@@ -21,6 +21,7 @@ from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 # =============================================================================
@@ -202,7 +203,7 @@ class TestEndSessionTouchKeys:
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(12))  # 3 chunks of 4
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
         session.get_hashes(0, 12)
 
         ipc_key = make_ipc_key(tokens, chunk_size=4, worker_id=None, request_id="req-1")
@@ -225,7 +226,7 @@ class TestEndSessionTouchKeys:
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(8))  # 2 chunks of 4
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
         session.get_hashes(0, 8)
 
         ipc_key = make_ipc_key(
@@ -258,7 +259,7 @@ class TestEndSessionTouchKeys:
         """end_session should skip touch when session has no lookup_ipc_key."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
-        session.set_tokens(list(range(8)))
+        session.set_tokens(pack_token_ids(list(range(8))))
         session.get_hashes(0, 8)
         # Don't set lookup_ipc_key
 
@@ -299,7 +300,7 @@ class TestEndSessionTouchKeys:
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(20))  # 5 chunks of 4
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
 
         # Simulate retrieve: first 3 chunks
         retrieve_hashes = session.get_hashes(0, 12)

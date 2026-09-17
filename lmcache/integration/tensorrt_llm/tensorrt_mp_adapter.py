@@ -114,14 +114,14 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         end: int,
         request_id: int,
     ) -> IPCCacheServerKey:
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
             # Each worker stores and reads only its own object (no MLA-style
             # sharing in this adapter yet).
             num_kv_readers=1,
             worker_id=None,
-            token_ids=tuple(token_ids),
+            token_ids=token_ids,
             start=start,
             end=end,
             request_id=str(request_id),
@@ -299,12 +299,12 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         request_id: int,
     ) -> IPCCacheServerKey:
         aligned_end = (len(token_ids) // self._chunk_size) * self._chunk_size
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
             num_kv_readers=1,
             worker_id=self._rank,
-            token_ids=tuple(token_ids),
+            token_ids=token_ids,
             start=0,
             end=aligned_end,
             request_id=str(request_id),

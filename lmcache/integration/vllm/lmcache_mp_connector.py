@@ -1072,7 +1072,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids(),
+            packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
         )
@@ -1136,7 +1136,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids(),
+            packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
         )
@@ -1216,7 +1216,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
                 if free_end > 0:
                     self.scheduler_adapter.free_lookup_locks(
-                        token_ids=tracker.get_token_ids(),
+                        packed_token_ids=tracker.packed_token_ids(),
                         start=0,
                         end=free_end,
                         request_id=request.request_id,

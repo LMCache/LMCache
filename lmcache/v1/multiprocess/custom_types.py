@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -8,6 +9,11 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    pack_token_ids,
+)
 from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
     DeviceIPCWrapper,
 )
@@ -18,7 +24,7 @@ communications.
 
 Key Types:
 - IPCCacheServerKey: Token-based cache key
-  - Contains token_ids, start, end, request_id (all required)
+  - Contains token_bytes, start, end, request_id (all required)
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
@@ -29,9 +35,15 @@ class IPCCacheServerKey:
 
     This key type is sent by the client over ZMQ (serialized via msgspec).
 
-    The client sends token_ids, start, end, and request_id (all required).
+    The client sends token_bytes, start, end, and request_id (all required).
     The server computes chunk hashes via TokenHasher and converts to
     ObjectKey for storage operations using ipc_key_to_object_keys().
+
+    ``token_bytes`` is packed by :mod:`lmcache.v1.multiprocess.token_codec`
+    (see there for the layout and why no chunk hash changes). It replaced a
+    ``token_ids`` tuple whose field number is now retired, so an older
+    client's payload arrives carrying no tokens at all: client and server
+    must be upgraded together.
 
     The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
@@ -42,7 +54,7 @@ class IPCCacheServerKey:
     world_size: int
     worker_id: int | None
 
-    token_ids: tuple[int, ...]  # frozen tuple for hashability
+    token_bytes: bytes  # packed big-endian uint32, one word per token
     start: int
     end: int
 
@@ -75,6 +87,11 @@ class IPCCacheServerKey:
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:
+        if len(self.token_bytes) % TOKEN_STRIDE:
+            raise ValueError(
+                f"token_bytes of {len(self.token_bytes)} byte(s) is not a "
+                f"whole number of {TOKEN_STRIDE}-byte token ids"
+            )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
             raise ValueError(
@@ -86,14 +103,13 @@ class IPCCacheServerKey:
                 f"(got {len(self.cache_salt)})"
             )
 
-    # Helper function for unit tests only
     @classmethod
     def from_token_ids(
         cls,
         model_name: str,
         world_size: int,
         worker_id: int | None,
-        token_ids: list[int],
+        token_ids: Sequence[int],
         start: int = 0,
         end: int = 0,
         request_id: str = "",
@@ -101,19 +117,43 @@ class IPCCacheServerKey:
         num_kv_readers: int = 1,
         request_configs: dict[str, Any] | None = None,
     ) -> "IPCCacheServerKey":
-        """Create a key from token ids. Only used by the tests."""
+        """Create a key from unpacked token ids.
+
+        The canonical way to build a key from a token list: it owns the
+        packing so callers never handle :mod:`token_codec` themselves.
+
+        Args:
+            model_name: Model the key belongs to.
+            world_size: Number of TP workers.
+            worker_id: Worker the key is scoped to, or ``None`` for all.
+            token_ids: The token sequence.
+            start: Start token index of the key's range.
+            end: End token index of the key's range (exclusive).
+            request_id: Request the key belongs to.
+            cache_salt: Per-user isolation salt.
+            num_kv_readers: Number of workers that will read the object.
+            request_configs: Optional LMCache request configs.
+
+        Returns:
+            The key, with ``token_ids`` packed into ``token_bytes``.
+        """
         return cls(
             model_name=model_name,
             world_size=world_size,
             worker_id=worker_id,
             num_kv_readers=num_kv_readers,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
+
+    @property
+    def num_tokens(self) -> int:
+        """How many token ids this key carries."""
+        return num_packed_tokens(self.token_bytes)
 
     def require_num_kv_readers(self) -> int:
         """Declared reader count; rejects keys from pre-field clients.
@@ -139,7 +179,7 @@ class IPCCacheServerKey:
             world_size=self.world_size,
             worker_id=None,
             num_kv_readers=self.num_kv_readers,
-            token_ids=self.token_ids,
+            token_bytes=self.token_bytes,
             start=self.start,
             end=self.end,
             request_id=self.request_id,

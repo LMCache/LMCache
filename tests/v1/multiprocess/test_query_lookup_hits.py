@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
@@ -243,7 +244,7 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
         world_size=world_size,
         num_kv_readers=1,
         worker_id=None,
-        token_ids=(0,),
+        token_bytes=pack_token_ids((0,)),
         start=0,
         end=0,
         request_id="r",
@@ -271,7 +272,7 @@ def _captured_lookup_object_keys(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )
-    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
 
     module = LookupModule(ctx)
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
