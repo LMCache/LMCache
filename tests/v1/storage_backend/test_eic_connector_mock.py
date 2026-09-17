@@ -223,6 +223,12 @@ class FakeKey:
     def to_string(self):
         return self.key_str
 
+    def __eq__(self, other):
+        return isinstance(other, FakeKey) and other.key_str == self.key_str
+
+    def __hash__(self):
+        return hash(self.key_str)
+
 
 def make_memory_obj(shapes, dtypes, fmt=MemoryFormat.KV_2LTD, fill=1):
     shapes = [torch.Size(s) for s in shapes]
@@ -495,6 +501,36 @@ def test_batched_get_unknown_meta_status_returns_none(env):
     assert results == [None]
 
 
+def test_batched_get_data_mget_raises_releases_all_staged(env):
+    # A raised data mget must release every object staged for it, not leak the
+    # allocations made before the call blew up.
+    client = env.client
+    connector = env.conn
+    keys = [FakeKey("k0"), FakeKey("k1")]
+    client.meta_script["k0"] = _meta_for(SHAPE)
+    client.meta_script["k1"] = _meta_for(SHAPE)
+
+    def raise_on_data(keys, vals):
+        if keys and not keys[0].endswith("_meta"):
+            raise RuntimeError("pybind transport error")
+        # Let meta flow through the scripted payload-copy path. The fake does
+        # not read the option argument.
+        client.mget_override = None
+        try:
+            status, _, outcome = client.mget(keys, None, vals)
+        finally:
+            client.mget_override = raise_on_data
+        return status, outcome.status_codes
+
+    client.mget_override = raise_on_data
+    results = asyncio.run(connector._batched_get(keys))
+
+    assert results == [None, None]
+    allocations = connector.memory_allocator.allocations
+    assert len(allocations) == 2
+    assert all(obj.get_ref_count() == 0 for obj in allocations)
+
+
 def test_put_sync_success_and_failure_modes(env):
     client = env.client
     connector = env.conn
@@ -560,17 +596,37 @@ def test_batched_put_skips_zero_ptr_keeps_batch(env):
         [_StatusCode.SUCCESS] * 4,
     )
 
-    asyncio.run(connector._batched_put(keys, objs))
+    # The addressless middle chunk still ships the other two chunks in one
+    # mset, but the skipped chunk is reported as a batch failure instead of
+    # being silently dropped.
+    with pytest.raises(RuntimeError, match="b1"):
+        asyncio.run(connector._batched_put(keys, objs))
 
     assert len(client.mset_calls) == 1
     sent_keys, entries, _ = client.mset_calls[0]
-    # The addressless middle chunk is skipped; the other two still ship their
-    # meta+data pairs.
     assert sent_keys == ["b0_meta", "b0", "b2_meta", "b2"]
     assert len(entries) == 4
 
 
-def test_batched_put_partial_failed_runs_per_key_loop(env, caplog):
+def test_batched_put_all_success_returns_cleanly(env):
+    client = env.client
+    connector = env.conn
+    keys = [FakeKey("b0"), FakeKey("b1")]
+    objs = [
+        make_memory_obj([SHAPE], [torch.bfloat16]),
+        make_memory_obj([SHAPE], [torch.bfloat16]),
+    ]
+    client.mset_result = (
+        _StatusCode.SUCCESS,
+        [_StatusCode.SUCCESS] * 4,
+    )
+
+    asyncio.run(connector._batched_put(keys, objs))
+    assert len(client.mset_calls) == 1
+    assert client.mset_calls[0][0] == ["b0_meta", "b0", "b1_meta", "b1"]
+
+
+def test_batched_put_partial_failed_raises_with_failed_chunk(env):
     client = env.client
     connector = env.conn
     keys = [FakeKey("b0"), FakeKey("b1")]
@@ -581,21 +637,60 @@ def test_batched_put_partial_failed_runs_per_key_loop(env, caplog):
     client.mset_result = (
         _StatusCode.PARTIAL_FAILED,
         [
-            _StatusCode.SUCCESS,
-            _StatusCode.SUCCESS,
-            _StatusCode.SUCCESS,
-            _StatusCode.FAILED,
+            _StatusCode.SUCCESS,  # b0 meta
+            _StatusCode.SUCCESS,  # b0 data
+            _StatusCode.SUCCESS,  # b1 meta
+            _StatusCode.FAILED,  # b1 data
         ],
     )
 
-    # PARTIAL_FAILED must not early-return: the per-key confirmation loop runs
-    # and logs the one failed data key.
-    asyncio.run(connector._batched_put(keys, objs))
+    # PARTIAL_FAILED must not early-return: the confirmation loop inspects the
+    # per-key pairs and raises on the one failed data chunk.
+    with pytest.raises(RuntimeError, match="1 of 2") as exc:
+        asyncio.run(connector._batched_put(keys, objs))
+    assert "b1" in str(exc.value)
     assert len(client.mset_calls) == 1
-    assert any("b1" in record.getMessage() for record in caplog.records)
 
 
-def test_batched_put_whole_call_failed_returns(env):
+def test_batched_put_partial_failed_distinguishes_pair_from_block(env):
+    # A failure at flat index 2 must be attributed to b1's META under the
+    # (meta,data) per-chunk pairing, not to b2's meta under an all-meta-then-
+    # all-data block layout. 3 chunks, codes: S S F S S S.
+    client = env.client
+    connector = env.conn
+    keys = [FakeKey("b0"), FakeKey("b1"), FakeKey("b2")]
+    objs = [make_memory_obj([SHAPE], [torch.bfloat16]) for _ in range(3)]
+    client.mset_result = (
+        _StatusCode.PARTIAL_FAILED,
+        [
+            _StatusCode.SUCCESS,
+            _StatusCode.SUCCESS,
+            _StatusCode.FAILED,
+            _StatusCode.SUCCESS,
+            _StatusCode.SUCCESS,
+            _StatusCode.SUCCESS,
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="1 of 3") as exc:
+        asyncio.run(connector._batched_put(keys, objs))
+    assert "['b1']" in str(exc.value), str(exc.value)
+    assert "b2" not in str(exc.value)
+
+
+def test_batched_put_all_skipped_raises_without_mset(env):
+    client = env.client
+    connector = env.conn
+    keys = [FakeKey("b0"), FakeKey("b1")]
+    objs = [AddrlessMemoryObj(), AddrlessMemoryObj()]
+
+    with pytest.raises(RuntimeError, match="wrote nothing"):
+        asyncio.run(connector._batched_put(keys, objs))
+    # No addressable chunk means no mset is attempted.
+    assert client.mset_calls == []
+
+
+def test_batched_put_whole_call_failed_raises(env):
     client = env.client
     connector = env.conn
     keys = [FakeKey("b0"), FakeKey("b1"), FakeKey("b2")]
@@ -605,10 +700,63 @@ def test_batched_put_whole_call_failed_returns(env):
         [_StatusCode.FAILED] * 6,
     )
 
-    # Whole-call failure is logged and returned, not raised.
-    asyncio.run(connector._batched_put(keys, objs))
+    with pytest.raises(RuntimeError, match="mset failed"):
+        asyncio.run(connector._batched_put(keys, objs))
     assert len(client.mset_calls) == 1
     assert len(client.mset_calls[0][0]) == 6
+
+
+def test_batched_put_callback_observes_failed_future():
+    # remote_backend.batched_put_callback must read the batch future so a
+    # failed mset reaches _put_failed_count; an unread failed future is silent.
+    from concurrent.futures import Future
+    import threading
+
+    from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+
+    backend = object.__new__(RemoteBackend)
+    backend.lock = threading.Lock()
+    backend.put_tasks = {FakeKey("b0"), FakeKey("b1")}
+    backend._put_failed_count = 0
+
+    ok = Future()
+    ok.set_result(None)
+    backend.batched_put_callback(ok, [FakeKey("b0")])
+    assert backend._put_failed_count == 0
+    assert FakeKey("b0") not in backend.put_tasks
+
+    bad = Future()
+    bad.set_exception(RuntimeError("mset failed"))
+    backend.batched_put_callback(bad, [FakeKey("b1")])
+    assert backend._put_failed_count == 1
+    assert not backend.put_tasks
+
+
+def test_instrumented_batched_put_propagates_and_releases(env):
+    # Production wraps every connector in InstrumentedRemoteConnector. Its
+    # batched_put used to catch the inner failure and return, so the batch
+    # future completed normally and the failure counter stayed at zero. It
+    # must now propagate while still releasing every object.
+    from lmcache.v1.storage_backend.connector.instrumented_connector import (
+        InstrumentedRemoteConnector,
+    )
+
+    class _FailingInner:
+        async def batched_put(self, keys, memory_objs):
+            raise RuntimeError("mset failed")
+
+    wrapper = InstrumentedRemoteConnector(_FailingInner())
+    objs = [
+        make_memory_obj([SHAPE], [torch.bfloat16]),
+        make_memory_obj([SHAPE], [torch.bfloat16]),
+    ]
+    before = [o.get_ref_count() for o in objs]
+
+    with pytest.raises(RuntimeError, match="mset failed"):
+        asyncio.run(wrapper.batched_put([FakeKey("b0"), FakeKey("b1")], objs))
+
+    # The finally still drops one reference per object despite the raise.
+    assert [o.get_ref_count() for o in objs] == [rc - 1 for rc in before]
 
 
 def test_transfer_base_ptr_multi_group(fake_eic):

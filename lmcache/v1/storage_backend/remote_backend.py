@@ -275,9 +275,19 @@ class RemoteBackend(StorageBackendInterface):
     def batched_put_callback(self, future: Future, keys: List[CacheEngineKey]):
         """
         Callback function for batched put tasks.
+
+        The batch completes as one future. Reading its result is what surfaces
+        a failed ``mset``: without it the future is never awaited and a write
+        failure is silent, the same false-success the single-key callback
+        guards against.
         """
         with self.lock:
             self.put_tasks.difference_update(keys)
+        try:
+            future.result()
+        except Exception as e:
+            self._put_failed_count += 1
+            logger.error("Batched put task failed for keys %s: %s", keys, e)
 
     def batched_submit_put_task(
         self,

@@ -25,6 +25,14 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
+# Capability marker: this core loads libcudart defensively (cuda_lib stays None
+# when the library is absent and only an explicit TRANSPORT_GDR is rejected).
+# Platform patches that previously shimmed the ctypes load to make this
+# connector importable without a CUDA runtime (e.g. lmcache_ascend) must gate
+# on it and no-op, because a truthy CDLL stand-in would also defeat the
+# cuda_lib is None GDR guard.
+_LMCACHE_EIC_CUDART_OPTIONAL = True
+
 
 class Priorities(IntEnum):
     PEEK = auto()
@@ -608,6 +616,10 @@ class EICConnector(RemoteConnector):
         eic_vals = eic.IOBuffers()
         # Keep references to meta_bytes to prevent dangling pointers
         meta_list = []
+        # chunk key per appended (meta, data) pair, in append order, so the
+        # flat per-key mset outcome maps back to its input chunk.
+        batched_key_strs: List[str] = []
+        skipped_key_strs: List[str] = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             key_str = key.to_string()
             logger.debug("eic batched_put processing %s", key_str)
@@ -619,10 +631,12 @@ class EICConnector(RemoteConnector):
             memory_format = memory_obj.get_memory_format()
             kv_ptr = _transfer_base_ptr(memory_obj)
             if kv_ptr == 0:
-                # Skip this chunk but keep the rest of the batch. A return
-                # here drops every other chunk; this path only becomes
+                # Skip this chunk but keep preparing the rest of the batch.
+                # A return here drops every other chunk. Recorded so the batch
+                # result still reports the chunk as failed below; the path is
                 # reachable once support_batched_put() reports True.
                 logger.error("Memory object has no address for key %s", key_str)
+                skipped_key_strs.append(key_str)
                 continue
 
             remote_meta = RemoteMetadata(
@@ -643,16 +657,23 @@ class EICConnector(RemoteConnector):
                 memory_format,
             )
 
-            # Add meta key & value
-            meta_key = key_str + "_meta"
-            eic_keys.append(meta_key)
+            # Add meta key & value, then data key & value, as one pair.
+            eic_keys.append(key_str + "_meta")
             eic_vals.append(meta_ptr, meta_size, False)
-            # Add data key & value
             eic_keys.append(key_str)
             if self.trans_type == eic.TransportType.TRANSPORT_GDR:
                 eic_vals.append(data_ptr, data_size, True)
             else:
                 eic_vals.append(data_ptr, data_size, False)
+            batched_key_strs.append(key_str)
+
+        # Every chunk was skipped before an mset was built: nothing landed and
+        # the empty call must not be mistaken for success.
+        if not batched_key_strs:
+            raise RuntimeError(
+                "eic batched_put wrote nothing; all chunks had no address: "
+                f"{skipped_key_strs}"
+            )
 
         set_option = eic.SetOption()
         set_option.ns = self.eic_kv_ns
@@ -662,27 +683,47 @@ class EICConnector(RemoteConnector):
             eic_keys, eic_vals, set_option
         )
 
-        # PARTIAL_FAILED means some keys landed and the per-key status_codes
-        # below are authoritative; returning here would skip the confirmation
-        # loop, so keys that did write are never confirmed and failures are
-        # never logged. Only a whole-call failure has nothing to inspect.
+        # PARTIAL_FAILED means some chunks landed and the per-key status_codes
+        # below are authoritative, so the confirmation loop still runs. A
+        # whole-call failure has no per-key detail to inspect.
         if set_status_code not in (
             eic.StatusCode.SUCCESS,
             eic.StatusCode.PARTIAL_FAILED,
         ):
-            logger.error("eic batched_put mset failed, status_code %s", set_status_code)
-            return
-        for i, key_str in enumerate(eic_keys):
-            meta_key = key_str + "_meta"
+            logger.error(
+                "eic batched_put mset failed, status_code %s", set_status_code
+            )
+            raise RuntimeError(
+                f"eic batched_put mset failed, status_code {set_status_code}, "
+                f"skipped chunks {skipped_key_strs}"
+            )
 
-            outcome_err_code = set_outcome.status_codes[i]
-            log_key = meta_key if i % 2 == 0 else key_str
-            if outcome_err_code == eic.StatusCode.SUCCESS:
-                logger.debug("eic batched_put %s success", log_key)
-            else:
-                logger.error(
-                    "eic batched_put %s failed, err_code %s", log_key, outcome_err_code
-                )
+        # Each input chunk occupies one (meta, data) status pair. A chunk is
+        # only confirmed when both landed; collect the rest and raise once so
+        # the task future carries the failure instead of completing normally.
+        failed = list(skipped_key_strs)
+        for pos, key_str in enumerate(batched_key_strs):
+            meta_err = set_outcome.status_codes[2 * pos]
+            data_err = set_outcome.status_codes[2 * pos + 1]
+            if (
+                meta_err == eic.StatusCode.SUCCESS
+                and data_err == eic.StatusCode.SUCCESS
+            ):
+                logger.debug("eic batched_put %s success", key_str)
+                continue
+            logger.error(
+                "eic batched_put %s failed, meta err_code %s, data err_code %s",
+                key_str,
+                meta_err,
+                data_err,
+            )
+            failed.append(key_str)
+
+        if failed:
+            raise RuntimeError(
+                f"eic batched_put failed for {len(failed)} of "
+                f"{len(batched_key_strs) + len(skipped_key_strs)} chunks: {failed}"
+            )
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         if not hasattr(self, "pq_executor") or self.pq_executor is None:
@@ -840,64 +881,85 @@ class EICConnector(RemoteConnector):
             return [None] * n
 
         # Stage 2: allocate buffers for every meta hit, then one mget for all
-        # data keys.
+        # data keys. Every allocation enters ``staged`` and is released in the
+        # finally unless the consume loop hands it to the caller, so a raise
+        # from allocate, the pointer helper, or mget cannot leak the objects
+        # staged before it.
         results: List[Optional[MemoryObj]] = [None] * n
         data_keys = eic.StringVector()
         data_vals = eic.IOBuffers()
-        staged: List[tuple[int, MemoryObj]] = []
-        for i in hit_indices:
-            meta = metas[i]
-            memory_obj = self.memory_allocator.allocate(
-                meta.shapes, meta.dtypes, meta.fmt
-            )
-            if memory_obj is None:
-                # Allocation failure is not a miss; leave the slot None and
-                # skip it instead of requesting data with nowhere to land.
+        staged: List[Optional[tuple[int, MemoryObj]]] = []
+        try:
+            for i in hit_indices:
+                meta = metas[i]
+                memory_obj = self.memory_allocator.allocate(
+                    meta.shapes, meta.dtypes, meta.fmt
+                )
+                if memory_obj is None:
+                    # Allocation failure is not a miss; leave the slot None and
+                    # skip it instead of requesting data with nowhere to land.
+                    logger.error(
+                        "fail to allocate memory during remote receive key %s",
+                        key_strs[i],
+                    )
+                    continue
+                # Take ownership as soon as allocation succeeds so the finally
+                # covers a raise from the pointer helper or buffer append, not
+                # just the data_ptr == 0 return.
+                staged.append((i, memory_obj))
+                data_ptr = _transfer_base_ptr(memory_obj)
+                if data_ptr == 0:
+                    staged.pop()
+                    memory_obj.ref_count_down()
+                    logger.error(
+                        "Memory object has no address for key %s", key_strs[i]
+                    )
+                    continue
+                data_keys.append(key_strs[i])
+                data_vals.append(
+                    data_ptr,
+                    memory_obj.get_size(),
+                    self.trans_type == eic.TransportType.TRANSPORT_GDR,
+                )
+
+            if not staged:
+                return results
+
+            try:
+                status_code, _, data_outcome = self.connection.mget(
+                    data_keys, get_option, data_vals
+                )
+            except Exception as e:
+                logger.error("eic batched mget data raised exception: %s", e)
+                return results
+
+            if status_code not in (
+                eic.StatusCode.SUCCESS,
+                eic.StatusCode.PARTIAL_FAILED,
+                eic.StatusCode.FAILED,
+            ):
                 logger.error(
-                    "fail to allocate memory during remote receive key %s",
-                    key_strs[i],
+                    "eic batched mget data failed, status_code %s", status_code
                 )
-                continue
-            data_ptr = _transfer_base_ptr(memory_obj)
-            if data_ptr == 0:
-                logger.error("Memory object has no address for key %s", key_strs[i])
-                memory_obj.ref_count_down()
-                continue
-            data_keys.append(key_strs[i])
-            data_vals.append(
-                data_ptr,
-                memory_obj.get_size(),
-                self.trans_type == eic.TransportType.TRANSPORT_GDR,
-            )
-            staged.append((i, memory_obj))
+                return results
 
-        if not staged:
+            for pos, entry in enumerate(staged):
+                i, memory_obj = entry
+                if data_outcome.status_codes[pos] == eic.StatusCode.SUCCESS:
+                    results[i] = memory_obj
+                    # Ownership passes to the caller; skip it in the finally.
+                    staged[pos] = None
+                else:
+                    logger.debug(
+                        "eic mget data %s missed, err_code %s",
+                        key_strs[i],
+                        data_outcome.status_codes[pos],
+                    )
             return results
-
-        status_code, _, data_outcome = self.connection.mget(
-            data_keys, get_option, data_vals
-        )
-        if status_code not in (
-            eic.StatusCode.SUCCESS,
-            eic.StatusCode.PARTIAL_FAILED,
-            eic.StatusCode.FAILED,
-        ):
-            logger.error("eic batched mget data failed, status_code %s", status_code)
-            for _, memory_obj in staged:
-                memory_obj.ref_count_down()
-            return results
-
-        for pos, (i, memory_obj) in enumerate(staged):
-            if data_outcome.status_codes[pos] == eic.StatusCode.SUCCESS:
-                results[i] = memory_obj
-            else:
-                logger.debug(
-                    "eic mget data %s missed, err_code %s",
-                    key_strs[i],
-                    data_outcome.status_codes[pos],
-                )
-                memory_obj.ref_count_down()
-        return results
+        finally:
+            for entry in staged:
+                if entry is not None:
+                    entry[1].ref_count_down()
 
     async def _batched_get(
         self, keys: List[CacheEngineKey]

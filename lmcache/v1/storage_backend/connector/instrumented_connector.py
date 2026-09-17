@@ -182,9 +182,11 @@ class InstrumentedRemoteConnector(RemoteConnector):
         begin = time.perf_counter()
         try:
             await self._connector.batched_put(keys, memory_objs)
-        except Exception as e:
-            logger.warning(f"batched put error: {e}")
         finally:
+            # Ensure reference counts are decreased even if exception occurs.
+            # Do not catch: a failed write must propagate to the batch future
+            # so remote_backend.batched_put_callback observes it, the same way
+            # the single-key put wrapper propagates.
             for memory_obj in memory_objs:
                 memory_obj.ref_count_down()
 
