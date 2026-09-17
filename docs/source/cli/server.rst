@@ -95,6 +95,9 @@ Commonly used flags include:
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
+   * - ``--server-module JSON``
+     - Load an out-of-tree multiprocess server module factory. Repeatable.
+       See :doc:`/developer_guide/extending_lmcache/server_modules`.
    * - ``--trace-level {storage}``
      - Enable storage-level trace recording (see :doc:`trace`).
    * - ``--trace-output PATH``

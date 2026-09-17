@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from multiprocessing.synchronize import Event as EventClass
-from typing import Any, Callable
+from typing import Any, Callable, cast
+from unittest.mock import MagicMock
 import multiprocessing as mp
+import socket
 import sys
 import threading
 import time
@@ -16,6 +18,7 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -35,6 +38,7 @@ from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
+    build_zmq_request_server,
     get_zmq_handler_specs,
 )
 
@@ -63,6 +67,12 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
     )
 
 
+def _unused_tcp_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
     """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
 
@@ -86,6 +96,27 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
         RequestType.P2P_QUERY_LOOKUP_RESULTS,
         RequestType.P2P_UNLOCK_OBJECTS,
     }
+
+
+def test_zmq_server_registers_out_of_tree_services() -> None:
+    """Server modules may attach package-owned ZMQ services before start."""
+    registered_servers: list[MessageQueueServer] = []
+    explicit_registrar = MagicMock(name="explicit_registrar")
+
+    class ServiceModule:
+        def register_zmq_services(self, server: MessageQueueServer) -> None:
+            registered_servers.append(server)
+
+    server = build_zmq_request_server(
+        [cast(Any, ServiceModule())],
+        MPServerConfig(port=_unused_tcp_port()),
+        service_registrars=[explicit_registrar],
+    )
+    try:
+        assert registered_servers == [server]
+        explicit_registrar.assert_called_once_with(server)
+    finally:
+        server.close()
 
 
 def _server_process(

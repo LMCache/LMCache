@@ -30,9 +30,21 @@ message PingResponse {
   bool ok = 1;
 }
 
+message ServerModuleCallRequest {
+  string method = 1;
+  bytes payload = 2;
+}
+
+message ServerModuleCallResponse {
+  bool success = 1;
+  bytes payload = 2;
+  string error = 3;
+}
+
 service ControllerService {
   rpc Clear(ClearRequest) returns (ClearResponse);
   rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
   rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
   rpc Ping(PingRequest) returns (PingResponse);
+  rpc ServerModuleCall(ServerModuleCallRequest) returns (ServerModuleCallResponse);
 }

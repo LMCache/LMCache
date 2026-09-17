@@ -13,6 +13,10 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.server_module import (
+    ServerModuleSpec,
+    parse_server_module_specs,
+)
 
 logger = init_logger(__name__)
 
@@ -119,6 +123,9 @@ class MPServerConfig:
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
+
+    server_modules: list[ServerModuleSpec] = field(default_factory=list)
+    """Out-of-tree server-module factories to load after built-in modules."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -453,6 +460,16 @@ def add_mp_server_args(
         "Options: transfer_query (see lmcache.v1.multiprocess.modules."
         "experimental.__init___.py).",
     )
+    mp_group.add_argument(
+        "--server-module",
+        action="append",
+        default=[],
+        help="JSON object describing an out-of-tree server-module factory. "
+        "Repeat to load multiple modules. Example: "
+        '\'{"module_path":"my_pkg.server_module",'
+        '"factory_name":"build_server_modules",'
+        '"config":{"name":"demo"}}\'.',
+    )
     return parser
 
 
@@ -502,6 +519,7 @@ def parse_args_to_mp_server_config(
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
+        server_modules=parse_server_module_specs(args.server_module or []),
     )
 
 
