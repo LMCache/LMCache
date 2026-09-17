@@ -65,13 +65,13 @@ High-Level Architecture
 
 .. code-block:: text
 
-    vLLM Instance(s)
+    Engine Worker(s)
          |
-         | ZMQ (tcp)
+         | request transport (ZMQ or gRPC)
          v
-    MessageQueueServer (mq.py)
+    RequestServer
          |
-         | dispatch by RequestType
+         | dispatch by operation name
          v
     MPCacheServer (server.py)
          |
@@ -102,15 +102,15 @@ it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The default ZMQ-only server.  Creates an
+**``server.py``** -- Creates an
 ``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
 and/or ``EngineDrivenTransferModule`` depending on
 ``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
 ``engine_driven`` loads just one,
 ``auto`` loads both — plus the blend module when
-``--engine-type blend`` is set). Starts a ``MessageQueueServer``,
-registers handlers for every ``RequestType`` exposed by the loaded
+``--engine-type blend`` is set). It starts the configured ZMQ or gRPC
+``RequestServer``, discovers the annotated operations exposed by the loaded
 modules, and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
@@ -134,12 +134,13 @@ for inspecting detailed internal state.  The ZMQ server runs as part of the
 same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
 
-ZMQ Protocol
-------------
+Request Operations
+------------------
 
-Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
+Workers call the same typed operations through either ZMQ (DEALER/ROUTER) or
+gRPC. The handler scheduling contract is transport-neutral.
 
-**RequestType enum** (defined in ``protocols/base.py``):
+**RPC operations** (declared by typed methods on ``RequestClient``):
 
 .. list-table::
    :header-rows: 1
@@ -531,20 +532,19 @@ Adding an observability subscriber
    concern (metrics / logging / tracing), gated on the corresponding
    CLI flag if needed.
 
-Adding a new request type
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Adding a new RPC
+~~~~~~~~~~~~~~~~
 
-1. Add a new member to ``RequestType`` in ``protocols/base.py``.
-2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   or ``p2p``) and add the request name to that module's ``REQUEST_NAMES``.
-3. Implement the handler method on the appropriate ``EngineModule``
-   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``) and
-   add its ``HandlerSpec`` to ``get_zmq_handler_specs()`` in the ZMQ transport
-   adapter.
-4. ``create_request_server()`` selects the transport. Its ZMQ implementation
-   registers every ``HandlerSpec`` returned for the loaded modules — no manual
-   registration step is needed.
+1. Add a typed ``@rpc_method`` to ``RequestClient``. The method name, parameter
+   annotations, and ``MessagingFuture[T]`` response form the shared Python
+   contract.
+2. Add the protobuf request, response, and service method used by gRPC.
+3. Implement a same-named ``@request_handler`` method on the appropriate
+   ``EngineModule`` and select its ``HandlerType``. ZMQ and gRPC both discover
+   it automatically.
+
+Existing ZMQ operations retain their frozen numeric wire IDs. New operations
+use their string name and do not extend the legacy compatibility table.
 
 Key Source Files
 ----------------
@@ -563,6 +563,10 @@ Key Source Files
      - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
      - Transport-neutral ``EngineModule`` protocol
+   * - ``lmcache/v1/multiprocess/rpc.py``
+     - RPC discovery and typed operation specifications
+   * - ``lmcache/v1/multiprocess/transport/base.py``
+     - Typed ``RequestClient`` and ``RequestServer`` contracts
    * - ``lmcache/v1/multiprocess/transport/server_factory.py``
      - Transport-neutral request-server construction boundary
    * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``
@@ -589,8 +593,6 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
-   * - ``lmcache/v1/multiprocess/protocols/base.py``
-     - RequestType, HandlerType, ProtocolDefinition
    * - ``lmcache/v1/distributed/storage_manager.py``
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``

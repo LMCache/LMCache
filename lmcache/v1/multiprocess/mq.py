@@ -2,7 +2,7 @@
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
+from typing import Any, Callable, Generic, TypeVar, get_type_hints
 import enum
 import inspect
 import itertools
@@ -25,13 +25,13 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.futures import (
     MessagingFuture,
 )
-from lmcache.v1.multiprocess.protocol import (
-    HandlerType,
-    RequestType,
-    get_payload_classes,
-    get_response_class,
-)
+from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
+from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    decode_operation,
+    encode_operation,
+)
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
@@ -276,7 +276,7 @@ class MessageQueueClient:
     class WrappedRequest:
         request_uid: RequestUID
         future: MessagingFuture[Any]
-        request_type: RequestType
+        rpc_spec: RpcSpec
         request_payloads: list[Any]
 
     def __init__(self, server_url: str, context: zmq.Context):
@@ -290,7 +290,7 @@ class MessageQueueClient:
 
         # Pending job's futures
         self._request_counter = itertools.count()
-        self.pending_futures: dict[int, MessagingFuture[Any]] = {}
+        self.pending_futures: dict[int, tuple[MessagingFuture[Any], RpcSpec]] = {}
 
         # Register with the shared polling loop
         self._polling_loop = ClientPollingLoop.get_instance()
@@ -302,10 +302,9 @@ class MessageQueueClient:
                 request_uid = wrapped_request.request_uid
                 try:
                     b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
-                    b_request_type = msgspec_encode(
-                        wrapped_request.request_type, cls=RequestType
-                    )
-                    payload_classes = get_payload_classes(wrapped_request.request_type)
+                    rpc_spec = wrapped_request.rpc_spec
+                    b_operation = encode_operation(rpc_spec.operation)
+                    payload_classes = rpc_spec.payload_types
                     if len(payload_classes) != len(wrapped_request.request_payloads):
                         expected_classes = [cls.__name__ for cls in payload_classes]
                         actual_classes = [
@@ -314,7 +313,7 @@ class MessageQueueClient:
                         ]
                         raise ValueError(
                             f"Payload count mismatch for request "
-                            f"{wrapped_request.request_type}: "
+                            f"{rpc_spec.operation}: "
                             f"expected {len(payload_classes)} payloads "
                             f"{expected_classes}, "
                             f"got {len(wrapped_request.request_payloads)} payloads "
@@ -331,9 +330,12 @@ class MessageQueueClient:
                             strict=False,
                         )
                     ]
-                    self.pending_futures[request_uid] = wrapped_request.future
+                    self.pending_futures[request_uid] = (
+                        wrapped_request.future,
+                        rpc_spec,
+                    )
                     self.socket.send_multipart(
-                        [b_request_uid, b_request_type] + b_payloads
+                        [b_request_uid, b_operation] + b_payloads
                     )
                 except Exception as exc:
                     self.pending_futures.pop(request_uid, None)
@@ -352,47 +354,52 @@ class MessageQueueClient:
         if len(msg) < 2:
             logger.error(
                 "Malformed response: expected at least 2 message parts "
-                "[request_uid, request_type, *response], got %d",
+                "[request_uid, operation, *response], got %d",
                 len(msg),
             )
             return
-        b_request_uid, b_request_type, *b_response = msg
+        b_request_uid, b_operation, *b_response = msg
         request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
-        request_type = msgspec_decode(b_request_type, cls=RequestType)
-        response_cls = get_response_class(request_type)
 
         if request_uid in self.pending_futures:
-            future = self.pending_futures.pop(request_uid)
+            future, rpc_spec = self.pending_futures.pop(request_uid)
+            operation = decode_operation(b_operation)
+            if operation != rpc_spec.operation:
+                future.set_exception(
+                    ValueError(
+                        f"Response operation {operation!r} does not match "
+                        f"request {rpc_spec.operation!r}"
+                    )
+                )
+                return
             if b_response:
-                response = msgspec_decode(b_response[0], cls=response_cls)
+                response = msgspec_decode(b_response[0], cls=rpc_spec.response_type)
                 future.set_result(response)
             else:
                 future.set_result(None)
 
     def submit_request(
         self,
-        request_type: RequestType,
+        operation: RpcOperation,
         request_payloads: list[Any],
-        response_cls: Optional[T] = None,
     ) -> MessagingFuture[T]:
         """Submit a request to the server.
 
         Args:
-            request_type (RequestType): The type of the request.
+            operation: Stable snake-case RPC name.
             request_payloads (list[Any]): The payloads of the request.
-            response_cls (Optional[T]): The expected response class.
-                This should be get from `get_response_class(request_type)`.
 
         Returns:
             MessagingFuture[T]: A future that will hold the response.
         """
+        rpc_spec = get_rpc_spec(operation)
         future: MessagingFuture[T] = MessagingFuture()
         request_uid = next(self._request_counter)
         self.input_queue.put(
             MessageQueueClient.WrappedRequest(
                 request_uid=request_uid,
                 future=future,
-                request_type=request_type,
+                rpc_spec=rpc_spec,
                 request_payloads=request_payloads,
             )
         )
@@ -527,8 +534,8 @@ class MessageQueueServer(RequestServer):
             target=self._main_loop, daemon=True, name="mq-server-thread"
         )
 
-        # Registered handlers: request_type -> (payload_cls, handler)
-        self.handlers: dict[RequestType, RequestHandlerBase[Any]] = {}
+        # Registered handlers: operation -> decoded handler wrapper
+        self.handlers: dict[RpcOperation, RequestHandlerBase[Any]] = {}
 
         # Thread pools assigned via add_normal_thread_pool / add_affinity_thread_pool
         self.extra_pools: list[ThreadPoolExecutor | AffinityThreadPool] = []
@@ -623,25 +630,27 @@ class MessageQueueServer(RequestServer):
                 msg = self.socket.recv_multipart()
                 assert len(msg) >= 3, (
                     "Expected at least 3 message parts "
-                    "[identity, request_uid, request_type, *payloads]"
+                    "[identity, request_uid, operation, *payloads]"
                 )
 
-                identity, b_request_uid, b_request_type, *payloads = msg
-                request_type = msgspec_decode(b_request_type, cls=RequestType)
+                identity, b_request_uid, b_operation, *payloads = msg
+                try:
+                    operation = decode_operation(b_operation)
+                except (TypeError, ValueError):
+                    logger.exception("Invalid ZMQ operation identifier")
+                    continue
 
-                if handler_entry := self.handlers.get(request_type):
+                if handler_entry := self.handlers.get(operation):
                     try:
                         self._call_handler(
                             handler_entry=handler_entry,
                             payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_request_type],
+                            prefix_frames=[identity, b_request_uid, b_operation],
                         )
                     except Exception:
-                        logger.exception("Error handling request %s", request_type)
+                        logger.exception("Error handling operation %s", operation)
                 else:
-                    logger.error(
-                        "No handler registered for request type %s", request_type
-                    )
+                    logger.error("No handler registered for operation %s", operation)
                     logger.error("Available handlers: %s", list(self.handlers.keys()))
 
             # Send the responses
@@ -656,7 +665,9 @@ class MessageQueueServer(RequestServer):
                 except queue.Empty:
                     pass
 
-    def _inspect_handler_signature(self, request_type: RequestType, handler) -> bool:
+    def _inspect_handler_signature(
+        self, rpc_spec: RpcSpec, handler: Callable[..., Any]
+    ) -> bool:
         """Inspect the handler signature to ensure it matches the expected
         payload classes.
 
@@ -686,11 +697,11 @@ class MessageQueueServer(RequestServer):
             )
         ]
 
-        payload_clss = get_payload_classes(request_type)
+        payload_clss = rpc_spec.payload_types
         if len(params) != len(payload_clss):
             logger.error(
                 "Handler for %s expects %d arguments, but got %d",
-                request_type,
+                rpc_spec.operation,
                 len(payload_clss),
                 len(params),
             )
@@ -703,7 +714,7 @@ class MessageQueueServer(RequestServer):
             if not same_type(ann, expected_cls):
                 logger.error(
                     "Handler for %s argument %d expects type %s, but got %s",
-                    request_type,
+                    rpc_spec.operation,
                     i,
                     expected_cls,
                     ann,
@@ -711,11 +722,11 @@ class MessageQueueServer(RequestServer):
                 return False
 
         return_ann = hints.get("return", sig.return_annotation)
-        expected_return_cls = get_response_class(request_type)
+        expected_return_cls = rpc_spec.response_type
         if not same_type(return_ann, expected_return_cls):
             logger.error(
                 "Handler for %s expects return type %s, but got %s",
-                request_type,
+                rpc_spec.operation,
                 expected_return_cls,
                 return_ann,
             )
@@ -724,79 +735,77 @@ class MessageQueueServer(RequestServer):
 
     def add_handler(
         self,
-        request_type: RequestType,
-        payload_clss: list[Any],
+        operation: RpcOperation,
         handler_type: HandlerType,
-        handler,
+        handler: Callable[..., Any],
     ) -> None:
-        """Register a handler for a specific request type.
+        """Register a handler for a specific RPC operation.
 
         Args:
-            request_type (RequestType): The type of the request to handle.
-            payload_clss (list[Any]): The expected payload classes for the request.
-                This should be get from `get_payload_classes(request_type)`.
-            handler (callable): The handler function that takes the payloads
-                as arguments.
+            operation: Stable snake-case RPC name.
+            handler_type: Whether to execute inline or on a worker.
+            handler: Function that accepts the declared RPC payloads.
+
+        Raises:
+            ValueError: If the handler signature does not match the RPC contract.
+            NotImplementedError: If a non-blocking handler is requested.
         """
-        if not self._inspect_handler_signature(request_type, handler):
+        rpc_spec = get_rpc_spec(operation)
+        if not self._inspect_handler_signature(rpc_spec, handler):
             raise ValueError(
-                f"Handler signature does not match for request type: {request_type}"
+                f"Handler signature does not match for operation: {operation}"
             )
 
         match handler_type:
             case HandlerType.SYNC:
-                self.add_sync_handler(request_type, payload_clss, handler)
+                self.add_sync_handler(rpc_spec, handler)
             case HandlerType.BLOCKING:
-                self.add_blocking_handler(request_type, payload_clss, handler)
+                self.add_blocking_handler(rpc_spec, handler)
             case HandlerType.NON_BLOCKING:
                 raise NotImplementedError("Non-blocking handler is not supported yet")
             case _:
                 raise ValueError(f"Unknown handler type: {handler_type}")
 
-    def add_sync_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
-    ) -> None:
-        response_cls = get_response_class(request_type)
-        self.handlers[request_type] = SyncRequestHandler(
-            payload_clss, response_cls, handler
+    def add_sync_handler(self, rpc_spec: RpcSpec, handler: Callable[..., Any]) -> None:
+        self.handlers[rpc_spec.operation] = SyncRequestHandler(
+            list(rpc_spec.payload_types), rpc_spec.response_type, handler
         )
 
     def add_blocking_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self, rpc_spec: RpcSpec, handler: Callable[..., Any]
     ) -> None:
-        response_cls = get_response_class(request_type)
-        self.handlers[request_type] = BlockingRequestHandler(
-            payload_clss, response_cls, handler
+        self.handlers[rpc_spec.operation] = BlockingRequestHandler(
+            list(rpc_spec.payload_types), rpc_spec.response_type, handler
         )
 
     def add_nonblocking_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self, rpc_spec: RpcSpec, handler: Callable[..., Any]
     ) -> None:
         raise NotImplementedError
 
     def _validate_blocking_handlers(
         self,
-        request_types: list[RequestType],
+        operations: list[RpcOperation],
         method_name: str,
     ) -> None:
-        """Validate that all request types are registered BlockingRequestHandlers."""
-        for request_type in request_types:
-            handler = self.handlers.get(request_type)
+        """Validate that all operations are registered blocking handlers."""
+        for operation in operations:
+            handler = self.handlers.get(operation)
             if handler is None:
                 raise ValueError(
-                    f"No handler registered for request type: {request_type}. "
+                    f"No handler registered for operation: {operation}. "
                     f"Register handlers before calling {method_name}."
                 )
             if not isinstance(handler, BlockingRequestHandler):
                 raise TypeError(
-                    f"Handler for {request_type} is "
+                    f"Handler for {operation} is "
                     f"{type(handler).__name__}, not BlockingRequestHandler. "
                     f"Only blocking handlers can use thread pools."
                 )
 
     def add_normal_thread_pool(
         self,
-        request_types: list[RequestType],
+        operations: list[RpcOperation],
         max_workers: int,
     ) -> None:
         """Assign a ThreadPoolExecutor to specific request types.
@@ -804,16 +813,16 @@ class MessageQueueServer(RequestServer):
         Use this for non-GPU blocking handlers (e.g. LOOKUP, END_SESSION).
 
         Must be called after the handlers are registered (via add_handler /
-        add_blocking_handler) and before start().  Each request_type must
+        add_blocking_handler) and before start(). Each operation must
         already be registered as a BlockingRequestHandler; otherwise a
         ValueError or TypeError is raised.
 
         Args:
-            request_types: The request types that should use this pool.
+            operations: The RPC operations that should use this pool.
             max_workers: Number of worker threads in the pool.
         """
-        self._validate_blocking_handlers(request_types, "add_normal_thread_pool")
-        if not request_types:
+        self._validate_blocking_handlers(operations, "add_normal_thread_pool")
+        if not operations:
             return
 
         pool = ThreadPoolExecutor(
@@ -821,20 +830,20 @@ class MessageQueueServer(RequestServer):
             thread_name_prefix=f"normal-pool-{len(self.extra_pools)}",
         )
         self.extra_pools.append(pool)
-        for request_type in request_types:
-            handler = self.handlers[request_type]
+        for operation in operations:
+            handler = self.handlers[operation]
             assert isinstance(handler, BlockingRequestHandler)
             handler.executor = pool
 
         logger.debug(
             "Created normal thread pool (max_workers=%d) for request types: %s",
             max_workers,
-            [rt.name for rt in request_types],
+            operations,
         )
 
     def add_affinity_thread_pool(
         self,
-        request_types: list[RequestType],
+        operations: list[RpcOperation],
         max_workers: int,
     ) -> None:
         """Assign an AffinityThreadPool to specific request types.
@@ -848,11 +857,11 @@ class MessageQueueServer(RequestServer):
         add_blocking_handler) and before start().
 
         Args:
-            request_types: The request types that should use this pool.
+            operations: The RPC operations that should use this pool.
             max_workers: Number of worker threads in the pool.
         """
-        self._validate_blocking_handlers(request_types, "add_affinity_thread_pool")
-        if not request_types:
+        self._validate_blocking_handlers(operations, "add_affinity_thread_pool")
+        if not operations:
             return
 
         pool = AffinityThreadPool(
@@ -860,15 +869,15 @@ class MessageQueueServer(RequestServer):
             thread_name_prefix=f"affinity-pool-{len(self.extra_pools)}",
         )
         self.extra_pools.append(pool)
-        for request_type in request_types:
-            handler = self.handlers[request_type]
+        for operation in operations:
+            handler = self.handlers[operation]
             assert isinstance(handler, BlockingRequestHandler)
             handler.executor = pool
 
         logger.debug(
             "Created affinity thread pool (max_workers=%d) for request types: %s",
             max_workers,
-            [rt.name for rt in request_types],
+            operations,
         )
 
     def start(self) -> None:

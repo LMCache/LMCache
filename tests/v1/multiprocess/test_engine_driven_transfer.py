@@ -15,16 +15,16 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.multiprocess.custom_types import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
     shm_open_pool_as_mmap,
     shm_unlink,
-)
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
@@ -1439,7 +1439,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
     # First Party
-    from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
+    from lmcache.v1.multiprocess.custom_types import PrepareStoreResponse
 
     mock_storage = MagicMock()
     memory_obj = MagicMock()

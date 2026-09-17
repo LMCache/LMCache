@@ -1,15 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """ZMQ transport implementation for multiprocess requests."""
 
-# Standard
-from typing import Any
+# Future
+from __future__ import annotations
 
-# First Party
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.zmq_impl.client import (
-    ZmqMultiprocessClient,
-)
+# Standard
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.multiprocess.transport.zmq_impl.client import (
+        ZmqMultiprocessClient,
+    )
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve public ZMQ client types without eager implementation imports."""
+    if name == "ZmqMultiprocessClient":
+        # First Party
+        from lmcache.v1.multiprocess.transport.zmq_impl.client import (
+            ZmqMultiprocessClient,
+        )
+
+        return ZmqMultiprocessClient
+    raise AttributeError(name)
 
 
 def create_request_client(
@@ -26,12 +41,20 @@ def create_request_client(
     Returns:
         A ZMQ-backed request client.
     """
-    if context is None:
-        # Third Party
-        import zmq
+    # Third Party
+    import zmq
 
+    # First Party
+    from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.transport.zmq_impl.client import (
+        ZmqMultiprocessClient,
+    )
+
+    if context is None:
         context = zmq.Context.instance()
-    return ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+    return ZmqMultiprocessClient(  # type: ignore[abstract]
+        MessageQueueClient(server_url, context)
+    )
 
 
 __all__ = ["ZmqMultiprocessClient", "create_request_client"]
