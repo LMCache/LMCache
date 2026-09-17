@@ -3,6 +3,7 @@
 from concurrent.futures import Future
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
+import os
 import threading
 import time
 
@@ -21,12 +22,22 @@ from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAlloc
 from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.memory_allocators.virtual_memory_allocator import (
+    VirtualMemoryAllocator,
+    build_regions_from_descriptors,
+    choose_allocation_policy,
+)
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.resource_manifest import (
+    parse_pcie_bar_env_vars,
+    resolve_device_binding,
+    resolve_manifest,
+)
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -353,11 +364,62 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             return configured_cpu_size
 
+    def _resolve_pcie_bar_allocator(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: Optional[LMCacheMetadata],
+    ) -> Optional[VirtualMemoryAllocator]:
+        """Build a VirtualMemoryAllocator for PCIe BAR resources.
+
+        Applies GPU device binding when running multi-GPU (non-MP path).
+        Returns None when no PCIe BAR configuration is found.
+        """
+        manifest = resolve_manifest(config)
+        if manifest is None:
+            manifest = parse_pcie_bar_env_vars(config.max_local_cpu_size)
+        if manifest is None:
+            return None
+
+        resources = manifest.resources
+        if manifest.device_binding_policy and manifest.device_binding_policy != "auto":
+            num_gpus = metadata.local_world_size if metadata else 1
+            gpu_id = metadata.local_worker_id if metadata else 0
+            binding_name = manifest.device_binding_policy
+            binding_policy = resolve_device_binding(binding_name)
+            resources = binding_policy.bind(resources, num_gpus, gpu_id)
+            if not resources:
+                raise ValueError(
+                    f"Binding policy {binding_name!r} assigned no resources to "
+                    f"GPU {gpu_id} (num_gpus={num_gpus}, "
+                    f"total_resources={len(manifest.resources)})"
+                )
+
+        numa_mapping = NUMADetector.get_numa_mapping(config)
+
+        def make_dram(size_bytes: int) -> MixedMemoryAllocator:
+            return MixedMemoryAllocator(
+                size_bytes, numa_mapping=numa_mapping, config=config
+            )
+
+        regions = build_regions_from_descriptors(resources, make_dram)
+        if not regions:
+            return None
+
+        policy_name = manifest.allocation_policy or "auto"
+        policy = choose_allocation_policy(regions, policy_name)
+        alloc = VirtualMemoryAllocator(regions, policy)
+        logger.info("LocalCPUBackend: %s", alloc)
+        return alloc
+
     def initialize_allocator(
         self,
         config: LMCacheEngineConfig,
         metadata: Optional[LMCacheMetadata] = None,
     ) -> MemoryAllocatorInterface:
+        pcie_bar_alloc = self._resolve_pcie_bar_allocator(config, metadata)
+        if pcie_bar_alloc is not None:
+            return pcie_bar_alloc
+
         cpu_size = config.max_local_cpu_size
         use_hugepages = config.local_cpu_use_hugepages
 
@@ -774,7 +836,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_objs is not None or not eviction:
             return memory_objs
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+        assert isinstance(
+            self.memory_allocator, (MixedMemoryAllocator, VirtualMemoryAllocator)
+        )
 
         evict_keys_count = 0
         num_attempts = 0
@@ -911,7 +975,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
         Returns:
             int: The estimated chunk budget for concurrent allocations
         """
-        total_memory = int(self.config.max_local_cpu_size * 1024**3)
+        if hasattr(self.memory_allocator, "total_size_bytes"):
+            total_memory = self.memory_allocator.total_size_bytes
+        else:
+            total_memory = int(self.config.max_local_cpu_size * 1024**3)
         chunk_bytes = self.get_full_chunk_size_bytes()
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
