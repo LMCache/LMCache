@@ -264,9 +264,8 @@ def normalize_and_discover_per_layer_formats(
 
     Args:
         kv_caches: The registered KV caches: a per-layer list (entries are
-            bare tensors or per-layer plane tuples, e.g. vLLM-Ascend's
-            ``(latent, rope)``), or a single fused tensor for cross-layer
-            formats.
+            bare tensors or per-layer tuples), or a single fused tensor
+            for cross-layer formats.
         layer_index_groups: Layer indices of each engine group (one inner
             sequence per group). Empty means a single non-hybrid group.
         serving_engine: Which serving engine produced the caches.
