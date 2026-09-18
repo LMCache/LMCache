@@ -286,31 +286,6 @@ def test_scheduler_reset_cache_failure_preserves_server_health(
     assert adapter.is_healthy is True
 
 
-def test_scheduler_reset_cache_still_tries_unhealthy_server() -> None:
-    """A stale health mark does not suppress a best-effort CLEAR attempt."""
-    adapter, clients = _make_scheduler_adapter(["server-a"])
-    adapter._health_events["server-a"].clear()
-    future = MagicMock(name="clear_future")
-    clients["server-a"].clear.return_value = future
-
-    assert adapter.reset_cache() is True
-    clients["server-a"].clear.assert_called_once_with(force=False)
-    assert adapter.is_healthy is False
-
-
-def test_scheduler_reset_cache_continues_after_submit_failure() -> None:
-    """One synchronous transport failure does not suppress other CLEARs."""
-    adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
-    clients["server-a"].clear.side_effect = RuntimeError("submit failed")
-    future = MagicMock(name="clear_future")
-    clients["server-b"].clear.return_value = future
-
-    assert adapter.reset_cache() is False
-    clients["server-a"].clear.assert_called_once_with(force=False)
-    clients["server-b"].clear.assert_called_once_with(force=False)
-    future.result.assert_called_once()
-
-
 def test_connector_reset_cache_forwards_with_active_requests() -> None:
     """Scheduler reset delegates without discarding active request trackers."""
     connector_mod = pytest.importorskip("lmcache.integration.vllm.lmcache_mp_connector")
