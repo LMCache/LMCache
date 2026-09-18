@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, List, Optional
-from urllib.parse import quote as url_quote
 import asyncio
+import hashlib
 
 # First Party
 from lmcache.logging import init_logger
@@ -26,8 +26,8 @@ class AzureConnector(RemoteConnector):
     ``azure-storage-blob`` (async client). The SDK is imported lazily inside
     ``__init__`` so that ``azure-storage-blob`` remains an optional dependency.
 
-    Keys are flattened into a single blob name per chunk (slashes replaced and
-    URL-encoded), matching the flat layout S3Connector uses.
+    The complete cache key is hashed into a bounded, versioned blob name,
+    matching S3Connector's logical object naming.
     """
 
     def __init__(
@@ -134,8 +134,9 @@ class AzureConnector(RemoteConnector):
     # helpers
     # ------------------------------------------------------------------ #
     def _blob_name(self, key_str: str) -> str:
-        """Flatten a key into a safe blob name."""
-        return url_quote(key_str.replace("/", "_"), safe="")
+        """Encode the complete identity without reusing ambiguous legacy names."""
+        digest = hashlib.sha256(key_str.encode("utf-8")).hexdigest()
+        return f"lmcache-v2/{digest}"
 
     async def _get_blob_size_async(self, key_str: str) -> int:
         """Return the blob size in bytes for ``key_str``, or 0 if the blob is
