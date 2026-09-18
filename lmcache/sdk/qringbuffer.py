@@ -625,12 +625,10 @@ class QRingBufferAdapter:
             raise RuntimeError("Q ring is not initialized yet.")
         try:
             self._adapter.transfer_ctx.register_q(
-                self._adapter.instance_id,
                 self.q_ring.tensors,
                 self.q_model_name,
                 self._adapter.world_size,
                 self._adapter.blocks_in_chunk,
-                self._adapter.req_client,
                 self._adapter._mq_timeout,
                 layout_hints=vllm_layout_hints(),
                 engine_group_infos=self.q_engine_group_infos,
@@ -710,7 +708,6 @@ class QRingBufferAdapter:
         future = self._adapter.transfer_ctx.submit_q_store(
             request_id,
             key,
-            self._adapter.instance_id,
             self.q_ring.tensors,
             [ring_block_ids],
             event,

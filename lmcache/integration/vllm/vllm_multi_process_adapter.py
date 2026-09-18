@@ -32,15 +32,13 @@ from lmcache.v1.multiprocess.group_view import (
 )
 from lmcache.v1.multiprocess.mq import MessagingFuture
 from lmcache.v1.multiprocess.transfer_context import (
-    EngineDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
-from lmcache.v1.platform.cuda.vmm_ipc import set_use_vmm_api
-from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import set_ipc_policy
 
 if TYPE_CHECKING:
     # First Party
@@ -88,13 +86,13 @@ class ExtraConfigDefault(enum.Enum):
     mp_transfer_mode = "auto"
     # Whether IPC mechanisms must work across isolated containers (no
     # shared host IPC namespace or /dev/shm); see
-    # lmcache/v1/platform/isolated_ipc.py. Must match the LMCache server's
+    # lmcache.v1.platform.ipc_policy. Must match the LMCache server's
     # ``--isolated-ipc`` setting.
     isolated_ipc = False
     # Whether the engine allocates its KV cache through the CUDA VMM API
     # (vLLM's ``--enable-cumem-allocator``), so KV registration must use
     # VMM IPC instead of legacy CUDA IPC handles; see
-    # lmcache/v1/platform/cuda/vmm_ipc.py.
+    # lmcache.v1.platform.ipc_policy.
     use_vmm_api = False
 
 
@@ -1251,8 +1249,10 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
-            set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
-            set_use_vmm_api(cfg[ExtraConfigDefault.use_vmm_api.name])
+            set_ipc_policy(
+                isolated_ipc=cfg[ExtraConfigDefault.isolated_ipc.name],
+                use_vmm_api=cfg[ExtraConfigDefault.use_vmm_api.name],
+            )
         else:
             self._mp_transfer_mode = None
         self.req_client = RequestClientFactory.create(server_url, context=context)
@@ -1463,7 +1463,12 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
+        transfer_ctx = create_transfer_context(
+            kv_caches,
+            instance_id=self.instance_id,
+            req_client=self.req_client,
+            mode=self._mp_transfer_mode,
+        )
         layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
         try:
@@ -1471,12 +1476,10 @@ class LMCacheMPWorkerAdapter:
             # shutdown() may null self.transfer_ctx between publish and this
             # call. The local is always non-None.
             transfer_ctx.register(
-                self.instance_id,
                 kv_caches,
                 self.model_name,
                 self.world_size,
                 self.blocks_in_chunk,
-                self.req_client,
                 self._mq_timeout,
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
@@ -1637,7 +1640,6 @@ class LMCacheMPWorkerAdapter:
         future = self.transfer_ctx.submit_store(
             request_id,
             key,
-            self.instance_id,
             self.kv_caches,
             self._block_ids_per_group(op),
             event,
@@ -1696,7 +1698,6 @@ class LMCacheMPWorkerAdapter:
         future = self.transfer_ctx.submit_retrieve(
             request_id,
             key,
-            self.instance_id,
             self.kv_caches,
             self._block_ids_per_group(op),
             event,
@@ -2129,21 +2130,18 @@ class LMCacheMPWorkerAdapter:
             if self._heartbeat is not None:
                 self._heartbeat.stop()
 
-        logger.info("Unregistering kv caches")
-        try:
-            if isinstance(self.transfer_ctx, EngineDrivenTransferContext):
-                future = self.req_client.unregister_kv_cache_engine_driven_context(
-                    self.instance_id
+        if self.transfer_ctx is not None:
+            logger.info("Unregistering kv caches")
+            try:
+                future = self.transfer_ctx.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "LMCache server did not respond to unregister within %ss. "
+                    "Proceeding with shutdown.",
+                    self._mq_timeout,
                 )
-            else:
-                future = self.req_client.unregister_kv_cache(self.instance_id)
-            future.result(timeout=self._mq_timeout)
-        except TimeoutError:
-            logger.warning(
-                "LMCache server did not respond to unregister within %ss. "
-                "Proceeding with shutdown.",
-                self._mq_timeout,
-            )
 
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "shutdown")
