@@ -158,6 +158,11 @@ class RequestClient(Protocol):
     def get_chunk_size(self) -> MessagingFuture[int]: ...
 
     @rpc_method
+    def negotiate_chunk_size(
+        self, required_chunk_alignment: int
+    ) -> MessagingFuture[int]: ...
+
+    @rpc_method
     def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...
 
     @rpc_method
