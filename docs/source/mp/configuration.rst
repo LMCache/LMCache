@@ -321,6 +321,31 @@ Source: ``lmcache/v1/distributed/config.py``
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.
+   * - ``--l2-prefetch-load-timeout``
+     - *(not set)*
+     - Optional monotonic deadline, in seconds, for a lookup-mode L2 prefetch,
+       covering the time from when the request enters the prefetch controller
+       through queueing, L2 lookup, and L2 load. When it expires the caller
+       receives the subset already usable under the trim policy and the rest is
+       reported as a cache miss to recompute, rather than waiting for a slow L2.
+       Not set (the default) disables the deadline and preserves existing
+       behavior; a value ``<= 0`` is rejected at startup.
+
+L2 Prefetch Load Deadline vs. ``mq_timeout``
+--------------------------------------------
+
+``--l2-prefetch-load-timeout`` is a **server-side cache policy**: on expiry it
+defines a *result* — the usable cache subset now, with the remainder recomputed.
+``lmcache.mp.mq_timeout`` (above) is a **client-side transport bound**: it caps
+how long a blocking message-queue request waits before the connector raises a
+connection error. The two are independent layers and should not be conflated:
+
+- Set ``mq_timeout`` comfortably larger than ``--l2-prefetch-load-timeout`` so
+  the deadline's fallback result returns over a healthy RPC. If ``mq_timeout``
+  were the smaller of the two, the transport could time out first and surface a
+  connection error instead of the intended recompute fallback.
+- When the load deadline fires, the request still returns a normal completion
+  status (the retained-chunk count), not a timeout error.
 
 GDS L1 Tier
 -----------
