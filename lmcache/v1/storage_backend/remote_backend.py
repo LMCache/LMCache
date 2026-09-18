@@ -224,12 +224,16 @@ class RemoteBackend(StorageBackendInterface):
         key: CacheEngineKey,
         memory_obj: MemoryObj,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+        *,
+        bypass_mla_write_filter: bool = False,
     ) -> Future:
         """
         Submit a put task to store KV cache to remote storage asynchronously.
 
         :param on_complete_callback: Optional callback invoked after the remote
             write completes. Callback exceptions are caught and logged.
+        :param bypass_mla_write_filter: Allow a health probe to perform a real
+            write on a nonzero MLA worker. Normal cache writes retain the filter.
         """
 
         def create_immediate_empty_future() -> Future:
@@ -242,7 +246,7 @@ class RemoteBackend(StorageBackendInterface):
             return create_immediate_empty_future()
 
         # If MLA worker id as 0 mode is enabled, skip put tasks
-        if self._mla_worker_id_as0_mode:
+        if self._mla_worker_id_as0_mode and not bypass_mla_write_filter:
             return create_immediate_empty_future()
 
         if self.exists_in_put_tasks(key):
