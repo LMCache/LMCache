@@ -135,11 +135,11 @@ class MPCacheServer:
                 }
         return None
 
-    def clear(self) -> None:
+    def clear(self, force: bool = False) -> None:
         """Used by ``/cache/clear``; delegates to :class:`ManagementModule`."""
         for module in self._modules:
             if isinstance(module, ManagementModule):
-                module.clear()
+                module.clear(force=force)
                 return
         raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
 
