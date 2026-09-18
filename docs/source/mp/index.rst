@@ -223,7 +223,8 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - Remove session state for a finished request.
    * - ``CLEAR``
      - BLOCKING
-     - Clear all cached data.
+     - Clear cached data. The optional ``force`` flag defaults to ``False``;
+       when set, active locks may be ignored.
    * - ``GET_CHUNK_SIZE``
      - SYNC
      - Return the server's chunk size.
