@@ -180,9 +180,9 @@ class ZmqMultiprocessClient(RequestClient):
         """Commit an engine-driven retrieve."""
         return self._call(RequestType.COMMIT_RETRIEVE, key, instance_id)
 
-    def clear(self) -> MessagingFuture[Any]:
+    def clear(self, force: bool = False) -> MessagingFuture[Any]:
         """Clear all server caches."""
-        return self._call(RequestType.CLEAR)
+        return self._call(RequestType.CLEAR, force)
 
     def get_chunk_size(self) -> MessagingFuture[Any]:
         """Return the server chunk size."""

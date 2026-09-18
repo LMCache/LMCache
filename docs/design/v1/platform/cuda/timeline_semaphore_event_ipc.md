@@ -151,7 +151,7 @@ when the failure is on the server).
 device event; this backend only exports its own event objects. Call sites
 that bypass the backend break under isolated IPC:
 
-- **Migrated**: the vLLM MP connectors (`main`, `_0180`, `_0201`) now call
+- **Migrated**: the vLLM MP connector now calls
   `LMCacheMPWorkerAdapter.create_recorded_event()` after mode and config
   selection. That delegates to `transfer_ctx.create_recorded_event()`, so
   LMCache-driven transfers use the cached platform event backend, async
