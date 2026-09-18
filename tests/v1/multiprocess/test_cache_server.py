@@ -376,7 +376,10 @@ def registered_instance(
 
     # Unregister KV cache
     try:
-        client.clear().result(timeout=DEFAULT_TIMEOUT)
+        # Fixture cleanup must restore the old test-isolation behavior:
+        # retrieve paths can leave completed entries read-locked briefly, and
+        # non-force clear intentionally preserves those objects.
+        client.clear(force=True).result(timeout=DEFAULT_TIMEOUT)
         future = client.unregister_kv_cache(instance_id)
         future.result(timeout=DEFAULT_TIMEOUT)
     except Exception as e:

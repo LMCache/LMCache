@@ -148,6 +148,27 @@ def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
     ]
 
 
+def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:
+    transport = _RecordingMessageQueueClient()
+    client = ZmqMultiprocessClient(transport)
+
+    client.clear()
+    client.clear(force=True)
+
+    assert transport.calls == [
+        (
+            RequestType.CLEAR,
+            [False],
+            get_response_class(RequestType.CLEAR),
+        ),
+        (
+            RequestType.CLEAR,
+            [True],
+            get_response_class(RequestType.CLEAR),
+        ),
+    ]
+
+
 def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
     transport = _RecordingMessageQueueClient()
     client = ZmqMultiprocessClient(transport)
