@@ -233,6 +233,18 @@ def test_add_rejects_invalid_size_payloads(
     assert resp.status_code == status_code
 
 
+def test_size_rejects_boolean_and_float_payloads() -> None:
+    resp = _client(_FakeStorageManager()).post(
+        "/reconfigure/dax/add", json={"device_path": "/dev/daxX.X", "size": True}
+    )
+    assert resp.status_code == 422
+    resp = _client(_FakeStorageManager()).post(
+        "/reconfigure/dax/resize",
+        json={"device_path": "/dev/daxX.X", "size": 4096.0},
+    )
+    assert resp.status_code == 422
+
+
 def test_add_rejects_pathological_size_string_without_echoing_input():
     sm = _FakeStorageManager()
     bad_size = "9" + " " * 5000 + "x"
@@ -331,6 +343,6 @@ def test_reconfigure_post_rejects_missing_backend_adapter():
     assert resp.json() == {"error": "fake adapter not found"}
 
 
-def test_old_dax_routes_are_not_registered():
+def test_old_dax_routes_are_not_registered() -> None:
     resp = _client(_FakeStorageManager()).get("/dax/status")
     assert resp.status_code == 404
