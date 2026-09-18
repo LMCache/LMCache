@@ -789,6 +789,11 @@ def _is_kv_second_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
     return _format_spec(engine_kv_format).is_kv_second_tuple
 
 
+def _is_mla_plane_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when each per-layer entry is a tuple of NP >= 1 MLA planes."""
+    return _is_kv_second_tuple_format(engine_kv_format) and is_mla(engine_kv_format)
+
+
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
     # Maps the byte width of a KV-cache element to a representative torch dtype.
     # Only widths that commonly appear in KV caches are listed; 1-byte entries
@@ -1014,7 +1019,7 @@ def _normalize_paged_layers(
     if _is_kv_second_tuple_format(engine_kv_format):
         # Plane tuples accept any length >= 1; other tuple formats are
         # exact (K, V) pairs.
-        is_mla_plane_tuple = engine_kv_format == EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS
+        is_mla_plane_tuple = _is_mla_plane_tuple_format(engine_kv_format)
         if isinstance(paged_buffer_ptrs_tensor, list) and all(
             isinstance(t, (list, tuple))
             and (len(t) >= 1 if is_mla_plane_tuple else len(t) == 2)
@@ -1226,7 +1231,7 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif engine_kv_format == EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS:
+    elif _is_mla_plane_tuple_format(engine_kv_format):
         # Must precede the generic MLA branch: is_mla() is also true here,
         # but per-layer entries are tuples, not tensors.
         _transfer_per_layer_mla_tuple(
