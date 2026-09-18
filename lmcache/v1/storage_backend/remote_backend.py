@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, TimeoutError
+from contextlib import nullcontext
 from typing import Any, Callable, List, Optional, Sequence, Set
 import asyncio
 import threading
 import time
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
@@ -20,6 +21,7 @@ from lmcache.v1.storage_backend.connector import CreateConnector
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.naive_serde import CreateSerde
+from lmcache.v1.storage_backend.naive_serde.cachegen_decoder import CacheGenDeserializer
 
 logger = init_logger(__name__)
 
@@ -69,6 +71,14 @@ class RemoteBackend(StorageBackendInterface):
         assert config.remote_serde is not None
         self.serializer, self.deserializer = CreateSerde(
             config.remote_serde, metadata, config
+        )
+        # CacheGen creates its tensors on the constructor thread's device and
+        # its native decoder launches on that device's default stream. Retain
+        # that stream to preserve the device when decoding on the I/O thread.
+        self._deserialization_stream = (
+            torch_dev.default_stream()
+            if isinstance(self.deserializer, CacheGenDeserializer)
+            else None
         )
 
         # Precompute MLA mode status
@@ -552,6 +562,23 @@ class RemoteBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> List[MemoryObj]:
+        """Fetch and decode the available prefix before completing the coroutine.
+
+        Args:
+            lookup_id: Identifier associated with the asynchronous lookup.
+            keys: Ordered cache keys requested from the remote connector.
+            transfer_spec: Unused transfer metadata accepted by the backend API.
+
+        Returns:
+            Decoded memory objects for the connector's available prefix, or an
+            empty list when the connection or remote read is unavailable.
+            CacheGen's GPU work is complete before returning, so the caller
+            can consume the objects on another thread or stream.
+
+        Raises:
+            Exception: Deserialization or device-completion failures propagate
+                to the caller rather than publishing partially decoded data.
+        """
         # Check if local_cpu_backend is available (required for memory allocation)
         if self.local_cpu_backend is None:
             logger.warning(
@@ -579,7 +606,16 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Error occurred in batched_get_non_blocking: %s", e)
             return []
 
-        return [self.deserializer.deserialize(memory_obj) for memory_obj in memory_objs]
+        stream = self._deserialization_stream
+        with torch_dev.stream(stream) if stream is not None else nullcontext():
+            try:
+                return [
+                    self.deserializer.deserialize(memory_obj)
+                    for memory_obj in memory_objs
+                ]
+            finally:
+                if stream is not None and memory_objs:
+                    stream.synchronize()
 
     def pin(self, key: CacheEngineKey) -> bool:
         logger.debug(

@@ -3,9 +3,11 @@
 
 # Standard
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError
 from dataclasses import dataclass
+from subprocess import Popen
 import asyncio
+import ctypes
 import threading
 
 # Third Party
@@ -21,6 +23,9 @@ from lmcache.v1.memory_management import MemoryFormat, MemoryObj, TensorMemoryOb
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+
+# Local
+from ...conftest import LMCacheServerProcess
 
 CHUNK_SIZE = 16
 KV_SHAPE = (32, 2, CHUNK_SIZE, 8, 128)
@@ -196,7 +201,7 @@ def _assert_decoded_kv(memory_obj: MemoryObj) -> torch.Tensor:
 
 @pytest.fixture(params=["cachegen", "naive"])
 def remote_cachegen_backend(
-    lmserver_v1_process, request
+    lmserver_v1_process: LMCacheServerProcess, request: pytest.FixtureRequest
 ) -> Iterator[RemoteCachegenHarness]:
     """Start a real RemoteBackend with the selected serde against LMServer.
 
@@ -208,7 +213,9 @@ def remote_cachegen_backend(
     Yields:
         Harness containing the backend, allocator, and its event-loop thread.
     """
-    assert lmserver_v1_process.server_process.poll() is None
+    server_process = lmserver_v1_process.server_process
+    assert isinstance(server_process, Popen)
+    assert server_process.poll() is None
     config = _create_config(lmserver_v1_process.server_url, request.param)
     metadata = _create_metadata()
     allocator = MixedMemoryAllocator(ALLOCATOR_BYTES)
@@ -320,3 +327,129 @@ def test_nonblocking_cachegen_remote_read_is_decoded(
                 result.ref_count_down()
         for source in sources:
             source.ref_count_down()
+
+
+@pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
+@pytest.mark.parametrize("remote_cachegen_backend", ["cachegen"], indirect=True)
+@pytest.mark.skipif(
+    torch.version.cuda is None, reason="requires NVIDIA CUDA host callbacks"
+)
+def test_async_decode_waits_for_gpu_before_publishing(
+    remote_cachegen_backend: RemoteCachegenHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the result pending while a deterministic GPU producer gate is closed.
+
+    The real CacheGen decoder runs first. A CUDA host callback then holds
+    its last output write, making the incomplete GPU work observable without
+    relying on kernel durations. The returned object is consumed on a separate
+    stream before any CPU tensor read.
+
+    Args:
+        remote_cachegen_backend: Real CacheGen backend and loopback transport.
+        monkeypatch: Installs the controlled GPU completion boundary around
+            the real deserializer for this test only.
+    """
+    backend = remote_cachegen_backend.backend
+    assert backend.local_cpu_backend is not None
+    source = _allocate_source(backend.local_cpu_backend, 20260918)
+    key = _create_key(10)
+    stored = threading.Event()
+    _await_store(
+        backend.submit_put_task(
+            key, source, on_complete_callback=_create_completion_callback(stored)
+        ),
+        stored,
+    )
+
+    driver = ctypes.CDLL("libcuda.so.1")
+    callback_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+    launch_host = driver.cuLaunchHostFunc
+    launch_host.argtypes = [ctypes.c_void_p, callback_type, ctypes.c_void_p]
+    launch_host.restype = ctypes.c_int
+    producer_started = threading.Event()
+    producer_release = threading.Event()
+    gate_expired = threading.Event()
+
+    @callback_type
+    def hold_producer(_data: object) -> None:
+        """Wait for the consumer without calling any CUDA API from the callback."""
+        producer_started.set()
+        if not producer_release.wait(TIMEOUT_SECONDS):
+            gate_expired.set()
+
+    destination = torch.empty(
+        TENSOR_SHAPE, dtype=torch.bfloat16, device=torch_device_type
+    )
+    load_stream = torch_dev.Stream()
+    producer_done = torch_dev.Event()
+    producer_queued = threading.Event()
+    producer_streams: list[torch.Stream] = []
+    torch_dev.synchronize()
+    deserialize = backend.deserializer.deserialize
+
+    def gated_deserialize(memory_obj: MemoryObj) -> MemoryObj:
+        """Hold the real decoder's final write until the consumer releases it.
+
+        Args:
+            memory_obj: Compressed object fetched through the real connector.
+
+        Returns:
+            Decoded object with an intentionally unfinished GPU write.
+        """
+        result = deserialize(memory_obj)
+        tensor = result.tensor
+        assert tensor is not None
+        stream = torch_dev.current_stream()
+        producer_streams.append(stream)
+        assert launch_host(stream.cuda_stream, hold_producer, None) == 0
+        tensor.fill_(7)
+        producer_done.record(stream)
+        producer_queued.set()
+        return result
+
+    monkeypatch.setattr(backend.deserializer, "deserialize", gated_deserialize)
+    future = asyncio.run_coroutine_threadsafe(
+        backend.batched_get_non_blocking("gpu-completion-gate", [key]),
+        remote_cachegen_backend.loop,
+    )
+    received: list[MemoryObj] = []
+    try:
+        assert producer_queued.wait(TIMEOUT_SECONDS)
+        assert producer_started.wait(TIMEOUT_SECONDS)
+        assert not producer_done.query()
+        try:
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.1)
+        finally:
+            # Always unblock the producer, including when the old code exposes
+            # the result early. No device-wide synchronization precedes this.
+            producer_release.set()
+        received = future.result(timeout=TIMEOUT_SECONDS)
+        assert len(received) == 1
+        assert not gate_expired.is_set()
+        assert producer_done.query()
+        tensor = received[0].tensor
+        assert tensor is not None
+        with torch_dev.stream(load_stream):
+            destination.copy_(tensor)
+        load_stream.synchronize()
+        assert torch.equal(
+            destination.cpu(), torch.full(TENSOR_SHAPE, 7, dtype=torch.bfloat16)
+        )
+    finally:
+        # Also release the gate if setup/queueing failed before the inner check.
+        producer_release.set()
+        try:
+            future.result(timeout=TIMEOUT_SECONDS)
+        finally:
+            try:
+                # Keep the ctypes callback alive until all queued work ends,
+                # even if decoding or event recording raises an exception.
+                for stream in producer_streams:
+                    stream.synchronize()
+            finally:
+                for result in received:
+                    if result.get_ref_count() > 0:
+                        result.ref_count_down()
+                source.ref_count_down()
