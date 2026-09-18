@@ -16,6 +16,7 @@ from lmcache.v1.multiprocess.protocols import (
     engine,
     observability,
     p2p,
+    server_module,
 )
 from lmcache.v1.multiprocess.protocols.base import (
     HandlerType,
@@ -37,6 +38,7 @@ _PROTOCOL_MODULES = [
     ("blend", blend),
     ("observability", observability),
     ("p2p", p2p),
+    ("server_module", server_module),
 ]
 
 

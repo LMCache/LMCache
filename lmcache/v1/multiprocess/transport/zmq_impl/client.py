@@ -280,6 +280,10 @@ class ZmqMultiprocessClient(RequestClient):
         """Return the server's experimental capabilities."""
         return self._call(RequestType.GET_EXPERIMENTAL)
 
+    def server_module_call(self, request: Any) -> MessagingFuture[Any]:
+        """Call a namespaced out-of-tree server-module extension."""
+        return self._call(RequestType.SERVER_MODULE_CALL, request)
+
     # Compatibility aliases used by older blend plugins.
     cb_register_rope_v3 = cb_register_rope
     cb_unregister_rope_v3 = cb_unregister_rope

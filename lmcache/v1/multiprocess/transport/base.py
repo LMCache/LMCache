@@ -156,6 +156,8 @@ class RequestClient(Protocol):
 
     def get_experimental(self) -> MessagingFuture[Any]: ...
 
+    def server_module_call(self, request: Any) -> MessagingFuture[Any]: ...
+
     def cb_register_rope_v3(
         self,
         instance_id: int,

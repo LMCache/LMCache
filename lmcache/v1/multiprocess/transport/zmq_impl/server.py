@@ -2,6 +2,7 @@
 """ZMQ request handlers and server construction for multiprocess requests."""
 
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Callable
@@ -20,6 +21,10 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
+from lmcache.v1.multiprocess.server_module import (
+    TransportServiceRegistrar,
+    register_zmq_services,
+)
 
 
 class ThreadPoolType(Enum):
@@ -106,12 +111,16 @@ def get_zmq_handler_specs(module: object) -> list[HandlerSpec]:
 def build_zmq_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
+    *,
+    service_registrars: Sequence[TransportServiceRegistrar] = (),
 ) -> MessageQueueServer:
     """Build a ZMQ request server for the supplied business modules.
 
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration.
+        service_registrars: Out-of-tree ZMQ service registrars returned by
+            server-module factories.
 
     Returns:
         Configured, but not yet started, ZMQ message queue server.
@@ -143,4 +152,5 @@ def build_zmq_request_server(
         server.add_normal_thread_pool(
             normal_types, max_workers=mp_config.max_cpu_workers
         )
+    register_zmq_services(modules, server, service_registrars)
     return server

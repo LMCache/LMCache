@@ -8,6 +8,7 @@ import ast
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -180,6 +181,22 @@ def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
             RequestType.CB_UNREGISTER_ROPE,
             [7],
             get_response_class(RequestType.CB_UNREGISTER_ROPE),
+        )
+    ]
+
+
+def test_server_module_call_delegates_to_zmq_request_envelope() -> None:
+    transport = _RecordingMessageQueueClient()
+    client = ZmqMultiprocessClient(transport)
+    request = ServerModuleCallRequest(method="fake.echo", payload=b"hello")
+
+    client.server_module_call(request)
+
+    assert transport.calls == [
+        (
+            RequestType.SERVER_MODULE_CALL,
+            [request],
+            get_response_class(RequestType.SERVER_MODULE_CALL),
         )
     ]
 
