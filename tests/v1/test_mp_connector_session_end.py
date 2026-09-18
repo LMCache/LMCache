@@ -9,6 +9,7 @@ in lazy-offload mode hold them until ``END_SESSION`` is finally sent from
 """
 
 # Standard
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -24,6 +25,9 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
     _build_session_end_info,
+)
+from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
+    LazyOffloadActions,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPWorkerMetadata,
@@ -123,16 +127,24 @@ def _scheduler_connector(lazy_offload: bool) -> SimpleNamespace:
     Returns:
         A namespace usable as ``self`` for the unbound connector methods.
     """
-    gpu_block_pool = MagicMock()
-    gpu_block_pool.blocks = {}
-    return SimpleNamespace(
+    manager = MagicMock()
+    # The store is still in flight when the request finishes, so the manager
+    # does not release the session yet; it does once the store completes.
+    manager.on_request_finished.return_value = LazyOffloadActions()
+    manager.on_store_results.return_value = LazyOffloadActions()
+    connector = SimpleNamespace(
         lazy_offload=lazy_offload,
         scheduler_adapter=MagicMock(),
-        _pending_store=MagicMock(),
+        _lazy_offload_manager=manager,
         _pending_end_info={},
-        _gpu_block_pool=gpu_block_pool,
+        _kv_cache_events=None,
         _cleanup_request_tracker=MagicMock(),
+        _can_store=True,
     )
+    connector._end_lazy_sessions = partial(
+        LMCacheMPConnector._end_lazy_sessions, connector
+    )
+    return connector
 
 
 class TestEndSessionDelivery:
@@ -153,8 +165,6 @@ class TestEndSessionDelivery:
     def test_lazy_mode_parks_the_info_until_the_store_completes(self):
         """The Request is gone by the time END_SESSION is sent."""
         connector = _scheduler_connector(lazy_offload=True)
-        connector.scheduler_adapter.update_pending_store_count.return_value = True
-        connector._pending_store.get_request_gpu_block_ids.return_value = []
         request = _finished_request()
 
         LMCacheMPConnector.request_finished(connector, request, block_ids=[])
@@ -164,10 +174,14 @@ class TestEndSessionDelivery:
             "req-1": SessionEndInfo(finish_reason="stop", stop_token_id=IM_END)
         }
 
+        connector._lazy_offload_manager.on_store_results.return_value = (
+            LazyOffloadActions(sessions_to_end=["req-1"])
+        )
         output = SimpleNamespace(
+            kv_cache_events=None,
             kv_connector_worker_meta=LMCacheMPWorkerMetadata(
                 completed_store_requests={"req-1": 1}
-            )
+            ),
         )
         LMCacheMPConnector.update_connector_output(connector, output)
 
@@ -179,13 +193,15 @@ class TestEndSessionDelivery:
     def test_lazy_mode_store_completion_without_parked_info_sends_defaults(self):
         """A completion for an unknown request still ends its session."""
         connector = _scheduler_connector(lazy_offload=True)
-        connector.scheduler_adapter.update_pending_store_count.return_value = True
-        connector._pending_store.get_request_gpu_block_ids.return_value = []
+        connector._lazy_offload_manager.on_store_results.return_value = (
+            LazyOffloadActions(sessions_to_end=["req-9"])
+        )
 
         output = SimpleNamespace(
+            kv_cache_events=None,
             kv_connector_worker_meta=LMCacheMPWorkerMetadata(
                 completed_store_requests={"req-9": 1}
-            )
+            ),
         )
         LMCacheMPConnector.update_connector_output(connector, output)
 
