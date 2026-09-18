@@ -6,6 +6,7 @@ Public surface:
 - :class:`KVFormatSpec` -- per-format geometry interface.
 - :func:`get_spec` / :func:`get_spec_class` -- look up the spec for a format.
 - :func:`detect_format` -- normalize a raw ``kv_caches`` and discover its format.
+- :func:`find_indexer_caches` -- names of indexer caches (spec fact ``is_indexer``).
 - :func:`describe_shape` / :func:`concrete_shape` -- render a format's symbolic /
   numeric shape string.
 """
@@ -14,6 +15,7 @@ Public surface:
 from lmcache.v1.gpu_connector.kv_format.detection import (
     detect_format,
     extract_kv_cache_shapes,
+    find_indexer_caches,
 )
 from lmcache.v1.gpu_connector.kv_format.specs import (
     KVFormatSpec,
@@ -28,6 +30,7 @@ __all__ = [
     "concrete_shape",
     "describe_shape",
     "detect_format",
+    "find_indexer_caches",
     "extract_kv_cache_shapes",
     "get_spec",
     "get_spec_class",
