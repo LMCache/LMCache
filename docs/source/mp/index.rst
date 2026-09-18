@@ -223,7 +223,8 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - Remove session state for a finished request.
    * - ``CLEAR``
      - BLOCKING
-     - Clear all cached data.
+     - Clear cached data. The optional ``force`` flag defaults to ``False``;
+       when set, active locks may be ignored.
    * - ``GET_CHUNK_SIZE``
      - SYNC
      - Return the server's chunk size.
@@ -567,6 +568,10 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``
      - ZMQ ``HandlerSpec`` and ``ThreadPoolType`` definitions, per-module
        handler adapters, and message queue server construction
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/protos/``
+     - Protobuf wire contracts for the planned gRPC request transport
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
+     - Build-time protobuf generator and generated Python package
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``

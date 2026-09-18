@@ -209,7 +209,7 @@ Core KV cache operations and their split-phase variants:
 
 ### Controller Operations (`controller.py`)
 Cache management and configuration:
-- `CLEAR`: Clear all caches in the server
+- `CLEAR`: Clear server caches (payload: `force`, defaults to `False` in clients)
 - `GET_CHUNK_SIZE`: Get the chunk size configuration
 - `PING`: Liveness / worker probe (payload: sender's worker instance id or `None`)
 

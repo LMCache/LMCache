@@ -27,8 +27,13 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform.cuda.vmm_ipc import is_use_vmm_api, set_use_vmm_api
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import (
+    is_isolated_ipc,
+    is_use_vmm_api,
+    set_ipc_policy,
+    set_isolated_ipc,
+    set_use_vmm_api,
+)
 
 
 class FakeCudaEvent:
@@ -97,6 +102,7 @@ class FakeHeartbeatThread:
 
 def _make_worker_adapter(
     extra_config: dict[str, object] | None = None,
+    enable_kv_events: bool = False,
 ) -> LMCacheMPWorkerAdapter:
     """Construct a worker adapter with the standard test arguments; the
     network boundary must already be patched (see ``fake_adapter``).
@@ -117,6 +123,7 @@ def _make_worker_adapter(
         parallel_strategy=parallel_strategy,
         mq_timeout=5.0,
         extra_config=extra_config,
+        enable_kv_events=enable_kv_events,
     )
 
 
@@ -133,8 +140,13 @@ def _patch_transfer_context_factory(
     contexts: list[MagicMock] = []
 
     def fake_create_transfer_context(
-        kv_caches: dict[str, torch.Tensor], mode: str
+        kv_caches: dict[str, torch.Tensor],
+        *,
+        instance_id: int,
+        req_client: RequestClient,
+        mode: str,
     ) -> MagicMock:
+        del kv_caches, instance_id, req_client, mode
         ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
         contexts.append(ctx)
         return ctx
@@ -303,7 +315,7 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     assert transfer_ctx.submit_store.call_args.args[1].request_configs == {
         "lmcache.skip_save": True
     }
-    assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
+    assert transfer_ctx.submit_store.call_args.args[3] == [[0]]
     assert adapter.store_futures["req-1"] is fake_future
 
 
@@ -331,11 +343,232 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
 
     adapter.submit_store_request("req-1", op, event=MagicMock())
 
-    assert transfer_ctx.submit_store.call_args.args[4] == [
+    assert transfer_ctx.submit_store.call_args.args[3] == [
         [0, 1],
         [0, 1],
         [10, 11],
     ]
+
+
+def test_store_kv_events_are_reported_after_successful_store(
+    fake_adapter,
+    monkeypatch,
+):
+    """Completed MP stores are exposed once as LMCache cache-store events."""
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    adapter = _make_worker_adapter(enable_kv_events=True)
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock()
+    store_future = MagicMock()
+    store_future.query.return_value = True
+    store_future.result.return_value = True
+    transfer_ctx.submit_store.return_value = store_future
+    adapter.transfer_ctx = transfer_ctx
+
+    chunk_size = adapter.lmcache_tokens_per_chunk
+    token_ids = list(range(chunk_size * 2))
+    op = LoadStoreOp(
+        token_ids=token_ids,
+        block_ids=[[1]],
+        start=chunk_size,
+        end=chunk_size * 2,
+    )
+    adapter.submit_store_request("req-1", op, event=None)
+
+    assert adapter.get_kv_events() == []
+
+    adapter.get_finished({"req-1"})
+    events = adapter.get_kv_events()
+    expected_hashes = TokenHasher(chunk_size=chunk_size).compute_chunk_hashes(
+        token_ids,
+        end=chunk_size * 2,
+    )
+
+    assert len(events) == 1
+    assert events[0].block_hashes == [expected_hashes[1]]
+    assert events[0].parent_block_hash == expected_hashes[0]
+    assert events[0].token_ids == token_ids[chunk_size : chunk_size * 2]
+    assert events[0].block_size == chunk_size
+    assert events[0].medium == "CPU"
+    assert adapter.get_kv_events() == []
+
+
+def test_store_kv_events_are_discarded_after_failed_store(
+    fake_adapter,
+    monkeypatch,
+):
+    """Failed MP stores must not emit cache-store events."""
+    adapter = _make_worker_adapter(enable_kv_events=True)
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    transfer_ctx = MagicMock()
+    store_future = MagicMock()
+    store_future.query.return_value = True
+    store_future.result.return_value = False
+    transfer_ctx.submit_store.return_value = store_future
+    adapter.transfer_ctx = transfer_ctx
+
+    chunk_size = adapter.lmcache_tokens_per_chunk
+    op = LoadStoreOp(
+        token_ids=list(range(chunk_size)),
+        block_ids=[[0]],
+        start=0,
+        end=chunk_size,
+    )
+    adapter.submit_store_request("req-1", op, event=None)
+
+    adapter.get_finished({"req-1"})
+
+    assert adapter.get_kv_events() == []
+
+
+@pytest.mark.parametrize("store_result", [True, False, None])
+def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
+    fake_adapter,
+    store_result: bool | None,
+) -> None:
+    """Only successful stores emit events; every lazy store reports completion."""
+    adapter = _make_worker_adapter(
+        extra_config={"lmcache.mp.lazy_offload": True},
+        enable_kv_events=True,
+    )
+    adapter.transfer_ctx = MagicMock()
+    future = adapter.transfer_ctx.submit_store.return_value
+    future.query.return_value = True
+    future.result.return_value = store_result
+    chunk_size = adapter.lmcache_tokens_per_chunk
+    op = LoadStoreOp(
+        token_ids=list(range(chunk_size)),
+        block_ids=[[0]],
+        start=0,
+        end=chunk_size,
+    )
+    adapter.submit_store_request("req-1", op, event=None)
+    assert adapter.get_kv_events() == []
+    if store_result is None:
+        # Lose server health while the store is pending.
+        FakeHeartbeatThread.instances[-1].health_event.clear()
+
+    adapter.get_finished_with_lazy_offload()
+
+    assert len(adapter.get_kv_events()) == (1 if store_result else 0)
+    assert adapter.get_kv_events() == []
+    assert adapter.get_completed_store_requests() == {"req-1": 1}
+    assert adapter.get_completed_store_requests() is None
+    assert adapter.get_failed_store_requests() == (None if store_result else {"req-1"})
+    assert adapter.get_failed_store_requests() is None
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+@pytest.mark.parametrize("enable_kv_events", [False, True])
+def test_kv_event_buffer_metrics(
+    fake_adapter: object,
+    lazy_offload: bool,
+    enable_kv_events: bool,
+) -> None:
+    """A stalled drain is visible; failed/pending stores do not count as events."""
+    adapter = _make_worker_adapter(
+        extra_config={"lmcache.mp.lazy_offload": lazy_offload},
+        enable_kv_events=enable_kv_events,
+    )
+    adapter.transfer_ctx = MagicMock()
+    future = adapter.transfer_ctx.submit_store.return_value
+    future.result.return_value = True
+    chunk_size = adapter.lmcache_tokens_per_chunk
+    op = LoadStoreOp(
+        token_ids=list(range(chunk_size * 2)),
+        block_ids=[[0, 1]],
+        start=0,
+        end=chunk_size * 2,
+    )
+
+    def metrics() -> tuple[float, ...]:
+        if not enable_kv_events:
+            return (0, 0, 0)
+        labels = {"model_name": "test-model", "worker_id": "0"}
+        values = []
+        for metric, name in (
+            (adapter_mod._KV_EVENTS_BUFFERED, "buffered"),
+            (adapter_mod._KV_EVENTS_GENERATED, "generated_total"),
+            (adapter_mod._KV_EVENTS_DRAINED, "drained_total"),
+        ):
+            sample_name = f"vllm:lmcache_mp_kv_events_{name}"
+            values.append(
+                next(
+                    sample.value
+                    for family in metric.collect()
+                    for sample in family.samples
+                    if sample.name == sample_name and sample.labels == labels
+                )
+            )
+        return tuple(values)
+
+    def finish() -> None:
+        if lazy_offload:
+            adapter.get_finished_with_lazy_offload()
+        else:
+            adapter.get_finished(set())
+
+    buffered, generated, drained = metrics()
+    count = 0
+    for request_id in ("first", "second"):
+        future.query.return_value = False
+        adapter.submit_store_request(request_id, op, event=None)
+        finish()
+        assert metrics() == (buffered + count, generated + count, drained)
+        future.query.return_value = True
+        finish()
+        count += 2 if enable_kv_events else 0
+        assert metrics() == (buffered + count, generated + count, drained)
+
+    future.result.return_value = False
+    adapter.submit_store_request("failed", op, event=None)
+    finish()
+    assert metrics() == (buffered + count, generated + count, drained)
+
+    future.query.return_value = False
+    adapter.submit_store_request("interrupted", op, event=None)
+    FakeHeartbeatThread.instances[-1].health_event.clear()
+    finish()
+    assert metrics() == (buffered + count, generated + count, drained)
+
+    assert len(adapter.get_kv_events()) == count
+    assert metrics() == (buffered, generated + count, drained + count)
+    assert adapter.get_kv_events() == []
+    assert metrics() == (buffered, generated + count, drained + count)
+
+
+def test_store_kv_events_use_hash_algorithm_extra_config(
+    fake_adapter,
+    monkeypatch,
+):
+    """KV event hashes use the hash algorithm configured for the MP server."""
+    captured: dict[str, object] = {}
+
+    class FakeTokenHasher:
+        def __init__(self, chunk_size: int, hash_algorithm: str) -> None:
+            captured["chunk_size"] = chunk_size
+            captured["hash_algorithm"] = hash_algorithm
+
+        def compute_chunk_hashes(
+            self,
+            token_ids: list[int],
+            end: int | None = None,
+        ) -> list[bytes]:
+            return [b"hash"]
+
+    monkeypatch.setattr(adapter_mod, "TokenHasher", FakeTokenHasher)
+
+    adapter = _make_worker_adapter(
+        extra_config={"lmcache.mp.hash_algorithm": "builtin"},
+        enable_kv_events=True,
+    )
+
+    assert captured == {
+        "chunk_size": adapter.lmcache_tokens_per_chunk,
+        "hash_algorithm": "builtin",
+    }
 
 
 def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatch):
@@ -369,7 +602,7 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     assert transfer_ctx.submit_retrieve.call_args.args[1].request_configs == {
         "lmcache.skip_save": True
     }
-    assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
+    assert transfer_ctx.submit_retrieve.call_args.args[3] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
 
 
@@ -441,30 +674,43 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
     fake_adapter, restore_isolated_ipc, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Backend selection sees isolated IPC before transfer registration."""
-    calls: list[tuple[str, bool]] = []
-    original_set_isolated_ipc = adapter_mod.set_isolated_ipc
+    calls: list[tuple[str, bool, bool | str | None]] = []
+    original_set_ipc_policy = adapter_mod.set_ipc_policy
 
-    def record_isolated_ipc(enabled: bool) -> None:
-        original_set_isolated_ipc(enabled)
-        calls.append(("set_isolated_ipc", is_isolated_ipc()))
+    def record_ipc_policy(
+        *,
+        isolated_ipc: bool | None = None,
+        use_vmm_api: bool | None = None,
+    ) -> None:
+        original_set_ipc_policy(
+            isolated_ipc=isolated_ipc,
+            use_vmm_api=use_vmm_api,
+        )
+        calls.append(("set_ipc_policy", is_isolated_ipc(), use_vmm_api))
 
     transfer_ctx = MagicMock(name="transfer_ctx")
 
     def create_context(
-        _kv_caches: dict[str, torch.Tensor], mode: str | None
+        _kv_caches: dict[str, torch.Tensor],
+        *,
+        instance_id: int,
+        req_client: RequestClient,
+        mode: str | None,
     ) -> MagicMock:
-        calls.append(("create_transfer_context", is_isolated_ipc()))
+        del instance_id, req_client
+        calls.append(("create_transfer_context", is_isolated_ipc(), mode))
         return transfer_ctx
 
-    monkeypatch.setattr(adapter_mod, "set_isolated_ipc", record_isolated_ipc)
+    monkeypatch.setattr(adapter_mod, "set_ipc_policy", record_ipc_policy)
     monkeypatch.setattr(adapter_mod, "create_transfer_context", create_context)
 
+    set_ipc_policy(isolated_ipc=False, use_vmm_api=False)
     adapter = _make_worker_adapter(extra_config={"lmcache.mp.isolated_ipc": True})
     adapter.register_kv_caches({"layer.0": torch.zeros(1)})
 
     assert calls == [
-        ("set_isolated_ipc", True),
-        ("create_transfer_context", True),
+        ("set_ipc_policy", True, False),
+        ("create_transfer_context", True, None),
     ]
     transfer_ctx.register.assert_called_once()
 
@@ -831,34 +1077,36 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
     stray heartbeat ping can race the closing req_client."""
     adapter, req_client, future = fake_adapter
-    adapter.transfer_ctx = MagicMock()
+    transfer_context = MagicMock()
+    adapter.transfer_ctx = transfer_context
     adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
     heartbeat = FakeHeartbeatThread.instances[0]
 
     stop_state_at_unregister: list[bool] = []
 
-    def record_unregister(_instance_id: int) -> MagicMock:
+    def record_unregister() -> MagicMock:
         stop_state_at_unregister.append(heartbeat.stop_requested)
         return future
 
-    req_client.unregister_kv_cache.side_effect = record_unregister
+    transfer_context.unregister.side_effect = record_unregister
 
     adapter.shutdown()
 
     assert "stop" in heartbeat.calls
     assert stop_state_at_unregister == [True]
+    transfer_context.unregister.assert_called_once_with()
+    req_client.unregister_kv_cache.assert_not_called()
 
 
-def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
+def test_cold_shutdown_skips_unregister(fake_adapter) -> None:
     """shutdown() on an adapter whose heartbeat was never lazily started
-    (cold shutdown before any traffic) still sends UNREGISTER and does
-    not raise."""
+    (cold shutdown before registration) does not send UNREGISTER."""
     adapter, req_client, _future = fake_adapter
 
     adapter.shutdown()
 
     assert FakeHeartbeatThread.instances == []
-    req_client.unregister_kv_cache.assert_called_once_with(adapter.instance_id)
+    req_client.unregister_kv_cache.assert_not_called()
 
 
 def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> None:
@@ -965,7 +1213,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
     local_ctx = MagicMock(name="local_transfer_ctx")
     monkeypatch.setattr(
-        adapter_mod, "create_transfer_context", lambda kv, mode: local_ctx
+        adapter_mod, "create_transfer_context", lambda kv, **_kwargs: local_ctx
     )
 
     parallel_strategy = ParallelStrategy(

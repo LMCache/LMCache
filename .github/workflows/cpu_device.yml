@@ -84,13 +84,14 @@ jobs:
   cpu-device-test:
     needs: changes
     if: needs.changes.outputs.lmcache == 'true'
-    name: CPU device (${{ matrix.os }} / ${{ matrix.model.name }})
+    name: CPU device (${{ matrix.os }} / ${{ matrix.model.name }} / ${{ matrix.request_transport }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest]
+        request_transport: [zmq]
         # Each entry is a self-contained model profile the e2e steps
         # thread through env vars. Adding a new model = adding a new
         # entry here. All models share the same downloader
@@ -129,6 +130,21 @@ jobs:
             trust_remote_code: "1"
             mla_disable: "0"
             run_engine_driven_e2e: true
+        # One representative gRPC leg covers the CPU request path without
+        # duplicating every OS/model combination.
+        include:
+          - os: ubuntu-22.04
+            request_transport: grpc
+            model:
+              name: opt-125m
+              id: facebook/opt-125m
+              tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
+              cache_marker: pytorch_model.bin
+              load_format: ""
+              hf_overrides: ""
+              trust_remote_code: "0"
+              mla_disable: "0"
+              run_engine_driven_e2e: true
 
     env:
       # Threaded to run-cpu-e2e-validation.sh; server_bench ignores them.
@@ -146,6 +162,9 @@ jobs:
       # models that would normally route through MLA. Required on CPU
       # today because vLLM's CPU backend raises for MLA.
       VLLM_MLA_DISABLE: ${{ matrix.model.mla_disable }}
+      # Request/RPC transport between vLLM and the LMCache MP server.
+      # This is independent of the worker-side KV data transfer mode.
+      LMCACHE_REQUEST_TRANSPORT: ${{ matrix.request_transport }}
 
     steps:
       - name: Harden Runner
@@ -236,7 +255,7 @@ jobs:
         run: |
           LMCACHE_BENCH_TRANSFER_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_BENCH=18080 \
-          LMCACHE_ZMQ_PORT_BENCH=15555 \
+          LMCACHE_REQUEST_PORT_BENCH=15555 \
             bash .github/scripts/cpu_device_test.sh server_bench
 
       - name: Server bench — Engine-driven
@@ -244,7 +263,7 @@ jobs:
         run: |
           LMCACHE_BENCH_TRANSFER_MODE=engine_driven \
           LMCACHE_HTTP_PORT_BENCH=18081 \
-          LMCACHE_ZMQ_PORT_BENCH=15556 \
+          LMCACHE_REQUEST_PORT_BENCH=15556 \
             bash .github/scripts/cpu_device_test.sh server_bench
 
       - name: Prepare model — ${{ matrix.model.name }}
@@ -270,7 +289,7 @@ jobs:
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=pickle \
           LMCACHE_HTTP_PORT_E2E=18082 \
-          LMCACHE_ZMQ_PORT_E2E=15557 \
+          LMCACHE_REQUEST_PORT_E2E=15557 \
           VLLM_PORT_E2E=18000 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
@@ -285,7 +304,7 @@ jobs:
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=shm \
           LMCACHE_HTTP_PORT_E2E=18083 \
-          LMCACHE_ZMQ_PORT_E2E=15558 \
+          LMCACHE_REQUEST_PORT_E2E=15558 \
           VLLM_PORT_E2E=18001 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
@@ -301,7 +320,7 @@ jobs:
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_E2E=18084 \
-          LMCACHE_ZMQ_PORT_E2E=15559 \
+          LMCACHE_REQUEST_PORT_E2E=15559 \
           VLLM_PORT_E2E=18002 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
@@ -309,7 +328,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: cpu-device-logs-${{ matrix.os }}-${{ matrix.model.name }}
+          name: cpu-device-logs-${{ matrix.os }}-${{ matrix.model.name }}-${{ matrix.request_transport }}
           path: |
             /tmp/cpu_device_*.log
           if-no-files-found: ignore
@@ -326,11 +345,12 @@ jobs:
           INSTALL_LMC_OUTCOME: ${{ steps.install-lmcache.outcome }}
           MATRIX_OS: ${{ matrix.os }}
           MATRIX_MODEL: ${{ matrix.model.name }}
+          MATRIX_REQUEST_TRANSPORT: ${{ matrix.request_transport }}
         run: python3 .github/scripts/nightly-collect-verify-result.py
 
       - name: Upload verify result
         if: always() && inputs.nightly_verify
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: verify-result-${{ matrix.os }}-${{ matrix.model.name }}
+          name: verify-result-${{ matrix.os }}-${{ matrix.model.name }}-${{ matrix.request_transport }}
           path: verify_result.json
