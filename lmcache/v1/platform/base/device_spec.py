@@ -96,6 +96,25 @@ class DeviceSpec:
         """
         return ""
 
+    def adapt_torch_module(self, torch_module: Any) -> Any:
+        """Return the device module LMCache should use for this backend.
+
+        Called once during detection with ``getattr(torch, torch_module_name)``.
+        The base returns it unchanged. Backends whose torch device module does
+        not expose the full surface LMCache calls (``set_device``,
+        ``device_count``, ``Stream``, ``current_stream``) override this to
+        return an adapter, rather than mutating the module in place -- that
+        module belongs to the accelerator vendor and is shared with every other
+        library in the process.
+
+        Args:
+            torch_module: The resolved ``torch.<torch_module_name>`` module.
+
+        Returns:
+            The module to publish as ``lmcache.torch_dev``.
+        """
+        return torch_module
+
     @property
     def ops_cls(self) -> type[DeviceOps]:
         """DeviceOps subclass providing this platform's operation surface.
