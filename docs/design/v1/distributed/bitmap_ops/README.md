@@ -25,7 +25,7 @@ Supporting / convenience:
 |---|---|
 | `fold_unfold_ranked` | Composes `fold` → `highest_set_bit` → `unfold`. |
 | `fold_unfold` | `fold_unfold_ranked` for the single-rank (`chunk x group`) layout. |
-| `fold_grouped` / `unfold_grouped` / `fold_unfold_grouped` | The same operators over the **grouped** layout: one bitmap per `(object group, kv_rank)` row, `rows[g * num_ranks + r]`, each of length `num_chunks`. This is the layout of `PrefetchTaskSpec.key_groups` and of `StorageManager.query_prefetch_status` results (see `../storage_manager.md`). |
+| `fold_grouped` / `unfold_grouped` / `fold_unfold_grouped` | The same operators over the **grouped** layout: a list of presence bitmaps (one per object, each of length `num_chunks`) paired 1:1 with a list of window sizes. No ordering of the rows is assumed; the caller resolves each row's window (a kv-rank shard is simply another row with its group's window). |
 | `unfold_range` | Chunk range one group needs for a given hit length. |
 | `merge_bitmaps` | Bitwise-OR several presence bitmaps (e.g. L1 ∪ L2). |
 | `select_retained` | Non-windowed `TrimPolicy` (`internal_api`) selection (`PREFIX` = longest prefix; any other = keep every set bit). |

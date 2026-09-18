@@ -60,54 +60,45 @@ Bitmap unfold(size_t hit_length, size_t num_chunks, size_t num_ranks,
               const std::vector<int64_t>& group_windows);
 
 /**
- * @brief Fold per-(object group, kv_rank) row presence into servable prefix
- * lengths.
+ * @brief Fold per-row presence bitmaps into servable prefix lengths.
  *
- * The presence is given as one bitmap per ``(object group, kv_rank)`` row:
- * ``rows[g * num_ranks + r]`` is the presence of object group ``g`` on
- * kv_rank ``r``, and its bit ``j`` is set iff chunk ``j`` is present. A chunk
- * counts as present for a group only when every one of its rank rows has the
- * bit set. Every row has the same size, which is the number of chunks.
+ * ``rows[i]`` and ``windows[i]`` describe one object: bit ``j`` of ``rows[i]``
+ * is set iff chunk ``j`` of that object is present, and ``windows[i]`` is the
+ * object's cross-chunk sliding-window size in chunks (``<= 0`` means full
+ * attention). A prefix of length ``L`` is servable iff every row can serve it
+ * under its own window, i.e. its last ``min(window, L)`` chunks are present.
+ * No ordering or grouping of the rows is assumed. Every row has the same
+ * size, which is the number of chunks.
  *
- * @param rows Group-major / rank-minor row bitmaps,
- *     ``group_windows.size() * num_ranks`` of them, all of equal size.
- * @param num_ranks Number of kv_rank shards per object group.
- * @param group_windows Per-object-group cross-chunk sliding-window size in
- *     chunks, in object-group order; ``<= 0`` means full attention.
+ * @param rows Presence bitmaps, all of equal size.
+ * @param windows Per-row window sizes, parallel to ``rows``.
  *
- * @return A bitmap of size ``num_chunks``; bit ``j`` set iff every group can
+ * @return A bitmap of size ``num_chunks``; bit ``j`` set iff every row can
  *     serve a length-``j + 1`` prefix.
  *
- * @throws std::invalid_argument If the row count is not
- *     ``group_windows.size() * num_ranks`` or the rows differ in size.
+ * @throws std::invalid_argument If ``rows`` and ``windows`` differ in length
+ *     or the rows differ in size.
  */
-Bitmap fold_grouped(const std::vector<Bitmap>& rows, size_t num_ranks,
-                    const std::vector<int64_t>& group_windows);
+Bitmap fold_grouped(const std::vector<Bitmap>& rows,
+                    const std::vector<int64_t>& windows);
 
 /**
- * @brief Expand a model-wide hit length into per-(object group, kv_rank)
- * retain bitmaps.
+ * @brief Expand a model-wide hit length into per-row retain bitmaps.
  *
- * Each group retains the chunks it needs to serve ``hit_length``: ``[0,
- * hit_length)`` for full attention, ``[hit_length - window, hit_length)`` for a
- * sliding window. The mask is returned as one bitmap per row, group-major /
- * rank-minor: ``result[g * num_ranks + r]`` has size ``num_chunks`` and bit
- * ``j`` set iff object group ``g`` must retain chunk ``j`` (every rank of a
- * group gets the same mask).
+ * Row ``i`` retains the chunks it needs to serve ``hit_length`` under
+ * ``windows[i]``: ``[0, hit_length)`` for full attention (``<= 0``),
+ * ``[hit_length - window, hit_length)`` for a sliding window.
  *
  * @param hit_length Model-wide prefix hit length in chunks (clamped to
  *     ``num_chunks``).
  * @param num_chunks Number of LMCache chunks in the request.
- * @param num_ranks Number of kv_rank shards per object group.
- * @param group_windows Per-object-group cross-chunk sliding-window size in
- *     chunks, in object-group order; ``<= 0`` means full attention.
+ * @param windows Per-row cross-chunk sliding-window sizes in chunks.
  *
- * @return ``group_windows.size() * num_ranks`` retain bitmaps of size
- *     ``num_chunks``, group-major / rank-minor.
+ * @return ``windows.size()`` retain bitmaps of size ``num_chunks``, parallel
+ *     to ``windows``.
  */
 std::vector<Bitmap> unfold_grouped(size_t hit_length, size_t num_chunks,
-                                   size_t num_ranks,
-                                   const std::vector<int64_t>& group_windows);
+                                   const std::vector<int64_t>& windows);
 
 }  // namespace lmcache_native
 

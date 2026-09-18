@@ -81,13 +81,13 @@ Bitmap unfold(size_t hit_length, size_t num_chunks, size_t num_ranks,
   return retain_mask;
 }
 
-Bitmap fold_grouped(const std::vector<Bitmap>& rows, size_t num_ranks,
-                    const std::vector<int64_t>& group_windows) {
-  const size_t num_groups = group_windows.size();
-  if (rows.size() != num_groups * num_ranks) {
+Bitmap fold_grouped(const std::vector<Bitmap>& rows,
+                    const std::vector<int64_t>& windows) {
+  if (rows.size() != windows.size()) {
     throw std::invalid_argument(
-        "fold_grouped: expected " + std::to_string(num_groups * num_ranks) +
-        " rows (groups x ranks), got " + std::to_string(rows.size()));
+        "fold_grouped: rows and windows must have the same length, got " +
+        std::to_string(rows.size()) + " rows and " +
+        std::to_string(windows.size()) + " windows");
   }
   const size_t num_chunks = rows.empty() ? 0 : rows[0].size();
   for (const Bitmap& row : rows) {
@@ -98,27 +98,19 @@ Bitmap fold_grouped(const std::vector<Bitmap>& rows, size_t num_ranks,
     }
   }
 
-  // ``servable[j]`` (prefix length ``j + 1``) stays set only if every group
-  // can serve that length: ``run`` counts consecutive present chunks, and a
-  // length-L prefix needs ``run >= min(window, L)``. Chunk ``j`` is present
-  // for group ``g`` iff every rank row ``rows[g * num_ranks + r]`` has bit j.
+  // ``servable[j]`` (prefix length ``j + 1``) stays set only if every row can
+  // serve that length: ``run`` counts consecutive present chunks ending at
+  // ``j``, and a length-L prefix needs ``run >= min(window, L)``.
   std::vector<char> servable(num_chunks, 1);
-  for (size_t g = 0; g < num_groups; ++g) {
-    const int64_t window = group_windows[g];
+  for (size_t i = 0; i < rows.size(); ++i) {
+    const int64_t window = windows[i];
     const size_t eff_window =
         (window <= 0) ? num_chunks : static_cast<size_t>(window);
-    const Bitmap* group_rows = rows.data() + g * num_ranks;
+    const Bitmap& row = rows[i];
     size_t run = 0;
     for (size_t prefix_len = 1; prefix_len <= num_chunks; ++prefix_len) {
       const size_t j = prefix_len - 1;
-      bool chunk_present = true;
-      for (size_t r = 0; r < num_ranks; ++r) {
-        if (!group_rows[r].test(j)) {
-          chunk_present = false;
-          break;
-        }
-      }
-      run = chunk_present ? run + 1 : 0;
+      run = row.test(j) ? run + 1 : 0;
       if (servable[j] && run < std::min(eff_window, prefix_len)) {
         servable[j] = 0;
       }
@@ -133,24 +125,19 @@ Bitmap fold_grouped(const std::vector<Bitmap>& rows, size_t num_ranks,
 }
 
 std::vector<Bitmap> unfold_grouped(size_t hit_length, size_t num_chunks,
-                                   size_t num_ranks,
-                                   const std::vector<int64_t>& group_windows) {
+                                   const std::vector<int64_t>& windows) {
   if (hit_length > num_chunks) hit_length = num_chunks;
-  const size_t num_groups = group_windows.size();
 
   std::vector<Bitmap> rows;
-  rows.reserve(num_groups * num_ranks);
-  for (size_t g = 0; g < num_groups; ++g) {
-    const int64_t window = group_windows[g];
+  rows.reserve(windows.size());
+  for (const int64_t window : windows) {
     size_t lo = 0;
     if (window > 0 && hit_length > static_cast<size_t>(window)) {
       lo = hit_length - static_cast<size_t>(window);
     }
-    for (size_t r = 0; r < num_ranks; ++r) {
-      Bitmap row(num_chunks);
-      if (hit_length > 0) row.set_range(lo, hit_length);
-      rows.push_back(std::move(row));
-    }
+    Bitmap row(num_chunks);
+    if (hit_length > 0) row.set_range(lo, hit_length);
+    rows.push_back(std::move(row));
   }
   return rows;
 }

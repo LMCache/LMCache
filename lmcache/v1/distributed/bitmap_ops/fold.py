@@ -32,9 +32,9 @@ Two input layouts are supported:
   group ``g`` (single-rank), or ``j * (num_groups * num_ranks) + g * num_ranks
   + r`` in the ranked layout;
 - **grouped** (:func:`fold_grouped`, :func:`unfold_grouped`,
-  :func:`fold_unfold_grouped`): one bitmap per ``(object group, kv_rank)`` row,
-  ``rows[g * num_ranks + r]``, each of length ``num_chunks`` with bit ``j`` set
-  iff chunk ``j`` is available.
+  :func:`fold_unfold_grouped`): one bitmap per row paired with that row's own
+  window size, each of length ``num_chunks`` with bit ``j`` set iff chunk
+  ``j`` is available. No ordering of the rows is assumed.
 """
 
 # Standard
@@ -236,85 +236,75 @@ def fold_unfold_ranked(
 
 def fold_grouped(
     rows: Sequence[Bitmap],
-    num_ranks: int,
-    group_windows: Sequence[int],
+    windows: Sequence[int],
 ) -> Bitmap:
-    """Fold per-``(object group, kv_rank)`` row presence into servable prefix
-    lengths.
+    """Fold per-row presence bitmaps into servable prefix lengths.
 
-    For each object group, computes which prefix lengths it can serve under
-    its rule (a length-``L`` prefix needs the last ``min(window, L)`` chunks
-    present) and intersects across groups. ``rows[g * num_ranks + r]`` is the
-    presence of object group ``g`` on kv_rank ``r``, bit ``j`` set iff chunk
-    ``j`` is present; a chunk is present for a group only when every one of
-    its rank rows has the bit set.
+    ``rows[i]`` and ``windows[i]`` describe one object: bit ``j`` of
+    ``rows[i]`` is set iff chunk ``j`` is present, and ``windows[i]`` is its
+    cross-chunk sliding-window size. A prefix of length ``L`` is servable iff
+    every row can serve it under its own window, i.e. its last
+    ``min(window, L)`` chunks are present.
 
     Args:
-        rows: ``len(group_windows) * num_ranks`` bitmaps, group-major /
-            rank-minor, all of the same length (the number of chunks).
-        num_ranks: number of kv_rank shards per object group.
-        group_windows: per-object-group cross-chunk sliding-window size in
-            chunks, in object-group order; ``<= 0`` means full attention.
+        rows: presence bitmaps, all of the same length (the number of chunks).
+        windows: per-row cross-chunk sliding-window size in chunks, parallel
+            to ``rows``; ``<= 0`` means full attention.
 
     Returns:
-        A bitmap of size ``num_chunks``; bit ``j`` set iff every group can
-        serve a length-``j + 1`` prefix.
+        A bitmap of size ``num_chunks``; bit ``j`` set iff every row can serve
+        a length-``j + 1`` prefix.
 
     Raises:
-        ValueError: If ``group_windows`` is empty, ``num_ranks`` is not
-            positive, the row count is not ``len(group_windows) * num_ranks``,
-            or the rows differ in length.
+        ValueError: If ``windows`` is empty, ``rows`` and ``windows`` differ in
+            length, or the rows differ in length.
         ImportError: If the installed ``lmcache.lmcache_native`` does not
             provide the grouped fold kernel (lightweight install).
+
+    Note:
+        No ordering or grouping of the rows is assumed; a kv-rank shard of an
+        object group is simply another row carrying that group's window.
     """
     if _native_fold_grouped is None:
         raise ImportError(
             "lmcache.lmcache_native lacks the fold_grouped kernel; install or "
             "build the full lmcache package"
         )
-    if num_ranks < 1:
-        raise ValueError(f"num_ranks must be >= 1 (got {num_ranks})")
-    if not group_windows:
-        raise ValueError("group_windows must be non-empty")
-    if len(rows) != len(group_windows) * num_ranks:
+    if not windows:
+        raise ValueError("windows must be non-empty")
+    if len(rows) != len(windows):
         raise ValueError(
-            f"expected {len(group_windows) * num_ranks} rows "
-            f"(groups x ranks), got {len(rows)}"
+            f"rows and windows must have the same length, got {len(rows)} rows "
+            f"and {len(windows)} windows"
         )
     # The native kernel re-checks the row lengths and raises ValueError.
-    return _native_fold_grouped(list(rows), num_ranks, list(group_windows))
+    return _native_fold_grouped(list(rows), list(windows))
 
 
 def unfold_grouped(
     hit_length: int,
     num_chunks: int,
-    num_ranks: int,
-    group_windows: Sequence[int],
+    windows: Sequence[int],
 ) -> list[Bitmap]:
-    """Expand a model-wide hit length into per-``(object group, kv_rank)``
-    retain bitmaps.
+    """Expand a model-wide hit length into per-row retain bitmaps.
 
-    Each group retains the chunks it needs to serve ``hit_length``:
-    ``[0, hit_length)`` for full attention, ``[hit_length - window, hit_length)``
-    for a sliding window. ``result[g * num_ranks + r]`` has length
-    ``num_chunks`` and bit ``j`` set iff object group ``g`` retains chunk ``j``
-    (every rank row of a group gets the same mask).
+    Row ``i`` retains the chunks it needs to serve ``hit_length`` under
+    ``windows[i]``: ``[0, hit_length)`` for full attention,
+    ``[hit_length - window, hit_length)`` for a sliding window.
 
     Args:
         hit_length: model-wide prefix hit length in chunks (clamped to
             ``num_chunks``).
         num_chunks: number of LMCache chunks in the request.
-        num_ranks: number of kv_rank shards per object group.
-        group_windows: per-object-group cross-chunk sliding-window size in
-            chunks, in object-group order; ``<= 0`` means full attention.
+        windows: per-row cross-chunk sliding-window size in chunks; ``<= 0``
+            means full attention.
 
     Returns:
-        ``len(group_windows) * num_ranks`` retain bitmaps of length
-        ``num_chunks``, group-major / rank-minor.
+        ``len(windows)`` retain bitmaps of length ``num_chunks``, parallel to
+        ``windows``.
 
     Raises:
-        ValueError: If ``group_windows`` is empty, ``num_chunks`` is negative,
-            or ``num_ranks`` is not positive.
+        ValueError: If ``windows`` is empty or ``num_chunks`` is negative.
         ImportError: If the installed ``lmcache.lmcache_native`` does not
             provide the grouped unfold kernel (lightweight install).
     """
@@ -323,34 +313,27 @@ def unfold_grouped(
             "lmcache.lmcache_native lacks the unfold_grouped kernel; install or "
             "build the full lmcache package"
         )
-    if num_ranks < 1:
-        raise ValueError(f"num_ranks must be >= 1 (got {num_ranks})")
-    if not group_windows:
-        raise ValueError("group_windows must be non-empty")
+    if not windows:
+        raise ValueError("windows must be non-empty")
     if num_chunks < 0:
         raise ValueError(f"num_chunks must be >= 0 (got {num_chunks})")
 
-    return _native_unfold_grouped(
-        hit_length, num_chunks, num_ranks, list(group_windows)
-    )
+    return _native_unfold_grouped(hit_length, num_chunks, list(windows))
 
 
 def fold_unfold_grouped(
     rows: Sequence[Bitmap],
-    num_ranks: int,
-    group_windows: Sequence[int],
+    windows: Sequence[int],
 ) -> tuple[int, list[Bitmap]]:
     """Compose :func:`fold_grouped` -> :func:`highest_set_bit` ->
     :func:`unfold_grouped`.
 
-    Computes the model-wide prefix hit length and, per ``(object group,
-    kv_rank)`` row, the chunks that row must retain to serve it.
+    Computes the model-wide prefix hit length and, per row, the chunks that
+    row must retain to serve it.
 
     Args:
-        rows: ``len(group_windows) * num_ranks`` presence bitmaps, group-major
-            / rank-minor, all of the same length.
-        num_ranks: number of kv_rank shards per object group.
-        group_windows: per-object-group cross-chunk window sizes.
+        rows: presence bitmaps, all of the same length.
+        windows: per-row cross-chunk window sizes, parallel to ``rows``.
 
     Returns:
         ``(hit_length, retain_rows)``; ``retain_rows`` is parallel to ``rows``.
@@ -359,12 +342,12 @@ def fold_unfold_grouped(
         ValueError: See :func:`fold_grouped`.
         ImportError: See :func:`fold_grouped`.
     """
-    servable = fold_grouped(rows, num_ranks, group_windows)
+    servable = fold_grouped(rows, windows)
     num_chunks = len(rows[0]) if rows else 0
     # fold's bits are chunk-indexed (bit j == prefix length j + 1), so the hit
     # length is the highest set bit plus one; -1 (no servable prefix) -> 0.
     hit_length = highest_set_bit(servable) + 1
-    return hit_length, unfold_grouped(hit_length, num_chunks, num_ranks, group_windows)
+    return hit_length, unfold_grouped(hit_length, num_chunks, windows)
 
 
 def fold_unfold(

@@ -586,12 +586,12 @@ class TestEndToEndAgainstVllmStyleReference:
 
 
 # ============================================================================ #
-# Grouped layout: one bitmap per (object group, kv_rank) row                   #
+# Grouped layout: one bitmap per row, paired 1:1 with a window size            #
 # ============================================================================ #
 
 
 def _rows_from_flat(flat: Bitmap, num_chunks: int, num_ranks: int, num_groups: int):
-    """Split a chunk-major ranked bitmap into group-major / rank-minor rows."""
+    """Split a chunk-major ranked bitmap into one row per (group, rank)."""
     rows = [Bitmap(num_chunks) for _ in range(num_groups * num_ranks)]
     for j in range(num_chunks):
         for g in range(num_groups):
@@ -601,8 +601,14 @@ def _rows_from_flat(flat: Bitmap, num_chunks: int, num_ranks: int, num_groups: i
     return rows
 
 
+def _row_windows(group_windows, num_ranks: int) -> list[int]:
+    """Each (group, rank) row carries its group's window."""
+    return [w for w in group_windows for _ in range(num_ranks)]
+
+
 class TestGroupedMatchesFlat:
-    """The grouped kernels compute exactly what the flat ones do."""
+    """With one row per (group, rank), each carrying its group's window, the
+    grouped kernels compute exactly what the flat ones do."""
 
     @pytest.mark.parametrize("num_ranks", [1, 2, 3])
     @pytest.mark.parametrize(
@@ -626,62 +632,88 @@ class TestGroupedMatchesFlat:
             if rng.random() < 0.7:
                 flat.set(i)
         rows = _rows_from_flat(flat, num_chunks, num_ranks, num_groups)
+        windows = _row_windows(group_windows, num_ranks)
 
         servable_flat = fold(flat, num_chunks, num_ranks, group_windows)
-        servable_grouped = fold_grouped(rows, num_ranks, group_windows)
+        servable_grouped = fold_grouped(rows, windows)
         assert servable_grouped.get_indices_list() == servable_flat.get_indices_list()
 
         hit_flat, mask_flat = fold_unfold_ranked(
             flat, num_chunks, num_ranks, group_windows
         )
-        hit_grouped, mask_rows = fold_unfold_grouped(rows, num_ranks, group_windows)
+        hit_grouped, mask_rows = fold_unfold_grouped(rows, windows)
         assert hit_grouped == hit_flat
-        assert len(mask_rows) == num_groups * num_ranks
+        assert len(mask_rows) == len(rows)
         expected_rows = _rows_from_flat(mask_flat, num_chunks, num_ranks, num_groups)
         assert [r.get_indices_list() for r in mask_rows] == [
             r.get_indices_list() for r in expected_rows
         ]
 
-    def test_unfold_grouped_rows_are_parallel_to_fold_input(self):
-        rows = unfold_grouped(3, 5, 2, [FULL_ATTENTION_WINDOW, 2])
-        assert len(rows) == 4
-        assert all(len(r) == 5 for r in rows)
-        # full attention: [0, 3); window 2: [1, 3); both ranks identical.
-        assert rows[0].get_indices_list() == [0, 1, 2]
-        assert rows[1].get_indices_list() == [0, 1, 2]
-        assert rows[2].get_indices_list() == [1, 2]
-        assert rows[3].get_indices_list() == [1, 2]
+    def test_row_order_does_not_matter(self):
+        """Rows are independent: permuting (row, window) pairs permutes the
+        retain rows and leaves the hit length unchanged."""
+        rows = [Bitmap(4, 4), Bitmap(4, 3), Bitmap(4, 2)]
+        windows = [FULL_ATTENTION_WINDOW, 1, 2]
+        hit, masks = fold_unfold_grouped(rows, windows)
+        perm = [2, 0, 1]
+        hit_p, masks_p = fold_unfold_grouped(
+            [rows[i] for i in perm], [windows[i] for i in perm]
+        )
+        assert hit_p == hit
+        assert [m.get_indices_list() for m in masks_p] == [
+            masks[i].get_indices_list() for i in perm
+        ]
 
-    def test_chunk_present_only_if_all_rank_rows_present(self):
-        r0 = Bitmap(3, 3)  # rank 0 has every chunk
-        r1 = Bitmap(3, 1)  # rank 1 has chunk 0 only
-        hit, mask = fold_unfold_grouped([r0, r1], 2, [FULL_ATTENTION_WINDOW])
+    def test_unfold_grouped_rows_are_parallel_to_windows(self):
+        rows = unfold_grouped(3, 5, [FULL_ATTENTION_WINDOW, 2, FULL_ATTENTION_WINDOW])
+        assert len(rows) == 3
+        assert all(len(r) == 5 for r in rows)
+        # full attention: [0, 3); window 2: [1, 3).
+        assert rows[0].get_indices_list() == [0, 1, 2]
+        assert rows[1].get_indices_list() == [1, 2]
+        assert rows[2].get_indices_list() == [0, 1, 2]
+
+    def test_every_row_must_serve_the_prefix(self):
+        r0 = Bitmap(3, 3)  # has every chunk
+        r1 = Bitmap(3, 1)  # has chunk 0 only
+        hit, mask = fold_unfold_grouped([r0, r1], [-1, -1])
         assert hit == 1
         assert [m.get_indices_list() for m in mask] == [[0], [0]]
 
+    def test_window_applies_per_row(self):
+        """A windowed row only needs its trailing chunks; a full-attention
+        row needs them all."""
+        full = Bitmap(4, 4)
+        windowed = Bitmap(4)
+        windowed.set_range(2, 4)  # chunks 2, 3 only
+        hit, mask = fold_unfold_grouped([full, windowed], [-1, 2])
+        assert hit == 4
+        assert mask[0].get_indices_list() == [0, 1, 2, 3]
+        assert mask[1].get_indices_list() == [2, 3]
+
 
 class TestGroupedValidation:
-    def test_row_count_mismatch_raises(self):
+    def test_rows_windows_length_mismatch_raises(self):
         with pytest.raises(ValueError):
-            fold_grouped([Bitmap(2)], 2, [FULL_ATTENTION_WINDOW])
+            fold_grouped([Bitmap(2)], [FULL_ATTENTION_WINDOW, 2])
+        with pytest.raises(ValueError):
+            fold_grouped([Bitmap(2), Bitmap(2)], [FULL_ATTENTION_WINDOW])
 
     def test_ragged_rows_raise(self):
         with pytest.raises(ValueError):
-            fold_grouped([Bitmap(2), Bitmap(3)], 1, [FULL_ATTENTION_WINDOW, 2])
+            fold_grouped([Bitmap(2), Bitmap(3)], [FULL_ATTENTION_WINDOW, 2])
 
-    def test_invalid_num_ranks_raises(self):
+    def test_empty_windows_raises(self):
         with pytest.raises(ValueError):
-            fold_grouped([], 0, [FULL_ATTENTION_WINDOW])
+            fold_grouped([], [])
         with pytest.raises(ValueError):
-            unfold_grouped(1, 1, 0, [FULL_ATTENTION_WINDOW])
+            unfold_grouped(1, 1, [])
 
-    def test_empty_group_windows_raises(self):
+    def test_negative_num_chunks_raises(self):
         with pytest.raises(ValueError):
-            fold_grouped([], 1, [])
-        with pytest.raises(ValueError):
-            unfold_grouped(1, 1, 1, [])
+            unfold_grouped(1, -1, [FULL_ATTENTION_WINDOW])
 
     def test_zero_chunks(self):
-        hit, mask = fold_unfold_grouped([Bitmap(0), Bitmap(0)], 1, [-1, 2])
+        hit, mask = fold_unfold_grouped([Bitmap(0), Bitmap(0)], [-1, 2])
         assert hit == 0
         assert [len(m) for m in mask] == [0, 0]
