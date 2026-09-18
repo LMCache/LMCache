@@ -3,7 +3,6 @@
 
 # Standard
 from pathlib import Path
-from typing import Any
 import json
 import threading
 import time
@@ -36,26 +35,31 @@ pytestmark = pytest.mark.no_shared_allocator
 class RecordedRpcClientTransport(RpcClientTransport):
     """Deterministic RPC boundary that records actual client messages."""
 
-    def __init__(self, responses: list[int]):
+    def __init__(self, responses: list[int]) -> None:
+        """Initialize the transport with one hit count per RPC request."""
         self._responses = iter(responses)
-        self.messages: list[list[Any]] = []
+        self.messages: list[list[object]] = []
         self.closed = False
 
     @property
     def world_size(self) -> int:
+        """Return the single deterministic worker represented by this transport."""
         return 1
 
-    def send_and_recv_all(self, msg: list[Any]) -> list[bytes]:
+    def send_and_recv_all(self, msg: list[object]) -> list[bytes]:
+        """Record one client message and return its configured hit count."""
         self.messages.append(msg)
         return [next(self._responses).to_bytes(4, "big")]
 
     def close(self) -> None:
+        """Mark this deterministic transport as closed."""
         self.closed = True
 
 
 def _make_client(
     hit_miss_ratio: float, responses: list[int], chunk_size: int = 4
 ) -> tuple[HitLimitLookupClient, LMCacheEngineConfig, RecordedRpcClientTransport]:
+    """Build a real synchronous lookup client with deterministic RPC replies."""
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=chunk_size,
         hit_miss_ratio=hit_miss_ratio,
@@ -84,7 +88,9 @@ def _make_client(
         ("zero_limit", 1.0, 0),
     ],
 )
-def test_lookup_cache_keeps_the_lookup_hit_limit(case, hit_miss_ratio, expected):
+def test_lookup_cache_keeps_the_lookup_hit_limit(
+    case: str, hit_miss_ratio: float, expected: int
+) -> None:
     """A real completed lookup and its cached re-entry share one public limit."""
     client, _config, transport = _make_client(hit_miss_ratio, responses=[8])
     tokens = list(range(8))
@@ -94,7 +100,9 @@ def test_lookup_cache_keeps_the_lookup_hit_limit(case, hit_miss_ratio, expected)
         assert client.lookup_cache(lookup_id) == -1
         assert client.lookup(tokens, lookup_id, request_configs) == expected
         assert client.lookup_cache(lookup_id) == expected
-        assert json.loads(transport.messages[0][-1]) == request_configs
+        request_config_frame = transport.messages[0][-1]
+        assert isinstance(request_config_frame, str)
+        assert json.loads(request_config_frame) == request_configs
         client.clear_lookup_status(lookup_id)
         assert client.lookup_cache(lookup_id) == -1
     finally:
@@ -102,7 +110,7 @@ def test_lookup_cache_keeps_the_lookup_hit_limit(case, hit_miss_ratio, expected)
     assert transport.closed is True
 
 
-def test_lookup_cache_uses_the_current_dynamic_ratio_and_chunk_size():
+def test_lookup_cache_uses_the_current_dynamic_ratio_and_chunk_size() -> None:
     """A completed request reads both live limit settings on re-entry."""
     client, config, transport = _make_client(0.0, responses=[10])
     try:
@@ -115,7 +123,7 @@ def test_lookup_cache_uses_the_current_dynamic_ratio_and_chunk_size():
     assert transport.closed is True
 
 
-def test_lookup_cache_accepts_a_live_none_ratio_then_a_numeric_ratio():
+def test_lookup_cache_accepts_a_live_none_ratio_then_a_numeric_ratio() -> None:
     """A disabled live quota preserves raw hits until a number is restored."""
     client, config, transport = _make_client(0.0, responses=[8])
     try:
@@ -129,7 +137,7 @@ def test_lookup_cache_accepts_a_live_none_ratio_then_a_numeric_ratio():
     assert transport.closed is True
 
 
-def test_lookup_cache_keeps_a_partial_hit_below_the_limit():
+def test_lookup_cache_keeps_a_partial_hit_below_the_limit() -> None:
     """The established wrapper keeps raw partial hits below its ratio boundary."""
     client, _config, transport = _make_client(0.1, responses=[12], chunk_size=8)
     try:
@@ -141,7 +149,7 @@ def test_lookup_cache_keeps_a_partial_hit_below_the_limit():
     assert transport.closed is True
 
 
-def test_clear_permits_lookup_id_reuse_at_a_different_token_length():
+def test_clear_permits_lookup_id_reuse_at_a_different_token_length() -> None:
     """Clear removes the cached token count alongside the inner status."""
     client, _config, transport = _make_client(0.0, responses=[8, 10])
     lookup_id = "reused-lookup-id"
@@ -158,7 +166,7 @@ def test_clear_permits_lookup_id_reuse_at_a_different_token_length():
     assert transport.closed is True
 
 
-def test_lookup_cache_preserves_zero_hit_and_empty_request_contracts():
+def test_lookup_cache_preserves_zero_hit_and_empty_request_contracts() -> None:
     """Zero is cacheable; an empty request keeps the inner not-found sentinel."""
     client, _config, transport = _make_client(0.5, responses=[0])
     try:
@@ -174,7 +182,8 @@ def test_lookup_cache_preserves_zero_hit_and_empty_request_contracts():
 class SingleResponseLookupPeer:
     """One real ZMQ/msgspec worker response, with test-controlled release."""
 
-    def __init__(self, worker_path: str, scheduler_path: str, hit_tokens: int):
+    def __init__(self, worker_path: str, scheduler_path: str, hit_tokens: int) -> None:
+        """Initialize a peer that withholds one real response until released."""
         self.worker_path = worker_path
         self.scheduler_path = scheduler_path
         self.hit_tokens = hit_tokens
@@ -189,10 +198,12 @@ class SingleResponseLookupPeer:
         )
 
     def start(self) -> None:
+        """Start the peer and wait until both IPC endpoints are ready."""
         self.thread.start()
         assert self.ready.wait(timeout=10)
 
     def _run(self) -> None:
+        """Receive one request and publish its configured response."""
         context = zmq.Context()
         pull_socket = context.socket(zmq.PULL)
         push_socket = context.socket(zmq.PUSH)
@@ -225,18 +236,24 @@ class SingleResponseLookupPeer:
             context.term()
 
     def close(self) -> None:
+        """Release a blocked response and join the peer thread."""
         self.stop.set()
         self.release_response.set()
         self.thread.join(timeout=10)
         assert not self.thread.is_alive()
 
 
-def test_async_cached_result_keeps_the_hit_limit_over_real_zmq(tmp_path, monkeypatch):
+def test_async_cached_result_keeps_the_hit_limit_over_real_zmq(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Async completion reaches the real client state machine before capping."""
     worker_path = str(tmp_path / "lookup-worker.sock")
     scheduler_path = str(tmp_path / "lookup-scheduler.sock")
 
-    def private_rpc_path(_engine_id, service_name, _rpc_port, _rank):
+    def private_rpc_path(
+        _engine_id: str, service_name: str, _rpc_port: int, _rank: int
+    ) -> str:
+        """Map the two test services onto isolated IPC paths."""
         return worker_path if service_name == "lookup_worker" else scheduler_path
 
     client_context = zmq.Context()
@@ -249,7 +266,14 @@ def test_async_cached_result_keeps_the_hit_limit_over_real_zmq(tmp_path, monkeyp
 
     real_get_zmq_socket = async_client_module.get_zmq_socket
 
-    def get_private_zmq_socket(context, socket_path, protocol, role, bind_or_connect):
+    def get_private_zmq_socket(
+        context: zmq.Context,
+        socket_path: str,
+        protocol: str,
+        role: zmq.SocketType,
+        bind_or_connect: str,
+    ) -> zmq.Socket:
+        """Create a test socket with a bounded pull wait."""
         socket = real_get_zmq_socket(
             context, socket_path, protocol, role, bind_or_connect
         )
