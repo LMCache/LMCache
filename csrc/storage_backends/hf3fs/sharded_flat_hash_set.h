@@ -63,6 +63,7 @@ class sharded_flat_hash_set {
   // Check if key exists (thread-safe, no lock on read path)
   bool Contains(const Key& key) const {
     size_t idx = Hash()(key) % num_shards_;
+    std::lock_guard<std::mutex> lock(shards_[idx].mu);
     return shards_[idx].set.count(key) > 0;
   }
 

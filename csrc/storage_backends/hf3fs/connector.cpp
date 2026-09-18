@@ -321,7 +321,10 @@ void Hf3fsConnector::read_file(WorkerHf3fsConn& conn, hf3fs_ior& ior,
     if (cqe.result < 0) {
       throw std::runtime_error("I/O failed: " + std::to_string(-cqe.result));
     }
-
+    if (cqe.result != sub_len) {
+      throw std::runtime_error("read_file (" + conn.file_path + ") failed, requested "+
+            std::to_string(sub_len) + " but got "+ std::to_string(cqe.result));
+    }
     memcpy(static_cast<char*>(buf) + total_read, iov.base, sub_len);
     total_read += sub_len;
     file_offset += sub_len;
@@ -379,6 +382,10 @@ void Hf3fsConnector::write_file(WorkerHf3fsConn& conn, hf3fs_ior& ior,
       throw std::runtime_error("I/O failed: " + std::to_string(-cqe.result));
     }
 
+    if (cqe.result != sub_len) {
+      throw std::runtime_error("write_file (" + conn.file_path + ") failed, requested "+
+            std::to_string(sub_len) + " but got "+ std::to_string(cqe.result));
+    }
     total_written += sub_len;
     file_offset += sub_len;
   }
@@ -543,7 +550,12 @@ void Hf3fsConnector::do_single_get(WorkerHf3fsConn& conn,
   (void)chunk_size;  // Unused for 3FS
   std::string file_path = key_to_path(key);
   open_file(conn, file_path, false);
-  read_file(conn, conn.read_ior, conn.read_iov, buf, len);
+  try {
+    read_file(conn, conn.read_ior, conn.read_iov, buf, len);
+  } catch (const std::exception& e) {
+    close_file(conn);
+    throw;
+  }
   close_file(conn);
 }
 
@@ -567,14 +579,14 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
                                    size_t len, size_t chunk_size) {
   (void)chunk_size;  // Unused for 3FS
 
-  // Skip if already stored on disk
-  // if (do_single_exists(conn, key)) {
-  //  return;
-  // }
-
   std::string file_path = key_to_path(key);
   open_file(conn, file_path, true);
-  write_file(conn, conn.write_ior, conn.write_iov, buf, len);
+  try {
+    write_file(conn, conn.write_ior, conn.write_iov, buf, len);
+  } catch (const std::exception& e) {
+    close_file(conn);
+    throw;
+  }
   close_file(conn);
   if (buffer_enabled_) {
     buffer_add_(key);
@@ -616,7 +628,9 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
     }
     return removed;
   } catch (const std::filesystem::filesystem_error& e) {
-    (void)e;  // Suppress unused warning
+    fprintf(stderr,
+            "[LMCache HF3FS] Delete file %s failed: %s\n",
+            file_path, e.what());
     return false;
   }
 }
