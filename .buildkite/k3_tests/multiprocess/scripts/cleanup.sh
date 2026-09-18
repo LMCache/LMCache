@@ -24,7 +24,11 @@ fi
 
 # Also kill any stray vllm/lmcache processes from this build
 # (safety net in case PIDs weren't recorded)
-for port in "${VLLM_PORT:-8000}" "${VLLM_BASELINE_PORT:-9000}" "${LMCACHE_PORT:-6555}"; do
+for port in \
+    "${VLLM_PORT:-8000}" \
+    "${VLLM_BASELINE_PORT:-9000}" \
+    "${LMCACHE_PORT:-6555}" \
+    "${LMCACHE_HTTP_PORT:-8080}"; do
     fuser -k "${port}/tcp" 2>/dev/null || true
 done
 

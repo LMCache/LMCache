@@ -3,7 +3,8 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | lazy_offload | gds_smoke_test
+#              | restart_recovery | lazy_offload_fifo
+#              | lazy_offload_eviction_aware | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -18,6 +19,7 @@ source .buildkite/k3_tests/common_scripts/helpers.sh
 
 # ── Configuration ────────────────────────────────────────────
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
+export LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 # Keep this aligned with wait-for-servers.sh. Large-model startup can exceed
@@ -85,13 +87,28 @@ elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
     # model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to DeepSeek-V4-Flash.
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
-elif [ "$TEST_NAME" = "lazy_offload" ]; then
+elif [ "$TEST_NAME" = "lazy_offload" ] || [ "$TEST_NAME" = "lazy_offload_fifo" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
     export LMCACHE_MP_LAZY_OFFLOAD=true
+    export LMCACHE_MP_LAZY_OFFLOAD_POLICY=FIFO
     # vLLM's default paged-block size is 16 tokens. Matching it keeps this
     # test's expected LMCache chunk counts exact and small.
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
+    export VLLM_DISABLE_PREFIX_CACHING=false
+    export VLLM_ENABLE_PREFIX_CACHING=true
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
+elif [ "$TEST_NAME" = "lazy_offload_eviction_aware" ]; then
+    export LMCACHE_MP_LAZY_OFFLOAD=true
+    export LMCACHE_MP_LAZY_OFFLOAD_POLICY=EVICTION_AWARE
+    # Cover the full free queue once a later request creates allocation
+    # pressure. No deadline fallback is allowed in this qualification.
+    export LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-100000}"
+    export LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP="${LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP:-4096}"
+    export LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS=0
+    export CHUNK_SIZE="${CHUNK_SIZE:-16}"
+    export VLLM_DISABLE_PREFIX_CACHING=false
+    export VLLM_ENABLE_PREFIX_CACHING=true
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
@@ -112,6 +129,7 @@ echo "============================================"
 echo "Build ID: $BUILD_ID"
 echo "Model: $MODEL"
 echo "LMCache port: $LMCACHE_PORT"
+echo "LMCache HTTP port: $LMCACHE_HTTP_PORT"
 echo "Request transport: $LMCACHE_REQUEST_TRANSPORT"
 echo "vLLM port: $VLLM_PORT"
 echo "vLLM baseline port: $VLLM_BASELINE_PORT"
@@ -200,7 +218,7 @@ case "$TEST_NAME" in
     cache_stats)
         exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
         ;;
-    lazy_offload)
+    lazy_offload|lazy_offload_fifo|lazy_offload_eviction_aware)
         exec_script="${SCRIPT_DIR}/run-lazy-offload.sh"
         ;;
     p2p)
@@ -220,12 +238,12 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, lazy_offload_fifo, lazy_offload_eviction_aware, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac
 
-if ! "$exec_script"; then
+if ! bash "$exec_script"; then
     echo "${TEST_NAME} test failed"
     exit 1
 fi
