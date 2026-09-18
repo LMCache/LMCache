@@ -25,6 +25,7 @@ from lmcache import torch_dev, torch_device_type
 import lmcache.lmcache_native as lmcache_native
 
 pytestmark = [
+    pytest.mark.layerwise,
     pytest.mark.cuda,
     pytest.mark.skipif(
         not (torch_dev.is_available() and torch_device_type == "cuda"),
@@ -79,6 +80,10 @@ def test_d2h_h2d_interleaved_roundtrip(num_tokens, kv_interleaved, engine_kv_for
     layout [L, 2, T, D].  Before the fix the D2H kernel always used 2LTD
     [2, L, T, D], causing silent data corruption on retrieve.
     """
+    # Seeded so a failure is reproducible from the parameters alone.
+    random.seed(0)
+    torch.manual_seed(0)
+
     device = torch_device_type
     dtype = torch.bfloat16
     element_size = dtype.itemsize  # 2

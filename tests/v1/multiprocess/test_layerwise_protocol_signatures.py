@@ -27,6 +27,8 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer_layerwise import (
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocols.base import RequestType
 
+pytestmark = pytest.mark.layerwise
+
 
 @pytest.mark.parametrize(
     "request_type,handler_name",

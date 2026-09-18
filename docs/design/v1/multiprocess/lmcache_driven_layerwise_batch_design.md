@@ -246,7 +246,11 @@ device addressing rule does not follow from section 4.
 
 `_TempGPUBuffer` (`lmcache/v1/platform/cuda/cache_context.py`) owns a single
 flat `uint8` tensor of `_get_size_for_single_batch() * max_batch_size` bytes,
-carved by one running offset over a three-level nest:
+carved by one running offset over a three-level nest.  The base class knows
+only kernel-group-major order; the layer-wise subclass
+`_TempLayerMajorGPUBuffer`
+(`lmcache/v1/platform/cuda/cache_context_layerwise.py`) re-carves that same
+tensor in depth order (5.2):
 
 ```
 for batch_idx in range(max_batch_size):              # a slot; one slot = one chunk
@@ -287,7 +291,10 @@ group, whether that group's inner ordering stays kernel-group-major (the
 per-chunk layout; `placement is None`) or becomes depth-major.  Under
 depth-major, `carve_layer_major_object_group` emits one slice per
 `(kernel group, local layer)` in model-depth order and records each into
-`_offset_map_layer[(batch_idx, kernel_group_idx, local_layer_idx)]`.
+`_offset_map_layer[(batch_idx, kernel_group_idx, local_layer_idx)]`.  Both
+calls are made from `_TempLayerMajorGPUBuffer._recarve_in_depth_order`
+(`cache_context_layerwise.py`), so an object group the module declines to
+place keeps the base ordering and one deployment can mix the two.
 
 This is a **layout** change, not a scheduling one.  Under kernel-group-major
 staging, model depth `d` lives at `kg0_off + d * per_layer(kg0)`,
@@ -553,7 +560,7 @@ How to read it:
   nothing.
 - **`requested` must be a subset of `announced`.** The two index spaces
   coincide only while every transformer layer owns exactly one KV cache; see
-  1.1 for that scope limit.
+  5.4 for the two index spaces.
 
 A frame summary sits next to it, covering the same retrieve. This is the
 direct evidence that the reply really is streamed:
@@ -576,7 +583,7 @@ How to read it:
   the indices `_export_cb` sends, which are registration order; the indices
   `wait_for_layer` is called with come from `_LAYER_RE`. Comparing this span
   against `requested idx` in the wait summary is what exposes the mismatch
-  described in 1.1.
+  described in 5.4.
 
 At debug level every frame also logs as it is imported, including the event
 pool slot it names. That slot is currently always the batch's first layer, so
@@ -619,13 +626,13 @@ In practice this is a non-issue: mixed deployments offer no benefit,
 and old chunks are naturally evicted.  If rolling upgrades are needed,
 flushing L2 between mode changes is sufficient.
 
-**Exposure is per kernel group**  `kv_size` is a per-group property
+**Exposure is per kernel group.**  `kv_size` is a per-group property
 -- one `PageBufferShapeDesc` per group spec -- so a single registration
-can mix exposed and inert groups.  if model pairs a `kv_size == 2` main
-K/V group with a `kv_size == 1` key-only indexer. Chunks from a `kv_size == 1`
-group are always reusable whatever the flag says; only `kv_size == 2` groups
-can observe a mismatch. `kv_size == 1` may be about fused K/V, MLA or key-only
-side caches.
+can mix exposed and inert groups, as when a model pairs a `kv_size == 2`
+main K/V group with a `kv_size == 1` key-only indexer.  Chunks from a
+`kv_size == 1` group are always reusable whatever the flag says; only
+`kv_size == 2` groups can observe a mismatch.  `kv_size == 1` arises with
+fused K/V, MLA or key-only side caches.
 
 **Future alternative:** store `kv_interleaved` in each chunk's
 `MemoryObjMetadata` at D2H time and have the token database lookup treat
@@ -678,7 +685,11 @@ for every non-layer-wise deployment (see 7.1).
 ### 9.2 How the Message Queue Stays Neutral
 
 Both file pairs follow the same shape: the layer-wise module subclasses
-the default one, and is imported only when `--layerwise-batch > 0`.
+the default one.  On the server the subclass is loaded only when
+`--layerwise-batch > 0`.  On the worker `mq_streaming.py` is imported
+unconditionally, because `zmq_impl/__init__.py` always builds the
+streaming client; the subclass is inert until a streaming request is
+submitted.
 
 ```
   mq.py                          mq_streaming.py
@@ -694,10 +705,10 @@ the default one, and is imported only when `--layerwise-batch > 0`.
              affinity_key)                  affinity_key,
                                             response_channel)      [+1 kwarg]
 
-  MessageQueueClient             (no subclass; one method added in place)
-    .submit_request()
-    .submit_streaming_request(request_type, payloads, future)      [new]
-    .process_inbound()             (reused verbatim; not overridden)
+  MessageQueueClient        <--  StreamingMessageQueueClient
+    .submit_request()              (inherited; not overridden)
+    .process_inbound()             (inherited; not overridden)
+                                   .submit_streaming_request(...)   [new]
 
 
   futures.py                     futures_layerwise.py
@@ -733,9 +744,12 @@ subclass intercepts.
 against the declared `payload_classes`, so a positional
 `response_channel` would fail validation before dispatch.
 
-`mq.py` has no notion of a partial result.  Its one change is the
-`submit_streaming_request` method added to `MessageQueueClient`; no
-existing method was modified.  Two additions carry the whole mechanism:
+`mq.py` has no notion of a partial result, and is not modified at all.
+`submit_streaming_request` lives on `StreamingMessageQueueClient` in
+`mq_streaming.py`, which `zmq_impl/__init__.py` instantiates in place of
+`MessageQueueClient`; the subclass adds that one method and inherits
+`submit_request` and `process_inbound` untouched.  Two additions carry
+the whole mechanism:
 
 1. **The future re-arms itself.**  `process_inbound` is unchanged: it
    pops the pending entry and calls `future.set_result(...)`, exactly as
@@ -744,9 +758,8 @@ existing method was modified.  Two additions carry the whole mechanism:
    pending table under the same uid.  It holds that table because
    `submit_streaming_request` handed it over via `bind_registry` before
    the request reached the polling loop.  Both halves of the multi-frame
-   contract therefore live in the future, which is why `mq.py` needs only
-   the one new submit method and `futures.py` is byte-identical to before
-   this feature.
+   contract therefore live in the future, which is why `mq.py` and
+   `futures.py` are both byte-identical to before this feature.
 2. **A handler may answer more than once.**  This lives entirely in
    `mq_streaming.py`, which `mq.py` never imports.
    `StreamingMessageQueueServer` subclasses `MessageQueueServer` and
@@ -885,3 +898,13 @@ native call.  The closing frame therefore means "no more frames", not
 block), and `LayerwiseDeviceMessagingFuture.wait()` calls
 `synchronize_event` on the last layer's event -- that is the only point
 at which all transfers are provably done.
+
+---
+
+## 10. Configuration
+
+- **`--layerwise-batch N` and `--enable transfer_query` cannot be used
+  together.**  The server refuses the pair at startup.
+- **Set `kv_load_failure_policy` to `"recompute"` in
+  `--kv-transfer-config`.** Make the scheduler recompute the request
+  whose layer-wise load failed.

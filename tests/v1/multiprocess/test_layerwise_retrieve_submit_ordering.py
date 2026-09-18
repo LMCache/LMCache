@@ -33,6 +33,8 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer_layerwise import (
 )
 from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 
+pytestmark = pytest.mark.layerwise
+
 
 class _RecordingClient:
     """Stand-in for ``MessageQueueClient`` exposing what the helper touches.

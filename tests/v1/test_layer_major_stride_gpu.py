@@ -43,6 +43,8 @@ if not hasattr(lmcache_native.PageBufferShapeDesc(), "layer_stride_elems"):
         allow_module_level=True,
     )
 
+pytestmark = pytest.mark.layerwise
+
 _NL, _NH, _HS = 4, 2, 16
 _NB, _BS = 64, 4
 _CHUNK = 8  # tokens per LMCache chunk

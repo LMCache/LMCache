@@ -41,6 +41,8 @@ from lmcache.v1.multiprocess.modules.layer_major_plan import (
 )
 import lmcache.lmcache_native as lmcache_native
 
+pytestmark = pytest.mark.layerwise
+
 # A per-layer format: the layer is selected by the paged pointer array, so
 # the engine-side offset does not depend on the layer axis.  Layer-major
 # requires this; the fused NB_NL_TWO_BS_NH_HS is the counter-example.
@@ -98,15 +100,25 @@ class _Ctx:
         return self._sizes[kernel_group_idx]
 
 
-@pytest.fixture
-def layer_major_on():
-    """Enable the gate for one test and put it back afterwards."""
+@pytest.fixture(autouse=True)
+def _restore_the_gate():
+    """Put the process-global gate back however a test left it.
+
+    ``set_layer_major_staging_enabled`` is process-global, so a test that
+    flips it directly would otherwise leak into every test that runs after it,
+    in this module and any other.
+    """
     previous = layer_major_staging_enabled()
-    set_layer_major_staging_enabled(True)
     try:
         yield
     finally:
         set_layer_major_staging_enabled(previous)
+
+
+@pytest.fixture
+def layer_major_on(_restore_the_gate):
+    """Enable the gate for one test; ``_restore_the_gate`` puts it back."""
+    set_layer_major_staging_enabled(True)
 
 
 def _offsets_by_group(

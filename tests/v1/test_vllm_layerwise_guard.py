@@ -36,6 +36,8 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer_layerwise import (
     LMCacheLayerwiseTransferContext,
 )
 
+pytestmark = pytest.mark.layerwise
+
 
 def _uniform_caches(num_layers: int) -> dict[str, Any]:
     """One KV cache per layer, as Qwen3-32B and most dense models register."""

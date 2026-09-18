@@ -12,8 +12,10 @@ actually execute.
 # Standard
 from typing import Any, Callable, Optional
 import queue
-import socket
+import shutil
+import tempfile
 import threading
+import uuid
 
 # Third Party
 import pytest
@@ -37,13 +39,29 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
 )
 
+pytestmark = pytest.mark.layerwise
+
+
 REQUEST_TYPE = RequestType.RETRIEVE_LAYERWISE
 
 
+_SOCKET_DIR = tempfile.mkdtemp(prefix="lmcache-streaming-mq-")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _remove_the_socket_dir():
+    yield
+    shutil.rmtree(_SOCKET_DIR, ignore_errors=True)
+
+
 def _free_url() -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return f"tcp://127.0.0.1:{sock.getsockname()[1]}"
+    """A private ipc endpoint for one server.
+
+    A tcp port picked by bind-then-close can be taken by another process in
+    the window before the server binds it, which surfaces as a rare CI
+    failure; a path under a private directory cannot collide.
+    """
+    return f"ipc://{_SOCKET_DIR}/{uuid.uuid4().hex}.sock"
 
 
 def _cache_key() -> IPCCacheServerKey:

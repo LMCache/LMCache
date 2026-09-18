@@ -18,6 +18,8 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.futures_layerwise import LayerwiseDeviceMessagingFuture
 
+pytestmark = pytest.mark.layerwise
+
 
 class _StubEventBackend:
     """Records the events a stream was told to wait on."""

@@ -28,6 +28,7 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.modules.layer_major_plan import (
     layer_major_placement,
+    layer_major_staging_enabled,
     placement_keeps_kernel_groups_contiguous,
     set_layer_major_staging_enabled,
     uniform_stride_runs,
@@ -38,14 +39,23 @@ from lmcache.v1.platform.cuda.cache_context_layerwise import (
 )
 import lmcache.lmcache_native as lmcache_native
 
+pytestmark = pytest.mark.layerwise
+
 
 @pytest.fixture(autouse=True)
 def _layer_major_opt_in():
     """Detection is gated on the deployment opting in; these tests exercise
-    the detection itself, so they opt in and restore the default after."""
+    the detection itself, so they opt in and put the gate back after.
+
+    Restoring the previous value rather than a hard-coded default keeps the
+    process-global gate from leaking out of this module.
+    """
+    previous = layer_major_staging_enabled()
     set_layer_major_staging_enabled(True)
-    yield
-    set_layer_major_staging_enabled(False)
+    try:
+        yield
+    finally:
+        set_layer_major_staging_enabled(previous)
 
 
 def _placement(buf, object_group_idx: int = 0):
