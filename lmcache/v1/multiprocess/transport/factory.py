@@ -33,6 +33,7 @@ class RequestClientFactory:
         server_url: str,
         *,
         context: Any | None = None,
+        connect_timeout: float | None = None,
     ) -> RequestClient:
         """Create a request client selected by ``server_url`` scheme.
 
@@ -45,6 +46,10 @@ class RequestClientFactory:
                 scheme for the legacy ZMQ TCP default.
             context: Optional transport context. ZMQ accepts a ``zmq.Context``;
                 transports that do not need a context may ignore it.
+            connect_timeout: Optional bound (seconds) on each TCP connect
+                attempt. Honored by the ZMQ transport (``None`` keeps
+                ``lmcache.v1.multiprocess.mq.DEFAULT_CONNECT_TIMEOUT``);
+                gRPC manages connection attempts itself and ignores it.
 
         Returns:
             A method-oriented request client for the selected transport.
@@ -58,9 +63,15 @@ class RequestClientFactory:
             # First Party
             from lmcache.v1.multiprocess.transport import zmq_impl
 
+            if connect_timeout is None:
+                return zmq_impl.create_request_client(
+                    normalized_url,
+                    context=context,
+                )
             return zmq_impl.create_request_client(
                 normalized_url,
                 context=context,
+                connect_timeout=connect_timeout,
             )
         if scheme in _GRPC_SCHEMES:
             # First Party

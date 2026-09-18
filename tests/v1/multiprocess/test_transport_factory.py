@@ -37,6 +37,24 @@ def test_factory_selects_zmq_by_scheme(
     create.assert_called_once_with(normalized_url, context=context)
 
 
+def test_factory_forwards_connect_timeout_to_zmq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(name="zmq_request_client")
+    create = MagicMock(return_value=client)
+    context = object()
+    monkeypatch.setattr(zmq_impl, "create_request_client", create)
+
+    result = RequestClientFactory.create(
+        "tcp://localhost:5555", context=context, connect_timeout=2.5
+    )
+
+    assert result is client
+    create.assert_called_once_with(
+        "tcp://localhost:5555", context=context, connect_timeout=2.5
+    )
+
+
 @pytest.mark.parametrize(
     ("server_url", "normalized_url"),
     [

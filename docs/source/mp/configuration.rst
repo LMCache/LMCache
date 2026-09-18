@@ -748,6 +748,16 @@ All connector-level options are passed through
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.connect_timeout``
+     - ``5.0``
+     - Bound (seconds) on each TCP connect attempt of the connector's ZMQ
+       client sockets. Without a bound, a connect whose SYN is silently
+       dropped (e.g. racing a Kubernetes Service endpoint update while the
+       server pod restarts) inherits the OS connect timeout (~127s on
+       Linux) and stalls heartbeat pings — and the recovery they gate —
+       for that long. Keep it below ``lmcache.mp.heartbeat_interval`` so
+       one wedged attempt costs at most a single missed ping. Applies to
+       the ZMQ transport only (``tcp://``, ``ipc://``, ``inproc://``).
    * - ``lmcache.mp.nonblocking_lookup_status``
      - ``true``
      - Poll lookup-status replies without blocking the scheduler by default.

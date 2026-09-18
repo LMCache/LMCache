@@ -44,6 +44,12 @@ A bare `host:port` endpoint is normalized to `tcp://host:port`. Invalid or
 unknown schemes fail before a client is created. The server selects the matching
 implementation through `--transport zmq` or `--transport grpc`.
 
+Transport-specific tuning travels through the factory as optional keywords that
+a transport may ignore, like `context`. `connect_timeout` bounds each TCP
+connect attempt of the ZMQ client socket (default
+`lmcache.v1.multiprocess.mq.DEFAULT_CONNECT_TIMEOUT`); gRPC manages connection
+attempts itself and ignores it.
+
 This abstraction covers MP request RPCs only. It does not select the mechanism
 used to move KV data between an engine worker and the server.
 
