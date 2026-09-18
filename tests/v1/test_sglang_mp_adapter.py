@@ -130,6 +130,9 @@ class _FakeRaw:
     ) -> MessagingFuture:
         return self._future
 
+    def result(self, timeout=None) -> tuple[bytes, bool]:
+        return b"fake-ipc-handle", True
+
 
 class _FakeEvent:
     def __init__(self, interprocess: bool = False) -> None:
@@ -456,6 +459,7 @@ def test_retrieve_failure_uses_single_cleanup_owner(
     adapter_mod, _, _completed_future, _, LoadMetadata, _ = _import_adapter_symbols()
     connector = _make_connector(healthy=True)
     connector.req_client = MagicMock(name="rpc_client")
+    connector.instance_id = 7
     connector.model_name = "test-model"
     connector.tp_size = 2
     connector.worker_id = 0

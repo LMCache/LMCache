@@ -4,7 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."""
 
 # Standard
-from typing import Callable, ClassVar, cast
+from typing import Any, Callable, ClassVar, cast
 from unittest.mock import MagicMock
 import gc
 import os
@@ -26,6 +26,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
+from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ipc_policy import (
@@ -1639,3 +1640,41 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok
+
+
+class _DoneEventBackend:
+    """Event backend double whose imported events are already complete."""
+
+    device_type = "fake"
+
+    def check_event_support(self, device: object) -> None:
+        return None
+
+    def import_event(self, handle: bytes, device: object) -> object:
+        return ("imported", handle)
+
+    def query_event(self, event: object) -> bool:
+        return True
+
+    def synchronize_event(self, event: object, device: object) -> None:
+        return None
+
+
+def test_get_finished_releases_the_completion_event(fake_adapter) -> None:
+    """Once a store future reports done, the adapter tells the server it is
+    done with the completion event the reply carried."""
+    adapter, req_client, _ = fake_adapter
+    raw: MessagingFuture[tuple[bytes, bool]] = MessagingFuture()
+    raw.set_result((b"completion-handle", True))
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value = DeviceMessagingFuture(
+        raw, device="fake", event_backend=cast(Any, _DoneEventBackend())
+    )
+
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    finished_stores, _ = adapter.get_finished({"req-1"})
+
+    assert finished_stores == {"req-1"}
+    req_client.release_event.assert_called_once_with(
+        adapter.instance_id, b"completion-handle"
+    )

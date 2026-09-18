@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
+    LMCacheDrivenTransferModule,
     get_layout_desc,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
@@ -54,8 +55,18 @@ class QStoreModule(InstanceLivenessTarget):
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheServerContext) -> None:
+    def __init__(
+        self,
+        ctx: MPCacheServerContext,
+        lmcache_driven_transfer: LMCacheDrivenTransferModule,
+    ) -> None:
         self._ctx = ctx
+        self._transfer_module = lmcache_driven_transfer
+        lmcache_driven_transfer.register_host_func(
+            "release_imported_q_event",
+            self._release_imported_event,
+            payload_type=tuple[int, int],
+        )
         self._q_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _q_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store and
@@ -68,6 +79,17 @@ class QStoreModule(InstanceLivenessTarget):
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
+
+    def _release_imported_event(self, payload: tuple[int, int]) -> None:
+        """Drop an imported worker event; the Q stream wait queued on it has run.
+
+        Args:
+            payload: ``(instance_id, import_token)`` of the imported event.
+        """
+        instance_id, import_token = payload
+        entry = self.get_and_touch_context_entry(instance_id)
+        if entry is not None:
+            entry.cache_context.ipc_event_registry.release_imported(import_token)
 
     def get_and_touch_context_entry(self, instance_id: int) -> ContextEntry | None:
         """Return the entry for ``instance_id``, refreshing its last-seen time.
@@ -374,6 +396,17 @@ class QStoreModule(InstanceLivenessTarget):
                 "Q ring event backend is not initialized; register the Q cache "
                 "before submitting store requests"
             )
+        # Imports wait on this Q context's stream, so they live with it.
+        # Exports are released by RELEASE_EVENT, which is routed to the
+        # worker's KV cache context; hold them there.
+        imports = cache_context.ipc_event_registry
+        kv_entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+        if kv_entry is None:
+            raise ValueError(
+                f"Q store for instance ID {instance_id} requires its KV cache "
+                "to be registered"
+            )
+        exports = kv_entry.cache_context.ipc_event_registry
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
@@ -418,16 +451,24 @@ class QStoreModule(InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                handle = event_backend.export_event(event, cache_context.device)
+                exports.hold_exported(handle, event)
+                return handle, False
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
 
-            vllm_event = event_backend.import_event(
+            producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(vllm_event, cache_context.stream)
+            event_backend.wait_event(producer_event, cache_context.stream)
+            import_token = imports.hold_imported(producer_event)
+            submit_callback_to_stream(
+                cache_context.cupy_stream,
+                "release_imported_q_event",
+                (instance_id, import_token),
+            )
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -533,4 +574,6 @@ class QStoreModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
-        return event_backend.export_event(event, cache_context.device), store_succeeded
+        handle = event_backend.export_event(event, cache_context.device)
+        exports.hold_exported(handle, event)
+        return handle, store_succeeded

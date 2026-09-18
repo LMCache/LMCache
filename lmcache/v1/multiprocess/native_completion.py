@@ -51,7 +51,7 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 # Runs on dispatcher thread with the decoded payload for one submission.
-DeviceHostFunc = Callable[[Any], None]
+DeviceHostFunc = Callable[[Any], object]
 
 
 class _Registration(msgspec.Struct):

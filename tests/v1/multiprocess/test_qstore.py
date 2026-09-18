@@ -17,6 +17,7 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.ipc_event_registry import IPCEventRegistry
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
@@ -35,8 +36,8 @@ def _ctx() -> MagicMock:
 
 
 def _module(ctx: MagicMock | None = None) -> QStoreModule:
-    """Creates a QStoreModule with a stub context."""
-    return QStoreModule(ctx or _ctx())
+    """Creates a QStoreModule with a stub context and transfer module."""
+    return QStoreModule(ctx or _ctx(), MagicMock(name="lmcache_driven_transfer"))
 
 
 def _stub_registration(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
@@ -253,6 +254,45 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
 
 
+def test_store_q_holds_events_until_their_release(stub_device, monkeypatch) -> None:
+    """A full Q store imports the worker's event into the Q context, queues its
+    release behind the stream wait, and parks the exported completion event in
+    the worker's KV context for RELEASE_EVENT."""
+    ctx = _ctx()
+    ctx.resolve_obj_keys.return_value = [["obj-0"]]
+    ctx.storage_manager.reserve_write.return_value = {}
+    transfer_module = MagicMock(name="lmcache_driven_transfer")
+    module = QStoreModule(ctx, transfer_module)
+    kv_context = transfer_module.get_and_touch_context_entry.return_value.cache_context
+    kv_context.ipc_event_registry = IPCEventRegistry()
+    cache_context = MagicMock()
+    cache_context.ipc_event_registry = IPCEventRegistry()
+    cache_context.kv_layer_groups_manager.num_object_groups = 1
+    cache_context.kv_layer_groups_manager.num_kernel_groups = 1
+    cache_context.calculate_num_blocks.return_value = 1
+    module._q_contexts[1] = ContextEntry(
+        cache_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+    )
+    callbacks: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        qstore_mod,
+        "submit_callback_to_stream",
+        lambda stream, kind, payload: callbacks.append((kind, payload)),
+    )
+    monkeypatch.setattr(qstore_mod, "downsample_and_stage_block_ids", lambda c, b: b)
+    monkeypatch.setattr(
+        qstore_mod, "transfer_kv_per_object_group", lambda *a, **k: None
+    )
+    monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **k: MagicMock())
+
+    handle, ok = module.store_q(MagicMock(), 1, [[0]], b"peer-handle")
+
+    assert (handle, ok) == (b"event-handle", True)
+    assert callbacks == [("release_imported_q_event", (1, 0))]
+    assert cache_context.ipc_event_registry.release_imported(0) is True
+    assert kv_context.ipc_event_registry.release_exported(handle) is True
+
+
 class _FakeLMCacheDriven:
     def __init__(self, ctx) -> None:
         self.ctx = ctx
@@ -264,7 +304,7 @@ class _FakeEngineDriven:
 
 
 class _FakeQStore:
-    def __init__(self, ctx) -> None:
+    def __init__(self, ctx, lmcache_driven_transfer) -> None:
         self.ctx = ctx
 
 

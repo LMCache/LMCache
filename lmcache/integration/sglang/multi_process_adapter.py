@@ -555,8 +555,11 @@ class LMCacheMPConnector:
                 block_ids=block_ids,
                 skip_prefix_n_blocks=prefix_pad_pages,
             )
-            if not future.result(timeout=self._mq_timeout):
-                event_handle, _ = raw_future.result(timeout=0)
+            success = future.result(timeout=self._mq_timeout)
+            event_handle, _ = raw_future.result(timeout=0)
+            if event_handle:
+                self.req_client.release_event(self.instance_id, event_handle)
+            if not success:
                 # An event-free False is the missing-registration response.
                 # Its server-side path already released this worker's share;
                 # sending FREE_LOOKUP_LOCKS here would release every rank again.
@@ -680,6 +683,9 @@ class LMCacheMPConnector:
             event_backend=self._event_backend,
         )
         success = future.result(timeout=self._mq_timeout)
+        event_handle, _ = raw_future.result(timeout=0)
+        if event_handle:
+            self.req_client.release_event(self.instance_id, event_handle)
         # END_SESSION is owned by ``LMCRadixCache.cache_finished_req`` so
         # it fires once per request, even when STORE early-returns or no
         # STORE was needed. See ``LMCacheMPConnector.end_session``.

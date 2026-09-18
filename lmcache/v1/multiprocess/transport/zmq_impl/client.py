@@ -122,6 +122,12 @@ class ZmqMultiprocessClient(RequestClient):
             skip_first_n_tokens,
         )
 
+    def release_event(
+        self, instance_id: int, event_ipc_handle: bytes
+    ) -> MessagingFuture[Any]:
+        """Tell the server this worker is done with an exported completion event."""
+        return self._call(RequestType.RELEASE_EVENT, instance_id, event_ipc_handle)
+
     def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Start a prefix lookup."""
         return self._call(RequestType.LOOKUP, key, tp_size)

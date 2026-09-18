@@ -25,6 +25,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,
 )
+from lmcache.v1.multiprocess.ipc_event_registry import IPCEventRegistry
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -67,6 +68,8 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        # IPC events shared with the worker over this context; dropped with it.
+        self.ipc_event_registry = IPCEventRegistry()
 
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
