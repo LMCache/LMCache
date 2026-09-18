@@ -346,7 +346,6 @@ class KVEventRecord:
         parent_block_hash: The preceding chunk's hash for a stored record;
             ``None`` for a sequence's first chunk or for removals.
         token_ids: The stored chunk's tokens; empty for removals.
-        block_size: Tokens per chunk (the server's chunk size).
     """
 
     seq: int
@@ -356,7 +355,6 @@ class KVEventRecord:
     block_hashes: list[bytes]
     parent_block_hash: bytes | None
     token_ids: list[int]
-    block_size: int
 
 
 @dataclass

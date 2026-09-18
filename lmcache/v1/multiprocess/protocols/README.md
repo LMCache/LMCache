@@ -14,8 +14,7 @@ protocols/
 ├── debug.py            # Debug operations (NOOP)
 ├── blend.py            # CacheBlend rope + unified lookup + retrieve (CB_REGISTER_ROPE, CB_UNREGISTER_ROPE, CB_RETRIEVE_PRE_COMPUTED, CB_UNIFIED_LOOKUP)
 ├── observability.py    # Observability events (REPORT_BLOCK_ALLOCATION)
-├── p2p.py              # Peer-to-peer transfers (P2P_LOOKUP_AND_LOCK, P2P_QUERY_LOOKUP_RESULTS, P2P_UNLOCK_OBJECTS)
-└── kv_events.py        # KV event channel for engine workers (POLL_KV_EVENTS)
+└── p2p.py              # Peer-to-peer transfers (P2P_LOOKUP_AND_LOCK, P2P_QUERY_LOOKUP_RESULTS, P2P_UNLOCK_OBJECTS)
 ```
 
 ## Design Overview
@@ -27,7 +26,7 @@ The protocol system is designed to be modular, extensible, and IDE-friendly:
    - All request types visible to static analysis tools
    - Validation ensures enum stays in sync with protocol definitions
 
-2. **Protocol Modules**: Each module (engine, controller, debug, blend, observability, p2p, kv_events) defines:
+2. **Protocol Modules**: Each module (engine, controller, debug, blend, observability, p2p) defines:
    - `REQUEST_NAMES`: List of request type names (for validation)
    - `get_protocol_definitions()`: Returns dict of name → ProtocolDefinition
 
@@ -48,7 +47,7 @@ To add new protocol operations:
 
 ### Option 1: Add to Existing Module
 
-If your operation fits an existing category (engine / controller / debug / blend / observability / p2p / kv_events):
+If your operation fits an existing category (engine / controller / debug / blend / observability / p2p):
 
 1. **Add to the enum** in `protocols/base.py`:
    ```python

@@ -1433,7 +1433,6 @@ def _record(
         block_hashes=list(hashes),
         parent_block_hash=parent,
         token_ids=list(token_ids or []),
-        block_size=256,
     )
 
 
@@ -1549,7 +1548,10 @@ def test_polling_reports_server_stores_once_and_lets_them_be_evicted(
     assert events[0].block_hashes == [b"server-chunk"]
     assert events[0].parent_block_hash == b"parent"
     assert events[0].token_ids == [1, 2, 3, 4]
-    assert (events[0].block_size, events[0].medium) == (256, "CPU")
+    assert (events[0].block_size, events[0].medium) == (
+        adapter.lmcache_tokens_per_chunk,
+        "CPU",
+    )
 
     server.answer(
         _poll_result(

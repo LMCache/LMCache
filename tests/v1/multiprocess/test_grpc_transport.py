@@ -23,8 +23,6 @@ from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     IPCCacheServerKey,
-    KVEventPollResult,
-    KVEventRecord,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
@@ -35,7 +33,6 @@ from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
-from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -161,33 +158,6 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         @request_handler(RequestType.NOOP)
         def debug(self) -> str:
             return "ok"
-
-        @request_handler(RequestType.POLL_KV_EVENTS)
-        def poll_kv_events(
-            self, model_name: str, cursor: int, max_events: int
-        ) -> KVEventPollResult:
-            assert (model_name, cursor, max_events) == ("model", 3, 8)
-            return KVEventPollResult(
-                enabled=True,
-                incarnation=9,
-                next_cursor=5,
-                lost=True,
-                events=[
-                    KVEventRecord(
-                        4, "stored", "CPU", "model", [b"h1"], b"h0", [1, 2], 2
-                    ),
-                    KVEventRecord(
-                        seq=5,
-                        kind="removed",
-                        medium="STORAGE",
-                        model_name="model",
-                        block_hashes=[b"h1", b"h2"],
-                        parent_block_hash=None,
-                        token_ids=[],
-                        block_size=2,
-                    ),
-                ],
-            )
 
         @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
         def report_block_allocations(
@@ -322,7 +292,6 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         EngineDrivenTransferModule,
         QStoreModule,
         BlendModule,
-        KVEventModule,
     )
     handlers = {
         registered.options.request_type: registered.handler
@@ -526,34 +495,6 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert registration == RegisterEngineDrivenContextResponse("shared-memory", 4096)
     assert client.ping(7).result(5) is True
     assert client.noop().result(5) == "ok"
-    assert client.poll_kv_events("model", 3, 8).result(5) == KVEventPollResult(
-        enabled=True,
-        incarnation=9,
-        next_cursor=5,
-        lost=True,
-        events=[
-            KVEventRecord(
-                seq=4,
-                kind="stored",
-                medium="CPU",
-                model_name="model",
-                block_hashes=[b"h1"],
-                parent_block_hash=b"h0",
-                token_ids=[1, 2],
-                block_size=2,
-            ),
-            KVEventRecord(
-                seq=5,
-                kind="removed",
-                medium="STORAGE",
-                model_name="model",
-                block_hashes=[b"h1", b"h2"],
-                parent_block_hash=None,
-                token_ids=[],
-                block_size=2,
-            ),
-        ],
-    )
 
     records = [BlockAllocationRecord("request", [4], [5, 6])]
     assert client.report_block_allocation(7, "model", records).result(5) is None

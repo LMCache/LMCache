@@ -57,7 +57,7 @@ def _bus(enabled: bool = True, max_queue_size: int = 10_000) -> EventBus:
 
 def _subscriber(bus: EventBus | None = None) -> tuple[KVEventLog, KVEventSubscriber]:
     log = KVEventLog(capacity=64)
-    return log, KVEventSubscriber(log, bus or _bus(), CHUNK_SIZE)
+    return log, KVEventSubscriber(log, bus or _bus())
 
 
 def _emit(subscriber: KVEventSubscriber, event_type: EventType, **metadata) -> None:
@@ -203,7 +203,6 @@ def test_subscriber_records_l1_stores_with_their_token_bindings() -> None:
         _hash(1),
         _tokens(2),
     )
-    assert all(r.block_size == CHUNK_SIZE for r in records)
     assert subscriber.unbound_stores == 0
 
 

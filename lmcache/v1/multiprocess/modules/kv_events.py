@@ -119,7 +119,6 @@ class KVEventLog:
         block_hashes: list[bytes],
         parent_block_hash: bytes | None = None,
         token_ids: list[int] | None = None,
-        block_size: int = 0,
     ) -> KVEventRecord:
         """Append one record, assigning it the next sequence number.
 
@@ -130,7 +129,6 @@ class KVEventLog:
             block_hashes: The chunk hashes the record covers.
             parent_block_hash: The preceding chunk's hash (stored records).
             token_ids: The chunk's tokens (stored records); ``None`` for none.
-            block_size: Tokens per chunk.
 
         Returns:
             The appended record.
@@ -144,7 +142,6 @@ class KVEventLog:
                 block_hashes=list(block_hashes),
                 parent_block_hash=parent_block_hash,
                 token_ids=list(token_ids) if token_ids else [],
-                block_size=block_size,
             )
             self._next_seq += 1
             self._records.append(record)
@@ -174,7 +171,6 @@ class KVEventLog:
                     block_hashes=[],
                     parent_block_hash=None,
                     token_ids=[],
-                    block_size=0,
                 )
             )
             self._next_seq += 1
@@ -251,13 +247,11 @@ class KVEventSubscriber(EventSubscriber):
         log: The log to append to.
         bus: The bus the subscriber is registered on; polled for its
             dropped-event count so losses reach readers.
-        chunk_size: Tokens per chunk, stamped on every record.
     """
 
-    def __init__(self, log: KVEventLog, bus: EventBus, chunk_size: int) -> None:
+    def __init__(self, log: KVEventLog, bus: EventBus) -> None:
         self._log = log
         self._bus = bus
-        self._chunk_size = chunk_size
         self._bindings: OrderedDict[bytes, _ChunkBinding] = OrderedDict()
         self._unbound_stores = 0
 
@@ -348,7 +342,6 @@ class KVEventSubscriber(EventSubscriber):
                 block_hashes=[key.chunk_hash],
                 parent_block_hash=binding.parent_hash,
                 token_ids=list(binding.token_ids),
-                block_size=self._chunk_size,
             )
 
     def _record_removed(self, medium: str, keys: list[ObjectKey]) -> None:
@@ -369,7 +362,6 @@ class KVEventSubscriber(EventSubscriber):
                 medium=medium,
                 model_name=model_name,
                 block_hashes=block_hashes,
-                block_size=self._chunk_size,
             )
 
 
@@ -412,7 +404,7 @@ class KVEventModule:
             return
         log = KVEventLog(log_size)
         self._log = log
-        self._subscriber = KVEventSubscriber(log, ctx.event_bus, ctx.chunk_size)
+        self._subscriber = KVEventSubscriber(log, ctx.event_bus)
         ctx.event_bus.register_subscriber(self._subscriber)
         register_gauge(
             "lmcache.kv_events",

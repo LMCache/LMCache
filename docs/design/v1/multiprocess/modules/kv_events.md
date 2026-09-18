@@ -76,69 +76,57 @@ new transport.
 ### Worker side (`LMCacheMPWorkerAdapter`)
 
 - **One poller per server.** Every rank attached to a server reads the same
-  records, and a repeated `BlockRemoved` is an error for a KV-aware router
-  (`lower_tier.rs` returns `BlockNotFound` and aborts the rest of the batch),
-  unlike a repeated `BlockStored`. So exactly one rank per server polls
+  records, and a repeated `BlockRemoved` makes a KV-aware router return
+  `BlockNotFound` and abort the rest of the batch, unlike a repeated
+  `BlockStored`. So exactly one rank per server polls
   (`ParallelStrategy.is_kv_event_poller`, the first rank of each server's
-  contiguous rank block), while **every** rank attached to an advertising
-  server stops announcing its own stores. The engine therefore has a single
-  publisher.
-- `get_kv_events()` (called by the connector every model-runner step)
-  advances a **non-blocking** poll: it consumes a completed poll's records
-  into the event buffer, then issues the next poll once
-  `lmcache.mp.kv_event_poll_interval` (default 0.1 s) elapsed, or at once
-  after a full page of 1024 records.
-  The step never waits on the server.
+  contiguous block), while every rank attached to an advertising server
+  stops announcing its own stores: one publisher per engine.
+- `get_kv_events()`, called every model-runner step, advances a
+  **non-blocking** poll. It buffers a completed poll's records, then issues
+  the next once `lmcache.mp.kv_event_poll_interval` elapsed, or at once
+  after a full page. The step never waits on the server.
 - **Server records are the only store source while polling.** A store
-  result only says the request completed without a fatal error: chunks the
-  storage manager cannot reserve (allocation failure while the eviction loop
-  lags) are skipped silently and the result is still `True`, so the own
-  completed-store events of #5076 can announce chunks that were never
-  written (observed in the e2e: four filler stores skipped, all announced).
-  With polling on, the adapter builds no own-store events and announces
-  stores from `L1_WRITE_FINISHED` records, which name exactly the chunks
-  written, one poll interval later. With polling off (or once it is
-  disabled), own completed stores are announced as before.
-- **Announced set.** The adapter tracks, per medium, the chunk hashes it has
-  announced as stored. A removal record is reported only for announced
-  chunks (a router counts a removal of an unknown block as an error), and a
-  stored record only for chunks not yet announced, so duplicate records
-  (one per KV rank, or a store repeated) collapse into one `BlockStored`.
+  result only says the request finished without a fatal error: chunks the
+  storage manager could not reserve are skipped silently and the result is
+  still `True`, so #5076's own-store events can announce chunks that were
+  never written (seen in the e2e: four filler stores skipped, all
+  announced). `L1_WRITE_FINISHED` records name exactly the chunks written.
+  With polling off, or once it is disabled, own stores are announced as
+  before.
+- **Announced set.** Per medium, the chunk hashes this worker announced. A
+  removal is reported only for announced chunks, and a store only for
+  chunks not yet announced, so duplicate records collapse into one event.
   The set mirrors the server's live key set for this model, so the server's
   cache capacity bounds it.
-- **Resync.** When the incarnation changes (server restart) or the answer
-  says `lost`, the adapter withdraws *every* announced chunk with one
-  `BlockRemoved` per medium and clears the set; placements return as chunks
-  are stored again. `AllBlocksCleared` is not used: it would also wipe the
-  router's GPU-tier view of the worker. `lost` on first contact is ignored
-  (nothing was announced from that log yet).
-- **Version skew.** A worker polls only a server that advertises
-  `kv_events` through `GET_EXPERIMENTAL`, which the adapter already queries
-  at construction. This is not an optimization: a server that predates
+- **Resync.** On an incarnation change (server restart) or a `lost` answer,
+  the adapter withdraws every announced chunk, one `BlockRemoved` per
+  medium, and clears the set; placements return as chunks are stored again.
+  `AllBlocksCleared` is never used, as it would also wipe the router's
+  GPU-tier view. `lost` on first contact is ignored, since nothing was
+  announced from that log yet.
+- **Version skew.** A worker polls only a server advertising `kv_events`
+  through `GET_EXPERIMENTAL`, which the adapter already queries at
+  construction. This is not an optimization: a server that predates
   `POLL_KV_EVENTS` decodes the request-type frame outside any `try` in its
-  request loop, so one poll would abort that loop and take the cache server
-  down for every engine attached to it. The `mq_timeout` branch then covers
-  only a server that advertises the channel and stops answering. When the
-  capability is absent, or
-  polling is disabled at runtime, the worker falls back to announcing its
-  own completed stores exactly as #5076 does.
+  request loop, so one poll would abort that loop for every engine attached
+  to it. The capability is advertised on the ZMQ transport only, because the
+  gRPC client builds its methods from the generated service descriptors,
+  which do not carry this request yet.
 
 ### Connector side (`LMCacheMPConnector`)
 
 - `get_kv_connector_kv_cache_events()` converts `CacheStoreEvent` to
-  `BlockStored` and `CacheRemoveEvent` to `BlockRemoved`, keeping the
-  medium.
-- `LMCacheMPKVEvents.aggregate()` merges the tensor-parallel workers'
-  batches as an **order-preserving, deduplicated union**
-  (`kv_event_merge.py`), not vLLM's `KVEventAggregator` intersection. That
-  aggregator counts only the ranks that reported something in a step and
-  keeps what all of them reported, so an event one rank reports while
-  another reports a different batch in the same step is dropped for good.
-  Store completions skew across ranks, which makes that the normal case.
-  The union is safe for stores because a router applies a repeated
-  `BlockStored` idempotently; removals never arrive twice because only one
+  `BlockStored` and `CacheRemoveEvent` to `BlockRemoved`, keeping the medium.
+- `LMCacheMPKVEvents.aggregate()` merges the ranks' batches as an
+  **order-preserving, deduplicated union** (`kv_event_merge.py`) rather than
+  vLLM's `KVEventAggregator` intersection. That aggregator counts only the
+  ranks that reported in a step and keeps what all of them reported, so
+  store-completion skew drops events, and with several MP servers per engine
+  the disjoint pollers would intersect to nothing. A repeated `BlockStored`
+  is idempotent for a router, and removals never arrive twice because one
   rank per server polls.
-- The scheduler keeps one aggregated batch per step and `take_events()`
+- The scheduler keeps one aggregated batch per step, and `take_events()`
   returns them in order.
 
 ## Guarantees and limits
@@ -157,18 +145,19 @@ new transport.
 
 ## Configuration
 
-| Where | Setting | Default | Meaning |
-|---|---|---|---|
-| MP server | `--kv-event-log-size` | 32768 | Records retained; 0 disables the channel |
-| MP server | observability bus | on | `--disable-observability` disables the channel |
-| vLLM connector | `lmcache.mp.kv_event_poll_interval` | 0.1 s | Seconds between polls; 0 disables polling |
-| vLLM connector | `lmcache.mp.hash_algorithm` | `blake3` | Must match the server's `--hash-algorithm` |
+Operator-facing settings are documented in
+`docs/source/mp/configuration.rst`: the server's `--kv-event-log-size` and
+the connector's `lmcache.mp.kv_event_poll_interval`. Two further conditions
+are not settings of this module: the channel needs the observability event
+bus, which `--disable-observability` turns off, and the connector's
+`lmcache.mp.hash_algorithm` must match the server's `--hash-algorithm`, or
+the chunk hashes on both sides disagree.
 
 ## Observability
 
-- Server: `report_status()["kv_events"]` (`enabled`, `incarnation`,
-  `log_depth`, `log_capacity`, `next_seq`, `lost_markers`,
-  `unbound_stores`), gauge `lmcache_mp.kv_events.log_depth`.
-- Worker (vLLM Prometheus registry): `vllm:lmcache_mp_kv_events_generated_total`,
-  `..._drained_total`, `..._buffered`, `vllm:lmcache_mp_kv_event_polls_total`,
-  `vllm:lmcache_mp_kv_event_resyncs_total{reason=server_restart|events_lost}`.
+- Server: `report_status()["kv_events"]` and the gauge
+  `lmcache_mp.kv_events.log_depth`.
+- Worker, on the vLLM Prometheus registry:
+  `vllm:lmcache_mp_kv_events_{generated,drained}_total`, `..._buffered`,
+  `vllm:lmcache_mp_kv_event_polls_total` and
+  `vllm:lmcache_mp_kv_event_resyncs_total{reason}`.

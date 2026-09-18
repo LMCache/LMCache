@@ -285,7 +285,14 @@ def _build_modules(
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
         experimental_transfer=experimental_transfer,
-        capabilities=[KV_EVENT_CAPABILITY] if kv_events.enabled else [],
+        # Advertised on ZMQ only: the gRPC client builds its methods from
+        # the generated service descriptors, which do not carry
+        # POLL_KV_EVENTS yet.
+        capabilities=(
+            [KV_EVENT_CAPABILITY]
+            if kv_events.enabled and mp_config.transport == "zmq"
+            else []
+        ),
     )
 
     # ManagementModule precedes the transfer/blend modules so close() stops

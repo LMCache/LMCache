@@ -149,6 +149,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``""`` (empty string, default): SHM disabled; KV transfer uses
        the pickle path.  Any other value: create a SHM pool and use
        that exact name for its segment.
+   * - ``--kv-event-log-size``
+     - ``32768``
+     - Cache-event records (host-cache store completions and evictions, L2
+       stores and deletes) retained for engine workers to poll and republish
+       as KV events. ``0`` disables the channel, and the server then stops
+       advertising it so no worker polls. Requires the observability event
+       bus, which ``--disable-observability`` turns off.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -755,6 +762,14 @@ All connector-level options are passed through
        callback, for example when long prefill steps delay observation of an
        already-ready reply. LOOKUP acknowledgement polling
        remains asynchronous. Available with the current ``LMCacheMPConnector``.
+   * - ``lmcache.mp.kv_event_poll_interval``
+     - ``0.1``
+     - Seconds between polls of the MP server's cache-event log, which the
+       connector republishes as vLLM ``BlockStored`` and ``BlockRemoved``
+       events so a KV-aware router learns host-cache evictions. One rank per
+       server polls. ``0`` disables polling, and the worker then reports only
+       its own completed stores, so evictions never reach the router. The
+       server must record events; see ``--kv-event-log-size``.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,

@@ -2581,7 +2581,7 @@ class LMCacheMPWorkerAdapter:
                         block_hashes=list(hashes),
                         parent_block_hash=record.parent_block_hash,
                         token_ids=list(record.token_ids),
-                        block_size=record.block_size,
+                        block_size=self.lmcache_tokens_per_chunk,
                         lora_id=None,
                         medium=record.medium,
                         lora_name=None,
