@@ -2,6 +2,7 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TypedDict
 import threading
@@ -192,7 +193,9 @@ class MPCacheServerContext:
 
     Args:
         storage_manager_config: Configuration for the storage manager.
-        chunk_size: Chunk size for KV cache operations.
+        chunk_size: Minimum chunk size for KV cache operations. vLLM connector
+            startup may negotiate this upward to satisfy model-specific KV
+            geometry.
         hash_algorithm: Hash algorithm for token hashing.
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
@@ -207,7 +210,12 @@ class MPCacheServerContext:
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
     ) -> None:
+        self._configured_chunk_size = chunk_size
         self._chunk_size = chunk_size
+        self._hash_algorithm = hash_algorithm
+        self._chunk_size_lock = threading.Lock()
+        self._chunk_size_finalized = False
+        self._chunk_size_bind_listeners: list[Callable[[int], None]] = []
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
 
@@ -240,6 +248,74 @@ class MPCacheServerContext:
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
         return self._chunk_size
+
+    def finalize_chunk_size(self) -> int:
+        """Return the current chunk size and prevent future renegotiation."""
+        with self._chunk_size_lock:
+            self._chunk_size_finalized = True
+            return self._chunk_size
+
+    @property
+    def hash_algorithm_name(self) -> str:
+        """Hash algorithm used for token hashing."""
+        return self._hash_algorithm
+
+    def negotiate_chunk_size(self, required_alignment: int) -> int:
+        """Negotiate the server chunk size against model geometry.
+
+        Args:
+            required_alignment: The least common multiple of all positive
+                cacheable ``tokens_per_block`` values for the registering
+                model.
+
+        Returns:
+            The concrete server chunk size.
+
+        Raises:
+            ValueError: If ``required_alignment`` is not positive, if an
+                already-finalized chunk size is incompatible with
+                ``required_alignment``, or if a resize is requested after
+                sessions already exist.
+        """
+        if required_alignment < 1:
+            raise ValueError(
+                f"required_chunk_alignment must be positive, got {required_alignment}"
+            )
+        with self._chunk_size_lock:
+            if self._chunk_size % required_alignment == 0:
+                self._chunk_size_finalized = True
+                return self._chunk_size
+
+            if self._chunk_size_finalized:
+                raise ValueError(
+                    f"LMCache chunk size {self._chunk_size} must be a multiple "
+                    f"of required chunk alignment {required_alignment}"
+                )
+
+            resolved = _round_up_to_multiple(
+                self._configured_chunk_size, required_alignment
+            )
+            if self._session_manager.active_count():
+                raise ValueError(
+                    "Cannot negotiate LMCache chunk size after sessions have started"
+                )
+            self._bind_chunk_size_locked(resolved)
+            self._chunk_size_finalized = True
+            for listener in list(self._chunk_size_bind_listeners):
+                listener(resolved)
+            if resolved != self._configured_chunk_size:
+                logger.info(
+                    "Negotiated LMCache MP chunk size to %d "
+                    "(configured_min=%d, required_alignment=%d)",
+                    resolved,
+                    self._configured_chunk_size,
+                    required_alignment,
+                )
+            return resolved
+
+    def add_chunk_size_bind_listener(self, listener: Callable[[int], None]) -> None:
+        """Register a callback for chunk-size changes during negotiation."""
+        self._chunk_size_bind_listeners.append(listener)
 
     @property
     def separate_object_groups(self) -> bool:
@@ -324,3 +400,25 @@ class MPCacheServerContext:
         if not bare.startswith("lmcache_l1_pool_"):
             shm_name = f"lmcache_l1_pool_{bare}"
         return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
+
+    def _bind_chunk_size_locked(self, chunk_size: int) -> None:
+        """Initialize runtime state that depends on a concrete chunk size."""
+        previous_session_manager = getattr(self, "_session_manager", None)
+        destroy_listeners = (
+            list(previous_session_manager.destroy_listeners)
+            if previous_session_manager is not None
+            else []
+        )
+        if previous_session_manager is not None:
+            previous_session_manager.close()
+        self._chunk_size = chunk_size
+        self._token_hasher = TokenHasher(
+            chunk_size=chunk_size, hash_algorithm=self._hash_algorithm
+        )
+        self._session_manager = SessionManager(self._token_hasher)
+        self._session_manager.destroy_listeners.extend(destroy_listeners)
+
+
+def _round_up_to_multiple(value: int, multiple: int) -> int:
+    """Round *value* up to a positive multiple of *multiple*."""
+    return ((value + multiple - 1) // multiple) * multiple

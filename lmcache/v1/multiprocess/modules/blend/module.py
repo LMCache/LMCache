@@ -74,10 +74,12 @@ class BlendModule(
         self._segmented_prefix = enable_segmented_prefix
         # Fleet-wide fingerprint directory; None => purely local matching.
         self._coordinator = coordinator
+        self._dedup_content = enable_dedup_content
 
         self._token_range_matcher = BlendTokenRangeMatcher(
             ctx.chunk_size, dedup_content=enable_dedup_content
         )
+        ctx.add_chunk_size_bind_listener(self._reset_token_range_matcher)
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
@@ -143,6 +145,12 @@ class BlendModule(
         # can refresh the bucket first.
         self._stale_strike: dict[bytes, int] = {}
         self._STALE_STRIKE_THRESHOLD = 2
+
+    def _reset_token_range_matcher(self, chunk_size: int) -> None:
+        """Recreate the blend matcher after chunk-size negotiation."""
+        self._token_range_matcher = BlendTokenRangeMatcher(
+            chunk_size, dedup_content=self._dedup_content
+        )
 
     @property
     def context(self) -> MPCacheServerContext:

@@ -25,6 +25,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
     ParallelStrategy,
+    get_lmcache_chunk_size,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -188,6 +189,32 @@ def _make_scheduler_adapter(
 def _op(block_ids: list[list[int]]) -> LoadStoreOp:
     """Build a minimal four-token ``LoadStoreOp`` over *block_ids*."""
     return LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=block_ids, start=0, end=4)
+
+
+def test_get_lmcache_chunk_size_uses_plain_query_without_alignment() -> None:
+    client = MagicMock()
+    client.get_chunk_size.return_value.result.return_value = 256
+
+    assert get_lmcache_chunk_size(client) == 256
+
+    client.get_chunk_size.assert_called_once_with()
+    client.negotiate_chunk_size.assert_not_called()
+
+
+def test_get_lmcache_chunk_size_negotiates_with_alignment() -> None:
+    client = MagicMock()
+    client.negotiate_chunk_size.return_value.result.return_value = 640
+
+    assert (
+        get_lmcache_chunk_size(
+            client,
+            required_chunk_alignment=640,
+        )
+        == 640
+    )
+
+    client.negotiate_chunk_size.assert_called_once_with(640)
+    client.get_chunk_size.assert_not_called()
 
 
 def _patch_transfer_context_factory(

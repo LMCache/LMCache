@@ -18,6 +18,14 @@ message GetChunkSizeResponse {
   int64 chunk_size = 1;
 }
 
+message NegotiateChunkSizeRequest {
+  int64 required_chunk_alignment = 1;
+}
+
+message NegotiateChunkSizeResponse {
+  int64 chunk_size = 1;
+}
+
 message GetExperimentalRequest {}
 
 message GetExperimentalResponse {
@@ -35,6 +43,8 @@ message PingResponse {
 service ControllerService {
   rpc Clear(ClearRequest) returns (ClearResponse);
   rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
+  rpc NegotiateChunkSize(NegotiateChunkSizeRequest)
+      returns (NegotiateChunkSizeResponse);
   rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
   rpc Ping(PingRequest) returns (PingResponse);
 }

@@ -110,6 +110,10 @@ class RequestClient(Protocol):
 
     def get_chunk_size(self) -> MessagingFuture[Any]: ...
 
+    def negotiate_chunk_size(
+        self, required_chunk_alignment: int
+    ) -> MessagingFuture[Any]: ...
+
     def ping(self, instance_id: int | None) -> MessagingFuture[Any]: ...
 
     def report_block_allocation(

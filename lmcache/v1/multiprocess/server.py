@@ -102,7 +102,7 @@ class MPCacheServer:
             "is_healthy": sm["is_healthy"],
             "engine_type": self.__class__.__name__,
             "chunk_size": self._context.chunk_size,
-            "hash_algorithm": self._context.token_hasher.hash_algorithm_name,
+            "hash_algorithm": self._context.hash_algorithm_name,
             "active_sessions": self._context.session_manager.active_count(),
             "storage_manager": sm,
         }
@@ -381,7 +381,9 @@ def run_cache_server(
     engine = MPCacheServer(ctx, modules)
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
-    InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
+    continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
+    if continuous_usage is not None:
+        ctx.add_chunk_size_bind_listener(continuous_usage.update_chunk_size)
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
