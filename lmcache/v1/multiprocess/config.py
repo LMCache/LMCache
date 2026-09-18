@@ -116,6 +116,18 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
+    layerwise_batch: int = 0
+    """Per-layer batch size for layerwise KV loading in LMCache-driven mode.
+    0 (default) disables layerwise mode entirely: the server serves per-chunk
+    requests only and never loads the layerwise transfer module.
+    >0 enables per-layer H2D transfer with N layers per batch. A server node
+    serves exactly one of the two modes, so this also selects which connector
+    workers must load.
+    Supported for the LMCache-driven transfer mode on CUDA only; ignored under
+    --supported-transfer-mode engine_driven. Requires --transport zmq: the
+    per-layer retrieve streams one frame per layer batch, which only the ZMQ
+    transport serves."""
+
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
@@ -144,6 +156,39 @@ class MPServerConfig:
             raise ValueError(
                 "worker registration grace must be >= the worker reap timeout "
                 f"({reap}s); got {grace}"
+            )
+        if self.layerwise_batch > 0 and self.transport != "zmq":
+            # The layer-wise retrieve is a streaming handler and only ZMQ
+            # serves those: the gRPC server has no proto method for it and
+            # refuses STREAMING handlers outright. Which module the server
+            # builds keys off layerwise_batch alone, so without this check the
+            # node would start, advertise layer-wise, and fail only once a
+            # worker attempted its first retrieve.
+            raise ValueError(
+                "layerwise batch requires the zmq transport; the per-layer "
+                f"retrieve is not served over {self.transport}. Use "
+                "--transport zmq, or drop --layerwise-batch to serve "
+                "per-chunk requests."
+            )
+        if self.layerwise_batch > 0 and self.enable:
+            # The experimental transfer modules copy with
+            # ``transfer_kv_per_object_group``, which addresses a whole kernel
+            # group as one contiguous staging range. Layer-wise staging orders
+            # slices by model depth instead, so a model whose layers span
+            # several kernel groups interleaves them and no such range exists:
+            # the copy would silently write the wrong order rather than fail.
+            #
+            # Refused for every geometry, not just the interleaved ones. The
+            # combination has never been validated even where the orders
+            # coincide, and failing here names both flags while a
+            # per-registration check could only fire once a ring was built.
+            raise ValueError(
+                "experimental transfer modules "
+                f"({', '.join(sorted(self.enable))}) cannot be combined with "
+                "--layerwise-batch: they address a whole kernel group as one "
+                "contiguous staging range, which layer-wise staging does not "
+                "guarantee. Start this node without --layerwise-batch, or "
+                "without --enable."
             )
 
 
@@ -445,6 +490,15 @@ def add_mp_server_args(
         "behind different prefixes is indexed once. No effect otherwise.",
     )
     mp_group.add_argument(
+        "--layerwise-batch",
+        type=int,
+        default=0,
+        help="Per-layer batch size for layerwise KV loading. "
+        "0 (default) disables layerwise mode. > 0 enables per-layer "
+        "H2D transfer with N layers per GPU batch. Supported for the "
+        "LMCache-driven transfer mode on CUDA only.",
+    )
+    mp_group.add_argument(
         "--enable",
         type=str,
         nargs="*",
@@ -502,6 +556,7 @@ def parse_args_to_mp_server_config(
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
+        layerwise_batch=args.layerwise_batch,
     )
 
 

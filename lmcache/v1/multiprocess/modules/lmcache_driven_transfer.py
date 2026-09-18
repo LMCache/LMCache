@@ -7,6 +7,9 @@ from typing import Any, Sequence
 import threading
 import time
 
+# Third Party
+import torch
+
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
@@ -712,7 +715,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
+                    self._transfer_object_group(
                         cache_context,
                         block_ids_per_group_gpu,
                         memory_objs,
@@ -767,6 +770,37 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return (
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
+        )
+
+    def _transfer_object_group(
+        self,
+        cache_context: BaseCacheContext,
+        block_ids_gpu: list[torch.Tensor],
+        memory_objs: Sequence[MemoryObj | None],
+        *,
+        object_group_id: int,
+        batch_size: int,
+        skip_first_n_tokens: int,
+        direction: lmcache_native.TransferDirection,
+        transfer_key: str,
+    ) -> None:
+        """Enqueue the copy for one object group.
+
+        Every object-group copy inside :meth:`store` and :meth:`retrieve`
+        routes through here so that subclasses can substitute a different copy
+        strategy, in either direction. Call this rather than
+        :func:`transfer_kv_per_object_group` directly when adding a new copy
+        site.
+        """
+        transfer_kv_per_object_group(
+            cache_context,
+            block_ids_gpu,
+            memory_objs,
+            object_group_id=object_group_id,
+            batch_size=batch_size,
+            skip_first_n_tokens=skip_first_n_tokens,
+            direction=direction,
+            transfer_key=transfer_key,
         )
 
     @request_handler(
@@ -958,7 +992,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             window_objs
                         )
 
-                        transfer_kv_per_object_group(
+                        self._transfer_object_group(
                             cache_context,
                             block_ids_per_group_gpu,
                             memory_objs,

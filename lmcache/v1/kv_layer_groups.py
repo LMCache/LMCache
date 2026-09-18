@@ -217,6 +217,18 @@ class KernelGroupInfo:
     """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
+    model_depths: list[int] | None = None
+    """Model depth (transformer block ordinal) of each entry in
+    ``layer_indices``, same length and order. ``None`` means the engine did
+    not report depths, in which case consumers must fall back to
+    ``layer_indices``.
+
+    ``layer_indices`` are *registration ordinals* -- positions in the flat
+    ``kv_caches`` sequence -- which coincide with model depth only when each
+    model layer registers exactly one KV cache. Models that register several
+    caches per layer (e.g. a sparse indexer plus a compressor state) are
+    registered type-major, so the ordinal ordering groups by cache type
+    rather than by depth. Ordering transfers by depth requires this field."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -450,6 +462,11 @@ class KVLayerGroupsManager:
             self._kernel_groups.append(
                 KernelGroupInfo(
                     layer_indices=indices,
+                    model_depths=(
+                        list(info.model_depths)
+                        if info is not None and info.model_depths
+                        else None
+                    ),
                     shape_desc=shape_desc,
                     dtype=dt,
                     engine_kv_format=group_format,

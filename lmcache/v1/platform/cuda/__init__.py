@@ -150,6 +150,21 @@ class CudaDeviceSpec(DeviceSpec):
 
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         # First Party
+        from lmcache.v1.multiprocess.modules.layer_major_plan import (
+            layer_major_staging_enabled,
+        )
+
+        # Layer-wise staging is a separate context class rather than a flag on
+        # the per-chunk one, so the kernel-group-major path stays untouched.
+        if layer_major_staging_enabled():
+            # First Party
+            from lmcache.v1.platform.cuda.cache_context_layerwise import (
+                GPULayerwiseCacheContext,
+            )
+
+            return GPULayerwiseCacheContext(*args, **kwargs)
+
+        # First Party
         from lmcache.v1.platform.cuda.cache_context import GPUCacheContext
 
         return GPUCacheContext(*args, **kwargs)

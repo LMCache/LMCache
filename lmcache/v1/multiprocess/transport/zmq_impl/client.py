@@ -6,27 +6,62 @@ from typing import Any
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq_streaming import StreamingMessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_response_class,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.base_layerwise import (
+    LayerwiseRequestClient,
+)
 
 
-class ZmqMultiprocessClient(RequestClient):
+# ``LayerwiseRequestClient`` already extends ``RequestClient``. Naming the
+# shared contract here as well keeps it a declared base of this transport
+# rather than one reachable only through the layer-wise extension.
+class ZmqMultiprocessClient(LayerwiseRequestClient, RequestClient):
     """Expose named multiprocess RPC methods over the existing ZMQ client.
 
     The wrapper changes only the Python call surface. Every method delegates to
-    :class:`MessageQueueClient` with the existing ``RequestType`` and positional
-    payload list, so the ZMQ wire protocol and server remain unchanged.
+    :class:`StreamingMessageQueueClient` with the existing ``RequestType``
+    and positional payload list, so the ZMQ wire protocol and server remain
+    unchanged.
 
     Args:
         message_queue_client: Existing ZMQ message queue client to wrap.
     """
 
-    def __init__(self, message_queue_client: MessageQueueClient) -> None:
+    def __init__(self, message_queue_client: StreamingMessageQueueClient) -> None:
         self._message_queue_client = message_queue_client
+
+    def register_layerwise_ipc_event_pool(
+        self, instance_id: int
+    ) -> MessagingFuture[Any]:
+        """Import the server's per-layer IPC event pool."""
+        return self._call(RequestType.REGISTER_LAYERWISE_IPC_EVENT_POOL, instance_id)
+
+    def retrieve_layerwise(
+        self,
+        key: Any,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: Any,
+        skip_first_n_tokens: int,
+        future: Any,
+    ) -> MessagingFuture[Any]:
+        """Retrieve one chunk layer by layer.
+
+        The server answers with one frame per layer batch. Unlike the other
+        methods the future is supplied by the caller, because it carries the
+        per-layer state and has to be bound to the pending-request table
+        before the first frame can arrive.
+        """
+        return self._message_queue_client.submit_streaming_request(
+            RequestType.RETRIEVE_LAYERWISE,
+            [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens],
+            future,
+        )
 
     def register_kv_cache(
         self,

@@ -304,3 +304,44 @@ def test_deprecated_flags_log_warning():
 def test_deprecated_flush_interval_flag_rejects_nonpositive():
     with pytest.raises(ValueError):
         _parse(["--coordinator-l2-event-flush-interval", "0"])
+
+
+def test_layerwise_batch_requires_the_zmq_transport():
+    """Only ZMQ serves the streaming per-layer retrieve.
+
+    The server picks the layer-wise module from layerwise_batch alone, so
+    without this the node would start on gRPC and fail only once a worker
+    issued its first retrieve.
+    """
+    with pytest.raises(ValueError, match="requires the zmq transport"):
+        MPServerConfig(transport="grpc", layerwise_batch=8)
+
+
+def test_layerwise_batch_is_accepted_on_zmq():
+    assert MPServerConfig(transport="zmq", layerwise_batch=8).layerwise_batch == 8
+
+
+def test_grpc_is_unaffected_when_layerwise_batch_is_off():
+    """The per-chunk path over gRPC keeps working; the guard is opt-in only."""
+    assert MPServerConfig(transport="grpc").layerwise_batch == 0
+
+
+def test_layerwise_batch_refuses_experimental_transfer_modules():
+    """The experimental modules copy a whole kernel group at a time.
+
+    Layer-wise staging orders slices by model depth, so a model whose layers
+    span several kernel groups leaves no contiguous per-group range and the
+    copy would write the wrong order rather than fail. Refused for every
+    geometry because the combination has never been validated.
+    """
+    with pytest.raises(ValueError, match="cannot be combined with"):
+        MPServerConfig(layerwise_batch=8, enable=["transfer_query"])
+
+
+def test_experimental_transfer_modules_are_accepted_without_layerwise():
+    """The guard is opt-in: the per-chunk path keeps serving them."""
+    assert MPServerConfig(enable=["transfer_query"]).enable == ["transfer_query"]
+
+
+def test_layerwise_batch_is_accepted_without_experimental_modules():
+    assert MPServerConfig(layerwise_batch=8, enable=[]).layerwise_batch == 8

@@ -6,9 +6,12 @@ import ast
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq_streaming import StreamingMessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.base_layerwise import (
+    LayerwiseRequestClient,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
@@ -19,8 +22,12 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
 from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
 
 
-class _RecordingMessageQueueClient(MessageQueueClient):
-    """Record requests without opening a ZMQ socket."""
+class _RecordingMessageQueueClient(StreamingMessageQueueClient):
+    """Record requests without opening a ZMQ socket.
+
+    Mirrors the streaming client the factory injects in production so the
+    delegation assertions below type-check against the real signature.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[RequestType, list[Any], Any | None]] = []
@@ -42,8 +49,15 @@ class _RecordingMessageQueueClient(MessageQueueClient):
 
 
 def test_all_request_types_have_explicit_named_methods() -> None:
+    # The layer-wise pair is declared on ``LayerwiseRequestClient`` instead of
+    # ``RequestClient`` so a transport that never implemented it cannot inherit
+    # an empty ``...`` body; see transport/base_layerwise.py. Every request type
+    # must still name an explicit method on one of the two protocols.
     contract_names = {
-        name for name, value in RequestClient.__dict__.items() if callable(value)
+        name
+        for protocol in (RequestClient, LayerwiseRequestClient)
+        for name, value in protocol.__dict__.items()
+        if callable(value)
     }
     expected_names = {name.lower() for name in RequestType.__members__}
 
@@ -103,6 +117,16 @@ def test_business_callers_create_clients_through_factory() -> None:
     """Transport implementations must not leak into business callers or tests."""
     repo_root = Path(__file__).parents[3]
     transport_root = repo_root / "lmcache/v1/multiprocess/transport"
+    # The transport layer is not coextensive with the ``transport/`` directory:
+    # ``mq.py`` defines MessageQueueClient and ``mq_streaming.py`` extends it,
+    # and both sit one level above. They are the transport, not callers of it,
+    # so the rule below must not read them as business code.
+    # ``test_only_zmq_transport_layer_submits_request_envelopes`` already
+    # allow-lists ``mq.py`` for the same reason.
+    transport_modules = {
+        repo_root / "lmcache/v1/multiprocess/mq.py",
+        repo_root / "lmcache/v1/multiprocess/mq_streaming.py",
+    }
     implementation_tests = {
         repo_root
         / "tests/v1/distributed/l2_adapters/test_p2p_l2_adapter_integration.py",
@@ -110,11 +134,21 @@ def test_business_callers_create_clients_through_factory() -> None:
         repo_root / "tests/v1/multiprocess/test_mq.py",
         repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
         repo_root / "tests/v1/multiprocess/transport_test_utils.py",
+        # Exercise the queue client itself rather than calling through it.
+        repo_root / "tests/v1/multiprocess/test_streaming_mq_server.py",
+        repo_root / "tests/v1/multiprocess/test_layerwise_retrieve_submit_ordering.py",
+        # Asserts the ZMQ client satisfies the layer-wise protocol, so it has
+        # to name the implementation it is checking.
+        repo_root / "tests/v1/multiprocess/test_layerwise_protocol_signatures.py",
     }
     violations: list[str] = []
     for source_root in (repo_root / "lmcache", repo_root / "tests"):
         for path in source_root.rglob("*.py"):
-            if path.is_relative_to(transport_root) or path in implementation_tests:
+            if (
+                path.is_relative_to(transport_root)
+                or path in transport_modules
+                or path in implementation_tests
+            ):
                 continue
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):

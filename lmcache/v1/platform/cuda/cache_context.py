@@ -436,11 +436,12 @@ class GPUCacheContext(BaseCacheContext):
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
-        self._temp_buffer = _TempGPUBuffer(
+        self._temp_buffer = self._make_temp_buffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
             max_batch_size=4,
+            full_sw_kv=full_sw_kv,
         )
 
         # GPU streams
@@ -464,6 +465,29 @@ class GPUCacheContext(BaseCacheContext):
                 "Initialized cuda stream on device %s", str(self.device_)
             ),
             logger,
+        )
+
+    def _make_temp_buffer(
+        self,
+        kv_layer_groups_manager: KVLayerGroupsManager,
+        lmcache_tokens_per_chunk: int,
+        device: torch.device,
+        max_batch_size: int,
+        full_sw_kv: bool,
+    ) -> _TempGPUBuffer:
+        """Builds the staging buffer for this context.
+
+        A seam rather than a branch: this class only ever produces the
+        kernel-group-major layout, and the layer-wise context overrides this
+        to stage in model-depth order instead.  ``full_sw_kv`` is passed
+        through so a layout that cannot serve CacheBlend can refuse the
+        combination while it is still being built.
+        """
+        return _TempGPUBuffer(
+            kv_layer_groups_manager=kv_layer_groups_manager,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            device=device,
+            max_batch_size=max_batch_size,
         )
 
     def close(self) -> None:
