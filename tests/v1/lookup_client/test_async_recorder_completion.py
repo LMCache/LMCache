@@ -2,6 +2,7 @@
 """Completion means the real file strategy has finished, even with an empty queue."""
 
 # Standard
+from pathlib import Path
 import json
 import threading
 
@@ -16,7 +17,8 @@ from lmcache.v1.lookup_client.record_strategies.file_hash import FileHashStrateg
 pytestmark = pytest.mark.no_shared_allocator
 
 
-def _file_strategy(tmp_path):
+def _file_strategy(tmp_path: Path) -> FileHashStrategy:
+    """Create a file-hash strategy whose output is isolated to ``tmp_path``."""
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=4,
         extra_config={"chunk_statistics_file_output_dir": str(tmp_path)},
@@ -24,7 +26,8 @@ def _file_strategy(tmp_path):
     return FileHashStrategy(config, chunk_size=4)
 
 
-def test_idle_smoke_can_finish_without_work(tmp_path):
+def test_idle_smoke_can_finish_without_work(tmp_path: Path) -> None:
+    """An empty recorder must report completion before it is closed."""
     recorder = AsyncRecorder(_file_strategy(tmp_path))
     try:
         assert recorder.wait_for_completion(timeout=0.1) is True
@@ -38,14 +41,19 @@ def test_idle_smoke_can_finish_without_work(tmp_path):
     [("preprocess", False), ("record", False), ("record", True)],
 )
 def test_completion_waits_for_in_flight_file_work(
-    tmp_path, monkeypatch, boundary, preprocess_in_caller
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    preprocess_in_caller: bool,
+) -> None:
+    """Completion remains false while a file strategy operation is blocked."""
     strategy = _file_strategy(tmp_path)
     entered = threading.Event()
     release = threading.Event()
     original = getattr(strategy, boundary)
 
-    def gated_file_operation(*args):
+    def gated_file_operation(*args: object) -> object:
+        """Block one real strategy operation until the test releases it."""
         entered.set()
         assert release.wait(timeout=5), "test did not release the strategy operation"
         return original(*args)
@@ -73,14 +81,16 @@ def test_completion_waits_for_in_flight_file_work(
 
 @pytest.mark.parametrize("boundary", ["preprocess", "record"])
 def test_failed_file_job_does_not_block_following_completion(
-    tmp_path, monkeypatch, boundary
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    """A failed job must not prevent a later file job from completing."""
     strategy = _file_strategy(tmp_path)
     original = getattr(strategy, boundary)
     first_call = True
     completed_good_job = threading.Event()
 
-    def fail_once_then_do_real_work(*args):
+    def fail_once_then_do_real_work(*args: object) -> object:
+        """Inject one strategy failure, then delegate subsequent jobs unchanged."""
         nonlocal first_call
         if first_call:
             first_call = False
@@ -89,8 +99,9 @@ def test_failed_file_job_does_not_block_following_completion(
 
     original_record = strategy.record
 
-    def record_and_notify(*args):
-        original_record(*args)
+    def record_and_notify(chunk_hashes: list[str], lookup_id: str) -> None:
+        """Perform the real write and expose completion to the test thread."""
+        original_record(chunk_hashes, lookup_id)
         completed_good_job.set()
 
     monkeypatch.setattr(strategy, "record", record_and_notify)
@@ -113,7 +124,8 @@ def test_failed_file_job_does_not_block_following_completion(
     assert not recorder.async_worker_thread.is_alive()
 
 
-def test_close_finishes_queued_file_work(tmp_path):
+def test_close_finishes_queued_file_work(tmp_path: Path) -> None:
+    """Closing a recorder drains already enqueued file jobs."""
     recorder = AsyncRecorder(_file_strategy(tmp_path))
     try:
         recorder.record_async(list(range(8)), "first")
