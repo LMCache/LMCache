@@ -216,6 +216,53 @@ class CudaIPCWrapper(DeviceIPCWrapper):
         return t
 
 
+def _bind_primary_context(device_index: int) -> None:
+    """Make the primary CUDA context of ``device_index`` current on the
+    calling thread if the thread has no current context yet.
+
+    The CUDA runtime binds the primary context lazily on a thread's first
+    runtime call; the driver API never does. :class:`RawCudaIPCWrapper`
+    calls the driver API directly and is not only constructed on the
+    worker's main thread: the MP connector's heartbeat re-registers the
+    KV caches from its own thread after a server restart, and on that
+    thread ``cuMemGetAddressRange`` failed with
+    ``CUDA_ERROR_INVALID_CONTEXT`` on every retry. ``torch.cuda.device``
+    is not a substitute: on a fresh thread torch skips the runtime call
+    when the target equals its cached current device (0), so nothing is
+    bound.
+
+    A thread that already has a current context is left untouched.
+
+    Args:
+        device_index: CUDA device ordinal whose primary context to bind.
+
+    Raises:
+        RuntimeError: If the driver cannot look up or bind the context.
+    """
+    err, ctx = _cuda.driver.cuCtxGetCurrent()
+    if err == _cuda.driver.CUresult.CUDA_SUCCESS and int(ctx) != 0:
+        return
+    err, device = _cuda.driver.cuDeviceGet(device_index)
+    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuDeviceGet({device_index}) failed: {err}")
+    # The primary context is already alive (torch owns the tensor). Retain
+    # only to obtain its handle, make it current, and drop the extra
+    # reference again: the thread keeps the context as its current one and
+    # the runtime's own reference keeps the context alive, so the process
+    # reference count is left exactly as it was.
+    err, ctx = _cuda.driver.cuDevicePrimaryCtxRetain(device)
+    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuDevicePrimaryCtxRetain({device_index}) failed: {err}")
+    (err,) = _cuda.driver.cuCtxSetCurrent(ctx)
+    (release_err,) = _cuda.driver.cuDevicePrimaryCtxRelease(device)
+    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuCtxSetCurrent failed: {err}")
+    if release_err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(
+            f"cuDevicePrimaryCtxRelease({device_index}) failed: {release_err}"
+        )
+
+
 class RawCudaIPCWrapper(DeviceIPCWrapper):
     """IPC wrapper that shares CUDA tensors through driver-level IPC only.
 
@@ -293,6 +340,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
             )
 
         data_ptr = tensor.data_ptr()
+        _bind_primary_context(tensor.device.index)
         range_result = _cuda.driver.cuMemGetAddressRange(
             _cuda.driver.CUdeviceptr(data_ptr)
         )
