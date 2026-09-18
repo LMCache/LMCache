@@ -14,11 +14,12 @@ from __future__ import annotations
 # Standard
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Literal, Optional, Union
+from typing import TYPE_CHECKING, Callable, Literal, Optional, Union, cast
 import asyncio
 
 # Third Party
 import pytest
+import redis.asyncio as redis
 import torch
 
 # First Party
@@ -30,6 +31,7 @@ from lmcache.v1.memory_allocators.tensor_memory_allocator import (
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, TensorMemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.connector import CreateConnector
 
 # Local
 from ..utils import (
@@ -202,41 +204,31 @@ def _create_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> RedisConnectorUnderTest:
     """Construct the selected real connector with only redis-py boundaries faked."""
-    # Import after the autouse Redis fixtures have patched redis-py. Importing
-    # during collection would cache the real RedisCluster before those patches
-    # and make other connector tests attempt real network connections.
-    # First Party
-    from lmcache.v1.storage_backend.connector import redis_connector
-    from lmcache.v1.storage_backend.connector.redis_connector import (
-        RedisClusterConnector,
-        RedisConnector,
-    )
-
     if connector_kind == "redis":
         pool = object()
         monkeypatch.setattr(
-            redis_connector.redis.ConnectionPool,
+            redis.ConnectionPool,
             "from_url",
             _connection_pool_factory(pool),
         )
         monkeypatch.setattr(
-            redis_connector.redis.Redis,
+            redis.Redis,
             "from_pool",
             _client_factory(client),
         )
-        return RedisConnector("redis://test.invalid:1", loop, local_backend)
+        url = "redis://test.invalid:1"
+    else:
+        # Resolve the construction boundary only after the suite's Redis
+        # fixtures are active, so collection never binds a real network client.
+        monkeypatch.setattr(
+            "lmcache.v1.storage_backend.connector.redis_connector.RedisCluster",
+            _cluster_factory(client),
+        )
+        url = "redis-cluster://127.0.0.1:1"
 
-    monkeypatch.setattr(
-        redis_connector,
-        "RedisCluster",
-        _cluster_factory(client),
-    )
-    return RedisClusterConnector(
-        hosts_and_ports=[("127.0.0.1", 1)],
-        username="",
-        password="",
-        loop=loop,
-        local_cpu_backend=local_backend,
+    return cast(
+        "RedisConnectorUnderTest",
+        CreateConnector(url, loop, local_backend).getWrappedConnector(),
     )
 
 
