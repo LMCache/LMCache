@@ -224,6 +224,13 @@ def test_validation_rejects_inconsistent_structures():
         grouping=Grouping.PER_LAYER_KV_PAIRS,
         dims=((Axis.B,), (Axis.N,), (Axis.H,), (Axis.C,)),
     )
+    # SHARED with a per-layer tuple level is the plane-tuple grouping, which
+    # carries no KV axis (the tuple splits the content across planes).
+    build(
+        kv_packing=KVPacking.SHARED,
+        grouping=Grouping.PER_LAYER_PLANE_TUPLES,
+        dims=((Axis.B,), (Axis.N,), (Axis.H,), (Axis.C,)),
+    )
     # FUSED requires KV inside the content region (after N and H).
     with pytest.raises(ValueError, match="FUSED"):
         build(

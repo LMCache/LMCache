@@ -112,12 +112,17 @@ class Grouping(Enum):
     The list levels carry logical axes that therefore must not appear in
     ``dims``: ``PER_LAYER`` carries ``L``; ``KV_LISTS`` carries ``KV`` and
     ``L``; ``PER_LAYER_KV_PAIRS`` carries ``L`` and ``KV``.
+    ``PER_LAYER_PLANE_TUPLES`` carries ``L`` only: its tuple level holds NP
+    single-head planes whose widths partition the per-token content, so it
+    splits ``C`` across tensors rather than carrying a whole axis, and each
+    plane materializes its slice of ``C`` as a per-tensor dim.
     """
 
     SINGLE_TENSOR = "single_tensor"  # everything in one tensor
     PER_LAYER = "per_layer"  # list[NL] of per-layer tensors
     KV_LISTS = "kv_lists"  # [key_layers, value_layers] two-list form
     PER_LAYER_KV_PAIRS = "per_layer_kv_pairs"  # list[NL] of (K, V) tensor pairs
+    PER_LAYER_PLANE_TUPLES = "per_layer_plane_tuples"  # list[NL] of NP-plane tuples
 
 
 # Axes each grouping carries at its list levels.
@@ -127,6 +132,7 @@ _CARRIED_AXES: Mapping[Grouping, frozenset[Axis]] = MappingProxyType(
         Grouping.PER_LAYER: frozenset({Axis.L}),
         Grouping.KV_LISTS: frozenset({Axis.KV, Axis.L}),
         Grouping.PER_LAYER_KV_PAIRS: frozenset({Axis.L, Axis.KV}),
+        Grouping.PER_LAYER_PLANE_TUPLES: frozenset({Axis.L}),
     }
 )
 
@@ -362,8 +368,12 @@ class KVLayoutDescriptor:
 
     @property
     def is_layer_list(self) -> bool:
-        """One list entry per layer (a tensor or a (K, V) pair)."""
-        return self.grouping in (Grouping.PER_LAYER, Grouping.PER_LAYER_KV_PAIRS)
+        """One list entry per layer (a tensor, a (K, V) pair, or a plane tuple)."""
+        return self.grouping in (
+            Grouping.PER_LAYER,
+            Grouping.PER_LAYER_KV_PAIRS,
+            Grouping.PER_LAYER_PLANE_TUPLES,
+        )
 
     @property
     def is_mla(self) -> bool:
@@ -398,8 +408,16 @@ class KVLayoutDescriptor:
 
     @property
     def is_kv_second_tuple(self) -> bool:
-        """Each per-layer list entry is a (K, V) pair of tensors."""
-        return self.grouping is Grouping.PER_LAYER_KV_PAIRS
+        """Each per-layer list entry is a tuple of tensors.
+
+        A (K, V) pair under SPLIT packing or NP content planes under SHARED:
+        the engine fact keeps one name for both tuple forms, and the transfer
+        path tells them apart through ``is_mla``.
+        """
+        return self.grouping in (
+            Grouping.PER_LAYER_KV_PAIRS,
+            Grouping.PER_LAYER_PLANE_TUPLES,
+        )
 
     @property
     def kv_size(self) -> int:
@@ -593,6 +611,19 @@ ENGINE_KV_FORMAT_DESCRIPTORS: Mapping[str, KVLayoutDescriptor] = MappingProxyTyp
         # is_two_major stays False.
         "NL_X_TWO_X_NB_BS_NH_HS": _split(
             ((_B,), (_N,), (_H,), (_C,)), Grouping.PER_LAYER_KV_PAIRS
+        ),
+        # vLLM-Ascend per-layer MLA / DSA plane tuples: NL x NP x [NB, BS, 1,
+        # HS]. Each layer is a tuple of NP single-head planes -- 2 MLA
+        # (latent, rope), 3 DSA (latent, rope, dsa) or 1 latent-only -- whose
+        # widths partition the per-token content, so the tuple level carries
+        # no whole axis and C stays unbound (it differs per plane); the latent
+        # head is the materialized 1, as in the other MLA entries.
+        "NL_X_NP_X_NB_BS_ONE_HS": KVLayoutDescriptor(
+            extents=_MLA_EXTENTS,
+            dims=((_B,), (_N,), (_H,), (_C,)),
+            grouping=Grouping.PER_LAYER_PLANE_TUPLES,
+            kv_packing=KVPacking.SHARED,
+            storage_dtype=DTYPE_UNSPECIFIED,
         ),
     }
 )
