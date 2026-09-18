@@ -196,12 +196,12 @@ compatibility with the vLLM-embedded API server.
      - Path
      - Purpose
    * - GET
-     - ``/reconfigure/{backend}/status``
+     - ``/reconfigure/{backend}/l2/status``
      - Report runtime-manageable L2 adapters for one backend type. (To discover
        reconfigurable backends, use ``GET /config/adapters`` and read the
        ``reconfigurable`` flag.)
    * - POST
-     - ``/reconfigure/{backend}/{operation}``
+     - ``/reconfigure/{backend}/l2/{operation}``
      - Apply one runtime reconfiguration operation to a backend adapter.
 
 **Observability**
@@ -489,7 +489,7 @@ This is the single live adapter listing; it supersedes the old
 ``primary`` is ``true`` only on the first entry. ``reconfigurable`` is
 ``true`` for adapters that accept ``/reconfigure`` operations — pass that
 adapter's ``type_name`` as the ``{backend}`` path parameter to
-``GET /reconfigure/{backend}/status`` and the reconfigure operations. An
+``GET /reconfigure/{backend}/l2/status`` and the reconfigure operations. An
 engine that has no L2 backends returns ``{"adapters": []}`` (still ``200`` —
 the engine is initialized, it just has no L2 storage).
 
@@ -1174,6 +1174,11 @@ writable by the server. The endpoint routes ``backend``, ``operation``, and the
 JSON request body into the generic L2 adapter reconfiguration API, while
 backend-specific validation and migration semantics stay inside the adapter.
 
+**Changed:** L2 reconfiguration uses ``/reconfigure/{backend}/l2/status``
+and ``/reconfigure/{backend}/l2/{operation}``. The previous
+``/reconfigure/{backend}/status`` and ``/reconfigure/{backend}/{operation}``
+URLs are removed and return ``404``.
+
 ``backend`` and ``operation`` path segments are normalized (stripped and
 lower-cased). Within a request body, ``adapter_index`` (default ``0``) is
 **backend-local** — it indexes only the adapters of that backend, not the
@@ -1186,8 +1191,8 @@ string is still the configured L2 adapter type, not the serde wrapper type.
    ``GET /config/adapters``: each adapter whose ``reconfigurable`` flag is
    ``true`` can be addressed by its ``type_name``.
 
-``GET /reconfigure/{backend}/status``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``GET /reconfigure/{backend}/l2/status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Report the runtime-manageable adapters for one backend type. Each adapter
 entry's ``adapter_index`` is rewritten to its **backend-local** 0-based index
@@ -1222,10 +1227,10 @@ An unknown or empty backend returns ``enabled=false``, ``num_adapters=0``,
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/reconfigure/dax/status | jq
+    curl -s http://localhost:8080/reconfigure/dax/l2/status | jq
 
-``POST /reconfigure/{backend}/{operation}``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``POST /reconfigure/{backend}/l2/{operation}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Apply one reconfiguration operation to a backend adapter. The request body is
 a JSON object whose accepted fields depend on the backend and operation. The
@@ -1293,7 +1298,7 @@ dict). A successful DAX ``add`` looks like:
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/reconfigure/dax/add \
+    curl -s -X POST http://localhost:8080/reconfigure/dax/l2/add \
         -H 'Content-Type: application/json' \
         -d '{"device_path": "/dev/dax0.0", "size": "100GiB"}'
 
