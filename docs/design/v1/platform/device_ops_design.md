@@ -429,3 +429,4 @@ module names and directories.
 | XPU | `XpuDeviceOps` | 12 via `bind_native(xpu_ops)` + 24 torch | existing SYCL | **low** |
 | MUSA | `MusaDeviceOps` | 1 native op | none | **low** |
 | HPU | `HpuDeviceOps` | none (inherits baseline) | none | **trivial** |
+| Neuron | `NeuronDeviceOps` | none (inherits baseline) | none | **trivial** |

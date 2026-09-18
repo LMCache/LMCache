@@ -12,6 +12,8 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
+    "grpcio==1.78.0",
+    "grpcio-tools==1.78.0",
     "torch==2.13.0",
     "wheel",
 ]
@@ -85,10 +87,14 @@ select = [
     #"SIM",
     # Ruff does not support isort's import_headings feature, yet.
     # "I",
-    # flake8-logging-format
-    #"G",
+    # flake8-logging-format: f-string in a logging call. %-format defers the
+    # formatting until the record is actually emitted. Only G004 is enabled;
+    # G201/G002 change the logged content rather than the evaluation cost.
+    "G004",
     # flake8-self (private member access)
     "SLF",
+    # pylint: logging call has more arguments than format placeholders
+    "PLE1205",
 ]
 ignore = [
     # star imports
@@ -105,6 +111,84 @@ ignore = [
 # Ignore SLF everywhere except lmcache/v1/multiprocess/
 "!lmcache/v1/multiprocess/**" = ["SLF"]
 "!lmcache/v1/distributed/**" = ["SLF"]
+# Temporary G004 ignores for the files/directories that have not been migrated
+# to lazy %-format logging yet. Delete an entry once its area is converted;
+# until then every already-migrated file is protected from regressing.
+# NOTE: "*" crosses directory separators in ruff's per-file-ignores, so a
+# pattern like "lmcache/*.py" would silently ignore the whole subtree -- that is
+# why mixed directories are listed file by file, and "<dir>/**" is used only
+# where every file below the directory still violates the rule.
+# Tracking issue: https://github.com/LMCache/LMCache/issues/5118
+".buildkite/correctness/async_request.py" = ["G004"]
+"benchmarks/multi_round_qa/multi-round-qa.py" = ["G004"]
+"benchmarks/multi_round_qa/utils.py" = ["G004"]
+"benchmarks/rag/rag.py" = ["G004"]
+"benchmarks/rag/utils.py" = ["G004"]
+"benchmarks/storage_backend_io/**" = ["G004"]
+"examples/disagg_prefill/**" = ["G004"]
+"examples/disagg_prefill_mp/**" = ["G004"]
+"examples/token_dropping/random_token_dropping.ipynb" = ["G004"]
+"examples/token_dropping/rkv_colab.ipynb" = ["G004"]
+"examples/token_dropping/rkv_token_dropping.ipynb" = ["G004"]
+"examples/token_dropping/rkv_variants/**" = ["G004"]
+"examples/token_dropping/snapkv_colab.ipynb" = ["G004"]
+"examples/token_dropping/snapkv_token_dropping.ipynb" = ["G004"]
+"lmcache/integration/vllm/utils.py" = ["G004"]
+"lmcache/observability.py" = ["G004"]
+"lmcache/sdk/context.py" = ["G004"]
+"lmcache/storage_backend/serde/cachegen_basics.py" = ["G004"]
+"lmcache/utils.py" = ["G004"]
+"lmcache/v1/api_server/__main__.py" = ["G004"]
+"lmcache/v1/cache_controller/controller_manager.py" = ["G004"]
+"lmcache/v1/cache_controller/executor.py" = ["G004"]
+"lmcache/v1/cache_controller/worker.py" = ["G004"]
+"lmcache/v1/cache_engine.py" = ["G004"]
+"lmcache/v1/check/__init__.py" = ["G004"]
+"lmcache/v1/compute/attention/triton_sparse.py" = ["G004"]
+"lmcache/v1/compute/attention/utils.py" = ["G004"]
+"lmcache/v1/compute/blend/blender.py" = ["G004"]
+"lmcache/v1/compute/blend/utils.py" = ["G004"]
+"lmcache/v1/compute/models/utils.py" = ["G004"]
+"lmcache/v1/config.py" = ["G004"]
+"lmcache/v1/config_base.py" = ["G004"]
+"lmcache/v1/distributed/l2_adapters/bigtable_l2_adapter.py" = ["G004"]
+"lmcache/v1/distributed/transfer_channel/impl/mooncake_te_impl.py" = ["G004"]
+"lmcache/v1/gpu_connector/utils.py" = ["G004"]
+"lmcache/v1/health_monitor/checks/remote_backend_check.py" = ["G004"]
+"lmcache/v1/lookup_client/hit_limit_lookup_client.py" = ["G004"]
+"lmcache/v1/memory_management.py" = ["G004"]
+"lmcache/v1/server/__main__.py" = ["G004"]
+"lmcache/v1/standalone/__main__.py" = ["G004"]
+"lmcache/v1/storage_backend/__init__.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/__init__.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/audit_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/azure_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/azure_connector.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/base_connector.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/eic_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/external_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/hf3fs_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/infinistore_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/infinistore_connector.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/instrumented_connector.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/lm_connector.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/mock_connector.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/mooncakestore_connector.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/redis_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/redis_connector.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/s3_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/connector/sagemaker_hyperpod_adapter.py" = ["G004"]
+"lmcache/v1/storage_backend/nixl_storage_backend.py" = ["G004"]
+"lmcache/v1/storage_backend/p2p_backend.py" = ["G004"]
+"lmcache/v1/storage_backend/path_sharder.py" = ["G004"]
+"lmcache/v1/storage_backend/pd_backend.py" = ["G004"]
+"lmcache/v1/storage_backend/pd_backend_async.py" = ["G004"]
+"lmcache/v1/transfer_channel/nixl_channel.py" = ["G004"]
+"tests/disagg/test_nixl_cache_engine.py" = ["G004"]
+"tests/disagg/test_nixl_channel.py" = ["G004"]
+"tests/v1/shm_allocator/test_shm_allocator.py" = ["G004"]
+"tests/v1/storage_backend/test_p2p_backend_with_controller.py" = ["G004"]
+"tests/v1/storage_backend/test_raw_block_uring_cmd.py" = ["G004"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg
@@ -150,8 +234,15 @@ warn_return_any = false
 
 follow_imports = "silent"
 
+[[tool.mypy.overrides]]
+module = [
+    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.*",
+]
+ignore_errors = true
+follow_imports = "skip"
+
 [tool.codespell]
-ignore-words-list = "afterall,allready,notin,te"
+ignore-words-list = "afterall,allready,notin,te,cann"
 skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
 # Base64 image payloads in executed notebooks are random-looking and will
 # eventually contain something that looks like a typo.

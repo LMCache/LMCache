@@ -178,6 +178,10 @@ General Options
    * - ``-q`` / ``--quiet``
      - No
      - Suppress the real-time progress display.
+   * - ``--no-warmup``
+     - No
+     - Skip the warmup phase and start measuring immediately.
+       See :ref:`bench-warmup`.
 
 
 .. _bench-tokens-per-gb:
@@ -199,6 +203,53 @@ startup log:
 Then compute::
 
    tokens_per_gb = 567890 / 12.34 = 46,020
+
+
+.. _bench-warmup:
+
+Warmup Phase
+~~~~~~~~~~~~
+
+Most workloads run a warmup phase before the measured run. What it sends is
+workload-specific -- ``long-doc-qa`` prefills each document, ``rag-qa-quality``
+prefills each document behind the system block, ``prefix-suffix-tuner`` sends a
+full pass over its prefix pool, ``multi-round-chat`` primes each session, and
+``long-doc-permutator`` sends a single dummy request. ``random-prefill`` has no
+warmup at all. Warmup requests are sent with ``max_tokens=1`` and their stats
+are discarded, so they never appear in the reported numbers.
+
+Warmup serves two purposes: it absorbs the engine's one-time first-request cost
+(``torch.compile``, CUDA-graph capture, weight paging), and -- for the workloads
+that prefill their data -- it puts the KV cache in the state the measured run is
+designed to exercise.
+
+``--no-warmup`` skips the phase entirely and starts measuring immediately:
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --no-warmup
+
+Use it to measure a cold start -- what the first requests against a fresh
+engine and an empty cache actually cost -- or to shorten a smoke test where the
+absolute numbers do not matter.
+
+.. warning::
+
+   Do not compare a ``--no-warmup`` run against a warmed run: the numbers
+   measure different things. Without warmup, the first requests pay the
+   engine's first-request cost and read from a cold cache, which inflates TTFT
+   and depresses cache hit rate.
+
+   For workloads whose warmup populates the data they then measure reuse of
+   (``long-doc-qa``, ``rag-qa-quality``, ``prefix-suffix-tuner``,
+   ``multi-round-chat``), skipping it removes the reuse the workload was built
+   to measure. ``prefix-suffix-tuner`` in particular reports pass-2 results
+   against a cache that pass 1 was supposed to fill, so its output is not
+   meaningful with ``--no-warmup``.
 
 
 Workloads
@@ -917,8 +968,8 @@ Options
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
-       (lmcache-driven handle path). ``cpu`` allocates POSIX-SHM-backed tensors
-       and uses the engine-driven (worker-side gather/scatter) path by default.
+       (lmcache-driven handle path). ``cpu`` allocates regular CPU tensors and
+       uses the engine-driven (worker-side gather/scatter) path by default.
    * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
      - ``auto``
      - Transport routing for STORE/RETRIEVE. ``lmcache_driven`` forces the
@@ -968,8 +1019,11 @@ CPU mode (no GPU)
 ~~~~~~~~~~~~~~~~~
 
 ``--mode cpu`` runs the same end-to-end path without a GPU. The server
-runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
-POSIX-SHM-backed KV tensors and exercises the full RPC path.
+runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates regular
+CPU KV tensors and exercises the full RPC path through ``TransferContext``.
+The engine-driven context uses server-owned SHM staging when available and
+falls back to pickle transport. In ``lmcache_driven`` mode, the CPU wrapper
+migrates the tensors to POSIX SHM during registration.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path
 (``auto`` → ``cpu→engine_driven``); that path requires the server to
@@ -1055,18 +1109,16 @@ Both transfer modes support MLA:
   ``use_mla`` from the registered tensor shapes -- the bench's rank-3
   MLA client tensors trip this automatically.
 * ``engine_driven`` (CPU default): the bench derives ``use_mla`` from
-  ``kv_size`` in the spec and sends it on the register payload, so the
-  server sizes its SHM chunks correctly.
+  the tensor layout through ``TransferContext``, so the server sizes its SHM
+  chunks correctly.
 
 .. note::
 
    Heterogeneous specs that mix ``kv_size=1`` and ``kv_size=2`` groups
-   are fully supported in ``lmcache_driven`` mode -- each layer's
-   rank (3 vs. 5) tells the detector which per-group KV format to
-   use. In ``engine_driven`` mode the server registers a *single*
-   SHM chunk shape per context, so a mixed spec falls back to the
-   classical (non-MLA) layout; use ``lmcache_driven`` when you need
-   true per-group MLA.
+   are supported in ``lmcache_driven`` mode -- each layer's rank (3 vs. 5)
+   tells the detector which per-group KV format to use. ``engine_driven``
+   currently supports one KV group per context; use ``lmcache_driven`` for
+   heterogeneous or hybrid KV groups.
 
 Tensor Parallel (TP > 1)
 ^^^^^^^^^^^^^^^^^^^^^^^^

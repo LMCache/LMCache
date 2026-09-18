@@ -18,6 +18,9 @@ from lmcache.v1.mp_coordinator.api import (
 )
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
+    FleetEvictionController,
+)
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 
@@ -131,6 +134,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
     """Pin excludes the resolved keys from L2 eviction; unpin restores them."""
     with _pin_client() as client:
         ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
         keys = _resolve(ctx)
         assert keys  # 2 chunks x world_size 1
 
@@ -155,7 +159,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
                     ],
                 )
             )
-        assert ctx.eviction_controller.compute_eviction_plan()["alice"]
+        assert eviction.compute_eviction_plan()["alice"]
 
         resp = client.post("/cache/pins", json=_pin_body())
         assert resp.status_code == 200, resp.text
@@ -165,7 +169,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
             "status": "pinned",
         }
         # Pinned: the keys drop out of the eviction plan.
-        assert ctx.eviction_controller.compute_eviction_plan() == {}
+        assert eviction.compute_eviction_plan() == {}
 
         resp = client.request("DELETE", "/cache/pins", json=_pin_body())
         assert resp.status_code == 200, resp.text
@@ -175,7 +179,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
             "status": "unpinned",
         }
         # Unpinned: the keys are eligible for eviction again.
-        assert ctx.eviction_controller.compute_eviction_plan()["alice"]
+        assert eviction.compute_eviction_plan()["alice"]
 
 
 def test_pin_short_sequence_is_noop():
@@ -197,6 +201,90 @@ def test_pin_invalid_cache_salt_returns_400():
     with _pin_client() as client:
         resp = client.post("/cache/pins", json=_pin_body(salt="bad@salt"))
         assert resp.status_code == 400
+
+
+def test_list_pins_empty_table():
+    """No pins yet: an empty page with total 0, not a 404."""
+    with _pin_client() as client:
+        resp = client.get("/cache/pins")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"total": 0, "pins": []}
+
+
+def test_list_pins_shows_pinned_keys_with_counts():
+    """GET lists every key the POSTs resolved to, with the wire form of the
+    key and a pin count that tracks repeated POSTs and DELETEs."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        keys = _resolve(ctx)
+        assert client.post("/cache/pins", json=_pin_body()).status_code == 200
+        assert client.post("/cache/pins", json=_pin_body()).status_code == 200
+
+        resp = client.get("/cache/pins")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["total"] == len(keys)
+        assert body["pins"] == [
+            {
+                "key": {
+                    "chunk_hash_hex": k.chunk_hash.hex(),
+                    "model_name": "m",
+                    "kv_rank": k.kv_rank,
+                    "object_group_id": 0,
+                    "cache_salt": "alice",
+                },
+                "pin_count": 2,
+            }
+            for k in keys
+        ]
+
+        client.request("DELETE", "/cache/pins", json=_pin_body())
+        counts = {p["pin_count"] for p in client.get("/cache/pins").json()["pins"]}
+        assert counts == {1}
+
+        client.request("DELETE", "/cache/pins", json=_pin_body())
+        assert client.get("/cache/pins").json() == {"total": 0, "pins": []}
+
+
+def test_list_pins_filters_by_cache_salt_and_model():
+    """cache_salt and model_name narrow the listing; total follows the filter."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        alice = _resolve(ctx, "alice")
+        bob = _resolve(ctx, "bob")
+        client.post("/cache/pins", json=_pin_body("alice"))
+        client.post("/cache/pins", json=_pin_body("bob"))
+
+        body = client.get("/cache/pins", params={"cache_salt": "bob"}).json()
+        assert body["total"] == len(bob)
+        assert {p["key"]["cache_salt"] for p in body["pins"]} == {"bob"}
+
+        body = client.get("/cache/pins", params={"model_name": "m"}).json()
+        assert body["total"] == len(alice) + len(bob)
+
+        body = client.get("/cache/pins", params={"model_name": "other"}).json()
+        assert body == {"total": 0, "pins": []}
+
+
+def test_list_pins_pages_and_validates_bounds():
+    """offset/limit page the filtered set; out-of-range values are a 422."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        alice = _resolve(ctx, "alice")
+        bob = _resolve(ctx, "bob")
+        client.post("/cache/pins", json=_pin_body("alice"))
+        client.post("/cache/pins", json=_pin_body("bob"))
+        expected = [k.chunk_hash.hex() for k in alice + bob]
+
+        first = client.get("/cache/pins", params={"offset": 0, "limit": 1}).json()
+        second = client.get("/cache/pins", params={"offset": 1, "limit": 10}).json()
+        assert first["total"] == second["total"] == len(expected)
+        listed = [p["key"]["chunk_hash_hex"] for p in first["pins"] + second["pins"]]
+        assert listed == expected
+
+        assert client.get("/cache/pins", params={"offset": -1}).status_code == 422
+        assert client.get("/cache/pins", params={"limit": 0}).status_code == 422
+        assert client.get("/cache/pins", params={"limit": 10001}).status_code == 422
 
 
 # -- Delete dispatch (coordinator resolves; key-addressed L1 + L2 to the node) --
@@ -333,9 +421,10 @@ def test_delete_non_force_holds_back_l2_pinned_key():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
         client.app.state.outbound_client = _mock_delete_server(deletes)
         keys = _resolve_delete(ctx)
-        ctx.eviction_controller.pin([keys[0]])  # protect one key at L2
+        eviction.pin([keys[0]])  # protect one key at L2
 
         resp = client.post("/cache/delete", json=_delete_body("mp-1"))
         assert resp.status_code == 200, resp.text
@@ -344,7 +433,7 @@ def test_delete_non_force_holds_back_l2_pinned_key():
         assert len(deletes) == 1
         assert len(deletes[0]["keys"]) == len(keys) - 1
         # The pin survives (non-force does not drop it).
-        assert ctx.eviction_controller.filter_unpinned([keys[0]]) == []
+        assert eviction.filter_unpinned([keys[0]]) == []
 
 
 def test_delete_force_removes_and_drops_l2_pin():
@@ -356,9 +445,10 @@ def test_delete_force_removes_and_drops_l2_pin():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
         client.app.state.outbound_client = _mock_delete_server(deletes)
         keys = _resolve_delete(ctx)
-        ctx.eviction_controller.pin([keys[0]])
+        eviction.pin([keys[0]])
 
         resp = client.post("/cache/delete", json=_delete_body("mp-1", force=True))
         assert resp.status_code == 200, resp.text
@@ -368,7 +458,7 @@ def test_delete_force_removes_and_drops_l2_pin():
         assert len(deletes[0]["keys"]) == len(keys)
         assert resp.json()["skipped"] == 0
         # ...and the coordinator dropped the L2 pin.
-        assert ctx.eviction_controller.filter_unpinned([keys[0]]) == [keys[0]]
+        assert eviction.filter_unpinned([keys[0]]) == [keys[0]]
 
 
 def test_delete_l1_tier_ignores_l2_pins():
@@ -380,9 +470,10 @@ def test_delete_l1_tier_ignores_l2_pins():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
         client.app.state.outbound_client = _mock_delete_server(deletes)
         keys = _resolve_delete(ctx)
-        ctx.eviction_controller.pin([keys[0]])
+        eviction.pin([keys[0]])
 
         resp = client.post("/cache/delete", json=_delete_body("mp-1", tier="l1"))
         assert resp.status_code == 200, resp.text
@@ -391,7 +482,7 @@ def test_delete_l1_tier_ignores_l2_pins():
         assert deletes[0]["tier"] == "l1"
         assert len(deletes[0]["keys"]) == len(keys)
         assert resp.json()["affected"] == len(keys)  # L1 only
-        assert ctx.eviction_controller.filter_unpinned([keys[0]]) == []  # pin untouched
+        assert eviction.filter_unpinned([keys[0]]) == []  # pin untouched
 
 
 def test_delete_server_unreachable_returns_502():

@@ -147,6 +147,27 @@ def _parse_mp(argv: list[str]) -> MPServerConfig:
     return parse_args_to_mp_server_config(parser.parse_args(argv))
 
 
+def test_transport_defaults_to_zmq():
+    assert _parse_mp([]).transport == "zmq"
+    assert MPServerConfig().transport == "zmq"
+
+
+def test_transport_flag_is_parsed_without_starting_grpc():
+    assert _parse_mp(["--transport", "grpc"]).transport == "grpc"
+
+
+def test_grpc_server_workers_are_parsed():
+    assert _parse_mp([]).grpc_server_workers == 32
+    assert MPServerConfig().grpc_server_workers == 32
+    assert _parse_mp(["--grpc-server-workers", "7"]).grpc_server_workers == 7
+
+
+@pytest.mark.parametrize("workers", ["0", "-1"])
+def test_grpc_server_workers_must_be_positive(workers):
+    with pytest.raises(ValueError, match="grpc server workers must be >= 1"):
+        _parse_mp(["--grpc-server-workers", workers])
+
+
 def test_instance_id_defaults_to_uuid4():
     # No --instance-id flag => a random UUID v4 is minted.
     config = _parse_mp([])
@@ -166,6 +187,33 @@ def test_instance_id_defaults_are_distinct():
 def test_instance_id_dataclass_default_is_distinct():
     # Direct construction (no CLI) also mints a fresh id per instance.
     assert MPServerConfig().instance_id != MPServerConfig().instance_id
+
+
+def test_isolated_ipc_defaults_to_false():
+    assert _parse_mp([]).isolated_ipc is False
+    assert MPServerConfig().isolated_ipc is False
+
+
+def test_isolated_ipc_flag_enables():
+    assert _parse_mp(["--isolated-ipc"]).isolated_ipc is True
+    assert _parse_mp(["--no-isolated-ipc"]).isolated_ipc is False
+
+
+# -- Engine type --------------------------------------------------------------
+
+
+def test_engine_type_defaults_to_default():
+    assert _parse_mp([]).engine_type == "default"
+
+
+def test_engine_type_blend_selects_blend_module():
+    assert _parse_mp(["--engine-type", "blend"]).engine_type == "blend"
+
+
+def test_engine_type_blend_legacy_removed():
+    # The original blend engine was removed; only ``blend`` remains.
+    with pytest.raises(SystemExit):
+        _parse_mp(["--engine-type", "blend_legacy"])
 
 
 # -- Event reporting ----------------------------------------------------------

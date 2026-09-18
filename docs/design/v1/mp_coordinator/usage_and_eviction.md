@@ -24,7 +24,8 @@ is tracked but **not yet exposed**: it is read in-process off
 `ctx.usage_manager`, and gets an endpoint when something needs one.
 
 Code: `lmcache/v1/mp_coordinator/controllers/` (coordinator side),
-`lmcache/v1/mp_coordinator/http_apis/quota_api.py` (REST endpoints),
+`lmcache/v1/mp_coordinator/controllers/eviction_http_api.py` (the REST
+endpoints the controller owns),
 `lmcache/v1/mp_coordinator/schemas.py` (wire types),
 `lmcache/v1/multiprocess/http_server.py` (MP-server wiring).
 
@@ -115,7 +116,7 @@ never reads. The controller takes it as a dependency instead. Its
 node-local counterpart one scope down is
 `distributed/storage_controllers/eviction_controller.py`.
 
-### CacheUsageManager (`usage_manager.py`)
+### CacheUsageManager (`views/usage_manager.py`)
 
 The byte totals are a **derived view of the global key directory**,
 constructed and maintained in this manager rather than inside the
@@ -220,10 +221,10 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
   ``policy.get_eviction_actions``. Salts without an explicit quota use the
   registry's default limit; while it is unset (``None``) they are skipped
   entirely — see QuotaManager above. No network, no mutation.
-- ``run(registry, http_client, check_interval)`` — the control loop
-  itself, started as an asyncio task by the app lifespan and cancelled on
-  shutdown. ``EVICTION_CHECK_INTERVAL = 0`` disables it (the task is
-  never created).
+- ``run(runtime)`` — the ``Controller`` lifetime hook, an async context
+  manager. Entering creates the loop task; ``EVICTION_CHECK_INTERVAL = 0``
+  creates none. Exiting cancels the loop, then drains the dispatches
+  already sent so a ``DELETE`` the last sweep launched still arrives.
 - ``execute_evictions(registry, http_client)`` — one pass: computes the plan and
   **fire-and-forget** ``DELETE /cache/objects`` to a holder MP server for each
   salt's victims; on confirmed deletion ``on_remove`` drops them from tracking.
@@ -232,7 +233,7 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
   own request, because the endpoint rejects any single delete over that cap with
   HTTP 400 — a full-salt eviction (quota dropped to 0) routinely exceeds it.
 
-## REST endpoints (`quota_api.py`)
+## REST endpoints (`controllers/eviction_http_api.py`)
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -242,6 +243,9 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
 | ``DELETE`` | ``/quota/{cache_salt}`` | Remove quota |
 | ``GET`` | ``/quota/{cache_salt}`` | Quota + usage for one salt (``tier``: ``l1`` or ``l2``) |
 | ``GET`` | ``/quota`` | Quota + usage for all salts (``tier``: ``l1`` or ``l2``) |
+| ``POST`` | ``/cache/pins`` | Pin a token sequence's keys against eviction |
+| ``DELETE`` | ``/cache/pins`` | Release them |
+| ``GET`` | ``/cache/pins`` | Page through the pin table, filterable by ``cache_salt`` / ``model_name`` |
 
 Both status reads are **wholly scoped to the requested tier** — quota fields
 included. Quotas are enforced on L2, so an ``l1`` read reports L1 usage with

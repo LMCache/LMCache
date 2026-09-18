@@ -12,7 +12,7 @@ For example, CacheBlend can combine multiple (pre-)computed KV caches, when thei
 Configuring CacheBlend in RAG scenarios
 -------------------------------------------------
 
-Here, we will explain the code in our end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1/blend.py>`_>.
+Here, we will explain the code in our end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process/blend.py>`_>.
 
 Below are some blending-related configurations (and explanations):
 

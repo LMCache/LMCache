@@ -65,6 +65,9 @@ def _fetch(url: str, timeout: int = _TIMEOUT) -> str:
             pass
         logger.error("Coordinator returned %s: %s", e.code, detail)
         sys.exit(1)
+    except TimeoutError as e:
+        logger.error("Timed out contacting %s after %ds (%s)", url, timeout, e)
+        sys.exit(1)
     except urllib.error.URLError as e:
         logger.error(
             "Cannot reach %s -- is the coordinator running? (%s)", url, e.reason
@@ -179,6 +182,8 @@ def _render_directory_stats(body: Any, metrics: Metrics) -> None:
     for key, label in (
         ("num_contents", "Contents"),
         ("num_chunks", "Chunks"),
+        ("num_claims", "Claims"),
+        ("num_namespaces", "Namespaces"),
         ("table_size", "Table size"),
     ):
         section.add(key, label, blend.get(key))

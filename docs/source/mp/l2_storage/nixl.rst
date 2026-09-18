@@ -113,11 +113,9 @@ per-operation instead of pre-allocating them at init. This enables:
 - ``shard_dirs``: ``"true"`` or ``"false"`` (default ``"false"``). When
   ``"true"``, data files are spread across a two-level subdirectory tree
   under ``file_path`` instead of all living in one flat directory. The two
-  levels are the first four hex characters of the chunk hash, matching the
-  hash prefix already embedded in the filename
-  (for example ``834ebc79...`` is stored as ``83/4e/<filename>``), giving a
-  fanout of up to 256 × 256 subdirectories. Leaving it unset preserves the
-  original flat layout.
+  levels use the first four hex characters of the chunk hash for both salted
+  and unsalted keys, providing up to 256 × 256 subdirectories. Leaving
+  ``shard_dirs`` unset preserves the flat layout.
 
   Large flat directories slow down metadata operations on many filesystems,
   so sharding helps once a single cache directory holds a large number of
@@ -131,6 +129,15 @@ per-operation instead of pre-allocating them at init. This enables:
      directory makes previously written files unreachable (they are not
      deleted, just no longer found). Choose the layout when the cache
      directory is first created, or clear it when changing the setting.
+
+     Releases that predate salted dynamic-NIXL filenames wrote salted traffic
+     to salt-blind legacy paths. Those files cannot be safely attributed to a
+     salt and are not used as a fallback. Clear or quarantine that cache
+     directory when upgrading a deployment that used non-empty salts.
+
+For both flat and sharded layouts, a non-empty ``cache_salt`` is appended to
+the filename as ``@<cache_salt>`` before ``.bin``. An empty salt retains the
+legacy filename.
 
 **Optional fields (for persist):**
 
