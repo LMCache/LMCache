@@ -21,7 +21,7 @@ from lmcache.v1.platform import resolve_kv_wrapper_factory
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.cuda import CudaDeviceSpec
 from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper, RawCudaIPCWrapper
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 
 pytestmark = [
     pytest.mark.cuda,
