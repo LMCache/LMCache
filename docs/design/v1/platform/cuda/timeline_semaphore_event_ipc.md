@@ -165,9 +165,11 @@ that bypass the backend break under isolated IPC:
   backend during initialization or KV registration, route producer-event
   creation through its `create_event` / `record_event` methods, and retain
   exported events on the raw request future until the daemon replies.
-- **Migrated for event handles**: CacheBlend and qstore server modules now
-  return `export_event(...)` on the registration-cached backend instead of raw
-  `event.ipc_handle()` bytes. The switch still defaults to off because the
+- **Server exports removed**: the `STORE`, `RETRIEVE`, `STORE_Q` and
+  `CB_RETRIEVE_PRE_COMPUTED` handlers no longer record or export a completion
+  event; the reply itself is sent once the transfer stream has run the work
+  (see `../../multiprocess/transfer_completion.md`). Only worker-exported
+  producer events cross the process boundary. The switch still defaults to off because the
   raw KV-wrapper work (already outside the event-IPC abstraction; see
   `event_ipc_abstraction.md` non-goals) remains before hostIPC-free
   deployment is complete.

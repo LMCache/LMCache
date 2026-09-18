@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
     get_response_class,
 )
+from lmcache.v1.multiprocess.protocols.base import unwrap_deferred_response
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 
@@ -577,6 +578,10 @@ class MessageQueueServer(RequestServer):
         def _notify_response(fut: Future):
             try:
                 response = fut.result()
+                if isinstance(response, Future):
+                    # The handler deferred its reply; send it once resolved.
+                    response.add_done_callback(_notify_response)
+                    return
                 response_cls = handler_entry.get_response_class()
                 b_response = msgspec_encode(response, cls=response_cls)
                 frames_to_send = (
@@ -710,7 +715,9 @@ class MessageQueueServer(RequestServer):
                 )
                 return False
 
-        return_ann = hints.get("return", sig.return_annotation)
+        return_ann = unwrap_deferred_response(
+            hints.get("return", sig.return_annotation)
+        )
         expected_return_cls = get_response_class(request_type)
         if not same_type(return_ann, expected_return_cls):
             logger.error(

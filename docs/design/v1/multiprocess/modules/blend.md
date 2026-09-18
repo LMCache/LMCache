@@ -72,8 +72,10 @@ event_ipc) → (event_ipc, scatter_ran)`**
   `gpu_block_ids` — one block table per engine group, indexed by
   `engine_group_id`, possibly partially allocated (vLLM calls once per
   block-alloc round); `event_ipc` — the forward's CUDA event handle.
-- Out: a freshly server-recorded scatter-complete event handle plus
-  `scatter_ran` per the reason table below — `True` means every matched row
+- Out: `(b"", scatter_ran)`. Once the scatter is enqueued the reply is sent
+  after the retrieve stream has run it (see `../transfer_completion.md`);
+  no-op exits reply at once. `scatter_ran` follows the reason table below —
+  `True` means every matched row
   the client forwards this step is backed by scattered KV, `False` means
   the client degrades the request (TP-consensus).
 - Side effects: applied ranges recorded per `(request, worker)`; consumed

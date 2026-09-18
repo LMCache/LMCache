@@ -508,6 +508,22 @@ def test_mq_store():
     )
 
 
+def test_mq_store_deferred_reply():
+    """A blocking handler may return a future; the reply is sent once it
+    resolves, and later requests are not blocked behind it."""
+    key = create_cache_key(0)
+    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:15599")
+    helper.register_handler(
+        RequestType.STORE, test_mq_handler_helpers.deferred_store_handler
+    )
+    helper.run_test(
+        request_type=RequestType.STORE,
+        payloads=[key, 0, [[0, 1, 2]], b"\x00" * 64],
+        expected_response=(b"", True),
+        num_requests=3,
+    )
+
+
 def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.

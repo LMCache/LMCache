@@ -8,6 +8,7 @@ from the LMCache-driven KV transfer module.
 """
 
 # Standard
+from concurrent.futures import Future
 import threading
 import time
 
@@ -37,6 +38,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.transfer_completion import TransferReply
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
@@ -331,7 +333,7 @@ class QStoreModule(InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
+    ) -> TransferReply | Future[TransferReply]:
         """Store the paged Q ring blocks to CPU.
 
         Args:
@@ -343,15 +345,14 @@ class QStoreModule(InstanceLivenessTarget):
             event_ipc_handle: The IPC handle of the event to wait on.
 
         Returns:
-            A tuple where the first element is the IPC handle of the event
-            that signals the completion of the store operation, and the second
-            element indicates whether the store operation completed without a
-            fatal error (not whether every requested chunk was stored; see
-            Notes).
+            ``(b"", ok)`` where ``ok`` indicates whether the store completed
+            without a fatal error (not whether every requested chunk was
+            stored; see Notes). Once work is enqueued the reply is deferred
+            until the transfer stream has run it (see ``TransferCompletion``).
 
         Raises:
             ValueError: If no Q ring is registered for the given instance ID.
-            RuntimeError: If the backend does not support IPC event handles.
+            RuntimeError: If the Q ring context has no event backend.
 
         Notes:
             All-or-nothing. If ``gpu_block_ids`` do not fully cover every chunk
@@ -394,8 +395,6 @@ class QStoreModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
-
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
             # drive the transfer kernel to read out-of-bounds GPU memory, so skip
@@ -417,17 +416,15 @@ class QStoreModule(InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
-                event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                return b"", False
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
 
-            vllm_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
+            self._ctx.transfer_completion.wait_for_producer(
+                event_backend, event_ipc_handle, cache_context
             )
-            event_backend.wait_event(vllm_event, cache_context.stream)
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -498,7 +495,6 @@ class QStoreModule(InstanceLivenessTarget):
             except Exception:
                 logger.exception("Cannot store Q keys due to exception")
             finally:
-                event_backend.record_event(event, cache_context.stream)
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
@@ -533,4 +529,6 @@ class QStoreModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
-        return event_backend.export_event(event, cache_context.device), store_succeeded
+        return self._ctx.transfer_completion.reply_when_done(
+            cache_context, store_succeeded
+        )

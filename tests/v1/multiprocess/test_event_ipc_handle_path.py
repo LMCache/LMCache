@@ -2,6 +2,7 @@
 """Tests for platform event IPC use in the LMCache-driven handle path."""
 
 # Standard
+from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
@@ -172,14 +173,24 @@ def test_worker_exports_events_through_platform_backend(
     assert all(call[-1] == device for call in backend.calls[3:])
 
 
-def test_server_store_and_retrieve_delegate_event_ordering(
+def test_server_holds_import_and_defers_reply_until_stream_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Server imports, waits, records, and exports through the event backend."""
+    """Server imports and waits through the backend, records no event of its
+    own, and releases both the import and the reply from callbacks queued on
+    the transfer stream."""
     # First Party
+    from lmcache.v1.multiprocess import transfer_completion
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 
     backend = _FakeEventBackend()
+    submitted: list[tuple[Any, str, Any]] = []
+    monkeypatch.setattr(
+        transfer_completion,
+        "submit_callback_to_stream",
+        lambda stream, kind, payload: submitted.append((stream, kind, payload)),
+    )
+    completion = transfer_completion.TransferCompletion()
 
     def unexpected_backend_lookup(_device: object) -> _FakeEventBackend:
         raise AssertionError("server should reuse the registered event backend")
@@ -230,6 +241,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
+        transfer_completion=completion,
     )
     module = lmcache_driven_transfer.LMCacheDrivenTransferModule(
         cast(Any, server_context)
@@ -262,24 +274,44 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     )
     key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
 
-    assert module.store(key, 1, [[]], b"store-producer") == (
-        b"completion-handle",
-        True,
-    )
-    assert module.retrieve(key, 1, [[]], b"retrieve-producer") == (
-        b"completion-handle",
-        False,
-    )
+    store_reply = module.store(key, 1, [[]], b"store-producer")
+    retrieve_reply = module.retrieve(key, 1, [[]], b"retrieve-producer")
 
+    # Both replies wait for the stream; nothing has been sent yet.
+    assert isinstance(store_reply, Future) and not store_reply.done()
+    assert isinstance(retrieve_reply, Future) and not retrieve_reply.done()
+
+    # The server only imports and waits; it creates, records, exports nothing.
+    assert [call[0] for call in backend.calls] == ["import", "wait"] * 2
     imported_handles = [call[1] for call in backend.calls if call[0] == "import"]
     waited_handles = [call[1][1] for call in backend.calls if call[0] == "wait"]
     assert imported_handles == [b"store-producer", b"retrieve-producer"]
     assert waited_handles == [b"store-producer", b"retrieve-producer"]
-    assert sum(call[0] == "record" for call in backend.calls) == 2
-    assert sum(call[0] == "export" for call in backend.calls) == 2
-    for index, call in enumerate(backend.calls):
-        if call[0] == "export":
-            assert backend.calls[index - 1][0] == "record"
+    assert all(
+        call[2] == "transfer-stream" for call in backend.calls if call[0] == "wait"
+    )
+    assert completion.held_import_count() == 2
+    assert completion.pending_reply_count() == 2
+
+    # Per transfer: release the import right behind the wait, then resolve
+    # the reply behind the copy, all on the transfer stream.
+    assert [(stream, kind) for stream, kind, _payload in submitted] == [
+        ("cupy-stream", transfer_completion.RELEASE_IMPORTED_EVENT_KIND),
+        ("cupy-stream", transfer_completion.RESOLVE_DEFERRED_REPLY_KIND),
+    ] * 2
+
+    # Drain the callbacks in stream order through the registered handlers.
+    handlers: dict[str, Any] = {}
+    completion.register_host_funcs(
+        lambda kind, handler, payload_type: handlers.__setitem__(kind, handler)
+    )
+    for _stream, kind, payload in submitted:
+        handlers[kind](payload)
+
+    assert completion.held_import_count() == 0
+    assert completion.pending_reply_count() == 0
+    assert store_reply.result(timeout=0) == (b"", True)
+    assert retrieve_reply.result(timeout=0) == (b"", False)
 
 
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:

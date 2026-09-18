@@ -6,6 +6,10 @@ These handlers are defined at module level to allow them to be pickled
 and passed between processes during multiprocessing tests.
 """
 
+# Standard
+from concurrent.futures import Future
+import threading
+
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
@@ -107,6 +111,26 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 # ==============================================================================
 # STORE Request Handlers
 # ==============================================================================
+
+
+def deferred_store_handler(
+    key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]], ipc_handle: bytes
+) -> tuple[bytes, bool] | Future[tuple[bytes, bool]]:
+    """STORE handler that defers its reply, as a transfer handler does once
+    device work is enqueued: the reply goes out when the future resolves.
+
+    Args:
+        key: Cache key to store
+        gpu_id: GPU device ID
+        gpu_block_ids: GPU block IDs per KV cache group
+        ipc_handle: Producer event IPC handle
+
+    Returns:
+        A future resolving to ``(b"", True)`` shortly after the call.
+    """
+    reply: Future[tuple[bytes, bool]] = Future()
+    threading.Timer(0.2, reply.set_result, args=((b"", True),)).start()
+    return reply
 
 
 def store_handler(

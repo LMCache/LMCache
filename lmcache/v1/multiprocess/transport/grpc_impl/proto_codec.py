@@ -26,6 +26,7 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.protocols.base import unwrap_deferred_response
 from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
     get_message_codec_registry,
 )
@@ -542,6 +543,7 @@ def compile_response_encoder(
     response_type = hints.get("return", sig.return_annotation)
     if response_type is inspect.Signature.empty:
         response_type = Any
+    response_type = unwrap_deferred_response(response_type)
     encoder = compile_response_encoder_for_type(message_cls, response_type)
     return encoder, response_type
 

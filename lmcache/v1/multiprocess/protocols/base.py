@@ -4,9 +4,11 @@ Base types and classes for the multiprocess protocol system.
 """
 
 # Standard
+from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union, get_args, get_origin
 import enum
+import types
 
 
 class HandlerType(enum.Enum):
@@ -111,3 +113,27 @@ class ProtocolDefinition:
     payload_classes: list[Any]
     response_class: Optional[Any]
     handler_type: HandlerType
+
+
+def unwrap_deferred_response(annotation: Any) -> Any:
+    """Strip ``Future[...]`` from a handler's return annotation.
+
+    A blocking handler that defers its reply annotates ``T | Future[T]``: the
+    transport waits for the future and sends ``T``. Signature checks compare
+    ``T`` against the protocol's response class.
+
+    Args:
+        annotation: The handler's return annotation.
+
+    Returns:
+        The annotation with its ``Future[...]`` members removed.
+    """
+    if get_origin(annotation) not in (Union, types.UnionType):
+        return annotation
+    args = get_args(annotation)
+    remaining = tuple(arg for arg in args if get_origin(arg) is not Future)
+    if len(remaining) == len(args):
+        return annotation
+    if len(remaining) == 1:
+        return remaining[0]
+    return Union[remaining]  # type: ignore[return-value]

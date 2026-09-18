@@ -157,8 +157,9 @@ class DeviceMessagingFuture(MessagingFuture[T]):
     future and the device event, ordered through the platform event backend.
     The original future should return tuple[bytes, T], where the first
     element is the serialized device event handle. An empty handle means the
-    remote side submitted no device work, so completion of the original future
-    is also terminal completion of this future.
+    remote side either submitted no device work or sends its reply only once
+    that work has completed, so completion of the original future is also
+    terminal completion of this future.
     """
 
     def __init__(

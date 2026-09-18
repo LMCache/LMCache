@@ -124,7 +124,8 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         # Store paged Q ring blocks (served by QStoreModule).
         # Same as STORE.
-        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
+        # Returns: tuple[bytes, bool] - (device event handle, success flag).
+        #   See STORE for the handle contract.
         "STORE_Q": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
@@ -138,7 +139,10 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #     data, indexed by LMCache KV group index.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         # Returns: tuple[bytes, bool] - (device event handle, success flag).
-        #   The handle is empty when the server submitted no device work.
+        #   A non-empty handle names a device event the caller must wait on
+        #   before treating the transfer as complete. An empty handle means the
+        #   reply itself was sent after the transfer completed (or no device
+        #   work was submitted); the server always sends it empty.
         "STORE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
@@ -154,7 +158,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
         # Returns: tuple[bytes, bool] - (device event handle, success flag).
-        #   The handle is empty when the server submitted no device work.
+        #   See STORE for the handle contract.
         "RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool],

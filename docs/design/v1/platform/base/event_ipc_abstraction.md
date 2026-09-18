@@ -8,8 +8,11 @@ cross-process KV-cache transfers:
 1. The worker records an event after producing or reserving KV-cache blocks.
 2. The server imports that event and waits before reading or writing shared
    KV-cache memory.
-3. The server records a completion event after transfer work is queued.
-4. The worker future imports, polls, and waits for that completion event.
+3. The server holds the imported event until the stream has consumed the
+   wait, then replies once the stream has run the transfer (see
+   `../../multiprocess/transfer_completion.md`).
+4. The worker future treats the reply as completion; the reply's event handle
+   is empty.
 
 CUDA-style backends expose this through `Event(interprocess=True)`,
 `Event.ipc_handle()`, and `Event.from_ipc_handle(...)`. MUSA has its own
@@ -201,13 +204,17 @@ Worker adapter
 
 Server: lmcache_driven_transfer.py
   at KV registration: resolve, validate, and cache event_backend in ContextEntry
-  event_backend.import_event / wait_event
+  transfer_completion.wait_for_producer:
+    event_backend.import_event / wait_event, import held until a stream
+    callback releases it
   enqueue KV transfer
-  event_backend.create_event / record_event / export_event
+  transfer_completion.reply_when_done: reply sent by a stream callback
 
 Worker: futures.py
   reuse the transfer context's cached event_backend
-  event_backend.import_event / query_event / wait_event / synchronize_event
+  empty handle in the reply: completion of the raw future is completion
+  (non-empty handle from an older server:
+   event_backend.import_event / query_event / synchronize_event)
 ```
 
 Backend lookup and capability validation belong to initialization or cache

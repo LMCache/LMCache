@@ -25,6 +25,7 @@ from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.multiprocess.transfer_completion import TransferCompletion
 
 logger = init_logger(__name__)
 
@@ -225,6 +226,7 @@ class MPCacheServerContext:
         self._session_manager = SessionManager(self._token_hasher)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
+        self._transfer_completion = TransferCompletion()
 
     def close(self) -> None:
         """
@@ -255,6 +257,11 @@ class MPCacheServerContext:
     def storage_manager(self) -> StorageManager:
         """The storage manager instance."""
         return self._storage_manager
+
+    @property
+    def transfer_completion(self) -> TransferCompletion:
+        """Stream-ordered release of imported events and deferred replies."""
+        return self._transfer_completion
 
     @property
     def token_hasher(self) -> TokenHasher:

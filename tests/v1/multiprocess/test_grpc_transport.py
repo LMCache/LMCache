@@ -3,12 +3,14 @@
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 import importlib
 import subprocess
 import sys
+import threading
 
 # Third Party
 import pytest
@@ -109,11 +111,19 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             instance_id: int,
             block_ids: list[list[int]],
             event_ipc_handle: bytes,
-        ) -> tuple[bytes, bool]:
+        ) -> tuple[bytes, bool] | Future[tuple[bytes, bool]]:
             assert instance_id == 7
             assert block_ids == [[1, 2], [3]]
             assert event_ipc_handle == b"input-event"
-            return b"output-event", key.model_name == "model"
+            # Defer the reply as the transfer module does once device work
+            # is enqueued; the servicer must wait for it.
+            reply: Future[tuple[bytes, bool]] = Future()
+            threading.Timer(
+                0.1,
+                reply.set_result,
+                args=((b"output-event", key.model_name == "model"),),
+            ).start()
+            return reply
 
         @request_handler(
             RequestType.PREPARE_STORE,

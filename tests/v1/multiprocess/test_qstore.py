@@ -228,8 +228,8 @@ def test_store_q_unregistered_instance_raises() -> None:
 
 def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     """Short block-id lists would drive the transfer kernel out of bounds, so
-    the whole store is skipped: nothing reserved, failure reported, event still
-    recorded so the waiting worker is released."""
+    the whole store is skipped: nothing reserved, failure reported at once,
+    and no device event is created for the reply."""
     ctx = _ctx()
     ctx.resolve_obj_keys.return_value = [["obj-0", "obj-1"]]  # 2 chunks
     module = _module(ctx)
@@ -247,8 +247,8 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     handle, ok = module.store_q(MagicMock(), 1, [[0, 1, 2]], b"peer-handle")
 
     assert ok is False
-    assert handle == b"event-handle"
-    assert stub_device.created[0].records == 1
+    assert handle == b""
+    assert stub_device.created == []
     cast(MagicMock, ctx.storage_manager.reserve_write).assert_not_called()
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
 

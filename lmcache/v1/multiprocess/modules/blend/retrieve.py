@@ -2,6 +2,7 @@
 """Blend retrieve: plan-then-execute H2D + re-RoPE + per-token scatter."""
 
 # Standard
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Protocol
 import enum
 import time
@@ -44,6 +45,10 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.transfer_completion import (
+    TransferReply,
+    TransferStreams,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
@@ -548,7 +553,7 @@ class RetrieveMixin:
         gpu_block_ids: list[list[int]],
         instance_id: int,
         event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
+    ) -> TransferReply | Future[TransferReply]:
         """Scatter every matched token range into the request's paged KV.
 
         Fills tmp slots from the lookup's prefetched chunks, K-only re-RoPEs
@@ -573,7 +578,10 @@ class RetrieveMixin:
             the scatter per the all-or-nothing rule above.
 
         Returns:
-            The scatter-complete event handle and whether the scatter ran.
+            ``(b"", scatter_ran)``. Once the producer wait is enqueued the
+            reply is deferred until the retrieve stream has run everything
+            queued for this request (see ``TransferCompletion``); earlier
+            exits reply at once.
 
         Raises:
             ValueError: If the instance has no registered KV cache or rope
@@ -609,12 +617,12 @@ class RetrieveMixin:
             reason: RetrieveReason,
             detail: str = "",
         ) -> tuple[bytes, bool]:
-            """Return ``(fresh scatter-complete handle, reason.scatter_ran)``.
+            """Return ``(b"", reason.scatter_ran)`` at once.
 
-            Records a NEW event in THIS process -- echoing the caller's own
-            handle back makes the worker re-import it (CUDA "invalid device
-            context"). Publishes CB_RETRIEVE_NOOP only when ``reason.publish``.
-            ``detail`` is log-only, never a metric attribute.
+            Nothing has been enqueued for this request, so there is nothing
+            for the reply to wait for. Publishes CB_RETRIEVE_NOOP only when
+            ``reason.publish``. ``detail`` is log-only, never a metric
+            attribute.
             """
             if reason.value not in _NOOP_REASONS_SEEN:
                 _NOOP_REASONS_SEEN.add(reason.value)
@@ -625,14 +633,6 @@ class RetrieveMixin:
                     f": {detail}" if detail else "",
                     len(cb_match_result),
                 )
-
-            with (
-                torch_dev.device(gpu_context.device),
-                torch_dev.stream(gpu_context.stream),
-            ):
-                done_event = event_backend.create_event(gpu_context.device)
-                event_backend.record_event(done_event, gpu_context.stream)
-                handle = event_backend.export_event(done_event, gpu_context.device)
 
             if reason.publish:
                 self._event_bus.publish(
@@ -651,7 +651,7 @@ class RetrieveMixin:
                     session_id=key.request_id,
                 )
             )
-            return handle, reason.scatter_ran
+            return b"", reason.scatter_ran
 
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
 
@@ -812,13 +812,14 @@ class RetrieveMixin:
             self._cb_retrieve_streams[gpu_context] = retrieve_stream
             self._cb_retrieve_cupy_streams[gpu_context] = retrieve_cupy_stream
         retrieve_cupy_stream = self._cb_retrieve_cupy_streams[gpu_context]
+        retrieve_target = TransferStreams(
+            gpu_context.device, retrieve_stream, retrieve_cupy_stream
+        )
 
         with (
             torch_dev.device(gpu_context.device),
             torch_dev.stream(retrieve_stream),
         ):
-            event = event_backend.create_event(gpu_context.device)
-
             # Resolve each kernel group's block table + block size once by
             # engine_group_idx (kernel groups may share one). CPU tables only.
             kgm = gpu_context.kv_layer_groups_manager
@@ -862,10 +863,9 @@ class RetrieveMixin:
                 ),
             )
 
-            vllm_event = event_backend.import_event(
-                event_ipc_handle, gpu_context.device
+            self._ctx.transfer_completion.wait_for_producer(
+                event_backend, event_ipc_handle, retrieve_target
             )
-            event_backend.wait_event(vllm_event, retrieve_stream)
 
             # Stage marks for the scatter_ms log line (CPU enqueue wall time):
             # fetch = prefetched read, plan = table build, exec = native enqueue.
@@ -880,9 +880,7 @@ class RetrieveMixin:
                     _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
                         # Read failed: close the retrieve span and end the
-                        # request, else cb.retrieve leaks. Return a fresh
-                        # server event + False, never the client's own handle
-                        # (self-import crashes TP).
+                        # request, else cb.retrieve leaks.
                         self._event_bus.publish_on_stream(
                             gpu_context.cupy_stream,
                             Event(
@@ -901,10 +899,8 @@ class RetrieveMixin:
                                 session_id=key.request_id,
                             ),
                         )
-                        event_backend.record_event(event, retrieve_stream)
-                        return (
-                            event_backend.export_event(event, gpu_context.device),
-                            False,
+                        return self._ctx.transfer_completion.reply_when_done(
+                            retrieve_target, False
                         )
 
                     # Per-token scatter handles any cur_st. Each match owns n_read
@@ -1058,11 +1054,10 @@ class RetrieveMixin:
                         session_id=key.request_id,
                     ),
                 )
-                # Fresh server event + False (never echo the client handle).
-                event_backend.record_event(event, retrieve_stream)
-                return event_backend.export_event(event, gpu_context.device), False
+                return self._ctx.transfer_completion.reply_when_done(
+                    retrieve_target, False
+                )
 
-            event_backend.record_event(event, retrieve_stream)
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
@@ -1102,4 +1097,4 @@ class RetrieveMixin:
                 session_id=key.request_id,
             ),
         )
-        return event_backend.export_event(event, gpu_context.device), True
+        return self._ctx.transfer_completion.reply_when_done(retrieve_target, True)

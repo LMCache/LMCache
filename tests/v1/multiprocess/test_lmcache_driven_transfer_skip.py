@@ -128,6 +128,8 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ctx = MagicMock()
     ctx.chunk_size = 256
     ctx.resolve_obj_keys.return_value = obj_keys
+    # Hand the reply back directly; there is no stream to wait for.
+    ctx.transfer_completion.reply_when_done.side_effect = lambda target, ok: (b"", ok)
 
     read_calls: list[list[str]] = []
 
