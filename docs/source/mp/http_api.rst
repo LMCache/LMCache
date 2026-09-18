@@ -1410,6 +1410,8 @@ default ``drain``).
 - ``500``: synchronization or cleanup failure after draining starts.
 - ``503``: engine not initialized.
 
+See :doc:`coordinator` for capacity reporting.
+
 Observability
 -------------
 

@@ -223,8 +223,9 @@ class MPServerMessage(UsageMessage):
 
         l1_config = storage_manager_config.l1_manager_config
         memory_config = l1_config.memory_config
-        # Shared derivation, so this and the fleet memory view agree. The
-        # medium label stays here: its exact strings are wire format.
+        # Startup snapshot from config. Runtime Device-DAX changes reach the
+        # fleet memory view through capacity events instead. The medium label
+        # stays here: its exact strings are wire format.
         l1_size_bytes = sum(get_configured_capacity_bytes(l1_config).values())
         if l1_config.gds_l1_config is not None:
             l1_medium = "gds"
