@@ -89,6 +89,8 @@ _KV_EVENT_RESYNCS = Counter(
     "server's cache-event log could not be followed exactly.",
     ["model_name", "worker_id", "reason"],
 )
+# Records fetched per poll; a full page is followed by an immediate poll.
+_KV_EVENT_POLL_PAGE = 1024
 # Reasons a resync withdraws every announced placement (metric label values).
 _KV_EVENT_RESYNC_SERVER_RESTART = "server_restart"
 _KV_EVENT_RESYNC_EVENTS_LOST = "events_lost"
@@ -153,9 +155,6 @@ class ExtraConfigDefault(enum.Enum):
     # events are enabled. 0 disables polling: the worker then reports only
     # its own completed stores, and evictions never reach the router.
     kv_event_poll_interval = 0.1
-    # Upper bound on records fetched per poll; a full page is followed by
-    # an immediate poll.
-    kv_event_poll_max_events = 1024
 
 
 # Backward-compatible aliases for callers that still pass these as
@@ -1321,16 +1320,12 @@ class LMCacheMPWorkerAdapter:
         )
         hash_algorithm = ExtraConfigDefault.hash_algorithm.default
         kv_event_poll_interval = ExtraConfigDefault.kv_event_poll_interval.default
-        kv_event_poll_max_events = ExtraConfigDefault.kv_event_poll_max_events.default
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
             hash_algorithm = cfg[ExtraConfigDefault.hash_algorithm.name]
             kv_event_poll_interval = cfg[ExtraConfigDefault.kv_event_poll_interval.name]
-            kv_event_poll_max_events = cfg[
-                ExtraConfigDefault.kv_event_poll_max_events.name
-            ]
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1420,13 +1415,7 @@ class LMCacheMPWorkerAdapter:
         self._kv_events: list[CacheEvent] = []
         # Non-blocking polling of the server's cache-event log; see
         # _poll_server_kv_events.
-        if kv_event_poll_max_events <= 0:
-            raise ValueError(
-                "lmcache.mp.kv_event_poll_max_events must be positive "
-                f"(got {kv_event_poll_max_events})"
-            )
         self._kv_event_poll_interval = kv_event_poll_interval
-        self._kv_event_poll_max_events = kv_event_poll_max_events
         # Both resolved against the server's advertised capabilities once the
         # request client is up; see _resolve_kv_event_source.
         self._kv_event_server_source = False
@@ -2425,16 +2414,8 @@ class LMCacheMPWorkerAdapter:
 
     # Helper functions
     def _publish_store_kv_events(self, request_id: str) -> None:
-        """Buffer successful store events and update metrics without a drain.
-
-        Events built before the server's log became the source are dropped;
-        that cannot happen today because the source is resolved once at
-        construction, but the log must stay the only source while in use.
-        """
-        events = self._pending_store_kv_events.pop(request_id, [])
-        if not events or self._kv_event_server_source:
-            return
-        self._buffer_kv_events(list(events))
+        """Buffer successful store events and update metrics without a drain."""
+        self._buffer_kv_events(list(self._pending_store_kv_events.pop(request_id, [])))
 
     def _buffer_kv_events(self, events: list[CacheEvent]) -> None:
         """Append events to the buffer vLLM drains and update its metrics."""
@@ -2474,12 +2455,6 @@ class LMCacheMPWorkerAdapter:
             except Exception as exc:
                 self._disable_kv_event_polling(f"POLL_KV_EVENTS failed: {exc!r}")
                 return
-            if not isinstance(result, KVEventPollResult):
-                self._disable_kv_event_polling(
-                    f"POLL_KV_EVENTS answered with {type(result).__name__}, not "
-                    "KVEventPollResult"
-                )
-                return
             self._apply_kv_event_poll_result(result)
             if not self._kv_event_polling:
                 return
@@ -2487,15 +2462,9 @@ class LMCacheMPWorkerAdapter:
             return
         if now - self._kv_event_last_poll < self._kv_event_poll_interval:
             return
-        poll = getattr(self.req_client, "poll_kv_events", None)
-        if poll is None:
-            self._disable_kv_event_polling(
-                f"{type(self.req_client).__name__} does not implement poll_kv_events"
-            )
-            return
         try:
-            self._kv_event_poll_future = poll(
-                self.model_name, self._kv_event_cursor, self._kv_event_poll_max_events
+            self._kv_event_poll_future = self.req_client.poll_kv_events(
+                self.model_name, self._kv_event_cursor, _KV_EVENT_POLL_PAGE
             )
         except Exception as exc:
             # Never let the transport fail the model-runner step.
@@ -2579,7 +2548,7 @@ class LMCacheMPWorkerAdapter:
         self._kv_event_cursor = result.next_cursor
         for record in result.events:
             self._apply_kv_event_record(record)
-        if len(result.events) >= self._kv_event_poll_max_events:
+        if len(result.events) >= _KV_EVENT_POLL_PAGE:
             # A full page means a backlog: poll again without waiting.
             self._kv_event_last_poll = -math.inf
 

@@ -115,10 +115,6 @@ Connector settings (``kv_connector_extra_config``):
        polling: the worker then publishes its own completed stores (which
        may include chunks the server skipped) and evictions never reach the
        router.
-   * - ``lmcache.mp.kv_event_poll_max_events``
-     - ``1024``
-     - Records fetched per poll; a full page is followed by an immediate
-       poll.
    * - ``lmcache.mp.hash_algorithm``
      - ``blake3``
      - Must match the MP server's ``--hash-algorithm``.

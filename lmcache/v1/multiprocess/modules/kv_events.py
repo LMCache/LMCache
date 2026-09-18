@@ -283,18 +283,7 @@ class KVEventSubscriber(EventSubscriber):
         self._note_dropped_events()
         chunk_hashes: list[bytes] = event.metadata["chunk_hashes"]
         token_chunks: list[list[int]] = event.metadata["token_chunks"]
-        parent_hashes: list[bytes | None] | None = event.metadata.get("parent_hashes")
-        if parent_hashes is None:
-            # Older producers chain only within the event: a first chunk
-            # that does not start the sequence has an unknown predecessor
-            # and stays unbound (its store is skipped rather than reported
-            # as a sequence start).
-            offsets: list[int] = event.metadata["token_offsets"]
-            parent_hashes = [None] + chunk_hashes[:-1]
-            if offsets and offsets[0] != 0:
-                chunk_hashes = chunk_hashes[1:]
-                token_chunks = token_chunks[1:]
-                parent_hashes = parent_hashes[1:]
+        parent_hashes: list[bytes | None] = event.metadata["parent_hashes"]
         for chunk_hash, chunk, parent_hash in zip(
             chunk_hashes, token_chunks, parent_hashes, strict=True
         ):

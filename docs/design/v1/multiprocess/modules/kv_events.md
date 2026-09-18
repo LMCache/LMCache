@@ -54,9 +54,7 @@ new transport.
   prefetch of a chunk stored long ago) is **counted and skipped**
   (`unbound_stores` in `report_status`), never reported without tokens.
   The first chunk of a mid-sequence store gets its parent from the session's
-  hash chain (`_publish_token_bindings`); an older producer without
-  `parent_hashes` leaves such a chunk unbound rather than reporting it as a
-  sequence start.
+  hash chain (`_publish_token_bindings`).
 - `KVEventLog` assigns consecutive sequence numbers from 1 and discards the
   oldest records past `capacity` (`--kv-event-log-size`, default 32768; 0
   disables the channel). `read_after(cursor, model_name, max_events)`
@@ -89,7 +87,7 @@ new transport.
   advances a **non-blocking** poll: it consumes a completed poll's records
   into the event buffer, then issues the next poll once
   `lmcache.mp.kv_event_poll_interval` (default 0.1 s) elapsed, or at once
-  after a full page (`lmcache.mp.kv_event_poll_max_events`, default 1024).
+  after a full page of 1024 records.
   The step never waits on the server.
 - **Server records are the only store source while polling.** A store
   result only says the request completed without a fatal error: chunks the
@@ -120,9 +118,8 @@ new transport.
   `POLL_KV_EVENTS` decodes the request-type frame outside any `try` in its
   request loop, so one poll would abort that loop and take the cache server
   down for every engine attached to it. The `mq_timeout` branch then covers
-  only a server that advertises the channel and stops answering, and the MQ
-  server additionally drops request types it does not define instead of
-  letting the decode error kill its loop. When the capability is absent, or
+  only a server that advertises the channel and stops answering. When the
+  capability is absent, or
   polling is disabled at runtime, the worker falls back to announcing its
   own completed stores exactly as #5076 does.
 
@@ -165,7 +162,6 @@ new transport.
 | MP server | `--kv-event-log-size` | 32768 | Records retained; 0 disables the channel |
 | MP server | observability bus | on | `--disable-observability` disables the channel |
 | vLLM connector | `lmcache.mp.kv_event_poll_interval` | 0.1 s | Seconds between polls; 0 disables polling |
-| vLLM connector | `lmcache.mp.kv_event_poll_max_events` | 1024 | Records per poll; a full page re-polls at once |
 | vLLM connector | `lmcache.mp.hash_algorithm` | `blake3` | Must match the server's `--hash-algorithm` |
 
 ## Observability

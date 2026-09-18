@@ -1695,13 +1695,13 @@ def test_pending_poll_times_out_only_while_healthy(fake_adapter) -> None:
     assert len(server.calls) == 2
 
 
-def test_a_full_page_is_followed_by_an_immediate_poll(fake_adapter) -> None:
+def test_a_full_page_is_followed_by_an_immediate_poll(
+    fake_adapter, monkeypatch
+) -> None:
+    monkeypatch.setattr(adapter_mod, "_KV_EVENT_POLL_PAGE", 1)
     adapter, server = _polling_adapter(
         fake_adapter,
-        extra_config={
-            "lmcache.mp.kv_event_poll_interval": 100.0,
-            "lmcache.mp.kv_event_poll_max_events": 1,
-        },
+        extra_config={"lmcache.mp.kv_event_poll_interval": 100.0},
     )
     server.answer(
         _poll_result([_record(1, KV_EVENT_KIND_REMOVED, [b"x"])], next_cursor=1)
@@ -1728,11 +1728,6 @@ def test_no_polling_without_kv_events_or_with_a_zero_interval(fake_adapter) -> N
         )
         assert adapter.get_kv_events() == []
     req_client.poll_kv_events.assert_not_called()
-    with pytest.raises(ValueError, match="kv_event_poll_max_events"):
-        _make_worker_adapter(
-            extra_config={"lmcache.mp.kv_event_poll_max_events": 0},
-            enable_kv_events=True,
-        )
 
 
 # -- Single publisher and server capability ------------------------------------

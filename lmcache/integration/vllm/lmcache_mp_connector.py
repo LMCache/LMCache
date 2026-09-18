@@ -144,25 +144,14 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
     Args:
         num_workers: Workers that contributed so far; vLLM's output
             aggregator increments it as it merges tensor-parallel workers.
-
-    Raises:
-        ValueError: If ``num_workers`` is not positive.
     """
 
     def __init__(self, num_workers: int = 1) -> None:
-        if num_workers <= 0:
-            raise ValueError("num_workers must be greater than zero.")
         self._batches: list[list[KVCacheEvent]] = []
         self._num_workers = num_workers
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
-        """Add one worker's batch of events.
-
-        Raises:
-            TypeError: If ``events`` is not a list.
-        """
-        if not isinstance(events, list):
-            raise TypeError("events must be a list of KVCacheEvent.")
+        """Add one worker's batch of events."""
         self._batches.append(list(events))
 
     def aggregate(self) -> "LMCacheMPKVEvents":
@@ -173,13 +162,7 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
         return self
 
     def increment_workers(self, count: int = 1) -> None:
-        """Track additional contributing workers.
-
-        Raises:
-            ValueError: If ``count`` is not positive.
-        """
-        if count <= 0:
-            raise ValueError("count must be positive.")
+        """Track additional contributing workers."""
         self._num_workers += count
 
     def get_all_events(self) -> list[KVCacheEvent]:

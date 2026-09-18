@@ -627,11 +627,9 @@ class MessageQueueServer(RequestServer):
                 )
 
                 identity, b_request_uid, b_request_type, *payloads = msg
-                request_type = self._decode_request_type(b_request_type)
+                request_type = msgspec_decode(b_request_type, cls=RequestType)
 
-                if request_type is None:
-                    pass
-                elif handler_entry := self.handlers.get(request_type):
+                if handler_entry := self.handlers.get(request_type):
                     try:
                         self._call_handler(
                             handler_entry=handler_entry,
@@ -657,30 +655,6 @@ class MessageQueueServer(RequestServer):
                         self.socket.send_multipart(frames_to_send)
                 except queue.Empty:
                     pass
-
-    @staticmethod
-    def _decode_request_type(b_request_type: bytes) -> RequestType | None:
-        """Decode a request-type frame, tolerating values this build lacks.
-
-        A client newer than the server may send a request type the server's
-        ``RequestType`` does not define. The request is dropped (the client's
-        future times out) instead of killing the request loop.
-
-        Args:
-            b_request_type: The msgpack-encoded request type frame.
-
-        Returns:
-            The request type, or ``None`` if this build does not define it.
-        """
-        try:
-            return msgspec_decode(b_request_type, cls=RequestType)
-        except msgspec.ValidationError:
-            logger.error(
-                "Dropping request with unknown request type %r: the client "
-                "is newer than this server",
-                b_request_type,
-            )
-            return None
 
     def _inspect_handler_signature(self, request_type: RequestType, handler) -> bool:
         """Inspect the handler signature to ensure it matches the expected

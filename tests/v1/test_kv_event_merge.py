@@ -16,10 +16,6 @@ def test_merge_keeps_an_event_one_worker_reported_alone() -> None:
     assert merge_worker_kv_events([[], ["store-req-1"]]) == ["store-req-1"]
 
 
-def test_merge_keeps_unhashable_events_as_they_are() -> None:
-    assert merge_worker_kv_events([[[1]], [[1]]]) == [[1], [1]]
-
-
 def test_merge_of_nothing_is_empty() -> None:
     assert merge_worker_kv_events([]) == []
     assert merge_worker_kv_events([[], []]) == []

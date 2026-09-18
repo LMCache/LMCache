@@ -27,18 +27,14 @@ def merge_worker_kv_events(contributions: Iterable[Sequence[T]]) -> list[T]:
         contributions: One event sequence per worker, in worker order.
 
     Returns:
-        Every distinct event in first-seen order. Unhashable events are kept
-        as they are.
+        Every distinct event in first-seen order.
     """
     merged: list[T] = []
     seen: set[T] = set()
     for events in contributions:
         for event in events:
-            try:
-                if event in seen:
-                    continue
-                seen.add(event)
-            except TypeError:
-                pass
+            if event in seen:
+                continue
+            seen.add(event)
             merged.append(event)
     return merged

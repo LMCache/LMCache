@@ -227,26 +227,6 @@ def test_subscriber_binds_a_mid_sequence_store_to_its_predecessor() -> None:
     assert [r.parent_block_hash for r in records] == [_hash(99), _hash(3)]
 
 
-def test_subscriber_without_parent_hashes_leaves_unknown_predecessors_unbound() -> None:
-    """Older producers omit ``parent_hashes``: a first chunk that does not
-    start the sequence must not be reported as a sequence start."""
-    log, subscriber = _subscriber()
-    _emit(
-        subscriber,
-        EventType.MP_TOKENS,
-        chunk_hashes=[_hash(3), _hash(4)],
-        token_chunks=[_tokens(3), _tokens(4)],
-        token_offsets=[2 * CHUNK_SIZE, 3 * CHUNK_SIZE],
-    )
-    _emit(subscriber, EventType.L1_WRITE_FINISHED, **_l1_keys(_key(3), _key(4)))
-
-    records, _, _ = log.read_after(0, MODEL, max_events=10)
-    assert [(r.block_hashes, r.parent_block_hash) for r in records] == [
-        ([_hash(4)], _hash(3))
-    ]
-    assert subscriber.unbound_stores == 1
-
-
 def test_subscriber_records_removals_per_model_without_duplicates() -> None:
     log, subscriber = _subscriber()
     _emit(
