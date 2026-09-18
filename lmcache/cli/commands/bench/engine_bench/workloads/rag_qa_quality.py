@@ -23,6 +23,7 @@ import os
 import random
 
 # First Party
+from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
     Sample,
@@ -489,9 +490,14 @@ class RagQaQualityWorkload(BaseWorkload):
         if request_id.startswith(_MEASURED_REQUEST_PREFIX):
             self._responses[request_id] = output
 
-    def run(self) -> None:
-        """Run the benchmark, then write the per-sample results file."""
-        super().run()
+    def run(self, warmup_policy: WarmupPolicy = WarmupPolicy.RUN) -> None:
+        """Run the benchmark, then write the per-sample results file.
+
+        Args:
+            warmup_policy: ``WarmupPolicy.SKIP`` starts the measured run
+                immediately, without prefilling the documents.
+        """
+        super().run(warmup_policy)
         self._write_results()
 
     # ------------------------------------------------------------------

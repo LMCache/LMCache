@@ -216,6 +216,18 @@ class ObjectKey:
             | local_rank
         )
 
+    @staticmethod
+    def WorldSizeFromKVRank(kv_rank: int) -> int:
+        """Recover the world size :meth:`ComputeKVRank` packed into a rank.
+
+        Args:
+            kv_rank: A ``kv_rank`` produced by :meth:`ComputeKVRank`.
+
+        Returns:
+            The parallel setup's world size (TP x PP).
+        """
+        return (kv_rank >> 24) & 0xFF
+
 
 @dataclass(frozen=True)
 class EncodedObjectKey:
@@ -324,9 +336,10 @@ class MemoryLayoutDesc:
             )
 
 
-GroupKind = Literal["attention", "recurrent", "standalone"]
+GroupKind = Literal["attention", "recurrent", "aux"]
 """Object-group kind label: attention KV, recurrent state pages, or a
-connector-private standalone group."""
+connector-private aux group. Derived server-side from
+``EngineGroupInfo.extra_object_group_tag``; never sent on the wire."""
 
 
 @dataclass(frozen=True)

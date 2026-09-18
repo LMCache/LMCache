@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Object model for Engine KV layouts.
+"""Dynamic object model for engine KV layouts.
 
-LMCache's native kernels still dispatch on small integer layout codes, but the
-Python/public surface does not need enum semantics. This module defines one
-singleton :class:`KVLayout` object per supported layout and installs those
-objects onto ``lmcache.lmcache_native`` so call sites can depend on layout
-facts instead of enum categories.
+This module intentionally does *not* hand-maintain a second copy of the layout
+catalog. The per-layout ``KVFormatSpec`` classes under
+``lmcache.v1.gpu_connector.kv_format.specs`` are already discovered
+dynamically, and each one declares the static facts that downstream code cares
+about. We therefore build one :class:`KVLayout` singleton per discovered spec at
+runtime and expose those objects through ``lmcache.lmcache_native``.
+
+Result: adding a new Python-side layout means adding one spec file; the layout
+object registry, ``KVLayout.all()``, and the module/class attributes are derived
+from that single definition point.
 """
 
 # Future
@@ -21,17 +26,25 @@ if TYPE_CHECKING:
     from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
     from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 
+# First Party
+from lmcache.v1.kv_layout_meta import (
+    concrete_axis_groups,
+    describe_axis_groups,
+    parse_axis_groups,
+)
+
 
 class KVLayout(int):
-    """One KV layout singleton plus its static facts.
+    """One discovered KV layout singleton plus its static facts."""
 
-    ``KVLayout`` is an ``int`` subclass so native bindings that accept integer
-    layout codes continue to work unchanged. Each singleton also carries the
-    Python-side metadata that call sites actually care about.
-    """
+    __members__: ClassVar[dict[str, "KVLayout"]]
 
     name: str
     code: int
+    axis_groups: tuple[tuple[str, ...], ...]
+    outer_axes: tuple[str, ...]
+    inner_axes: tuple[str, ...]
+    attention_backends: tuple[str, ...]
     is_cross_layer: bool
     is_kv_list: bool
     is_layer_list: bool
@@ -41,51 +54,35 @@ class KVLayout(int):
     is_two_major: bool
     is_pbs_fused: bool
     is_kv_second_tuple: bool
-    NB_NL_TWO_BS_NH_HS: ClassVar["KVLayout"]
-    NL_X_TWO_NB_BS_NH_HS: ClassVar["KVLayout"]
-    NL_X_NB_TWO_BS_NH_HS: ClassVar["KVLayout"]
-    NL_X_NB_BS_HS: ClassVar["KVLayout"]
-    TWO_X_NL_X_NBBS_NH_HS: ClassVar["KVLayout"]
-    NL_X_NBBS_ONE_HS: ClassVar["KVLayout"]
-    NL_X_TWO_NB_NH_BS_HS: ClassVar["KVLayout"]
-    NL_X_NB_TWO_NH_BS_HS: ClassVar["KVLayout"]
-    NB_NL_TWO_NH_BS_HS: ClassVar["KVLayout"]
-    TWO_X_NL_X_NB_BS_NH_HS: ClassVar["KVLayout"]
-    NL_X_NB_NH_BS_TWO_HS: ClassVar["KVLayout"]
-    NL_X_NB_BS_NH_TWO_HS: ClassVar["KVLayout"]
-    NL_X_NB_NH_BS_CS: ClassVar["KVLayout"]
-    NL_X_NB_BS_NH_CS: ClassVar["KVLayout"]
-    NL_X_NB_BSV_BSS: ClassVar["KVLayout"]
-    NL_X_TWO_NB_NH_ONE_BS_HS: ClassVar["KVLayout"]
-    NL_X_TWO_X_NB_BS_NH_HS: ClassVar["KVLayout"]
+    probe_tensor_block_axis: int | None
+    _spec_class: type["KVFormatSpec"]
 
     def __new__(
         cls,
         code: int,
         *,
         name: str,
-        is_cross_layer: bool = False,
-        is_kv_list: bool = False,
-        is_layer_list: bool = False,
-        is_mla: bool = False,
-        is_hnd: bool = False,
-        is_fused_packed: bool = False,
-        is_two_major: bool = False,
-        is_pbs_fused: bool = False,
-        is_kv_second_tuple: bool = False,
+        axis_groups: tuple[tuple[str, ...], ...],
+        spec_class: type["KVFormatSpec"],
     ) -> "KVLayout":
         obj = int.__new__(cls, code)
         obj.name = name
         obj.code = code
-        obj.is_cross_layer = is_cross_layer
-        obj.is_kv_list = is_kv_list
-        obj.is_layer_list = is_layer_list
-        obj.is_mla = is_mla
-        obj.is_hnd = is_hnd
-        obj.is_fused_packed = is_fused_packed
-        obj.is_two_major = is_two_major
-        obj.is_pbs_fused = is_pbs_fused
-        obj.is_kv_second_tuple = is_kv_second_tuple
+        obj.axis_groups = axis_groups
+        obj.outer_axes = tuple("_".join(group) for group in axis_groups[:-1])
+        obj.inner_axes = axis_groups[-1]
+        obj.attention_backends = tuple(getattr(spec_class, "attention_backends", ()))
+        obj.is_cross_layer = bool(getattr(spec_class, "is_cross_layer", False))
+        obj.is_kv_list = bool(getattr(spec_class, "is_kv_list", False))
+        obj.is_layer_list = bool(getattr(spec_class, "is_layer_list", False))
+        obj.is_mla = bool(getattr(spec_class, "is_mla", False))
+        obj.is_hnd = bool(getattr(spec_class, "is_hnd", False))
+        obj.is_fused_packed = bool(getattr(spec_class, "is_fused_packed", False))
+        obj.is_two_major = bool(getattr(spec_class, "is_two_major", False))
+        obj.is_pbs_fused = bool(getattr(spec_class, "is_pbs_fused", False))
+        obj.is_kv_second_tuple = bool(getattr(spec_class, "is_kv_second_tuple", False))
+        obj.probe_tensor_block_axis = _probe_tensor_block_axis(axis_groups, obj)
+        obj._spec_class = spec_class
         return obj
 
     @property
@@ -93,121 +90,193 @@ class KVLayout(int):
         """Backward-compatible enum-style numeric value."""
         return int(self)
 
+    @property
+    def is_plane_tuple(self) -> bool:
+        """Whether the per-layer entry is an NP plane tuple, not a fixed K/V pair."""
+        return self.is_kv_second_tuple and "NP" in self.outer_axes
+
+    @property
+    def supports_dim0_block_padding(self) -> bool:
+        """Whether dim-0 padding is meaningful and currently supported."""
+        return self.probe_tensor_block_axis == 0 and (
+            self.is_mla
+            or self.is_fused_packed
+            or self.is_plane_tuple
+            or not self.has_inner_axis("TWO")
+        )
+
     def __repr__(self) -> str:
         return f"KVLayout.{self.name}"
 
     __str__ = __repr__
 
-    def __reduce__(self) -> tuple[Callable[[str], "KVLayout"], tuple[str]]:
-        return (kv_layout_from_name, (self.name,))
+    def __reduce__(self) -> tuple[Callable[[int], "KVLayout"], tuple[int]]:
+        return (kv_layout_from_code, (int(self),))
 
     @classmethod
     def all(cls) -> tuple["KVLayout", ...]:
-        """Return every registered layout singleton in code order."""
-        return ALL_KV_LAYOUTS
+        """Return every discovered layout singleton in numeric-code order."""
+        _ensure_registry()
+        return _ALL_KV_LAYOUTS
 
     @classmethod
     def from_code(cls, code: int) -> "KVLayout":
-        """Return the layout singleton for *code*."""
         return kv_layout_from_code(code)
 
     @classmethod
     def from_name(cls, name: str) -> "KVLayout":
-        """Return the layout singleton for *name*."""
         return kv_layout_from_name(name)
 
-    def spec_class(self) -> type["KVFormatSpec"]:
-        """Return the ``KVFormatSpec`` class that owns this layout's geometry."""
-        # First Party
-        from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
+    def has_outer_axis(self, axis: str) -> bool:
+        return axis in self.outer_axes
 
-        return get_spec_class(cast(Any, self))
+    def has_inner_axis(self, axis: str) -> bool:
+        return axis in self.inner_axes
+
+    def inner_axis_index(self, axis: str) -> int | None:
+        try:
+            return self.inner_axes.index(axis)
+        except ValueError:
+            return None
+
+    def inner_shape(self, *, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:
+        """Return the symbolic per-tensor inner shape from ``shape_desc`` dims."""
+        sizes = {
+            "ONE": 1,
+            "TWO": 2,
+            "NBBS": nb * bs,
+            "NB": nb,
+            "BS": bs,
+            "NH": nh,
+            "HS": hs,
+            "CS": hs,
+            "BSV": bs,
+            "BSS": bs,
+        }
+        try:
+            return tuple(int(sizes[axis]) for axis in self.inner_axes)
+        except KeyError as exc:
+            raise ValueError(
+                f"KV layout {self.name} uses unsupported inner axis {exc.args[0]!r}"
+            ) from exc
+
+    def paged_tensor_shape(
+        self, *, nb: int, bs: int, nh: int, hs: int
+    ) -> tuple[int, ...]:
+        """Return the per-layer tensor shape reconstructed from ``shape_desc``.
+
+        For fused ``..._TWO_HS`` layouts, ``shape_desc.hs`` already carries the
+        packed content width (``2 * head_size``), so the physical tensor is the
+        flattened 4-D leaf rather than the symbolic 5-D ``[..., TWO, HS]`` form.
+        """
+        if self.is_fused_packed and self.inner_axes[-2:] == ("TWO", "HS"):
+            prefix = self.inner_shape(nb=nb, bs=bs, nh=nh, hs=hs)[:-2]
+            return prefix + (hs,)
+        return self.inner_shape(nb=nb, bs=bs, nh=nh, hs=hs)
+
+    def num_layers(self, kv_caches: "DiscoverableKVCache") -> int:
+        return self.spec(kv_caches).num_layers()
+
+    def num_blocks(self, kv_caches: "DiscoverableKVCache") -> int:
+        return self.spec(kv_caches).num_blocks()
+
+    def block_size(self, kv_caches: "DiscoverableKVCache", layer_idx: int = 0) -> int:
+        return self.spec(kv_caches).block_size(layer_idx)
+
+    def page_buffer_size(self, kv_caches: "DiscoverableKVCache") -> int:
+        return self.spec(kv_caches).page_buffer_size()
+
+    def kv_size(self, kv_caches: "DiscoverableKVCache") -> int:
+        return self.spec(kv_caches).kv_size()
+
+    def num_heads(self, kv_caches: "DiscoverableKVCache", layer_idx: int = 0) -> int:
+        return self.spec(kv_caches).num_heads(layer_idx)
+
+    def hidden_dim(self, kv_caches: "DiscoverableKVCache", layer_idx: int = 0) -> int:
+        return self.spec(kv_caches).hidden_dim(layer_idx)
+
+    def head_size(self, kv_caches: "DiscoverableKVCache", layer_idx: int = 0) -> int:
+        return self.spec(kv_caches).head_size(layer_idx)
+
+    def tokens_per_layer(self, kv_caches: "DiscoverableKVCache") -> int:
+        return self.spec(kv_caches).tokens_per_layer()
+
+    def elements_per_layer(self, kv_caches: "DiscoverableKVCache") -> int:
+        return self.spec(kv_caches).elements_per_layer()
+
+    def dtype(self, kv_caches: "DiscoverableKVCache", layer_idx: int = 0) -> Any:
+        return self.spec(kv_caches).dtype(layer_idx)
+
+    def data_ptrs(
+        self, kv_caches: "DiscoverableKVCache", layer_indices: list[int]
+    ) -> list[int]:
+        return self.spec(kv_caches).data_ptrs(layer_indices)
+
+    def spec_class(self) -> type["KVFormatSpec"]:
+        return cast("type[KVFormatSpec]", self._spec_class)
 
     def spec(self, kv_caches: "DiscoverableKVCache") -> "KVFormatSpec":
-        """Bind the layout to concrete KV tensors and return a spec instance."""
         return self.spec_class()(kv_caches)
 
     def describe_shape(self) -> str:
-        """Return the symbolic shape description for this layout."""
-        # First Party
-        from lmcache.v1.gpu_connector.kv_format.specs.base import describe_shape
+        return describe_axis_groups(self.axis_groups)
 
-        return describe_shape(cast(Any, self))
+    def concrete_shape(self, size: Callable[[str], int]) -> str:
+        return concrete_axis_groups(self.axis_groups, size)
 
-
-def _define_layout(
-    name: str,
-    code: int,
-    **facts: bool,
-) -> KVLayout:
-    layout = KVLayout(code, name=name, **facts)
-    setattr(KVLayout, name, layout)
-    return layout
+    def concrete_shape_from(self, kv_caches: "DiscoverableKVCache") -> str:
+        return self.spec(kv_caches).concrete_shape_str()
 
 
-ALL_KV_LAYOUTS = (
-    _define_layout("NB_NL_TWO_BS_NH_HS", 0, is_cross_layer=True),
-    _define_layout("NL_X_TWO_NB_BS_NH_HS", 1, is_layer_list=True, is_two_major=True),
-    _define_layout("NL_X_NB_TWO_BS_NH_HS", 2, is_layer_list=True),
-    _define_layout("NL_X_NB_BS_HS", 3, is_layer_list=True, is_mla=True),
-    _define_layout("TWO_X_NL_X_NBBS_NH_HS", 4, is_kv_list=True),
-    _define_layout(
-        "NL_X_NBBS_ONE_HS",
-        5,
-        is_layer_list=True,
-        is_mla=True,
-        is_pbs_fused=True,
-    ),
-    _define_layout(
-        "NL_X_TWO_NB_NH_BS_HS",
-        6,
-        is_layer_list=True,
-        is_hnd=True,
-        is_two_major=True,
-    ),
-    _define_layout("NL_X_NB_TWO_NH_BS_HS", 7, is_layer_list=True, is_hnd=True),
-    _define_layout("NB_NL_TWO_NH_BS_HS", 8, is_cross_layer=True, is_hnd=True),
-    _define_layout("TWO_X_NL_X_NB_BS_NH_HS", 9, is_kv_list=True),
-    _define_layout(
-        "NL_X_NB_NH_BS_TWO_HS",
-        10,
-        is_layer_list=True,
-        is_hnd=True,
-        is_fused_packed=True,
-    ),
-    _define_layout(
-        "NL_X_NB_BS_NH_TWO_HS", 11, is_layer_list=True, is_fused_packed=True
-    ),
-    _define_layout(
-        "NL_X_NB_NH_BS_CS",
-        12,
-        is_layer_list=True,
-        is_hnd=True,
-        is_fused_packed=True,
-    ),
-    _define_layout("NL_X_NB_BS_NH_CS", 13, is_layer_list=True, is_fused_packed=True),
-    _define_layout("NL_X_NB_BSV_BSS", 14, is_layer_list=True, is_mla=True),
-    _define_layout(
-        "NL_X_TWO_NB_NH_ONE_BS_HS",
-        15,
-        is_layer_list=True,
-        is_hnd=True,
-        is_two_major=True,
-    ),
-    _define_layout(
-        "NL_X_TWO_X_NB_BS_NH_HS",
-        16,
-        is_layer_list=True,
-        is_kv_second_tuple=True,
-    ),
-)
+_ALL_KV_LAYOUTS: tuple[KVLayout, ...] = ()
+_KV_LAYOUTS_BY_CODE: dict[int, KVLayout] = {}
+_KV_LAYOUTS_BY_NAME: dict[str, KVLayout] = {}
 
-_KV_LAYOUTS_BY_CODE = {int(layout): layout for layout in ALL_KV_LAYOUTS}
-_KV_LAYOUTS_BY_NAME = {layout.name: layout for layout in ALL_KV_LAYOUTS}
+
+def _probe_tensor_block_axis(
+    axis_groups: tuple[tuple[str, ...], ...], layout: KVLayout
+) -> int | None:
+    if layout.is_cross_layer or layout.is_kv_list or layout.is_pbs_fused:
+        return None
+    inner_axes = axis_groups[-1]
+    try:
+        return inner_axes.index("NB")
+    except ValueError:
+        return None
+
+
+def _ensure_registry() -> None:
+    global _ALL_KV_LAYOUTS
+    if _ALL_KV_LAYOUTS:
+        return
+
+    # Imported lazily so top-level ``lmcache`` import does not pull the native
+    # extension before the platform package has prepared the torch runtime.
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format.specs.registry import SPECS
+
+    layouts: list[KVLayout] = []
+    for native_layout, spec_class in sorted(
+        SPECS.items(), key=lambda item: int(item[0])
+    ):
+        layout = KVLayout(
+            int(native_layout),
+            name=native_layout.name,
+            axis_groups=parse_axis_groups(native_layout.name),
+            spec_class=spec_class,
+        )
+        setattr(KVLayout, layout.name, layout)
+        spec_class.engine_kv_format = cast(Any, layout)
+        layouts.append(layout)
+
+    _ALL_KV_LAYOUTS = tuple(layouts)
+    _KV_LAYOUTS_BY_CODE.update({int(layout): layout for layout in _ALL_KV_LAYOUTS})
+    _KV_LAYOUTS_BY_NAME.update({layout.name: layout for layout in _ALL_KV_LAYOUTS})
+    KVLayout.__members__ = {layout.name: layout for layout in _ALL_KV_LAYOUTS}
 
 
 def kv_layout_from_code(code: int) -> KVLayout:
-    """Return the registered layout singleton for *code*."""
+    _ensure_registry()
     try:
         return _KV_LAYOUTS_BY_CODE[int(code)]
     except KeyError as exc:
@@ -215,7 +284,7 @@ def kv_layout_from_code(code: int) -> KVLayout:
 
 
 def kv_layout_from_name(name: str) -> KVLayout:
-    """Return the registered layout singleton for *name*."""
+    _ensure_registry()
     try:
         return _KV_LAYOUTS_BY_NAME[name]
     except KeyError as exc:
@@ -223,6 +292,7 @@ def kv_layout_from_name(name: str) -> KVLayout:
 
 
 def _coerce_layout(layout: KVLayout | int) -> KVLayout:
+    _ensure_registry()
     if isinstance(layout, KVLayout):
         return layout
     return kv_layout_from_code(int(layout))
@@ -249,14 +319,13 @@ def is_kv_second_tuple(layout: KVLayout | int) -> bool:
 
 
 def install_on_native_module(native_module: ModuleType) -> None:
-    """Replace enum-like layout exports on *native_module* with layout objects."""
+    """Expose discovered layout objects through ``lmcache.lmcache_native``."""
+    _ensure_registry()
     module = cast(Any, native_module)
     module.KVLayout = KVLayout
     module.EngineKVFormat = KVLayout
     module.GPUKVFormat = KVLayout
-    for layout in ALL_KV_LAYOUTS:
-        setattr(KVLayout, layout.name, layout)
-    module.ALL_KV_LAYOUTS = ALL_KV_LAYOUTS
+    module.ALL_KV_LAYOUTS = _ALL_KV_LAYOUTS
     module.kv_layout_from_code = kv_layout_from_code
     module.kv_layout_from_name = kv_layout_from_name
     module.is_kv_list = is_kv_list

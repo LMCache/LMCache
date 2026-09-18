@@ -10,13 +10,17 @@ from lmcache.logging import init_logger
 from lmcache.v1.platform import torch_dev as torch_dev
 from lmcache.v1.platform import torch_device_type as torch_device_type
 
+_native_module = None
+_retry_native_layout_install = False
+
 try:
     # First Party
     import lmcache.lmcache_native as lmcache_native
 
+    _native_module = lmcache_native
     install_on_native_module(lmcache_native)
 except ImportError:
-    pass
+    _retry_native_layout_install = _native_module is not None
 
 try:
     # First Party
@@ -41,3 +45,6 @@ except Exception as exc:
         "Reason: %s",
         exc,
     )
+
+if _retry_native_layout_install and _native_module is not None:
+    install_on_native_module(_native_module)

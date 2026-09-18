@@ -11,6 +11,9 @@ format or an edit cannot silently break the contract the per-layer detection
 relies on.
 """
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.v1.gpu_connector.kv_format import get_spec_class
 import lmcache.lmcache_native as lmcache_native
@@ -37,6 +40,7 @@ EXPECTED = {
     F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
     F.NL_X_NB_BSV_BSS: (False, False, True, True, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, True, False, True),
+    F.NL_X_NP_X_NB_BS_ONE_HS: (False, False, True, True, True),
 }
 
 # Facts that only the spec carries (no native predicate mirrors them):
@@ -59,6 +63,7 @@ EXPECTED_SPEC_FACTS = {
     F.NL_X_NBBS_ONE_HS: (False, False, False, True),
     F.NL_X_NB_BSV_BSS: (False, False, False, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, False, False),
+    F.NL_X_NP_X_NB_BS_ONE_HS: (False, False, False, False),
 }
 
 
@@ -135,3 +140,23 @@ def test_layout_objects_expose_direct_facts_and_registry():
     assert fmt.is_mla
     assert fmt.is_layer_list
     assert not fmt.is_kv_list
+    assert fmt.probe_tensor_block_axis == 0
+    assert fmt.supports_dim0_block_padding
+
+
+def test_layout_objects_expose_runtime_geometry_methods():
+    fmt = F.NL_X_TWO_NB_BS_NH_HS
+    kv_caches = [torch.empty(2, 32, 16, 8, 64) for _ in range(3)]
+
+    assert fmt.num_layers(kv_caches) == 3
+    assert fmt.num_blocks(kv_caches) == 32
+    assert fmt.block_size(kv_caches) == 16
+    assert fmt.kv_size(kv_caches) == 2
+    assert fmt.num_heads(kv_caches) == 8
+    assert fmt.head_size(kv_caches) == 64
+    assert fmt.hidden_dim(kv_caches) == 512
+    assert fmt.tokens_per_layer(kv_caches) == 512
+
+    fused = F.NL_X_NB_NH_BS_TWO_HS
+    assert fused.inner_shape(nb=32, bs=16, nh=8, hs=128) == (32, 8, 16, 2, 128)
+    assert fused.paged_tensor_shape(nb=32, bs=16, nh=8, hs=128) == (32, 8, 16, 128)

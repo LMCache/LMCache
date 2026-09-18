@@ -8,6 +8,45 @@ server.  Arguments are grouped by the config module that defines them.
    :local:
    :depth: 2
 
+Per-request LMCache configuration
+---------------------------------
+
+vLLM clients can attach request-scoped LMCache metadata through the top-level
+``kv_transfer_params`` field.  When vLLM uses ``LMCacheMPConnector``, entries
+whose keys start with ``lmcache.`` are forwarded with the request across the
+MP scheduler and worker IPC paths.  Other ``kv_transfer_params`` entries are
+reserved for the transfer layer and are not forwarded to LMCache.
+
+For example:
+
+.. code-block:: bash
+
+   curl -X POST http://localhost:8000/v1/completions \
+       -H "Content-Type: application/json" \
+       -d '{
+           "model": "Qwen/Qwen3-14B",
+           "prompt": "Explain KV cache reuse.",
+           "max_tokens": 32,
+           "kv_transfer_params": {
+               "lmcache.tag.tenant": "example-tenant",
+               "lmcache.ttl": 60
+           }
+       }'
+
+The connector carries these values on lookup, prefetch, store, retrieve, and
+lookup-lock cleanup operations so server-side features can inspect the same
+request metadata throughout the request lifecycle.
+
+.. important::
+
+   Forwarding a value does not by itself make the MP server act on it or make
+   it part of cache identity.  The current MP server treats request configs as
+   metadata.  Do not rely on ``lmcache.tag.*``, ``lmcache.ttl``,
+   ``lmcache.skip_save``, or another request config for isolation, expiration,
+   or cache-control behavior in MP mode unless the selected server-side
+   feature explicitly documents support for it.  The in-process
+   ``LMCacheConnectorV1`` may interpret these values differently.
+
 MP Server
 ---------
 
@@ -57,12 +96,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--engine-type``
      - ``default``
      - Cache engine backend type. ``default`` uses standard prefix
-       caching; ``blend`` selects the current CacheBlend V3 implementation
-       (composes a ``BlendV3Module`` into the engine);
-       ``blend_legacy`` selects the original CacheBlend
-       (composes a ``BlendModule``). Both blend variants require
+       caching; ``blend`` composes the CacheBlend ``BlendModule`` into the
+       engine for non-prefix KV reuse and requires
        ``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``.
-       Choices: ``default``, ``blend``, ``blend_legacy``.
+       Choices: ``default``, ``blend``.
    * - ``--supported-transfer-mode``
      - ``lmcache_driven``
      - Which worker → server transfer paths the server loads.
@@ -73,6 +110,21 @@ Source: ``lmcache/v1/multiprocess/config.py``
        so workers of either device type can connect without manual
        configuration.
        Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
+   * - ``--isolated-ipc`` / ``--no-isolated-ipc``
+     - ``false``
+     - Assume engine workers and this server run in containers that share
+       no host IPC namespace (``hostIPC``) and no common ``/dev/shm``, and
+       use IPC mechanisms that work there: on CUDA, raw CUDA IPC memory
+       handles for KV-cache registration (instead of PyTorch storage IPC,
+       which needs a shared ``/dev/shm``) and timeline-semaphore events
+       (instead of CUDA interprocess *event* handles). Must match the
+       workers'
+       ``lmcache.mp.isolated_ipc`` setting -- the two mechanisms exchange
+       incompatible event handles, and a mismatch fails at event import
+       on whichever side receives the foreign handle. Currently supported
+       by the vLLM MP connector only; the default stays ``false`` until
+       the integrations that still create raw CUDA interprocess events
+       (SGLang, TensorRT-LLM, CacheBlend, qstore) migrate.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to
@@ -591,12 +643,22 @@ Decode context parallelism (DCP)
 ``--decode-context-parallel-size`` is supported. Under DCP, vLLM shards the
 attention KV cache across ranks along the token axis, so each rank holds only
 a strided ``1/dcp`` slice and one block ID spans ``block_size * dcp`` tokens.
-LMCache stores each rank's slice as its own object and a chunk counts as a hit
-only when every rank's slice is present.
+LMCache stores each rank's opaque page as its own object and a chunk counts as
+a hit only when every rank's slice is present. Non-trivial
+``--cp-kv-cache-interleave-size`` values are supported when they evenly divide
+every resolved attention cache block size. Because interleave changes the
+token-to-slot byte layout, the connector automatically adds the DCP size and
+interleave value to its internal cache namespace. This prevents pages written
+by one interleave layout from being loaded by another. It does not change the
+model name served by vLLM, but the decorated cache model name is visible in MP
+metric labels so operators can distinguish incompatible cache layouts.
 
 One configuration change is required: the LMCache chunk size must be a
-multiple of ``block_size * decode_context_parallel_size``, not just
-``block_size``. If it is smaller, vLLM fails at connector startup with the
+multiple of vLLM's resolved scheduler block size. For a single attention
+group, that is ``block_size * decode_context_parallel_size``. For a hybrid
+model, it is the least common multiple of every attention group's DCP-scaled
+block span and every recurrent-state group's unscaled physical block span. If
+the chunk size is incompatible, vLLM fails at connector startup with the
 required multiple in the message (the LMCache server itself starts fine).
 
 The example model also needs a vLLM build that can run it under DCP:
@@ -627,11 +689,13 @@ DCP. These combinations are rejected at startup:
      - Reason
    * - ``--prefill-context-parallel-size > 1``
      - Adds a second KV shard axis this connector does not map.
-   * - ``--cp-kv-cache-interleave-size != 1``
-     - Changes the token-to-rank mapping, which would store the wrong KV.
    * - Fewer than ``dcp_size`` ranks per LMCache server
      - No server holds a complete set of shards, and lookup takes the
        minimum hit count across servers, so it reports no hits.
+
+An interleave value that is non-positive, larger than a resolved attention
+cache block, or does not evenly divide every resolved attention block is
+rejected at connector startup.
 
 ``decode_context_parallel_size > tensor_parallel_size`` is rejected by vLLM
 itself, so this connector does not re-check it.
@@ -684,29 +748,44 @@ All connector-level options are passed through
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.nonblocking_lookup_status``
+     - ``true``
+     - Poll lookup-status replies without blocking the scheduler by default.
+       Set to ``false`` to wait for each status RPC reply in the current
+       callback, for example when long prefill steps delay observation of an
+       already-ready reply. LOOKUP acknowledgement polling
+       remains asynchronous. Available with the current ``LMCacheMPConnector``.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
-   * - ``lmcache.mp.lazy_offload``
+   * - ``lmcache.mp.autostart``
      - ``false``
-     - Defer store operations and submit finished requests in FIFO batches.
-       Available only with vLLM and ``LMCacheMPConnector``. See
-       :doc:`lazy_offload` for behavior, limitations, and tuning guidance.
-   * - ``lmcache.mp.lazy_offload_policy``
-     - ``FIFO``
-     - Policy used to select finished pending requests. ``FIFO`` is currently
-       the only supported value. Used only when lazy offload is enabled.
-   * - ``lmcache.mp.lazy_offload_threshold``
-     - ``100``
-     - Number of finished pending requests required before a lazy-offload
-       batch becomes eligible for submission.
-   * - ``lmcache.mp.lazy_offload_select_count``
-     - ``10``
-     - Maximum number of finished requests selected each time the
-       lazy-offload threshold is met.
+     - Whether vLLM worker 0 should start a local ``lmcache server`` process
+       before workers connect to it. Other local workers wait for the server to
+       become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
+       IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
+       because the MP ZMQ transport does not enable IPv6 sockets.
+       Auto-start supports exactly one server endpoint; configuring
+       multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
+       connector initialization.
+   * - ``lmcache.mp.autostart.wait_timeout``
+     - ``90.0``
+     - Timeout (seconds) to wait for the auto-started server to respond to
+       ZMQ ``PING`` requests. Must be positive and finite.
+   * - ``lmcache.mp.autostart.server_args``
+     - ``""``
+     - Extra command-line arguments passed to the auto-started MP HTTP server
+       process. Required server settings such as ``--l1-size-gb`` and
+       ``--eviction-policy`` must be supplied here. For example, pass
+       ``--l1-size-gb 20 --eviction-policy LRU``. Endpoint flags such as
+       ``--host``, ``--port``, and ``--http-host`` are rejected because the
+       auto-started ZMQ and HTTP listeners are bound to the local connector
+       endpoint. If multiple auto-started MP servers run on the same host, pass
+       distinct ``--http-port`` values here to avoid HTTP frontend port
+       conflicts.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
@@ -716,6 +795,108 @@ All connector-level options are passed through
        ``engine_driven`` (force the worker-side gather/scatter copy
        path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
        set.
+   * - ``lmcache.mp.isolated_ipc``
+     - ``false``
+     - Assume the vLLM workers and the LMCache server run in containers
+       that share no host IPC namespace (``hostIPC``) and no common
+       ``/dev/shm``, and use IPC mechanisms that work there: on CUDA, raw
+       CUDA IPC memory handles for KV-cache registration and
+       timeline-semaphore events instead of CUDA interprocess *event*
+       handles. Set it together with the
+       server's ``--isolated-ipc`` flag -- a mismatch fails at event
+       import on whichever side receives the foreign handle.
+   * - ``lmcache.mp.use_vmm_api``
+     - ``false``
+     - Set when the engine allocates its KV cache through the CUDA VMM
+       API (vLLM's ``--enable-cumem-allocator``): such memory has no
+       legacy CUDA IPC handle, so KV-cache registration exports it via
+       ``cuMemExportToShareableHandle`` instead (a fabric handle when
+       the allocation is fabric-exportable -- requires an IMEX channel
+       device, e.g. ``NVIDIA_IMEX_CHANNELS=0`` -- or a POSIX fd
+       otherwise). Composes with ``lmcache.mp.isolated_ipc`` for
+       fabric-exportable pools; a POSIX-fd-only pool under isolated IPC
+       is rejected at registration.
+   * - ``lmcache.mp.lazy_offload``
+     - ``false``
+     - Buffer stores on the scheduler and submit them according to the
+       selected lazy-offload policy. Requires vLLM prefix caching. See
+       :doc:`lazy_offload` for behavior, limitations, and tuning guidance.
+   * - ``lmcache.mp.lazy_offload_policy``
+     - ``EVICTION_AWARE``
+     - Lazy drain policy. ``EVICTION_AWARE`` drains blocks near the GPU free
+       queue's eviction head. Set ``FIFO`` explicitly to keep the
+       count-triggered behavior.
+   * - ``lmcache.mp.lazy_offload_horizon_steps``
+     - ``2.5``
+     - ``EVICTION_AWARE`` only: estimated scheduler steps of block
+       consumption treated as imminent eviction. Must be greater than zero.
+       Larger values store earlier and reduce eviction losses, but may store
+       GPU-resident hot content and increase lower-tier eviction pressure.
+   * - ``lmcache.mp.lazy_offload_max_drain_per_step``
+     - ``64``
+     - ``EVICTION_AWARE`` only: maximum store operations emitted per
+       scheduler step. A value below the concurrent prefill admission rate
+       can lose buffered operations to eviction.
+   * - ``lmcache.mp.lazy_offload_max_deferral_seconds``
+     - ``0.0``
+     - ``EVICTION_AWARE`` only: how long a buffered operation may wait before
+       it is emitted regardless of eviction pressure. Not a hard bound: no
+       drain runs on a step that schedules no tokens, a request whose store
+       is already in flight is skipped, and due operations that do not fit
+       in ``max_drain_per_step`` wait for a later step. Zero leaves emission
+       entirely to the danger window. Set it below the reuse interval the
+       workload has to beat.
+   * - ``lmcache.mp.lazy_offload_threshold``
+     - ``100``
+     - ``FIFO`` only: number of finished buffered requests that triggers a
+       drain.
+   * - ``lmcache.mp.lazy_offload_select_count``
+     - ``10``
+     - ``FIFO`` only: maximum finished requests emitted by one drain.
+
+To let vLLM worker 0 start a local MP server automatically:
+
+.. code-block:: bash
+
+    vllm serve Qwen/Qwen3-14B \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.autostart": true, "lmcache.mp.autostart.server_args": "--l1-size-gb 20 --eviction-policy LRU"}}'
+
+Auto-start is a convenience for single-node, single-server deployments. The MP
+server is a child of vLLM worker 0, not an independently managed service.
+
+.. note::
+
+   LMCache's adapter shutdown does not explicitly terminate this child, but
+   vLLM's process-tree cleanup may terminate it. Its lifetime depends on the
+   vLLM version and exit path; neither survival nor automatic cleanup is
+   guaranteed. Stop any remaining auto-started server when it is no longer
+   needed.
+
+For servers that must survive vLLM restarts or be shared across vLLM instances,
+and for multi-node TP/PP deployments, start and manage the server separately.
+For example, run the server in a separate terminal or service manager and leave
+auto-start disabled in vLLM:
+
+.. code-block:: bash
+
+    # Terminal 1: independently managed MP server
+    lmcache server --host 127.0.0.1 --port 5555 \
+        --http-host 127.0.0.1 --l1-size-gb 20 --eviction-policy LRU
+
+    # Terminal 2: connect-only vLLM instance
+    vllm serve Qwen/Qwen3-14B \
+        --kv-transfer-config '{
+            "kv_connector": "LMCacheMPConnector",
+            "kv_connector_module_path":
+                "lmcache.integration.vllm.lmcache_mp_connector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "lmcache.mp.host": "127.0.0.1",
+                "lmcache.mp.port": 5555,
+                "lmcache.mp.autostart": false
+            }
+        }'
 
 Environment Variables
 ---------------------

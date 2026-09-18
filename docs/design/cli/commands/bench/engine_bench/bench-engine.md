@@ -84,8 +84,12 @@ All concrete workloads depend on `BaseWorkload`, `RequestSender`,
 
 `EngineBenchConfig` holds only general parameters (`engine_url`, `model`,
 `workload`, `kv_cache_volume_gb`, `tokens_per_gb_kvcache`, `seed`,
-`output_dir`, `export_csv`, `export_json`, `quiet`, `ignore_eos`).
-Workload-specific configs live in their own modules.
+`output_dir`, `export_csv`, `export_json`, `quiet`, `ignore_eos`,
+`warmup_policy`). Workload-specific configs live in their own modules.
+
+`WarmupPolicy` (`RUN` / `SKIP`) is set from `--no-warmup` and handed to
+`BaseWorkload.run()` by the orchestrator. It is a `str` enum so it lands in
+`bench_summary.json` as `"run"` / `"skip"`.
 
 | Function | Purpose |
 |----------|---------|
@@ -108,7 +112,7 @@ Workload-specific configs live in their own modules.
 | `on_request_finished(result)` | RequestSender callback |
 | `get_current_stats()` | ProgressMonitor (every 1s) |
 | `get_final_stats()` | Orchestrator, after the benchmark |
-| `reset()` | BaseWorkload, between warmup and benchmark |
+| `reset()` | BaseWorkload, before the benchmark (after warmup, when it runs) |
 | `export_csv(path)` / `export_json(path, config)` | Orchestrator |
 
 ### 2.3 `request_sender.py`
@@ -156,7 +160,7 @@ class BaseWorkload(ABC):
     @abstractmethod def on_request_finished(self, request_id: str, output: str) -> None
 
     # --- Provided ---
-    def run(self) -> None                                    # entry point (blocks)
+    def run(self, warmup_policy=WarmupPolicy.RUN) -> None     # entry point (blocks)
     def request_finished(self, result, text)                 # thread-safe queue bridge
     def extra_metric_sections(self) -> list[MetricSection]   # default: []
 ```
@@ -165,6 +169,7 @@ class BaseWorkload(ABC):
 
 ```
 log_config()  →  warmup()  →  stats_collector.reset()
+                 (skipped when warmup_policy is WarmupPolicy.SKIP)
 loop:
     drain_finished_queue() → on_request_finished()
     next_wakeup = step(time_offset)
@@ -512,11 +517,12 @@ its output is deliberately agnostic of engine-side metrics. Confirm the cache
 was exercised from the engine's own `/metrics` if a run needs that evidence.
 
 **Scoring.** The model wraps its answer in `<final_answer>…</final_answer>`;
-the *last complete* region is taken, since reasoning models may echo an
-example while thinking. An unterminated region counts as no answer —
-generation was cut off, so scoring the reasoning before it would report an
-answer never produced. Answers are scored by SQuAD-normalized token-overlap
-F1, best over the gold answers.
+the *last* region is considered, including an unfinished one, since reasoning
+models may echo an example while thinking. If that region has no closing
+tag, it counts as no answer; the parser does not fall back to an earlier
+complete region. Such a sample is exported with `parsed: false`, an empty
+answer, and `f1: null`. Completed answers are scored by SQuAD-normalized
+token-overlap F1, best over the gold answers.
 
 `f1_mean` covers **parsed samples only** and is always reported beside
 `parse_rate`: a high F1 over a third of the samples is a different result from
@@ -604,6 +610,9 @@ sender. Add a factory case to `test_create_workload.py`.
 - Use `progress_monitor.log_message()` for runtime logging, to avoid
   corrupting the live display.
 - Warmup stats are discarded (`reset()` runs after warmup).
+- `warmup()` may be skipped entirely (`--no-warmup` / `WarmupPolicy.SKIP`), so
+  a workload must not do setup there that `step()` depends on — build state in
+  `__init__` and keep `warmup()` to requests that only prime engine and cache.
 
 ---
 

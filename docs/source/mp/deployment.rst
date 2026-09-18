@@ -38,7 +38,8 @@ Required Docker flags:
 
 - ``--network host`` -- Allows the vLLM container to reach LMCache on localhost.
 - ``--ipc host`` -- Required for CUDA IPC shared memory transfers between
-  containers.
+  containers in the default (legacy) mode; see *Isolated IPC* below for
+  running without it.
 - ``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container
   runtime.
 
@@ -56,6 +57,67 @@ orchestrators), use the HTTP server entry point:
         /opt/venv/bin/lmcache server \
         --l1-size-gb 60 --eviction-policy LRU --max-workers 4 --port 6555
 
+Isolated IPC (running without ``--ipc host``)
+---------------------------------------------
+
+CUDA IPC in MP mode has two legs, and by default both depend on a shared
+``/dev/shm`` tmpfs -- which is what ``--ipc host`` / ``hostIPC: true``
+really provides:
+
+- **KV-cache memory sharing**: the default registration path uses
+  PyTorch storage IPC, which keeps a reference-counter file in
+  ``/dev/shm``.
+- **Event ordering** (the per-STORE/RETRIEVE device events): CUDA
+  interprocess *event* handles only resolve when both containers share
+  a ``/dev/shm`` tmpfs.
+
+The **isolated IPC** setting removes both: KV-cache registration switches
+to raw CUDA IPC memory handles
+(``docs/design/v1/platform/cuda/ipc_wrapper.md``) and event ordering to
+timeline-semaphore events carried over CUDA IPC memory handles
+(``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``). Both
+rendezvous in the kernel driver, so they work across containers that
+share nothing -- no host IPC namespace, no common ``/dev/shm``, no
+``--ipc host``. It must be enabled on **both** sides of a deployment:
+
+.. code-block:: bash
+
+    # LMCache server
+    lmcache server --isolated-ipc --l1-size-gb 60 --eviction-policy LRU
+
+    # vLLM
+    vllm serve Qwen/Qwen3-14B --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both",
+          "kv_connector_extra_config": {"lmcache.mp.port": 6555,
+                                        "lmcache.mp.isolated_ipc": true}}'
+
+The two event mechanisms exchange incompatible handles, so a half-enabled
+deployment fails loudly at event import (the vLLM side crashes
+immediately; the server side logs the error and the worker times out
+after ``lmcache.mp.mq_timeout``).
+
+.. note::
+   With isolated IPC enabled on both sides, the MP data path has no
+   ``/dev/shm`` dependency left: ``--ipc host`` (Docker) and
+   ``hostIPC: true`` / the shared ``/dev/shm`` mount (Kubernetes) can be
+   dropped. The two containers only need access to the same GPUs and
+   distinct PID *values* (any regular container setup provides both).
+   The Kubernetes :doc:`operator` wires isolated IPC by default on NVIDIA
+   (``spec.isolatedIPC``).
+
+Current limitations:
+
+- Supported by the **vLLM MP connector only**. SGLang, TensorRT-LLM,
+  CacheBlend, and qstore still create raw CUDA interprocess events and
+  require isolated IPC to stay off (the default).
+- KV-cache tensors must live in ``cudaMalloc``-style memory. CUDA VMM
+  allocations have no IPC memory handle, so
+  ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` and vLLM's sleep
+  mode (``CuMemAllocator``) are incompatible with isolated IPC;
+  registration fails with an explanatory error.
+- Requires the ``cuda-python`` package on both sides (included in the
+  CUDA requirement files).
+
 Kubernetes
 ----------
 
@@ -70,6 +132,12 @@ Prerequisites
 - Kubernetes cluster with GPU support (NVIDIA GPU Operator installed)
 - At least 4 GPUs per node
 - ``kubectl`` configured to access your cluster
+
+Classic GPU Operator installs register RuntimeClass ``nvidia``. CDI+NRI
+installs often have no RuntimeClass objects. On those clusters omit
+``runtimeClassName`` on the LMCache DaemonSet and request a management CDI
+device (see *GPU Operator NRI/CDI* below). The operator path is
+:ref:`mp-operator-nri-cdi`.
 
 Step-by-Step
 ~~~~~~~~~~~~
@@ -143,12 +211,44 @@ Architecture Notes
 - **DaemonSet uses ``hostNetwork: true``** so vLLM pods discover the LMCache
   server via ``status.hostIP``.
 - **Both containers mount ``/dev/shm``** from the host to enable CUDA IPC
-  memory sharing.
+  memory sharing in the default (legacy) mode; see *Isolated IPC* above for
+  running without it.
 - **GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain
-  exclusively allocated to vLLM pods.  The NVIDIA container runtime
-  automatically provides GPU access for IPC-based memory transfers.
+  exclusively allocated to vLLM pods. On classic GPU Operator installs the
+  NVIDIA container runtime (RuntimeClass ``nvidia``) provides GPU access
+  for IPC-based memory transfers. On CDI+NRI installs there is no
+  ``nvidia`` RuntimeClass; omit it and request a management CDI device
+  instead (see below).
 - **Multiple vLLM pods** on the same node automatically connect to the same
   LMCache DaemonSet instance.
+
+GPU Operator NRI/CDI
+^^^^^^^^^^^^^^^^^^^^
+
+If ``kubectl get runtimeclass`` is empty, do not set ``runtimeClassName``
+on the DaemonSet. Request the management CDI device on the pod (the
+container name must match the annotation key):
+
+.. code-block:: yaml
+
+    metadata:
+      annotations:
+        nvidia.cdi.k8s.io/container.lmcache-server: management.nvidia.com/gpu=all
+
+If the DaemonSet namespace is not the GPU Operator install namespace,
+NVIDIA Container Toolkit **≥ v1.20.0** takes extra namespaces from
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES`` (Helm ``toolkit.env``, or
+``ClusterPolicy`` ``spec.toolkit.env``).
+(`NVIDIA: Requesting a Management CDI Device
+<https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/cdi.html>`_)
+Below v1.20.0 that env is not available, so the DaemonSet can see GPUs
+only in the toolkit install namespace (typically ``gpu-operator``).
+
+For reference, toolkit v1.20.0 became the GPU Operator Helm default in
+v26.7.0. The default allowed namespace is the toolkit install namespace;
+from 1.20, additional namespaces can be listed in
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES``, and the toolkit namespace remains
+allowed.
 
 .. note::
    LMCache pods on nodes without GPUs will crash with CUDA initialization

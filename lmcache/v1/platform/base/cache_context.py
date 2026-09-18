@@ -13,7 +13,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 import array
 
 # Third Party
@@ -25,9 +25,12 @@ from lmcache.v1.gpu_connector.utils import (
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
 class BaseCacheContext(ABC):

@@ -141,33 +141,41 @@ async def get_prefetch(request_id: str, request: Request) -> dict[str, object]:
 # Diagnostics (clear, checksums) -- engine-local; validated inline
 # ---------------------------------------------------------------------------
 
-# Per-format axis of the ``num_blocks`` dimension inside a per-layer KV tensor.
-# The checksum endpoint gathers KV data by block IDs along this axis, which
-# preserves the block_size dimension verbatim so chunking is a clean slice on a
-# known axis. Formats that fuse num_blocks and block_size into a single
-# page-buffer dimension are intentionally not listed: the block-level semantics
-# don't map cleanly, and the endpoint declines them with 501.
-_BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
-    lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS: 1,  # [2, NB, BS, NH, HS]
-    lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS: 0,  # [NB, 2, BS, NH, HS]
-    lmcache_native.EngineKVFormat.NL_X_NB_BS_HS: 0,  # MLA: [NB, BS, HS]
-    lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS: 0,  # DSA indexer: [NB, BS, 132]
-    lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS: 1,  # [2, NB, NH, BS, HS]
-    lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS: 0,  # [NB, 2, NH, BS, HS]
-}
+
+def _checksum_block_axis(
+    fmt: "lmcache_native.EngineKVFormat",
+) -> int | None:
+    """Return the checksum gather axis for one per-layer tensor layout.
+
+    The checksum endpoint is intentionally conservative: it accepts layouts
+    whose per-layer leaf is one tensor with a separate ``NB`` axis and no extra
+    singleton bookkeeping axis. K/V tuple layouts, plane tuples, top-level K/V
+    lists, cross-layer formats, and PBS-fused formats stay unsupported here.
+    """
+    if (
+        not fmt.is_layer_list
+        or fmt.is_kv_second_tuple
+        or fmt.is_pbs_fused
+        or fmt.has_inner_axis("ONE")
+    ):
+        return None
+    if not fmt.is_mla and not fmt.has_inner_axis("TWO"):
+        return None
+    return fmt.probe_tensor_block_axis
 
 
 @router.post("/cache/clear", response_model=None)
 async def clear_cache(
     request: Request, body: ClearRequest | None = None
 ) -> dict[str, object]:
-    """Force-clear a tier's resident cache.
+    """Clear a tier's resident cache.
 
-    Clears all objects in the tier, including those with active read/write
-    locks; in-flight store/prefetch operations may be corrupted.
+    By default, clears only objects that are safe to remove. With
+    ``force=true``, clears all objects in the tier, including those with active
+    read/write locks; in-flight store/prefetch operations may be corrupted.
 
     The body is optional: an absent (or empty) body defaults to
-    ``{"tier": "l1", "force": true}``.
+    ``{"tier": "l1", "force": false}``.
 
     Responses:
         200: ``{"status": "ok", "cleared": {"tier": "l1"}}``.
@@ -182,11 +190,7 @@ async def clear_cache(
                 f"tier {body.tier.value!r} not supported; only {_CLEAR_TIER.value!r}"
             ),
         )
-    # TODO(cache-control): ``body.force`` is accepted for API forward-compat but
-    # not honored -- the engine's CLEAR path always force-clears. Wiring it
-    # through would require extending the ZMQ ``RequestType.CLEAR`` payload
-    # (which currently carries no fields) so the cross-process op can pass force.
-    get_context(request).engine.clear()
+    get_context(request).engine.clear(force=body.force)
     logger.info("Cache cleared via HTTP API")
     return {"status": "ok", "cleared": {"tier": _CLEAR_TIER.value}}
 
@@ -207,7 +211,7 @@ def _resolve_per_layer_block_axes(
     for fmt in formats_per_layer:
         if fmt is None or int(fmt) in axis_by_format:
             continue
-        axis = _BLOCK_AXIS_BY_FORMAT.get(fmt)
+        axis = _checksum_block_axis(fmt)
         if axis is None:
             return None, "checksum not supported for GPU KV format %s" % fmt.name
         axis_by_format[int(fmt)] = axis

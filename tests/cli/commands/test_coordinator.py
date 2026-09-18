@@ -133,7 +133,7 @@ class TestCoordinatorCommandExecute:
             checkpoint_path="/var/lib/lmcache/checkpoint",
             checkpoint_interval=30.0,
             metadata_path="/var/lib/lmcache/metadata.json",
-            extra_config='{"my_view.window": 8}',
+            extra_config='{"my_view.window": 8, "controller_packages": ["acme.c"]}',
             timeout_keep_alive=None,
             disable_metrics=True,
             otlp_endpoint="http://collector:4317",
@@ -164,7 +164,12 @@ class TestCoordinatorCommandExecute:
         assert captured["config"].checkpoint_path == "/var/lib/lmcache/checkpoint"
         assert captured["config"].checkpoint_interval == 30.0
         assert captured["config"].metadata_path == "/var/lib/lmcache/metadata.json"
-        assert captured["config"].extra_config == {"my_view.window": 8}
+        # Out-of-tree controllers ride in here rather than on a flag of
+        # their own, the way vLLM is told where to find a KV connector.
+        assert captured["config"].extra_config == {
+            "my_view.window": 8,
+            "controller_packages": ["acme.c"],
+        }
         assert captured["config"].metrics_enabled is False
         assert captured["config"].otlp_endpoint == "http://collector:4317"
         # Unset flags keep the config defaults.

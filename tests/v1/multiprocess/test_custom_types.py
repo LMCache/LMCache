@@ -70,6 +70,40 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
     assert decoded_key.cache_salt == "alice"
 
 
+def test_ipc_cache_server_key_roundtrip_preserves_request_configs():
+    """Request configuration survives IPC serialization but is not identity."""
+    original_key = IPCCacheServerKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=1,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="test_request",
+        request_configs={"lmcache.skip_save": True, "lmcache.priority": "high"},
+    )
+
+    encoded = msgspec.msgpack.encode(original_key)
+    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheServerKey)
+    key_without_configs = IPCCacheServerKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=1,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="test_request",
+    )
+
+    assert decoded_key == original_key
+    assert decoded_key.request_configs == original_key.request_configs
+    assert original_key == key_without_configs
+    assert decoded_key.no_worker_id_version().request_configs == {
+        "lmcache.skip_save": True,
+        "lmcache.priority": "high",
+    }
+
+
 @pytest.mark.cuda
 @pytest.mark.skipif(
     not (torch_dev.is_available() and torch_device_type == "cuda"),
