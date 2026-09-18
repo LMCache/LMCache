@@ -93,7 +93,7 @@ S3-Specific (in extra_config)
 
 
 Cache Object Names and Upgrades
-------------------------------
+-------------------------------
 
 The in-process connector stores each chunk under
 ``lmcache-v2/<SHA-256 hex digest of the UTF-8 CacheEngineKey string>``.

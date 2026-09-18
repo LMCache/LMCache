@@ -13,6 +13,7 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
     # Third Party
+    from azure.core.credentials_async import AsyncTokenCredential
     from azure.storage.blob.aio import ContainerClient
 
 logger = init_logger(__name__)
@@ -97,7 +98,7 @@ class AzureConnector(RemoteConnector):
                 )
             if account_key:
                 logger.info("AzureConnector: authenticating via account key")
-                credential: object = account_key
+                credential: "str | AsyncTokenCredential" = account_key
             elif sas_token:
                 logger.info("AzureConnector: authenticating via SAS token")
                 credential = sas_token
