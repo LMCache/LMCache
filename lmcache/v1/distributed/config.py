@@ -223,14 +223,15 @@ class L1ManagerConfig:
 def get_configured_capacity_bytes(
     config: L1ManagerConfig,
 ) -> dict[L1BackendType, int]:
-    """Return the configured L1 capacity of each backing medium.
+    """Return the boot-configured L1 capacity of each backing medium.
 
-    The single source for "how large is L1". Unlike
+    The boot-time source for "how large is L1". Unlike
     ``L1Manager.get_memory_usage()``, whose total is the grown heap on the
     lazy tier, this is stable from boot. Keyed per medium because a hybrid
     Device-DAX tier spans two, matching how L1 events tag placements.
     Reports the *configured* topology, so devices added later via
-    ``add_device`` are not counted.
+    ``add_device`` are not counted. ``L1Manager`` overlays live Device-DAX
+    arena capacity when it builds a runtime declaration.
 
     Expects a **normalized** config: ``normalize_storage_manager_config``
     back-fills ``devdax_size_in_bytes`` from a matching DAX L2 adapter,

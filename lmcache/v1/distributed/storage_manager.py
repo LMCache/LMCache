@@ -28,7 +28,6 @@ from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     StorageManagerConfig,
-    get_configured_capacity_bytes,
     requires_single_l1_memory_region,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
@@ -60,6 +59,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     create_store_policy,
 )
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaState,
     DevDaxArenaStatus,
     DevDaxRemoveMode,
 )
@@ -81,9 +81,6 @@ logger = init_logger(__name__)
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
-        # Retained for the L1 half of the capacity report; L1's configured
-        # size is a pure function of it.
-        self._l1_config = config.l1_manager_config
         self._event_bus = get_event_bus()
 
         # L1 eviction controller
@@ -101,6 +98,9 @@ class StorageManager:
         self._next_adapter_id = 0
         # Serializes add_l2_adapter / delete_l2_adapter against each other.
         self._lifecycle_lock = threading.Lock()
+        # Keeps capacity snapshots ordered by the point at which they are
+        # built. Registration can publish concurrently with runtime changes.
+        self._capacity_publish_lock = threading.Lock()
         # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
         self._registered_l2_listeners: list[L2AdapterListener] = []
@@ -870,9 +870,9 @@ class StorageManager:
                 capacity_bytes=configured,
                 shared=False,
             )
-            for backend, configured in get_configured_capacity_bytes(
-                self._l1_config
-            ).items()
+            for backend, configured in (
+                self._l1_manager.get_capacity_bytes_by_backend().items()
+            )
         ]
         for _adapter_id, desc, adapter in self._snapshot_adapters():
             try:
@@ -923,6 +923,8 @@ class StorageManager:
     ) -> DevDaxArenaStatus:
         """Add a Device-DAX device to the L1 arena pool.
 
+        A successful addition publishes the current whole capacity topology.
+
         The addition is refused while an L2 adapter that registers a single L1
         memory region is configured.
         The compatibility checks and addition are protected by ``_lifecycle_lock``.
@@ -959,7 +961,9 @@ class StorageManager:
                     "is already mapped by L2 adapter(s) "
                     f"({', '.join(device_owners)})",
                 )
-            return self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+            status = self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+        self._publish_capacity_changed()
+        return status
 
     def remove_l1_devdax_device(
         self,
@@ -967,6 +971,10 @@ class StorageManager:
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
     ) -> DevDaxArenaStatus:
         """Remove a Device-DAX device from the L1 arena pool.
+
+        Whenever the call changes usable capacity, it publishes the current
+        whole topology. This includes a drain transition whose later device
+        cleanup raises an exception.
 
         Args:
             device_path: Path of the mapped Device-DAX device.
@@ -978,8 +986,30 @@ class StorageManager:
         Raises:
             L1ReconfigureError: If L1 is not Device-DAX backed or the request
                 cannot be applied.
+            RuntimeError: If device synchronization or cleanup fails after the
+                drain transition.
+            OSError: If unmapping or closing the device fails after the drain
+                transition.
         """
-        return self._l1_manager.remove_devdax_device(device_path, mode)
+        target_was_active = self._l1_devdax_arena_is_active(device_path)
+        try:
+            status = self._l1_manager.remove_devdax_device(device_path, mode)
+        except Exception:
+            # Draining begins before an empty arena is synchronized and
+            # unmapped. If that cleanup raises, usable capacity has still
+            # changed and the coordinator must not retain the old topology.
+            try:
+                if target_was_active and not self._l1_devdax_arena_is_active(
+                    device_path
+                ):
+                    self._publish_capacity_changed()
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile L1 capacity after a Device-DAX remove error"
+                )
+            raise
+        self._publish_capacity_changed()
+        return status
 
     def _single_region_adapter_names(self) -> list[str]:
         """Return type names of registered L2 adapters needing one L1 region.
@@ -994,6 +1024,18 @@ class StorageManager:
             for descriptor in descriptors
             if (name := requires_single_l1_memory_region(descriptor.config)) is not None
         ]
+
+    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
+        """Return whether an ACTIVE Device-DAX arena is mapped at ``device_path``.
+
+        The path must match the one used when adding the arena. ``False``
+        when L1 is not Device-DAX backed or nothing is registered there.
+        """
+        try:
+            status = self._l1_manager.get_devdax_arena_status(device_path)
+        except L1ReconfigureError:
+            return False
+        return status.state is DevDaxArenaState.ACTIVE
 
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.
@@ -1058,29 +1100,23 @@ class StorageManager:
     def _publish_capacity_changed(self) -> None:
         """Announce the current capacity topology on the event bus.
 
-        Lock-free. ``_build_capacities`` guards its own reads
-        (``_snapshot_adapters`` takes ``_adapters_lock``), and ordering is
-        not this class's problem: the cache-event subscriber numbers
-        declarations as it emits them, on the one bus drain thread, so a
-        number cannot come apart from the topology it labels. Callers here
-        are concurrent -- registration publishes from the event loop while a
-        worker may be adding an adapter -- which is exactly why the counter
-        does not live here.
+        Snapshot construction and enqueue are serialized because registration
+        can publish concurrently with runtime reconfiguration. The subscriber
+        assigns revisions in queue order, so an older snapshot must not be
+        enqueued after a newer one. The locks used by ``_build_capacities`` to
+        protect its reads are still required; this lock only orders declarations.
 
-        The event carries the whole topology, not a delta, so a dropped one
-        is repaired by the next rather than leaving the coordinator
-        permanently wrong.
+        The event carries the whole topology, not a delta, so a later
+        publication can repair a dropped declaration.
         """
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_CAPACITY_CHANGED,
-                metadata={
-                    "snapshot": CapacitySnapshot(
-                        modules=tuple(self._build_capacities())
-                    )
-                },
+        with self._capacity_publish_lock:
+            snapshot = CapacitySnapshot(modules=tuple(self._build_capacities()))
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.SM_CAPACITY_CHANGED,
+                    metadata={"snapshot": snapshot},
+                )
             )
-        )
 
     def reconfigure_l2_adapter(
         self,
@@ -1101,8 +1137,6 @@ class StorageManager:
         adapter = self._get_reconfigurable_l2_adapter(adapter_index)
         result = adapter.reconfigure(operation, payload)
         result["adapter_index"] = adapter_index
-        # Lock-free: reconfigure did not serialize against adapter
-        # add/delete before, and publishing is no reason to start.
         self._publish_capacity_changed()
         return result
 

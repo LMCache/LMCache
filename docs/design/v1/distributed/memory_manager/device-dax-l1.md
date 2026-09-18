@@ -41,7 +41,7 @@ reconfigure types.
 `memory_config.devdax_path` is set and GDS L1 is not configured. It exposes
 Device-DAX status, add, and remove as narrow delegation methods.
 `lmcache/v1/distributed/storage_manager.py` provides the HTTP-facing delegates
-through public manager methods.
+and publishes capacity after add and drain transitions.
 
 The runtime-reconfigure HTTP surface lives in
 `lmcache/v1/multiprocess/http_apis/l1_reconfigure_api.py` as backend-first,
@@ -123,6 +123,8 @@ Add:
    best-effort pin it.
 3. Append the arena as `active` and non-primary. It is immediately available as
    overflow. Existing allocations are untouched.
+4. The `StorageManager` entry point publishes the current whole capacity
+   topology.
 
 If any setup step fails (mapping, allocator construction, or pin registration),
 the freshly opened fd and mmap are released before the error propagates.
@@ -136,6 +138,9 @@ Remove (drain):
    automatically (auto-reap). If the unmap is blocked by lingering external
    views into the mapping (e.g. freed tensors awaiting garbage collection), the
    arena stays `draining` and later frees retry the reap.
+4. After drain begins, the `StorageManager` entry point publishes the
+   post-transition capacity topology even if synchronization or cleanup later
+   fails; a later remove retries cleanup while the path remains mapped.
 
 State machine: `active -> draining -> removed`. `removed` is a report-only
 terminal value; a removed arena has already left the pool, so it is never
@@ -169,7 +174,7 @@ l1 = L1Manager(
 ```
 
 Reconfiguration is available over HTTP (`/reconfigure/dax/l1/*`).
-`StorageManager` is the system entry point;
+`StorageManager` is the system entry point that publishes capacity changes;
 the `L1Manager` methods below are lower-level delegation methods:
 
 ```python
@@ -247,12 +252,23 @@ above total (ratio > 1), which is intentional -- it keeps the eviction
 watermark tracking real pressure on the active pool instead of being diluted
 by capacity that is being removed.
 
+`L1Manager.get_capacity_bytes_by_backend()` is also used by `report_status()`
+and `StorageManager` capacity snapshots. CPU, GDS, and the DRAM half of a hybrid
+tier retain their boot-configured values; the Device-DAX entry is the sum of
+active arena sizes. Capacity-changing calls through `StorageManager` publish
+`SM_CAPACITY_CHANGED` with the whole topology. Delivery is asynchronous and
+best-effort, so operation success confirms the local topology change rather
+than coordinator receipt.
+
 ## Verification
 
 `tests/v1/distributed/test_devdax_l1_allocator.py` unit-tests the pool:
 add/remove lifecycle, drain gating, per-arena usage, deferred unmap while
 external views are alive, mapping release on setup failure, and the
 `StorageManager` reconfiguration delegates.
+`tests/v1/distributed/test_memory_capacity.py` verifies capacity reporting and
+whole-topology `SM_CAPACITY_CHANGED` publication after successful add/remove
+and after a drain transition whose cleanup fails.
 `tests/v1/distributed/test_devdax_l1_reconfigure_integration.py` (opt-in via
 `RUN_DEVDAX_L1_INTEGRATION=1`) drives real mmap-backed devices end to end,
 at the memory-manager level, through the `L1Manager` KV-cache path, and through

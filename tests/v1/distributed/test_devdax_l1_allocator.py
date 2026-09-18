@@ -1036,6 +1036,8 @@ def test_draining_arena_capacity_excluded_from_total(tmp_path):
     # Both arenas active: total counts all capacity.
     used, total = manager.get_memory_usage()
     assert (used, total) == (8192, 12288)
+    assert manager.get_capacity_bytes_by_backend() == {L1BackendType.DEVDAX: 12288}
+    assert manager.report_status()["memory_configured_bytes"] == 12288
 
     status = manager.remove_devdax_device(extra)
     assert status.state == DevDaxArenaState.DRAINING
@@ -1045,6 +1047,8 @@ def test_draining_arena_capacity_excluded_from_total(tmp_path):
     # watermark is satisfied.
     used, total = manager.get_memory_usage()
     assert (used, total) == (8192, 4096)
+    assert manager.get_capacity_bytes_by_backend() == {L1BackendType.DEVDAX: 4096}
+    assert manager.report_status()["memory_configured_bytes"] == 4096
 
     # Once the draining arena is unmapped, both totals reflect the primary only.
     assert manager.delete([second_key])[second_key] == L1Error.SUCCESS
@@ -1245,10 +1249,16 @@ def test_hybrid_initial_devdax_arena_is_removable(tmp_path):
     statuses = manager.get_devdax_arena_statuses()
     assert len(statuses) == 1
     assert statuses[0].is_primary is False
+    assert manager.get_capacity_bytes_by_backend() == {
+        L1BackendType.DEVDAX: 4096,
+        L1BackendType.DRAM: 4096,
+    }
 
     status = manager.remove_devdax_device(path)
     assert status.state == DevDaxArenaState.REMOVED
     assert manager.get_devdax_arena_statuses() == []
+    assert manager.get_capacity_bytes_by_backend() == {L1BackendType.DRAM: 4096}
+    assert manager.report_status()["memory_configured_bytes"] == 4096
 
     # DRAM still serves allocations after the overflow arena is gone.
     key = _key(3)

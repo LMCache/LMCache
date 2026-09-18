@@ -790,6 +790,21 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         with self.host_mem_lock:
             return [arena.status() for arena in self._arenas]
 
+    def arena_status(self, device_path: str) -> DevDaxArenaStatus:
+        """Return the status of the arena registered at ``device_path``.
+
+        Args:
+            device_path: The exact path used when the arena was added.
+
+        Returns:
+            The arena's current status.
+
+        Raises:
+            DevDaxNotMappedError: If no arena is registered at the path.
+        """
+        with self.host_mem_lock:
+            return self._find_arena_locked(device_path).status()
+
     def memory_region_count(self) -> int:
         """Return the number of memory regions backing this allocator.
 
