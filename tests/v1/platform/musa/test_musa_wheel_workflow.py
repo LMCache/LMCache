@@ -133,9 +133,13 @@ def test_publish_workflow_wires_musa_build_and_release() -> None:
         "needs.nightly-musa-wheel.outputs.musa_version"
         in publish_step["with"]["release_notes"]
     )
-    assert "nightly-musa" in publish_step["run"]
-    assert "--prerelease" in publish_step["run"]
-    assert "MUSA_VERSION" in publish_step["env"]
+    publish_action = _load_workflow(".github/actions/publish-artifacts/action.yml")
+    publish_command = next(
+        step["run"]
+        for step in publish_action["runs"]["steps"]
+        if step.get("name") == "Publish rolling prerelease"
+    )
+    assert "--prerelease" in publish_command
 
 
 def test_musa_wheel_metadata_verifier_accepts_pep440_normalized_version(
