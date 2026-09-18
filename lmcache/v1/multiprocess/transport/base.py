@@ -53,6 +53,14 @@ class RequestClient(Protocol):
         event_ipc_handle: bytes,
     ) -> MessagingFuture[Any]: ...
 
+    def store_with_chunk_events(
+        self,
+        key: Any,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[Any]: ...
+
     def retrieve(
         self,
         key: Any,

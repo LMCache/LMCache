@@ -170,6 +170,11 @@ def get_zmq_handler_specs(module: EngineModule) -> list[HandlerSpec]:
             ),
             HandlerSpec(RequestType.STORE, module.store, ThreadPoolType.AFFINITY),
             HandlerSpec(
+                RequestType.STORE_WITH_CHUNK_EVENTS,
+                module.store_with_chunk_events,
+                ThreadPoolType.AFFINITY,
+            ),
+            HandlerSpec(
                 RequestType.RETRIEVE,
                 module.retrieve,
                 ThreadPoolType.AFFINITY,

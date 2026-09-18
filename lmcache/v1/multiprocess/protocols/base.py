@@ -91,6 +91,10 @@ class RequestType(enum.Enum):
 
     CB_PROTOCOL_HANDSHAKE = enum.auto()
 
+    # Store that also reports one device completion event per token chunk.
+    # Appended for wire compatibility; do not move this above existing values.
+    STORE_WITH_CHUNK_EVENTS = enum.auto()
+
     # Deprecated aliases.
     CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE
     CB_UNREGISTER_ROPE_V3 = CB_UNREGISTER_ROPE

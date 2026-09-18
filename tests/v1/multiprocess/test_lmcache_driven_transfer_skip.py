@@ -301,6 +301,26 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
     ]
 
 
+def test_chunk_event_store_enqueues_all_groups_chunk_by_chunk(monkeypatch):
+    module, _context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    _handle, chunk_events, ok = module.store_with_chunk_events(
+        SimpleNamespace(request_id="req", worker_id=1, start=8, end=12),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+    )
+
+    assert ok
+    assert [group_id for group_id, _objects in transfers] == [0, 1, 0, 1]
+    assert all(len(objects) == 1 for _group_id, objects in transfers)
+    assert transfers[1][1] == [None]
+    assert transfers[3][1][0] is not None
+    assert [(start, end) for _event, start, end in chunk_events] == [
+        (8, 10),
+        (10, 12),
+    ]
+
+
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     # Group 0 = full attention (-1): whole prefix; group 1 = mamba window 1:
     # only the last chunk.

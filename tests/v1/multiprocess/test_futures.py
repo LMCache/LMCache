@@ -255,6 +255,45 @@ def test_messaging_future_retains_reference_for_its_lifetime() -> None:
     assert resource_ref() is None
 
 
+def test_chunk_event_future_drains_ranges_before_terminal_event() -> None:
+    class EventBackend:
+        def __init__(self) -> None:
+            self.ready = {b"chunk-0": True, b"chunk-1": False, b"final": False}
+
+        def import_event(self, handle, _device):
+            return handle
+
+        def query_event(self, event):
+            return self.ready[event]
+
+        def synchronize_event(self, event, _device):
+            self.ready[event] = True
+
+    backend = EventBackend()
+    raw = MessagingFuture()
+    future = raw.to_chunk_event_device_future(device=0, event_backend=backend)
+    assert future.take_completed_ranges() == ()
+
+    raw.set_result(
+        (
+            b"final",
+            [(b"chunk-0", 0, 8), (b"chunk-1", 8, 16)],
+            True,
+        )
+    )
+    assert future.take_completed_ranges() == ((0, 8),)
+    assert future.take_completed_ranges() == ()
+    assert not future.query()
+
+    backend.ready[b"chunk-1"] = True
+    assert future.take_completed_ranges() == ((8, 16),)
+    assert not future.query()
+
+    backend.ready[b"final"] = True
+    assert future.query()
+    assert future.result(timeout=0) is True
+
+
 # ==============================================================================
 # CUDAMessagingFuture Tests
 # ==============================================================================
