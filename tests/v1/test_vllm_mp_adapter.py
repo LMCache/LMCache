@@ -13,7 +13,6 @@ import time
 import weakref
 
 # Third Party
-from prometheus_client import REGISTRY
 import pytest
 import torch
 
@@ -485,14 +484,25 @@ def test_kv_event_buffer_metrics(
     )
 
     def metrics() -> tuple[float, ...]:
-        return tuple(
-            REGISTRY.get_sample_value(
-                f"vllm:lmcache_mp_kv_events_{name}",
-                {"model_name": "test-model", "worker_id": "0"},
+        if not enable_kv_events:
+            return (0, 0, 0)
+        labels = {"model_name": "test-model", "worker_id": "0"}
+        values = []
+        for metric, name in (
+            (adapter_mod._KV_EVENTS_BUFFERED, "buffered"),
+            (adapter_mod._KV_EVENTS_GENERATED, "generated_total"),
+            (adapter_mod._KV_EVENTS_DRAINED, "drained_total"),
+        ):
+            sample_name = f"vllm:lmcache_mp_kv_events_{name}"
+            values.append(
+                next(
+                    sample.value
+                    for family in metric.collect()
+                    for sample in family.samples
+                    if sample.name == sample_name and sample.labels == labels
+                )
             )
-            or 0
-            for name in ("buffered", "generated_total", "drained_total")
-        )
+        return tuple(values)
 
     def finish() -> None:
         if lazy_offload:
