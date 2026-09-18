@@ -59,6 +59,56 @@ Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
 Bitmap unfold(size_t hit_length, size_t num_chunks, size_t num_ranks,
               const std::vector<int64_t>& group_windows);
 
+/**
+ * @brief Fold per-(object group, kv_rank) row presence into servable prefix
+ * lengths.
+ *
+ * The presence is given as one bitmap per ``(object group, kv_rank)`` row:
+ * ``rows[g * num_ranks + r]`` is the presence of object group ``g`` on
+ * kv_rank ``r``, and its bit ``j`` is set iff chunk ``j`` is present. A chunk
+ * counts as present for a group only when every one of its rank rows has the
+ * bit set. Every row has the same size, which is the number of chunks.
+ *
+ * @param rows Group-major / rank-minor row bitmaps,
+ *     ``group_windows.size() * num_ranks`` of them, all of equal size.
+ * @param num_ranks Number of kv_rank shards per object group.
+ * @param group_windows Per-object-group cross-chunk sliding-window size in
+ *     chunks, in object-group order; ``<= 0`` means full attention.
+ *
+ * @return A bitmap of size ``num_chunks``; bit ``j`` set iff every group can
+ *     serve a length-``j + 1`` prefix.
+ *
+ * @throws std::invalid_argument If the row count is not
+ *     ``group_windows.size() * num_ranks`` or the rows differ in size.
+ */
+Bitmap fold_grouped(const std::vector<Bitmap>& rows, size_t num_ranks,
+                    const std::vector<int64_t>& group_windows);
+
+/**
+ * @brief Expand a model-wide hit length into per-(object group, kv_rank)
+ * retain bitmaps.
+ *
+ * Each group retains the chunks it needs to serve ``hit_length``: ``[0,
+ * hit_length)`` for full attention, ``[hit_length - window, hit_length)`` for a
+ * sliding window. The mask is returned as one bitmap per row, group-major /
+ * rank-minor: ``result[g * num_ranks + r]`` has size ``num_chunks`` and bit
+ * ``j`` set iff object group ``g`` must retain chunk ``j`` (every rank of a
+ * group gets the same mask).
+ *
+ * @param hit_length Model-wide prefix hit length in chunks (clamped to
+ *     ``num_chunks``).
+ * @param num_chunks Number of LMCache chunks in the request.
+ * @param num_ranks Number of kv_rank shards per object group.
+ * @param group_windows Per-object-group cross-chunk sliding-window size in
+ *     chunks, in object-group order; ``<= 0`` means full attention.
+ *
+ * @return ``group_windows.size() * num_ranks`` retain bitmaps of size
+ *     ``num_chunks``, group-major / rank-minor.
+ */
+std::vector<Bitmap> unfold_grouped(size_t hit_length, size_t num_chunks,
+                                   size_t num_ranks,
+                                   const std::vector<int64_t>& group_windows);
+
 }  // namespace lmcache_native
 
 }  // namespace lmcache

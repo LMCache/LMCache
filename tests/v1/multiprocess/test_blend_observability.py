@@ -17,7 +17,7 @@ import threading
 import time
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, TrimPolicy
+from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
@@ -190,7 +190,7 @@ class TestPrefixLegNoGpuContext:
 
         handle, world_size, gids, windows, n_chunks, no_gpu_context = _bind(
             eng, "_submit_prefix_leg"
-        )(self._key(), 2, TrimPolicy.PREFIX)
+        )(self._key(), 2)
 
         assert handle is None
         assert world_size == 2
@@ -215,7 +215,7 @@ class TestPrefixLegNoGpuContext:
         eng._ctx.token_hasher.compute_chunk_hashes.return_value = []
 
         handle, _, _, _, _, no_gpu_context = _bind(eng, "_submit_prefix_leg")(
-            self._key(), 2, TrimPolicy.PREFIX
+            self._key(), 2
         )
 
         assert handle is None
@@ -433,7 +433,7 @@ class TestLookupOnlyRequestEnds:
             sparse_started=True,
             non_prefix=[match],
             handle=MagicMock(),
-            found_uidx={0, 1},
+            found_rows=[MagicMock()],
         )
         eng = self._engine_with_finished_job(rid, job)
         eng._sparse_classify.return_value = [match]

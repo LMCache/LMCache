@@ -20,7 +20,6 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -43,6 +42,9 @@ from lmcache.v1.distributed.serde.turboquant import (
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import current_device_spec
+
+# Test helpers
+from tests.v1.distributed.utils import single_row_spec
 
 
 def test_turboquant_registered() -> None:
@@ -221,7 +223,7 @@ def _wait_for_prefetch_status(
     handle,
     timeout: float = 20.0,
     poll_interval: float = 0.05,
-) -> Bitmap | None:
+) -> list[Bitmap] | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
@@ -418,10 +420,10 @@ def test_turboquant_storage_manager_roundtrip(
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hit_bitmap is not None
-        hits = hit_bitmap.count_leading_ones()
+        hits = hit_bitmap[0].count_leading_ones()
         assert hits == len(keys), f"Expected {len(keys)} hits, got {hits}"
 
         with sm.read_prefetched_results(keys) as objs:
@@ -651,10 +653,10 @@ def test_turboquant_fs_storage_manager_roundtrip(
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
         hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hit_bitmap is not None
-        hits = hit_bitmap.count_leading_ones()
+        hits = hit_bitmap[0].count_leading_ones()
         assert hits == len(keys), f"Expected {len(keys)} hits, got {hits}"
 
         with sm.read_prefetched_results(keys) as objs:

@@ -29,9 +29,14 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
+    GroupedKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchLockMode,
+    PrefetchTaskSpec,
+)
+from lmcache.v1.distributed.internal_api import (
     PrefetchMode,
     PrefetchRequestSpec,
     TrimPolicy,
@@ -210,6 +215,7 @@ def _enc_prefetch_handle(h: PrefetchHandle) -> dict[str, Any]:
         "total_requested_keys": h.total_requested_keys,
         "submit_time": h.submit_time,
         "l2_orig_indices": list(h.l2_orig_indices),
+        "row_lengths": list(h.row_lengths),
     }
 
 
@@ -222,6 +228,7 @@ def _dec_prefetch_handle(d: dict[str, Any]) -> PrefetchHandle:
         total_requested_keys=d["total_requested_keys"],
         submit_time=d["submit_time"],
         l2_orig_indices=tuple(d.get("l2_orig_indices", ())),
+        row_lengths=tuple(d.get("row_lengths", ())),
     )
 
 
@@ -314,6 +321,52 @@ def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
     )
 
 
+def _enc_prefetch_lock_mode(m: PrefetchLockMode) -> str:
+    return m.name
+
+
+def _dec_prefetch_lock_mode(name: str) -> PrefetchLockMode:
+    return PrefetchLockMode[name]
+
+
+def _enc_grouped_keys(g: GroupedKeys) -> dict[str, Any]:
+    return {
+        "keys": [encode_value(k) for k in g.keys],
+        "object_group_id": g.object_group_id,
+        "layout_desc": encode_value(g.layout_desc),
+        "sliding_window_size": g.sliding_window_size,
+    }
+
+
+def _dec_grouped_keys(d: dict[str, Any]) -> GroupedKeys:
+    return GroupedKeys(
+        keys=[decode_value(k) for k in d["keys"]],
+        object_group_id=d["object_group_id"],
+        layout_desc=decode_value(d["layout_desc"]),
+        sliding_window_size=d["sliding_window_size"],
+    )
+
+
+def _enc_prefetch_task_spec(s: PrefetchTaskSpec) -> dict[str, Any]:
+    # Delegate each field to its registered codec so the struct survives
+    # component-type changes (every field type has its own codec).
+    return {
+        "key_groups": [encode_value(g) for g in s.key_groups],
+        "num_kv_readers": s.num_kv_readers,
+        "fetching_policy": s.fetching_policy,
+        "lock_mode": encode_value(s.lock_mode),
+    }
+
+
+def _dec_prefetch_task_spec(d: dict[str, Any]) -> PrefetchTaskSpec:
+    return PrefetchTaskSpec(
+        key_groups=[decode_value(g) for g in d["key_groups"]],
+        num_kv_readers=d["num_kv_readers"],
+        fetching_policy=d["fetching_policy"],
+        lock_mode=decode_value(d["lock_mode"]),
+    )
+
+
 def _enc_set(s: set) -> list:
     return [encode_value(x) for x in s]
 
@@ -368,6 +421,30 @@ register_codec(
         tag="PrefetchRequestSpec",
         encode=_enc_prefetch_request_spec,
         decode=_dec_prefetch_request_spec,
+    ),
+)
+register_codec(
+    PrefetchLockMode,
+    TypeCodec(
+        tag="PrefetchLockMode",
+        encode=_enc_prefetch_lock_mode,
+        decode=_dec_prefetch_lock_mode,
+    ),
+)
+register_codec(
+    GroupedKeys,
+    TypeCodec(
+        tag="GroupedKeys",
+        encode=_enc_grouped_keys,
+        decode=_dec_grouped_keys,
+    ),
+)
+register_codec(
+    PrefetchTaskSpec,
+    TypeCodec(
+        tag="PrefetchTaskSpec",
+        encode=_enc_prefetch_task_spec,
+        decode=_dec_prefetch_task_spec,
     ),
 )
 register_codec(
