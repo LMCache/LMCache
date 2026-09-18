@@ -44,6 +44,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
+    is_scratch_spec,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -174,15 +175,17 @@ def get_group_tokens_per_block(
 
     Attention pages are local DCP shards and therefore cover
     ``spec.block_size * dcp_size`` global tokens. Recurrent-state pages are
-    replicated and retain their physical ``spec.block_size`` span. When vLLM
-    does not provide group metadata, preserve the legacy single-group rule.
+    replicated and retain their physical ``spec.block_size`` span. Scratch
+    groups cover no tokens and report ``0``. When vLLM does not provide
+    group metadata, preserve the legacy single-group rule.
 
     Args:
         vllm_config: The active vLLM configuration.
         kv_cache_config: vLLM's resolved KV cache group configuration.
 
     Returns:
-        The effective token span of each KV cache group.
+        The effective token span of each KV cache group, ``0`` for scratch
+        groups that never store or retrieve.
     """
     dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
     groups = (
@@ -202,7 +205,8 @@ def get_vllm_scheduler_block_size(
     """Return vLLM's scheduler block size for the resolved cache groups.
 
     The scheduler boundary must align with every cache group, so vLLM uses the
-    least common multiple of their effective block spans.
+    least common multiple of their effective block spans. Scratch groups
+    (span ``0``) do not take part.
 
     Args:
         vllm_config: The active vLLM configuration.
@@ -211,7 +215,11 @@ def get_vllm_scheduler_block_size(
     Returns:
         The scheduler block size in tokens.
     """
-    group_spans = get_group_tokens_per_block(vllm_config, kv_cache_config)
+    group_spans = [
+        span
+        for span in get_group_tokens_per_block(vllm_config, kv_cache_config)
+        if span > 0
+    ]
     scheduler_block_size = math.lcm(*group_spans)
     largest_group_span = max(group_spans)
     if scheduler_block_size > largest_group_span * _MAX_LCM_EXPANSION_FACTOR:
@@ -270,6 +278,9 @@ def get_resolved_attention_block_sizes(
 ) -> set[int]:
     """Return physical block sizes for resolved attention cache groups.
 
+    Scratch groups are attention specs by class but cover no tokens, so they
+    are left out.
+
     Args:
         vllm_config: The active vLLM configuration.
         kv_cache_config: vLLM's resolved KV cache group configuration.
@@ -282,6 +293,7 @@ def get_resolved_attention_block_sizes(
         spec.block_size
         for spec in _iter_kv_cache_specs(kv_cache_config)
         if any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
+        and not is_scratch_spec(spec)
     }
     if block_sizes:
         return block_sizes
@@ -509,6 +521,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
+        self._can_store = vllm_config.kv_transfer_config.is_kv_producer
 
         self._eager_prefetch: bool = bool(
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -672,21 +685,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Tokens covered by one paged chunk (one block ID) of each engine
         # group, from the group's KV cache spec. Hybrid models can mix
         # different values (e.g. gemma-4: sliding-window groups 32,
-        # full-attention groups 16; DeepSeek V4: 256/64/8/4). Falls back to
+        # full-attention groups 16; DeepSeek V4: 256/64/8/4); scratch
+        # groups report 0 and take no part in caching. Falls back to
         # the engine's base block size when no group metadata is available
         # (single non-hybrid group).
         self._group_tokens_per_block = group_tokens_per_block
-        for engine_group_idx, tokens_per_block in enumerate(
-            self._group_tokens_per_block
-        ):
-            if tokens_per_block <= 0:
-                raise ValueError(
-                    f"group {engine_group_idx} tokens_per_block "
-                    f"{tokens_per_block} must be positive"
-                )
+        cached_spans = [span for span in group_tokens_per_block if span > 0]
+        if not cached_spans or min(group_tokens_per_block) < 0:
+            raise ValueError(
+                f"group tokens_per_block {group_tokens_per_block} must be "
+                "non-negative with at least one cacheable group"
+            )
         # Smallest token count aligned to every group's paged-chunk
         # boundary; used to round down vLLM APC hit counts.
-        self._hit_alignment_tokens = math.lcm(*self._group_tokens_per_block)
+        self._hit_alignment_tokens = math.lcm(*cached_spans)
         if self.role == KVConnectorRole.SCHEDULER:
             # Chunk boundaries must land on every group's paged-chunk
             # boundary so per-group block-id slicing stays aligned.
@@ -694,7 +706,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             for engine_group_idx, tokens_per_block in enumerate(
                 self._group_tokens_per_block
             ):
-                if lmcache_tokens_per_chunk % tokens_per_block != 0:
+                if tokens_per_block and lmcache_tokens_per_chunk % tokens_per_block:
                     raise ValueError(
                         f"LMCache chunk size {lmcache_tokens_per_chunk} must be "
                         f"a multiple of group {engine_group_idx} "
@@ -944,7 +956,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:
-            val = self.worker_adapter.get_finished(finished_req_ids)
+            # The adapter reports engine-finished IDs even without a STORE.
+            # Consumers never delay frees for saves, but must still poll retrieves.
+            val = self.worker_adapter.get_finished(
+                finished_req_ids if self._can_store else set()
+            )
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
@@ -1359,7 +1375,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
-        return True, (return_params or None)
+        return self._can_store, (return_params or None)
 
     def request_finished_all_groups(
         self,
@@ -1479,6 +1495,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
+            if not self._can_store:
+                continue
+
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
                 lmcache_tokens_per_chunk,
@@ -1511,6 +1530,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # stay consistent with _process_new_requests.
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+
+            if not self._can_store:
+                continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,

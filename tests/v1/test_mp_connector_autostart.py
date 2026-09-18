@@ -70,7 +70,9 @@ def test_connector_multiserver_autostart_fails_before_network(
     extra = {"lmcache.mp.server_urls": urls, "lmcache.mp.autostart": enabled}
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
-            kv_connector_extra_config=extra, get_from_extra_config=extra.get
+            kv_connector_extra_config=extra,
+            get_from_extra_config=extra.get,
+            is_kv_producer=True,
         ),
         parallel_config=SimpleNamespace(
             world_size=2, data_parallel_size=1, pipeline_parallel_size=1
@@ -115,7 +117,9 @@ def test_connector_single_server_autostart_keeps_resolved_endpoint(
         extra["lmcache.mp.server_urls"] = ["localhost:6000"]
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
-            kv_connector_extra_config=extra, get_from_extra_config=extra.get
+            kv_connector_extra_config=extra,
+            get_from_extra_config=extra.get,
+            is_kv_producer=True,
         ),
         parallel_config=SimpleNamespace(
             world_size=2, data_parallel_size=1, pipeline_parallel_size=1
