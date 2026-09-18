@@ -31,9 +31,13 @@ _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
 }
 
 
-def _requires_single_l1_memory_region(
+def requires_single_l1_memory_region(
     adapter_config: L2AdapterConfigBase,
 ) -> str | None:
+    """Return the adapter type requiring a single L1 memory region, if any."""
+    inner_config = getattr(adapter_config, "inner_config", None)
+    if isinstance(inner_config, L2AdapterConfigBase):
+        return requires_single_l1_memory_region(inner_config)
     type_name = get_type_name_for_config(adapter_config)
     if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
         return type_name
@@ -366,7 +370,7 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     incompatible_adapters = [
         adapter_name
         for adapter_config in config.l2_adapter_config.adapters
-        if (adapter_name := _requires_single_l1_memory_region(adapter_config))
+        if (adapter_name := requires_single_l1_memory_region(adapter_config))
         is not None
     ]
     if incompatible_adapters:

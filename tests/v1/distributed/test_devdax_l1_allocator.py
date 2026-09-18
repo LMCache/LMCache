@@ -7,6 +7,7 @@ manager wiring while keeping CI portable.
 """
 
 # Standard
+from pathlib import Path
 from typing import Any, cast
 import argparse
 import gc
@@ -18,7 +19,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    L1BackendType,
+    MemoryLayoutDesc,
+    ObjectKey,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -26,20 +31,31 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     parse_args_to_config,
+    requires_single_l1_memory_region,
 )
-from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
     get_type_name_for_config,
 )
+from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
+    DaxDeviceConfig,
+    DaxL2AdapterConfig,
+)
+from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
+    FaultInjectL2AdapterConfig,
+)
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxMemoryAllocator,
+    DevDaxRemoveMode,
 )
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -53,6 +69,19 @@ def _make_mmap_file(
     with open(path, "wb") as f:
         f.truncate(size)
     return str(path)
+
+
+def _open_fd_count(path: str) -> int:
+    """Count this process's open descriptors that resolve to ``path``."""
+    target = os.path.realpath(path)
+    count = 0
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            if os.readlink(f"/proc/self/fd/{name}") == target:
+                count += 1
+        except OSError:
+            continue
+    return count
 
 
 def _key(seed: int = 0) -> ObjectKey:
@@ -342,6 +371,259 @@ def test_l1_manager_round_trip_on_devdax_mapping(tmp_path):
 
     with open(path, "rb") as f:
         assert f.read(1) == bytes([0x23])
+
+
+def test_storage_manager_routes_l1_devdax_reconfigure(tmp_path: Path) -> None:
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    storage_manager = _pure_devdax_storage_manager(primary)
+    try:
+        (primary_status,) = storage_manager.get_l1_devdax_arena_statuses()
+        assert primary_status.device_path == primary
+        assert primary_status.is_primary is True
+
+        # An uninterpretable user path is a 404 lookup miss through the full
+        # manager chain rather than an unhandled 500.
+        with pytest.raises(L1ReconfigureError) as nul_lookup_miss:
+            storage_manager.remove_l1_devdax_device(
+                "bad\x00path", DevDaxRemoveMode.DRAIN
+            )
+        assert nul_lookup_miss.value.status_code == 404
+
+        added = storage_manager.add_l1_devdax_device(extra, 4096)
+        assert added.device_path == extra
+        assert added.state == DevDaxArenaState.ACTIVE
+
+        removed = storage_manager.remove_l1_devdax_device(extra, DevDaxRemoveMode.DRAIN)
+        assert removed.device_path == extra
+        assert removed.state == DevDaxArenaState.REMOVED
+
+        # Once unmapped the path is unknown: the allocator lookup miss is
+        # translated into the HTTP-mappable 404, not a 409 state conflict.
+        with pytest.raises(L1ReconfigureError) as lookup_miss:
+            storage_manager.remove_l1_devdax_device(extra, DevDaxRemoveMode.DRAIN)
+        assert lookup_miss.value.status_code == 404
+    finally:
+        storage_manager.close()
+
+
+def test_storage_manager_l1_devdax_reconfigure_rejects_cpu_l1() -> None:
+    storage_manager = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=4096,
+                    use_lazy=False,
+                    shm_name="",
+                    align_bytes=4096,
+                )
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+        )
+    )
+    try:
+        with pytest.raises(L1ReconfigureError, match="Device-DAX"):
+            storage_manager.get_l1_devdax_arena_statuses()
+        with pytest.raises(L1ReconfigureError, match="not Device-DAX backed"):
+            storage_manager.add_l1_devdax_device("unused", 4096)
+    finally:
+        storage_manager.close()
+
+
+def _pure_devdax_storage_manager(
+    primary: str, adapters: list[L2AdapterConfigBase] | None = None
+) -> StorageManager:
+    return StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=4096,
+                    use_lazy=False,
+                    shm_name="",
+                    align_bytes=4096,
+                    devdax_path=primary,
+                )
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+            l2_adapter_config=L2AdaptersConfig(adapters=adapters or []),
+        )
+    )
+
+
+def _mock_l2_config() -> MockL2AdapterConfig:
+    return MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+
+
+_SINGLE_REGION_PREDICATE = (
+    "lmcache.v1.distributed.storage_manager.requires_single_l1_memory_region"
+)
+
+
+def test_storage_manager_rejects_l1_devdax_add_with_single_region_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing the last single-region adapter permits runtime arena add."""
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    # The mock adapter stands in for NIXL, which needs a transfer engine.
+    monkeypatch.setattr(_SINGLE_REGION_PREDICATE, lambda _config: "nixl_store")
+    storage_manager = _pure_devdax_storage_manager(primary, [_mock_l2_config()])
+    try:
+        with pytest.raises(L1ReconfigureError, match="nixl_store") as rejected:
+            storage_manager.add_l1_devdax_device(extra, 4096)
+        assert rejected.value.status_code == 409
+        statuses = storage_manager.get_l1_devdax_arena_statuses()
+        assert [s.device_path for s in statuses] == [primary]
+        assert _open_fd_count(extra) == 0
+
+        storage_manager.delete_l2_adapter(0)
+        added = storage_manager.add_l1_devdax_device(extra, 4096)
+        assert added.device_path == extra
+        assert added.state == DevDaxArenaState.ACTIVE
+    finally:
+        storage_manager.close()
+
+
+def test_storage_manager_rejects_l1_add_of_l2_dax_device_alias(
+    tmp_path: Path,
+) -> None:
+    """L1 cannot map a physical device already owned by DAX L2."""
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    l2_device = _make_mmap_file(tmp_path, size=4096, name="l2-device.bin")
+    l1_alias = tmp_path / "l1-alias.bin"
+    os.link(l2_device, l1_alias)
+    dax_config = DaxL2AdapterConfig(
+        devices=[
+            DaxDeviceConfig(
+                device_path=l2_device,
+                max_dax_size_gb=4096 / (1024**3),
+            )
+        ],
+        slot_bytes=4096,
+    )
+    storage_manager = _pure_devdax_storage_manager(primary, [dax_config])
+    try:
+        with pytest.raises(L1ReconfigureError) as conflict:
+            storage_manager.add_l1_devdax_device(str(l1_alias), 4096)
+        assert conflict.value.status_code == 409
+        assert "already mapped by L2" in str(conflict.value)
+        statuses = storage_manager.get_l1_devdax_arena_statuses()
+        assert [status.device_path for status in statuses] == [primary]
+    finally:
+        storage_manager.close()
+
+
+def test_storage_manager_rejects_single_region_adapter_with_runtime_arenas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror check: with two arenas mapped a NIXL-like adapter is refused
+    until L1 is back to a single arena."""
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    storage_manager = _pure_devdax_storage_manager(primary)
+    try:
+        storage_manager.add_l1_devdax_device(extra, 4096)
+        monkeypatch.setattr(_SINGLE_REGION_PREDICATE, lambda _config: "nixl_store")
+        with pytest.raises(ValueError, match="nixl_store"):
+            storage_manager.add_l2_adapter(_mock_l2_config())
+
+        removed = storage_manager.remove_l1_devdax_device(extra, DevDaxRemoveMode.DRAIN)
+        assert removed.state == DevDaxArenaState.REMOVED
+        adapter_id = storage_manager.add_l2_adapter(_mock_l2_config())
+        assert adapter_id >= 0
+    finally:
+        storage_manager.close()
+
+
+def _wrapped_in_fault_inject(inner: L2AdapterConfigBase) -> FaultInjectL2AdapterConfig:
+    return FaultInjectL2AdapterConfig(
+        inner_config=inner, rate=0.0, seed=0, gap_indices=()
+    )
+
+
+def _type_name_nixl_unless_wrapper(config: object) -> str:
+    return (
+        "fault_inject"
+        if isinstance(config, FaultInjectL2AdapterConfig)
+        else "nixl_store"
+    )
+
+
+def test_single_region_predicate_sees_through_wrapper_configs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.config.get_type_name_for_config",
+        _type_name_nixl_unless_wrapper,
+    )
+    wrapper = _wrapped_in_fault_inject(_mock_l2_config())
+    assert requires_single_l1_memory_region(wrapper) == "nixl_store"
+
+
+def test_storage_manager_rejects_single_region_adapter_while_arena_drains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A draining arena holding a live object still counts as a region."""
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    storage_manager = _pure_devdax_storage_manager(primary)
+    try:
+        key_a, key_b = _key(1), _key(2)
+        # A fills the primary arena.
+        assert set(storage_manager.reserve_write([key_a], _layout(), "new")) == {key_a}
+        storage_manager.finish_write([key_a])
+        storage_manager.add_l1_devdax_device(extra, 4096)
+        # B lands on the extra arena and stays write-reserved, so it can be
+        # neither evicted nor freed while the arena drains.
+        pending = storage_manager.reserve_write([key_b], _layout(), "new")
+        assert set(pending) == {key_b}
+        draining = storage_manager.remove_l1_devdax_device(
+            extra, DevDaxRemoveMode.DRAIN
+        )
+        assert draining.state == DevDaxArenaState.DRAINING
+        assert draining.active_allocations == 1
+
+        monkeypatch.setattr(_SINGLE_REGION_PREDICATE, lambda _config: "nixl_store")
+        with pytest.raises(ValueError, match="2 regions"):
+            storage_manager.add_l2_adapter(_mock_l2_config())
+
+        storage_manager.finish_write([key_b])
+        del pending
+        storage_manager.delete_l1_keys([key_b])
+        gc.collect()
+        statuses = storage_manager.get_l1_devdax_arena_statuses()
+        assert [s.device_path for s in statuses] == [primary]
+        assert storage_manager.add_l2_adapter(_mock_l2_config()) >= 0
+    finally:
+        storage_manager.close()
+
+
+def test_storage_manager_rejects_single_region_adapter_on_hybrid_l1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hybrid DRAM + Device-DAX is already two regions with a single arena."""
+    path = _make_mmap_file(tmp_path)
+    storage_manager = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=1024 * 1024,
+                    use_lazy=False,
+                    shm_name="",
+                    devdax_path=path,
+                    devdax_size_in_bytes=1024 * 1024,
+                )
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+            l2_adapter_config=L2AdaptersConfig(adapters=[]),
+        )
+    )
+    try:
+        monkeypatch.setattr(_SINGLE_REGION_PREDICATE, lambda _config: "nixl_store")
+        with pytest.raises(ValueError, match="2 regions"):
+            storage_manager.add_l2_adapter(_mock_l2_config())
+    finally:
+        storage_manager.close()
 
 
 def test_devdax_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
@@ -725,21 +1007,37 @@ def test_draining_arena_capacity_excluded_from_total(tmp_path):
     # count as used. Otherwise the eviction watermark (used / total) is diluted
     # by capacity that is going away and eviction never triggers.
     primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
-    manager = _pure_devdax_manager(primary)
+    manager = L1Manager(
+        L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=4096,
+                use_lazy=False,
+                shm_name="",
+                align_bytes=4096,
+                devdax_path=primary,
+            )
+        )
+    )
+    first_key = _key(1)
+    second_key = _key(2)
 
-    error, first = manager.allocate(_layout(4096), count=1)
-    assert error == L1Error.SUCCESS
+    first = manager.reserve_write([first_key], [False], _layout(4096))
+    assert first[first_key][0] == L1Error.SUCCESS
+    assert manager.finish_write([first_key])[first_key] == L1Error.SUCCESS
+    del first
 
     extra = _make_mmap_file(tmp_path, size=8192, name="extra.bin")
-    manager.add_device(extra, 8192)
-    error, second = manager.allocate(_layout(4096), count=1)
-    assert error == L1Error.SUCCESS
+    manager.add_devdax_device(extra, 8192)
+    second = manager.reserve_write([second_key], [False], _layout(4096))
+    assert second[second_key][0] == L1Error.SUCCESS
+    assert manager.finish_write([second_key])[second_key] == L1Error.SUCCESS
+    del second
 
     # Both arenas active: total counts all capacity.
     used, total = manager.get_memory_usage()
     assert (used, total) == (8192, 12288)
 
-    status = manager.remove_device(extra)
+    status = manager.remove_devdax_device(extra)
     assert status.state == DevDaxArenaState.DRAINING
 
     # Draining: the extra arena's 8192 bytes leave the total, but its live 4096
@@ -749,14 +1047,12 @@ def test_draining_arena_capacity_excluded_from_total(tmp_path):
     assert (used, total) == (8192, 4096)
 
     # Once the draining arena is unmapped, both totals reflect the primary only.
-    manager.free(second)
-    del second
+    assert manager.delete([second_key])[second_key] == L1Error.SUCCESS
     gc.collect()
     used, total = manager.get_memory_usage()
     assert (used, total) == (4096, 4096)
 
-    manager.free(first)
-    del first
+    assert manager.delete([first_key])[first_key] == L1Error.SUCCESS
     gc.collect()
     manager.close()
 
@@ -896,7 +1192,7 @@ def test_remove_primary_arena_rejected(tmp_path):
     primary = _make_mmap_file(tmp_path, size=4096)
     manager = _pure_devdax_manager(primary)
 
-    with pytest.raises(ValueError, match="primary"):
+    with pytest.raises(L1ReconfigureError, match="primary"):
         manager.remove_device(primary)
 
     # The primary arena survives the rejected removal.
@@ -910,7 +1206,7 @@ def test_add_duplicate_device_rejected(tmp_path):
 
     extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
     manager.add_device(extra, 4096)
-    with pytest.raises(ValueError, match="already mapped"):
+    with pytest.raises(L1ReconfigureError, match="already mapped"):
         manager.add_device(extra, 4096)
 
     assert len(manager.get_arena_statuses()) == 2
@@ -921,9 +1217,9 @@ def test_add_device_validates_arguments(tmp_path):
     primary = _make_mmap_file(tmp_path, size=4096)
     manager = _pure_devdax_manager(primary)
 
-    with pytest.raises(ValueError, match="device_path"):
+    with pytest.raises(L1ReconfigureError, match="device_path"):
         manager.add_device("", 4096)
-    with pytest.raises(ValueError, match="size_in_bytes"):
+    with pytest.raises(L1ReconfigureError, match="size_in_bytes"):
         manager.add_device(str(tmp_path / "unused.bin"), 0)
 
     manager.close()
@@ -933,30 +1229,34 @@ def test_hybrid_initial_devdax_arena_is_removable(tmp_path):
     # In hybrid mode DRAM is the primary L1 region, so the initial Device-DAX
     # arena is removable overflow rather than primary.
     path = _make_mmap_file(tmp_path, size=4096)
-    manager = DevDaxL1MemoryManager(
-        L1MemoryManagerConfig(
-            size_in_bytes=4096,
-            use_lazy=False,
-            shm_name="",
-            align_bytes=4096,
-            devdax_path=path,
-            devdax_size_in_bytes=4096,
+    manager = L1Manager(
+        L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=4096,
+                use_lazy=False,
+                shm_name="",
+                align_bytes=4096,
+                devdax_path=path,
+                devdax_size_in_bytes=4096,
+            )
         )
     )
 
-    statuses = manager.get_arena_statuses()
+    statuses = manager.get_devdax_arena_statuses()
     assert len(statuses) == 1
     assert statuses[0].is_primary is False
 
-    status = manager.remove_device(path)
+    status = manager.remove_devdax_device(path)
     assert status.state == DevDaxArenaState.REMOVED
-    assert manager.get_arena_statuses() == []
+    assert manager.get_devdax_arena_statuses() == []
 
     # DRAM still serves allocations after the overflow arena is gone.
-    error, objs = manager.allocate(_layout(4096), count=1)
-    assert error == L1Error.SUCCESS
-    manager.free(objs)
-    del objs
+    key = _key(3)
+    result = manager.reserve_write([key], [False], _layout(4096))
+    assert result[key][0] == L1Error.SUCCESS
+    assert manager.finish_write([key])[key] == L1Error.SUCCESS
+    del result
+    assert manager.delete([key])[key] == L1Error.SUCCESS
     gc.collect()
     manager.close()
 

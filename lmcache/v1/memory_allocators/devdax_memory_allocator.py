@@ -28,6 +28,10 @@ from lmcache.v1.memory_management import (
 import lmcache.v1.memory_management as memory_management
 
 
+class DevDaxNotMappedError(ValueError):
+    """No Device-DAX arena is registered at the requested path."""
+
+
 class DevDaxArenaState(Enum):
     """Lifecycle state of one Device-DAX arena in the L1 pool.
 
@@ -364,12 +368,12 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         """Return the arena mapped at ``device_path``. Caller holds the lock.
 
         Raises:
-            ValueError: If no arena is mapped at ``device_path``.
+            DevDaxNotMappedError: If no arena is mapped at ``device_path``.
         """
         for arena in self._arenas:
             if arena.device_path == device_path:
                 return arena
-        raise ValueError(f"no Device-DAX arena mapped at {device_path}")
+        raise DevDaxNotMappedError(f"no Device-DAX arena mapped at {device_path}")
 
     def _arena_for_obj_locked(self, memory_obj: MemoryObj) -> _DevDaxArena:
         """Return the arena that owns ``memory_obj``. Caller holds the lock.
@@ -785,6 +789,17 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         """Return a status snapshot of every arena currently in the pool."""
         with self.host_mem_lock:
             return [arena.status() for arena in self._arenas]
+
+    def memory_region_count(self) -> int:
+        """Return the number of memory regions backing this allocator.
+
+        Returns:
+            One for the local DRAM region, if present, plus one per mapped
+            Device-DAX arena, including draining arenas.
+        """
+        with self.host_mem_lock:
+            arena_count = len(self._arenas)
+        return (1 if self.local_allocator is not None else 0) + arena_count
 
     def memcheck(self) -> bool:
         local_ok = True
