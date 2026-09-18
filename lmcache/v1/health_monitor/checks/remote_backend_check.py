@@ -306,9 +306,11 @@ class RemoteBackendHealthCheck(HealthCheck):
         try:
             # put
             put_obj = self.backend.local_cpu_backend.allocate(shapes, dtypes, fmt)
-            assert put_obj is not None
+            if put_obj is None:
+                raise RuntimeError("Failed to allocate remote health probe")
             probe_tensor = put_obj.raw_tensor
-            assert probe_tensor is not None
+            if probe_tensor is None:
+                raise RuntimeError("Remote health probe requires a tensor allocation")
             probe_tensor.zero_()
             future = self.backend.submit_put_task(
                 key, put_obj, bypass_mla_write_filter=True

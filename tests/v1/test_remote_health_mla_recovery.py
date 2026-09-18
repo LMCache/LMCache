@@ -3,10 +3,9 @@
 
 # Standard
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Optional
 import asyncio
 import threading
 import time
@@ -22,6 +21,7 @@ from lmcache.v1.health_monitor.checks.remote_backend_check import (
     RemoteBackendHealthCheck,
 )
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector import InstrumentedRemoteConnector
 from lmcache.v1.storage_backend.connector.fs_connector import FSConnector
@@ -32,7 +32,7 @@ pytestmark = pytest.mark.no_shared_allocator
 
 
 @pytest.fixture
-def running_loop():
+def running_loop() -> Iterator[asyncio.AbstractEventLoop]:
     """Run the real FS connector loop with bounded teardown."""
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever)
@@ -52,10 +52,10 @@ def _open_remote_backend(
     case: str,
     use_mla: bool,
     worker_id: int,
-    worker_id_as0: Optional[bool],
+    worker_id_as0: bool | None,
     loop: asyncio.AbstractEventLoop,
-    remote_root: Optional[Path] = None,
-    logical_name: Optional[str] = None,
+    remote_root: Path | None = None,
+    logical_name: str | None = None,
 ) -> Iterator[tuple[RemoteBackend, LocalCPUBackend, TensorMemoryAllocator]]:
     """Construct a tiny public RemoteBackend route backed by a fresh FS root."""
     logical_name = logical_name or case
@@ -105,6 +105,7 @@ def _open_remote_backend(
 
 
 def _missing_key(case: str, worker_id: int) -> CacheEngineKey:
+    """Build a missing key that increments the backend health-failure counter."""
     return CacheEngineKey(
         model_name=f"missing-health-key-{case}",
         world_size=2,
@@ -139,13 +140,13 @@ def _probe_paths(backend: RemoteBackend) -> list[Path]:
     ],
 )
 def test_remote_health_recovers_after_real_missing_get(
-    tmp_path,
-    running_loop,
-    case,
-    use_mla,
-    worker_id,
-    worker_id_as0,
-):
+    tmp_path: Path,
+    running_loop: asyncio.AbstractEventLoop,
+    case: str,
+    use_mla: bool,
+    worker_id: int,
+    worker_id_as0: bool | None,
+) -> None:
     """A reachable backend must recover after the measured failure threshold.
 
     The nonzero MLA default case is intentionally the baseline RED case.  The
@@ -208,13 +209,18 @@ def test_remote_health_recovers_after_real_missing_get(
 
 
 def test_two_mla_ranks_recover_to_distinct_shared_fs_probes(
-    tmp_path, running_loop, monkeypatch
-):
+    tmp_path: Path,
+    running_loop: asyncio.AbstractEventLoop,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Two logical MLA ranks recover through one FS root without a shared probe."""
     observed_put_keys: list[str] = []
     original_put = FSConnector.put
 
-    async def record_real_put(self, key, memory_obj):
+    async def record_real_put(
+        self: FSConnector, key: CacheEngineKey, memory_obj: MemoryObj
+    ) -> None:
+        """Record a real FS write key while retaining the production put path."""
         observed_put_keys.append(key.to_string())
         await original_put(self, key, memory_obj)
 
@@ -263,6 +269,7 @@ def test_two_mla_ranks_recover_to_distinct_shared_fs_probes(
         start_barrier = threading.Barrier(2)
 
         def recover(check: RemoteBackendHealthCheck) -> bool:
+            """Synchronize both workers before performing their recovery check."""
             start_barrier.wait(timeout=10)
             return check.check()
 
@@ -280,3 +287,50 @@ def test_two_mla_ranks_recover_to_distinct_shared_fs_probes(
         assert len(set(observed_put_keys)) == 2
     assert allocator_zero.total_allocated_size == 0
     assert allocator_one.total_allocated_size == 0
+
+
+def test_remote_health_keeps_failure_when_probe_allocation_fails(
+    tmp_path: Path,
+    running_loop: asyncio.AbstractEventLoop,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed probe allocation must not submit or release a nonexistent object."""
+    with _open_remote_backend(
+        tmp_path,
+        "allocation-failure",
+        True,
+        1,
+        None,
+        running_loop,
+    ) as (backend, local_cpu_backend, allocator):
+        health_check = RemoteBackendHealthCheck(backend)
+        assert health_check.check() is True
+        assert backend.get_blocking(_missing_key("allocation-failure", 1)) is None
+        assert health_check.check() is False
+        assert health_check.failure_time is not None
+
+        submitted_keys: list[CacheEngineKey] = []
+
+        def allocation_failure(*args: object, **kwargs: object) -> MemoryObj | None:
+            """Return no buffer to exercise the probe's allocation failure branch."""
+            del args, kwargs
+            return None
+
+        def unexpected_submit(
+            key: CacheEngineKey,
+            memory_obj: MemoryObj,
+            *,
+            bypass_mla_write_filter: bool = False,
+        ) -> Future[None]:
+            """Fail if a probe attempts a write after allocation returned ``None``."""
+            del memory_obj, bypass_mla_write_filter
+            submitted_keys.append(key)
+            raise AssertionError("allocation failure must prevent probe submission")
+
+        monkeypatch.setattr(local_cpu_backend, "allocate", allocation_failure)
+        monkeypatch.setattr(backend, "submit_put_task", unexpected_submit)
+        time.sleep(0.02)
+        assert health_check.check() is False
+        assert health_check.failure_time is not None
+        assert submitted_keys == []
+    assert allocator.total_allocated_size == 0
