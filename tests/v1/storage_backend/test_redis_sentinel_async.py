@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regression tests for Redis Sentinel's asynchronous child-client boundary."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 from collections.abc import Iterator
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 import asyncio
 
@@ -21,10 +24,15 @@ from lmcache.v1.storage_backend.connector import CreateConnector
 from lmcache.v1.storage_backend.connector.instrumented_connector import (
     InstrumentedRemoteConnector,
 )
-from lmcache.v1.storage_backend.connector.redis_connector import RedisSentinelConnector
 
 # Local
 from ..utils import close_asyncio_loop, dumb_cache_engine_key, init_asyncio_loop
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.storage_backend.connector.redis_connector import (
+        RedisSentinelConnector,
+    )
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -84,7 +92,7 @@ def _sentinel_child(
         The Redis Sentinel connector whose public ``master`` and ``slave``
         client handles are the mocked Redis network boundary.
     """
-    return cast(RedisSentinelConnector, connector.getWrappedConnector())
+    return cast("RedisSentinelConnector", connector.getWrappedConnector())
 
 
 @pytest.fixture
