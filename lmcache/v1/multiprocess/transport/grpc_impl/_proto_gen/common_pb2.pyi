@@ -34,6 +34,14 @@ class IpcCacheServerKey(_message.Message):
     num_kv_readers: int
     def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_ids: _Optional[_Iterable[int]] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., num_kv_readers: _Optional[int] = ...) -> None: ...
 
+class SessionEndInfo(_message.Message):
+    __slots__ = ("finish_reason", "stop_token_id")
+    FINISH_REASON_FIELD_NUMBER: _ClassVar[int]
+    STOP_TOKEN_ID_FIELD_NUMBER: _ClassVar[int]
+    finish_reason: str
+    stop_token_id: int
+    def __init__(self, finish_reason: _Optional[str] = ..., stop_token_id: _Optional[int] = ...) -> None: ...
+
 class EventIpcHandleResult(_message.Message):
     __slots__ = ("event_ipc_handle", "success")
     EVENT_IPC_HANDLE_FIELD_NUMBER: _ClassVar[int]

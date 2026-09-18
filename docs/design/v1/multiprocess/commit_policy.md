@@ -101,6 +101,14 @@ the ordinary chat case, so the connector falls back to the last generated
 token. `NO_SESSION_END_INFO` (all defaults) is what an engine that observes
 nothing sends; every built-in policy treats it as "do not commit".
 
+On the wire, ZMQ pickles the dataclass. gRPC carries it as the
+`SessionEndInfo` message of `common.proto`, the second field of
+`EndSessionRequest`, through an explicit codec in
+`transport/grpc_impl/codecs/common.py`. `stop_token_id` is declared
+`optional` there because proto3's default `0` is a valid token id: a
+request that omits `end_info` decodes to `NO_SESSION_END_INFO`, not to a
+stop on token `0`.
+
 ### 2.3 Server Side: `CommitPolicy`
 
 `handle_end_session` builds a `CommitContext` from the session and the
