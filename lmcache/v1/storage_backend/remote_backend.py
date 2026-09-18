@@ -568,7 +568,7 @@ class RemoteBackend(StorageBackendInterface):
         try:
             # warning, this timeout will not actually stop the
             # scheduler from waiting for the result
-            return await asyncio.wait_for(
+            memory_objs = await asyncio.wait_for(
                 self.connection.batched_get_non_blocking(lookup_id, keys),
                 self.config.blocking_timeout_secs,
             )
@@ -578,6 +578,8 @@ class RemoteBackend(StorageBackendInterface):
         except Exception as e:
             logger.warning("Error occurred in batched_get_non_blocking: %s", e)
             return []
+
+        return [self.deserializer.deserialize(memory_obj) for memory_obj in memory_objs]
 
     def pin(self, key: CacheEngineKey) -> bool:
         logger.debug(
