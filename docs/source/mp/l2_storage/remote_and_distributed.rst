@@ -15,3 +15,4 @@ sharing cache across nodes.
    resp
    valkey
    aerospike
+   hf3fs
