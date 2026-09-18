@@ -2,9 +2,9 @@
 """Unit tests for the warm-prefetch job table (:mod:`warm_prefetch`).
 
 Fakes the ``StorageManager``, so no real engine/CUDA/L2 is needed. Verifies the
-no-lock contract: ``submit`` uses ``PrefetchMode.WARM`` (the no-lock warm
-path), status is polled reactively, and completion releases **nothing** (no
-``finish_read`` — the warm holds no lock).
+no-lock contract: ``submit`` uses ``PrefetchLockMode.NO_LOCK`` with ``"full"``
+fetching (the no-lock warm path), status is polled reactively, and completion
+releases **nothing** (no ``finish_read`` — the warm holds no lock).
 """
 
 # Standard
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, PrefetchMode, TrimPolicy
+from lmcache.v1.distributed.api import GroupedKeys, ObjectKey, PrefetchLockMode
 from lmcache.v1.multiprocess.warm_prefetch import (
     COMPLETED,
     PENDING,
@@ -55,11 +55,12 @@ class _FakeStorageManager:
     _total: int = 0
 
     def submit_prefetch_task(self, spec):
-        self._total = len(spec.keys)
+        keys = [key for row in spec.key_groups for key in row.keys]
+        self._total = len(keys)
         self.submit_args = {
-            "keys": list(spec.keys),
-            "mode": spec.mode,
-            "policy": spec.policy,
+            "keys": keys,
+            "lock_mode": spec.lock_mode,
+            "fetching_policy": spec.fetching_policy,
         }
         return _FakeHandle(self._total)
 
@@ -67,7 +68,7 @@ class _FakeStorageManager:
         if self._polls < self.delay_polls:
             self._polls += 1
             return None
-        return _FakeBitmap(self.found)
+        return [_FakeBitmap(self.found)]
 
     def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
         # Must never be called: the warm holds no lock.
@@ -81,10 +82,13 @@ def test_submit_uses_retain_and_poll_completes_without_release():
     sm = _FakeStorageManager(found=2, delay_polls=2)
     jobs = WarmPrefetchJobs()
 
-    request_id = jobs.submit(sm, keys, layout_desc=object())
+    request_id = jobs.submit(
+        sm, [GroupedKeys(keys=keys, object_group_id=0, layout_desc=object())]
+    )
     assert sm.submit_args is not None
-    assert sm.submit_args["mode"] is PrefetchMode.WARM
-    assert sm.submit_args["policy"] is TrimPolicy.SPARSE
+    assert sm.submit_args["keys"] == keys
+    assert sm.submit_args["lock_mode"] is PrefetchLockMode.NO_LOCK
+    assert sm.submit_args["fetching_policy"] == "full"
 
     # Pending while the load runs (reactive poll; no background loop).
     assert jobs.poll(sm, request_id).state == PENDING

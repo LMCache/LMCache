@@ -22,12 +22,10 @@ import uuid
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
-    MemoryLayoutDesc,
-    ObjectKey,
+    GroupedKeys,
     PrefetchHandle,
-    PrefetchMode,
-    PrefetchRequestSpec,
-    TrimPolicy,
+    PrefetchLockMode,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 
@@ -76,25 +74,23 @@ class WarmPrefetchJobs:
     def submit(
         self,
         storage_manager: StorageManager,
-        keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        key_groups: list[GroupedKeys],
     ) -> str:
         """Start a no-lock retain prefetch and register its handle.
 
         Args:
             storage_manager: The MP server's storage manager.
-            keys: Object keys to load from L2 into L1.
-            layout_desc: Memory layout for the L1 write buffers.
+            key_groups: The keys to load from L2 into L1, one row per
+                ``(object group, kv rank)`` with that group's memory layout.
 
         Returns:
             An opaque request id to pass to :meth:`poll`.
         """
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(
-                keys=keys,
-                group_layout_descs={0: layout_desc},
-                mode=PrefetchMode.WARM,
-                policy=TrimPolicy.SPARSE,
+            PrefetchTaskSpec(
+                key_groups=key_groups,
+                fetching_policy="full",
+                lock_mode=PrefetchLockMode.NO_LOCK,
             )
         )
         request_id = uuid.uuid4().hex
@@ -123,13 +119,13 @@ class WarmPrefetchJobs:
         if handle is None:
             return WarmStatus(state=UNKNOWN)
 
-        found = storage_manager.query_prefetch_status(handle)
-        if found is None:
+        found_rows = storage_manager.query_prefetch_status(handle)
+        if found_rows is None:
             return WarmStatus(state=PENDING)
 
         with self._lock:
             self._jobs.pop(request_id, None)
-        found_keys = found.popcount()
+        found_keys = sum(row.popcount() for row in found_rows)
         logger.info(
             "Warm prefetch %s completed: %d/%d keys loaded into L1",
             request_id,
