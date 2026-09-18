@@ -181,6 +181,14 @@ class Bitmap:
         """
         ...
 
+    def size(self) -> int:
+        """Number of bits in the bitmap."""
+        ...
+
+    def __len__(self) -> int:
+        """Number of bits in the bitmap (same as :meth:`size`)."""
+        ...
+
     def popcount(self) -> int:
         """Return the number of bits set to 1."""
         ...
@@ -284,6 +292,54 @@ def unfold(
     Returns:
         Retain mask of length ``len(group_windows) * num_chunks * num_ranks``
         (all ranks of each retained ``(group, chunk)`` set).
+    """
+    ...
+
+def fold_grouped(
+    rows: Sequence[Bitmap],
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """:func:`fold` over per-(object group, kv_rank) row bitmaps.
+
+    Args:
+        rows: ``len(group_windows) * num_ranks`` bitmaps, group-major /
+            rank-minor (``rows[g * num_ranks + r]``), all of the same length
+            (the number of chunks); bit ``j`` set iff chunk ``j`` is present.
+        num_ranks: Number of kv_rank shards per object group.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        A bitmap of size ``num_chunks``; bit ``j`` set iff every object group
+        can serve a length-``j + 1`` prefix.
+
+    Raises:
+        ValueError: If the row count is not ``len(group_windows) * num_ranks``
+            or the rows differ in length.
+    """
+    ...
+
+def unfold_grouped(
+    hit_length: int,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> list[Bitmap]:
+    """:func:`unfold` returning one retain bitmap per (object group, kv_rank).
+
+    Args:
+        hit_length: Model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per object group.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        ``len(group_windows) * num_ranks`` bitmaps of size ``num_chunks``,
+        group-major / rank-minor; bit ``j`` of row ``g * num_ranks + r`` set
+        iff object group ``g`` retains chunk ``j``.
     """
     ...
 

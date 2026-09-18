@@ -110,6 +110,16 @@ PYBIND11_MODULE(lmcache_native, m) {
       py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
       "Expand a model-wide hit length into the per-group retain mask over the "
       "group x chunk x kv_rank layout.");
+  m.def("fold_grouped", &lmcache::lmcache_native::fold_grouped, py::arg("rows"),
+        py::arg("num_ranks"), py::arg("group_windows"),
+        "fold() over per-(object group, kv_rank) row bitmaps "
+        "(rows[g * num_ranks + r], each of size num_chunks). Raises "
+        "ValueError if the row count or row sizes are inconsistent.");
+  m.def("unfold_grouped", &lmcache::lmcache_native::unfold_grouped,
+        py::arg("hit_length"), py::arg("num_chunks"), py::arg("num_ranks"),
+        py::arg("group_windows"),
+        "unfold() returning one retain bitmap per (object group, kv_rank) "
+        "row (rows[g * num_ranks + r], each of size num_chunks).");
 
   py::class_<TTLLock>(m, "TTLLock")
       .def(py::init<uint32_t>(), py::arg("ttl_second") = 300,
@@ -138,6 +148,8 @@ PYBIND11_MODULE(lmcache_native, m) {
       .def("test", &Bitmap::test, py::arg("index"),
            "Test the bit at the specified index.")
       .def("popcount", &Bitmap::popcount, "Count the number of bits set to 1.")
+      .def("size", &Bitmap::size, "Number of bits in the bitmap.")
+      .def("__len__", &Bitmap::size, "Number of bits in the bitmap.")
       .def("count_leading_zeros", &Bitmap::clz,
            "Count the number of leading zeros.")
       .def("count_leading_ones", &Bitmap::clo,
