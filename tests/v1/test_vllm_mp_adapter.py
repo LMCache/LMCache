@@ -236,7 +236,9 @@ def fake_adapter(monkeypatch):
     return adapter, req_client, future
 
 
-def test_scheduler_reset_cache_clears_every_server_without_force() -> None:
+def test_scheduler_reset_cache_clears_every_server_without_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Reset sends non-forced CLEAR and preserves local lookup state."""
     adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
     lookup_state = {
@@ -252,25 +254,61 @@ def test_scheduler_reset_cache_clears_every_server_without_force() -> None:
     futures = {server: MagicMock(name=f"future[{server}]") for server in clients}
     for server, client in clients.items():
         client.clear.return_value = futures[server]
+    monotonic_values = iter([100.0, 101.0, 106.0])
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: next(monotonic_values))
 
     assert adapter.reset_cache() is True
 
+    expected_timeouts = {"server-a": 4.0, "server-b": 0.0}
     for server, client in clients.items():
         client.clear.assert_called_once_with(force=False)
-        futures[server].result.assert_called_once_with(timeout=5.0)
+        futures[server].result.assert_called_once_with(
+            timeout=expected_timeouts[server]
+        )
     for name, value in lookup_state.items():
         assert getattr(adapter, name) is value
 
 
-def test_scheduler_reset_cache_timeout_preserves_server_health() -> None:
-    """A best-effort CLEAR timeout does not disable cache data operations."""
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("server down"), RuntimeError("rpc failed")],
+)
+def test_scheduler_reset_cache_failure_preserves_server_health(
+    error: Exception,
+) -> None:
+    """A best-effort CLEAR failure does not disable cache data operations."""
     adapter, clients = _make_scheduler_adapter(["server-a"])
     future = MagicMock(name="clear_future")
-    future.result.side_effect = TimeoutError("server down")
+    future.result.side_effect = error
     clients["server-a"].clear.return_value = future
 
     assert adapter.reset_cache() is False
     assert adapter.is_healthy is True
+
+
+def test_scheduler_reset_cache_still_tries_unhealthy_server() -> None:
+    """A stale health mark does not suppress a best-effort CLEAR attempt."""
+    adapter, clients = _make_scheduler_adapter(["server-a"])
+    adapter._health_events["server-a"].clear()
+    future = MagicMock(name="clear_future")
+    clients["server-a"].clear.return_value = future
+
+    assert adapter.reset_cache() is True
+    clients["server-a"].clear.assert_called_once_with(force=False)
+    assert adapter.is_healthy is False
+
+
+def test_scheduler_reset_cache_continues_after_submit_failure() -> None:
+    """One synchronous transport failure does not suppress other CLEARs."""
+    adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
+    clients["server-a"].clear.side_effect = RuntimeError("submit failed")
+    future = MagicMock(name="clear_future")
+    clients["server-b"].clear.return_value = future
+
+    assert adapter.reset_cache() is False
+    clients["server-a"].clear.assert_called_once_with(force=False)
+    clients["server-b"].clear.assert_called_once_with(force=False)
+    future.result.assert_called_once()
 
 
 def test_connector_reset_cache_forwards_with_active_requests() -> None:
