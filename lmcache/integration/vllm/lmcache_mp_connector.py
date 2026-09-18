@@ -1094,8 +1094,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         protected by in-flight read or write locks.
 
         Returns:
-            True when every MP server answers the clear, False on a server
-            timeout, and None for worker-role connectors.
+            True when every MP server answers the clear, False on timeout or
+            RPC failure, and None for worker-role connectors.
         """
         if self.role != KVConnectorRole.SCHEDULER:
             return None
