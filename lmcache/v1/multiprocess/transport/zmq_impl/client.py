@@ -104,6 +104,22 @@ class ZmqMultiprocessClient(RequestClient):
             RequestType.STORE, key, instance_id, block_ids, event_ipc_handle
         )
 
+    def store_with_chunk_events(
+        self,
+        key: Any,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[Any]:
+        """Store KV-cache blocks and return per-chunk source-safety events."""
+        return self._call(
+            RequestType.STORE_WITH_CHUNK_EVENTS,
+            key,
+            instance_id,
+            block_ids,
+            event_ipc_handle,
+        )
+
     def retrieve(
         self,
         key: Any,

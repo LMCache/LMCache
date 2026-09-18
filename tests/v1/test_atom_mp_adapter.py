@@ -258,6 +258,35 @@ def test_atom_submit_returns_future_and_expands_physical_groups(
     assert returned.result(timeout=0) is True
 
 
+def test_atom_chunk_event_store_forwards_and_retains_event(
+    worker_with_transfer_context: tuple[
+        AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]
+    ],
+) -> None:
+    worker, transfer_context, caches = worker_with_transfer_context
+    worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
+    future: MessagingFuture[bool] = MessagingFuture()
+    transfer_context.submit_store_with_chunk_events.return_value = future
+    spec = AtomMPTransferSpec(
+        token_ids=list(range(256)),
+        block_ids=[[7, 8, 9, 10]],
+        start=0,
+        end=256,
+    )
+    event = _FakeEvent()
+
+    returned = worker.submit_store_request_with_chunk_events("request-1", spec, event)
+
+    assert returned is future
+    assert event in returned._retained_references
+    submit_call = transfer_context.submit_store_with_chunk_events.call_args
+    assert submit_call.args[1].require_num_kv_readers() == 1
+    assert submit_call.args[3] == [[7, 8, 9, 10], [7, 8, 9, 10]]
+
+    future.set_result(True)
+    assert returned.result(timeout=0) is True
+
+
 def test_atom_worker_reregisters_without_wrapping_inflight_future(
     worker_with_transfer_context: tuple[
         AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]
