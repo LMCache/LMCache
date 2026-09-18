@@ -69,6 +69,8 @@ jobs:
                         - '.github/workflows/build_xpu_artifacts.yml'
                         - '.github/workflows/build_musa_artifacts.yml'
                         - '.github/workflows/build_rocm_torch210_artifacts.yml'
+                        - '.github/actions/build-artifacts/action.yml'
+                        - '.github/actions/publish-artifacts/action.yml'
                         - '.github/scripts/build_rocm_wheel.sh'
                         - '.github/scripts/rocm_wheel_common.sh'
                         - '.github/scripts/build_xpu_wheel.sh'
@@ -105,7 +107,8 @@ jobs:
         uses: ./.github/workflows/build_cu129_artifacts.yml
         # DockerHub creds needed for the cu12.9 manylinux image pull;
         # reusable workflows do not auto-inherit secrets.
-        secrets: inherit
+        secrets:
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
     build-rocm:
         needs: changes
@@ -114,7 +117,8 @@ jobs:
         uses: ./.github/workflows/build_rocm_artifacts.yml
         # DockerHub creds avoid anonymous rate limits pulling the ROCm
         # dev image; reusable workflows do not auto-inherit secrets.
-        secrets: inherit
+        secrets:
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
     build-xpu:
         needs: changes
@@ -123,7 +127,8 @@ jobs:
         uses: ./.github/workflows/build_xpu_artifacts.yml
         # DockerHub creds avoid anonymous rate limits pulling the oneAPI image;
         # reusable workflows do not auto-inherit secrets.
-        secrets: inherit
+        secrets:
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
     build-musa:
         needs: changes
@@ -138,7 +143,8 @@ jobs:
         uses: ./.github/workflows/build_rocm_torch210_artifacts.yml
         # DockerHub credentials avoid rate limits when pulling the pinned
         # torch 2.10 builder image; forks can still pull it anonymously.
-        secrets: inherit
+        secrets:
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
     # Run tests and code quality checks before publishing
     test:

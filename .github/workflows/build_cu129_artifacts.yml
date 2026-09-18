@@ -7,7 +7,11 @@ name: Build cu129 Artifacts
 # dedicated v{tag}-cu12 GitHub Release (not PyPI).
 
 on:
-    workflow_call:
+  workflow_call:
+    secrets:
+      dockerhub_token:
+        description: DockerHub token used to avoid image pull rate limits.
+        required: false
 
 env:
     LC_ALL: en_US.UTF-8
@@ -35,26 +39,17 @@ jobs:
               with:
                 fetch-depth: 0
 
-            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
-            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
-            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
-
-            - name: Login to DockerHub
-              # Skip when either the username var or the token secret is
-              # absent. Secrets are not inherited into reusable workflows
-              # without `secrets: inherit`, and fork PRs never get secrets,
-              # so the token can legitimately be empty on some runs.
-              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-              env:
-                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+            - name: Prepare artifact build
+              id: prepare
+              uses: ./.github/actions/build-artifacts
               with:
-                username: ${{ vars.DOCKERHUB_USERNAME }}
-                password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-            - name: Free disk space
-              uses: ./.github/actions/free-disk-space
+                dockerhub_login: "true"
+                dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+                dockerhub_token: ${{ secrets.dockerhub_token }}
+                free_disk_space: "true"
+                resolve_version: "true"
+                fallback_version: 0.0.0.dev
+                version_environment_variable: CU129_VERSION
 
             - name: Setup Python 3.13
               uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -69,15 +64,6 @@ jobs:
             - name: Clean up release artifacts
               run: |
                 rm -rf dist/
-
-            - name: Get base version for cu12.9 wheel
-              run: |
-                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-                  BASE="${GITHUB_REF_NAME#v}"
-                else
-                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
-                fi
-                echo "CU129_VERSION=${BASE}" >> "$GITHUB_ENV"
 
             - name: Build cu12.9 CUDA wheels with cibuildwheel
               env:

@@ -1,0 +1,151 @@
+name: Prepare Artifact Build
+description: Prepare a checkout and optional Python build dependencies.
+
+inputs:
+  python_version:
+    description: Python version to install.
+    required: false
+    default: ""
+  pip_packages:
+    description: Space-separated packages to install from the default package index.
+    required: false
+    default: ""
+  pip_index_packages:
+    description: Space-separated packages to install from pip_index_url.
+    required: false
+    default: ""
+  pip_index_url:
+    description: Optional Python package index URL for pip_index_packages.
+    required: false
+    default: ""
+  requirements_file:
+    description: Optional requirements file to install.
+    required: true
+    default: ""
+  resolve_version:
+    description: Whether to resolve a version from the current release tag history.
+    required: false
+    default: "false"
+  version_suffix:
+    description: Optional local version suffix appended to the resolved base version.
+    required: false
+    default: ""
+  version_environment_variable:
+    description: Environment variable name that receives the resolved version.
+    required: false
+    default: "RESOLVED_VERSION"
+  dev_version:
+    description: Whether to produce the next development version from the latest stable tag.
+    required: false
+    default: "false"
+  fallback_version:
+    description: Version to use when no stable release tag is available.
+    required: false
+    default: "0.0.0.dev0"
+  dockerhub_username:
+    description: DockerHub username for authenticated image pulls.
+    required: false
+    default: ""
+  dockerhub_token:
+    description: DockerHub token for authenticated image pulls.
+    required: false
+    default: ""
+  dockerhub_login:
+    description: Whether to authenticate DockerHub pulls.
+    required: false
+    default: "false"
+  free_disk_space:
+    description: Whether to free runner disk space before the build.
+    required: false
+    default: "false"
+
+outputs:
+  version:
+    description: Version resolved when resolve_version is enabled.
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch tags and history
+      shell: bash
+      run: |
+        set -euo pipefail
+        git fetch --force --tags --prune --unshallow 2>/dev/null || \
+          git fetch --force --tags --prune
+
+    - name: Remove non-release tags
+      shell: bash
+      run: |
+        set -euo pipefail
+        non_release_tags=$(git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' || true)
+        if [[ -n "${non_release_tags}" ]]; then
+          while IFS= read -r tag; do
+            git tag -d "${tag}"
+          done <<< "${non_release_tags}"
+        fi
+
+    - name: Resolve version
+      id: version
+      if: inputs.resolve_version == 'true'
+      shell: bash
+      env:
+        DEV_VERSION: ${{ inputs.dev_version }}
+        FALLBACK_VERSION: ${{ inputs.fallback_version }}
+        VERSION_ENVIRONMENT_VARIABLE: ${{ inputs.version_environment_variable }}
+        VERSION_SUFFIX: ${{ inputs.version_suffix }}
+      run: |
+        set -euo pipefail
+        latest_tag=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          base="${GITHUB_REF_NAME#v}"
+        elif [[ "${DEV_VERSION}" == "true" && -n "${latest_tag}" ]]; then
+          commits=$(git rev-list --count "${latest_tag}..HEAD")
+          IFS=. read -r major minor patch <<< "${latest_tag#v}"
+          base="${major}.${minor}.$((patch + 1)).dev${commits}"
+        else
+          base="${latest_tag#v}"
+          base="${base:-${FALLBACK_VERSION}}"
+        fi
+        version="${base}${VERSION_SUFFIX}"
+        echo "${VERSION_ENVIRONMENT_VARIABLE}=${version}" >> "$GITHUB_ENV"
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+    - name: Login to DockerHub
+      if: inputs.dockerhub_login == 'true' && inputs.dockerhub_username != '' && inputs.dockerhub_token != ''
+      uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+      with:
+        username: ${{ inputs.dockerhub_username }}
+        password: ${{ inputs.dockerhub_token }}
+
+    - name: Free disk space
+      if: inputs.free_disk_space == 'true'
+      uses: ./.github/actions/free-disk-space
+
+    - name: Setup Python
+      if: inputs.python_version != ''
+      uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Install Python build dependencies
+      if: inputs.pip_packages != '' || inputs.pip_index_packages != '' || inputs.requirements_file != ''
+      shell: bash
+      env:
+        PIP_PACKAGES: ${{ inputs.pip_packages }}
+        PIP_INDEX_PACKAGES: ${{ inputs.pip_index_packages }}
+        CUSTOM_PIP_INDEX_URL: ${{ inputs.pip_index_url }}
+        REQUIREMENTS_FILE: ${{ inputs.requirements_file }}
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        if [[ -n "${PIP_INDEX_PACKAGES}" ]]; then
+          [[ -n "${CUSTOM_PIP_INDEX_URL}" ]] || { echo "pip_index_url is required for pip_index_packages" >&2; exit 1; }
+          pip install --index-url "${CUSTOM_PIP_INDEX_URL}" ${PIP_INDEX_PACKAGES}
+        fi
+        if [[ -n "${PIP_PACKAGES}" ]]; then
+          pip install ${PIP_PACKAGES}
+        fi
+        if [[ -n "${REQUIREMENTS_FILE}" ]]; then
+          pip install -r "${REQUIREMENTS_FILE}"
+        fi

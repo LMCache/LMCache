@@ -16,6 +16,10 @@ name: Build XPU Artifacts
 # (not PyPI).
 on:
     workflow_call:
+        secrets:
+            dockerhub_token:
+                description: DockerHub token used to avoid image pull rate limits.
+                required: false
         outputs:
             xpu_version:
                 description: Resolved LMCache version baked into the XPU wheel.
@@ -42,7 +46,7 @@ jobs:
         name: Build XPU wheel (SYCL)
         runs-on: ubuntu-latest
         outputs:
-            xpu_version: ${{ steps.version.outputs.xpu_version }}
+            xpu_version: ${{ steps.prepare.outputs.version }}
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -55,38 +59,17 @@ jobs:
               with:
                 fetch-depth: 0
 
-            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
-            # (v*-xpu, v*-cu129, v*-rocm) that yield invalid PEP 440 versions.
-            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
-
-            - name: Login to DockerHub
-              # Skip when creds are absent (fork PRs never get secrets). The
-              # image pull works unauthenticated, but anonymous rate limits can
-              # still bite CI.
-              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-              env:
-                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+            - name: Prepare artifact build
+              id: prepare
+              uses: ./.github/actions/build-artifacts
               with:
-                username: ${{ vars.DOCKERHUB_USERNAME }}
-                password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-            - name: Free disk space
-              uses: ./.github/actions/free-disk-space
-
-            - name: Resolve xpu wheel version
-              id: version
-              run: |
-                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-                  BASE="${GITHUB_REF_NAME#v}"
-                else
-                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//')
-                  BASE="${BASE:-0.0.0.dev0}"
-                fi
-                XPU_VERSION="${BASE}+xpu"
-                echo "XPU_VERSION=${XPU_VERSION}" >> "$GITHUB_ENV"
-                echo "xpu_version=${XPU_VERSION}" >> "$GITHUB_OUTPUT"
+                dockerhub_login: "true"
+                dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+                dockerhub_token: ${{ secrets.dockerhub_token }}
+                free_disk_space: "true"
+                resolve_version: "true"
+                version_suffix: +xpu
+                version_environment_variable: XPU_VERSION
 
             # Build inside oneAPI image. No GPU required for compiling the
             # extension itself.
