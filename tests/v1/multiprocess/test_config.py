@@ -162,6 +162,26 @@ def test_grpc_server_workers_are_parsed():
     assert _parse_mp(["--grpc-server-workers", "7"]).grpc_server_workers == 7
 
 
+def test_chunk_size_integer_is_parsed():
+    assert _parse_mp(["--chunk-size", "640"]).chunk_size == 640
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "auto", "bogus"])
+def test_chunk_size_rejects_invalid_values(value: str) -> None:
+    with pytest.raises(SystemExit):
+        _parse_mp(["--chunk-size", value])
+
+
+def test_mp_config_rejects_non_positive_chunk_size() -> None:
+    with pytest.raises(ValueError, match="chunk size must be positive"):
+        MPServerConfig(chunk_size=0)
+
+
+def test_mp_config_rejects_invalid_chunk_size_type() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        MPServerConfig(chunk_size="bad")  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("workers", ["0", "-1"])
 def test_grpc_server_workers_must_be_positive(workers):
     with pytest.raises(ValueError, match="grpc server workers must be >= 1"):

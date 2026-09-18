@@ -234,18 +234,25 @@ class _LookupAck:
 def get_lmcache_chunk_size(
     req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
+    required_chunk_alignment: int | None = None,
 ) -> int:
     """
-    Helper function to get the LMCache chunk size from the server
+    Helper function to get or negotiate the LMCache chunk size from the server
 
     Args:
         req_client: The LMCache multiprocess request client.
         timeout: Timeout in seconds for the blocking request.
+        required_chunk_alignment: Optional model-derived chunk alignment. When
+            provided, the server rounds its configured minimum chunk size up
+            to a compatible multiple if needed.
 
     Returns:
         An integer representing the LMCache chunk size
     """
-    future = req_client.get_chunk_size()
+    if required_chunk_alignment is None:
+        future = req_client.get_chunk_size()
+    else:
+        future = req_client.negotiate_chunk_size(required_chunk_alignment)
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
 
@@ -641,6 +648,7 @@ class LMCacheMPSchedulerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
+        required_chunk_alignment: int | None = None,
     ):
         """
         Args:
@@ -661,6 +669,8 @@ class LMCacheMPSchedulerAdapter:
             extra_config: Optional dict with keys starting with
                 ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
+            required_chunk_alignment: Optional model-derived chunk alignment
+                used to bind or validate an auto-sized LMCache server.
         """
         vllm_block_size, parallel_strategy, mq_timeout = _normalize_adapter_init_args(
             vllm_block_size,
@@ -716,7 +726,9 @@ class LMCacheMPSchedulerAdapter:
         for url, client in self.req_clients.items():
             try:
                 chunk_sizes[url] = get_lmcache_chunk_size(
-                    client, timeout=self._mq_timeout
+                    client,
+                    timeout=self._mq_timeout,
+                    required_chunk_alignment=required_chunk_alignment,
                 )
             except TimeoutError:
                 for c in self.req_clients.values():
@@ -1233,6 +1245,7 @@ class LMCacheMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
         enable_kv_events: bool = False,
+        required_chunk_alignment: int | None = None,
     ):
         """Initialize the worker adapter for current or legacy vLLM callers.
 
@@ -1255,6 +1268,8 @@ class LMCacheMPWorkerAdapter:
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
             enable_kv_events: Whether to collect completed store operations
                 for vLLM's KV event publisher.
+            required_chunk_alignment: Optional model-derived chunk alignment
+                used to bind or validate an auto-sized LMCache server.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1341,7 +1356,9 @@ class LMCacheMPWorkerAdapter:
         # Read chunk size from lmcache
         try:
             lmcache_tokens_per_chunk = get_lmcache_chunk_size(
-                self.req_client, timeout=self._mq_timeout
+                self.req_client,
+                timeout=self._mq_timeout,
+                required_chunk_alignment=required_chunk_alignment,
             )
         except TimeoutError:
             self.req_client.close()

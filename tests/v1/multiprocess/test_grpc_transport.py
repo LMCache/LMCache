@@ -71,6 +71,7 @@ class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
     allocation: tuple[int, str, list[BlockAllocationRecord]] | None = None
     clear_force: bool | None = None
+    chunk_negotiation: int | None = None
 
 
 class _TestDeviceIPCWrapper(DeviceIPCWrapper):
@@ -159,6 +160,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
         def clear(self, force: bool = False) -> None:
             calls.clear_force = force
+
+        @request_handler(RequestType.NEGOTIATE_CHUNK_SIZE)
+        def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
+            calls.chunk_negotiation = required_chunk_alignment
+            return 640
 
         @request_handler(RequestType.NOOP)
         def debug(self) -> str:
@@ -262,6 +268,13 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert clear_codec.request_decoder(
         clear_codec.request_encoder((), {"force": True})
     ) == (True,)
+
+    negotiate_codec = registry.by_full_name[
+        "lmcache.mp.ControllerService.NegotiateChunkSize"
+    ]
+    assert negotiate_codec.request_type is RequestType.NEGOTIATE_CHUNK_SIZE
+    assert negotiate_codec.payload_types == (int,)
+    assert negotiate_codec.response_type is int
 
     registration_codec = registry.by_full_name[
         "lmcache.mp.EngineDrivenService.RegisterKvCacheEngineDrivenContext"
@@ -511,6 +524,8 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert calls.clear_force is False
     assert client.clear(force=True).result(5) is None
     assert calls.clear_force is True
+    assert client.negotiate_chunk_size(640).result(5) == 640
+    assert calls.chunk_negotiation == 640
     assert client.noop().result(5) == "ok"
 
     records = [BlockAllocationRecord("request", [4], [5, 6])]

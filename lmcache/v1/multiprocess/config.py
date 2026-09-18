@@ -17,6 +17,29 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+def _parse_chunk_size(value: str) -> int:
+    """Parse a chunk-size CLI value.
+
+    Args:
+        value: The raw ``--chunk-size`` value.
+
+    Returns:
+        A positive integer chunk size.
+
+    Raises:
+        argparse.ArgumentTypeError: If *value* is not a positive integer.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--chunk-size must be a positive integer"
+        ) from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("--chunk-size must be positive")
+    return parsed
+
+
 @dataclass
 class MPServerConfig:
     """Configuration for the multiprocess cache server."""
@@ -31,7 +54,8 @@ class MPServerConfig:
     """Request server port."""
 
     chunk_size: int = 256
-    """Chunk size for KV cache operations."""
+    """Minimum chunk size for KV cache operations. vLLM connector startup may
+    negotiate this upward to satisfy model-specific KV geometry."""
 
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
@@ -130,6 +154,12 @@ class MPServerConfig:
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
+        if not isinstance(self.chunk_size, int):
+            raise ValueError(
+                f"chunk size must be a positive integer; got {self.chunk_size!r}"
+            )
+        if self.chunk_size < 1:
+            raise ValueError(f"chunk size must be positive; got {self.chunk_size}")
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
@@ -302,9 +332,11 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--chunk-size",
-        type=int,
+        type=_parse_chunk_size,
         default=256,
-        help="Chunk size for KV cache operations. Default is 256.",
+        help="Minimum chunk size for KV cache operations. The vLLM connector "
+        "may negotiate this upward to satisfy model-specific KV geometry. "
+        "Default is 256.",
     )
     mp_group.add_argument(
         "--max-workers",
