@@ -735,6 +735,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+                required_chunk_alignment=scheduler_block_size,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
             # Worker events aggregated per step, awaiting take_events().
@@ -768,6 +769,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 enable_kv_events=self._enable_kv_events,
+                required_chunk_alignment=scheduler_block_size,
             )
             if self.transfer_intermediate_tensors:
                 # First Party
