@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar, Union
 import asyncio
@@ -533,15 +533,8 @@ class CacheEngineKey:
         )
 
     def with_new_worker_id(self, new_worker_id: int) -> "CacheEngineKey":
-        # Reconstruct the cache engine key with new worker id
-        return CacheEngineKey(
-            self.model_name,
-            world_size=self.world_size,
-            worker_id=new_worker_id,
-            chunk_hash=self.chunk_hash,
-            dtype=self.dtype,
-            request_configs=self.request_configs,
-        )
+        # Preserve subclass fields, including the layer identity.
+        return replace(self, worker_id=new_worker_id)
 
     @property
     def chunk_hash_hex(self) -> str:
