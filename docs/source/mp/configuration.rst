@@ -89,6 +89,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--max-cpu-workers``
      - (inherits ``--max-workers``)
      - Worker threads for the normal CPU pool (LOOKUP, etc.).
+   * - ``--grpc-server-workers``
+     - ``32``
+     - Worker threads for gRPC request dispatch. Only used when
+       ``--transport grpc`` is selected; ignored for the ZMQ transport.
+       Must be ``>= 1``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.

@@ -569,9 +569,13 @@ Key Source Files
      - ZMQ ``HandlerSpec`` and ``ThreadPoolType`` definitions, per-module
        handler adapters, and message queue server construction
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/protos/``
-     - Protobuf wire contracts for the planned gRPC request transport
+     - Protobuf wire contracts for the gRPC request transport
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
      - Build-time protobuf generator and generated Python package
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/server.py``,
+       ``client.py``, ``method_registry.py``, ``codecs/``
+     - gRPC server/client, method-codec registry, and per-message
+       codecs (see :doc:`request_transport`)
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
