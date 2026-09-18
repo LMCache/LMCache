@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// KvEventsService wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+// Mirrors lmcache.v1.multiprocess.custom_types.KVEventRecord field-by-field.
+message KvEventRecord {
+  int64 seq = 1;
+  string kind = 2;
+  string medium = 3;
+  string model_name = 4;
+  repeated bytes block_hashes = 5;
+  optional bytes parent_block_hash = 6;
+  repeated int64 token_ids = 7;
+  int64 block_size = 8;
+}
+
+message PollKvEventsRequest {
+  string model_name = 1;
+  int64 cursor = 2;
+  int64 max_events = 3;
+}
+
+// Mirrors lmcache.v1.multiprocess.custom_types.KVEventPollResult.
+message PollKvEventsResponse {
+  bool enabled = 1;
+  int64 incarnation = 2;
+  int64 next_cursor = 3;
+  bool lost = 4;
+  repeated KvEventRecord events = 5;
+}
+
+service KvEventsService {
+  rpc PollKvEvents(PollKvEventsRequest) returns (PollKvEventsResponse);
+}

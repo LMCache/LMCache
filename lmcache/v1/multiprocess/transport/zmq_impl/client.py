@@ -280,6 +280,12 @@ class ZmqMultiprocessClient(RequestClient):
         """Return the server's experimental capabilities."""
         return self._call(RequestType.GET_EXPERIMENTAL)
 
+    def poll_kv_events(
+        self, model_name: str, cursor: int, max_events: int
+    ) -> MessagingFuture[Any]:
+        """Read the server's cache-event log after ``cursor``."""
+        return self._call(RequestType.POLL_KV_EVENTS, model_name, cursor, max_events)
+
     # Compatibility aliases used by older blend plugins.
     cb_register_rope_v3 = cb_register_rope
     cb_unregister_rope_v3 = cb_unregister_rope

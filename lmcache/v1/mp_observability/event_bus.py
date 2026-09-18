@@ -142,6 +142,12 @@ class EventBus:
 
     # -- Public API --------------------------------------------------------
 
+    @property
+    def enabled(self) -> bool:
+        """Whether ``publish()`` enqueues events (``False`` for the disabled
+        default bus, where nothing ever reaches a subscriber)."""
+        return self._config.enabled
+
     def subscribe(self, event_type: EventType, callback: EventCallback) -> None:
         """Register a callback for a specific event type (thread-safe)."""
         with self._lock:

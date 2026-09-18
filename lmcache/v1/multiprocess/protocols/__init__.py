@@ -14,6 +14,7 @@ from lmcache.v1.multiprocess.protocols import (
     controller,
     debug,
     engine,
+    kv_events,
     observability,
     p2p,
 )
@@ -37,6 +38,7 @@ _PROTOCOL_MODULES = [
     ("blend", blend),
     ("observability", observability),
     ("p2p", p2p),
+    ("kv_events", kv_events),
 ]
 
 

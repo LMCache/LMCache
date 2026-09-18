@@ -51,6 +51,7 @@ from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.experimental import EXPERIMENTAL_TRANSFER
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -278,6 +279,10 @@ def _build_modules(
         experimental_transfer=experimental_transfer,
     )
 
+    # Records the storage layer's key events for engine workers that
+    # republish them as KV events (KV-aware routing).
+    kv_events = KVEventModule(ctx, log_size=mp_config.kv_event_log_size)
+
     # ManagementModule precedes the transfer/blend modules so close() stops
     # and joins the reaper before those modules clear their state and before
     # storage_manager.close() runs.
@@ -286,6 +291,7 @@ def _build_modules(
         lookup_module,
         p2p_controller,
         management,
+        kv_events,
         *transfer_modules,
         *experimental_modules,
         *blend_modules,

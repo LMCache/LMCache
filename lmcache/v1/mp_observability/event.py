@@ -90,7 +90,10 @@ class EventType(Enum):
     MP_LOOKUP = "mp.lookup"
 
     # Per-chunk token bindings. Metadata (parallel lists):
-    # chunk_hashes (list[bytes]) and token_chunks (list[list[int]]).
+    # chunk_hashes (list[bytes]), token_chunks (list[list[int]]),
+    # token_offsets (list[int]: position of each chunk's first token) and
+    # parent_hashes (list[bytes | None]: the preceding chunk's hash, None
+    # for a sequence's first chunk).
     MP_TOKENS = "mp.tokens"
 
     # MP Server lifecycle sentinels (CPU-synchronous)

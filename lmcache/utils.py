@@ -642,6 +642,21 @@ class CacheStoreEvent:
     lora_name: str | None
 
 
+@dataclass
+class CacheRemoveEvent:
+    """A KV cache removal, the counterpart of :class:`CacheStoreEvent`.
+
+    Reported when chunks previously announced as stored leave a cache medium
+    (host-cache eviction, L2 delete) so a KV-aware router can forget them.
+    """
+
+    block_hashes: list[int | bytes]
+    medium: str | None
+
+
+CacheEvent = CacheStoreEvent | CacheRemoveEvent
+
+
 class EngineType(Enum):
     VLLM = "vllm"
     ATOM = "atom"

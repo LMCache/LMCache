@@ -156,6 +156,10 @@ class RequestClient(Protocol):
 
     def get_experimental(self) -> MessagingFuture[Any]: ...
 
+    def poll_kv_events(
+        self, model_name: str, cursor: int, max_events: int
+    ) -> MessagingFuture[Any]: ...
+
     def cb_register_rope_v3(
         self,
         instance_id: int,

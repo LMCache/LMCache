@@ -989,3 +989,38 @@ def test_start_fails_without_pool_assignment():
         server.start()
 
     server.close()
+
+
+def test_server_survives_unknown_request_type() -> None:
+    """
+    A request type this build does not define must not stop the server.
+
+    A client running a newer protocol can send a request type value this
+    build's enum lacks. The server drops that request (the client times out);
+    a later, well-formed request must still be served.
+    """
+    server_url = "tcp://127.0.0.1:16031"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    unknown_value = max(member.value for member in RequestType) + 1
+    dealer = context.socket(zmq.DEALER)
+    dealer.connect(server_url)
+    try:
+        dealer.send_multipart(
+            [msgspec.msgpack.encode(1), msgspec.msgpack.encode(unknown_value)]
+        )
+        time.sleep(0.3)
+        assert server.worker_thread.is_alive()
+
+        client = MessageQueueClient(server_url, context)
+        try:
+            healthy: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+            assert healthy.result(timeout=5) == "NOOP_OK"
+        finally:
+            client.close()
+    finally:
+        dealer.close()
+        server.close()

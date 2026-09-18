@@ -6,6 +6,7 @@ recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."
 # Standard
 from typing import Callable, ClassVar
 from unittest.mock import MagicMock
+import collections
 import gc
 import os
 import threading
@@ -24,6 +25,15 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
     ParallelStrategy,
+)
+from lmcache.utils import CacheEvent, CacheRemoveEvent, CacheStoreEvent
+from lmcache.v1.multiprocess.custom_types import (
+    KV_EVENT_KIND_REMOVED,
+    KV_EVENT_KIND_STORED,
+    KV_EVENT_MEDIUM_CPU,
+    KV_EVENT_MEDIUM_STORAGE,
+    KVEventPollResult,
+    KVEventRecord,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -98,6 +108,11 @@ class FakeHeartbeatThread:
             ok = self.recover_callback()
         if ok:
             self.health_event.set()
+
+
+# Own completed-store events are the fallback path: they are published only
+# while the server's cache-event log is not polled.
+_OWN_STORE_EVENTS: dict[str, object] = {"lmcache.mp.kv_event_poll_interval": 0}
 
 
 def _make_worker_adapter(
@@ -358,7 +373,9 @@ def test_store_kv_events_are_reported_after_successful_store(
     # First Party
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
-    adapter = _make_worker_adapter(enable_kv_events=True)
+    adapter = _make_worker_adapter(
+        extra_config=_OWN_STORE_EVENTS, enable_kv_events=True
+    )
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     transfer_ctx = MagicMock()
     store_future = MagicMock()
@@ -400,7 +417,9 @@ def test_store_kv_events_are_discarded_after_failed_store(
     monkeypatch,
 ):
     """Failed MP stores must not emit cache-store events."""
-    adapter = _make_worker_adapter(enable_kv_events=True)
+    adapter = _make_worker_adapter(
+        extra_config=_OWN_STORE_EVENTS, enable_kv_events=True
+    )
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     transfer_ctx = MagicMock()
     store_future = MagicMock()
@@ -430,7 +449,7 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
 ) -> None:
     """Only successful stores emit events; every lazy store reports completion."""
     adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.lazy_offload": True},
+        extra_config={"lmcache.mp.lazy_offload": True, **_OWN_STORE_EVENTS},
         enable_kv_events=True,
     )
     adapter.transfer_ctx = MagicMock()
@@ -469,7 +488,7 @@ def test_kv_event_buffer_metrics(
 ) -> None:
     """A stalled drain is visible; failed/pending stores do not count as events."""
     adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.lazy_offload": lazy_offload},
+        extra_config={"lmcache.mp.lazy_offload": lazy_offload, **_OWN_STORE_EVENTS},
         enable_kv_events=enable_kv_events,
     )
     adapter.transfer_ctx = MagicMock()
@@ -561,7 +580,7 @@ def test_store_kv_events_use_hash_algorithm_extra_config(
     monkeypatch.setattr(adapter_mod, "TokenHasher", FakeTokenHasher)
 
     adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.hash_algorithm": "builtin"},
+        extra_config={"lmcache.mp.hash_algorithm": "builtin", **_OWN_STORE_EVENTS},
         enable_kv_events=True,
     )
 
@@ -1342,3 +1361,361 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok
+
+
+# -- Server-side KV event polling ---------------------------------------------
+
+
+class _FakePollServer:
+    """Answers ``poll_kv_events``. A poll completes once an answer is queued,
+    so each ``get_kv_events`` call consumes at most one answer and issues at
+    most one poll, in a deterministic order."""
+
+    def __init__(self, req_client: MagicMock) -> None:
+        self.answers: collections.deque[KVEventPollResult] = collections.deque()
+        self.calls: list[tuple[str, int, int]] = []
+        req_client.poll_kv_events.side_effect = self._poll
+
+    def answer(self, *results: KVEventPollResult) -> None:
+        self.answers.extend(results)
+
+    def _poll(self, model_name: str, cursor: int, max_events: int) -> object:
+        self.calls.append((model_name, cursor, max_events))
+        server = self
+
+        class _Future:
+            def query(self) -> bool:
+                return bool(server.answers)
+
+            def result(self, timeout: float | None = None) -> KVEventPollResult:
+                return server.answers.popleft()
+
+        return _Future()
+
+
+def _poll_result(
+    events: list[KVEventRecord] | None = None,
+    *,
+    incarnation: int = 7,
+    next_cursor: int = 0,
+    lost: bool = False,
+    enabled: bool = True,
+) -> KVEventPollResult:
+    return KVEventPollResult(
+        enabled=enabled,
+        incarnation=incarnation,
+        next_cursor=next_cursor,
+        lost=lost,
+        events=list(events or []),
+    )
+
+
+def _record(
+    seq: int,
+    kind: str,
+    hashes: list[bytes],
+    *,
+    medium: str = KV_EVENT_MEDIUM_CPU,
+    token_ids: list[int] | None = None,
+    parent: bytes | None = None,
+) -> KVEventRecord:
+    return KVEventRecord(
+        seq=seq,
+        kind=kind,
+        medium=medium,
+        model_name="test-model",
+        block_hashes=list(hashes),
+        parent_block_hash=parent,
+        token_ids=list(token_ids or []),
+        block_size=256,
+    )
+
+
+def _polling_adapter(
+    fake_adapter, **extra: object
+) -> tuple[LMCacheMPWorkerAdapter, _FakePollServer]:
+    """A KV-event-enabled adapter whose poll interval never throttles."""
+    _adapter, req_client, _future = fake_adapter
+    config: dict[str, object] = {"lmcache.mp.kv_event_poll_interval": 1e-6}
+    config.update(extra)
+    adapter = _make_worker_adapter(extra_config=config, enable_kv_events=True)
+    adapter.transfer_ctx = MagicMock()
+    return adapter, _FakePollServer(req_client)
+
+
+def _complete_own_store(
+    adapter: LMCacheMPWorkerAdapter, request_id: str, chunk_index: int
+) -> bytes:
+    """Store one chunk and report it finished; return its chunk hash."""
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    chunk_size = adapter.lmcache_tokens_per_chunk
+    token_ids = [chunk_index * 1000 + i for i in range(chunk_size)]
+    transfer_ctx = MagicMock()
+    future = MagicMock()
+    future.query.return_value = True
+    future.result.return_value = True
+    transfer_ctx.submit_store.return_value = future
+    adapter.transfer_ctx = transfer_ctx
+    adapter.submit_store_request(
+        request_id,
+        LoadStoreOp(token_ids=token_ids, block_ids=[[0]], start=0, end=chunk_size),
+        event=None,
+    )
+    adapter.get_finished({request_id})
+    return TokenHasher(chunk_size=chunk_size).compute_chunk_hashes(token_ids)[0]
+
+
+def _resync_count(reason: str) -> float:
+    labels = {"model_name": "test-model", "worker_id": "0", "reason": reason}
+    return sum(
+        sample.value
+        for family in adapter_mod._KV_EVENT_RESYNCS.collect()
+        for sample in family.samples
+        if sample.name == "vllm:lmcache_mp_kv_event_resyncs_total"
+        and sample.labels == labels
+    )
+
+
+def _step(adapter: LMCacheMPWorkerAdapter) -> list[CacheEvent]:
+    """One model-runner step: let the poll interval elapse, then drain."""
+    time.sleep(0.001)
+    return adapter.get_kv_events()
+
+
+def test_polling_reports_evictions_of_announced_chunks_only(fake_adapter) -> None:
+    """A server removal becomes a CacheRemoveEvent for chunks announced from
+    the server's records; chunks never announced are not withdrawn."""
+    adapter, server = _polling_adapter(fake_adapter)
+    server.answer(
+        _poll_result(
+            [_record(1, KV_EVENT_KIND_STORED, [b"h1"], token_ids=[1])], next_cursor=1
+        )
+    )
+    assert _step(adapter) == []  # issues the first poll
+    assert [type(e).__name__ for e in _step(adapter)] == ["CacheStoreEvent"]
+    assert server.calls[0] == ("test-model", 0, 1024)
+
+    server.answer(
+        _poll_result(
+            [_record(2, KV_EVENT_KIND_REMOVED, [b"never-announced", b"h1"])],
+            next_cursor=2,
+        )
+    )
+    events = _step(adapter)
+    assert len(events) == 1
+    assert isinstance(events[0], CacheRemoveEvent)
+    assert (events[0].block_hashes, events[0].medium) == ([b"h1"], "CPU")
+    # The next poll continues from the returned cursor.
+    assert server.calls[-1] == ("test-model", 2, 1024)
+
+    # A second removal of the same chunk is not reported again.
+    server.answer(
+        _poll_result([_record(3, KV_EVENT_KIND_REMOVED, [b"h1"])], next_cursor=3)
+    )
+    assert _step(adapter) == []
+
+
+def test_polling_reports_server_stores_once_and_lets_them_be_evicted(
+    fake_adapter,
+) -> None:
+    adapter, server = _polling_adapter(fake_adapter)
+    stored = _record(
+        1,
+        KV_EVENT_KIND_STORED,
+        [b"server-chunk"],
+        token_ids=[1, 2, 3, 4],
+        parent=b"parent",
+    )
+    server.answer(_poll_result([stored, stored], next_cursor=2))
+    assert _step(adapter) == []  # issues the first poll
+
+    events = _step(adapter)
+    assert len(events) == 1
+    assert isinstance(events[0], CacheStoreEvent)
+    assert events[0].block_hashes == [b"server-chunk"]
+    assert events[0].parent_block_hash == b"parent"
+    assert events[0].token_ids == [1, 2, 3, 4]
+    assert (events[0].block_size, events[0].medium) == (256, "CPU")
+
+    server.answer(
+        _poll_result(
+            [_record(3, KV_EVENT_KIND_REMOVED, [b"server-chunk"])], next_cursor=3
+        )
+    )
+    assert [type(e).__name__ for e in _step(adapter)] == ["CacheRemoveEvent"]
+
+
+def test_own_store_completions_are_not_announced_while_polling(fake_adapter) -> None:
+    """With the server's log polled, only its write-finished records announce
+    stores: a store result does not say which chunks were written."""
+    adapter, server = _polling_adapter(fake_adapter)
+    own = _complete_own_store(adapter, "req-1", 1)
+    assert _step(adapter) == []  # the own completion announces nothing
+
+    server.answer(
+        _poll_result(
+            [_record(1, KV_EVENT_KIND_STORED, [own], token_ids=[1])], next_cursor=1
+        )
+    )
+    events = _step(adapter)
+    assert [(type(e).__name__, e.block_hashes) for e in events] == [
+        ("CacheStoreEvent", [own])
+    ]
+
+
+def test_server_restart_withdraws_every_announced_chunk(fake_adapter) -> None:
+    adapter, server = _polling_adapter(fake_adapter)
+    server.answer(
+        _poll_result(
+            [
+                _record(1, KV_EVENT_KIND_STORED, [b"cpu-chunk"], token_ids=[1]),
+                _record(
+                    2,
+                    KV_EVENT_KIND_STORED,
+                    [b"l2-chunk"],
+                    medium=KV_EVENT_MEDIUM_STORAGE,
+                    token_ids=[1],
+                ),
+            ],
+            incarnation=7,
+            next_cursor=2,
+        )
+    )
+    _step(adapter)
+    assert [e.medium for e in _step(adapter)] == ["CPU", "STORAGE"]
+    before = _resync_count("server_restart")
+
+    server.answer(_poll_result(incarnation=8, next_cursor=0))
+    events = _step(adapter)
+    assert all(isinstance(e, CacheRemoveEvent) for e in events)
+    assert {(e.medium, tuple(e.block_hashes)) for e in events} == {
+        ("CPU", (b"cpu-chunk",)),
+        ("STORAGE", (b"l2-chunk",)),
+    }
+    assert _resync_count("server_restart") == before + 1
+
+    # Nothing is announced any more, so nothing is withdrawn twice.
+    server.answer(_poll_result(incarnation=9, next_cursor=0))
+    assert _step(adapter) == []
+
+
+def test_lost_events_withdraw_announced_chunks(fake_adapter) -> None:
+    adapter, server = _polling_adapter(fake_adapter)
+    server.answer(
+        _poll_result(
+            [_record(1, KV_EVENT_KIND_STORED, [b"h1"], token_ids=[1])], next_cursor=1
+        )
+    )
+    _step(adapter)
+    assert len(_step(adapter)) == 1
+    before = _resync_count("events_lost")
+
+    server.answer(
+        _poll_result(
+            [_record(41, KV_EVENT_KIND_STORED, [b"after-loss"], token_ids=[1])],
+            lost=True,
+            next_cursor=41,
+        )
+    )
+    events = _step(adapter)
+    assert [(type(e).__name__, e.block_hashes) for e in events] == [
+        ("CacheRemoveEvent", [b"h1"]),
+        ("CacheStoreEvent", [b"after-loss"]),
+    ]
+    assert _resync_count("events_lost") == before + 1
+    assert server.calls[-1] == ("test-model", 41, 1024)
+
+
+def test_lost_events_on_first_contact_do_not_resync(fake_adapter) -> None:
+    adapter, server = _polling_adapter(fake_adapter)
+    before = _resync_count("events_lost")
+    server.answer(_poll_result(lost=True, next_cursor=40))
+    _step(adapter)
+    assert _step(adapter) == []
+    assert _resync_count("events_lost") == before
+    assert server.calls[-1] == ("test-model", 40, 1024)
+
+
+@pytest.mark.parametrize("failure", ["disabled_on_server", "no_client_method"])
+def test_polling_stops_when_the_server_cannot_serve_it(
+    fake_adapter, failure: str
+) -> None:
+    adapter, server = _polling_adapter(fake_adapter)
+    _adapter, req_client, _future = fake_adapter
+    if failure == "disabled_on_server":
+        server.answer(_poll_result(enabled=False))
+        _step(adapter)
+        _step(adapter)
+        assert len(server.calls) == 1
+    else:
+        req_client.poll_kv_events = None
+        _step(adapter)
+
+    # Own store events keep flowing, and no further poll is issued.
+    _complete_own_store(adapter, "req-1", 1)
+    assert len(_step(adapter)) == 1
+    assert len(server.calls) == (1 if failure == "disabled_on_server" else 0)
+
+
+def test_pending_poll_times_out_only_while_healthy(fake_adapter) -> None:
+    adapter, server = _polling_adapter(fake_adapter, **{"lmcache.mp.mq_timeout": 0.0})
+    _complete_own_store(adapter, "req-1", 1)  # starts the (fake) heartbeat
+    heartbeat = FakeHeartbeatThread.instances[-1]
+    _step(adapter)
+    assert len(server.calls) == 1  # unanswered
+
+    # Unhealthy: the stale poll is dropped, but polling resumes on recovery.
+    heartbeat.health_event.clear()
+    _step(adapter)
+    _step(adapter)
+    assert len(server.calls) == 1
+    heartbeat.health_event.set()
+    _step(adapter)
+    assert len(server.calls) == 2
+
+    # Healthy and unanswered: the server predates the request; stop for good.
+    _step(adapter)
+    _step(adapter)
+    assert len(server.calls) == 2
+
+
+def test_a_full_page_is_followed_by_an_immediate_poll(fake_adapter) -> None:
+    adapter, server = _polling_adapter(
+        fake_adapter,
+        **{
+            "lmcache.mp.kv_event_poll_interval": 100.0,
+            "lmcache.mp.kv_event_poll_max_events": 1,
+        },
+    )
+    server.answer(
+        _poll_result([_record(1, KV_EVENT_KIND_REMOVED, [b"x"])], next_cursor=1)
+    )
+    _step(adapter)
+    _step(adapter)  # consumes the full page and polls again at once
+    assert server.calls == [("test-model", 0, 1), ("test-model", 1, 1)]
+
+    server.answer(_poll_result(next_cursor=1))
+    _step(adapter)
+    _step(adapter)  # an empty page: the 100 s interval applies again
+    assert len(server.calls) == 2
+
+
+def test_no_polling_without_kv_events_or_with_a_zero_interval(fake_adapter) -> None:
+    _adapter, req_client, _future = fake_adapter
+    cases: list[tuple[bool, dict[str, object]]] = [
+        (False, {"lmcache.mp.kv_event_poll_interval": 1e-6}),
+        (True, {"lmcache.mp.kv_event_poll_interval": 0}),
+    ]
+    for enable_kv_events, extra_config in cases:
+        adapter = _make_worker_adapter(
+            extra_config=extra_config, enable_kv_events=enable_kv_events
+        )
+        assert adapter.get_kv_events() == []
+    req_client.poll_kv_events.assert_not_called()
+    with pytest.raises(ValueError, match="kv_event_poll_max_events"):
+        _make_worker_adapter(
+            extra_config={"lmcache.mp.kv_event_poll_max_events": 0},
+            enable_kv_events=True,
+        )
