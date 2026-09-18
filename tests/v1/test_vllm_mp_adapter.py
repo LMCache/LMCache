@@ -262,15 +262,15 @@ def test_scheduler_reset_cache_clears_every_server_without_force() -> None:
         assert getattr(adapter, name) is value
 
 
-def test_scheduler_reset_cache_marks_timed_out_server_unhealthy() -> None:
-    """A CLEAR timeout fails reset and marks that server unhealthy."""
+def test_scheduler_reset_cache_timeout_preserves_server_health() -> None:
+    """A best-effort CLEAR timeout does not disable cache data operations."""
     adapter, clients = _make_scheduler_adapter(["server-a"])
     future = MagicMock(name="clear_future")
     future.result.side_effect = TimeoutError("server down")
     clients["server-a"].clear.return_value = future
 
     assert adapter.reset_cache() is False
-    assert adapter.is_healthy is False
+    assert adapter.is_healthy is True
 
 
 def test_connector_reset_cache_forwards_with_active_requests() -> None:

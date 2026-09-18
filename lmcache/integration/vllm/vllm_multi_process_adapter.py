@@ -1059,11 +1059,10 @@ class LMCacheMPSchedulerAdapter:
                 future.result(timeout=self._mq_timeout)
             except TimeoutError:
                 logger.warning(
-                    "CLEAR to %s timed out after %ss. Marking server as unhealthy.",
+                    "CLEAR to %s timed out after %ss.",
                     url,
                     self._mq_timeout,
                 )
-                self._health_events[url].clear()
                 success = False
 
         return success
