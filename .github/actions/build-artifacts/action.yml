@@ -15,7 +15,7 @@ inputs:
     required: false
     default: ""
   pip_index_url:
-    description: Optional Python package index URL for pip_packages.
+    description: Optional Python package index URL for pip_index_packages.
     required: false
     default: ""
   requirements_file:
@@ -134,14 +134,14 @@ runs:
       env:
         PIP_PACKAGES: ${{ inputs.pip_packages }}
         PIP_INDEX_PACKAGES: ${{ inputs.pip_index_packages }}
-        PIP_INDEX_URL: ${{ inputs.pip_index_url }}
+        CUSTOM_PIP_INDEX_URL: ${{ inputs.pip_index_url }}
         REQUIREMENTS_FILE: ${{ inputs.requirements_file }}
       run: |
         set -euo pipefail
         python -m pip install --upgrade pip
         if [[ -n "${PIP_INDEX_PACKAGES}" ]]; then
-          [[ -n "${PIP_INDEX_URL}" ]] || { echo "pip_index_url is required for pip_index_packages" >&2; exit 1; }
-          pip install --index-url "${PIP_INDEX_URL}" ${PIP_INDEX_PACKAGES}
+          [[ -n "${CUSTOM_PIP_INDEX_URL}" ]] || { echo "pip_index_url is required for pip_index_packages" >&2; exit 1; }
+          pip install --index-url "${CUSTOM_PIP_INDEX_URL}" ${PIP_INDEX_PACKAGES}
         fi
         if [[ -n "${PIP_PACKAGES}" ]]; then
           pip install ${PIP_PACKAGES}

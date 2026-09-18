@@ -69,6 +69,8 @@ jobs:
                         - '.github/workflows/build_xpu_artifacts.yml'
                         - '.github/workflows/build_musa_artifacts.yml'
                         - '.github/workflows/build_rocm_torch210_artifacts.yml'
+                        - '.github/actions/build-artifacts/action.yml'
+                        - '.github/actions/publish-artifacts/action.yml'
                         - '.github/scripts/build_rocm_wheel.sh'
                         - '.github/scripts/rocm_wheel_common.sh'
                         - '.github/scripts/build_xpu_wheel.sh'
