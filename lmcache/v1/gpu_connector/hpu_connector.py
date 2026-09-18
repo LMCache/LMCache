@@ -24,6 +24,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import GPUConnectorInterface
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.gpu_connector.utils import (
     get_block_size,
     get_dtype,
@@ -36,7 +37,6 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
@@ -315,7 +315,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         self.page_buffer_size = get_page_buffer_size(kv_caches, self.engine_kv_format)
         self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.engine_kv_format)
         self.head_size = get_head_size(kv_caches, self.engine_kv_format)
-        self.use_mla = lmcache_native.is_mla(self.engine_kv_format)
+        self.use_mla = get_spec_class(self.engine_kv_format).is_mla
         self.dtype = get_dtype(kv_caches, self.engine_kv_format)
         self.num_heads = (
             1 if self.use_mla else get_num_heads(kv_caches, self.engine_kv_format)

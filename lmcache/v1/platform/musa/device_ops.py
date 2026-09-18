@@ -19,7 +19,8 @@ import ctypes
 import torch
 
 # First Party
-from lmcache.lmcache_native import EngineKVFormat, TransferDirection, is_kv_list
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.musa import native_kv_transfer
@@ -212,7 +213,7 @@ def _reconstruct_paged_layers(
 ) -> _PagedLayers:
     """Normalize pointer-form paged operands to non-owning MUSA views."""
     expected_layers = int(shape_desc.nl)
-    separate_kv_lists = is_kv_list(engine_kv_format)
+    separate_kv_lists = get_spec_class(engine_kv_format).is_kv_list
     if separate_kv_lists:
         nested_layers = _kv_layer_lists(value)
         if nested_layers is not None:

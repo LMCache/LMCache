@@ -67,21 +67,6 @@ class KernelGroupSpec:
         block_ids_capacity: int,
     ) -> None: ...
 
-def is_kv_list(format: EngineKVFormat) -> bool:
-    """Return whether the format stores KV as a list of per-token KV tensors."""
-
-def is_layer_list(format: EngineKVFormat) -> bool:
-    """Return whether the format stores one list entry per layer."""
-
-def is_cross_layer(format: EngineKVFormat) -> bool:
-    """Return whether the format stacks KV from different layers into one tensor."""
-
-def is_mla(format: EngineKVFormat) -> bool:
-    """Return whether the format is an MLA variant (single latent KV head)."""
-
-def is_kv_second_tuple(format: EngineKVFormat) -> bool:
-    """Return whether each per-layer list entry is a (K, V) tuple of paged tensors."""
-
 class TTLLock:
     """
     A thread-safe lock with TTL (Time-To-Live) support.

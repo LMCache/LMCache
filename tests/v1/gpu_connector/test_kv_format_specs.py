@@ -321,9 +321,9 @@ def test_data_ptrs_shape(case):
     kv = _build(name)
     spec = get_spec(kv, fmt)
     ptrs = spec.data_ptrs(list(range(NL)))
-    if lmcache_native.is_cross_layer(fmt):
+    if get_spec_class(fmt).is_cross_layer:
         assert len(ptrs) == 1, name  # single base pointer
-    elif lmcache_native.is_kv_list(fmt):
+    elif get_spec_class(fmt).is_kv_list:
         assert len(ptrs) == 2 * NL, name  # K's then V's
     else:
         assert len(ptrs) == NL, name  # one per layer

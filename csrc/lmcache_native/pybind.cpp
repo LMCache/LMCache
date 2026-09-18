@@ -84,21 +84,6 @@ PYBIND11_MODULE(lmcache_native, m) {
            py::arg("engine_kv_format"), py::arg("block_ids_base"),
            py::arg("block_ids_capacity"));
 
-  m.def("is_kv_list", &is_kv_list, py::arg("format"),
-        "Return whether the format stores KV as a list of per-token KV "
-        "tensors (kv_size == 2).");
-  m.def("is_layer_list", &is_layer_list, py::arg("format"),
-        "Return whether the format stores one list entry per layer.");
-  m.def("is_cross_layer", &is_cross_layer, py::arg("format"),
-        "Return whether the format stacks KV from different layers into a "
-        "single tensor.");
-  m.def("is_mla", &is_mla, py::arg("format"),
-        "Return whether the format is an MLA variant (single latent KV "
-        "head).");
-  m.def("is_kv_second_tuple", &is_kv_second_tuple, py::arg("format"),
-        "Return whether each per-layer list entry is a (K, V) tuple of "
-        "paged tensors.");
-
   m.def("fold", &lmcache::lmcache_native::fold, py::arg("found"),
         py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
         "Fold per-(group, chunk, rank) presence into a servable-prefix-lengths "

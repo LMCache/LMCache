@@ -178,7 +178,9 @@ enum class EngineKVFormat : int {
 
 // Static layout facts for each format, declared once per format (indexed by the
 // enum value). This mirrors the facts declared on each Python KVFormatSpec so
-// the two sides can never drift; the predicates below are one-line lookups.
+// the two sides can never drift (pinned by
+// tests/v1/gpu_connector/test_kv_format_classification.py, which parses this
+// table); the predicates below are one-line lookups.
 // Exactly one structural shape (cross_layer / kv_list / layer_list) is true per
 // format. The remaining flags are modifiers layered on top of it.
 // Every field defaults to false; the table below only sets the true ones.
@@ -217,6 +219,7 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
       break;
     case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:
       facts.is_kv_list = true;
+      facts.is_pbs_fused = true;
       break;
     case EngineKVFormat::NL_X_NBBS_ONE_HS:
       facts.is_layer_list = true;
@@ -276,20 +279,11 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
   return facts;
 }
 
-// All layers in one fused tensor.
-LMC_KV_FORMAT_HD constexpr bool is_cross_layer(EngineKVFormat f) {
-  return format_facts(f).is_cross_layer;
-}
-
-// Keys and values in two separate top-level lists: [key_layers, value_layers].
-LMC_KV_FORMAT_HD constexpr bool is_kv_list(EngineKVFormat f) {
-  return format_facts(f).is_kv_list;
-}
-
-// The outermost dimension indexes the list of layers
-LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
-  return format_facts(f).is_layer_list;
-}
+// Predicates for the facts the device kernels branch on. The remaining fields
+// of FormatFacts are declared above (and kept in sync with the Python
+// KVFormatSpec table) but have no C++ reader, so they get no predicate: Python
+// call sites read every fact from the spec via get_spec_class() rather than
+// through a pybind binding.
 
 // Multi-head Latent Attention: a single latent KV head (no separate K/V split).
 // The blocked-scale indexer cache transfers like MLA (single plane,
@@ -302,9 +296,4 @@ LMC_KV_FORMAT_HD constexpr bool is_mla(EngineKVFormat f) {
 // separate K/V axis — transferred as one k_or_v == 0 pass (like MLA).
 LMC_KV_FORMAT_HD constexpr bool is_fused_packed(EngineKVFormat f) {
   return format_facts(f).is_fused_packed;
-}
-
-// One list entry per layer, each entry is a tuple of paged tensors.
-LMC_KV_FORMAT_HD constexpr bool is_kv_second_tuple(EngineKVFormat f) {
-  return format_facts(f).is_kv_second_tuple;
 }
