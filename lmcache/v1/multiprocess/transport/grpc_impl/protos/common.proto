@@ -18,6 +18,8 @@ message IpcCacheServerKey {
   string cache_salt = 8;
   optional bytes encoded_request_configs = 9;
   int64 num_kv_readers = 10;
+  // msgpack-encoded ``tuple[tuple[bool, ...], ...]``; absent means None.
+  optional bytes encoded_null_chunk_mask = 11;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.

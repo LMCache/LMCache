@@ -118,6 +118,45 @@ def _decode_mapping(value: bytes) -> dict[Any, Any]:
     return decoded
 
 
+def _is_bool_matrix_type(py_type: Any) -> bool:
+    """Whether ``py_type`` is ``tuple[tuple[bool, ...], ...]``."""
+    outer = _sequence_type(py_type)
+    if outer is None:
+        return False
+    inner = _sequence_type(outer[0])
+    return inner is not None and inner[0] is bool
+
+
+def _encode_bool_matrix(value: Any) -> bytes:
+    if not value:
+        return b""
+    return msgspec.msgpack.encode([list(row) for row in value])
+
+
+def _decode_bool_matrix(value: bytes) -> tuple[tuple[bool, ...], ...]:
+    if not value:
+        return ()
+    decoded = msgspec.msgpack.decode(value)
+    return tuple(tuple(row) for row in decoded)
+
+
+def _is_int_list_type(py_type: Any) -> bool:
+    """Whether ``py_type`` is ``list[int]``."""
+    return get_origin(py_type) is list and get_args(py_type) == (int,)
+
+
+def _encode_int_list(value: Any) -> bytes:
+    if not value:
+        return b""
+    return msgspec.msgpack.encode(list(value))
+
+
+def _decode_int_list(value: bytes) -> list[int]:
+    if not value:
+        return []
+    return msgspec.msgpack.decode(value)
+
+
 def _identity(value: Any) -> Any:
     return value
 
@@ -130,6 +169,10 @@ def _compile_scalar_codec(
             return bytes, bytes
         if py_type is dict or get_origin(py_type) is dict or is_typeddict(py_type):
             return _encode_mapping, _decode_mapping
+        if _is_bool_matrix_type(py_type):
+            return _encode_bool_matrix, _decode_bool_matrix
+        if _is_int_list_type(py_type):
+            return _encode_int_list, _decode_int_list
     if field.type == field.TYPE_STRING:
         if _is_enum_type(py_type):
 

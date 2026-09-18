@@ -8,6 +8,7 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
     DeviceIPCWrapper,
 )
@@ -68,6 +69,13 @@ class IPCCacheServerKey:
     # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
+
+    # ``[group_id][chunk_position]``; ``True`` marks a chunk backed entirely
+    # by vLLM's null block, which the server skips on store (``None`` = all
+    # chunks real).
+    null_chunk_mask: tuple[tuple[bool, ...], ...] | None = field(
+        default=None, compare=False
+    )
 
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
@@ -167,6 +175,12 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         num_physical_slots: Number of physical KV slots gathered into one
             LMCache chunk. ``None`` accepts the legacy protocol, where the
             server assumed one physical slot per logical token.
+        engine_group_infos: One entry per KV cache group, in protocol order,
+            giving each group its own layout for hybrid models. Empty means
+            a single non-hybrid group.
+        group_hidden_dim_sizes: Per-group override of ``hidden_dim_size``,
+            aligned with ``engine_group_infos``. Missing entries fall back
+            to the shared ``hidden_dim_size``.
     """
 
     instance_id: int
@@ -178,6 +192,8 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     num_physical_slots: int | None = None
+    engine_group_infos: list[EngineGroupInfo] = msgspec.field(default_factory=list)
+    group_hidden_dim_sizes: list[int] | None = None
 
 
 @dataclass
