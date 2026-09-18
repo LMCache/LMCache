@@ -71,6 +71,10 @@ from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
 
+# L1 write tag for every object reserved through this manager. Sharing one
+# tag makes concurrent stores of the same key exclude each other.
+_L1_WRITE_TAG = "storage_manager"
+
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
@@ -201,12 +205,17 @@ class StorageManager:
             dict[ObjectKey, MemoryObj]: A dictionary mapping object keys to their
                 reserved memory objects. Note that not all requested keys could be
                 reserved (e.g., out of memory or write conflict)
+
+        Note:
+            Newly reserved objects become visible to readers only when
+            :meth:`finish_write` admits them.
         """
         reserve_result = self._l1_manager.reserve_write(
             keys=keys,
             is_temporary=[False] * len(keys),
             layout_desc=layout_desc,
             mode=mode,
+            tag=_L1_WRITE_TAG,
         )
 
         result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
@@ -243,10 +252,14 @@ class StorageManager:
         """
         Finish writing the objects into the storage manager.
 
+        Admits the objects reserved by :meth:`reserve_write`: each becomes
+        visible to readers unless the key is already resident, in which case
+        the reserved copy is dropped.
+
         Args:
             keys (list[ObjectKey]): List of object keys that have been written.
         """
-        finish_result = self._l1_manager.finish_write(keys)
+        finish_result = self._l1_manager.finish_write(keys, tag=_L1_WRITE_TAG)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -897,6 +910,17 @@ class StorageManager:
             Tuple of ``(used_bytes, total_bytes)``.
         """
         return self._l1_manager.get_memory_usage()
+
+    def get_l1_staging_usage(self) -> int:
+        """Bytes held by L1 objects that are write-reserved but not admitted.
+
+        Returns:
+            The staging area size in bytes.
+
+        Note:
+            The value is part of :meth:`get_l1_usage`'s used bytes.
+        """
+        return self._l1_manager.get_staging_memory_usage()
 
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.

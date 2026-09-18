@@ -6,8 +6,9 @@ These tests verify the behavior of L1Manager as described in the
 interface docstrings. The tests focus on:
 
 1. reserve_read() - Reserve read access for given keys
-   - Returns KEY_NOT_EXIST if key does not exist
-   - Returns KEY_NOT_READABLE if key exists but is write-locked
+   - Returns KEY_NOT_EXIST if key does not exist (a key that is only being
+     written -- a staging object -- counts as not existing)
+   - Returns KEY_NOT_READABLE if key exists but is write-locked in place
    - Returns SUCCESS and MemoryObj if key is readable
 
 2. unsafe_read() - Unsafe read without acquiring new read locks
@@ -22,14 +23,17 @@ interface docstrings. The tests focus on:
    - Deletes temporary objects when read count reaches zero
 
 4. reserve_write() - Reserve write access for given keys
-   - Returns KEY_NOT_WRITABLE if key exists but cannot be written
+   - Returns KEY_NOT_WRITABLE if key exists but cannot be written, or the
+     same tag already stages the key
    - Returns OUT_OF_MEMORY if allocation fails
-   - Returns SUCCESS and MemoryObj on success
+   - Returns SUCCESS and MemoryObj on success; a non-resident key becomes a
+     staging object owned by the tag, invisible until admitted
 
 5. finish_write() - Finish write access for given keys
    - Returns KEY_NOT_EXIST if key does not exist
    - Returns KEY_IN_WRONG_STATE if not write-locked or read-locked
-   - Returns SUCCESS on successful unlock
+   - Returns SUCCESS on admission (or on discard, if the key already became
+     resident) and on in-place unlock
 
 6. delete() - Delete keys from L1 cache
    - Returns KEY_NOT_EXIST if key does not exist
@@ -39,10 +43,14 @@ interface docstrings. The tests focus on:
 7. get_object_state() - Debugging API to get internal state
 
 8. close() - Close the L1Manager and free all resources
+
+9. Staging objects (TestStaging*) - tags, admission, discard, expiry,
+   eviction of abandoned reservations and staging-memory accounting
 """
 
 # Standard
 import threading
+import time
 
 # Third Party
 import pytest
@@ -56,6 +64,8 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.eviction import L1EvictionPolicy
+from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
@@ -122,6 +132,16 @@ def small_l1_config(small_memory_config):
 
 
 @pytest.fixture
+def short_write_ttl_l1_config(basic_memory_config):
+    """L1ManagerConfig whose write reservations expire after one second."""
+    return L1ManagerConfig(
+        memory_config=basic_memory_config,
+        write_ttl_seconds=1,
+        read_ttl_seconds=300,
+    )
+
+
+@pytest.fixture
 def basic_layout():
     """Create a basic MemoryLayoutDesc for testing."""
     return MemoryLayoutDesc(
@@ -179,25 +199,47 @@ class TestReserveRead:
 
         manager.close()
 
-    def test_reserve_read_write_locked_key_returns_key_not_readable(
+    def test_reserve_read_staged_key_returns_key_not_exist(
         self, basic_l1_config, basic_layout
     ):
-        """Test that reserve_read returns KEY_NOT_READABLE for write-locked keys."""
+        """A key that is only being written (staging object) is invisible."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
-        # Reserve write (but don't finish) - key is now write-locked
+        # Reserve write (but don't finish) - the key is staged, not resident
         write_result = manager.reserve_write([key], [False], basic_layout)
         assert write_result[key][0] == L1Error.SUCCESS
 
-        # Try to reserve read on a write-locked key
         read_result = manager.reserve_read([key])
 
-        assert key in read_result
-        error, mem_obj = read_result[key]
-        assert error == L1Error.KEY_NOT_READABLE
-        assert mem_obj is None
+        assert read_result[key] == (L1Error.KEY_NOT_EXIST, None)
 
+        # Admission makes it readable, with the very same buffer.
+        manager.finish_write([key])
+        read_result = manager.reserve_read([key])
+        assert read_result[key][0] == L1Error.SUCCESS
+        assert read_result[key][1] is write_result[key][1]
+
+        manager.finish_read([key])
+        manager.close()
+
+    def test_reserve_read_in_place_write_locked_key_returns_key_not_readable(
+        self, basic_l1_config, basic_layout
+    ):
+        """A resident key write-locked in place (mode="update") is not readable."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        update = manager.reserve_write([key], [False], basic_layout, mode="update")
+        assert update[key][0] == L1Error.SUCCESS
+
+        read_result = manager.reserve_read([key])
+
+        assert read_result[key] == (L1Error.KEY_NOT_READABLE, None)
+
+        manager.finish_write([key])
         manager.close()
 
     def test_reserve_read_ready_key_returns_success(
@@ -236,7 +278,7 @@ class TestReserveRead:
         manager.finish_write([key1])
 
         # key2 does not exist
-        # key3 is write-locked
+        # key3 is being written (staging object, not resident)
         manager.reserve_write([key3], [False], basic_layout)
 
         # Reserve read on all three
@@ -246,7 +288,7 @@ class TestReserveRead:
         assert result[key1][1] is not None
         assert result[key2][0] == L1Error.KEY_NOT_EXIST
         assert result[key2][1] is None
-        assert result[key3][0] == L1Error.KEY_NOT_READABLE
+        assert result[key3][0] == L1Error.KEY_NOT_EXIST
         assert result[key3][1] is None
 
         manager.close()
@@ -387,23 +429,19 @@ class TestUnsafeRead:
 
         manager.close()
 
-    def test_unsafe_read_write_locked_returns_key_not_readable(
+    def test_unsafe_read_staged_key_returns_key_not_exist(
         self, basic_l1_config, basic_layout
     ):
-        """Test that unsafe_read returns KEY_NOT_READABLE for write-locked keys."""
+        """Test that unsafe_read cannot see a staging object."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
-        # Create write-locked object
+        # Reserve write without finishing: staging object only
         manager.reserve_write([key], [False], basic_layout)
 
-        # Try unsafe_read on write-locked key
         result = manager.unsafe_read([key])
 
-        assert key in result
-        error, mem_obj = result[key]
-        assert error == L1Error.KEY_NOT_READABLE
-        assert mem_obj is None
+        assert result[key] == (L1Error.KEY_NOT_EXIST, None)
 
         manager.close()
 
@@ -607,21 +645,39 @@ class TestFinishRead:
 
         manager.close()
 
-    def test_finish_read_write_locked_returns_wrong_state(
+    def test_finish_read_staged_key_returns_key_not_exist(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that finish_read cannot see a staging object."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Reserve write without finishing: staging object only
+        manager.reserve_write([key], [False], basic_layout)
+
+        result = manager.finish_read([key])
+
+        assert result[key] == L1Error.KEY_NOT_EXIST
+
+        manager.close()
+
+    def test_finish_read_in_place_write_locked_returns_wrong_state(
         self, basic_l1_config, basic_layout
     ):
         """Test that finish_read returns KEY_IN_WRONG_STATE if write-locked."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
-        # Create write-locked object
+        # Resident object write-locked in place
         manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_write([key], [False], basic_layout, mode="update")
 
-        # Try to finish read on write-locked key
         result = manager.finish_read([key])
 
         assert result[key] == L1Error.KEY_IN_WRONG_STATE
 
+        manager.finish_write([key])
         manager.close()
 
     def test_finish_read_temporary_object_deleted_when_count_zero(
@@ -1111,8 +1167,11 @@ class TestFinishWriteAndReserveRead:
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
-        # Create write-locked object
+        # Resident object write-locked in place (only resident objects can
+        # carry both locks; staging objects have no readers).
         manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_write([key], [False], basic_layout, mode="update")
 
         # Force a read lock via internal state (unusual state)
         state = manager.get_object_state(key)
@@ -1404,13 +1463,28 @@ class TestGetObjectState:
 
         manager.close()
 
-    def test_get_object_state_write_locked(self, basic_l1_config, basic_layout):
-        """Test get_object_state for write-locked objects."""
+    def test_get_object_state_staged_returns_none(self, basic_l1_config, basic_layout):
+        """A staging object is not reported as the key's object."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
-        # Create write-locked object
         manager.reserve_write([key], [False], basic_layout)
+
+        assert manager.get_object_state(key) is None
+        assert manager.report_status()["staging_object_count"] == 1
+
+        manager.close()
+
+    def test_get_object_state_in_place_write_locked(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test get_object_state for objects write-locked in place."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_write([key], [False], basic_layout, mode="update")
 
         state = manager.get_object_state(key)
 
@@ -1418,6 +1492,7 @@ class TestGetObjectState:
         assert state.available_for_read() is False
         assert state.available_for_write() is False
 
+        manager.finish_write([key])
         manager.close()
 
     def test_get_object_state_read_locked(self, basic_l1_config, basic_layout):
@@ -1511,14 +1586,14 @@ class TestStateMachineTransitions:
         # None state (key doesn't exist)
         assert manager.get_object_state(key) is None
 
-        # reserve_write: None -> write_locked
+        # reserve_write: None -> write_locked staging object (not resident)
         result = manager.reserve_write([key], [False], basic_layout)
         assert result[key][0] == L1Error.SUCCESS
-        state = manager.get_object_state(key)
-        assert state.available_for_read() is False
-        assert state.available_for_write() is False
+        assert manager.get_object_state(key) is None
+        assert manager.reserve_read([key])[key][0] == L1Error.KEY_NOT_EXIST
+        assert manager.report_status()["staging_object_count"] == 1
 
-        # finish_write: write_locked -> ready
+        # finish_write: write_locked -> ready (admission)
         result = manager.finish_write([key])
         assert result[key] == L1Error.SUCCESS
         state = manager.get_object_state(key)
@@ -1995,5 +2070,565 @@ class TestIsKeyEvictable:
         # Release the remaining 2 read locks
         manager.finish_read([key], read_locks=2)
         assert manager.is_key_evictable(key) is True
+
+        manager.close()
+
+
+# =============================================================================
+# Tests for staging objects (write tags)
+# =============================================================================
+
+
+def write_ready(manager: L1Manager, keys, layout, is_temporary=False):
+    """Stage and admit ``keys`` so they are resident and unlocked."""
+    result = manager.reserve_write(keys, [is_temporary] * len(keys), layout)
+    for key in keys:
+        assert result[key][0] == L1Error.SUCCESS
+    result = manager.finish_write(keys)
+    for key in keys:
+        assert result[key] == L1Error.SUCCESS
+
+
+class TestStagingReservation:
+    """reserve_write on non-resident keys creates tagged staging objects."""
+
+    def test_same_tag_twice_returns_not_writable(self, basic_l1_config, basic_layout):
+        """One tag holds at most one staging object per key."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        first = manager.reserve_write([key], [False], basic_layout, tag="w")
+        second = manager.reserve_write([key], [False], basic_layout, tag="w")
+
+        assert first[key][0] == L1Error.SUCCESS
+        assert second[key] == (L1Error.KEY_NOT_WRITABLE, None)
+
+        manager.close()
+
+    def test_different_tags_stage_same_key(self, basic_l1_config, basic_layout):
+        """Writers with different tags get independent buffers for one key."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+
+        result_a = manager.reserve_write([key], [False], basic_layout, tag="a")
+        result_b = manager.reserve_write([key], [False], basic_layout, tag="b")
+        result_default = manager.reserve_write([key], [False], basic_layout)
+
+        for result in (result_a, result_b, result_default):
+            assert result[key][0] == L1Error.SUCCESS
+            assert result[key][1] is not None
+        assert result_a[key][1] is not result_b[key][1]
+        assert result_a[key][1] is not result_default[key][1]
+        assert manager.get_object_state(key) is None
+        status = manager.report_status()
+        assert status["staging_object_count"] == 3
+        assert status["total_object_count"] == 3
+        assert status["write_locked_count"] == 3
+
+        manager.close()
+
+    def test_new_mode_refuses_resident_key_for_any_tag(
+        self, basic_l1_config, basic_layout
+    ):
+        """Visibility is tag-independent: mode="new" fails for a resident key."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        write_ready(manager, [key], basic_layout)
+
+        result = manager.reserve_write(
+            [key], [False], basic_layout, mode="new", tag="other"
+        )
+
+        assert result[key] == (L1Error.KEY_NOT_WRITABLE, None)
+
+        manager.close()
+
+    def test_refused_keys_do_not_consume_memory(self, basic_l1_config, basic_layout):
+        """Only the newly staged keys are allocated."""
+        manager = L1Manager(basic_l1_config)
+        resident = make_object_key(1)
+        staged = make_object_key(2)
+        fresh = make_object_key(3)
+        write_ready(manager, [resident], basic_layout)
+        manager.reserve_write([staged], [False], basic_layout, tag="w")
+        before = manager.get_staging_memory_usage()
+
+        result = manager.reserve_write(
+            [resident, staged, fresh], [False] * 3, basic_layout, mode="new", tag="w"
+        )
+
+        assert result[resident] == (L1Error.KEY_NOT_WRITABLE, None)
+        assert result[staged] == (L1Error.KEY_NOT_WRITABLE, None)
+        assert result[fresh][0] == L1Error.SUCCESS
+        size = result[fresh][1].get_size()
+        assert manager.get_staging_memory_usage() == before + size
+
+        manager.close()
+
+    def test_rejects_mismatched_lengths(self, basic_l1_config, basic_layout):
+        """keys and is_temporary must have the same length."""
+        manager = L1Manager(basic_l1_config)
+        keys = [make_object_key(i) for i in range(2)]
+
+        with pytest.raises(ValueError):
+            manager.reserve_write(keys, [False], basic_layout)
+
+        manager.close()
+
+    def test_expired_reservation_is_taken_over(
+        self, short_write_ttl_l1_config, basic_layout
+    ):
+        """After the write TTL expires the same tag re-reserves the key and
+        receives the same buffer; the stale writer's finish fails."""
+        manager = L1Manager(short_write_ttl_l1_config)
+        key = make_object_key(1)
+
+        first = manager.reserve_write([key], [False], basic_layout, tag="w")
+        assert first[key][0] == L1Error.SUCCESS
+        time.sleep(1.2)
+
+        # The stale writer cannot admit an expired reservation.
+        assert manager.finish_write([key], tag="w")[key] == L1Error.KEY_IN_WRONG_STATE
+        assert manager.get_object_state(key) is None
+
+        second = manager.reserve_write([key], [True], basic_layout, tag="w")
+        assert second[key][0] == L1Error.SUCCESS
+        assert second[key][1] is first[key][1]
+        assert manager.report_status()["staging_object_count"] == 1
+
+        assert manager.finish_write([key], tag="w")[key] == L1Error.SUCCESS
+        state = manager.get_object_state(key)
+        assert state is not None
+        assert state.is_temporary is True
+
+        manager.close()
+
+
+class TestStagingAdmission:
+    """finish_write variants admit or discard staging objects."""
+
+    def test_finish_write_wrong_tag_returns_key_not_exist(
+        self, basic_l1_config, basic_layout
+    ):
+        """A tag can only admit its own staging objects."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout, tag="a")
+
+        assert manager.finish_write([key], tag="b")[key] == L1Error.KEY_NOT_EXIST
+        assert manager.get_object_state(key) is None
+        assert manager.finish_write([key], tag="a")[key] == L1Error.SUCCESS
+        assert manager.get_object_state(key) is not None
+
+        manager.close()
+
+    def test_first_admission_wins_and_later_copy_is_freed(
+        self, basic_l1_config, basic_layout
+    ):
+        """The resident object is kept; the late staging copy is discarded."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        first = manager.reserve_write([key], [False], basic_layout, tag="a")
+        second = manager.reserve_write([key], [True], basic_layout, tag="b")
+        used_before, _ = manager.get_memory_usage()
+
+        assert manager.finish_write([key], tag="a")[key] == L1Error.SUCCESS
+        assert manager.finish_write([key], tag="b")[key] == L1Error.SUCCESS
+
+        state = manager.get_object_state(key)
+        assert state is not None
+        assert state.memory_obj is first[key][1]
+        assert state.is_temporary is False
+        assert manager.get_staging_memory_usage() == 0
+        used_after, _ = manager.get_memory_usage()
+        assert used_after == used_before - second[key][1].get_size()
+
+        manager.close()
+
+    def test_discard_keeps_resident_read_locks(self, basic_l1_config, basic_layout):
+        """Discarding a late copy never disturbs readers of the resident object."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        write_ready(manager, [key], basic_layout)
+        read = manager.reserve_read([key], read_locks=2)
+        # mode="new" refuses resident keys; stage the late copy first.
+        manager.delete([key])  # refused: read-locked
+        assert manager.get_object_state(key) is not None
+
+        late = manager.reserve_write([key], [False], basic_layout, tag="late")
+        # The key is resident, so "all" mode write-locks it in place instead of
+        # staging; a read-locked key cannot be write-locked -> NOT_WRITABLE.
+        assert late[key] == (L1Error.KEY_NOT_WRITABLE, None)
+        assert manager.unsafe_read([key])[key][1] is read[key][1]
+
+        manager.finish_read([key], read_locks=2)
+        manager.close()
+
+    def test_admission_after_resident_deleted(self, basic_l1_config, basic_layout):
+        """A staging object survives deletion of the resident object."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        staged = manager.reserve_write([key], [False], basic_layout, tag="w")
+        write_ready(manager, [key], basic_layout)
+        # The resident object is unlocked and goes; the live staging object
+        # is untouched.
+        assert manager.delete([key])[key] == L1Error.SUCCESS
+        assert manager.get_object_state(key) is None
+        assert manager.report_status()["staging_object_count"] == 1
+
+        assert manager.finish_write([key], tag="w")[key] == L1Error.SUCCESS
+
+        state = manager.get_object_state(key)
+        assert state is not None
+        assert state.memory_obj is staged[key][1]
+
+        manager.close()
+
+    def test_finish_write_and_reserve_read_locks_resident_copy(
+        self, basic_l1_config, basic_layout
+    ):
+        """Two tagged writers: the late one gets read locks on the resident
+        object and its own buffer is freed (the concurrent-prefetch case)."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        first = manager.reserve_write([key], [True], basic_layout, tag="p1")
+        second = manager.reserve_write([key], [True], basic_layout, tag="p2")
+        assert first[key][0] == L1Error.SUCCESS
+        assert second[key][0] == L1Error.SUCCESS
+        assert manager.reserve_read([key])[key][0] == L1Error.KEY_NOT_EXIST
+
+        r1 = manager.finish_write_and_reserve_read([key], read_locks=2, tag="p1")
+        r2 = manager.finish_write_and_reserve_read([key], read_locks=2, tag="p2")
+
+        assert r1[key][0] == L1Error.SUCCESS
+        assert r2[key][0] == L1Error.SUCCESS
+        assert r1[key][1] is first[key][1]
+        assert r2[key][1] is first[key][1]
+        assert manager.get_staging_memory_usage() == 0
+        assert manager.unsafe_read([key])[key][0] == L1Error.SUCCESS
+
+        # Four read locks in total; the temporary object lives until all are
+        # released.
+        assert manager.finish_read([key], read_locks=2)[key] == L1Error.SUCCESS
+        assert manager.get_object_state(key) is not None
+        assert manager.finish_read([key], read_locks=2)[key] == L1Error.SUCCESS
+        assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_finish_write_and_delete_discards_own_tag_only(
+        self, basic_l1_config, basic_layout
+    ):
+        """Discarding under one tag leaves other tags' staging objects alone."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout, tag="a")
+        manager.reserve_write([key], [False], basic_layout, tag="b")
+
+        assert manager.finish_write_and_delete([key], tag="a")[key] == L1Error.SUCCESS
+        assert manager.finish_write_and_delete([key], tag="a")[key] == (
+            L1Error.KEY_NOT_EXIST
+        )
+        assert manager.report_status()["staging_object_count"] == 1
+        assert manager.finish_write([key], tag="b")[key] == L1Error.SUCCESS
+        assert manager.get_object_state(key) is not None
+
+        manager.close()
+
+    def test_partial_admission(self, basic_l1_config, basic_layout):
+        """Admitting a subset leaves the rest staged."""
+        manager = L1Manager(basic_l1_config)
+        keys = [make_object_key(i) for i in range(3)]
+        manager.reserve_write(keys, [False] * 3, basic_layout)
+
+        result = manager.finish_write(keys[:1])
+
+        assert result[keys[0]] == L1Error.SUCCESS
+        assert manager.get_object_state(keys[0]) is not None
+        for key in keys[1:]:
+            assert manager.get_object_state(key) is None
+        status = manager.report_status()
+        assert status["total_object_count"] == 3
+        assert status["staging_object_count"] == 2
+
+        manager.close()
+
+
+class TestStagingEviction:
+    """Abandoned reservations are reclaimed through delete / clear / eviction."""
+
+    def test_live_staging_is_locked(self, basic_l1_config, basic_layout):
+        """delete refuses a key whose only object is a live staging object."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout)
+
+        assert manager.is_key_evictable(key) is False
+        assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+        assert manager.report_status()["staging_object_count"] == 1
+
+        manager.close()
+
+    def test_expired_staging_is_evictable_and_reclaimed(
+        self, short_write_ttl_l1_config, basic_layout
+    ):
+        """An expired reservation makes the key evictable; delete reclaims it."""
+        manager = L1Manager(short_write_ttl_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout)
+        time.sleep(1.2)
+
+        assert manager.is_key_evictable(key) is True
+        assert manager.delete([key])[key] == L1Error.SUCCESS
+        assert manager.get_staging_memory_usage() == 0
+        assert manager.report_status()["staging_object_count"] == 0
+        used, _ = manager.get_memory_usage()
+        assert used == 0
+        assert manager.delete([key])[key] == L1Error.KEY_NOT_EXIST
+
+        manager.close()
+
+    def test_delete_reclaims_expired_but_keeps_live_staging(
+        self, short_write_ttl_l1_config, basic_layout
+    ):
+        """Mixed tags: expired ones go, the live one stays and locks the key."""
+        manager = L1Manager(short_write_ttl_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout, tag="stale")
+        time.sleep(1.2)
+        live = manager.reserve_write([key], [False], basic_layout, tag="live")
+        assert live[key][0] == L1Error.SUCCESS
+
+        assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+
+        assert manager.report_status()["staging_object_count"] == 1
+        assert manager.get_staging_memory_usage() == live[key][1].get_size()
+        assert manager.finish_write([key], tag="live")[key] == L1Error.SUCCESS
+
+        manager.close()
+
+    def test_force_delete_discards_live_staging(self, basic_l1_config, basic_layout):
+        """force=True drops live staging objects as well as the resident one."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        write_ready(manager, [key], basic_layout)
+        manager.reserve_write([key], [False], basic_layout, mode="update")
+        # In-place write lock on the resident object plus a staged copy under
+        # another tag for a second key.
+        other = make_object_key(2)
+        manager.reserve_write([other], [False], basic_layout, tag="a")
+        manager.reserve_write([other], [False], basic_layout, tag="b")
+
+        assert manager.delete([key, other], force=True) == {
+            key: L1Error.SUCCESS,
+            other: L1Error.SUCCESS,
+        }
+
+        assert manager.get_object_state(key) is None
+        assert manager.get_staging_memory_usage() == 0
+        used, _ = manager.get_memory_usage()
+        assert used == 0
+        assert manager.finish_write([other], tag="a")[other] == L1Error.KEY_NOT_EXIST
+
+        manager.close()
+
+    def test_clear_keeps_live_staging_and_reclaims_expired(
+        self, short_write_ttl_l1_config, basic_layout
+    ):
+        """Non-force clear frees expired staging objects only."""
+        manager = L1Manager(short_write_ttl_l1_config)
+        stale, live = make_object_key(1), make_object_key(2)
+        manager.reserve_write([stale], [False], basic_layout)
+        time.sleep(1.2)
+        manager.reserve_write([live], [False], basic_layout)
+
+        manager.clear()
+
+        status = manager.report_status()
+        assert status["staging_object_count"] == 1
+        assert manager.finish_write([live])[live] == L1Error.SUCCESS
+        assert manager.finish_write([stale])[stale] == L1Error.KEY_NOT_EXIST
+
+        manager.close()
+
+    def test_force_clear_frees_staging(self, basic_l1_config, basic_layout):
+        """Force clear drops every staging object."""
+        manager = L1Manager(basic_l1_config)
+        keys = [make_object_key(i) for i in range(3)]
+        manager.reserve_write(keys, [False] * 3, basic_layout, tag="w")
+
+        manager.clear(force=True)
+
+        status = manager.report_status()
+        assert status["total_object_count"] == 0
+        assert status["staging_object_count"] == 0
+        assert status["staging_bytes"] == 0
+        assert status["memory_used_bytes"] == 0
+
+        manager.close()
+
+    def test_eviction_policy_reclaims_abandoned_reservation(
+        self, short_write_ttl_l1_config, basic_layout
+    ):
+        """End to end through the listener: the LRU policy learns the key at
+        reservation time, skips it while the write lock is live, and evicts
+        it once the lock expired -- passing the original key to delete."""
+        manager = L1Manager(short_write_ttl_l1_config)
+        policy = LRUEvictionPolicy()
+        manager.register_listener(L1EvictionPolicy(policy))
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout, tag="abandoned")
+
+        # Live reservation: tracked but not eligible.
+        actions = policy.get_eviction_actions(
+            1.0, key_eligible_filter=manager.is_key_evictable
+        )
+        assert [k for a in actions for k in a.keys] == []
+
+        time.sleep(1.2)
+        actions = policy.get_eviction_actions(
+            1.0, key_eligible_filter=manager.is_key_evictable
+        )
+        evicted = [k for a in actions for k in a.keys]
+        assert evicted == [key]
+        assert manager.delete(evicted)[key] == L1Error.SUCCESS
+        assert manager.get_staging_memory_usage() == 0
+
+        # The policy forgot the key: nothing left to evict.
+        actions = policy.get_eviction_actions(
+            1.0, key_eligible_filter=manager.is_key_evictable
+        )
+        assert [k for a in actions for k in a.keys] == []
+
+        manager.close()
+
+    def test_eviction_policy_forgets_discarded_reservation(
+        self, basic_l1_config, basic_layout
+    ):
+        """A key dropped via finish_write_and_delete leaves the policy too."""
+        manager = L1Manager(basic_l1_config)
+        policy = LRUEvictionPolicy()
+        manager.register_listener(L1EvictionPolicy(policy))
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout, tag="p")
+        manager.finish_write_and_delete([key], tag="p")
+
+        actions = policy.get_eviction_actions(1.0)
+
+        assert [k for a in actions for k in a.keys] == []
+        manager.close()
+
+
+class TestStagingAccounting:
+    """get_staging_memory_usage() and report_status() staging fields."""
+
+    def test_staging_bytes_follow_lifecycle(self, basic_l1_config, basic_layout):
+        """Staging bytes grow on reserve and drop on admission or discard,
+        while allocator usage only drops on discard."""
+        manager = L1Manager(basic_l1_config)
+        keys = [make_object_key(i) for i in range(4)]
+        assert manager.get_staging_memory_usage() == 0
+
+        reserved = manager.reserve_write(keys, [False] * 4, basic_layout, tag="w")
+        size = reserved[keys[0]][1].get_size()
+        assert manager.get_staging_memory_usage() == 4 * size
+        used, _ = manager.get_memory_usage()
+        assert used >= 4 * size
+
+        manager.finish_write(keys[:2], tag="w")
+        assert manager.get_staging_memory_usage() == 2 * size
+
+        manager.finish_write_and_reserve_read(keys[2:3], tag="w")
+        assert manager.get_staging_memory_usage() == size
+
+        manager.finish_write_and_delete(keys[3:], tag="w")
+        assert manager.get_staging_memory_usage() == 0
+        used_after, _ = manager.get_memory_usage()
+        assert used_after == used - size
+
+        manager.finish_read(keys[2:3])
+        manager.close()
+
+    def test_report_status_counts(self, basic_l1_config, basic_layout):
+        """report_status separates resident, read-locked and staging objects."""
+        manager = L1Manager(basic_l1_config)
+        ready, locked, temp = (make_object_key(i) for i in range(3))
+        staged = [make_object_key(10 + i) for i in range(2)]
+        write_ready(manager, [ready, locked], basic_layout)
+        write_ready(manager, [temp], basic_layout, is_temporary=True)
+        manager.reserve_read([locked])
+        manager.reserve_read([temp])
+        manager.reserve_write(staged, [False] * 2, basic_layout, tag="a")
+        manager.reserve_write(staged[:1], [True], basic_layout, tag="b")
+
+        status = manager.report_status()
+
+        assert status["total_object_count"] == 6
+        assert status["read_locked_count"] == 2
+        assert status["temporary_count"] == 2
+        assert status["staging_object_count"] == 3
+        assert status["write_locked_count"] == 3
+        assert status["staging_bytes"] == manager.get_staging_memory_usage()
+        assert status["staging_bytes"] > 0
+        assert status["memory_used_bytes"] >= status["staging_bytes"]
+
+        manager.finish_read([locked])
+        manager.finish_read([temp])
+        manager.close()
+
+    def test_concurrent_tagged_writers_same_keys(self, basic_l1_config, basic_layout):
+        """Many tagged writers race on the same keys: a reservation either
+        succeeds or finds the key already resident, every admission
+        succeeds, and exactly one copy per key survives."""
+        manager = L1Manager(basic_l1_config)
+        keys = [make_object_key(i) for i in range(4)]
+        num_threads = 8
+        errors = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(num_threads)
+
+        def worker(thread_id):
+            tag = f"writer-{thread_id}"
+            try:
+                barrier.wait()
+                reserved = manager.reserve_write(
+                    keys, [False] * len(keys), basic_layout, "new", tag
+                )
+                mine = [k for k in keys if reserved[k][0] == L1Error.SUCCESS]
+                bad = [
+                    k
+                    for k in keys
+                    if reserved[k][0] not in (L1Error.SUCCESS, L1Error.KEY_NOT_WRITABLE)
+                ]
+                if bad:
+                    raise AssertionError(f"{tag}: reserve failed for {bad}")
+                # KEY_NOT_WRITABLE means another writer already admitted the
+                # key; the rest must admit (or discard) successfully.
+                finished = manager.finish_write_and_reserve_read(mine, tag=tag)
+                bad = [k for k in mine if finished[k][0] != L1Error.SUCCESS]
+                if bad:
+                    raise AssertionError(f"{tag}: finish failed for {bad}")
+                manager.finish_read(mine)
+            except Exception as e:
+                with lock:
+                    errors.append(e)
+
+        threads = [
+            threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        status = manager.report_status()
+        assert status["total_object_count"] == len(keys)
+        assert status["staging_object_count"] == 0
+        assert status["read_locked_count"] == 0
+        assert manager.get_staging_memory_usage() == 0
+        used, _ = manager.get_memory_usage()
+        one_copy = manager.get_object_state(keys[0]).memory_obj.get_size()
+        assert used == one_copy * len(keys)
 
         manager.close()

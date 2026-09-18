@@ -1113,12 +1113,17 @@ class TestStorageManagerDelete:
         key = make_object_key(1)
         storage_manager.reserve_write([key], basic_layout, mode="new")
 
-        # Non-force delete refuses the locked key; it survives.
+        # Non-force delete refuses the locked key; its reservation survives.
         assert storage_manager.delete_l1_keys([key]) == (0, 1)
-        assert storage_manager._l1_manager.get_object_state(key) is not None
+        assert (
+            storage_manager.report_status()["l1_manager"]["staging_object_count"] == 1
+        )
 
         # Force delete removes it regardless of the lock.
         assert storage_manager.delete_l1_keys([key], force=True) == (1, 0)
-        assert storage_manager._l1_manager.get_object_state(key) is None
+        assert (
+            storage_manager.report_status()["l1_manager"]["staging_object_count"] == 0
+        )
+        assert storage_manager.delete_l1_keys([key]) == (0, 0)
 
         storage_manager.close()
