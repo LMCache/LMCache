@@ -16,7 +16,23 @@ steps:
 
   - label: "vLLM + LMCache E2E (AMD, {{matrix.mode}}, {{matrix.request_transport}})"
     timeout_in_minutes: 90
-    command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}}
+    command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}} vllm_bench
+    matrix:
+      setup:
+        mode:
+          - "serialized"
+          - "unserialized"
+        request_transport:
+          - "zmq"
+    env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+
+    artifact_paths:
+      - "*.log"
+      - "amd-vllm-bench-results/**/*"
+
+  - label: "Eviction-aware lazy offload (AMD, {{matrix.mode}}, {{matrix.request_transport}})"
+    timeout_in_minutes: 90
+    command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}} lazy_offload_eviction_aware
     matrix:
       setup:
         mode:

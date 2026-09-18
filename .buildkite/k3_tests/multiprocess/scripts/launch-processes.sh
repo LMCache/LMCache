@@ -10,6 +10,7 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 
 # Configuration (inherited from run-mp-test.sh)
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
+LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
 vllm_port="${VLLM_PORT:-8000}"
 vllm_baseline_port="${VLLM_BASELINE_PORT:-9000}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
@@ -104,15 +105,19 @@ fi
 BATCH_INVARIANT="${BATCH_INVARIANT:-${BATCH_INVARIANT_DEFAULT}}"
 
 # Prefix-caching policy. Default behavior is unchanged: ordinary models rely on
-# vLLM's existing default, while hybrid Mamba models explicitly enable prefix
-# caching. Tests that need to force LMCache retrieve can opt out with
+# vLLM's existing default, while hybrid Mamba models and lazy-offload tests
+# explicitly enable prefix caching. Other tests can opt out with
 # VLLM_DISABLE_PREFIX_CACHING=true.
 PREFIX_CACHING_ARG=""
 MAMBA_ARGS=""
 if [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "true" ]; then
     echo "Disabling vLLM prefix caching via --no-enable-prefix-caching"
     PREFIX_CACHING_ARG="--no-enable-prefix-caching"
-elif [ -n "${MAMBA_CACHE_MODE:-}" ]; then
+elif [ "${VLLM_ENABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_ENABLE_PREFIX_CACHING:-false}" = "true" ]; then
+    echo "Enabling vLLM prefix caching"
+    PREFIX_CACHING_ARG="--enable-prefix-caching"
+fi
+if [ -n "${MAMBA_CACHE_MODE:-}" ]; then
     MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE}"
     PREFIX_CACHING_ARG="--enable-prefix-caching"
 fi
@@ -187,6 +192,7 @@ lmcache server \
     --max-workers "$MAX_WORKERS" \
     $CHUNK_SIZE_ARG \
     --port "$LMCACHE_PORT" \
+    --http-port "$LMCACHE_HTTP_PORT" \
     ${GDS_L1_ARG} \
     ${L1_LAZY_ARG} \
     ${SHM_NAME_ARG} \
@@ -218,8 +224,12 @@ KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
     LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    LMCACHE_MP_LAZY_OFFLOAD_POLICY="${LMCACHE_MP_LAZY_OFFLOAD_POLICY:-FIFO}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
+    LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-2.5}" \
+    LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP="${LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP:-64}" \
+    LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS="${LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS:-0}" \
     python3 - <<'PY'
 import json
 import os
@@ -230,18 +240,40 @@ extra_config = {
     "lmcache.mp.mq_timeout": 10,
 }
 if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
+    policy = os.environ["LMCACHE_MP_LAZY_OFFLOAD_POLICY"]
     extra_config.update(
         {
             "lmcache.mp.lazy_offload": True,
-            "lmcache.mp.lazy_offload_policy": "FIFO",
-            "lmcache.mp.lazy_offload_threshold": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
-            ),
-            "lmcache.mp.lazy_offload_select_count": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
-            ),
+            "lmcache.mp.lazy_offload_policy": policy,
         }
     )
+    if policy == "FIFO":
+        extra_config.update(
+            {
+                "lmcache.mp.lazy_offload_threshold": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
+                ),
+                "lmcache.mp.lazy_offload_select_count": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
+                ),
+            }
+        )
+    elif policy == "EVICTION_AWARE":
+        extra_config.update(
+            {
+                "lmcache.mp.lazy_offload_horizon_steps": float(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS"]
+                ),
+                "lmcache.mp.lazy_offload_max_drain_per_step": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP"]
+                ),
+                "lmcache.mp.lazy_offload_max_deferral_seconds": float(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS"]
+                ),
+            }
+        )
+    else:
+        raise ValueError(f"Unknown lazy-offload policy: {policy}")
 
 print(
     json.dumps(

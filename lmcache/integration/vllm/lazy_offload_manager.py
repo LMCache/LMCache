@@ -24,6 +24,9 @@ ones defined in ``lazy_offload_policy.base``:
   operation, which deferral would otherwise retain once per operation.
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
@@ -37,16 +40,15 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
     OffloadPolicy,
 )
 from lmcache.integration.vllm.lazy_offload_state import LazyOffloadRequestRegistry
-from lmcache.integration.vllm.lmcache_mp_metadata import (
-    LMCacheMPRequestMetadata,
-    LoadStoreOp,
-)
 from lmcache.utils import init_logger
 
 if TYPE_CHECKING:
     # Third Party
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.sched.output import SchedulerOutput
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_metadata import LMCacheMPRequestMetadata
 
 logger = init_logger(__name__)
 
@@ -157,17 +159,15 @@ def _coalesce_store_metadata(
         expected_start = meta.op.end
         for group_idx, group_ids in enumerate(meta.op.block_ids):
             merged_block_ids[group_idx].extend(group_ids)
-    merged_op = LoadStoreOp(
-        token_ids=last.op.token_ids,
-        block_ids=merged_block_ids,
-        start=first.op.start,
-        end=last.op.end,
-    )
-    return LMCacheMPRequestMetadata(
-        request_id=first.request_id,
-        direction="STORE",
-        op=merged_op,
-        cache_salt=first.cache_salt,
+    return replace(
+        first,
+        op=replace(
+            first.op,
+            token_ids=last.op.token_ids,
+            block_ids=merged_block_ids,
+            start=first.op.start,
+            end=last.op.end,
+        ),
     )
 
 

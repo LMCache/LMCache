@@ -293,8 +293,20 @@ steps:
       # Real GPU MP integration: vLLM is launched with FIFO lazy offload
       # (threshold=2, select_count=1). Three requests verify that the first
       # two remain pending and the third drains the first request.
-      - label: ":compression: lazy_offload / {{matrix.request_transport}}"
-        command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
+      - label: ":compression: lazy_offload_fifo / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload_fifo
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      # Eviction-aware lazy offload: a cold request remains deferred until a
+      # later allocation-pressure step emits it. Resetting vLLM's local prefix
+      # cache then forces an L1 replay whose output must match byte-for-byte.
+      - label: ":compression: lazy_offload_eviction_aware / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload_eviction_aware
         matrix: *request-transport-matrix
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
