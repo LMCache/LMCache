@@ -44,6 +44,7 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
 )
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -271,17 +272,21 @@ def _build_modules(
         liveness_targets.append(module)
         experimental_transfer.append(enabled_module)
 
+    # Records the storage layer's key events for engine workers that
+    # republish them as KV events (KV-aware routing). Built before the
+    # management module so the channel can be advertised: an engine polls
+    # only a server that advertises it, because a server that predates the
+    # request aborts its request loop on the unknown request type.
+    kv_events = KVEventModule(ctx, log_size=mp_config.kv_event_log_size)
+
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
         experimental_transfer=experimental_transfer,
+        capabilities=[KV_EVENT_CAPABILITY] if kv_events.enabled else [],
     )
-
-    # Records the storage layer's key events for engine workers that
-    # republish them as KV events (KV-aware routing).
-    kv_events = KVEventModule(ctx, log_size=mp_config.kv_event_log_size)
 
     # ManagementModule precedes the transfer/blend modules so close() stops
     # and joins the reaper before those modules clear their state and before

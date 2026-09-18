@@ -43,6 +43,9 @@ class ManagementModule:
             registered but never pinged.
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
+        capabilities: Feature flags this server advertises alongside them
+            through ``GET_EXPERIMENTAL``, such as ``KV_EVENT_CAPABILITY``
+            when it records cache events.
     """
 
     def __init__(
@@ -52,6 +55,7 @@ class ManagementModule:
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
         experimental_transfer: Sequence[str] = (),
+        capabilities: Sequence[str] = (),
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
@@ -59,6 +63,7 @@ class ManagementModule:
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
         self._experimental_transfer = tuple(experimental_transfer)
+        self._capabilities = tuple(capabilities)
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
@@ -150,14 +155,15 @@ class ManagementModule:
 
     @request_handler(RequestType.GET_EXPERIMENTAL)
     def get_experimental(self) -> list[str]:
-        """Return the experimental intermediate tensor transfer built in the
-        server.
+        """Return the capabilities this server advertises.
 
         Returns:
-            The enabled experimental intermediate tensor transfer types.
-            See ``lmcache.v1.multiprocess.modules.experimental.__init__``.
+            The enabled experimental intermediate tensor transfer types (see
+            ``lmcache.v1.multiprocess.modules.experimental.__init__``) plus
+            any advertised feature flag, such as ``KV_EVENT_CAPABILITY`` when
+            the server records cache events.
         """
-        return list(self._experimental_transfer)
+        return list(self._experimental_transfer) + list(self._capabilities)
 
     @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
     def clear(self) -> None:

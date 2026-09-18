@@ -77,6 +77,14 @@ new transport.
 
 ### Worker side (`LMCacheMPWorkerAdapter`)
 
+- **One poller per server.** Every rank attached to a server reads the same
+  records, and a repeated `BlockRemoved` is an error for a KV-aware router
+  (`lower_tier.rs` returns `BlockNotFound` and aborts the rest of the batch),
+  unlike a repeated `BlockStored`. So exactly one rank per server polls
+  (`ParallelStrategy.is_kv_event_poller`, the first rank of each server's
+  contiguous rank block), while **every** rank attached to an advertising
+  server stops announcing its own stores. The engine therefore has a single
+  publisher.
 - `get_kv_events()` (called by the connector every model-runner step)
   advances a **non-blocking** poll: it consumes a completed poll's records
   into the event buffer, then issues the next poll once
@@ -106,36 +114,41 @@ new transport.
   are stored again. `AllBlocksCleared` is not used: it would also wipe the
   router's GPU-tier view of the worker. `lost` on first contact is ignored
   (nothing was announced from that log yet).
-- **Version skew.** A pending poll that goes unanswered for `mq_timeout`
-  while the server is healthy means the server predates `POLL_KV_EVENTS`;
-  polling is disabled with a warning and own store events keep flowing.
-  While unhealthy, the stale poll is dropped and polling resumes after
-  recovery (where the incarnation check triggers the resync). The MQ
-  server, in turn, now drops requests whose type it does not define instead
-  of letting the decode error kill its request loop.
+- **Version skew.** A worker polls only a server that advertises
+  `kv_events` through `GET_EXPERIMENTAL`, which the adapter already queries
+  at construction. This is not an optimization: a server that predates
+  `POLL_KV_EVENTS` decodes the request-type frame outside any `try` in its
+  request loop, so one poll would abort that loop and take the cache server
+  down for every engine attached to it. The `mq_timeout` branch then covers
+  only a server that advertises the channel and stops answering, and the MQ
+  server additionally drops request types it does not define instead of
+  letting the decode error kill its loop. When the capability is absent, or
+  polling is disabled at runtime, the worker falls back to announcing its
+  own completed stores exactly as #5076 does.
 
 ### Connector side (`LMCacheMPConnector`)
 
 - `get_kv_connector_kv_cache_events()` converts `CacheStoreEvent` to
   `BlockStored` and `CacheRemoveEvent` to `BlockRemoved`, keeping the
   medium.
-- `LMCacheMPKVEvents.aggregate()` merges the tensor-parallel workers' batches
-  as an **order-preserving, deduplicated union** (`kv_event_merge.py`), not
-  vLLM's `KVEventAggregator` intersection. vLLM's aggregator only sees the
-  workers that reported something in the same step, and LMCache workers
-  finish store futures and drain the log independently, so the same event
-  usually arrives from different ranks in different steps; an intersection
-  would drop it for good. The union is safe because a router applies stores
-  and removals idempotently, and a removal seen by any rank invalidates the
-  chunk (a shard is gone).
+- `LMCacheMPKVEvents.aggregate()` merges the tensor-parallel workers'
+  batches as an **order-preserving, deduplicated union**
+  (`kv_event_merge.py`), not vLLM's `KVEventAggregator` intersection. That
+  aggregator counts only the ranks that reported something in a step and
+  keeps what all of them reported, so an event one rank reports while
+  another reports a different batch in the same step is dropped for good.
+  Store completions skew across ranks, which makes that the normal case.
+  The union is safe for stores because a router applies a repeated
+  `BlockStored` idempotently; removals never arrive twice because only one
+  rank per server polls.
 - The scheduler keeps one aggregated batch per step and `take_events()`
   returns them in order.
 
 ## Guarantees and limits
 
-- Exactly the chunks a worker can serve from LMCache are announced, in the
-  order they became (un)available, within one poll interval plus the bus
-  drain lag.
+- Exactly the chunks a worker can serve from LMCache are announced, once,
+  in the order they became (un)available, within one poll interval plus the
+  bus drain lag.
 - Every loss of fidelity is explicit: `lost` and incarnation changes
   resync (metric `vllm:lmcache_mp_kv_event_resyncs_total{reason}`),
   unknown bindings are counted, and a disabled channel is logged once.

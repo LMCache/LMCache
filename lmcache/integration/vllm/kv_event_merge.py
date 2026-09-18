@@ -11,13 +11,17 @@ T = TypeVar("T")
 def merge_worker_kv_events(contributions: Iterable[Sequence[T]]) -> list[T]:
     """Return the order-preserving union of per-worker KV event batches.
 
-    vLLM's ``KVEventAggregator`` keeps only the events every worker reported
-    in the same step. LMCache MP workers finish store futures and drain the
-    server's event log independently, so the same event usually reaches the
-    scheduler from different workers in different steps, and an intersection
-    would drop it for good. The union keeps every distinct event once (first
-    sighting wins); that is safe because a router applies stores and
-    removals idempotently.
+    vLLM's ``KVEventAggregator`` counts the ranks that reported something in
+    a step and keeps only the events all of them reported, so an event one
+    rank reports while another rank reports a different batch in the same
+    step is dropped for good. LMCache MP ranks complete their store futures
+    independently, which makes that skew normal. The union keeps every
+    distinct event once, first sighting wins, and a KV-aware router applies
+    a repeated ``BlockStored`` idempotently.
+
+    A repeated ``BlockRemoved`` is not idempotent, so the same record must
+    never reach this merge from two ranks: exactly one rank per server reads
+    the server's event log, see ``ParallelStrategy.is_kv_event_poller``.
 
     Args:
         contributions: One event sequence per worker, in worker order.

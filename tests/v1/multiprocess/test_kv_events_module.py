@@ -18,6 +18,7 @@ from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.custom_types import (
+    KV_EVENT_CAPABILITY,
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     KV_EVENT_MEDIUM_CPU,
@@ -29,6 +30,7 @@ from lmcache.v1.multiprocess.modules.kv_events import (
     KVEventModule,
     KVEventSubscriber,
 )
+from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
 
@@ -403,3 +405,13 @@ def test_module_reports_bus_drops_as_lost_on_the_next_poll() -> None:
     result = module.poll_kv_events(MODEL, 0, 8)
     assert (result.lost, result.events, result.next_cursor) == (True, [], 1)
     assert module.poll_kv_events(MODEL, result.next_cursor, 8).lost is False
+
+
+def test_the_kv_event_capability_is_advertised_to_engines() -> None:
+    """An engine polls only a server that advertises the channel, so the
+    management module must carry the flag alongside the transfer types."""
+    advertising = ManagementModule(_context(_bus()), capabilities=[KV_EVENT_CAPABILITY])
+    silent = ManagementModule(_context(_bus()))
+
+    assert KV_EVENT_CAPABILITY in advertising.get_experimental()
+    assert KV_EVENT_CAPABILITY not in silent.get_experimental()

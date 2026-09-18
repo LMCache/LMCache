@@ -28,6 +28,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.utils import CacheEvent, CacheRemoveEvent, CacheStoreEvent
 from lmcache.v1.multiprocess.custom_types import (
+    KV_EVENT_CAPABILITY,
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     KV_EVENT_MEDIUM_CPU,
@@ -118,18 +119,21 @@ _OWN_STORE_EVENTS: dict[str, object] = {"lmcache.mp.kv_event_poll_interval": 0}
 def _make_worker_adapter(
     extra_config: dict[str, object] | None = None,
     enable_kv_events: bool = False,
+    parallel_strategy: ParallelStrategy | None = None,
 ) -> LMCacheMPWorkerAdapter:
     """Construct a worker adapter with the standard test arguments; the
     network boundary must already be patched (see ``fake_adapter``).
-    ``extra_config`` forwards ``lmcache.mp.*`` overrides."""
-    parallel_strategy = ParallelStrategy(
-        mla_only=False,
-        vllm_world_size=1,
-        vllm_worker_id=0,
-        tp_size=1,
-        pp_size=1,
-        n_servers=1,
-    )
+    ``extra_config`` forwards ``lmcache.mp.*`` overrides, and
+    ``parallel_strategy`` overrides the default single-rank placement."""
+    if parallel_strategy is None:
+        parallel_strategy = ParallelStrategy(
+            mla_only=False,
+            vllm_world_size=1,
+            vllm_worker_id=0,
+            tp_size=1,
+            pp_size=1,
+            n_servers=1,
+        )
     return LMCacheMPWorkerAdapter(
         server_url="tcp://127.0.0.1:0",
         context=MagicMock(name="zmq_context"),
@@ -200,7 +204,9 @@ def fake_adapter(monkeypatch):
     req_client = MagicMock(name="req_client", spec=RequestClient)
     _patch_request_client_factory(monkeypatch, req_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
-    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
+    monkeypatch.setattr(
+        adapter_mod, "get_experimental", lambda *a, **kw: {KV_EVENT_CAPABILITY}
+    )
 
     future = MagicMock(name="future")
     future.result.return_value = None
@@ -1432,13 +1438,19 @@ def _record(
 
 
 def _polling_adapter(
-    fake_adapter, **extra: object
+    fake_adapter,
+    parallel_strategy: ParallelStrategy | None = None,
+    extra_config: dict[str, object] | None = None,
 ) -> tuple[LMCacheMPWorkerAdapter, _FakePollServer]:
     """A KV-event-enabled adapter whose poll interval never throttles."""
     _adapter, req_client, _future = fake_adapter
     config: dict[str, object] = {"lmcache.mp.kv_event_poll_interval": 1e-6}
-    config.update(extra)
-    adapter = _make_worker_adapter(extra_config=config, enable_kv_events=True)
+    config.update(extra_config or {})
+    adapter = _make_worker_adapter(
+        extra_config=config,
+        enable_kv_events=True,
+        parallel_strategy=parallel_strategy,
+    )
     adapter.transfer_ctx = MagicMock()
     return adapter, _FakePollServer(req_client)
 
@@ -1660,7 +1672,9 @@ def test_polling_stops_when_the_server_cannot_serve_it(
 
 
 def test_pending_poll_times_out_only_while_healthy(fake_adapter) -> None:
-    adapter, server = _polling_adapter(fake_adapter, **{"lmcache.mp.mq_timeout": 0.0})
+    adapter, server = _polling_adapter(
+        fake_adapter, extra_config={"lmcache.mp.mq_timeout": 0.0}
+    )
     _complete_own_store(adapter, "req-1", 1)  # starts the (fake) heartbeat
     heartbeat = FakeHeartbeatThread.instances[-1]
     _step(adapter)
@@ -1684,7 +1698,7 @@ def test_pending_poll_times_out_only_while_healthy(fake_adapter) -> None:
 def test_a_full_page_is_followed_by_an_immediate_poll(fake_adapter) -> None:
     adapter, server = _polling_adapter(
         fake_adapter,
-        **{
+        extra_config={
             "lmcache.mp.kv_event_poll_interval": 100.0,
             "lmcache.mp.kv_event_poll_max_events": 1,
         },
@@ -1719,3 +1733,96 @@ def test_no_polling_without_kv_events_or_with_a_zero_interval(fake_adapter) -> N
             extra_config={"lmcache.mp.kv_event_poll_max_events": 0},
             enable_kv_events=True,
         )
+
+
+# -- Single publisher and server capability ------------------------------------
+
+
+def _strategy(worker_id: int, world_size: int, n_servers: int = 1) -> ParallelStrategy:
+    return ParallelStrategy(
+        mla_only=False,
+        vllm_world_size=world_size,
+        vllm_worker_id=worker_id,
+        tp_size=world_size // n_servers,
+        pp_size=1,
+        n_servers=n_servers,
+    )
+
+
+@pytest.mark.parametrize(
+    ("worker_id", "world_size", "n_servers", "is_poller"),
+    [
+        (0, 1, 1, True),
+        (0, 2, 1, True),
+        (1, 2, 1, False),
+        (3, 4, 1, False),
+        # Two servers, two ranks each: the first rank of each block polls
+        # its own server's log.
+        (0, 4, 2, True),
+        (1, 4, 2, False),
+        (2, 4, 2, True),
+        (3, 4, 2, False),
+    ],
+)
+def test_one_rank_per_server_is_the_poller(
+    worker_id: int, world_size: int, n_servers: int, is_poller: bool
+) -> None:
+    """Every rank reads the same records, so only one may republish them."""
+    assert _strategy(worker_id, world_size, n_servers).is_kv_event_poller is is_poller
+
+
+@pytest.mark.parametrize(("worker_id", "is_poller"), [(0, True), (1, False)])
+def test_only_one_rank_per_engine_publishes(
+    fake_adapter, worker_id: int, is_poller: bool
+) -> None:
+    """Every rank of an engine reads the same records, so only one may
+    republish them: a repeated BlockRemoved is an error for the router. The
+    silent ranks must not fall back to their own store events either, or the
+    engine would have two publishers."""
+    adapter, server = _polling_adapter(fake_adapter, _strategy(worker_id, 2))
+    server.answer(
+        _poll_result(
+            [_record(1, KV_EVENT_KIND_STORED, [b"h1"], token_ids=[1])], next_cursor=1
+        )
+    )
+    _step(adapter)
+    events = _step(adapter)
+
+    assert bool(server.calls) is is_poller
+    assert [type(e).__name__ for e in events] == (
+        ["CacheStoreEvent"] if is_poller else []
+    )
+
+    # While the server's log is the source, no rank announces its own stores.
+    _complete_own_store(adapter, "req-own", 9)
+    assert _step(adapter) == []
+
+
+def test_an_unadvertised_server_is_never_polled(fake_adapter, monkeypatch) -> None:
+    """A server that predates POLL_KV_EVENTS aborts its request loop on the
+    unknown request type, so the worker keeps to its own completed stores."""
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
+    adapter, server = _polling_adapter(fake_adapter)
+
+    own = _complete_own_store(adapter, "req-1", 1)
+    events = _step(adapter)
+
+    assert server.calls == []
+    assert [(type(e).__name__, e.block_hashes) for e in events] == [
+        ("CacheStoreEvent", [own])
+    ]
+
+
+def test_polling_failure_falls_back_to_own_store_events(fake_adapter) -> None:
+    """When the advertised channel stops working, the polling rank resumes
+    announcing its own completed stores."""
+    adapter, server = _polling_adapter(fake_adapter)
+    server.answer(_poll_result(enabled=False))
+    _step(adapter)
+    _step(adapter)
+    assert len(server.calls) == 1
+
+    own = _complete_own_store(adapter, "req-2", 2)
+    assert [(type(e).__name__, e.block_hashes) for e in _step(adapter)] == [
+        ("CacheStoreEvent", [own])
+    ]

@@ -318,6 +318,12 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
 # KV event channel (``POLL_KV_EVENTS``) wire vocabulary. The media are vLLM's
 # ``BlockStored.medium`` values: the L1 host cache is ``CPU``, L2 is
 # ``STORAGE``.
+# Advertised through ``GET_EXPERIMENTAL`` when the server records cache
+# events. An engine polls ``POLL_KV_EVENTS`` only against a server that
+# advertises it: a server that predates the request aborts its request loop
+# on the unknown request type, taking the cache down for every engine.
+KV_EVENT_CAPABILITY = "kv_events"
+
 KV_EVENT_KIND_STORED = "stored"
 KV_EVENT_KIND_REMOVED = "removed"
 KV_EVENT_MEDIUM_CPU = "CPU"

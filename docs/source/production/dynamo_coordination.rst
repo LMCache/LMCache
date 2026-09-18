@@ -36,9 +36,11 @@ How it works
 1. The MP server records the storage layer's key events (host-cache store
    completions and evictions, L2 stores and deletes) in a bounded,
    sequenced log.
-2. Each vLLM worker's LMCache connector polls that log without blocking the
-   model-runner step and translates the records for the worker: a removal is
-   published only for chunks the worker had announced, and a store only once.
+2. One rank per worker polls that log, without blocking the model-runner
+   step, and translates the records: a removal is published only for chunks
+   the worker had announced, and a store only once. Polling happens only
+   against a server that advertises the channel, so a worker never disturbs
+   an older cache server.
    While the log is polled, the server's write-finished records are the only
    source of store announcements: they name exactly the chunks written,
    whereas a store's completion only says it finished without a fatal error

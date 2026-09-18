@@ -31,6 +31,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    KV_EVENT_CAPABILITY,
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
@@ -438,6 +439,26 @@ class ParallelStrategy:
     def kv_tp_size(self) -> int:
         """Tensor-parallel size as seen from a single LMCache server."""
         return self.tp_size // self.n_servers
+
+    @property
+    def ranks_per_server(self) -> int:
+        """Number of workers attached to one LMCache server.
+
+        Workers are assigned to servers in contiguous rank blocks, matching
+        the connector's node routing.
+        """
+        return max(1, self.vllm_world_size // self.n_servers)
+
+    @property
+    def is_kv_event_poller(self) -> bool:
+        """Whether this rank reads its server's cache-event log for the engine.
+
+        One rank per server: every rank attached to a server would otherwise
+        republish the same records, and while a duplicate ``BlockStored`` is
+        idempotent for a KV-aware router, a duplicate ``BlockRemoved`` is an
+        error.
+        """
+        return self.vllm_worker_id % self.ranks_per_server == 0
 
     @property
     def is_kv_writer(self) -> bool:
@@ -1406,7 +1427,10 @@ class LMCacheMPWorkerAdapter:
             )
         self._kv_event_poll_interval = kv_event_poll_interval
         self._kv_event_poll_max_events = kv_event_poll_max_events
-        self._kv_event_polling = enable_kv_events and kv_event_poll_interval > 0
+        # Both resolved against the server's advertised capabilities once the
+        # request client is up; see _resolve_kv_event_source.
+        self._kv_event_server_source = False
+        self._kv_event_polling = False
         self._kv_event_cursor = 0
         self._kv_event_incarnation: int | None = None
         self._kv_event_poll_future: MessagingFuture[KVEventPollResult] | None = None
@@ -1442,6 +1466,7 @@ class LMCacheMPWorkerAdapter:
         self.experimental: set[str] = get_experimental(
             self.req_client, timeout=self._mq_timeout
         )
+        self._resolve_kv_event_source(enable_kv_events, parallel_strategy)
         self.dispatcher: "Dispatcher | None" = None
 
         # Health state (shared with heartbeat thread)
@@ -1785,13 +1810,13 @@ class LMCacheMPWorkerAdapter:
         self.store_futures[request_id] = future
         if event is not None:
             self.store_events[request_id] = event
-        if self._kv_events_enabled and not self._kv_event_polling:
+        if self._kv_events_enabled and not self._kv_event_server_source:
             # Own completion events are the fallback when the server's
-            # cache-event log is not polled. A successful store result only
-            # means the request completed without a fatal error: chunks the
-            # server could not reserve are skipped silently, so with polling
-            # on, the server's write-finished records announce exactly the
-            # chunks written.
+            # cache-event log is not the source. A successful store result
+            # only means the request completed without a fatal error: chunks
+            # the server could not reserve are skipped silently, so when the
+            # log is the source, its write-finished records announce exactly
+            # the chunks written.
             self._pending_store_kv_events.setdefault(request_id, []).extend(
                 self._build_store_kv_events(key)
             )
@@ -2402,13 +2427,12 @@ class LMCacheMPWorkerAdapter:
     def _publish_store_kv_events(self, request_id: str) -> None:
         """Buffer successful store events and update metrics without a drain.
 
-        Events built while polling was off are dropped if polling has been
-        enabled since; that cannot happen today (polling only ever turns
-        off), but the server's records must stay the only source while it
-        is on.
+        Events built before the server's log became the source are dropped;
+        that cannot happen today because the source is resolved once at
+        construction, but the log must stay the only source while in use.
         """
         events = self._pending_store_kv_events.pop(request_id, [])
-        if not events or self._kv_event_polling:
+        if not events or self._kv_event_server_source:
             return
         self._buffer_kv_events(list(events))
 
@@ -2426,9 +2450,8 @@ class LMCacheMPWorkerAdapter:
         Consumes a completed poll, then issues the next one once the poll
         interval has elapsed (at once after a full page); never blocks the
         caller, so a poll's records are buffered by a later call. Polling
-        stops for good when the server does not answer the request while
-        healthy (it predates the request) or reports that it records no
-        events.
+        stops for good when the server reports that it records no events, or
+        stops answering while healthy.
         """
         if not self._kv_event_polling:
             return
@@ -2440,9 +2463,9 @@ class LMCacheMPWorkerAdapter:
                     self._kv_event_poll_future = None
                     if self.is_healthy:
                         self._disable_kv_event_polling(
-                            "the LMCache server did not answer POLL_KV_EVENTS "
-                            f"within {self._mq_timeout}s (is it older than "
-                            "this connector?)"
+                            "the LMCache server advertised the KV event "
+                            "channel but did not answer POLL_KV_EVENTS "
+                            f"within {self._mq_timeout}s"
                         )
                 return
             self._kv_event_poll_future = None
@@ -2482,15 +2505,58 @@ class LMCacheMPWorkerAdapter:
         self._kv_event_last_poll = now
 
     def _disable_kv_event_polling(self, reason: str) -> None:
-        """Stop polling for good; own store events keep flowing."""
+        """Stop polling for good and fall back to own completed-store events.
+
+        Only the polling rank reaches this; the other ranks of the engine
+        stay silent, so the engine keeps a single publisher.
+
+        Args:
+            reason: Why polling stopped, for the operator-facing warning.
+        """
         logger.warning(
-            "Disabling server-side KV event polling (%s): the router will not "
-            "learn LMCache host-cache evictions from this worker",
+            "Disabling server-side KV event polling (%s): this worker falls "
+            "back to reporting its own completed stores, so the router no "
+            "longer learns LMCache host-cache evictions from it",
             reason,
         )
         self._kv_event_polling = False
+        self._kv_event_server_source = False
         self._kv_event_poll_future = None
         self._announced_kv_hashes.clear()
+
+    def _resolve_kv_event_source(
+        self, enable_kv_events: bool, parallel_strategy: ParallelStrategy
+    ) -> None:
+        """Decide whether this rank takes KV events from the server's log.
+
+        The log is used only when the server advertises the channel: a server
+        that predates ``POLL_KV_EVENTS`` aborts its request loop on the
+        unknown request type, which would take the cache server down for
+        every engine attached to it.
+
+        Every rank attached to an advertising server stops announcing its own
+        stores, but only one of them polls
+        (:attr:`ParallelStrategy.is_kv_event_poller`), so each record reaches
+        the router exactly once.
+
+        Args:
+            enable_kv_events: Whether vLLM's KV event publisher is enabled.
+            parallel_strategy: This worker's parallel placement.
+        """
+        if not enable_kv_events or self._kv_event_poll_interval <= 0:
+            return
+        if KV_EVENT_CAPABILITY not in self.experimental:
+            logger.warning(
+                "The LMCache server does not advertise the '%s' capability, "
+                "so this worker reports only its own completed stores and the "
+                "router will not learn LMCache host-cache evictions from it. "
+                "Upgrade the server, or set lmcache.mp.kv_event_poll_interval "
+                "to 0 to silence this warning.",
+                KV_EVENT_CAPABILITY,
+            )
+            return
+        self._kv_event_server_source = True
+        self._kv_event_polling = parallel_strategy.is_kv_event_poller
 
     def _apply_kv_event_poll_result(self, result: KVEventPollResult) -> None:
         """Buffer the events of one completed poll."""
