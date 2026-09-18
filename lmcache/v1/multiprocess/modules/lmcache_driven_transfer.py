@@ -86,11 +86,12 @@ def all_null_chunk_masks(
     object_groups: Sequence[ObjectGroupInfo],
     blocks_per_chunk: Sequence[int],
     num_chunks: int,
+    null_block_ids: Sequence[int | None] | None = None,
 ) -> list[list[bool]]:
     """Mark, per object group, the chunks whose engine block ids are all null.
 
-    A chunk is null for an object group when every block id of every kernel
-    group in that group is 0 (the vLLM null block). Align-mode Mamba/linear
+    A chunk is null for an object group when every block ID of every kernel
+    group equals that group's null marker. Align-mode Mamba/linear
     layers produce such chunks: only the block holding the last recurrent state
     is real, so every earlier chunk is null. These chunks must not be stored --
     the null block carries no valid KV, and object keys are content hashes, so
@@ -103,6 +104,9 @@ def all_null_chunk_masks(
         blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
             kernel-group index.
         num_chunks: Number of chunks in the request.
+        null_block_ids: Null marker per kernel group. ``None`` entries mean
+            that group has no null block; omitting the sequence preserves the
+            historical null marker zero for every group.
 
     Returns:
         ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
@@ -114,7 +118,10 @@ def all_null_chunk_masks(
             is_null = True
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                if any(block_ids[kg][i * bpc : (i + 1) * bpc]):
+                null_id = null_block_ids[kg] if null_block_ids is not None else 0
+                if null_id is None or any(
+                    block != null_id for block in block_ids[kg][i * bpc : (i + 1) * bpc]
+                ):
                     is_null = False
                     break
             chunk_null.append(is_null)
@@ -628,15 +635,23 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Mamba chunks holding no real state) carry no valid KV and must not
             # be committed. Computed on the raw block ids before downsampling
             # mutates them.
+            null_block_ids = [
+                group.null_block_id
+                for group in cache_context.kv_layer_groups_manager.kernel_groups
+            ]
+            has_sparse_groups = any(null_id != 0 for null_id in null_block_ids)
             skipped_chunks = all_null_chunk_masks(
                 gpu_block_ids,
                 cache_context.kv_layer_groups_manager.object_groups,
                 blocks_per_chunk,
                 num_chunks,
+                null_block_ids,
             )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
+                cache_context,
+                gpu_block_ids,
+                skipped_chunks=skipped_chunks if has_sparse_groups else None,
             )
 
             producer_event = event_backend.import_event(
@@ -902,15 +917,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
-            # Cut and stage all block_ids to GPU once before the transfer
-            block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
-            )
-            producer_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
-            event_backend.wait_event(producer_event, cache_context.stream)
-
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
@@ -926,6 +932,26 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 0 if window < 0 else max(0, num_chunks - window)
                 for window in attn_desc.num_chunks_in_sw
             ]
+            skipped_chunks = [
+                [g in skipped_groups or i < skip for i in range(num_chunks)]
+                for g, skip in enumerate(group_skips)
+            ]
+            has_sparse_groups = any(
+                group.null_block_id != 0
+                for group in cache_context.kv_layer_groups_manager.kernel_groups
+            )
+            block_ids_per_group_gpu = downsample_and_stage_block_ids(
+                cache_context,
+                gpu_block_ids,
+                skipped_chunks=skipped_chunks if has_sparse_groups else None,
+                skip_first_n_tokens=skip_first_n_tokens if has_sparse_groups else 0,
+            )
+
+            producer_event = event_backend.import_event(
+                event_ipc_handle, cache_context.device
+            )
+            event_backend.wait_event(producer_event, cache_context.stream)
+
             expected_retained = sum(
                 num_chunks - skip
                 for g, skip in enumerate(group_skips)

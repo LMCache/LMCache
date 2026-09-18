@@ -79,9 +79,37 @@ def batched_iteration_with_skip(
         batch_start_idx += len(batch)
 
 
+def kept_blocks_per_chunk(cache_context: BaseCacheContext, kernel_group_id: int) -> int:
+    """Return the blocks one chunk keeps for a kernel group after downsampling.
+
+    Sliding-window groups keep only the in-window suffix of each chunk, so the
+    staged buffer is shorter than the raw block ID list. Every caller that
+    indexes into the staged buffer must derive its stride from this function.
+
+    Args:
+        cache_context: The cache context holding the KV cache geometry.
+        kernel_group_id: Index of the kernel group.
+
+    Returns:
+        Number of blocks that one chunk contributes to the staged buffer.
+    """
+    subchunk_sw_size_tokens = (
+        cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
+            kernel_group_id
+        )
+    )
+    tokens_per_chunk = min(
+        cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
+    )
+    return cache_context.calculate_num_blocks(tokens_per_chunk, kernel_group_id)
+
+
 def downsample_and_stage_block_ids(
     cache_context: BaseCacheContext,
     block_ids: list[list[int]],
+    *,
+    skipped_chunks: Sequence[Sequence[bool]] | None = None,
+    skip_first_n_tokens: int = 0,
 ) -> list[torch.Tensor]:
     """Cut the block id lists to skip the unneeded blocks in a chunk and
     stage it into GPU tensors for later use.
@@ -89,11 +117,16 @@ def downsample_and_stage_block_ids(
     This mainly targets the case where a portion of the blocks are not
     needed for every chunk, such as deepseek v4's swa cache.
 
-    Note that the we do NOT do any object-level skipping here.
+    Object-level skipping is decided by the caller. Slots excluded from the
+    transfer are staged as zero, so negative null markers for absent objects
+    never reach a GPU index buffer.
 
     Args:
         cache_context: The cache context containing the KV cache information.
         block_ids: The original block id lists, indexed by LMCache KV group index.
+        skipped_chunks: Optional per-object-group masks marking chunks that
+            the caller will not transfer.
+        skip_first_n_tokens: Initial tokens excluded from the transfer.
 
     Returns:
         The cut block id lists, indexed by LMCache KV group index.
@@ -120,34 +153,66 @@ def downsample_and_stage_block_ids(
           [13, 14, 17, 18], # swa attention group only needs the last 2 block per chunk
         ]
     """
-    num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
+    manager = cache_context.kv_layer_groups_manager
+    num_kernel_groups = manager.num_kernel_groups
+    masking_requested = skipped_chunks is not None or skip_first_n_tokens > 0
+    object_group_by_kernel: dict[int, int] = {}
+    if skipped_chunks is not None:
+        object_group_by_kernel = {
+            kernel_group_id: object_group_id
+            for object_group_id, group in enumerate(manager.object_groups)
+            for kernel_group_id in group.kernel_group_indices
+        }
+
     for kernel_group_id in range(num_kernel_groups):
-        subchunk_sw_size_tokens = (
-            cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
-                kernel_group_id
-            )
-        )
-        tokens_per_chunk = min(
-            cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
-        )
-        keep_blocks_per_chunk = cache_context.calculate_num_blocks(
-            tokens_per_chunk, kernel_group_id
-        )
+        keep_blocks_per_chunk = kept_blocks_per_chunk(cache_context, kernel_group_id)
         total_blocks_per_chunk = cache_context.calculate_num_blocks(
             cache_context.lmcache_tokens_per_chunk, kernel_group_id
         )
 
-        new_block_ids = []
+        new_block_ids: list[int] = []
         old_block_ids = block_ids[kernel_group_id]
-        assert len(old_block_ids) % total_blocks_per_chunk == 0, (
-            f"len(block_ids[{kernel_group_id}]) should be a multiple "
-            f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
-            f"{len(old_block_ids)}"
-        )
+        if len(old_block_ids) % total_blocks_per_chunk != 0:
+            raise ValueError(
+                f"len(block_ids[{kernel_group_id}]) should be a multiple "
+                f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
+                f"{len(old_block_ids)}"
+            )
 
-        for i in range(0, len(old_block_ids), total_blocks_per_chunk):
-            chunk_block_ids = old_block_ids[i : i + total_blocks_per_chunk]
-            new_block_ids.extend(chunk_block_ids[-keep_blocks_per_chunk:])
+        if not masking_requested:
+            for i in range(0, len(old_block_ids), total_blocks_per_chunk):
+                chunk_block_ids = old_block_ids[i : i + total_blocks_per_chunk]
+                new_block_ids.extend(chunk_block_ids[-keep_blocks_per_chunk:])
+            block_ids[kernel_group_id] = new_block_ids
+            continue
+
+        chunk_mask = (
+            skipped_chunks[object_group_by_kernel[kernel_group_id]]
+            if skipped_chunks is not None
+            else None
+        )
+        skip_blocks = cache_context.calculate_num_blocks(
+            skip_first_n_tokens, kernel_group_id
+        )
+        zeros = [0] * keep_blocks_per_chunk
+        for chunk_idx, i in enumerate(
+            range(0, len(old_block_ids), total_blocks_per_chunk)
+        ):
+            if chunk_mask is not None and (
+                chunk_idx >= len(chunk_mask) or chunk_mask[chunk_idx]
+            ):
+                new_block_ids.extend(zeros)
+                continue
+            first_kept = i + total_blocks_per_chunk - keep_blocks_per_chunk
+            kept = old_block_ids[first_kept : i + total_blocks_per_chunk]
+            if first_kept >= skip_blocks:
+                new_block_ids.extend(kept)
+            elif first_kept + keep_blocks_per_chunk <= skip_blocks:
+                new_block_ids.extend(zeros)
+            else:
+                cut = skip_blocks - first_kept
+                new_block_ids.extend(zeros[:cut])
+                new_block_ids.extend(kept[cut:])
 
         block_ids[kernel_group_id] = new_block_ids
 
