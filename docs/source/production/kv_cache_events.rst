@@ -5,7 +5,7 @@ KV Cache Events
 
 .. warning::
 
-   This page documents LMCache's in-process mode, which is deprecated. Prefer :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For KV cache events in MP mode, including the eviction events a KV-aware router needs, see :doc:`/production/dynamo_coordination`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/observability/index`.
 
 
 KV cache events are actions or lifecycle events that occur when managing the KV cache during inference. These events can be used for KV-cache-aware routing.
@@ -15,41 +15,6 @@ LMCache supports KV cache events as follows:
 - Generates storage KV cache events
 - The events format is defined as per the `BlockStored class <https://github.com/vllm-project/vllm/blob/main/vllm/distributed/kv_events.py>`_ in vLLM
 - LMCache passes the events to SGLang or vLLM to publish them using their messaging system
-
-What this mode publishes
-------------------------
-
-In-process mode publishes **store events only**. It emits a ``BlockStored``
-event when a chunk enters the CPU cache, and never emits ``BlockRemoved`` or
-``AllBlocksCleared``, so eviction is silent. A consumer that routes requests
-on these events keeps entries for chunks the cache has already evicted, and
-its view drifts further from reality as the cache fills.
-
-The ``medium`` field is not a canonical medium name in this mode. It is the
-string ``'cpu'``, and when the tokens are passed as a tensor it is replaced
-by that tensor's device, so it can read as a device object instead.
-KV-aware routers match the medium against fixed names such as ``CPU``, and
-classify anything else as an unknown medium.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 34 33 33
-
-   * - Capability
-     - In-process (this page)
-     - MP mode
-   * - Store events
-     - Yes
-     - Yes
-   * - Eviction and removal events
-     - No
-     - Yes, for the host cache and L2
-   * - ``medium`` value
-     - ``'cpu'``, or the tokens' device
-     - ``CPU`` for the host cache, ``STORAGE`` for L2
-
-Use :doc:`MP mode </production/dynamo_coordination>` if a KV-aware router has
-to track what each worker actually holds.
 
 Prerequisites
 -------------
@@ -120,7 +85,7 @@ How to Generate KV Cache events
       .. code-block:: bash
 
           Received event batch at 1765529395.2132685:
-        - BlockStored(block_hashes=[b'\x96\x95[h6\x1dE$v\x03\xe8\xf0\xc20\xcd\xe8\xa7#\x9cS\xe0\x16\xba\xab7\xf7z\x10P]\xfaT'], parent_block_hash=None, token_ids=[27, 91, 7265, 3575, 4326, 91, 1784, 91, 8948, 91, 397, 2610, 525, 264, 10950, 15235, 17847, 624, 27, 91, 872, 91, 397, 3838, 374, 279, 16158, 1685, 1370, 276, 5267, 27, 91, 77091, 91, 29], block_size=36, lora_id=None, medium='cpu')
+        - BlockStored(block_hashes=[b'\x96\x95[h6\x1dE$v\x03\xe8\xf0\xc20\xcd\xe8\xa7#\x9cS\xe0\x16\xba\xab7\xf7z\x10P]\xfaT'], parent_block_hash=None, token_ids=[27, 91, 7265, 3575, 4326, 91, 1784, 91, 8948, 91, 397, 2610, 525, 264, 10950, 15235, 17847, 624, 27, 91, 872, 91, 397, 3838, 374, 279, 16158, 1685, 1370, 276, 5267, 27, 91, 77091, 91, 29], block_size=36, lora_id=None, medium='CPU')
 
       This is the event generated after the cache store operation.
 

@@ -1656,6 +1656,7 @@ def test_lost_events_on_first_contact_do_not_resync(fake_adapter) -> None:
 def test_polling_stops_when_the_server_cannot_serve_it(
     fake_adapter, failure: str
 ) -> None:
+    """Polling stops for good and the rank resumes announcing its own stores."""
     adapter, server = _polling_adapter(fake_adapter)
     _adapter, req_client, _future = fake_adapter
     if failure == "disabled_on_server":
@@ -1806,20 +1807,5 @@ def test_an_unadvertised_server_is_never_polled(fake_adapter, monkeypatch) -> No
 
     assert server.calls == []
     assert [(type(e).__name__, e.block_hashes) for e in events] == [
-        ("CacheStoreEvent", [own])
-    ]
-
-
-def test_polling_failure_falls_back_to_own_store_events(fake_adapter) -> None:
-    """When the advertised channel stops working, the polling rank resumes
-    announcing its own completed stores."""
-    adapter, server = _polling_adapter(fake_adapter)
-    server.answer(_poll_result(enabled=False))
-    _step(adapter)
-    _step(adapter)
-    assert len(server.calls) == 1
-
-    own = _complete_own_store(adapter, "req-2", 2)
-    assert [(type(e).__name__, e.block_hashes) for e in _step(adapter)] == [
         ("CacheStoreEvent", [own])
     ]
