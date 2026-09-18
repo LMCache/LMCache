@@ -1037,6 +1037,37 @@ class LMCacheMPSchedulerAdapter:
         self._per_server_hits.pop(request_id, None)
         self._lookup_params.pop(request_id, None)
 
+    def reset_cache(self) -> bool:
+        """Ask every backing LMCache server to best-effort clear idle cache.
+
+        Sends non-forced CLEAR to every backing LMCache server and waits for
+        the RPCs to complete. Locked in-flight objects and scheduler-side
+        lookup bookkeeping are preserved.
+
+        Returns:
+            True when every healthy server answers CLEAR, False on timeout.
+        """
+        if not self.is_healthy:
+            return False
+
+        futures = {
+            url: self.req_clients[url].clear(force=False) for url in self._server_urls
+        }
+        success = True
+        for url, future in futures.items():
+            try:
+                future.result(timeout=self._mq_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "CLEAR to %s timed out after %ss. Marking server as unhealthy.",
+                    url,
+                    self._mq_timeout,
+                )
+                self._health_events[url].clear()
+                success = False
+
+        return success
+
     def shutdown(self) -> None:
         """Shutdown the scheduler adapter and its resources."""
         for client in self.req_clients.values():
