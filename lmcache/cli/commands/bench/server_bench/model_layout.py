@@ -428,7 +428,10 @@ def load_model_layout(path: str | Path) -> "ModelLayout":
         else:
             raise ValueError("unknown model.preset")
         data["model"] = msgspec.to_builtins(model)
-    spec = msgspec.convert(data, ModelLayout)
+    try:
+        spec = msgspec.convert(data, ModelLayout)
+    except msgspec.ValidationError as exc:
+        raise ValueError(f"invalid model layout: {exc}") from exc
     order = spec.model.layer_types
     if not order or any(n not in spec.model.layer_definitions for n in order):
         raise ValueError("model.layer_types must be nonempty and reference definitions")
