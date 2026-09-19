@@ -8,7 +8,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
-- Helm 3.8+ for chart installation; Helm 3.17+ for adopting an existing YAML installation
+- Helm 3.8+ for chart installation or deploying from source; Helm 3.17+ for adopting an existing YAML installation. Installing the release `install.yaml` only needs `kubectl`.
 - [cert-manager](https://cert-manager.io/docs/installation/) installed and ready **before installing the operator**, for its webhook serving certificate
 - For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
@@ -53,11 +53,7 @@ helm upgrade --install lmcache-operator \
   --namespace lmcache-operator-system --create-namespace --wait
 ```
 
-The chart installs the operator, its three CRDs, RBAC, webhook, and certificate resources. Create engine and coordinator custom resources separately; the chart does not create cache workloads. `--create-namespace` creates the operator namespace without making it part of the Helm release. The default release name preserves the existing `lmcache-operator-*` object names.
-
 **Option B: Rendered YAML from a release**
-
-The same chart also produces `install.yaml`, which includes the namespace. cert-manager is required for this installation too:
 
 ```bash
 # Latest stable release
@@ -75,22 +71,30 @@ make docker-build docker-push IMG=<your-registry>/lmcache-operator:latest
 make deploy IMG=<your-registry>/lmcache-operator:latest
 ```
 
-`make deploy` uses the local chart with `helm upgrade --install`. Use [chart values](charts/lmcache-operator/values.yaml) to configure the operator, including its image, resources, scheduling, and optional ServiceMonitor. Cache server settings belong in the engine custom resources.
+`make deploy` runs `make build-installer`: it renders the chart with `helm template`, adds the namespace, and applies `dist/install.yaml` with `kubectl apply`. Developers need Helm to render these resources; the resulting installation has no Helm release.
 
-If you enable `metrics.serviceMonitor.enabled`, bind the `<release>-metrics-reader` ClusterRole to your Prometheus ServiceAccount so it can scrape the operator's authenticated HTTPS metrics. Configure Prometheus to discover the ServiceMonitor's namespace and labels as well.
+To manage a source deployment as a Helm release instead, use:
+
+```bash
+make helm-deploy IMG=<your-registry>/lmcache-operator:latest
+```
+
+Both entry points use the same [chart templates and values](charts/lmcache-operator/values.yaml).
 
 ### Upgrade, uninstall, and existing YAML installations
 
 For a Helm upgrade, repeat the Helm command with the new `--version` (or downloaded chart archive) and your values file (`-f operator-values.yaml`, if used). Helm updates the CRD schemas as part of the release. Review the Operator release notes before upgrading: changes to CRD schemas or reconciliation can affect existing engines.
 
-To remove the operator:
+To remove a Helm installation:
 
 ```bash
 helm uninstall lmcache-operator --namespace lmcache-operator-system
-# From the source tree, the equivalent is: make undeploy
+# From the source tree, the equivalent is: make helm-undeploy
 ```
 
-The CRDs carry `helm.sh/resource-policy: keep`, so uninstall retains the three CRDs, their custom resources, and the cache workloads they own. The namespace also remains. Reconciliation and admission injection stop until the operator is installed again. `make uninstall` is a separate, destructive CRD cleanup: it deletes all instances of these custom resources across the cluster and can remove their owned workloads. Use it only when removing the caches themselves.
+The CRDs carry `helm.sh/resource-policy: keep`, so Helm uninstall retains the three CRDs, their custom resources, and the cache workloads they own. The namespace also remains. Reconciliation and admission injection stop until the operator is installed again.
+
+**YAML cleanup is destructive:** `make undeploy` renders the full installer again and runs `kubectl delete -f dist/install.yaml`. This deletes the operator namespace and all three CRDs, including their instances and owned workloads. The `helm.sh/resource-policy: keep` annotation does not prevent `kubectl delete`. Use the same namespace and rendering settings as the YAML installation, and only run this target when removing those resources. `make uninstall` is a separate CRD-only cleanup that also deletes all instances of the three CRDs across the cluster.
 
 An existing `kubectl apply` installation is **not adopted automatically**. To move it to Helm, use the same release name and namespace and first compare the chart's rendered resources with the installed objects:
 
@@ -328,8 +332,8 @@ make test-e2e-gpu-cluster    IMG=<registry/image:tag>  # existing GPU cluster
 
 | Target | Tools to install |
 |---|---|
-| `test-e2e-kind` | `kind`, `kubectl`, `docker` |
-| `test-e2e-cluster` | `kubectl` (cluster access via `KUBECONFIG`) |
+| `test-e2e-kind` | `kind`, `kubectl`, `docker`, `helm` |
+| `test-e2e-cluster` | `kubectl`, `helm` (cluster access via `KUBECONFIG`) |
 | `test-e2e-gpu-kind` | `kind`, `kubectl`, `docker`, `helm` (v3) |
 | `test-e2e-gpu-cluster` | `kubectl`, `helm` (cluster access via `KUBECONFIG`) |
 

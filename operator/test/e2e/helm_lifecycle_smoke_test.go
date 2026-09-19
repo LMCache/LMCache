@@ -20,6 +20,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -84,7 +85,7 @@ var _ = Describe("Operator Helm lifecycle (no-GPU)", Serial, func() {
 		chartPath, originalDescription, upgradedDescription := chartWithUpgradedSchema()
 		assertHelmCRDSchemaDescription(ctx, originalDescription)
 		restoreOperator = true
-		_, err = utils.RunMake("deploy", fmt.Sprintf("IMG=%s", managerImage),
+		_, err = utils.RunMake("helm-deploy", fmt.Sprintf("IMG=%s", managerImage),
 			"CHART="+chartPath,
 			"HELM_EXTRA_ARGS=--set-string podAnnotations.helm-lifecycle=upgraded")
 		Expect(err).NotTo(HaveOccurred())
@@ -102,7 +103,7 @@ var _ = Describe("Operator Helm lifecycle (no-GPU)", Serial, func() {
 		}
 
 		By("uninstalling the operator release")
-		_, err = utils.RunMake("undeploy")
+		_, err = utils.RunMake("helm-undeploy")
 		Expect(err).NotTo(HaveOccurred())
 		assertHelmOperatorRemoved(ctx, operatorObjects)
 
@@ -134,7 +135,7 @@ var _ = Describe("Operator Helm lifecycle (no-GPU)", Serial, func() {
 		By("installing the standalone YAML with externally managed CRDs")
 		restoreOperator = true
 		restoreDeployArgs = []string{"HELM_EXTRA_ARGS=--take-ownership"}
-		_, err = utils.RunMake("undeploy")
+		_, err = utils.RunMake("helm-undeploy")
 		Expect(err).NotTo(HaveOccurred())
 		assertHelmOperatorRemoved(ctx, operatorObjects)
 		adoptedObjects := helmOperatorObjects(namespace)
@@ -150,11 +151,10 @@ var _ = Describe("Operator Helm lifecycle (no-GPU)", Serial, func() {
 			Expect(k8sClient.Patch(ctx, crd, patch)).To(Succeed())
 			adoptedObjects = append(adoptedObjects, crd)
 		}
-		_, err = utils.RunMake("build-installer", fmt.Sprintf("IMG=%s", managerImage))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = utils.RunFromOperator(exec.Command("kubectl", "apply", "-f", "dist/install.yaml"))
+		_, err = utils.RunMake("deploy", fmt.Sprintf("IMG=%s", managerImage))
 		Expect(err).NotTo(HaveOccurred())
 		waitHelmOperatorRollout()
+		assertOperatorReleaseAbsent()
 		assertHelmObjectsRetained(ctx, retained)
 
 		By("adopting the YAML installation into Helm without replacing cache resources")
@@ -166,6 +166,46 @@ var _ = Describe("Operator Helm lifecycle (no-GPU)", Serial, func() {
 			Expect(object.GetAnnotations()).To(HaveKeyWithValue("meta.helm.sh/release-name", "lmcache-operator"))
 			Expect(object.GetAnnotations()).To(HaveKeyWithValue("meta.helm.sh/release-namespace", namespace))
 		}
+	})
+
+	It("deploys YAML without a Helm release and undeploys the namespace and CRDs", func() {
+		ctx := context.Background()
+		DeferCleanup(func() {
+			deployHelmOperator("HELM_EXTRA_ARGS=--take-ownership")
+			Expect(labelOperatorNamespace()).To(Succeed())
+		})
+
+		By("removing the Helm release before exercising YAML deployment")
+		_, err := utils.RunMake("helm-undeploy")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("deploying the operator through rendered YAML")
+		_, err = utils.RunMake("deploy", fmt.Sprintf("IMG=%s", managerImage))
+		Expect(err).NotTo(HaveOccurred())
+		waitHelmOperatorRollout()
+		assertOperatorReleaseAbsent()
+		objects := make([]client.Object, 0, 4)
+		objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})
+		for _, name := range []string{
+			"lmcacheengines.lmcache.lmcache.ai",
+			"cacheblendengines.lmcache.lmcache.ai",
+			"lmcachecoordinators.lmcache.lmcache.ai",
+		} {
+			objects = append(objects, &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: name}})
+		}
+		for _, object := range objects {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(object), object)).To(Succeed())
+		}
+
+		By("undeploying the complete YAML installation, including namespace and CRDs")
+		_, err = utils.RunMake("undeploy", fmt.Sprintf("IMG=%s", managerImage))
+		Expect(err).NotTo(HaveOccurred())
+		for _, object := range objects {
+			key := client.ObjectKeyFromObject(object)
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, object))).To(BeTrue(), "delete %T %s", object, key)
+		}
+		assertHelmOperatorRemoved(ctx, helmOperatorObjects(namespace))
+		assertOperatorReleaseAbsent()
 	})
 })
 
@@ -280,10 +320,20 @@ func assertHelmOperatorRemoved(ctx context.Context, objects []client.Object) {
 
 func deployHelmOperator(extraArgs ...string) {
 	GinkgoHelper()
-	args := append([]string{"deploy", fmt.Sprintf("IMG=%s", managerImage)}, extraArgs...)
+	args := append([]string{"helm-deploy", fmt.Sprintf("IMG=%s", managerImage)}, extraArgs...)
 	_, err := utils.RunMake(args...)
 	Expect(err).NotTo(HaveOccurred(), "Failed to reinstall the operator Helm release")
 	waitHelmOperatorRollout()
+}
+
+func assertOperatorReleaseAbsent() {
+	GinkgoHelper()
+	out, err := utils.RunFromOperator(exec.Command(envDefault("HELM", "helm"), "list", "--all",
+		"--namespace", "lmcache-operator-system", "--filter", "^lmcache-operator$", "--output", "json"))
+	Expect(err).NotTo(HaveOccurred())
+	var releases []json.RawMessage
+	Expect(json.Unmarshal([]byte(out), &releases)).To(Succeed())
+	Expect(releases).To(BeEmpty(), "YAML deployment must not create a Helm release")
 }
 
 func waitHelmOperatorRollout() {

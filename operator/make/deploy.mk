@@ -15,7 +15,7 @@ case "$${image##*/}" in ?*:?*) ;; *) echo 'IMG must include an explicit :tag' >&
 endef
 
 .PHONY: install
-install: manifests ## Install CRDs only (Helm deploy already includes them).
+install: manifests ## Install CRDs only (both deployment methods already include them).
 	"$(KUBECTL)" apply -f charts/lmcache-operator/files/crds
 
 .PHONY: uninstall
@@ -23,12 +23,20 @@ uninstall: ## Delete CRDs and ALL their custom resources; run only for full clea
 	"$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f charts/lmcache-operator/files/crds
 
 .PHONY: deploy
-deploy: manifests helm ## Install or upgrade the Operator with Helm; cert-manager must already be installed.
+deploy: build-installer ## Apply the rendered YAML installer without creating a Helm release; cert-manager must already be installed.
+	"$(KUBECTL)" apply -f dist/install.yaml
+
+.PHONY: undeploy
+undeploy: build-installer ## Delete the YAML installation, including its namespace, CRDs and ALL custom resources.
+	"$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f dist/install.yaml
+
+.PHONY: helm-deploy
+helm-deploy: manifests helm ## Install or upgrade the Operator Helm release; cert-manager must already be installed.
 	@$(helm-image-args) \
 	"$(HELM)" upgrade --install "$(RELEASE)" "$(CHART)" \
 		--namespace "$(NAMESPACE)" --create-namespace --wait --timeout "$(HELM_TIMEOUT)" \
 		--set-string "image.repository=$${image%:*}" --set-string "image.tag=$${image##*:}" $(HELM_EXTRA_ARGS)
 
-.PHONY: undeploy
-undeploy: helm ## Uninstall the Operator, retaining CRDs, instances and their workloads.
+.PHONY: helm-undeploy
+helm-undeploy: helm ## Uninstall the Operator Helm release, retaining CRDs, instances and their workloads.
 	"$(HELM)" uninstall "$(RELEASE)" --namespace "$(NAMESPACE)" --wait --timeout "$(HELM_TIMEOUT)" $(if $(filter true,$(ignore-not-found)),--ignore-not-found,)

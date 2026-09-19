@@ -1,8 +1,6 @@
 # LMCache Operator
 
-This chart installs one cluster-wide LMCache Operator, its three CRDs, RBAC,
-admission webhooks, and webhook certificate resources. Create `LMCacheEngine`,
-`CacheBlendEngine`, and `LMCacheCoordinator` instances separately.
+This chart installs the LMCache Operator.
 
 Install cert-manager and wait for it to be ready before installing this chart.
 cert-manager is an external prerequisite, not a chart dependency.
@@ -29,13 +27,14 @@ Use `-f operator-values.yaml` to customize the settings in `values.yaml`.
 The operator watches all namespaces; install only one release per cluster.
 Use the same release name, namespace, and values file for subsequent upgrades.
 
-Helm upgrades also update CRD schemas. Uninstall removes the operator and its
+Helm upgrades also update CRD schemas. Helm uninstall removes the operator and its
 chart-managed infrastructure, but keeps CRDs, user-created instances, and their
 workloads. The release does not own its namespace. Reinstall with the same
 release name and namespace to resume management of retained instances.
 
 ```sh
 helm uninstall lmcache-operator --namespace lmcache-operator-system
+# From the source tree, the equivalent is: make helm-undeploy
 ```
 
 Existing YAML installations require an explicit ownership transfer with Helm
@@ -43,16 +42,26 @@ Existing YAML installations require an explicit ownership transfer with Helm
 for migration and full cleanup instructions. Do not delete the YAML installer
 resources when migrating, because that also deletes CRDs and the namespace.
 
-The optional `metrics.serviceMonitor.enabled` setting requires the Prometheus
-Operator CRDs. Bind the Prometheus ServiceAccount to the
-`lmcache-operator-metrics-reader` ClusterRole and configure Prometheus to discover
-ServiceMonitors in the release namespace.
-
 For contributors: `make manifests` in `operator/` generates the CRD schemas,
 controller RBAC, and webhook definitions directly from Go markers into `files/`.
 Tests, CRD installation, and Helm all use these files. Do not edit them directly.
 `make lint-chart` lints the chart; `make build-installer` renders the same templates
-as YAML.
+as YAML and adds the namespace to `dist/install.yaml`.
+
+There are two deployment entry points using these templates:
+
+- `make deploy IMG=...` renders the installer with Helm and applies it with
+  `kubectl apply`; it does not create a Helm release. Developers need Helm for
+  rendering, while users of the published `install.yaml` only need `kubectl`.
+- `make helm-deploy IMG=...` runs `helm upgrade --install` against the chart.
+  Remove this Helm release with `make helm-undeploy`, retaining the namespace,
+  CRDs, instances, and their workloads.
+
+**YAML cleanup is destructive:** `make undeploy` renders the full installer
+again and deletes it with `kubectl delete`, including the namespace, all three
+CRDs, their instances, and owned workloads. `helm.sh/resource-policy: keep`
+only affects Helm; it does not prevent this deletion. Use the same namespace
+and rendering settings as the YAML installation.
 
 Release and nightly workflows publish OCI charts to Docker Hub repository
 `lmcache/lmcache-operator-chart`, separately from the operator image repository
