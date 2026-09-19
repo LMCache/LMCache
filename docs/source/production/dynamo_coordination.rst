@@ -10,6 +10,9 @@ requests.
 Local
 -----
 
+Start NATS and etcd
+~~~~~~~~~~~~~~~~~~~
+
 If you are deploying Dynamo locally, start NATS and etcd first.
 On the host, run the included Compose file from the root of the LMCache
 repository:
@@ -17,6 +20,9 @@ repository:
 .. code-block:: bash
 
    docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
+
+Start the Dynamo container
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This demo serves ``Qwen/Qwen3-0.6B`` on a single GPU, with 16 GiB of CPU
 memory for LMCache. The ``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2`` image
@@ -39,6 +45,9 @@ Open two more terminals on the host and enter the same container in each:
 .. code-block:: bash
 
    docker exec -it dynamo-lmcache bash
+
+Start LMCache and Dynamo
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 In the three container shells, start one process in each:
 
@@ -67,6 +76,9 @@ In the three container shells, start one process in each:
 The frontend accepts requests on port 8000. The vLLM worker uses
 ``LMCacheMPConnector`` to store and retrieve KV cache through the server
 on port 5555.
+
+Run with a script
+~~~~~~~~~~~~~~~~~
 
 You can also start the whole demo with a `script
 <https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/local/launch_lmcache_mp.sh>`_.
