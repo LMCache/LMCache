@@ -8,8 +8,8 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
-- Helm 3.8+ for chart installation or deploying from source. Installing the release `install.yaml` only needs `kubectl`.
-- [cert-manager](https://cert-manager.io/docs/installation/) installed and ready **before installing the operator**, for its webhook serving certificate
+- Helm 3.8+ for chart installation or deploying from source
+- [cert-manager](https://cert-manager.io/docs/installation/) installed and ready
 - For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
 - (Optional) [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) for ServiceMonitor support
@@ -185,8 +185,7 @@ so you must set it explicitly; leave `injection` unset for connection-only wirin
 Editable sample: [`config/samples/vllm_lmcache_deployment.yaml`](config/samples/vllm_lmcache_deployment.yaml).
 
 > [!IMPORTANT]
-> The webhook needs an in-cluster operator installation (Helm, release YAML, or
-> `make deploy`) and cert-manager. `make run` disables the webhook. With
+> The webhook requires an in-cluster operator; `make run` disables it. With
 > `spec.isolatedIPC: false` the vLLM pod's namespace must additionally be
 > labeled `pod-security.kubernetes.io/enforce=privileged` (the injected
 > hostPath `/dev/shm` mount — and `hostIPC`, if the engine opts in — is
@@ -218,9 +217,7 @@ image ENTRYPOINT — a `sh -c` wrapper is skipped). Editable samples:
 - [`config/samples/vllm_cacheblend_deployment.yaml`](config/samples/vllm_cacheblend_deployment.yaml) — an opted-in vLLM Deployment
 
 > [!IMPORTANT]
-> CacheBlend needs the **webhook** from an in-cluster operator installation
-> (Helm, release YAML, or `make deploy`); `make run` is controller-only.
-> cert-manager is a prerequisite for every operator installation.
+> CacheBlend requires the **webhook**; `make run` disables it.
 > If Pod Security Standards are enforced, label the engine's and the vLLM pod's
 > namespaces `pod-security.kubernetes.io/enforce=privileged` — the webhook injects
 > a hostPath `/dev/shm` mount (or `hostIPC` when the engine opts in), which
@@ -252,16 +249,14 @@ make build-installer IMG=lmcache/lmcache-operator:v0.5.5 # Render dist/install.y
 make package-chart VERSION=v0.5.5                     # Package the Helm chart
 ```
 
-The chart is the deployment template source for both distribution formats. Operator release and nightly workflows push the chart to Docker Hub at `oci://registry-1.docker.io/lmcache/lmcache-operator-chart` and attach `install.yaml` plus `lmcache-operator-chart-<chart-version>.tgz` to GitHub releases. Nightly image versions such as `nightly-2026-09-19` use chart version `0.0.0-nightly.20260919`, while `appVersion` keeps the original image version.
-
-Before publishing, create the Docker Hub repository `lmcache/lmcache-operator-chart` and make it public for anonymous Helm pulls. Both workflows reuse the GitHub variable `DOCKERHUB_USERNAME` and secret `DOCKERHUB_TOKEN` used for image publishing; that credential must also have write access to the chart repository. No additional publishing secret is required.
-
-For local packaging, `CHART_VERSION` defaults to `VERSION` without its leading `v`. Pass an explicit SemVer for compact prerelease or nightly image tags:
+For prerelease or nightly packaging, pass an explicit `CHART_VERSION`:
 
 ```bash
 make package-chart VERSION=v0.4.8rc1 CHART_VERSION=0.4.8-rc.1
 make package-chart VERSION=nightly-2026-09-19 CHART_VERSION=0.0.0-nightly.20260919
 ```
+
+Publishing uses `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, with write access to the public `lmcache/lmcache-operator-chart` Docker Hub repository.
 
 ### End-to-End Tests
 
@@ -381,7 +376,7 @@ kubectl create secret docker-registry regcred \
   -n lmcache-operator-system
 ```
 
-Reference it through chart values and pass the file to `helm upgrade --install`:
+Set `imagePullSecrets` in your values file:
 
 ```yaml
 imagePullSecrets:

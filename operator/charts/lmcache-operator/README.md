@@ -1,11 +1,6 @@
 # LMCache Operator
 
-This chart installs the LMCache Operator.
-
-Install cert-manager and wait for it to be ready before installing this chart.
-cert-manager is an external prerequisite, not a chart dependency.
-
-Install with Helm 3.8 or newer:
+Requires Helm 3.8+ and cert-manager installed and ready.
 
 ```sh
 helm upgrade --install lmcache-operator \
@@ -17,22 +12,4 @@ helm upgrade --install lmcache-operator \
 Use `-f operator-values.yaml` to customize the settings in `values.yaml`.
 The operator watches all namespaces; install only one release per cluster.
 
-For contributors: `make manifests` in `operator/` generates the CRD schemas,
-controller RBAC, and webhook definitions directly from Go markers into `files/`.
-Tests, CRD installation, and Helm all use these files. Do not edit them directly.
-`make lint-chart` lints the chart; `make build-installer` renders the same templates
-as YAML and adds the namespace to `dist/install.yaml`.
-
-There are two deployment entry points using these templates:
-
-- `make deploy IMG=...` renders the installer with Helm and applies it with
-  `kubectl apply`; it does not create a Helm release. Developers need Helm for
-  rendering, while users of the published `install.yaml` only need `kubectl`.
-- `make helm-deploy IMG=...` runs `helm upgrade --install` against the chart.
-
-Release and nightly workflows publish OCI charts to Docker Hub repository
-`lmcache/lmcache-operator-chart`, separately from the operator image repository
-`lmcache/lmcache-operator`. They reuse the GitHub variable `DOCKERHUB_USERNAME`
-and secret `DOCKERHUB_TOKEN`. Before publishing, create the chart repository,
-grant that credential write access, and make the repository public for anonymous
-Helm pulls. No additional publishing secret is required.
+For development and publishing, see the [operator development guide](../../README.md#development).

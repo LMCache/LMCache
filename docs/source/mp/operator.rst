@@ -42,10 +42,8 @@ Prerequisites
 
 - Kubernetes 1.20+
 - ``kubectl`` configured to access your cluster
-- Helm 3.8+ for chart installation or deploying from source. Installing the
-  release ``install.yaml`` only needs ``kubectl``.
-- `cert-manager <https://cert-manager.io/docs/installation/>`_ installed and
-  ready **before installing the operator**, for its webhook serving certificate
+- Helm 3.8+ for chart installation or deploying from source
+- `cert-manager <https://cert-manager.io/docs/installation/>`_ installed and ready
 - NVIDIA GPU Operator on NVIDIA clusters (default). Classic installs
   register RuntimeClass ``nvidia``. CDI+NRI installs often have no
   RuntimeClass objects; see :ref:`mp-operator-nri-cdi` below.
@@ -291,9 +289,7 @@ ignores the extra mount).  It fails open
 Prerequisites
 ~~~~~~~~~~~~~
 
-- **In-cluster operator installation** -- Helm, release YAML, or
-  ``make deploy``, with cert-manager ready first. ``make run`` is
-  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``.
+- **Operator webhook** -- requires an in-cluster operator; ``make run`` disables it.
 - **Pod Security Standards** -- under the default isolated IPC the webhook
   injects only an emptyDir, which the ``baseline`` / ``restricted`` PSS
   profiles allow.  With ``spec.isolatedIPC: false`` the injected hostPath
@@ -1171,10 +1167,7 @@ Additional Prerequisites
 
 Beyond the operator prerequisites above:
 
-- **Deploy with the webhook** -- use Helm, release YAML, or ``make deploy``.
-  ``make run`` is controller-only and disables the webhook via
-  ``ENABLE_WEBHOOKS=false``. cert-manager is required for every operator
-  installation, as described in the prerequisites above.
+- **Operator webhook** -- ``make run`` disables it.
 - **Pod Security Standards** -- the webhook injects a hostPath ``/dev/shm``
   mount (or ``hostIPC``/``privileged`` when the engine opts in), which the
   ``baseline``/``restricted`` profiles reject, so label the engine's and the
@@ -1886,8 +1879,7 @@ If your cluster needs pull credentials:
       --docker-password=<password> \
       -n lmcache-operator-system
 
-Reference the secret in a values file and pass it to
-``helm upgrade --install``:
+Set ``imagePullSecrets`` in your values file:
 
 .. code-block:: yaml
 
