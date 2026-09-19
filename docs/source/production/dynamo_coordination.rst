@@ -51,7 +51,7 @@ In the three container shells, start one process in each:
    # Terminal 2: start the inference frontend.
    python3 -m dynamo.frontend
 
-   # Terminal 3: start the vLLM worker after LMCache is ready.
+   # Terminal 3: once LMCache is ready, start the vLLM worker and connect it to LMCache.
    DYN_SYSTEM_PORT=8081 python3 -m dynamo.vllm \
        --model Qwen/Qwen3-0.6B \
        --enforce-eager \
