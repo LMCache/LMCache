@@ -17,10 +17,12 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
-from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
+from lmcache.v1.multiprocess.custom_types import (
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -521,7 +523,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 model_name,
                 world_size,
                 engine_type,
-                layout_hints,
+                layout_hints or {},
                 list(engine_group_infos),
             )
         )
@@ -576,7 +578,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             model_name,
             world_size,
             EngineType.VLLM,
-            layout_hints,
+            layout_hints or {},
             list(engine_group_infos),
         )
         future.result(timeout=mq_timeout)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the QUERY_PREFETCH_LOOKUP_HITS protocol: enum registration,
-protocol definition, request-transport round-trip, and server handler.
+Tests for the QUERY_PREFETCH_LOOKUP_HITS RPC contract,
+request-transport round-trip, and server handler.
 """
 
 # Standard
@@ -20,14 +20,8 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-    get_payload_classes,
-    get_response_class,
-)
-from lmcache.v1.multiprocess.protocols.base import HandlerType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
@@ -43,29 +37,17 @@ from tests.v1.multiprocess.transport_test_utils import (
 # ============================================================================
 
 
-def test_query_prefetch_lookup_hits_in_request_type():
-    """QUERY_PREFETCH_LOOKUP_HITS should be a member of RequestType."""
-    assert hasattr(RequestType, "QUERY_PREFETCH_LOOKUP_HITS")
-    assert isinstance(RequestType.QUERY_PREFETCH_LOOKUP_HITS, RequestType)
-
-
 def test_query_prefetch_lookup_hits_payload_classes():
     """QUERY_PREFETCH_LOOKUP_HITS payload should be [str]."""
-    payload_classes = get_payload_classes(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+    payload_classes = get_rpc_spec("query_prefetch_lookup_hits").payload_types
     assert len(payload_classes) == 1
     assert payload_classes[0] is str
 
 
 def test_query_prefetch_lookup_hits_response_class():
     """QUERY_PREFETCH_LOOKUP_HITS response should be int | None."""
-    response_class = get_response_class(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+    response_class = get_rpc_spec("query_prefetch_lookup_hits").response_type
     assert response_class == int | None
-
-
-def test_query_prefetch_lookup_hits_handler_type():
-    """QUERY_PREFETCH_LOOKUP_HITS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
-    assert handler_type == HandlerType.BLOCKING
 
 
 # ============================================================================
@@ -80,7 +62,7 @@ class _QueryLookupHitsHandler:
         self.result = result
         self.request_id: str | None = None
 
-    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def query_prefetch_lookup_hits(self, request_id: str) -> int | None:
         """Record the request ID and return the configured result."""
         self.request_id = request_id

@@ -14,8 +14,8 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocols.engine import (
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
