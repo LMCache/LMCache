@@ -105,8 +105,7 @@ a Service, and a ``lmcache-mp-connection`` ConfigMap for the workers.
    :language: yaml
    :caption: lmcache_engine.yaml
 
-``isolatedIPC: false`` lets the server share the host's ``/dev/shm`` with
-workers on the same node, as required by LMCache 0.5.2. Apply the resource:
+Apply the resource:
 
 .. code-block:: bash
 
