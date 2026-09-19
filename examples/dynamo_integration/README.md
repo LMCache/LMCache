@@ -12,7 +12,8 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 
 | Path | What it is |
 |------|------------|
-| [`local/docker-compose.yml`](local/docker-compose.yml) | Defines NATS, etcd, and the Dynamo runtime container. |
+| [`local/docker-compose.yml`](local/docker-compose.yml) | Defines NATS and etcd. |
+| [`local/docker-compose.dynamo.yml`](local/docker-compose.dynamo.yml) | Defines the Dynamo runtime container used by the local scripts. |
 | [`local/nats-server.conf`](local/nats-server.conf) | NATS configuration mounted by Docker Compose. |
 | [`local/agg_lmcache_mp.sh`](local/agg_lmcache_mp.sh) | Local single-node launch script, aggregated (1 GPU). |
 | [`local/disagg_lmcache_mp.sh`](local/disagg_lmcache_mp.sh) | Local single-node launch script, disaggregated (2 GPUs). |

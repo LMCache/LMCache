@@ -5,7 +5,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export DYNAMO_MODE=aggregated
-COMPOSE=(docker compose -f "$SCRIPT_DIR/docker-compose.yml" --profile serving)
+COMPOSE=(docker compose
+  -f "$SCRIPT_DIR/docker-compose.yml"
+  -f "$SCRIPT_DIR/docker-compose.dynamo.yml")
 
 # Stop this demo's services on failure or Ctrl+C as well as normal exit.
 trap '"${COMPOSE[@]}" stop' EXIT

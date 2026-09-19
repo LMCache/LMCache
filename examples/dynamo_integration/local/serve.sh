@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Container entry point used by docker-compose.yml.
+# Container entry point used by docker-compose.dynamo.yml.
 set -euo pipefail
 
 PIDS=()
