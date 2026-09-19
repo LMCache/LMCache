@@ -406,7 +406,7 @@ collection cascade-deletes them when the CR goes away. **No finalizer
 is used.** An earlier design added a `lmcache.ai/cleanup` finalizer
 to mirror that GC behavior, but it was a no-op that only created
 deadlocks when the controller pod was not running (e.g. during
-cluster issues or a single-step `kubectl delete -k config/default`).
+cluster issues or removing the controller alongside the CRDs).
 The reconciler now actively strips that legacy finalizer from any CR
 it sees, so migration from older operator versions is automatic.
 Finalizers will return when we need to clean up state K8s GC cannot
