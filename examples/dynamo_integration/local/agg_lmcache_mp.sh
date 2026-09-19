@@ -30,14 +30,7 @@ trap 'exit 143' TERM
 docker run --rm --init --name "$CONTAINER_NAME" \
   --gpus all --network host --ipc host --ulimit memlock=-1 \
   -v "$SCRIPT_DIR:/opt/dynamo-lmcache:ro" \
-  -e "LMCACHE_L1_SIZE_GB=${LMCACHE_L1_SIZE_GB:-16}" \
-  -e "LMCACHE_PORT=${LMCACHE_PORT:-5555}" \
-  -e "LMCACHE_HTTP_PORT=${LMCACHE_HTTP_PORT:-8080}" \
-  -e "DYN_HTTP_PORT=${DYN_HTTP_PORT:-8000}" \
-  -e "DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081}" \
-  -e "MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}" \
-  -e "MAX_CONCURRENT_SEQS=${MAX_CONCURRENT_SEQS:-2}" \
-  "${DYNAMO_IMAGE:-nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2}" \
+  nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2 \
   bash /opt/dynamo-lmcache/serve.sh aggregated &
 DOCKER_PID=$!
 wait "$DOCKER_PID"

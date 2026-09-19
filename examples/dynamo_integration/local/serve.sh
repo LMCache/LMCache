@@ -55,38 +55,56 @@ unset PROMETHEUS_MULTIPROC_DIR
 wait_for_http NATS http://localhost:8222/healthz
 wait_for_http etcd http://localhost:2379/health
 
-LMCACHE_PORT="${LMCACHE_PORT:-5555}"
-LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
-lmcache server \
-  --l1-size-gb "${LMCACHE_L1_SIZE_GB:-16}" --eviction-policy LRU \
-  --port "$LMCACHE_PORT" --http-port "$LMCACHE_HTTP_PORT" &
+lmcache server --l1-size-gb 16 --eviction-policy LRU \
+  --port 5555 --http-port 8080 &
 PIDS+=("$!")
-wait_for_http LMCache "http://localhost:$LMCACHE_HTTP_PORT/healthcheck"
+wait_for_http LMCache http://localhost:8080/healthcheck
 
 python3 -m dynamo.frontend &
 PIDS+=("$!")
 
-WORKER_ARGS=(
-  --model Qwen/Qwen3-0.6B --enforce-eager
-  --max-model-len "${MAX_MODEL_LEN:-4096}"
-  --max-num-seqs "${MAX_CONCURRENT_SEQS:-2}"
-  --disable-hybrid-kv-cache-manager
-  --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":$LMCACHE_PORT}}"
-)
-
 if [[ "$MODE" == aggregated ]]; then
-  DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" CUDA_VISIBLE_DEVICES=0 \
-    python3 -m dynamo.vllm "${WORKER_ARGS[@]}" &
+  DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --enforce-eager \
+    --max-model-len 4096 \
+    --max-num-seqs 2 \
+    --disable-hybrid-kv-cache-manager \
+    --kv-transfer-config '{
+      "kv_connector": "LMCacheMPConnector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {"lmcache.mp.port": 5555}
+    }' &
   PIDS+=("$!")
 else
   # Run the decode worker on GPU 0.
-  DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" CUDA_VISIBLE_DEVICES=0 \
-    python3 -m dynamo.vllm "${WORKER_ARGS[@]}" --disaggregation-mode decode &
+  DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --enforce-eager \
+    --max-model-len 4096 \
+    --max-num-seqs 2 \
+    --disaggregation-mode decode \
+    --disable-hybrid-kv-cache-manager \
+    --kv-transfer-config '{
+      "kv_connector": "LMCacheMPConnector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {"lmcache.mp.port": 5555}
+    }' &
   PIDS+=("$!")
 
   # Run the prefill worker on GPU 1.
-  DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" CUDA_VISIBLE_DEVICES=1 \
-    python3 -m dynamo.vllm "${WORKER_ARGS[@]}" --disaggregation-mode prefill &
+  DYN_SYSTEM_PORT=8082 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --enforce-eager \
+    --max-model-len 4096 \
+    --max-num-seqs 2 \
+    --disaggregation-mode prefill \
+    --disable-hybrid-kv-cache-manager \
+    --kv-transfer-config '{
+      "kv_connector": "LMCacheMPConnector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {"lmcache.mp.port": 5555}
+    }' &
   PIDS+=("$!")
 fi
 
