@@ -114,7 +114,9 @@ Apply the resource:
 Aggregated serving
 ~~~~~~~~~~~~~~~~~~
 
-``agg_lmcache_mp.yaml`` defines a ``DynamoGraphDeployment`` with a frontend
+`agg_lmcache_mp.yaml
+<https://github.com/cr7258/LMCache/blob/docs/dynamo-integration/examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml>`_
+defines a ``DynamoGraphDeployment`` with a frontend
 and one vLLM worker. The worker serves ``Qwen/Qwen3-0.6B`` on one GPU and
 handles both prefill and decode.
 
@@ -135,7 +137,9 @@ Apply the aggregated deployment:
 Disaggregated serving
 ~~~~~~~~~~~~~~~~~~~~~
 
-``disagg_lmcache_mp.yaml`` starts a frontend and separate prefill and
+`disagg_lmcache_mp.yaml
+<https://github.com/cr7258/LMCache/blob/docs/dynamo-integration/examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml>`_
+starts a frontend and separate prefill and
 decode workers. Use a cluster with one GPU node and at least two GPUs.
 Each worker uses one GPU and connects to the same LMCache server.
 
