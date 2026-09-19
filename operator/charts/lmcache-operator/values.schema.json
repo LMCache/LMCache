@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "replicaCount", "resources", "metrics"],
+  "properties": {
+    "global": {
+      "type": "object",
+      "description": "Global values inherited when this chart is a dependency."
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "replicaCount": {"type": "integer", "minimum": 1},
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {"name": {"type": "string", "minLength": 1}}
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {"type": "object"},
+        "limits": {"type": "object"}
+      }
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "tolerations": {"type": "array", "items": {"type": "object"}},
+    "affinity": {"type": "object"},
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["serviceMonitor"],
+      "properties": {
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "labels", "interval", "tlsConfig"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "labels": {
+              "type": "object",
+              "additionalProperties": {"type": "string"}
+            },
+            "interval": {"type": "string", "minLength": 1},
+            "tlsConfig": {"type": "object"}
+          }
+        }
+      }
+    }
+  }
+}

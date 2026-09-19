@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026.
@@ -31,6 +30,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -110,13 +110,9 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 	}
 
-	By("installing CRDs")
-	_, err := utils.RunMake("install")
-	Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-	By("deploying the controller-manager")
-	_, err = utils.RunMake("deploy", fmt.Sprintf("IMG=%s", managerImage))
-	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+	By("installing the operator Helm release, including its CRDs")
+	_, err := utils.RunMake("deploy", fmt.Sprintf("IMG=%s", managerImage))
+	Expect(err).NotTo(HaveOccurred(), "Failed to install the operator Helm release")
 
 	By("labeling the operator namespace with the restricted Pod Security profile")
 	labelCmd := exec.Command("kubectl", "label", "--overwrite", "ns",
@@ -129,6 +125,7 @@ var _ = BeforeSuite(func() {
 	By("registering custom types in the scheme")
 	Expect(lmcachev1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
 	Expect(monitoringv1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(apiextensionsv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	By("building the typed Kubernetes client")
 	cfg, err := ctrl.GetConfig()

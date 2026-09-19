@@ -77,12 +77,8 @@ var _ = BeforeSuite(func() {
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
-		// Point at the generated manifest FILE, not the config/webhook dir: the
-		// dir also holds the kustomize selectors patch (a partial
-		// MutatingWebhookConfiguration with the same name), which envtest's
-		// path loader would try to install and reject as invalid. The base
-		// manifest has no objectSelector, so the webhook matches every pod —
-		// fine here, since the specs control which pods exist.
+		// The generated base has no opt-in selector (the chart adds it), so
+		// the webhook matches every pod in this controlled test environment.
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
 			Paths: []string{filepath.Join("..", "..", "config", "webhook", "manifests.yaml")},
 		},

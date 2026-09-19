@@ -39,17 +39,18 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract version from tag
+      - name: Validate release version
         id: version
         run: |
           # Strip "operator-" prefix from tag to get version (e.g. operator-v0.4.8rc1 -> v0.4.8rc1).
           VERSION="${GITHUB_REF_NAME#operator-}"
+          CHART_VERSION="$(python3 hack/chart-version.py "${VERSION}")"
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-          # Pre-releases (rc/alpha/beta) get the floating ":latest-rc" tag and must
+          # All prereleases get the floating ":latest-rc" tag and must
           # never move the stable ":latest" image tag or the "operator-latest" alias.
-          # Detect from the version string rather than the GitHub "pre-release" flag
+          # Detect from normalized SemVer rather than the GitHub "pre-release" flag
           # so behavior is robust whether or not that box is ticked in the UI.
-          if [[ "${VERSION}" =~ (rc|alpha|beta) ]]; then
+          if [[ "${CHART_VERSION}" == *-* ]]; then
             echo "FLOATING_TAG=latest-rc" >> "$GITHUB_OUTPUT"
             echo "IS_PRERELEASE=true" >> "$GITHUB_OUTPUT"
           else
@@ -72,16 +73,30 @@ jobs:
         with:
           go-version-file: operator/go.mod
 
-      - name: Build installer manifest
-        run: make build-installer IMG=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+      - name: Setup Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.17.3
 
-      - name: Attach installer to GitHub Release
+      - name: Build installer and Helm chart
+        id: artifacts
+        run: |
+          make package-chart VERSION=${{ steps.version.outputs.VERSION }}
+          chart_packages=(dist/lmcache-operator-*.tgz)
+          test "${#chart_packages[@]}" -eq 1
+          test -f "${chart_packages[0]}"
+          make build-installer CHART="${chart_packages[0]}" IMG=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+          echo "CHART_FILE=$(basename "${chart_packages[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Attach installer and chart to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: operator/dist/install.yaml
+          files: |
+            operator/dist/install.yaml
+            operator/dist/lmcache-operator-*.tgz
 
       - name: Update latest release alias
-        # Skip for pre-releases: an rc/alpha/beta must not repoint the stable
+        # Skip for prereleases: they must not repoint the stable
         # "operator-latest" alias (or its install.yaml) at a pre-release build.
         if: steps.version.outputs.IS_PRERELEASE == 'false'
         uses: softprops/action-gh-release@v2
@@ -94,7 +109,19 @@ jobs:
 
             **Image:** `${{ env.IMAGE_NAME }}:latest`
 
+            Install cert-manager before installing the operator.
+
+            ```bash
+            helm upgrade --install lmcache-operator \
+              https://github.com/${{ github.repository }}/releases/download/operator-latest/${{ steps.artifacts.outputs.CHART_FILE }} \
+              --namespace lmcache-operator-system --create-namespace --wait
+            ```
+
+            Or use the rendered YAML:
+
             ```bash
             kubectl apply -f https://github.com/${{ github.repository }}/releases/download/operator-latest/install.yaml
             ```
-          files: operator/dist/install.yaml
+          files: |
+            operator/dist/install.yaml
+            operator/dist/lmcache-operator-*.tgz

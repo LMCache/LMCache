@@ -1,0 +1,15 @@
+LMCache Operator watches all namespaces. Install only one release per cluster.
+cert-manager must already be installed and ready.
+
+Check the operator:
+  kubectl rollout status deployment/{{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager") }} -n {{ .Release.Namespace }}
+
+Create LMCacheEngine, CacheBlendEngine, or LMCacheCoordinator resources separately.
+Uninstalling this release retains the CRDs and existing instances. Install the
+operator again with release name {{ .Release.Name }} in namespace {{ .Release.Namespace }}
+to reuse those CRDs and resume reconciliation of the instances.
+{{- if .Values.metrics.serviceMonitor.enabled }}
+
+Authorize your Prometheus ServiceAccount to read HTTPS metrics by binding the
+ClusterRole {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "metrics-reader") }}.
+{{- end }}

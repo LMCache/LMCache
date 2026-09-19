@@ -1,0 +1,15 @@
+{{- $manifest := required "generated webhook file is missing; run make manifests before packaging the chart" (.Files.Get "files/webhooks.yaml") | fromYaml -}}
+{{- $_ := set $manifest.metadata "name" (include "lmcache-operator.resourceName" (dict "root" . "suffix" "mutating-webhook-configuration")) -}}
+{{- $_ := set $manifest.metadata "labels" (include "lmcache-operator.labels" . | fromYaml) -}}
+{{- $certificate := include "lmcache-operator.resourceName" (dict "root" . "suffix" "serving-cert") -}}
+{{- $_ := set $manifest.metadata "annotations" (dict "cert-manager.io/inject-ca-from" (printf "%s/%s" .Release.Namespace $certificate)) -}}
+{{- $selectors := dict "mcacheblendpod.lmcache.ai" "lmcache.ai/cacheblend-inject" "mlmcachepod.lmcache.ai" "lmcache.ai/lmcache-inject" -}}
+{{- range $webhook := $manifest.webhooks -}}
+{{- $label := required (printf "no opt-in selector defined for webhook %s" $webhook.name) (get $selectors $webhook.name) -}}
+{{- $_ := set $webhook.clientConfig.service "name" (include "lmcache-operator.resourceName" (dict "root" $ "suffix" "webhook-service")) -}}
+{{- $_ := set $webhook.clientConfig.service "namespace" $.Release.Namespace -}}
+{{- $_ := set $webhook "objectSelector" (dict "matchLabels" (dict $label "true")) -}}
+{{- $excludedNamespaces := list "kube-system" "kube-public" $.Release.Namespace | uniq -}}
+{{- $_ := set $webhook "namespaceSelector" (dict "matchExpressions" (list (dict "key" "kubernetes.io/metadata.name" "operator" "NotIn" "values" $excludedNamespaces))) -}}
+{{- end -}}
+{{ toYaml $manifest }}

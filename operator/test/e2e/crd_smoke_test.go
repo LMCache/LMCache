@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026.
@@ -104,12 +103,12 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 
 		By("validating the DaemonSet pod template shape")
 		ds := &appsv1.DaemonSet{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName(key), ds)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key, ds)).To(Succeed())
 		assertDaemonSetShape(ds, 5555 /* default server port */)
 
 		By("validating the lookup Service shape")
 		svc := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName(key), svc)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key, svc)).To(Succeed())
 		assertLookupServiceShape(svc, 5555)
 
 		By("validating the connection ConfigMap matches the documented contract")
@@ -140,7 +139,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 
 		By("validating the DaemonSet pod template")
 		ds := &appsv1.DaemonSet{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName(key), ds)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key, ds)).To(Succeed())
 		assertDaemonSetShape(ds, 6555 /* spec.server.port */)
 
 		args := containerArgs(ds)
@@ -149,7 +148,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 
 		By("validating the lookup Service uses the custom port")
 		svc := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName(key), svc)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key, svc)).To(Succeed())
 		assertLookupServiceShape(svc, 6555)
 
 		By("validating the ConfigMap reflects the custom port")
@@ -159,13 +158,9 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 	})
 })
 
-// assertDaemonSetShape verifies the operator's auto-injected pod-level
-// settings: the /dev/shm hostPath mount for CUDA IPC (hostIPC is opt-in via
-// spec.hostIPC and defaults to false), runtimeClassName=nvidia, a container
-// security context that is non-privileged by default (privileged is opt-in via
-// spec.privileged), --host 0.0.0.0 always present in container args, and the
-// absence of any emptyDir /dev/shm volume that would shadow the host's
-// /dev/shm and break CUDA IPC.
+// assertDaemonSetShape verifies the default NVIDIA isolated-IPC contract:
+// driver-level CUDA IPC without host IPC or shared host /dev/shm, GPU visibility
+// through the nvidia runtime, and a non-privileged container on the requested port.
 func assertDaemonSetShape(ds *appsv1.DaemonSet, expectedServerPort int32) {
 	GinkgoHelper()
 	pod := ds.Spec.Template.Spec
@@ -180,30 +175,15 @@ func assertDaemonSetShape(ds *appsv1.DaemonSet, expectedServerPort int32) {
 	Expect(*c.SecurityContext.Privileged).To(BeFalse(),
 		"container.privileged must default to false (opt-in via spec.privileged)")
 	Expect(c.Args).To(ContainElements("--host", "0.0.0.0"))
+	Expect(c.Args).To(ContainElement("--isolated-ipc"))
 	Expect(argValue(c.Args, "--port")).To(Equal(fmt.Sprintf("%d", expectedServerPort)))
 
-	// The host's /dev/shm is shared into the container via a hostPath mount —
-	// that (not the IPC namespace) is what cudaIpcOpenMemHandle between the
-	// LMCache and vLLM pods needs. An emptyDir there would shadow
-	// the host tmpfs and break CUDA IPC.
-	var shmMount *corev1.VolumeMount
-	for i, vm := range c.VolumeMounts {
-		if vm.MountPath == "/dev/shm" {
-			shmMount = &c.VolumeMounts[i]
+	for _, volume := range pod.Volumes {
+		if volume.HostPath != nil {
+			Expect(volume.HostPath.Path).NotTo(Equal("/dev/shm"),
+				"isolated IPC must not expose the host's shared memory")
 		}
 	}
-	Expect(shmMount).NotTo(BeNil(), "missing /dev/shm volume mount on lmcache container")
-	var shmVol *corev1.Volume
-	for i, v := range pod.Volumes {
-		Expect(v.EmptyDir).To(BeNil(),
-			"unexpected emptyDir volume %q — an emptyDir at /dev/shm shadows the host tmpfs", v.Name)
-		if v.Name == shmMount.Name {
-			shmVol = &pod.Volumes[i]
-		}
-	}
-	Expect(shmVol).NotTo(BeNil(), "no volume backs the /dev/shm mount")
-	Expect(shmVol.HostPath).NotTo(BeNil(), "/dev/shm volume must be a hostPath")
-	Expect(shmVol.HostPath.Path).To(Equal("/dev/shm"))
 }
 
 // assertLookupServiceShape checks the node-local discovery Service has

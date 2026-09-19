@@ -42,6 +42,10 @@ Prerequisites
 
 - Kubernetes 1.20+
 - ``kubectl`` configured to access your cluster
+- Helm 3 for chart installation; Helm 3.17+ for adopting an existing YAML
+  installation
+- `cert-manager <https://cert-manager.io/docs/installation/>`_ installed and
+  ready **before installing the operator**, for its webhook serving certificate
 - NVIDIA GPU Operator on NVIDIA clusters (default). Classic installs
   register RuntimeClass ``nvidia``. CDI+NRI installs often have no
   RuntimeClass objects; see :ref:`mp-operator-nri-cdi` below.
@@ -51,7 +55,37 @@ Prerequisites
 Installing the Operator
 -----------------------
 
-**Option A: One-line install from release (recommended)**
+**Option A: Helm chart from an Operator release (recommended)**
+
+Operator releases attach a Helm chart archive alongside ``install.yaml``.
+For example, Operator ``v0.5.5`` uses chart ``0.5.5``:
+
+.. code-block:: bash
+
+    helm upgrade --install lmcache-operator \
+      "./lmcache-operator-<chart-version>.tgz" \
+      --namespace lmcache-operator-system --create-namespace --wait
+
+The chart installs the operator, its three CRDs (``LMCacheEngine``,
+``CacheBlendEngine``, and ``LMCacheCoordinator``), RBAC, webhook, and
+certificate resources. Create the engine and coordinator custom resources
+separately. The chart does not deploy cache workloads itself.
+
+``--create-namespace`` creates the operator namespace without making it part
+of the Helm release. The default release name preserves the existing
+``lmcache-operator-*`` object names. The chart's ``values.yaml`` configures
+the operator image, resources, scheduling, and optional ServiceMonitor;
+cache server settings belong in the engine custom resources.
+
+If you enable ``metrics.serviceMonitor.enabled``, bind the
+``<release>-metrics-reader`` ClusterRole to your Prometheus ServiceAccount
+to authorize scraping the operator's HTTPS metrics. Configure Prometheus
+to discover the ServiceMonitor's namespace and labels as well.
+
+**Option B: Rendered YAML from a release**
+
+The same chart produces ``install.yaml``, including the namespace.
+cert-manager must also be installed before using this option:
 
 .. code-block:: bash
 
@@ -61,14 +95,69 @@ Installing the Operator
     # Or nightly build from the dev branch
     kubectl apply -f https://github.com/LMCache/LMCache/releases/download/operator-nightly-latest/install.yaml
 
-**Option B: Build from source**
+**Option C: Build from source**
 
 .. code-block:: bash
 
     cd operator
-    make build
-    make install
+    make docker-build docker-push IMG=<your-registry>/lmcache-operator:latest
     make deploy IMG=<your-registry>/lmcache-operator:latest
+
+``make deploy`` uses ``helm upgrade --install`` with the chart under
+``operator/charts/lmcache-operator``.
+
+Upgrading and Uninstalling
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For a Helm upgrade, repeat the installation command with the new chart
+archive and your values file (``-f operator-values.yaml``, if used). Helm
+updates the CRD schemas as part of the release. Review the Operator release
+notes before upgrading: schema and reconciliation changes can affect
+existing engines.
+
+To remove the operator:
+
+.. code-block:: bash
+
+    helm uninstall lmcache-operator --namespace lmcache-operator-system
+    # From the source tree, the equivalent is: make undeploy
+
+The CRDs carry ``helm.sh/resource-policy: keep``. Uninstall therefore retains
+the three CRDs, their custom resources, and the cache workloads they own.
+The namespace also remains. Reconciliation and admission injection stop
+until the operator is installed again.
+
+``make uninstall`` is a separate, destructive CRD cleanup: it deletes all
+instances of these custom resources across the cluster and can remove their
+owned workloads. Use it only when removing the caches themselves.
+
+Migrating an Existing YAML Installation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Helm does **not** automatically adopt a ``kubectl apply`` installation.
+Use the same release name and namespace and review the rendered resource
+diff first:
+
+.. code-block:: bash
+
+    # From the repository root, using the chart version you intend to install.
+    helm template lmcache-operator operator/charts/lmcache-operator \
+      --namespace lmcache-operator-system > /tmp/lmcache-operator-helm.yaml
+    kubectl diff -f /tmp/lmcache-operator-helm.yaml
+
+After confirming these objects belong to this operator installation,
+explicitly transfer ownership with Helm 3.17+:
+
+.. code-block:: bash
+
+    helm upgrade --install lmcache-operator operator/charts/lmcache-operator \
+      --namespace lmcache-operator-system --create-namespace \
+      --take-ownership --wait
+
+If you customize values, pass the same values file to both commands. Do not
+delete the old ``install.yaml`` resources to migrate: that deletes the CRDs
+and namespace, including workloads you intend to retain. After adoption,
+manage the operator through Helm instead of applying the old installer.
 
 Deploying an LMCacheEngine
 ---------------------------
@@ -278,10 +367,9 @@ ignores the extra mount).  It fails open
 Prerequisites
 ~~~~~~~~~~~~~
 
-- **cert-manager** + ``make deploy`` (not ``make run``, which is
-  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``) --
-  same as the CacheBlend webhook; install once per cluster (see
-  :ref:`mp-operator-cacheblend` "Additional Prerequisites").
+- **In-cluster operator installation** -- Helm, release YAML, or
+  ``make deploy``, with cert-manager ready first. ``make run`` is
+  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``.
 - **Pod Security Standards** -- under the default isolated IPC the webhook
   injects only an emptyDir, which the ``baseline`` / ``restricted`` PSS
   profiles allow.  With ``spec.isolatedIPC: false`` the injected hostPath
@@ -1159,16 +1247,10 @@ Additional Prerequisites
 
 Beyond the operator prerequisites above:
 
-- **cert-manager** -- the webhook's serving certificate is issued by a
-  cert-manager ``Issuer`` + ``Certificate``.  Install it before ``make deploy``:
-
-  .. code-block:: bash
-
-      kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-      kubectl -n cert-manager wait --for=condition=Available deploy --all --timeout=180s
-
-- **Deploy with the webhook** -- use ``make deploy`` (not ``make run``, which is
-  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``).
+- **Deploy with the webhook** -- use Helm, release YAML, or ``make deploy``.
+  ``make run`` is controller-only and disables the webhook via
+  ``ENABLE_WEBHOOKS=false``. cert-manager is required for every operator
+  installation, as described in the prerequisites above.
 - **Pod Security Standards** -- the webhook injects a hostPath ``/dev/shm``
   mount (or ``hostIPC``/``privileged`` when the engine opts in), which the
   ``baseline``/``restricted`` profiles reject, so label the engine's and the
@@ -1859,6 +1941,20 @@ Development
     make test         # Run unit tests
     make lint         # Run golangci-lint
 
+The Helm chart is the deployment template source for both release formats:
+
+.. code-block:: bash
+
+    make build-installer IMG=lmcache/lmcache-operator:v0.5.5
+    make package-chart VERSION=v0.5.5
+
+These commands create ``dist/install.yaml`` and
+``dist/lmcache-operator-0.5.5.tgz``. The release workflows attach both to
+GitHub releases; there is no Helm repository index or OCI chart registry.
+Chart versions normalize Operator versions to SemVer: ``v0.4.8rc1`` becomes
+``0.4.8-rc.1`` and ``nightly-2026-09-19`` becomes
+``0.0.0-nightly.20260919``. ``appVersion`` keeps the original image version.
+
 Pushing a custom operator image:
 
 .. code-block:: bash
@@ -1879,3 +1975,11 @@ If your cluster needs pull credentials:
       --docker-username=<username> \
       --docker-password=<password> \
       -n lmcache-operator-system
+
+Reference the secret in a values file and pass it to
+``helm upgrade --install``:
+
+.. code-block:: yaml
+
+    imagePullSecrets:
+      - name: regcred

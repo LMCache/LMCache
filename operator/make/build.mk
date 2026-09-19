@@ -37,7 +37,23 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: manifests helm ## Render the chart as a standalone YAML installer.
 	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	@$(helm-image-args) \
+	"$(HELM)" template "$(RELEASE)" "$(CHART)" --namespace "$(NAMESPACE)" \
+		--set-string "image.repository=$${image%:*}" --set-string "image.tag=$${image##*:}" $(HELM_EXTRA_ARGS) > dist/operator.yaml
+	@printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n' "$(NAMESPACE)" > dist/install.yaml
+	@cat dist/operator.yaml >> dist/install.yaml
+	@rm dist/operator.yaml
+
+VERSION ?= v0.5.5
+.PHONY: package-chart
+package-chart: manifests helm ## Package the chart for an Operator VERSION (stable, rc, or nightly).
+	@chart_version="$$(python3 hack/chart-version.py "$(VERSION)")"; \
+	"$(HELM)" package "$(CHART)" --destination dist --version "$$chart_version" --app-version "$(VERSION)"
+
+.PHONY: test-chart
+test-chart: manifests helm ## Lint the chart and test its rendered deployment contract.
+	"$(HELM)" lint "$(CHART)" --strict
+	HELM="$(HELM)" go test ./test/chart -v
+	python3 -m unittest discover -s hack -p 'test_chart_version.py'

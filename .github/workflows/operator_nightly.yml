@@ -59,8 +59,20 @@ jobs:
         with:
           go-version-file: operator/go.mod
 
-      - name: Build installer manifest
-        run: make build-installer IMG=${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
+      - name: Setup Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.17.3
+
+      - name: Build installer and Helm chart
+        id: artifacts
+        run: |
+          make package-chart VERSION=${{ steps.tag.outputs.TAG }}
+          chart_packages=(dist/lmcache-operator-*.tgz)
+          test "${#chart_packages[@]}" -eq 1
+          test -f "${chart_packages[0]}"
+          make build-installer CHART="${chart_packages[0]}" IMG=${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
+          echo "CHART_FILE=$(basename "${chart_packages[0]}")" >> "$GITHUB_OUTPUT"
 
       - name: Update nightly release
         uses: softprops/action-gh-release@v2
@@ -74,7 +86,19 @@ jobs:
 
             **Image:** `${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}`
 
+            Install cert-manager before installing the operator.
+
+            ```bash
+            helm upgrade --install lmcache-operator \
+              https://github.com/${{ github.repository }}/releases/download/operator-nightly-latest/${{ steps.artifacts.outputs.CHART_FILE }} \
+              --namespace lmcache-operator-system --create-namespace --wait
+            ```
+
+            Or use the rendered YAML:
+
             ```bash
             kubectl apply -f https://github.com/${{ github.repository }}/releases/download/operator-nightly-latest/install.yaml
             ```
-          files: operator/dist/install.yaml
+          files: |
+            operator/dist/install.yaml
+            operator/dist/lmcache-operator-*.tgz

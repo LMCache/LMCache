@@ -1,0 +1,117 @@
+{{- $role := required "generated role file is missing; run make manifests before packaging the chart" (.Files.Get "files/role.yaml") | fromYaml -}}
+{{- $_ := set $role.metadata "name" (include "lmcache-operator.resourceName" (dict "root" . "suffix" "manager-role")) -}}
+{{- $_ := set $role.metadata "labels" (include "lmcache-operator.labels" . | fromYaml) -}}
+{{ toYaml $role }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "manager-rolebinding") }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "manager-role") }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager") }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "leader-election-role") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "leader-election-rolebinding") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "leader-election-role") }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager") }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "metrics-auth-role") }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "metrics-auth-rolebinding") }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "metrics-auth-role") }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager") }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "metrics-reader") }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: [/metrics]
+    verbs: [get]
+{{ range $name, $verbs := dict "admin" (list "*") "editor" (list "create" "delete" "get" "list" "patch" "update" "watch") "viewer" (list "get" "list" "watch") }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" $ "suffix" (printf "lmcacheengine-%s-role" $name)) }}
+  labels:
+    {{- include "lmcache-operator.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [lmcache.lmcache.ai]
+    resources: [lmcacheengines]
+    verbs:
+      {{- toYaml $verbs | nindent 6 }}
+  - apiGroups: [lmcache.lmcache.ai]
+    resources: [lmcacheengines/status]
+    verbs: [get]
+{{ end -}}
