@@ -21,7 +21,7 @@ Two kinds of objects live in the manager:
 | owner | the key | `(key, tag)` -- one per writer tag |
 | created by | admission of a staging object | `reserve_write` of a key that is not resident |
 | readers | `reserve_read` / `unsafe_read` / `finish_read` | invisible (`KEY_NOT_EXIST`) |
-| writers | `reserve_write(mode="update" / "all")` write-locks it in place | another tag may stage the same key |
+| writers | `reserve_write` refuses it (`KEY_NOT_WRITABLE`) | another tag may stage the same key |
 | ends | `delete`, eviction, temporary object read out | admission, `finish_write_and_delete`, reclaim after write-lock expiry |
 
 **Tag.** A plain `str` naming the writer (a transaction): the prefetch
@@ -32,8 +32,8 @@ default is `""`. Writers sharing a tag exclude each other on a key
 writers with different tags never block each other.
 
 **Admission.** `finish_write`, `finish_write_and_reserve_read` and
-`finish_write_and_delete` take the tag used at reservation. They look up
-`(key, tag)` in the staging table first:
+`finish_write_and_delete` take the tag used at reservation and act on the
+staging object `(key, tag)`:
 
 - key not resident: the staging object *becomes* the resident object (tag
   dropped). `finish_write_and_reserve_read` read-locks it in the same
@@ -44,10 +44,6 @@ writers with different tags never block each other.
   resident object and returns *that* `MemoryObj`, so the caller always ends
   up holding what readers see.
 - `finish_write_and_delete` never admits; it frees the staging object.
-
-If `(key, tag)` is not staged, the call falls back to the in-place path (the
-resident object must be exclusively write-locked), so `mode="update"` writes
-finish exactly as before.
 
 **Expiry and eviction.** A staging object keeps its write TTL lock. Once the
 lock expires the reservation is abandoned:
@@ -93,7 +89,7 @@ prefetch planning (how much L1 is committed to loads that have not landed).
 ## Residual race
 
 A prefetch request still aborts its L2 load when a key becomes resident
-between its L1 lock pass and its `reserve_write(mode="new")`
+between its L1 lock pass and its `reserve_write`
 (`KEY_NOT_WRITABLE`, reported as `L2_PREFETCH_FAILED{reason="l1_contended"}`).
 That window is the L2 lookup latency, not the L2 load time as before; see
 `storage_controllers/prefetch_l1_lock_pass.md`.

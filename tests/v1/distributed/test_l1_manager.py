@@ -8,8 +8,7 @@ interface docstrings. The tests focus on:
 1. reserve_read() - Reserve read access for given keys
    - Returns KEY_NOT_EXIST if key does not exist (a key that is only being
      written -- a staging object -- counts as not existing)
-   - Returns KEY_NOT_READABLE if key exists but is write-locked in place
-   - Returns SUCCESS and MemoryObj if key is readable
+   - Returns SUCCESS and MemoryObj if key is resident
 
 2. unsafe_read() - Unsafe read without acquiring new read locks
    - Returns KEY_NOT_EXIST if key does not exist
@@ -18,22 +17,22 @@ interface docstrings. The tests focus on:
 
 3. finish_read() - Finish read access for given keys
    - Returns KEY_NOT_EXIST if key does not exist
-   - Returns KEY_IN_WRONG_STATE if key is write-locked or non-read-locked
+   - Returns KEY_IN_WRONG_STATE if key is not read-locked
    - Returns SUCCESS on successful unlock
    - Deletes temporary objects when read count reaches zero
 
-4. reserve_write() - Reserve write access for given keys
-   - Returns KEY_NOT_WRITABLE if key exists but cannot be written, or the
-     same tag already stages the key
+4. reserve_write() - Reserve a staging object per key
+   - Returns KEY_NOT_WRITABLE if the key is already resident, or the same
+     tag already stages the key
    - Returns OUT_OF_MEMORY if allocation fails
-   - Returns SUCCESS and MemoryObj on success; a non-resident key becomes a
-     staging object owned by the tag, invisible until admitted
+   - Returns SUCCESS and MemoryObj on success; the staging object is owned
+     by the tag and invisible until admitted
 
-5. finish_write() - Finish write access for given keys
-   - Returns KEY_NOT_EXIST if key does not exist
-   - Returns KEY_IN_WRONG_STATE if not write-locked or read-locked
-   - Returns SUCCESS on admission (or on discard, if the key already became
-     resident) and on in-place unlock
+5. finish_write() - Admit the staging objects of the given keys
+   - Returns KEY_NOT_EXIST if the tag stages nothing for the key
+   - Returns KEY_IN_WRONG_STATE if the reservation expired
+   - Returns SUCCESS on admission, or on discard if the key already became
+     resident
 
 6. delete() - Delete keys from L1 cache
    - Returns KEY_NOT_EXIST if key does not exist
@@ -178,8 +177,7 @@ class TestReserveRead:
     Tests for L1Manager.reserve_read() method.
 
     Per the docstring:
-    - KEY_NOT_EXIST: The key does not exist.
-    - KEY_NOT_READABLE: The key exists but is not readable.
+    - KEY_NOT_EXIST: The key does not exist (staging objects are invisible).
     - Returns (L1Error, Optional[MemoryObj]) for each key.
     """
 
@@ -221,25 +219,6 @@ class TestReserveRead:
         assert read_result[key][1] is write_result[key][1]
 
         manager.finish_read([key])
-        manager.close()
-
-    def test_reserve_read_in_place_write_locked_key_returns_key_not_readable(
-        self, basic_l1_config, basic_layout
-    ):
-        """A resident key write-locked in place (mode="update") is not readable."""
-        manager = L1Manager(basic_l1_config)
-        key = make_object_key(12345)
-
-        manager.reserve_write([key], [False], basic_layout)
-        manager.finish_write([key])
-        update = manager.reserve_write([key], [False], basic_layout, mode="update")
-        assert update[key][0] == L1Error.SUCCESS
-
-        read_result = manager.reserve_read([key])
-
-        assert read_result[key] == (L1Error.KEY_NOT_READABLE, None)
-
-        manager.finish_write([key])
         manager.close()
 
     def test_reserve_read_ready_key_returns_success(
@@ -316,9 +295,7 @@ class TestReserveRead:
         # Verify using get_object_state that read lock is held
         state = manager.get_object_state(key)
         assert state is not None
-        # Check via available_for_read (should still be true since
-        # read-locked is readable)
-        assert state.available_for_read() is True
+        assert state.read_lock.is_locked()
 
         manager.close()
 
@@ -592,7 +569,7 @@ class TestFinishRead:
 
     Per the docstring:
     - KEY_NOT_EXIST: The key does not exist.
-    - KEY_IN_WRONG_STATE: The key is write-locked or non-read-locked.
+    - KEY_IN_WRONG_STATE: The key is not read-locked.
     - Will delete the object if it is temporary and read count reaches zero.
     """
 
@@ -659,25 +636,6 @@ class TestFinishRead:
 
         assert result[key] == L1Error.KEY_NOT_EXIST
 
-        manager.close()
-
-    def test_finish_read_in_place_write_locked_returns_wrong_state(
-        self, basic_l1_config, basic_layout
-    ):
-        """Test that finish_read returns KEY_IN_WRONG_STATE if write-locked."""
-        manager = L1Manager(basic_l1_config)
-        key = make_object_key(12345)
-
-        # Resident object write-locked in place
-        manager.reserve_write([key], [False], basic_layout)
-        manager.finish_write([key])
-        manager.reserve_write([key], [False], basic_layout, mode="update")
-
-        result = manager.finish_read([key])
-
-        assert result[key] == L1Error.KEY_IN_WRONG_STATE
-
-        manager.finish_write([key])
         manager.close()
 
     def test_finish_read_temporary_object_deleted_when_count_zero(
@@ -836,7 +794,7 @@ class TestReserveWrite:
     Tests for L1Manager.reserve_write() method.
 
     Per the docstring:
-    - KEY_NOT_WRITABLE: The key exists but is not writable.
+    - KEY_NOT_WRITABLE: The key is resident, or the tag already stages it.
     - OUT_OF_MEMORY: Not enough memory to allocate for the object.
     - Returns (L1Error, Optional[MemoryObj]) for each key.
     """
@@ -856,10 +814,10 @@ class TestReserveWrite:
 
         manager.close()
 
-    def test_reserve_write_write_locked_key_returns_not_writable(
+    def test_reserve_write_staged_key_returns_not_writable(
         self, basic_l1_config, basic_layout
     ):
-        """Test that reserve_write returns KEY_NOT_WRITABLE for write-locked keys."""
+        """Test that reserve_write refuses a key the same tag already stages."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -878,7 +836,7 @@ class TestReserveWrite:
     def test_reserve_write_read_locked_key_returns_not_writable(
         self, basic_l1_config, basic_layout
     ):
-        """Test that reserve_write returns KEY_NOT_WRITABLE for read-locked keys."""
+        """Test that reserve_write refuses a resident (here read-locked) key."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -900,7 +858,7 @@ class TestReserveWrite:
     def test_reserve_write_temporary_key_returns_not_writable(
         self, basic_l1_config, basic_layout
     ):
-        """Test that reserve_write returns KEY_NOT_WRITABLE for temporary objects."""
+        """Test that reserve_write refuses a resident temporary object."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -947,13 +905,13 @@ class TestReserveWrite:
 
         manager.close()
 
-    def test_reserve_write_new_mode(self, basic_l1_config, basic_layout):
-        """Test that reserve_write returns KEY_NOT_WRITABLE for existing keys."""
+    def test_reserve_write_resident_keys(self, basic_l1_config, basic_layout):
+        """Test that reserve_write returns KEY_NOT_WRITABLE for resident keys."""
         manager = L1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(5)]
         is_temporary = [False] * 5
 
-        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="new")
+        result = manager.reserve_write(keys, is_temporary, basic_layout)
 
         for key in keys:
             assert result[key][0] == L1Error.SUCCESS
@@ -964,46 +922,11 @@ class TestReserveWrite:
         for key in keys:
             assert result[key] == L1Error.SUCCESS
 
-        # Now try to reserve write again with mode="new"
-        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="new")
+        # Now try to reserve write again: the keys are resident
+        result = manager.reserve_write(keys, is_temporary, basic_layout)
         for key in keys:
             assert result[key][0] == L1Error.KEY_NOT_WRITABLE
             assert result[key][1] is None
-
-        manager.close()
-
-    def test_reserve_write_update_mode(self, basic_l1_config, basic_layout):
-        """Test that reserve_write returns KEY_NOT_WRITABLE for new keys."""
-        manager = L1Manager(basic_l1_config)
-        keys = [make_object_key(i) for i in range(5)]
-        is_temporary = [False] * 5
-
-        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="update")
-        for key in keys:
-            assert result[key][0] == L1Error.KEY_NOT_WRITABLE
-            assert result[key][1] is None
-
-        # Cannot finish write in update mode because keys not exist
-        result = manager.finish_write(keys)
-        for key in keys:
-            assert result[key] == L1Error.KEY_NOT_EXIST
-
-        # Now try to reserve write again with mode="new"
-        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="new")
-        for key in keys:
-            assert result[key][0] == L1Error.SUCCESS
-            assert result[key][1] is not None
-
-        # Commit the write
-        result = manager.finish_write(keys)
-        for key in keys:
-            assert result[key] == L1Error.SUCCESS
-
-        # Now try to reserve write again with mode="update"
-        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="update")
-        for key in keys:
-            assert result[key][0] == L1Error.SUCCESS
-            assert result[key][1] is not None
 
         manager.close()
 
@@ -1018,8 +941,8 @@ class TestFinishWrite:
     Tests for L1Manager.finish_write() method.
 
     Per the docstring:
-    - KEY_NOT_EXIST: The key does not exist.
-    - KEY_IN_WRONG_STATE: The key is not write-locked, or it's read-locked.
+    - KEY_NOT_EXIST: The tag stages nothing for the key.
+    - KEY_IN_WRONG_STATE: The reservation expired.
     """
 
     def test_finish_write_non_existing_key_returns_key_not_exist(
@@ -1049,29 +972,29 @@ class TestFinishWrite:
 
         assert result[key] == L1Error.SUCCESS
 
-        # Verify object is now ready (not write-locked)
+        # Verify object is now ready (resident, unlocked)
         state = manager.get_object_state(key)
         assert state is not None
-        assert state.available_for_read() is True
-        assert state.available_for_write() is True
+        assert not state.write_lock.is_locked()
+        assert not state.read_lock.is_locked()
 
         manager.close()
 
-    def test_finish_write_non_write_locked_returns_wrong_state(
+    def test_finish_write_twice_returns_key_not_exist(
         self, basic_l1_config, basic_layout
     ):
-        """Test that finish_write returns KEY_IN_WRONG_STATE if not write-locked."""
+        """After admission the tag stages nothing for the key any more."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
-        # Create ready object (not write-locked)
+        # Create ready object (admitted)
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
         # Try to finish write again
         result = manager.finish_write([key])
 
-        assert result[key] == L1Error.KEY_IN_WRONG_STATE
+        assert result[key] == L1Error.KEY_NOT_EXIST
 
         manager.close()
 
@@ -1089,9 +1012,9 @@ class TestFinishWriteAndReserveRead:
     preventing a race window where eviction could interfere.
 
     Per the docstring:
-    - KEY_NOT_EXIST: The key does not exist.
-    - KEY_IN_WRONG_STATE: Not write-locked, or already read-locked.
-    - SUCCESS: Write unlocked and read lock acquired atomically.
+    - KEY_NOT_EXIST: The tag stages nothing for the key.
+    - KEY_IN_WRONG_STATE: The reservation expired.
+    - SUCCESS: Admitted and read lock acquired atomically.
     """
 
     def test_normal_transition(self, basic_l1_config, basic_layout):
@@ -1111,16 +1034,11 @@ class TestFinishWriteAndReserveRead:
         assert error == L1Error.SUCCESS
         assert mem_obj is not None
 
-        # Verify state: write unlocked, read locked
+        # Verify state: resident, write unlocked, read locked
         state = manager.get_object_state(key)
         assert state is not None
         assert not state.write_lock.is_locked()
         assert state.read_lock.is_locked()
-
-        # Should be readable (not write-locked)
-        assert state.available_for_read() is True
-        # Should not be writable (read-locked)
-        assert state.available_for_write() is False
 
         # Clean up read lock
         manager.finish_read([key])
@@ -1140,12 +1058,12 @@ class TestFinishWriteAndReserveRead:
 
         manager.close()
 
-    def test_not_write_locked(self, basic_l1_config, basic_layout):
-        """Test that non-write-locked key returns KEY_IN_WRONG_STATE."""
+    def test_already_admitted(self, basic_l1_config, basic_layout):
+        """Test that an already admitted key returns KEY_NOT_EXIST."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
-        # Create ready object (not write-locked)
+        # Create ready object (admitted, nothing staged any more)
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
@@ -1153,40 +1071,9 @@ class TestFinishWriteAndReserveRead:
 
         assert key in result
         error, mem_obj = result[key]
-        assert error == L1Error.KEY_IN_WRONG_STATE
+        assert error == L1Error.KEY_NOT_EXIST
         assert mem_obj is None
 
-        manager.close()
-
-    def test_already_read_locked(self, basic_l1_config, basic_layout):
-        """Test that key with both write+read locks returns KEY_IN_WRONG_STATE.
-
-        This is an unexpected state — normally a key shouldn't be both
-        write-locked and read-locked simultaneously.
-        """
-        manager = L1Manager(basic_l1_config)
-        key = make_object_key(12345)
-
-        # Resident object write-locked in place (only resident objects can
-        # carry both locks; staging objects have no readers).
-        manager.reserve_write([key], [False], basic_layout)
-        manager.finish_write([key])
-        manager.reserve_write([key], [False], basic_layout, mode="update")
-
-        # Force a read lock via internal state (unusual state)
-        state = manager.get_object_state(key)
-        assert state is not None
-        state.read_lock.lock()
-
-        result = manager.finish_write_and_reserve_read([key])
-
-        assert key in result
-        error, mem_obj = result[key]
-        assert error == L1Error.KEY_IN_WRONG_STATE
-        assert mem_obj is None
-
-        # Clean up
-        state.read_lock.unlock()
         manager.close()
 
     def test_multiple_keys_mixed_results(self, basic_l1_config, basic_layout):
@@ -1196,10 +1083,10 @@ class TestFinishWriteAndReserveRead:
         key2 = make_object_key(2)  # will not exist
         key3 = make_object_key(3)
 
-        # key1: write-locked (should succeed)
+        # key1: staged (should succeed)
         manager.reserve_write([key1], [False], basic_layout)
 
-        # key3: ready, not write-locked (should fail)
+        # key3: ready, nothing staged (should fail)
         manager.reserve_write([key3], [False], basic_layout)
         manager.finish_write([key3])
 
@@ -1213,8 +1100,8 @@ class TestFinishWriteAndReserveRead:
         assert result[key2][0] == L1Error.KEY_NOT_EXIST
         assert result[key2][1] is None
 
-        # key3: KEY_IN_WRONG_STATE (not write-locked)
-        assert result[key3][0] == L1Error.KEY_IN_WRONG_STATE
+        # key3: KEY_NOT_EXIST (already admitted)
+        assert result[key3][0] == L1Error.KEY_NOT_EXIST
         assert result[key3][1] is None
 
         # Clean up
@@ -1248,8 +1135,8 @@ class TestFinishWriteAndReserveRead:
 class TestFinishWriteAndDelete:
     """Tests for L1Manager.finish_write_and_delete()."""
 
-    def test_deletes_write_locked_keys_only(self, basic_l1_config, basic_layout):
-        """Write-locked keys are deleted; other states error out intact."""
+    def test_discards_staged_keys_only(self, basic_l1_config, basic_layout):
+        """Staged keys are discarded; other states error out intact."""
         manager = L1Manager(basic_l1_config)
         locked_key = make_object_key(1)
         ready_key = make_object_key(2)
@@ -1262,7 +1149,7 @@ class TestFinishWriteAndDelete:
 
         assert result[locked_key] == L1Error.SUCCESS
         assert manager.get_object_state(locked_key) is None
-        assert result[ready_key] == L1Error.KEY_IN_WRONG_STATE
+        assert result[ready_key] == L1Error.KEY_NOT_EXIST
         assert manager.get_object_state(ready_key) is not None
         assert result[missing_key] == L1Error.KEY_NOT_EXIST
 
@@ -1457,9 +1344,8 @@ class TestGetObjectState:
         state = manager.get_object_state(key)
 
         assert state is not None
-        # Verify we can use the state's methods
-        assert state.available_for_read() is True
-        assert state.available_for_write() is True
+        assert not state.read_lock.is_locked()
+        assert state.memory_obj.is_valid()
 
         manager.close()
 
@@ -1475,26 +1361,6 @@ class TestGetObjectState:
 
         manager.close()
 
-    def test_get_object_state_in_place_write_locked(
-        self, basic_l1_config, basic_layout
-    ):
-        """Test get_object_state for objects write-locked in place."""
-        manager = L1Manager(basic_l1_config)
-        key = make_object_key(12345)
-
-        manager.reserve_write([key], [False], basic_layout)
-        manager.finish_write([key])
-        manager.reserve_write([key], [False], basic_layout, mode="update")
-
-        state = manager.get_object_state(key)
-
-        assert state is not None
-        assert state.available_for_read() is False
-        assert state.available_for_write() is False
-
-        manager.finish_write([key])
-        manager.close()
-
     def test_get_object_state_read_locked(self, basic_l1_config, basic_layout):
         """Test get_object_state for read-locked objects."""
         manager = L1Manager(basic_l1_config)
@@ -1508,10 +1374,7 @@ class TestGetObjectState:
         state = manager.get_object_state(key)
 
         assert state is not None
-        # Read-locked is still readable
-        assert state.available_for_read() is True
-        # But not writable
-        assert state.available_for_write() is False
+        assert state.read_lock.is_locked()
 
         manager.close()
 
@@ -1597,22 +1460,22 @@ class TestStateMachineTransitions:
         result = manager.finish_write([key])
         assert result[key] == L1Error.SUCCESS
         state = manager.get_object_state(key)
-        assert state.available_for_read() is True
-        assert state.available_for_write() is True
+        assert not state.read_lock.is_locked()
+        assert manager.is_key_evictable(key) is True
 
         # reserve_read: ready -> read_locked
         result = manager.reserve_read([key])
         assert result[key][0] == L1Error.SUCCESS
         state = manager.get_object_state(key)
-        assert state.available_for_read() is True
-        assert state.available_for_write() is False
+        assert state.read_lock.is_locked()
+        assert manager.is_key_evictable(key) is False
 
         # finish_read: read_locked -> ready
         result = manager.finish_read([key])
         assert result[key] == L1Error.SUCCESS
         state = manager.get_object_state(key)
-        assert state.available_for_read() is True
-        assert state.available_for_write() is True
+        assert not state.read_lock.is_locked()
+        assert manager.is_key_evictable(key) is True
 
         manager.close()
 
@@ -1728,10 +1591,8 @@ class TestStateMachineTransitions:
         fr = manager.finish_read([key], read_locks=read_locks)
         assert fr[key] == L1Error.SUCCESS
 
-        # All locks released -> writable again
-        state = manager.get_object_state(key)
-        assert state is not None
-        assert state.available_for_write() is True
+        # All locks released -> evictable again
+        assert manager.is_key_evictable(key) is True
 
         manager.close()
 
@@ -2127,17 +1988,13 @@ class TestStagingReservation:
 
         manager.close()
 
-    def test_new_mode_refuses_resident_key_for_any_tag(
-        self, basic_l1_config, basic_layout
-    ):
-        """Visibility is tag-independent: mode="new" fails for a resident key."""
+    def test_resident_key_refused_for_any_tag(self, basic_l1_config, basic_layout):
+        """Residency is tag-independent: every tag is refused a resident key."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(1)
         write_ready(manager, [key], basic_layout)
 
-        result = manager.reserve_write(
-            [key], [False], basic_layout, mode="new", tag="other"
-        )
+        result = manager.reserve_write([key], [False], basic_layout, tag="other")
 
         assert result[key] == (L1Error.KEY_NOT_WRITABLE, None)
 
@@ -2154,7 +2011,7 @@ class TestStagingReservation:
         before = manager.get_staging_memory_usage()
 
         result = manager.reserve_write(
-            [resident, staged, fresh], [False] * 3, basic_layout, mode="new", tag="w"
+            [resident, staged, fresh], [False] * 3, basic_layout, tag="w"
         )
 
         assert result[resident] == (L1Error.KEY_NOT_WRITABLE, None)
@@ -2221,17 +2078,15 @@ class TestStagingAdmission:
         """Discarding a late copy never disturbs readers of the resident object."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(1)
+        late = manager.reserve_write([key], [False], basic_layout, tag="late")
+        assert late[key][0] == L1Error.SUCCESS
         write_ready(manager, [key], basic_layout)
         read = manager.reserve_read([key], read_locks=2)
-        # mode="new" refuses resident keys; stage the late copy first.
-        manager.delete([key])  # refused: read-locked
-        assert manager.get_object_state(key) is not None
 
-        late = manager.reserve_write([key], [False], basic_layout, tag="late")
-        # The key is resident, so "all" mode write-locks it in place instead of
-        # staging; a read-locked key cannot be write-locked -> NOT_WRITABLE.
-        assert late[key] == (L1Error.KEY_NOT_WRITABLE, None)
+        assert manager.finish_write([key], tag="late")[key] == L1Error.SUCCESS
+
         assert manager.unsafe_read([key])[key][1] is read[key][1]
+        assert manager.get_staging_memory_usage() == 0
 
         manager.finish_read([key], read_locks=2)
         manager.close()
@@ -2382,9 +2237,8 @@ class TestStagingEviction:
         manager = L1Manager(basic_l1_config)
         key = make_object_key(1)
         write_ready(manager, [key], basic_layout)
-        manager.reserve_write([key], [False], basic_layout, mode="update")
-        # In-place write lock on the resident object plus a staged copy under
-        # another tag for a second key.
+        manager.reserve_read([key])
+        # Read-locked resident object plus two staged copies of a second key.
         other = make_object_key(2)
         manager.reserve_write([other], [False], basic_layout, tag="a")
         manager.reserve_write([other], [False], basic_layout, tag="b")
@@ -2562,7 +2416,7 @@ class TestStagingAccounting:
             try:
                 barrier.wait()
                 reserved = manager.reserve_write(
-                    keys, [False] * len(keys), basic_layout, "new", tag
+                    keys, [False] * len(keys), basic_layout, tag
                 )
                 mine = [k for k in keys if reserved[k][0] == L1Error.SUCCESS]
                 bad = [

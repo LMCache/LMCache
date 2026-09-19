@@ -99,7 +99,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:

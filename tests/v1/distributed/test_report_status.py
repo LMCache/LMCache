@@ -198,7 +198,7 @@ class TestStorageManagerReportStatus:
     def test_l1_status_reflects_writes(self, storage_manager_no_l2, basic_layout):
         """After writing objects, L1 status should reflect them."""
         keys = [make_object_key(i) for i in range(3)]
-        reserved = storage_manager_no_l2.reserve_write(keys, basic_layout, "new")
+        reserved = storage_manager_no_l2.reserve_write(keys, basic_layout)
         assert len(reserved) == 3
 
         # Reserved objects are staging objects until they are admitted.

@@ -377,7 +377,7 @@ def test_turboquant_storage_manager_roundtrip(
     )
 
     try:
-        ret = sm.reserve_write(keys, layout, mode="new")
+        ret = sm.reserve_write(keys, layout)
         assert len(ret) == len(keys), f"reserve_write got {len(ret)} / {len(keys)}"
 
         original_by_key = {}
@@ -607,7 +607,7 @@ def test_turboquant_fs_storage_manager_roundtrip(
         layout = _make_turboquant_layout()
         keys = [_make_turboquant_object_key(i) for i in range(3)]
 
-        ret = sm.reserve_write(keys, layout, mode="new")
+        ret = sm.reserve_write(keys, layout)
         assert len(ret) == len(keys), f"reserve_write got {len(ret)} / {len(keys)}"
 
         original_by_key = {}

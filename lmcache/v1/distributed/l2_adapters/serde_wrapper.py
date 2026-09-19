@@ -618,7 +618,6 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             keys=temp_keys,
             is_temporary=[True] * len(temp_keys),
             layout_desc=layout,
-            mode="new",
             tag=_L1_WRITE_TAG,
         )
         # First pass: collect every key whose reserve_write succeeded.

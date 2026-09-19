@@ -5,7 +5,6 @@ Managing objects and memory for L1 cache
 
 # Standard
 from dataclasses import dataclass
-from typing import Literal
 import threading
 
 # First Party
@@ -42,35 +41,13 @@ class L1ObjectState:
     """ The memory object stored in L1 cache. """
 
     write_lock: TTLLock
-    """ Whether the object is write-locked. """
+    """ The writer's reservation; held while the object is staged. """
 
     read_lock: TTLLock
     """ The read lock with TTL for the object. """
 
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
-
-    def available_for_read(self) -> bool:
-        """Check if the object is available for read.
-
-        Returns:
-            True if the object is not write-locked, False otherwise.
-        """
-        return not self.write_lock.is_locked()
-
-    def available_for_write(self) -> bool:
-        """Check if the object is available for write.
-
-        Returns:
-            True if the object is not write-locked and has no read locks
-            and is not a temporary object, False otherwise.
-        """
-
-        return (
-            not self.write_lock.is_locked()
-            and not self.read_lock.is_locked()
-            and not self.is_temporary
-        )
 
 
 def l1_mgr_synchronized(func):
@@ -145,10 +122,10 @@ class L1Manager:
     """
     Object lifecycle state machine for L1 cache
 
-    A write of a key that is not resident yet creates a *staging object*,
-    owned by the writer's ``tag``. Staging objects are kept apart from the
-    resident objects: readers of the key do not see them, and writers with
-    different tags may stage the same key at the same time.
+    A write creates a *staging object* owned by the writer's ``tag``. Staging
+    objects are kept apart from the resident objects: readers of the key do
+    not see them, and writers with different tags may stage the same key at
+    the same time.
 
           +--------+
           |  None  | <---------------------------------------+
@@ -164,27 +141,26 @@ class L1Manager:
           | staging      |---------->|   ready   |
           | (key, tag)   |  write()  |           |---------------+
           +--------------+ (admit or +-----------+               |
-                            discard)   ^   |                     |
-                                       |   | reserve_read()      | finish_read()
-                    reserve_write()    |   |                     | (if count becomes 0)
-                    (mode="update",    |   |                     |
-                     in place)         |   v                     |
-                   +--------------+    |  +-----------------+    |
-                   | write_locked |----+  |   read_locked   |----+
-                   | (resident)   |       |   (count = 1)   |
-                   +--------------+       +-----------------+
-                                                |     ^
-                                 reserve_read() |     | finish_read()
-                                                v     |
-                                          +-----------------+
-                                          |   read_locked   |
-                                          |   (count = 2)   |
-                                          +-----------------+
-                                                |     ^
-                                 reserve_read() |     | finish_read()
-                                                v     |
-                                              (...)  (...)
-                                          (Higher Counts)
+            |               discard)       |                     |
+            |                              | reserve_read()      | finish_read()
+            | finish_write_and_            |                     | (if count becomes 0)
+            | delete() -> None             v                     |
+            |                      +-----------------+           |
+            |                      |   read_locked   |-----------+
+            |                      |   (count = 1)   |
+            |                      +-----------------+
+            |                            |     ^
+            |             reserve_read() |     | finish_read()
+            |                            v     |
+            |                      +-----------------+
+            |                      |   read_locked   |
+            |                      |   (count = 2)   |
+            |                      +-----------------+
+            |                            |     ^
+            |             reserve_read() |     | finish_read()
+            |                            v     |
+            v                          (...)  (...)
+          (freed)                  (Higher Counts)
 
     For every operation on list of keys, the operation is atomic
     """
@@ -199,7 +175,7 @@ class L1Manager:
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
 
-        # Resident objects (readable once their write lock is released).
+        # Resident objects: readable, never write-locked.
         self._objects: dict[ObjectKey, L1ObjectState] = {}
         # Staging objects: key -> writer tag -> write-locked object that is
         # invisible to readers until it is admitted by finish_write.
@@ -288,8 +264,6 @@ class L1Manager:
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_NOT_READABLE: The key exists but is not
-                readable.
 
         Note:
             Staging objects are never readable; a key that is only
@@ -302,10 +276,6 @@ class L1Manager:
             entry = self._objects.get(key, None)
             if entry is None:
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
-                continue
-
-            if not entry.available_for_read():
-                ret[key] = (L1Error.KEY_NOT_READABLE, None)
                 continue
 
             # TODO(perf): support a count argument in
@@ -383,9 +353,8 @@ class L1Manager:
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key is write-locked or
-                non-read-locked, which means the reader may
-                read inconsistent data.
+            KEY_IN_WRONG_STATE: The key is not read-locked, which
+                means the reader may read inconsistent data.
         """
         total = _validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
@@ -404,15 +373,6 @@ class L1Manager:
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            if entry.write_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish read on write-locked key %s, "
-                    "potential inconsistent data might be read",
-                    key,
-                )
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                continue
-
             if not entry.read_lock.is_locked():
                 logger.warning(
                     "L1Manager: finish read on non-read-locked key %s, "
@@ -428,7 +388,6 @@ class L1Manager:
             for _ in range(total):
                 entry.read_lock.unlock()
             if entry.is_temporary and not entry.read_lock.is_locked():
-                # NOTE: temporary objects shouldn't have write-locks
                 need_to_free.append(entry.memory_obj)
                 need_to_free_keys.append(key)
                 del self._objects[key]
@@ -463,13 +422,9 @@ class L1Manager:
         keys: list[ObjectKey],
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
-        mode: Literal["new", "update", "all"] = "all",
         tag: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Reserve write access for the given keys.
-
-        A key that is not resident gets a staging object owned by ``tag``;
-        a resident key is write-locked in place.
+        """Reserve a staging object for each of the given keys.
 
         Args:
             keys: The list of object keys to reserve write access for.
@@ -477,10 +432,6 @@ class L1Manager:
                 temporary.
             layout_desc: The memory layout description for the objects to be
                 allocated.
-            mode (Literal["new", "update", "all"]): Reservation mode.
-            - "new": Reserve only new objects that do not exist.
-            - "update": Reserve only existing objects for update.
-            - "all": Reserve all writable objects regardless of existence.
             tag: The writer's identity; the same tag must be passed to the
                 ``finish_write`` variant that completes the write.
 
@@ -492,8 +443,8 @@ class L1Manager:
             ValueError: If ``keys`` and ``is_temporary`` differ in length.
 
         Errors:
-            KEY_NOT_WRITABLE: The key exists but is not writable, or ``tag``
-                already stages the key.
+            KEY_NOT_WRITABLE: The key already has a resident object, or
+                ``tag`` already stages the key.
             OUT_OF_MEMORY: Not enough memory to allocate for the object.
 
         Note:
@@ -512,20 +463,8 @@ class L1Manager:
         successful_keys: list[ObjectKey] = []
 
         for key, is_temp in zip(keys, is_temporary, strict=True):
-            entry = self._objects.get(key, None)
-            if entry is not None:
-                # Resident key: in-place update path.
-                if mode == "new":
-                    ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
-                    continue
-
-                if not entry.available_for_write():
-                    ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
-                    continue
-
-                entry.write_lock.lock()
-                ret[key] = (L1Error.SUCCESS, entry.memory_obj)
-                successful_keys.append(key)
+            if key in self._objects:
+                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
                 continue
 
             staged = self._get_staging(key, tag)
@@ -550,12 +489,6 @@ class L1Manager:
 
         # Early return if no allocation is needed
         if len(need_to_allocate) == 0:
-            return ret
-
-        # Don't allow allocation in "update" mode
-        if mode == "update":
-            for key, _ in need_to_allocate:
-                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
             return ret
 
         err, allocated_objs = self._memory_manager.allocate(
@@ -604,8 +537,7 @@ class L1Manager:
         """Finish write access for the given keys.
 
         Admits ``tag``'s staging objects as the resident objects of their
-        keys; a key without a staging object under ``tag`` finishes an
-        in-place write of the resident object.
+        keys.
 
         Temporary objects are unlocked normally but do not emit write-finished
         notifications because they are internal staging buffers that must not
@@ -619,9 +551,10 @@ class L1Manager:
             A dictionary mapping each object key to an L1Error.
 
         Errors:
-            KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key is not write-locked, or it's read-locked,
-                which means the writer may have caused inconsistent data.
+            KEY_NOT_EXIST: ``tag`` stages nothing for the key.
+            KEY_IN_WRONG_STATE: The staging object is not write-locked (its
+                reservation expired), which means the writer may have
+                caused inconsistent data.
 
         Note:
             If the key became resident before admission, the staging object
@@ -634,15 +567,11 @@ class L1Manager:
         discarded: list[MemoryObj] = []
 
         for key in keys:
-            err, entry = self._take_write(key, tag, "finish write")
+            err, entry = self._take_staging(key, tag, "finish write")
             ret[key] = err
             if err != L1Error.SUCCESS or entry is None:
                 continue
-            if key not in self._objects:
-                # Admission: the staging object becomes the resident object.
-                self._objects[key] = entry
-            elif self._objects[key] is not entry:
-                # Another writer made the key resident first.
+            if key in self._objects:
                 logger.debug(
                     "L1Manager: discarding staging object for key %s (tag %r): "
                     "the key is already resident",
@@ -651,6 +580,7 @@ class L1Manager:
                 )
                 discarded.append(entry.memory_obj)
                 continue
+            self._objects[key] = entry
             if not entry.is_temporary:
                 notification_keys.append(key)
                 notification_keys_meta.append(self._object_meta(entry.memory_obj))
@@ -698,9 +628,9 @@ class L1Manager:
             is now resident and read-locked.
 
         Errors:
-            KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key is not write-locked, or it already
-                has read locks.
+            KEY_NOT_EXIST: ``tag`` stages nothing for the key.
+            KEY_IN_WRONG_STATE: The staging object is not write-locked (its
+                reservation expired).
 
         Note:
             Admission follows :meth:`finish_write`. If the key became
@@ -716,7 +646,7 @@ class L1Manager:
         discarded: list[MemoryObj] = []
 
         for key in keys:
-            err, entry = self._take_write(key, tag, "finish_write_and_reserve_read")
+            err, entry = self._take_staging(key, tag, "finish_write_and_reserve_read")
             if err != L1Error.SUCCESS or entry is None:
                 ret[key] = (err, None)
                 continue
@@ -725,7 +655,7 @@ class L1Manager:
                 self._objects[key] = entry
                 successful_keys.append(key)
                 successful_keys_meta.append(self._object_meta(entry.memory_obj))
-            elif resident is not entry:
+            else:
                 logger.debug(
                     "L1Manager: discarding staging object for key %s (tag %r): "
                     "the key is already resident; read-locking the resident one",
@@ -735,10 +665,6 @@ class L1Manager:
                 discarded.append(entry.memory_obj)
                 resident_keys.append(key)
                 entry = resident
-            else:
-                # In-place update finished: the object was resident all along.
-                successful_keys.append(key)
-                successful_keys_meta.append(self._object_meta(entry.memory_obj))
             for _ in range(total):
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
@@ -768,8 +694,8 @@ class L1Manager:
 
         Args:
             keys: The list of object keys to delete.
-            force: When True, delete even a read/write-locked key and discard
-                its live staging objects. This may free memory a concurrent
+            force: When True, delete even a read-locked key and discard its
+                live staging objects. This may free memory a concurrent
                 store/read still uses (same hazard as :meth:`clear` with
                 ``force=True``); use with care.
 
@@ -778,9 +704,9 @@ class L1Manager:
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is write-locked or read-locked, or a live
-                staging object exists for it, so it cannot be deleted. Never
-                returned when ``force`` is True.
+            KEY_IS_LOCKED: The key is read-locked, or a live staging object
+                exists for it, so it cannot be deleted. Never returned when
+                ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -804,7 +730,7 @@ class L1Manager:
                 gone_keys.append(key)
                 continue
 
-            locked = entry.read_lock.is_locked() or entry.write_lock.is_locked()
+            locked = entry.read_lock.is_locked()
             if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
@@ -826,42 +752,33 @@ class L1Manager:
         keys: list[ObjectKey],
         tag: str = "",
     ) -> dict[ObjectKey, L1Error]:
-        """Atomically finish write access and delete the given keys.
+        """Atomically finish write access and discard the staging objects.
 
-        Unlock and deletion happen in one critical section, so no other
-        component can observe or lock the key in between. A staging object
-        reserved under ``tag`` is discarded; an in-place write deletes the
-        resident object. No write-finished notification is emitted; resident
-        deletions are reported the same way as :meth:`delete`.
+        Unlock and discard happen in one critical section, so no other
+        component can observe or lock the object in between. The staging
+        objects never become resident, and no write-finished notification is
+        emitted.
 
         Args:
-            keys: The list of object keys to unlock and delete.
+            keys: The list of object keys whose staging objects to discard.
             tag: The writer's tag passed to ``reserve_write``.
 
         Returns:
             A dictionary mapping each object key to an L1Error.
 
         Errors:
-            KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key is not write-locked, or it's
-                read-locked.
+            KEY_NOT_EXIST: ``tag`` stages nothing for the key.
+            KEY_IN_WRONG_STATE: The staging object is not write-locked (its
+                reservation expired).
         """
-        need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
-        successful_keys: list[ObjectKey] = []
         discarded: list[MemoryObj] = []
         gone_keys: list[ObjectKey] = []
 
         for key in keys:
-            err, entry = self._take_write(key, tag, "finish_write_and_delete")
+            err, entry = self._take_staging(key, tag, "finish_write_and_delete")
             ret[key] = err
             if err != L1Error.SUCCESS or entry is None:
-                continue
-            resident = self._objects.get(key, None)
-            if resident is entry:
-                need_to_free.append(entry.memory_obj)
-                del self._objects[key]
-                successful_keys.append(key)
                 continue
             logger.debug(
                 "L1Manager: discarding staging object for key %s (tag %r)",
@@ -869,11 +786,10 @@ class L1Manager:
                 tag,
             )
             discarded.append(entry.memory_obj)
-            if resident is None and key not in self._staging:
+            if key not in self._objects and key not in self._staging:
                 gone_keys.append(key)
 
         self._memory_manager.free(discarded)
-        self._free_and_report_deleted(successful_keys, need_to_free)
         self._report_staging_gone(gone_keys)
         return ret
 
@@ -898,12 +814,12 @@ class L1Manager:
         """Clear objects from L1 cache.
 
         Args:
-            force: If True, clear ALL objects including locked ones and
+            force: If True, clear ALL objects including read-locked ones and
                 every staging object. This may corrupt in-flight
                 store/prefetch operations. If False (default), only clear
-                unlocked objects -- including staging objects whose write
-                lock expired -- keeping write-locked and read-locked objects
-                intact.
+                unlocked resident objects and staging objects whose write
+                lock expired, keeping read-locked objects and live staging
+                objects intact.
         """
         if force:
             staging_count = sum(len(per_tag) for per_tag in self._staging.values())
@@ -944,7 +860,7 @@ class L1Manager:
         locked_count = 0
 
         for key, entry in list(self._objects.items()):
-            if entry.write_lock.is_locked() or entry.read_lock.is_locked():
+            if entry.read_lock.is_locked():
                 locked_count += 1
                 continue
             keys_to_clear.append(key)
@@ -986,16 +902,11 @@ class L1Manager:
             key: The object key to check.
 
         Returns:
-            True if the key exists and is not locked (neither read-locked
-            nor write-locked), or has a staging object whose write lock
-            expired; False otherwise.
+            True if the key has a resident object that is not read-locked,
+            or a staging object whose write lock expired; False otherwise.
         """
         entry = self._objects.get(key, None)
-        if (
-            entry is not None
-            and not entry.read_lock.is_locked()
-            and not entry.write_lock.is_locked()
-        ):
+        if entry is not None and not entry.read_lock.is_locked():
             return True
         per_tag = self._staging.get(key, None)
         if per_tag is None:
@@ -1055,19 +966,17 @@ class L1Manager:
 
         ``total_object_count`` covers resident and staging objects;
         ``staging_object_count`` / ``staging_bytes`` report the staging
-        subset.
+        subset and ``write_locked_count`` the live reservations among them.
         """
-        write_locked = 0
         read_locked = 0
         temporary = 0
         for entry in self._objects.values():
-            if entry.write_lock.is_locked():
-                write_locked += 1
             if entry.read_lock.is_locked():
                 read_locked += 1
             if entry.is_temporary:
                 temporary += 1
         staging = 0
+        write_locked = 0
         for per_tag in self._staging.values():
             staging += len(per_tag)
             for staged in per_tag.values():
@@ -1116,20 +1025,15 @@ class L1Manager:
         mem_check_result = self._memory_manager.memcheck()
 
         # Log the locked objects for debugging
-        num_write_locked = 0
-        num_read_locked = 0
-        for key, entry in self._objects.items():
-            if entry.write_lock.is_locked():
-                num_write_locked += 1
-            if entry.read_lock.is_locked():
-                num_read_locked += 1
+        num_read_locked = sum(
+            1 for entry in self._objects.values() if entry.read_lock.is_locked()
+        )
         num_staging = sum(len(per_tag) for per_tag in self._staging.values())
 
         logger.info(
-            "L1Manager memcheck: total objects = %d, write-locked = %d, "
-            "read-locked = %d, staging = %d (%d bytes)",
+            "L1Manager memcheck: total objects = %d, read-locked = %d, "
+            "staging = %d (%d bytes)",
             len(self._objects),
-            num_write_locked,
             num_read_locked,
             num_staging,
             self._staging_bytes,
@@ -1162,18 +1066,13 @@ class L1Manager:
         self._staging_bytes -= entry.memory_obj.get_size()
         return entry
 
-    def _take_write(
+    def _take_staging(
         self,
         key: ObjectKey,
         tag: str,
         op: str,
     ) -> tuple[L1Error, "L1ObjectState | None"]:
-        """Release the write lock a writer holds on ``key``.
-
-        ``tag``'s staging object is preferred; it is removed from the
-        staging table and returned so the caller can admit or discard it.
-        Otherwise the resident object is unlocked in place (see
-        :meth:`_try_unlock_write`).
+        """Unlock and remove ``tag``'s staging object for ``key``.
 
         Args:
             key: The object key.
@@ -1181,14 +1080,14 @@ class L1Manager:
             op: Operation name used in the wrong-state warning logs.
 
         Returns:
-            (SUCCESS, entry) on success; (KEY_NOT_EXIST, None) or
-            (KEY_IN_WRONG_STATE, None) otherwise. An expired staging
-            reservation reports KEY_IN_WRONG_STATE and stays staged for
-            eviction to reclaim or a same-tag writer to take over.
+            (SUCCESS, entry) with the entry removed from the staging table;
+            (KEY_NOT_EXIST, None) when ``tag`` stages nothing for ``key``;
+            (KEY_IN_WRONG_STATE, None) when the reservation's write lock
+            expired (the object stays staged for eviction to reclaim).
         """
         staged = self._get_staging(key, tag)
         if staged is None:
-            return self._try_unlock_write(key, op)
+            return L1Error.KEY_NOT_EXIST, None
 
         if not staged.write_lock.is_locked():
             logger.warning(
@@ -1202,47 +1101,6 @@ class L1Manager:
 
         staged.write_lock.unlock()
         return L1Error.SUCCESS, self._pop_staging(key, tag)
-
-    def _try_unlock_write(
-        self,
-        key: ObjectKey,
-        op: str,
-    ) -> tuple[L1Error, "L1ObjectState | None"]:
-        """Validate that the resident ``key`` is exclusively write-locked and
-        unlock it.
-
-        Args:
-            key: The object key to unlock.
-            op: Operation name used in the wrong-state warning logs.
-
-        Returns:
-            (SUCCESS, entry) on success; (KEY_NOT_EXIST, None) or
-            (KEY_IN_WRONG_STATE, None) otherwise.
-        """
-        entry = self._objects.get(key, None)
-        if entry is None:
-            return L1Error.KEY_NOT_EXIST, None
-
-        if not entry.write_lock.is_locked():
-            logger.warning(
-                "L1Manager: %s on non-write-locked key %s, "
-                "potential inconsistent data might be written",
-                op,
-                key,
-            )
-            return L1Error.KEY_IN_WRONG_STATE, None
-
-        if entry.read_lock.is_locked():
-            logger.warning(
-                "L1Manager: %s on read-locked key %s, "
-                "potential inconsistent data might be written",
-                op,
-                key,
-            )
-            return L1Error.KEY_IN_WRONG_STATE, None
-
-        entry.write_lock.unlock()
-        return L1Error.SUCCESS, entry
 
     def _reclaim_staging(self, key: ObjectKey, force: bool) -> int:
         """Free ``key``'s staging objects whose write lock expired.

@@ -1094,7 +1094,6 @@ class PrefetchController(StorageControllerInterface):
                 keys=group_keys,
                 is_temporary=[not retention_map[k] for k in group_keys],
                 layout_desc=gld,
-                mode="new",
                 tag=_get_prefetch_write_tag(request.request_id),
             )
             write_results.update(gr)

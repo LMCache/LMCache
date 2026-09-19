@@ -211,7 +211,7 @@ class PickleTransferStrategy(TransferStrategy):
         obj_keys = resolve_obj_keys(key)
         chunks: list[torch.Tensor] = pickle.loads(cpu_data)
         reserved_dict = self._storage_manager.reserve_write(
-            obj_keys, context.layout_desc, "new"
+            obj_keys, context.layout_desc
         )
         written_keys: list[ObjectKey] = []
         try:
@@ -356,9 +356,7 @@ class ShmTransferStrategy(TransferStrategy):
             Context with ``slots`` and ``chunk_indices``.
         """
         obj_keys = resolve_obj_keys(key)
-        reserved = self._storage_manager.reserve_write(
-            obj_keys, context.layout_desc, "new"
-        )
+        reserved = self._storage_manager.reserve_write(obj_keys, context.layout_desc)
         slots: list[dict[str, Any]] = []
         chunk_indices: list[int] = []
         reserved_keys: list[ObjectKey] = []

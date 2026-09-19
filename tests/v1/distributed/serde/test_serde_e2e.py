@@ -151,7 +151,7 @@ def write_and_wait_for_l2(
     """
     stored_before = get_l2_stored_object_count(sm)
 
-    ret = sm.reserve_write(keys, layout, mode="new")
+    ret = sm.reserve_write(keys, layout)
     assert len(ret) == len(keys), f"reserve_write: {len(ret)}/{len(keys)} succeeded"
 
     # Fill with deterministic data per key

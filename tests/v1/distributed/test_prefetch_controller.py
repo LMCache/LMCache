@@ -1502,7 +1502,7 @@ class TestPrefetchMode:
         store_keys_in_l2(adapter, keys, layout)
 
         staged = l1_manager.reserve_write(
-            [keys[0]], is_temporary=[False], layout_desc=layout, mode="new"
+            [keys[0]], is_temporary=[False], layout_desc=layout
         )
         assert staged[keys[0]][0] == L1Error.SUCCESS
 
@@ -1550,7 +1550,7 @@ class TestPrefetchMode:
         store_keys_in_l2(adapter, keys, layout)
 
         staged = l1_manager.reserve_write(
-            [keys[0]], is_temporary=[False], layout_desc=layout, mode="new"
+            [keys[0]], is_temporary=[False], layout_desc=layout
         )
         assert staged[keys[0]][0] == L1Error.SUCCESS
         racing_l1 = AdmissionRacingL1Manager(l1_manager, staged_key=keys[0])
@@ -1673,7 +1673,7 @@ class AdmissionRacingL1Manager:
     ``finish_write``) by the test. After the first delegated
     ``reserve_read`` returns, the wrapper admits it via ``finish_write`` on
     the inner manager, so the controller's subsequent
-    ``reserve_write(mode="new")`` finds the key resident.
+    ``reserve_write`` finds the key resident.
     """
 
     def __init__(self, inner: L1Manager, staged_key: ObjectKey) -> None:
@@ -1766,7 +1766,7 @@ class TestConcurrentEvictionRace:
     failing that, from the still-locked L2 copy.
 
     The controller currently discovers the L1-existing key with
-    ``reserve_write(mode="new")`` (KEY_NOT_WRITABLE) and read-locks it
+    ``reserve_write`` (KEY_NOT_WRITABLE) and read-locks it
     with a separate ``reserve_read`` call.  An eviction between those two
     calls deletes the key; the failed ``reserve_read`` then leaves a gap
     that truncates the whole prefix behind it.
@@ -1781,7 +1781,7 @@ class TestConcurrentEvictionRace:
 
         # keys[1] already exists in L1, unlocked (a prior request stored it).
         existing = l1_manager.reserve_write(
-            [keys[1]], is_temporary=[False], layout_desc=layout, mode="new"
+            [keys[1]], is_temporary=[False], layout_desc=layout
         )
         assert existing[keys[1]][0] == L1Error.SUCCESS
         l1_manager.finish_write([keys[1]])
@@ -1831,7 +1831,7 @@ class TestConcurrentEvictionRace:
 
         # L1 already holds the tail (chunks 2-4), unlocked.
         existing = l1_manager.reserve_write(
-            keys[2:], is_temporary=[False] * 3, layout_desc=layout, mode="new"
+            keys[2:], is_temporary=[False] * 3, layout_desc=layout
         )
         for key in keys[2:]:
             assert existing[key][0] == L1Error.SUCCESS
@@ -1869,7 +1869,7 @@ class TestConcurrentEvictionRace:
         store_keys_in_l2(adapter, keys, layout)
 
         existing = l1_manager.reserve_write(
-            [keys[1]], is_temporary=[False], layout_desc=layout, mode="new"
+            [keys[1]], is_temporary=[False], layout_desc=layout
         )
         assert existing[keys[1]][0] == L1Error.SUCCESS
         l1_manager.finish_write([keys[1]])
@@ -1917,7 +1917,7 @@ class TestSlidingWindowClaims:
 
         # All keys resident in L1, unlocked; L2 has nothing.
         existing = l1_manager.reserve_write(
-            keys, is_temporary=[False] * 8, layout_desc=layout, mode="new"
+            keys, is_temporary=[False] * 8, layout_desc=layout
         )
         for key in keys:
             assert existing[key][0] == L1Error.SUCCESS
@@ -1984,7 +1984,7 @@ class TestSlidingWindowClaims:
 
         # L1: chunks 0-1, both groups (indices 0-3), unlocked.
         existing = l1_manager.reserve_write(
-            keys[:4], is_temporary=[False] * 4, layout_desc=layout, mode="new"
+            keys[:4], is_temporary=[False] * 4, layout_desc=layout
         )
         for key in keys[:4]:
             assert existing[key][0] == L1Error.SUCCESS
@@ -1998,7 +1998,7 @@ class TestSlidingWindowClaims:
         # A concurrent writer stages one plan key and admits it right after
         # the lock pass -> the key is resident, the reservation aborts.
         contended = l1_manager.reserve_write(
-            [keys[4]], is_temporary=[False], layout_desc=layout, mode="new"
+            [keys[4]], is_temporary=[False], layout_desc=layout
         )
         assert contended[keys[4]][0] == L1Error.SUCCESS
         racing_l1 = AdmissionRacingL1Manager(l1_manager, staged_key=keys[4])

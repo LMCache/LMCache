@@ -6,7 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator, Literal, Optional
+from typing import Iterator, Optional
 import threading
 import time
 
@@ -187,7 +187,6 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
-        mode: Literal["new", "update", "all"],
     ) -> dict[ObjectKey, MemoryObj]:
         """
         Reserve the object for writing into the storage manager.
@@ -196,11 +195,6 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to reserve for writing.
             layout_desc (MemoryLayoutDesc): Description of the memory layout
                 for the objects to be reserved.
-            mode (Literal["new", "update", "all"]): Reservation mode.
-            - "new": Reserve only new objects that do not exist.
-            - "update": Reserve only existing objects for update.
-            - "all": Reserve all writable objects regardless of existence.
-
         Returns:
             dict[ObjectKey, MemoryObj]: A dictionary mapping object keys to their
                 reserved memory objects. Note that not all requested keys could be
@@ -210,7 +204,6 @@ class StorageManager:
             keys=keys,
             is_temporary=[False] * len(keys),
             layout_desc=layout_desc,
-            mode=mode,
             tag=_L1_WRITE_TAG,
         )
 
