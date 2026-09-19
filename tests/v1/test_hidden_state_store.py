@@ -432,3 +432,58 @@ def test_store_token_offset_rejects_bad_args():
             token_offset=2,
         )
     fix.close()
+
+
+# ---------------------------------------------------------------------------
+# Coverage reporting
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_reports_the_stored_prefix():
+    fix = _Fixture()
+    token_ids = list(range(3 * CHUNK_SIZE))
+    fix.mark_kv_present(fix.keys_for(token_ids))
+    fix.store.store_hidden_states(token_ids, torch.randn(len(token_ids), HIDDEN_DIM))
+
+    chunks = list(fix.db.process_tokens(tokens=token_ids))
+    assert fix.store.coverage(chunks) == 3 * CHUNK_SIZE
+    fix.close()
+
+
+def test_coverage_stops_at_the_first_gap():
+    """A hole partway through truncates, so the result stays a usable prefix."""
+    fix = _Fixture()
+    token_ids = list(range(3 * CHUNK_SIZE))
+    keys = fix.keys_for(token_ids)
+    fix.mark_kv_present(keys)
+    fix.store.store_hidden_states(token_ids, torch.randn(len(token_ids), HIDDEN_DIM))
+
+    fix.store.drop_key(keys[1])
+    chunks = list(fix.db.process_tokens(tokens=token_ids))
+    assert fix.store.coverage(chunks) == CHUNK_SIZE
+    fix.close()
+
+
+def test_coverage_requires_every_requested_layer():
+    fix = _Fixture(layers=[0, 1])
+    token_ids = list(range(2 * CHUNK_SIZE))
+    fix.mark_kv_present(fix.keys_for(token_ids))
+    rows = torch.randn(len(token_ids), HIDDEN_DIM)
+    fix.store.store_hidden_states(token_ids, rows, layer_idx=0)
+    # Layer 1 only covers the first chunk.
+    fix.store.store_hidden_states(
+        token_ids[:CHUNK_SIZE], rows[:CHUNK_SIZE], layer_idx=1
+    )
+
+    chunks = list(fix.db.process_tokens(tokens=token_ids))
+    assert fix.store.coverage(chunks, layer_idxs=(0,)) == 2 * CHUNK_SIZE
+    assert fix.store.coverage(chunks, layer_idxs=(0, 1)) == CHUNK_SIZE
+    fix.close()
+
+
+def test_coverage_is_zero_without_any_stored_chunk():
+    fix = _Fixture()
+    token_ids = list(range(2 * CHUNK_SIZE))
+    chunks = list(fix.db.process_tokens(tokens=token_ids))
+    assert fix.store.coverage(chunks) == 0
+    fix.close()
