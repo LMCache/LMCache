@@ -716,6 +716,33 @@ Connector ``extra_config`` Keys
 All connector-level options are passed through
 ``kv_connector_extra_config`` and use the ``lmcache.mp.`` prefix.
 
+By default, MP stores only complete chunks within the request's initial prompt.
+For example, with a 290-token prompt and 256-token chunks, it stores the first
+256 tokens. Generating another 250 tokens does not write the chunk spanning
+the remaining 34 prompt tokens and the output. This prevents sampled output
+from creating new cache entries on every replay of a fixed prompt set.
+Lookup and retrieval of existing entries are unchanged. The prompt boundary
+is retained for the request, including after preemption; streaming input that
+extends a prompt does not extend that boundary until the tracker is recreated.
+
+To retain the previous behavior of caching generated tokens, pass the JSON
+boolean ``"lmcache.mp.save_decode_cache": true`` in
+``kv_connector_extra_config``. MP configuration is separate from the
+in-process connector's ``save_decode_cache`` YAML/environment setting.
+The limit applies before both immediate and lazy offloading. A per-request
+``lmcache.max_offload_tokens`` limit, when supplied, still caps writes even
+when decode caching is enabled.
+
+Use a version of the connector containing this option. When vLLM bundles an
+older implementation, select the updated LMCache implementation explicitly::
+
+    vllm serve Qwen/Qwen3-0.6B --kv-transfer-config '{
+      "kv_connector": "LMCacheMPConnector",
+      "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {"lmcache.mp.save_decode_cache": false}
+    }'
+
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -723,6 +750,11 @@ All connector-level options are passed through
    * - Key
      - Default
      - Description
+   * - ``lmcache.mp.save_decode_cache``
+     - ``false``
+     - Store complete chunks containing generated tokens as well as prompt
+       tokens. Must be a JSON boolean. When false, a partial prompt tail is
+       never stored merely because decode completes the chunk.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
