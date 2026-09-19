@@ -50,10 +50,8 @@ You can find the latest image tags on
 [NVIDIA NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/-/tags).
 
 To start each process yourself, follow the
-[manual startup steps](../../docs/source/production/dynamo_coordination.rst#start-processes-manually)
-instead of running a launch script. The
-[Dynamo integration guide](../../docs/source/production/dynamo_coordination.rst#check-the-deployment)
-also includes inference and cache-hit checks.
+[manual startup steps](../../docs/source/production/dynamo_coordination.rst#local)
+instead of running a launch script.
 
 ## Kubernetes
 

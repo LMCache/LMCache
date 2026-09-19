@@ -11,79 +11,12 @@ Local
 -----
 
 To deploy Dynamo locally, use a Linux host with NVIDIA GPUs, Docker
-Compose 2.30 or newer, and the NVIDIA Container Toolkit installed. Choose
-a mode and run its script on the host from the root of the LMCache repository:
+Compose 2.30 or newer, and the NVIDIA Container Toolkit installed.
 
-.. tab-set::
-
-   .. tab-item:: Aggregated (1 GPU)
-
-      .. code-block:: bash
-
-         ./examples/dynamo_integration/local/agg_lmcache_mp.sh
-
-      One worker handles both prefill and decode.
-
-   .. tab-item:: Disaggregated (2 GPUs)
-
-      .. code-block:: bash
-
-         ./examples/dynamo_integration/local/disagg_lmcache_mp.sh
-
-      The decode worker uses GPU 0 and the prefill worker uses GPU 1.
-      Both connect to one LMCache server on the same node. This script
-      does not configure KV transfer between nodes.
-
-Each `launch script
-<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/local>`_
-starts NATS and etcd, creates a GPU-enabled Dynamo container, and launches
-the LMCache server, Dynamo frontend, and vLLM workers. The script waits
-for LMCache to be ready before starting the workers. Press ``Ctrl+C`` to
-stop the whole demo, including NATS and etcd.
-
-Both modes serve ``Qwen/Qwen3-0.6B`` and give LMCache 16 GiB of CPU memory.
-They use ``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2``, which includes
-LMCache 0.5.2. You can find the latest image tags on `NVIDIA NGC
+This example serves ``Qwen/Qwen3-0.6B`` on one GPU and gives LMCache
+16 GiB of CPU memory. The ``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2``
+image includes LMCache 0.5.2. You can find the latest image tags on `NVIDIA NGC
 <https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/-/tags>`_.
-
-The frontend accepts requests on port 8000. The vLLM workers use
-``LMCacheMPConnector`` to store and retrieve KV cache through the server
-on port 5555.
-
-Check the deployment
-~~~~~~~~~~~~~~~~~~~~
-
-Once the workers have loaded the model, send a request from another
-terminal on the host:
-
-.. code-block:: bash
-
-   curl -fsS http://localhost:8000/v1/chat/completions \
-       -H 'Content-Type: application/json' \
-       -d '{
-         "model": "Qwen/Qwen3-0.6B",
-         "messages": [{"role": "user", "content": "What is a KV cache?"}],
-         "max_tokens": 32
-       }'
-
-This checks that inference works. To check LMCache reuse, send a long
-prompt more than once and inspect the server's lookup metrics:
-
-.. code-block:: bash
-
-   curl -fsS http://localhost:8080/metrics | grep '^lmcache_mp_lookup'
-
-An increase in ``lmcache_mp_lookup_hit_tokens_total`` shows an LMCache
-hit. vLLM can also serve repeated prompts from its GPU prefix cache, so
-``cached_tokens`` in an inference response alone does not identify an
-LMCache hit.
-
-Start processes manually
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-You can also start each process yourself. Use these steps instead of the
-launch script; if a demo is already running, stop it with ``Ctrl+C`` first.
-This example uses one GPU.
 
 On the host, start NATS and etcd from the root of the LMCache repository:
 
@@ -131,6 +64,23 @@ In the three container shells, start one process in each:
          "kv_role": "kv_both",
          "kv_connector_extra_config": {"lmcache.mp.port": 5555}
        }'
+
+The frontend accepts requests on port 8000. The vLLM worker uses
+``LMCacheMPConnector`` to store and retrieve KV cache through the server
+on port 5555.
+
+You can also start the whole demo with either `launch script
+<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/local>`_.
+Run one command on the host from the root of the LMCache repository,
+instead of the manual steps above:
+
+.. code-block:: bash
+
+   # Aggregated: 1 GPU.
+   ./examples/dynamo_integration/local/agg_lmcache_mp.sh
+
+   # Disaggregated: 2 GPUs on the same node.
+   ./examples/dynamo_integration/local/disagg_lmcache_mp.sh
 
 Kubernetes
 ----------
@@ -226,5 +176,3 @@ For the disaggregated example, the Dynamo resource is named
 .. code-block:: bash
 
    kubectl -n default port-forward pod/FRONTEND_POD_NAME 8000:8000
-
-Send the same request shown in the Local section to check inference.
