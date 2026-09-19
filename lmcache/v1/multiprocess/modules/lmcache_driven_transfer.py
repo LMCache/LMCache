@@ -696,7 +696,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
-                        keys_to_reserve, layout_desc, "new"
+                        keys_to_reserve, layout_desc
                     )
                     all_dict.update(reserved_dict)
                     if reserved_dict:
