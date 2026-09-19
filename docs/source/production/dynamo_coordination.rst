@@ -98,8 +98,14 @@ Deploy the LMCache server
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``lmcache_engine.yaml`` defines an ``LMCacheEngine`` custom resource with
-16 GiB of CPU cache per server. The operator creates a server DaemonSet,
-a Service, and a ``lmcache-mp-connection`` ConfigMap for the workers.
+16 GiB of CPU cache per server. The operator creates:
+
+- A DaemonSet that runs one LMCache server on each eligible node.
+- The ``lmcache-mp`` Service, which routes workers to the server on their
+  own node.
+- The ``lmcache-mp-connection`` ConfigMap. Its ``kv-transfer-config.json``
+  entry contains the ``LMCacheMPConnector`` settings, including the
+  Service address and server port.
 
 .. literalinclude:: ../../../examples/dynamo_integration/kubernetes/lmcache_engine.yaml
    :language: yaml
@@ -120,9 +126,10 @@ defines a ``DynamoGraphDeployment`` with a frontend
 and one vLLM worker. The worker serves ``Qwen/Qwen3-0.6B`` on one GPU and
 handles both prefill and decode.
 
-The worker mounts ``lmcache-mp-connection`` at ``/etc/lmcache`` and reads
-``kv-transfer-config.json`` through ``--kv-transfer-config``. This sets up
-``LMCacheMPConnector`` to connect to the server on its node.
+The worker mounts ``lmcache-mp-connection`` at ``/etc/lmcache``, making
+the configuration available as ``/etc/lmcache/kv-transfer-config.json``.
+At startup, it passes the file's JSON contents to ``--kv-transfer-config``
+to connect to the LMCache server on its node.
 
 .. literalinclude:: ../../../examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
    :language: yaml
