@@ -79,7 +79,6 @@ WORKER_ARGS=(
   --model Qwen/Qwen3-0.6B --enforce-eager
   --max-model-len "${MAX_MODEL_LEN:-4096}"
   --max-num-seqs "${MAX_CONCURRENT_SEQS:-2}"
-  --kv-cache-memory-bytes 1119388000 --gpu-memory-utilization 0.01
   --disable-hybrid-kv-cache-manager
   --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":$LMCACHE_PORT}}"
 )
