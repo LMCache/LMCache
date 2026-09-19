@@ -21,8 +21,8 @@ def test_autostart_health_real_transport(start_server: bool) -> None:
         import sys
         import zmq
         from lmcache.integration.vllm.mp_server_launcher import is_mp_server_healthy
-        from lmcache.v1.multiprocess.mq import MessageQueueServer
         from lmcache.v1.multiprocess.request_handler import HandlerType
+        from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
 
         def ping(instance_id: int | None) -> bool:
             assert instance_id is None

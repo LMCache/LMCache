@@ -25,8 +25,11 @@ from lmcache.v1.multiprocess.modules.p2p_controller import (
     _P2PState,
     _PeerInstance,
 )
-from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
+    msgspec_decode,
+    msgspec_encode,
+)
 
 
 def _make_key(i: int) -> ObjectKey:

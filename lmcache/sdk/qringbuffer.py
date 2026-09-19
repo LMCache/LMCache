@@ -32,7 +32,7 @@ if TYPE_CHECKING:
         LoadStoreOp,
         StoreResult,
     )
-    from lmcache.v1.multiprocess.mq import MessagingFuture
+    from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 
 logger = lmcache_init_logger(__name__)

@@ -45,10 +45,10 @@ def create_request_client(
     import zmq
 
     # First Party
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
     from lmcache.v1.multiprocess.transport.zmq_impl.client import (
         ZmqMultiprocessClient,
     )
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
 
     if context is None:
         context = zmq.Context.instance()

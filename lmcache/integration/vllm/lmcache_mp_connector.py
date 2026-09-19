@@ -1112,6 +1112,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ==============================
 
+    def reset_cache(self) -> bool | None:
+        """Request a best-effort LMCache MP cache clear from the scheduler.
+
+        Active request trackers are preserved. Backing servers retain objects
+        protected by in-flight read or write locks.
+
+        Returns:
+            True when every MP server answers the clear, False on timeout or
+            RPC failure, and None for worker-role connectors.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return None
+
+        return self.scheduler_adapter.reset_cache()
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind GPU block pool so that we can touch blocks during stores.
         Called by Scheduler after kv_cache_manager is ready."""

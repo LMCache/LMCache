@@ -226,9 +226,10 @@ coordinator. This is the recommended way to develop and debug P2P.
    CUDA_VISIBLE_DEVICES=1 vllm serve <model> --port 8001 \
        --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.port":6556}}'
 
-The two servers must differ in **every** port: ZMQ (``--port``), HTTP
-(``--http-port``), and the P2P transfer endpoint (``--p2p-advertise-url``).
-Give each a distinct ``--instance-id`` so they are easy to tell apart.
+The two servers must differ in **every** port: request transport
+(``--port``), HTTP (``--http-port``), and the P2P transfer endpoint
+(``--p2p-advertise-url``). Give each a distinct ``--instance-id`` so they are
+easy to tell apart.
 
 To test the path, send a long prompt to vLLM **A** (port ``8000``) and then the
 *same* prompt to vLLM **B** (port ``8001``). B has never seen the prompt and its

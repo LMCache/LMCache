@@ -21,7 +21,7 @@ store/retrieve address those infos directly.
 
 ## Goals / Non-Goals
 
-- Keep the ZMQ API engine-neutral; confine vLLM field reads to
+- Keep the request API engine-neutral; confine vLLM field reads to
   `lmcache.integration.vllm`.
 - Registration defines the protocol-visible group order; store/retrieve block
   IDs are indexed by that order.

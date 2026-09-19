@@ -28,7 +28,9 @@ MP integration / SDK / benchmark
 Methods marked with `@rpc_method` on `RequestClient` are the Python source of
 truth. The method name is the stable operation name, its parameters define the
 ordered payload types, and `MessagingFuture[T]` defines the response type.
-`get_rpc_specs()` discovers these contracts at startup.
+`get_rpc_specs()` discovers these contracts at startup. Low-level ZMQ sockets,
+polling, multipart frames, msgspec codecs, and worker-pool dispatch stay in
+`zmq_impl/mq.py`.
 
 Business modules use `@request_handler` only for scheduling. The operation
 defaults to the handler name; `operation=` is for legacy method names.
@@ -54,6 +56,13 @@ The ZMQ adapter installs client methods from the same RPC specifications. IDs
 1–33 remain frozen for compatibility with deployed clients and servers. New
 operations use their stable string name on the wire and must not be added to
 the legacy ID table. The server accepts both encodings.
+
+The server follows the same boundary. `server.py` builds transport-neutral
+engine modules and passes them to `create_request_server()`, which returns the
+`RequestServer` protocol implemented by either `MessageQueueServer` or
+`GrpcMultiprocessServer`. Shared runtime code starts and closes only that
+protocol; concrete server classes are accessed only inside their transport
+packages and implementation-level tests.
 
 ## Adding an RPC
 

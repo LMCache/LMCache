@@ -325,7 +325,6 @@ import importlib.abc
 import sys
 
 banned = (
-    "lmcache.v1.multiprocess.mq",
     "lmcache.v1.multiprocess.transport.zmq_impl",
 )
 
