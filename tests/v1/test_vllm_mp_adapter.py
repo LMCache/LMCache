@@ -674,6 +674,17 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     assert adapter.store_futures["req-1"] is fake_future
 
 
+def test_lazy_submit_requires_store_operation_id(fake_adapter) -> None:
+    """Lazy receipts must be keyed by the scheduler's operation identity."""
+    adapter = _make_worker_adapter(
+        extra_config={"lmcache.mp.lazy_offload": True},
+    )
+    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
+
+    with pytest.raises(ValueError, match="requires store_operation_id"):
+        adapter.submit_store_request("req-1", op, event=None)
+
+
 def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypatch):
     adapter, _send_mock, _ = fake_adapter
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
