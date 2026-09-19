@@ -289,7 +289,10 @@ ignores the extra mount).  It fails open
 Prerequisites
 ~~~~~~~~~~~~~
 
-- **Operator webhook** -- requires an in-cluster operator; ``make run`` disables it.
+- **cert-manager** + ``make deploy`` (not ``make run``, which is
+  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``) --
+  same as the CacheBlend webhook; install once per cluster (see
+  :ref:`mp-operator-cacheblend` "Additional Prerequisites").
 - **Pod Security Standards** -- under the default isolated IPC the webhook
   injects only an emptyDir, which the ``baseline`` / ``restricted`` PSS
   profiles allow.  With ``spec.isolatedIPC: false`` the injected hostPath
@@ -1167,7 +1170,16 @@ Additional Prerequisites
 
 Beyond the operator prerequisites above:
 
-- **Operator webhook** -- ``make run`` disables it.
+- **cert-manager** -- the webhook's serving certificate is issued by a
+  cert-manager ``Issuer`` + ``Certificate``.  Install it before ``make deploy``:
+
+  .. code-block:: bash
+
+      kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+      kubectl -n cert-manager wait --for=condition=Available deploy --all --timeout=180s
+
+- **Deploy with the webhook** -- use ``make deploy`` (not ``make run``, which is
+  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``).
 - **Pod Security Standards** -- the webhook injects a hostPath ``/dev/shm``
   mount (or ``hostIPC``/``privileged`` when the engine opts in), which the
   ``baseline``/``restricted`` profiles reject, so label the engine's and the

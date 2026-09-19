@@ -1,6 +1,6 @@
 # LMCache Kubernetes Operator
 
-A Kubernetes operator that automates the deployment and lifecycle management of [LMCache](https://github.com/LMCache/LMCache) multiprocess cache servers. It manages `LMCacheEngine`, `CacheBlendEngine`, and `LMCacheCoordinator` custom resources and reconciles their Kubernetes workloads.
+A Kubernetes operator that automates the deployment and lifecycle management of [LMCache](https://github.com/LMCache/LMCache) multiprocess cache servers. It manages a single CRD (`LMCacheEngine`) and reconciles it into a DaemonSet, ConfigMap, Service, and optional ServiceMonitor.
 
 See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and CRD spec reference.
 
@@ -185,7 +185,7 @@ so you must set it explicitly; leave `injection` unset for connection-only wirin
 Editable sample: [`config/samples/vllm_lmcache_deployment.yaml`](config/samples/vllm_lmcache_deployment.yaml).
 
 > [!IMPORTANT]
-> The webhook requires an in-cluster operator; `make run` disables it. With
+> The webhook needs `make deploy` (not `make run`) + cert-manager. With
 > `spec.isolatedIPC: false` the vLLM pod's namespace must additionally be
 > labeled `pod-security.kubernetes.io/enforce=privileged` (the injected
 > hostPath `/dev/shm` mount — and `hostIPC`, if the engine opts in — is
@@ -217,7 +217,9 @@ image ENTRYPOINT — a `sh -c` wrapper is skipped). Editable samples:
 - [`config/samples/vllm_cacheblend_deployment.yaml`](config/samples/vllm_cacheblend_deployment.yaml) — an opted-in vLLM Deployment
 
 > [!IMPORTANT]
-> CacheBlend requires the **webhook**; `make run` disables it.
+> CacheBlend needs the **webhook**, so deploy with `make deploy` (not `make run`,
+> which is controller-only) and install **cert-manager** first
+> (`kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml`).
 > If Pod Security Standards are enforced, label the engine's and the vLLM pod's
 > namespaces `pod-security.kubernetes.io/enforce=privileged` — the webhook injects
 > a hostPath `/dev/shm` mount (or `hostIPC` when the engine opts in), which
