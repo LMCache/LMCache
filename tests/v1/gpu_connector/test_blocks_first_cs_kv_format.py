@@ -17,6 +17,8 @@ import torch
 from lmcache import device_ops, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import utils as U
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
@@ -54,6 +56,7 @@ def test_accessors():
     assert U.get_block_size(norm, fmt) == BS
     assert U.get_num_heads(norm, fmt) == NH
     assert U.get_head_size(norm, fmt) == HS * 2
+    assert U.get_transfer_head_size(norm, fmt) == HS
     assert U.get_hidden_dim_size(norm, fmt) == NH * HS * 2
     assert U.get_page_buffer_size(norm, fmt) == NB * BS
     assert U.get_tokens_per_layer(norm, fmt) == NB * BS
@@ -62,6 +65,32 @@ def test_accessors():
     # so it must recognize this format too.
     assert U.get_dtype(norm, fmt) == _raw_blocks_first_caches()[0].dtype
     assert not lmcache_native.is_mla(fmt)
+
+
+def test_group_metadata_uses_canonical_kv_planes():
+    fmt, norm = U.normalize_kv_and_discover_format(
+        _raw_blocks_first_caches(), EngineType.VLLM, HINTS
+    )
+    manager = KVLayerGroupsManager(norm, [fmt] * NL)
+    group = manager.kernel_groups[0]
+    assert group.shape_desc.hs == 2 * HS  # physical fused engine width
+    assert group.hidden_dim_size == NH * 2 * HS
+    assert group.get_lmcache_shape(BS) == torch.Size([2, NL, BS, NH * HS])
+
+    metadata = LMCacheMetadata(
+        model_name="test",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=norm[0].dtype,
+        kv_shape=(NL, 2, BS, NH, HS),
+        chunk_size=BS,
+    )
+    expected = [torch.Size([2, NL, BS, NH * HS])]
+    assert metadata.get_shapes() == expected
+    metadata.kv_layer_groups_manager = manager
+    assert metadata.get_shapes() == expected
 
 
 def test_mp_gather_scatter_roundtrip():
