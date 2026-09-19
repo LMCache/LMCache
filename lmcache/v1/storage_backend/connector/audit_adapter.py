@@ -39,7 +39,7 @@ class AuditConnectorAdapter(ConnectorAdapter):
         - audit://audit-server.example.com:8080?verify=true
         - audit://127.0.0.1:8080?verify=false
         """
-        logger.info(f"Creating Audit connector for URL: {context.url}")
+        logger.info("Creating Audit connector for URL: %s", context.url)
         hosts = context.url.split(",")
         if len(hosts) > 1:
             raise ValueError(
