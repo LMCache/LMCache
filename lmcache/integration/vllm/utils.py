@@ -195,7 +195,7 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                     _config_instance.validate()
                 else:
                     config_file = os.environ["LMCACHE_CONFIG_FILE"]
-                    logger.info(f"Loading LMCache config file {config_file}")
+                    logger.info("Loading LMCache config file %s", config_file)
                     _config_instance = LMCacheEngineConfig.from_file(config_file)
                     # Update config from environment variables
                     _config_instance.update_config_from_env()
