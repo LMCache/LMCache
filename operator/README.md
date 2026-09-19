@@ -369,13 +369,6 @@ kubectl create secret docker-registry regcred \
   -n lmcache-operator-system
 ```
 
-Set `imagePullSecrets` in your values file:
-
-```yaml
-imagePullSecrets:
-  - name: regcred
-```
-
 ## License
 
 Copyright 2026.
