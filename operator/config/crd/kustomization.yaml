@@ -1,12 +1,4 @@
-# Generated CRD index retained for Kubebuilder scaffolding.
-# The deployable chart consumes config/crd/bases via make manifests.
-resources:
-- bases/lmcache.lmcache.ai_lmcacheengines.yaml
-- bases/lmcache.lmcache.ai_cacheblendengines.yaml
-- bases/lmcache.lmcache.ai_lmcachecoordinators.yaml
+# Reserved for Kubebuilder scaffold markers. make manifests writes CRDs
+# directly to charts/lmcache-operator/files/crds; this is not an install target.
 # +kubebuilder:scaffold:crdkustomizeresource
-
-patches:
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.
-# patches here are for enabling the conversion webhook for each CRD
 # +kubebuilder:scaffold:crdkustomizewebhookpatch

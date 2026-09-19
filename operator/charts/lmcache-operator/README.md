@@ -35,7 +35,7 @@ Operator CRDs. Bind the Prometheus ServiceAccount to the
 `lmcache-operator-metrics-reader` ClusterRole and configure Prometheus to discover
 ServiceMonitors in the release namespace.
 
-For contributors: `make manifests` in `operator/` regenerates the CRD schemas,
-controller RBAC, and webhook definitions from Go markers and copies them into
-`files/`. Do not edit these generated chart inputs directly. `make test-chart`
+For contributors: `make manifests` in `operator/` generates the CRD schemas,
+controller RBAC, and webhook definitions directly from Go markers into `files/`.
+Tests, CRD installation, and Helm all use these files. Do not edit them directly. `make test-chart`
 validates the chart; `make build-installer` renders the same templates as YAML.

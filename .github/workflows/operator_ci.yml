@@ -107,8 +107,13 @@ jobs:
       - name: Validate chart contracts
         run: make test-chart
 
-      - name: Check generated CRDs and RBAC are current
-        run: git diff --exit-code -- charts/lmcache-operator config/crd/bases config/rbac/role.yaml config/webhook/manifests.yaml
+      - name: Check generated manifests are current
+        run: |
+          changes="$(git status --porcelain --untracked-files=all -- charts/lmcache-operator/files)"
+          if [ -n "${changes}" ]; then
+            printf '%s\n' "${changes}"
+            exit 1
+          fi
 
   smoke:
     needs: [changes, chart]

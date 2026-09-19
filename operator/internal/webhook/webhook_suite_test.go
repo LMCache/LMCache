@@ -75,12 +75,12 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping the test environment with the mutating webhook installed")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "charts", "lmcache-operator", "files", "crds")},
 		ErrorIfCRDPathMissing: true,
 		// The generated base has no opt-in selector (the chart adds it), so
 		// the webhook matches every pod in this controlled test environment.
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
-			Paths: []string{filepath.Join("..", "..", "config", "webhook", "manifests.yaml")},
+			Paths: []string{filepath.Join("..", "..", "charts", "lmcache-operator", "files", "webhook", "manifests.yaml")},
 		},
 	}
 	if dir := firstFoundEnvtestBinaryDir(); dir != "" {

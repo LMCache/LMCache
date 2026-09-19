@@ -2,12 +2,10 @@
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	@mkdir -p charts/lmcache-operator/files/crds
-	@rm -f charts/lmcache-operator/files/crds/*.yaml
-	@cp config/crd/bases/*.yaml charts/lmcache-operator/files/crds/
-	@cp config/rbac/role.yaml charts/lmcache-operator/files/role.yaml
-	@cp config/webhook/manifests.yaml charts/lmcache-operator/files/webhooks.yaml
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." \
+		output:crd:artifacts:config=charts/lmcache-operator/files/crds \
+		output:rbac:artifacts:config=charts/lmcache-operator/files \
+		output:webhook:artifacts:config=charts/lmcache-operator/files/webhook
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

@@ -1,4 +1,4 @@
-{{- $manifest := required "generated webhook file is missing; run make manifests before packaging the chart" (.Files.Get "files/webhooks.yaml") | fromYaml -}}
+{{- $manifest := required "generated webhook file is missing; run make manifests before packaging the chart" (.Files.Get "files/webhook/manifests.yaml") | fromYaml -}}
 {{- $_ := set $manifest.metadata "name" (include "lmcache-operator.resourceName" (dict "root" . "suffix" "mutating-webhook-configuration")) -}}
 {{- $_ := set $manifest.metadata "labels" (include "lmcache-operator.labels" . | fromYaml) -}}
 {{- $certificate := include "lmcache-operator.resourceName" (dict "root" . "suffix" "serving-cert") -}}

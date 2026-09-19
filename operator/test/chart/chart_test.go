@@ -74,7 +74,7 @@ func decode(t *testing.T, object unstructured.Unstructured, target any) {
 func TestGeneratedAPIsAndPermissions(t *testing.T) {
 	g := NewWithT(t)
 	objects := render(t, "lmcache-operator", "lmcache-operator-system")
-	crds, err := filepath.Glob("../../config/crd/bases/*.yaml")
+	crds, err := filepath.Glob(filepath.Join(chartPath, "files", "crds", "*.yaml"))
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(crds).To(HaveLen(3))
 	for _, path := range crds {
@@ -87,7 +87,7 @@ func TestGeneratedAPIsAndPermissions(t *testing.T) {
 		g.Expect(actual.Annotations).To(HaveKeyWithValue("helm.sh/resource-policy", "keep"))
 	}
 	var expected, actual rbacv1.ClusterRole
-	source, err := os.ReadFile("../../config/rbac/role.yaml")
+	source, err := os.ReadFile(filepath.Join(chartPath, "files", "role.yaml"))
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(yaml.Unmarshal(source, &expected)).To(Succeed())
 	decode(t, objectOf(t, objects, "ClusterRole", "lmcache-operator-manager-role"), &actual)

@@ -16,11 +16,11 @@ endef
 
 .PHONY: install
 install: manifests ## Install CRDs only (Helm deploy already includes them).
-	"$(KUBECTL)" apply -f config/crd/bases
+	"$(KUBECTL)" apply -f charts/lmcache-operator/files/crds
 
 .PHONY: uninstall
 uninstall: ## Delete CRDs and ALL their custom resources; run only for full cleanup.
-	"$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f config/crd/bases
+	"$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f charts/lmcache-operator/files/crds
 
 .PHONY: deploy
 deploy: manifests helm ## Install or upgrade the Operator with Helm; cert-manager must already be installed.
