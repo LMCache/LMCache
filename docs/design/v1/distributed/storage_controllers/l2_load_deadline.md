@@ -8,7 +8,8 @@ policy and recomputes the rest, instead of waiting for a slow or stuck L2.
 ## Configuration
 
 `StorageManagerConfig.prefetch_load_timeout` (CLI `--l2-prefetch-load-timeout`),
-seconds. `None` (default) disables it; a non-positive value is rejected at
+seconds. `None` (default) disables it; a value that is not a finite positive
+number (including `nan` and `inf`) is rejected at
 startup. It is threaded into `PrefetchController(l2_load_timeout=, clock=)`; the
 clock is injectable so tests advance time without sleeping.
 
@@ -41,10 +42,15 @@ resolved, shared by normal completion, the deadline finalize, and the drain).
 
 ## Scheduling (single loop thread)
 
-Deadlines are stamped under the submission lock, so the pending queue is
-deadline-monotonic. The loop bounds its poll by the nearest deadline — the
-in-flight minimum or the queue head — rounded up so a sub-millisecond remainder
-does not busy-spin. Once per iteration, **after** processing completions, an
+Deadlines are stamped under the submission lock, so the *armed* entries of the
+pending queue are deadline-monotonic. Unarmed `WARM` entries carry no deadline
+and are interleaved freely, so both the poll bound and the expiry sweep scan past
+them to the first armed entry rather than inspecting only the queue head. The
+loop bounds its poll by the nearest deadline — the in-flight minimum or that
+first armed queue entry — clamped to the poll interval and rounded up so a
+sub-millisecond remainder does not busy-spin. A request that goes past its
+deadline between the sweep and its own admission is re-checked when it is popped
+and takes the queued fallback instead of starting L2 work. Once per iteration, **after** processing completions, an
 expiry sweep fires due requests. Because expiry runs after completion processing
 on the one thread, a completion signaled in the same wake is finalized first and
 wins the race; only genuinely-pending adapters remain when the fallback is
@@ -57,7 +63,9 @@ computed. When disabled, nothing is armed and the loop never reads the clock.
 deadline in:      (a)        (b)          (c)
 ```
 
-- **(a) Queued (never admitted):** does the cheap synchronous L1 lock + trim,
+- **(a) Queued (never admitted or admitted late):** does the cheap synchronous
+  L1 lock + trim, touches the retained keys for LRU parity with normal
+  completion,
   skipping only L2, and publishes that L1-only subset. An L1-resident hit is not
   discarded as a miss; the L2 portion is recomputed.
 - **(b) Lookup:** only finalized L1 hits are usable (an L2 lookup that returned
@@ -79,8 +87,28 @@ get a bounded-latency fallback and slots free once the slow I/O drains). One
 budget, elapsed, and retained/missed chunk counts (low-cardinality; no
 request-id label); the L2 metrics and logging subscribers consume it.
 
+## Buffer ownership during the drain
+
+The unit of ownership is the adapter *load task*, not the key. As soon as an
+adapter's task returns, every key in that adapter's load plan is resolvable —
+the ones that loaded *and* the ones that did not — so all of them are finalized
+immediately, at the deadline and again on each late completion. Only a
+still-pending adapter's reservations stay held. Resolving just the successful
+keys would pin a failed key's L1 write reservation for the whole of the slowest
+adapter's drain.
+
 ## Deliberately out of scope
 
 No task-cancellation protocol; no dynamic wait-vs-recompute cost model; no change
 to `WARM` (the deadline is unarmed for it) or to `mq_timeout` semantics; no
 storage-adapter interface change; a slot-free drain pool is possible follow-up.
+
+**Shutdown and TTL are explicitly *not* strengthened by this change.**
+`PrefetchController.stop()` joins its own loop thread and then releases the
+requests it still tracks; it does not obtain any quiescence guarantee from the L2
+adapters, because `L2AdapterInterface.close()` does not define one and most
+in-tree adapters cancel rather than join their in-flight loads. That is the
+behaviour on `dev` today and this change neither improves nor worsens it. The
+drain is also unbounded, while the L1 write lock protecting a reserved buffer is
+a TTL lock (default 600 s). Both are pre-existing lifecycle gaps tracked
+separately, not solved here.

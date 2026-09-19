@@ -329,7 +329,8 @@ Source: ``lmcache/v1/distributed/config.py``
        receives the subset already usable under the trim policy and the rest is
        reported as a cache miss to recompute, rather than waiting for a slow L2.
        Not set (the default) disables the deadline and preserves existing
-       behavior; a value ``<= 0`` is rejected at startup.
+       behavior; a value that is not a finite positive number (including
+       ``nan`` and ``inf``) is rejected at startup.
 
 L2 Prefetch Load Deadline vs. ``mq_timeout``
 --------------------------------------------
