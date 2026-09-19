@@ -480,8 +480,77 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        force_store_wait = self.config.get_extra_config_value("force_store_wait", False)
+
         with store_stats.profile_process_tokens():
             prev_key = 0
+            pending_chunks: List[Tuple[int, int, CacheEngineKey]] = []
+            pending_shapes: Optional[list[torch.Size]] = None
+            pending_dtypes: Optional[list[torch.dtype]] = None
+
+            def flush_pending_chunks() -> bool:
+                nonlocal prev_key, pending_shapes, pending_dtypes
+                nonlocal tot_kv_size, tot_token_num
+
+                if not pending_chunks:
+                    return False
+
+                assert pending_shapes is not None
+                assert pending_dtypes is not None
+                allocated_objs, allocation_stopped = self._allocate_store_memory_objs(
+                    pending_shapes,
+                    pending_dtypes,
+                    len(pending_chunks),
+                    busy_loop=force_store_wait,
+                )
+
+                for (start, end, key), memory_obj in zip(
+                    pending_chunks,
+                    allocated_objs,
+                    strict=False,
+                ):
+                    starts.append(start)
+                    ends.append(end)
+                    keys.append(key)
+                    memory_objs.append(memory_obj)
+                    tot_kv_size += memory_obj.get_size()
+                    tot_token_num += end - start
+
+                    # Create KV event
+                    if self.kv_events_enabled:
+                        stored_event = CacheStoreEvent(
+                            block_hashes=[key.chunk_hash],
+                            parent_block_hash=None if start == 0 else prev_key,
+                            token_ids=[],
+                            block_size=end - start,
+                            lora_id=None,
+                            medium="cpu",
+                            lora_name=None,
+                        )
+                        if tokens is not None:
+                            stored_event.token_ids = convert_tokens_to_list(
+                                tokens,
+                                start,
+                                end,
+                            )
+                            if isinstance(tokens, torch.Tensor):
+                                stored_event.medium = tokens.device
+                        elif hashes is not None:
+                            stored_event.token_ids = hashes[start : end + 1]
+                        logger.debug(
+                            (
+                                "Added kv cache event '%s' to kv cache events queue"
+                                % stored_event
+                            )
+                        )
+                        self.kv_events.append(stored_event)
+                        prev_key = key.chunk_hash
+
+                pending_chunks.clear()
+                pending_shapes = None
+                pending_dtypes = None
+                return allocation_stopped
+
             for start, end, key in self.token_database.process_tokens(
                 tokens,
                 hashes,
@@ -495,60 +564,31 @@ class LMCacheEngine:
                 kv_shapes = self.metadata.get_shapes(num_tokens)
                 kv_dtypes = self.metadata.get_dtypes()
 
-                # TODO (Jiayi): should be batched in the future
-                memory_obj = self.storage_manager.allocate(
-                    kv_shapes,
-                    kv_dtypes,
-                    busy_loop=self.config.get_extra_config_value(
-                        "force_store_wait", False
-                    ),
-                    fmt=self.fmt,
-                )
-                if memory_obj is None:
+                if pending_shapes is not None and (
+                    kv_shapes != pending_shapes or kv_dtypes != pending_dtypes
+                ):
+                    if flush_pending_chunks():
+                        logger.warning(
+                            "Local cpu memory under pressure so"
+                            " choosing to store only "
+                            " %d total chunks of KV cache.",
+                            len(memory_objs),
+                        )
+                        break
+
+                if not pending_chunks:
+                    pending_shapes = kv_shapes
+                    pending_dtypes = kv_dtypes
+
+                pending_chunks.append((start, end, key))
+            else:
+                if flush_pending_chunks():
                     logger.warning(
                         "Local cpu memory under pressure so"
                         " choosing to store only "
                         " %d total chunks of KV cache.",
                         len(memory_objs),
                     )
-                    break
-
-                starts.append(start)
-                ends.append(end)
-                keys.append(key)
-                memory_objs.append(memory_obj)
-                tot_kv_size += memory_obj.get_size()
-                tot_token_num += num_tokens
-
-                # Create KV event
-                if self.kv_events_enabled:
-                    stored_event = CacheStoreEvent(
-                        block_hashes=[key.chunk_hash],
-                        parent_block_hash=None if start == 0 else prev_key,
-                        token_ids=[],
-                        block_size=num_tokens,
-                        lora_id=None,
-                        medium="cpu",
-                        lora_name=None,
-                    )
-                    if tokens is not None:
-                        stored_event.token_ids = convert_tokens_to_list(
-                            tokens,
-                            start,
-                            end,
-                        )
-                        if isinstance(tokens, torch.Tensor):
-                            stored_event.medium = tokens.device
-                    elif hashes is not None:
-                        stored_event.token_ids = hashes[start : end + 1]
-                    logger.debug(
-                        (
-                            "Added kv cache event '%s' to kv cache events queue"
-                            % stored_event
-                        )
-                    )
-                    self.kv_events.append(stored_event)
-                    prev_key = key.chunk_hash
 
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
@@ -1639,6 +1679,68 @@ class LMCacheEngine:
             logger.error("Error closing storage_manager: %s", e)
 
         logger.info("LMCacheEngine closed.")
+
+    def _allocate_store_memory_objs(
+        self,
+        kv_shapes: list[torch.Size],
+        kv_dtypes: list[torch.dtype],
+        batch_size: int,
+        busy_loop: bool,
+    ) -> tuple[List[MemoryObj], bool]:
+        """Allocate store buffers, using the batched allocator as a fast path."""
+        assert self.storage_manager is not None
+
+        memory_objs = self.storage_manager.batched_allocate(
+            kv_shapes,
+            kv_dtypes,
+            batch_size=batch_size,
+            busy_loop=busy_loop,
+            eviction=False,
+            fmt=self.fmt,
+        )
+        if memory_objs is None:
+            return self._allocate_store_memory_objs_one_by_one(
+                kv_shapes,
+                kv_dtypes,
+                batch_size,
+                busy_loop,
+            )
+
+        allocated_objs: List[MemoryObj] = []
+        for memory_obj in memory_objs[:batch_size]:
+            if memory_obj is None:
+                break
+            allocated_objs.append(memory_obj)
+
+        for memory_obj in memory_objs[len(allocated_objs) :]:
+            if memory_obj is not None:
+                memory_obj.ref_count_down()
+
+        allocation_stopped = len(allocated_objs) < batch_size
+        return allocated_objs, allocation_stopped
+
+    def _allocate_store_memory_objs_one_by_one(
+        self,
+        kv_shapes: list[torch.Size],
+        kv_dtypes: list[torch.dtype],
+        batch_size: int,
+        busy_loop: bool,
+    ) -> tuple[List[MemoryObj], bool]:
+        """Allocate store buffers one at a time, preserving partial-store behavior."""
+        assert self.storage_manager is not None
+
+        memory_objs: List[MemoryObj] = []
+        for _ in range(batch_size):
+            memory_obj = self.storage_manager.allocate(
+                kv_shapes,
+                kv_dtypes,
+                busy_loop=busy_loop,
+                fmt=self.fmt,
+            )
+            if memory_obj is None:
+                return memory_objs, True
+            memory_objs.append(memory_obj)
+        return memory_objs, False
 
     def _async_process_tokens_internal(
         self,
