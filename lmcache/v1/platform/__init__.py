@@ -28,6 +28,7 @@ __all__ = [
     "get_device_spec",
     "get_torch_device",
     "resolve_device_ops",
+    "synchronize_device",
     "torch_dev",
     "torch_device_type",
     "consume_fd",
@@ -41,6 +42,9 @@ __all__ = [
 # Standard
 from typing import TYPE_CHECKING, Any
 import os
+
+# Third Party
+import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -187,6 +191,25 @@ def resolve_device_ops(device_type: str) -> DeviceOps:
     the process.
     """
     return _resolve_device_spec(device_type).get_ops()
+
+
+def synchronize_device(device: torch.device) -> None:
+    """Wait for work on the given device; CPU transfers need no synchronization.
+
+    Args:
+        device: Tensor device, including the accelerator index to synchronize.
+
+    Returns:
+        None after device work completes, or immediately for CPU.
+
+    Raises:
+        RuntimeError: If no accelerator backend is registered.
+        AttributeError: If the backend lacks its torch module or synchronize API.
+    """
+    if device.type == "cpu":
+        return
+    spec = _resolve_device_spec(device.type)
+    getattr(torch, spec.torch_module_name).synchronize(device)
 
 
 torch_dev, torch_device_type = get_torch_device()
