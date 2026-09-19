@@ -122,10 +122,7 @@ class HeartbeatService:
             if version:
                 print(f"Got version from target nodes: {version}")
 
-            # Calculate total children nodes across all proxies
-            total_children = sum(
-                len(proxy_node["nodes"]) for proxy_node in self.target_nodes
-            )
+            nodes_count = len(self.target_nodes)
             params = {
                 "pid": os.getpid(),
                 "api_address": api_address,
@@ -133,7 +130,7 @@ class HeartbeatService:
                 "other_info": json.dumps(
                     {
                         "startup_time": self.startup_time.isoformat(),
-                        "nodes_count": total_children,
+                        "nodes_count": nodes_count,
                     }
                 ),
             }
@@ -155,30 +152,23 @@ class HeartbeatService:
         if not self.target_nodes:
             return None
 
-        for proxy_node in self.target_nodes:
-            for node in proxy_node["nodes"]:
-                try:
-                    url = "http://%s:%s/version" % (
-                        node["host"],
-                        node["port"],
-                    )
-                    async with httpx.AsyncClient(timeout=5.0) as client:
-                        response = await client.get(url)
+        for node in list(self.target_nodes):
+            try:
+                url = "http://%s:%s/version" % (node["host"], node["port"])
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(url)
 
-                    if response.status_code == 200 and response.content:
-                        content = response.content.decode("utf-8").strip()
-                        if (content.startswith('"') and content.endswith('"')) or (
-                            content.startswith("'") and content.endswith("'")
-                        ):
-                            content = content[1:-1]
-                        return content
+                if response.status_code == 200 and response.content:
+                    content = response.content.decode("utf-8").strip()
+                    if (content.startswith('"') and content.endswith('"')) or (
+                        content.startswith("'") and content.endswith("'")
+                    ):
+                        content = content[1:-1]
+                    return content
 
-                except Exception as e:
-                    print(
-                        "Failed to get version from node %s: %s"
-                        % (node["name"], str(e))
-                    )
-                    continue
+            except Exception as e:
+                print("Failed to get version from node %s: %s" % (node["name"], str(e)))
+                continue
 
         return None
 
