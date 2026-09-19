@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 # Standard
+from pathlib import Path
 import os
 import platform
+import subprocess
+import sys
 
 # Third Party
 import pytest
@@ -102,6 +105,84 @@ def test_raw_block_device_iouring_best_effort_roundtrip(tmp_path):
     finally:
         if dev is not None:
             dev.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("queue_depth", [1, 2])
+def test_raw_block_device_iouring_batch_exceeds_queue_depth(
+    tmp_path: Path, queue_depth: int
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            io_engine="io_uring",
+            iouring_queue_depth=queue_depth,
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+
+    try:
+        payloads = [bytearray([index]) * 4096 for index in range(32)]
+        buffers = [bytearray(4096) for _ in payloads]
+        offsets = [4096 * index for index in range(len(payloads))]
+        lengths = [4096] * len(payloads)
+        batch = device.batched_write(offsets, payloads, lengths)
+        assert device.wait_iouring(batch) == ([True] * len(payloads), [])
+        batch = device.batched_read(offsets, buffers, lengths)
+        assert device.wait_iouring(batch) == ([True] * len(payloads), [])
+        assert buffers == payloads
+    finally:
+        device.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("remaining_bytes", [0, 4])
+def test_raw_block_device_iouring_eof_terminates(
+    tmp_path: Path, remaining_bytes: int
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path), writable=False, io_engine="io_uring", use_odirect=False
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+    device.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from lmcache_rust_raw_block_io import RawBlockDevice
+
+device = RawBlockDevice(
+    sys.argv[1], writable=False, io_engine="io_uring", use_odirect=False
+)
+try:
+    batch = device.batched_read([int(sys.argv[2])], [bytearray(8)], [8])
+    success, errors = device.wait_iouring(batch)
+    assert success == [False], success
+    assert len(errors) == 1, errors
+finally:
+    device.close()
+""",
+            str(path),
+            str(RAW_BLOCK_CI_CAPACITY_BYTES - remaining_bytes),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(
