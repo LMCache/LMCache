@@ -19,8 +19,9 @@ cleanup() {
 wait_for_http() {
   local service=$1
   local endpoint=$2
+  local max_attempts=${3:-60}
   local attempt pid
-  for attempt in {1..60}; do
+  for ((attempt=0; attempt<max_attempts; attempt++)); do
     if ((${#PIDS[@]})); then
       for pid in "${PIDS[@]}"; do
         if ! kill -0 "$pid" 2>/dev/null; then
@@ -91,6 +92,9 @@ else
       "kv_connector_extra_config": {"lmcache.mp.port": 5555}
     }' &
   PIDS+=("$!")
+
+  # Wait for decode to finish downloading and loading the model before prefill.
+  wait_for_http "decode worker" http://localhost:8081/health 600
 
   # Run the prefill worker on GPU 1.
   DYN_SYSTEM_PORT=8082 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
