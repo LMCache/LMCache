@@ -76,12 +76,6 @@ The frontend accepts requests on port 8000. The vLLM worker uses
 ``LMCacheMPConnector`` to store and retrieve KV cache through the server
 on port 5555. This example gives LMCache 16 GiB of CPU memory.
 
-Before starting the worker, confirm that LMCache is ready:
-
-.. code-block:: bash
-
-   curl -fsS http://localhost:8080/healthcheck
-
 Use the launch scripts
 ~~~~~~~~~~~~~~~~~~~~~~
 
