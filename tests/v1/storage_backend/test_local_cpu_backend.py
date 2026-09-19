@@ -175,6 +175,27 @@ class TestLocalCPUBackend:
 
         local_cpu_backend.memory_allocator.close()
 
+    def test_is_hot_cache_object(self, local_cpu_backend):
+        """Test is_hot_cache_object() distinguishes residents from staging."""
+        key = create_test_key("test_key")
+        resident_obj = create_test_memory_obj()
+        staging_obj = create_test_memory_obj()
+
+        # Unknown key: nothing is resident
+        assert not local_cpu_backend.is_hot_cache_object(key, resident_obj)
+
+        local_cpu_backend.submit_put_task(key, resident_obj)
+
+        # The stored object is resident; a different object under the
+        # same key (e.g. a staging buffer) is not
+        assert local_cpu_backend.is_hot_cache_object(key, resident_obj)
+        assert not local_cpu_backend.is_hot_cache_object(key, staging_obj)
+
+        local_cpu_backend.remove(key)
+        assert not local_cpu_backend.is_hot_cache_object(key, resident_obj)
+
+        local_cpu_backend.memory_allocator.close()
+
     def test_contains_key_exists(self, local_cpu_backend):
         """Test contains() when key exists."""
         key = create_test_key("test_key")
