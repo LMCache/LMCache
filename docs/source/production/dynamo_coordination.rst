@@ -10,19 +10,18 @@ requests.
 Local
 -----
 
-To deploy Dynamo locally, use a Linux host with NVIDIA GPUs, Docker
-Compose 2.30 or newer, and the NVIDIA Container Toolkit installed.
-
-This example serves ``Qwen/Qwen3-0.6B`` on one GPU and gives LMCache
-16 GiB of CPU memory. The ``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2``
-image includes LMCache 0.5.2. You can find the latest image tags on `NVIDIA NGC
-<https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/-/tags>`_.
-
-On the host, start NATS and etcd from the root of the LMCache repository:
+If you are deploying Dynamo locally, start NATS and etcd first.
+On the host, run the included Compose file from the root of the LMCache
+repository:
 
 .. code-block:: bash
 
    docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
+
+This demo serves ``Qwen/Qwen3-0.6B`` on a single GPU, with 16 GiB of CPU
+memory for LMCache. The ``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2`` image
+includes LMCache 0.5.2. You can find the latest image tags on `NVIDIA NGC
+<https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/-/tags>`_.
 
 From the same directory, start the Dynamo container:
 
