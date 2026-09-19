@@ -7,6 +7,8 @@ Health check for RemoteBackend.
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Optional
 import asyncio
+import hashlib
+import json
 import time
 
 # Third Party
@@ -267,13 +269,6 @@ class RemoteBackendHealthCheck(HealthCheck):
 
     @contextmanager
     def _resource_manager(self):
-        key = CacheEngineKey(
-            model_name="test",
-            world_size=1,
-            worker_id=0,
-            chunk_hash=0,
-            dtype=torch.bfloat16,
-        )
         connector = self.backend.connection
         if isinstance(connector, InstrumentedRemoteConnector):
             connector = connector.getWrappedConnector()
@@ -282,11 +277,44 @@ class RemoteBackendHealthCheck(HealthCheck):
         shapes = connector.meta_shapes
         dtypes = connector.meta_dtypes
         fmt = connector.meta_fmt
+        # Scope probes to the logical backend and original rank. Keep the key
+        # stable across checks/restarts and outside MLA's worker-ID rewrite.
+        probe_identity = json.dumps(
+            {
+                "instance_id": self.backend.config.lmcache_instance_id,
+                "model": self.backend.metadata.model_name,
+                "world_size": self.backend.metadata.world_size,
+                "worker_id": self.backend.metadata.worker_id,
+                "remote_url": self.backend.remote_url,
+                "serde": self.backend.config.remote_serde,
+                "shapes": [list(shape) for shape in shapes],
+                "dtypes": [str(dtype) for dtype in dtypes],
+                "format": fmt.name,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        probe_digest = hashlib.sha256(probe_identity.encode("utf-8")).hexdigest()
+        key = CacheEngineKey(
+            model_name=f"lmcache-health-{probe_digest}",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=0,
+            dtype=torch.bfloat16,
+        )
         put_obj, get_obj = None, None
         try:
             # put
             put_obj = self.backend.local_cpu_backend.allocate(shapes, dtypes, fmt)
-            future = self.backend.submit_put_task(key, put_obj)
+            if put_obj is None:
+                raise RuntimeError("Failed to allocate remote health probe")
+            probe_tensor = put_obj.raw_tensor
+            if probe_tensor is None:
+                raise RuntimeError("Remote health probe requires a tensor allocation")
+            probe_tensor.zero_()
+            future = self.backend.submit_put_task(
+                key, put_obj, bypass_mla_write_filter=True
+            )
             future.result(timeout=self._get_ping_timeout())
             # get
             if connector.support_batched_get():
