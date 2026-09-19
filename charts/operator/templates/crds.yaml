@@ -1,0 +1,7 @@
+{{- if .Values.crdInstall }}
+{{ .Files.Get "crd-bases/lmcache.lmcache.ai_lmcacheengines.yaml" }}
+---
+{{ .Files.Get "crd-bases/lmcache.lmcache.ai_cacheblendengines.yaml" }}
+---
+{{ .Files.Get "crd-bases/lmcache.lmcache.ai_lmcachecoordinators.yaml" }}
+{{- end }}
