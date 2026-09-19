@@ -222,7 +222,7 @@ Failure & Health Counters
 Health-monitoring counters emitted on the dedicated ``lmcache_mp.health``
 OTel meter. Driven by the ``L1FailureMetricsSubscriber`` and
 ``L2FailureMetricsSubscriber``, which are registered automatically when
-metrics are enabled. All three counters carry ``model_name`` (extracted
+metrics are enabled. All of these counters carry ``model_name`` (extracted
 from each ``ObjectKey``) so operators can slice per-model on the
 Prometheus ``/metrics`` endpoint.
 
@@ -255,6 +255,20 @@ Prometheus ``/metrics`` endpoint.
        ``model_name``. ``l1_oom`` means L1 had no room to receive the
        prefetched object; ``not_found`` means the adapter returned no
        data despite a positive lookup (e.g. concurrent delete).
+   * - ``lmcache_mp.l2_store_failure``
+     - Counter
+     - Chunks whose L1→L2 store task failed, so the data never reached
+       L2. Tagged by ``l2_name`` plus ``model_name``. Nothing else on the
+       endpoint counts a failed store: ``l2_store_completed`` counts
+       *finished* store tasks whatever their outcome, and
+       ``l2_store_completed_objects`` advances only on the success path,
+       so a backend failing every write leaves it absent from
+       ``/metrics`` rather than flat at zero — and ``rate(...) == 0``
+       never fires on a missing series. ``l2_usage_bytes`` reports
+       occupancy, not outcome, so it cannot fill the gap either: it
+       reads 0 for a cold cache as well as a broken one, and on a warm
+       cache it does not fall when writes start failing. Alert on
+       ``rate(lmcache_mp_l2_store_failure_chunks_total[5m]) > 0``.
 
 A ``reason=serde_failure`` value will be added to ``l2_prefetch_failure``
 as an additive, non-breaking extension once L2 adapters distinguish

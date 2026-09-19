@@ -734,7 +734,14 @@ class StoreController(StorageControllerInterface):
         task: InFlightStoreTask,
     ) -> None:
         """Release read locks, publish completion, apply policy L1 deletions
-        on success, and remove the tracking entry."""
+        on success, and remove the tracking entry.
+
+        A single ``L2_STORE_COMPLETED`` event is published for either
+        outcome; the two branches differ in the per-key breakdown they
+        carry.  Success reports ``key_count_per_salt`` (the keys now in
+        L2); failure reports ``failed_count_per_model`` (the keys that
+        did not make it), which ``L2FailureMetricsSubscriber`` turns
+        into the ``lmcache_mp.l2_store_failure`` counter."""
         adapter_index, task_id = task_key
         l1_mgr = self._l1_manager
         success = task.l2_store_result
@@ -779,6 +786,9 @@ class StoreController(StorageControllerInterface):
                         **completion_meta,
                         "succeeded_count": 0,
                         "failed_count": len(task.keys),
+                        "failed_count_per_model": Counter(
+                            k.model_name for k in task.keys
+                        ),
                     },
                 )
             )
