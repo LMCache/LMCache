@@ -83,84 +83,79 @@ On the host, run one of these commands from the root of the LMCache repository:
 Kubernetes
 ----------
 
-The `Kubernetes manifests
-<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/kubernetes>`_
-deploy the same model with Dynamo's vLLM backend. After preparing the
-cluster as described below, run these two commands from the root of the
-LMCache repository:
+For Kubernetes, install the :doc:`LMCache operator </mp/operator>` and
+the Dynamo platform before applying the examples. Use x86_64 NVIDIA GPU
+nodes and a Dynamo operator that serves ``nvidia.com/v1alpha1``.
+
+Run the commands below from the root of the LMCache repository. Deploy
+the LMCache server first, then choose aggregated or disaggregated serving.
+Keep the cache engine and Dynamo deployment in the same namespace; these
+examples use ``default``.
+
+Deploy the LMCache server
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``lmcache_engine.yaml`` defines an ``LMCacheEngine`` custom resource with
+16 GiB of CPU cache per server. It uses ``lmcache/standalone:v0.5.2``,
+which supports ``linux/amd64``. The operator creates a server DaemonSet,
+a Service, and a ``lmcache-mp-connection`` ConfigMap for the workers.
+
+.. literalinclude:: ../../../examples/dynamo_integration/kubernetes/lmcache_engine.yaml
+   :language: yaml
+   :caption: lmcache_engine.yaml
+
+``isolatedIPC: false`` lets the server share the host's ``/dev/shm`` with
+workers on the same node, as required by LMCache 0.5.2. Apply the resource:
 
 .. code-block:: bash
 
    kubectl apply -n default -f examples/dynamo_integration/kubernetes/lmcache_engine.yaml
+
+Aggregated serving
+~~~~~~~~~~~~~~~~~~
+
+``agg_lmcache_mp.yaml`` defines a ``DynamoGraphDeployment`` with a frontend
+and one vLLM worker. The worker serves ``Qwen/Qwen3-0.6B`` on one GPU and
+handles both prefill and decode. Both containers use
+``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2``, which includes the same
+LMCache 0.5.2 version as the cache server.
+
+The worker mounts ``lmcache-mp-connection`` at ``/etc/lmcache`` and reads
+``kv-transfer-config.json`` through ``--kv-transfer-config``. This sets up
+``LMCacheMPConnector`` to connect to the server on its node.
+``hostIPC: true`` and ``sharedMemory.disabled: true`` let the worker use
+the same shared memory as the server.
+
+.. literalinclude:: ../../../examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
+   :language: yaml
+   :caption: agg_lmcache_mp.yaml
+
+Apply the aggregated deployment:
+
+.. code-block:: bash
+
    kubectl apply -n default -f examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
 
-The first command creates the shared cache service. The second creates a
-Dynamo frontend and one vLLM worker. The LMCache operator generates the
-connection ConfigMap that the worker mounts at startup.
-
-Prepare the cluster
-~~~~~~~~~~~~~~~~~~~
-
-Use a cluster with x86_64 NVIDIA GPU nodes. Install the Dynamo platform
-and :doc:`LMCache operator </mp/operator>` before applying these manifests.
-The Dynamo operator must serve ``nvidia.com/v1alpha1``. The aggregated
-demo needs one GPU.
-
-The manifests use ``lmcache/standalone:v0.5.2`` for the cache server and
-``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2`` for Dynamo. Both include
-LMCache 0.5.2. The server image supports ``linux/amd64``.
-
-The examples use the ``default`` namespace. If you change it, update both
-the manifests and commands so the cache engine and Dynamo
-deployment stay in the same namespace.
-
-How the YAML connects the services
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``lmcache_engine.yaml`` defines the cache server image and CPU cache size:
-
-.. literalinclude:: ../../../examples/dynamo_integration/kubernetes/lmcache_engine.yaml
-   :language: yaml
-
-The operator creates a server DaemonSet, a Service, and the
-``lmcache-mp-connection`` ConfigMap. Workers use the server on their own
-node, which lets multiple workers on that node share the CPU cache.
-The engine sets ``isolatedIPC: false`` to share the host's ``/dev/shm``
-with the workers, as required by LMCache 0.5.2. The workers use
-``hostIPC: true`` to access the same shared memory.
-
-The `aggregated Dynamo manifest
-<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml>`_
-starts a frontend and one ``VllmDecodeWorker`` that handles both prefill
-and decode. The worker mounts the connection ConfigMap at ``/etc/lmcache``
-and reads ``kv-transfer-config.json`` through ``--kv-transfer-config``.
-This configures ``LMCacheMPConnector`` to connect to the cache server.
-
-For separate prefill and decode workers, use
-``disagg_lmcache_mp.yaml`` in the second ``kubectl apply`` command instead
-of ``agg_lmcache_mp.yaml``. It launches one worker for prefill and one for
-decode, each using one GPU and the same connection ConfigMap.
-
-Run this disaggregated example on a single GPU node with at least two
-GPUs so both workers use the same MP server. The manifest does not force
-worker co-location or configure cache sharing between nodes.
-
-Verify the deployment
+Disaggregated serving
 ~~~~~~~~~~~~~~~~~~~~~
 
-Check the cache engine, connection ConfigMap, and Dynamo resources:
+``disagg_lmcache_mp.yaml`` defines a ``DynamoGraphDeployment`` with a
+frontend and separate prefill and decode workers. Each worker uses one
+GPU, with ``--disaggregation-mode`` set to ``prefill`` or ``decode``.
+Both workers use the same image and connection ConfigMap as the
+aggregated example and connect to the LMCache server created above.
+
+Use a cluster with a single GPU node and at least two GPUs so both
+workers connect to the same server. The manifest does not force worker
+co-location or configure cache sharing between nodes.
+
+.. literalinclude:: ../../../examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml
+   :language: yaml
+   :caption: disagg_lmcache_mp.yaml
+
+To use disaggregated serving, apply this manifest instead of the
+aggregated deployment:
 
 .. code-block:: bash
 
-   kubectl -n default get lmcacheengine lmcache-mp
-   kubectl -n default get configmap lmcache-mp-connection
-   kubectl -n default get dynamographdeployment vllm-agg-lmcache
-   kubectl -n default get pods
-
-For the disaggregated example, the Dynamo resource is named
-``vllm-disagg-lmcache``. Once the pods are ready, replace
-``FRONTEND_POD_NAME`` with the frontend pod name and forward its HTTP port:
-
-.. code-block:: bash
-
-   kubectl -n default port-forward pod/FRONTEND_POD_NAME 8000:8000
+   kubectl apply -n default -f examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml

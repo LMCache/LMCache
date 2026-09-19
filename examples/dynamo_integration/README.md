@@ -89,4 +89,4 @@ kubectl apply -n default -f examples/dynamo_integration/kubernetes/disagg_lmcach
 ```
 
 See the [Dynamo integration guide](../../docs/source/production/dynamo_coordination.rst)
-for cluster prerequisites, manifest settings, and verification commands.
+for cluster prerequisites, the YAML manifests, and deployment steps.
