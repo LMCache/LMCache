@@ -5,21 +5,12 @@ This chart installs the LMCache Operator.
 Install cert-manager and wait for it to be ready before installing this chart.
 cert-manager is an external prerequisite, not a chart dependency.
 
-Install the OCI chart with Helm 3.8 or newer, selecting a chart version from
-the [Operator releases](https://github.com/LMCache/LMCache/releases):
+Install with Helm 3.8 or newer:
 
 ```sh
 helm upgrade --install lmcache-operator \
   oci://registry-1.docker.io/lmcache/lmcache-operator-chart \
   --version "<chart-version>" \
-  --namespace lmcache-operator-system --create-namespace --wait
-```
-
-The same chart archive is attached to each Operator release. To install a
-downloaded archive:
-
-```sh
-helm upgrade --install lmcache-operator "./lmcache-operator-chart-<chart-version>.tgz" \
   --namespace lmcache-operator-system --create-namespace --wait
 ```
 

@@ -34,9 +34,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 ### 1. Install the Operator
 
-**Option A: Helm chart from Docker Hub (recommended)**
-
-Install the OCI chart from Docker Hub, selecting a version from the [Operator releases](https://github.com/LMCache/LMCache/releases). Chart versions track Operator versions: for example, Operator `v0.5.5` uses chart `0.5.5`, and `v0.4.8rc1` uses chart `0.4.8-rc.1`.
+**Option A: Helm chart**
 
 ```bash
 helm upgrade --install lmcache-operator \
@@ -45,21 +43,17 @@ helm upgrade --install lmcache-operator \
   --namespace lmcache-operator-system --create-namespace --wait
 ```
 
-The same chart archive is attached to the Operator release. To install a downloaded archive:
+**Option B: One-line install from release**
+
+Install the latest stable release:
 
 ```bash
-helm upgrade --install lmcache-operator \
-  "./lmcache-operator-chart-<chart-version>.tgz" \
-  --namespace lmcache-operator-system --create-namespace --wait
+kubectl apply -f https://github.com/LMCache/LMCache/releases/download/operator-latest/install.yaml
 ```
 
-**Option B: Rendered YAML from a release**
+Or use the nightly build from the `dev` branch:
 
 ```bash
-# Latest stable release
-kubectl apply -f https://github.com/LMCache/LMCache/releases/download/operator-latest/install.yaml
-
-# Or nightly build from the dev branch
 kubectl apply -f https://github.com/LMCache/LMCache/releases/download/operator-nightly-latest/install.yaml
 ```
 
@@ -67,19 +61,10 @@ kubectl apply -f https://github.com/LMCache/LMCache/releases/download/operator-n
 
 ```bash
 cd operator
-make docker-build docker-push IMG=<your-registry>/lmcache-operator:latest
+make build
+make install
 make deploy IMG=<your-registry>/lmcache-operator:latest
 ```
-
-`make deploy` runs `make build-installer`: it renders the chart with `helm template`, adds the namespace, and applies `dist/install.yaml` with `kubectl apply`. Developers need Helm to render these resources; the resulting installation has no Helm release.
-
-To manage a source deployment as a Helm release instead, use:
-
-```bash
-make helm-deploy IMG=<your-registry>/lmcache-operator:latest
-```
-
-Both entry points use the same [chart templates and values](charts/lmcache-operator/values.yaml).
 
 ### 2. Deploy an LMCacheEngine
 

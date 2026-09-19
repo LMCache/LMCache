@@ -55,11 +55,7 @@ Prerequisites
 Installing the Operator
 -----------------------
 
-**Option A: Helm chart from Docker Hub (recommended)**
-
-Install the OCI chart from Docker Hub, selecting a version from the
-`Operator releases <https://github.com/LMCache/LMCache/releases>`_.
-For example, Operator ``v0.5.5`` uses chart ``0.5.5``:
+**Option A: Helm chart**
 
 .. code-block:: bash
 
@@ -68,16 +64,7 @@ For example, Operator ``v0.5.5`` uses chart ``0.5.5``:
       --version "<chart-version>" \
       --namespace lmcache-operator-system --create-namespace --wait
 
-The same chart archive is attached to the Operator release alongside
-``install.yaml``. To install a downloaded archive:
-
-.. code-block:: bash
-
-    helm upgrade --install lmcache-operator \
-      "./lmcache-operator-chart-<chart-version>.tgz" \
-      --namespace lmcache-operator-system --create-namespace --wait
-
-**Option B: Rendered YAML from a release**
+**Option B: One-line install from release**
 
 .. code-block:: bash
 
@@ -92,22 +79,9 @@ The same chart archive is attached to the Operator release alongside
 .. code-block:: bash
 
     cd operator
-    make docker-build docker-push IMG=<your-registry>/lmcache-operator:latest
+    make build
+    make install
     make deploy IMG=<your-registry>/lmcache-operator:latest
-
-``make deploy`` runs ``make build-installer``: it renders the chart with
-``helm template``, adds the namespace, and applies ``dist/install.yaml``
-with ``kubectl apply``. Developers need Helm to render these resources;
-the resulting installation has no Helm release.
-
-To manage a source deployment as a Helm release instead, use:
-
-.. code-block:: bash
-
-    make helm-deploy IMG=<your-registry>/lmcache-operator:latest
-
-Both entry points use the same templates and values under
-``operator/charts/lmcache-operator``.
 
 Deploying an LMCacheEngine
 ---------------------------
