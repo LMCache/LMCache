@@ -1,4 +1,0 @@
-# Reserved for Kubebuilder scaffold markers. make manifests writes CRDs
-# directly to charts/lmcache-operator/files/crds; this is not an install target.
-# +kubebuilder:scaffold:crdkustomizeresource
-# +kubebuilder:scaffold:crdkustomizewebhookpatch
