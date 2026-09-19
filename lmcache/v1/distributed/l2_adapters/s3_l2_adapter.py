@@ -24,7 +24,10 @@ import ctypes
 import threading
 import xml.etree.ElementTree as ET
 
-from . import s3_bucket_router as _bucket_router  # per-cache_salt bucket routing (PR feature)
+# Local
+from . import (
+    s3_bucket_router as _bucket_router,  # per-cache_salt bucket routing (PR feature)
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -490,10 +493,16 @@ class S3L2Adapter(L2AdapterInterface):
         self._bucket_template = config.s3_bucket_template or "{base}-{salt}"
         self._base_bucket = endpoint.split(".", 1)[0]
         self._host_suffix = endpoint.partition(".")[2]  # s3.<region>.amazonaws.com
-        self._seen_salts: set[str] = set()  # salts observed → buckets to list for eviction
-        self._ensured_buckets: set[str] = set()  # tenant buckets provisioned this process
+        self._seen_salts: set[str] = (
+            set()
+        )  # salts observed → buckets to list for eviction
+        self._ensured_buckets: set[str] = (
+            set()
+        )  # tenant buckets provisioned this process
         self._bucket_creation_lock = threading.Lock()  # serialize provisioning
-        self._mgmt_s3 = None  # lazy boto3 client for bucket create/lifecycle (control plane)
+        self._mgmt_s3 = (
+            None  # lazy boto3 client for bucket create/lifecycle (control plane)
+        )
         # Auto-provision a tenant bucket on first use (+ TTL). Disable to require
         # buckets to be pre-created by an onboarding hook.
         self._auto_create_bucket = config.s3_bucket_mode == "per_cache_salt"
@@ -803,7 +812,10 @@ class S3L2Adapter(L2AdapterInterface):
             # (bucket_index, in-bucket-token). Deletes the eviction controller
             # issues route back to the right bucket via _make_request.
             hosts = _bucket_router.bucket_hosts(
-                self._endpoint, self._seen_salts, self._bucket_mode, self._bucket_template
+                self._endpoint,
+                self._seen_salts,
+                self._bucket_mode,
+                self._bucket_template,
             )
             idx, token = _bucket_router.decode_cursor(cursor)
             entries, next_token = [], None
@@ -827,7 +839,8 @@ class S3L2Adapter(L2AdapterInterface):
                 if len(entries) >= max_keys:  # page full → resume at next bucket
                     next_token = (
                         _bucket_router.encode_cursor(idx, None)
-                        if idx < len(hosts) else None
+                        if idx < len(hosts)
+                        else None
                     )
                     break
         page_entries = tuple(
@@ -944,12 +957,15 @@ class S3L2Adapter(L2AdapterInterface):
             if bucket in self._ensured_buckets:
                 return
         with self._bucket_creation_lock:
-            with self._lock:  # re-check: another thread may have finished while we waited
+            with (
+                self._lock
+            ):  # re-check: another thread may have finished while we waited
                 if bucket in self._ensured_buckets:
                     return
             try:
-                import boto3
+                # Third Party
                 from botocore.exceptions import ClientError
+                import boto3
 
                 if self._mgmt_s3 is None:
                     self._mgmt_s3 = boto3.client(
@@ -977,11 +993,16 @@ class S3L2Adapter(L2AdapterInterface):
                         raise
                 self._mgmt_s3.put_bucket_lifecycle_configuration(
                     Bucket=bucket,
-                    LifecycleConfiguration={"Rules": [{
-                        "ID": "kv-cache-ttl", "Filter": {"Prefix": ""},
-                        "Status": "Enabled",
-                        "Expiration": {"Days": self._bucket_ttl_days},
-                    }]},
+                    LifecycleConfiguration={
+                        "Rules": [
+                            {
+                                "ID": "kv-cache-ttl",
+                                "Filter": {"Prefix": ""},
+                                "Status": "Enabled",
+                                "Expiration": {"Days": self._bucket_ttl_days},
+                            }
+                        ]
+                    },
                 )
                 # Only mark provisioned after success, so a failed create isn't
                 # cached as "done" (a later write would then 404 forever).
