@@ -36,6 +36,12 @@ class S3ConnectorAdapter(ConnectorAdapter):
         self.s3_region = str(self.s3_region)
         self.s3_enable_s3express = bool(extra_config.get("s3_enable_s3express", False))
         self.disable_tls = bool(extra_config.get("disable_tls", False))
+        # Addressing style ("virtual" | "path") and managed-upload toggle for
+        # S3-compatible (non-AWS) endpoints. Defaults preserve AWS S3 behavior.
+        self.s3_addressing_style = str(
+            extra_config.get("s3_addressing_style", "virtual")
+        )
+        self.s3_managed_upload = bool(extra_config.get("s3_managed_upload", True))
         self.aws_access_key_id = extra_config.get("aws_access_key_id", None)
         self.aws_secret_access_key = extra_config.get("aws_secret_access_key", None)
         if context.metadata is None:
@@ -56,4 +62,6 @@ class S3ConnectorAdapter(ConnectorAdapter):
             disable_tls=self.disable_tls,
             aws_access_key_id=self.aws_access_key_id,
             aws_secret_access_key=self.aws_secret_access_key,
+            s3_addressing_style=self.s3_addressing_style,
+            s3_managed_upload=self.s3_managed_upload,
         )
