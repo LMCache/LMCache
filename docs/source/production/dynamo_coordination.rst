@@ -4,16 +4,16 @@ Dynamo Integration
 `NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ is an open-source,
 datacenter-scale inference stack. It orchestrates inference engines such
 as vLLM, SGLang, and TensorRT-LLM across multiple nodes. LMCache provides a
-KV cache layer for Dynamo's vLLM workers, allowing them to offload cache
-beyond GPU memory and reuse it across requests.
+KV cache layer that stores cache beyond GPU memory for reuse across
+requests.
 
 Local
 -----
 
-The local example serves ``Qwen/Qwen3-0.6B``. Use three terminals in the
-same Dynamo ``vllm-runtime`` container, with one NVIDIA GPU, compatible
-LMCache and vLLM versions, and NATS and etcd already running. Start each
-process with the following commands:
+The local example uses Dynamo's vLLM backend to serve ``Qwen/Qwen3-0.6B``.
+Use three terminals in the same Dynamo ``vllm-runtime`` container, with one
+NVIDIA GPU, compatible LMCache and vLLM versions, and NATS and etcd already
+running. Start each process with the following commands:
 
 .. code-block:: bash
 
@@ -146,8 +146,9 @@ Kubernetes
 
 The `Kubernetes manifests
 <https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/deploy>`_
-deploy the same model. After preparing the cluster and image tags described
-below, run these two commands from the LMCache checkout root:
+deploy the same model with Dynamo's vLLM backend. After preparing the
+cluster and image tags described below, run these two commands from the
+LMCache checkout root:
 
 .. code-block:: bash
 
