@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pure, dependency-free bucket routing for the S3 L2 adapter (multi-tenant isolation).
+"""Pure bucket routing for the S3 L2 adapter (multi-tenant isolation).
 
-Kept import-free (no awscrt / lmcache) so the routing logic is unit-testable in isolation and
-trivial to review. The adapter delegates here.
+Kept import-free (no awscrt / lmcache) so routing is unit-testable in
+isolation and trivial to review. The adapter delegates here.
 """
+
+# Future
 from __future__ import annotations
 
 # Standard
@@ -21,7 +23,9 @@ def sanitize_salt(salt: str) -> str:
 
 def salt_of_key(key_str: str) -> str:
     """Extract the cache_salt from a stored object key.
-    Key format: ``<model>@<rank>@<group>@<hash>[@<cache_salt>]`` ('@' barred in model & salt)."""
+    Key format: ``<model>@<rank>@<group>@<hash>[@<cache_salt>]``
+    ('@' barred in model & salt).
+    """
     parts = (key_str or "").split("@")
     return parts[4] if len(parts) >= 5 else ""
 
@@ -36,9 +40,10 @@ def resolve_bucket_host(
     """Virtual-hosted S3 Host for a key.
 
     - mode 'single' (default = upstream behavior): always the configured base bucket.
-    - mode 'per_cache_salt': a *salted* key routes to its own bucket named by ``template``
-      (``{salt}`` = sanitized cache_salt, ``{base}`` = base bucket name). Unsalted keys, and any
-      salt that sanitizes to empty, fall back to the base bucket.
+    - mode 'per_cache_salt': a *salted* key routes to its own bucket named
+      by ``template`` (``{salt}`` = sanitized cache_salt, ``{base}`` = base
+      bucket name). Unsalted keys, and any salt that sanitizes to empty,
+      fall back to the base bucket.
 
     base_endpoint is virtual-hosted: ``<bucket>.s3.<region>.amazonaws.com``.
     """
@@ -61,26 +66,30 @@ def bucket_hosts(
     mode: str = "single",
     template: str = "{base}-{salt}",
 ) -> list[str]:
-    """Ordered list of bucket Hosts the adapter must list for eviction: the base bucket plus
-    one per observed tenant salt (per_cache_salt mode). 'single' mode → just the base."""
+    """Ordered eviction bucket Hosts: base plus one per observed tenant salt.
+    'single' mode → just the base."""
     if mode != "per_cache_salt":
         return [base_endpoint]
     base_bucket, _, suffix = base_endpoint.partition(".")
     hosts = [base_endpoint]
     for salt in sorted(s for s in seen_salts if s):
-        h = (template.format(salt=salt, base=base_bucket) + "." + suffix) if suffix else base_endpoint
+        h = (
+            (template.format(salt=salt, base=base_bucket) + "." + suffix)
+            if suffix
+            else base_endpoint
+        )
         if h not in hosts:
             hosts.append(h)
     return hosts
 
 
 def encode_cursor(bucket_idx: int, token: str | None) -> str:
-    """Encode a (bucket_index, in-bucket continuation token) pair into one opaque cursor."""
+    """Encode a bucket index and continuation token as one opaque cursor."""
     return base64.urlsafe_b64encode(json.dumps([bucket_idx, token]).encode()).decode()
 
 
 def decode_cursor(cursor: str | None) -> tuple[int, str | None]:
-    """Cross-bucket cursor → (bucket_index, in-bucket continuation token). None/garbage → (0, None)."""
+    """Decode cursor → (bucket_index, continuation token). Garbage → (0, None)."""
     if not cursor:
         return 0, None
     try:
