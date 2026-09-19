@@ -40,8 +40,13 @@ if TYPE_CHECKING:
 ConfigValue = str | int | float | bool | list[str] | None
 
 #: Prefix-cache hash of every GPU block covering one store operation, keyed
-#: by block id. ``None`` means the block carries no hash.
-BlockHashes = dict[int, "BlockHashWithGroupId | None"]
+#: by ``(engine_group_id, block_id)``. Block IDs are group-local for hybrid
+#: models and must never be flattened into one numeric namespace. ``None``
+#: means the block carries no hash.
+BlockHashes = dict[tuple[int, int], "BlockHashWithGroupId | None"]
+
+#: One independently scheduled cache-retention group of a request.
+RetentionGroupKey = tuple[str, int]
 
 
 @dataclass
@@ -52,6 +57,8 @@ class PendingStoreItem:
         request_id: The vLLM request id these operations belong to. One item
             carries operations of exactly one request, so the manager can
             coalesce them into a single store submission.
+        retention_group_id: Scheduler-side group whose cache state shares one
+            retirement mechanism and LMCache object-group commit boundary.
         metadatas: The selected operations in token order, each paired with
             the block-hash snapshot taken when it was buffered. The manager
             re-reads the hashes before submitting to prove the blocks still
@@ -59,6 +66,7 @@ class PendingStoreItem:
     """
 
     request_id: str
+    retention_group_id: int = 0
     metadatas: list[tuple["LMCacheMPRequestMetadata", BlockHashes]] = field(
         default_factory=list
     )
@@ -78,15 +86,22 @@ class DrainSignals:
         finished_request_ids: Requests whose generation has ended. Their
             buffered operations are still storable; the id is reported so a
             policy may treat them differently from running requests.
-        blocked_request_ids: Requests that already have a store batch in
-            flight. The worker tracks one store future per request id, so
-            these must stay buffered until their receipt arrives.
+        blocked_request_ids: Legacy request-wide in-flight blocks. Kept for
+            compatibility with callers that cannot identify retention groups.
+        blocked_retention_groups: Request/group pairs that already have a
+            store operation in flight. Other groups of the same request may
+            still drain independently.
+        request_progress_tokens: Projected computed-token count after this
+            scheduler step, keyed by request id. Windowed groups use it to
+            submit state before the next scheduler step can retire its blocks.
     """
 
     new_blocks_allocated: int
     est_next_step_blocks: int
     finished_request_ids: set[str]
-    blocked_request_ids: set[str]
+    blocked_request_ids: set[str] = field(default_factory=set)
+    blocked_retention_groups: set[RetentionGroupKey] = field(default_factory=set)
+    request_progress_tokens: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -119,6 +134,9 @@ class OffloadPolicy(ABC):
         self,
         meta: "LMCacheMPRequestMetadata",
         block_hashes: BlockHashes,
+        *,
+        requires_prefix: bool = True,
+        retire_at_token: int | None = None,
     ) -> None:
         """Buffer one store operation instead of submitting it.
 
@@ -138,6 +156,12 @@ class OffloadPolicy(ABC):
                 ``meta``'s token range, read now. The policy keeps this
                 snapshot and compares against it later; a block whose hash
                 changed was recycled, so the buffered data is gone.
+            requires_prefix: Whether losing one range makes all later ranges
+                of this retention group unreachable. Full attention requires
+                this; sliding-window and recurrent groups do not.
+            retire_at_token: Projected request progress at which the operation
+                must be emitted before this group's live blocks can retire.
+                ``None`` means free-queue pressure is the only trigger.
         """
 
     @abstractmethod
@@ -208,8 +232,14 @@ class OffloadPolicy(ABC):
         """
 
     @abstractmethod
-    def mark_store_failed(self, request_id: str) -> int:
-        """Break the request's prefix chain after a failed store.
+    def mark_store_failed(
+        self,
+        request_id: str,
+        retention_group_id: int = 0,
+        *,
+        requires_prefix: bool = True,
+    ) -> int:
+        """Apply a failed store to one retention group's prefix state.
 
         The failed range will never be stored, and the request's tracker
         only moves forward, so every later range of this request would be
@@ -219,6 +249,8 @@ class OffloadPolicy(ABC):
 
         Args:
             request_id: The request whose submitted store failed.
+            retention_group_id: Independently stored group that failed.
+            requires_prefix: Whether later ranges depend on the failed range.
 
         Returns:
             The number of buffered operations dropped.

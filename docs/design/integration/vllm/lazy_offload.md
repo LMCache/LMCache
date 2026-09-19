@@ -290,7 +290,7 @@ Free queue (LRU order): block3, block17, block0, block22, block1, ...
 
 | Aspect | vLLM SimpleCPUOffload | LMCache MP Connector |
 |--------|------------------|-------------------|
-| CPU storage | Local pinned tensors (same process) | Remote LMCache server (separate process via request RPC + CUDA IPC) |
+| CPU storage | Local pinned tensors (same process) | Remote LMCache server (separate process via request RPC + device IPC, including CUDA/HIP IPC) |
 | Copy mechanism | `cuMemcpyBatchAsync` (direct DMA) | Server-side `transfer_kv_per_object_group` (IPC + kernel + D2H) |
 | Latency | same-process | cross-process IPC |
 | Block pool access | Direct (scheduler owns it) | Indirect (scheduler has access, but worker/server do not) |
@@ -350,27 +350,65 @@ Two policies are available:
   every policy.
 
 Policies do not receive lifecycle events; the manager derives finished and
-blocked request-id sets from the registry and passes those as inputs to one
-`OffloadPolicy.drain()` entry point, which takes one `DrainSignals` and
-returns a policy-neutral `LazyOffloadDrain`: request batches plus ids whose
+blocked request/group sets from the registry and passes those as inputs to one
+`OffloadPolicy.drain()` entry point, which takes one `DrainSignals` and returns
+a policy-neutral `LazyOffloadDrain`: retention-group batches plus ids whose
 buffers became empty. Pressure-aware versus FIFO triggering stays inside the
 policy. Only the manager validates and pins emitted batches and combines
 empty-buffer facts with registry state to authorize session teardown.
 
-For either policy, the manager coalesces each request's released chunks into
-one store operation, calls `BlockPool.touch()` to pin its surviving blocks,
-and records those block ids in the request's manager-owned state until
-every worker rank reports completion. Each request id has at most one
-submitted batch. A preemption reset or a finished-id reuse marks an
-outstanding batch orphaned: its receipt still releases its pins, but its
-failure is never charged to the request generation now using the id, and the
-receipt does not end the successor's shared session prematurely.
-Overlapping emission remains a logic error because worker receipts are keyed
-only by request id. The completion receipt balances the pins with
-`free_blocks()`, returning the blocks to vLLM's own placement for a freed
-cached block. Failed stores are reported alongside completion receipts,
-allowing the scheduler to break the request's prefix chain before considering
-later chunks.
+For either policy, the manager coalesces released chunks by request and
+retention group, calls `BlockPool.touch()` to pin its surviving non-null
+blocks, and records those block ids until every worker rank reports completion.
+Every batch carries a scheduler-assigned operation id, so independent groups
+of one request may be in flight concurrently without ambiguous receipts. A
+preemption reset or finished-id reuse marks outstanding batches orphaned:
+their receipts still release pins, but their failures are not charged to the
+request generation now using the id. The completion receipt balances the pins
+with `free_blocks()`, returning the blocks to vLLM's normal free-queue
+placement.
+
+### 2.1 Hybrid KV-cache retention groups
+
+Hybrid models cannot use one request-wide offload cursor because their cache
+groups stop retaining useful state in different ways:
+
+| Retention kind | Lazy-offload behavior |
+|----------------|-----------------------|
+| Full attention | Drain under free-queue pressure. A missing or failed range breaks only this retention group's later prefix. |
+| Sliding window | Drain before token progress reaches the group's retirement boundary. A later intact range remains reusable after an older loss. |
+| Recurrent/Mamba | Drain each completed snapshot boundary. All-null ranges are skipped because they contain no reusable state. |
+| Scratch/non-prefix-cacheable | Excluded from store, hashing, pinning, and lookup. |
+
+Engine groups with the same retention kind and normalized window share one
+`retention_group_id`. They are stored atomically because they map to one
+LMCache object-group commit boundary. Block identities are always qualified as
+`(engine_group_id, block_id)`; numeric block ids from different engine groups
+must not collide.
+
+When a model has more than one cacheable retention group, the scheduler
+requires every configured MP server to advertise `partial_store_groups`.
+Servers advertise that capability only when started with
+`--separate-object-groups`. A partial store selects whole object groups; an
+empty, unknown, or partial-object selection is rejected. If any selected group
+copy fails, all reservations from that operation are aborted on the transfer
+stream and none become visible.
+
+Hybrid lazy offload requires the LMCache-driven transfer path, which sends
+device IPC handles to the server and can select complete object groups. The
+engine-driven path rejects selected-group stores because its gathered payload
+does not carry the object-group commit contract.
+
+The server treats a selected-group operation as successful only when every
+requested object is either newly reserved or already present as a complete,
+readable object. An allocation failure, write conflict, missing reservation
+status, or copy failure aborts every new reservation from the operation.
+
+Lookup remains model-wide: the ranked presence bitmap is folded across every
+object group and worker rank using each group's retention window. Data present
+for only a subset of groups therefore cannot become a false cache hit.
+For the same reason, selected-group stores do not emit vLLM model-wide KV-store
+events; those events are emitted only for stores covering the complete cache.
 
 Configuration in `kv_connector_extra_config`:
 
@@ -391,20 +429,23 @@ hashes to prove that buffered data still occupies the same GPU blocks; the
 connector therefore fails construction when lazy offload is enabled without
 `enable_prefix_caching=True`.
 
-### 2.1 Scheduler-step flow
+### 2.2 Scheduler-step flow
 
-1. `GetStoreMetadata` produces each newly storable contiguous token range.
-2. The manager snapshots its block hashes and buffers it in the selected
-   policy instead of sending it to the worker immediately.
+1. `GetLazyStoreMetadatas` produces at most one newly storable contiguous
+   range per retention group and advances each group's cursor independently.
+2. The manager snapshots group-qualified block hashes and buffers each range
+   in the selected policy instead of sending it to the worker immediately.
 3. On a token-producing scheduler step, the connector forwards the scheduler
-   output to `LazyOffloadManager`, which observes allocation pressure and
-   drains the selected policy once.
-4. The manager validates, pins, and coalesces released operations per request,
-   then returns them as explicit actions for the connector metadata.
+   output and projected request progress to `LazyOffloadManager`, which applies
+   free-queue pressure and retention deadlines.
+4. The manager validates, pins, and coalesces released operations per
+   request/retention group, then returns them as explicit actions carrying
+   operation ids.
 5. Worker completion and failure metadata returns on later token-producing
-   steps. The scheduler unpins only after all ranks have reported.
+   steps. The scheduler unpins the exact operation only after all ranks have
+   reported.
 6. A finished request's LMCache session ends when its pending queue is dropped
-   empty or its final in-flight store receipt arrives.
+   empty and its final in-flight operation receipt arrives.
 
 An idle engine deliberately does not emit store metadata because vLLM's
 no-forward path would discard it. Consequently pending stores, receipts, pins,

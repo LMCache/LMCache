@@ -37,6 +37,20 @@ from lmcache.v1.platform.ipc_policy import (
 )
 
 
+def test_load_store_op_preserves_group_qualified_block_ids():
+    """Equal numeric block IDs in different engine groups remain distinct."""
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[[7, 8], [7, 9], []],
+        start=0,
+        end=4,
+        selected_engine_group_ids=(0, 1),
+    )
+
+    assert op.selected_group_block_ids == [(0, 7), (0, 8), (1, 7), (1, 9)]
+    assert op.flat_block_ids == [7, 8, 7, 9]
+
+
 class FakeMQClient:
     """MessageQueueClient double that records close calls."""
 
@@ -178,11 +192,55 @@ def _make_scheduler_adapter(
     adapter._server_urls = servers
     adapter.req_clients = cast(dict[str, RequestClient], clients)
     adapter._mq_timeout = 5.0
+    adapter._server_capabilities = None
     adapter._health_events = {}
     for server in servers:
         adapter._health_events[server] = threading.Event()
         adapter._health_events[server].set()
     return adapter, clients
+
+
+def test_require_capability_checks_every_server() -> None:
+    adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
+    for client in clients.values():
+        future = MagicMock()
+        future.result.return_value = ["partial_store_groups"]
+        client.get_experimental.return_value = future
+
+    adapter.require_capability("partial_store_groups")
+
+    for client in clients.values():
+        client.get_experimental.assert_called_once_with()
+
+
+def test_require_capability_reports_every_server_missing_it() -> None:
+    adapter, clients = _make_scheduler_adapter(["server-a", "server-b", "server-c"])
+    advertised = {
+        "server-a": ["partial_store_groups"],
+        "server-b": [],
+        "server-c": ["transfer_query"],
+    }
+    for server, client in clients.items():
+        future = MagicMock()
+        future.result.return_value = advertised[server]
+        client.get_experimental.return_value = future
+
+    with pytest.raises(RuntimeError, match="server-b.*server-c"):
+        adapter.require_capability("partial_store_groups")
+
+
+def test_require_capability_reuses_the_all_server_snapshot() -> None:
+    adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
+    for client in clients.values():
+        future = MagicMock()
+        future.result.return_value = ["partial_store_groups", "transfer_query"]
+        client.get_experimental.return_value = future
+
+    adapter.require_capability("partial_store_groups")
+    adapter.require_capability("transfer_query")
+
+    for client in clients.values():
+        client.get_experimental.assert_called_once_with()
 
 
 def _op(block_ids: list[list[int]]) -> LoadStoreOp:
@@ -647,6 +705,39 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
     ]
 
 
+def test_submit_store_request_expands_across_scratch_group_gap(
+    fake_adapter, monkeypatch
+):
+    """The server receives kernel-group order, not compacted engine-group order."""
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.kv_caches = {"layer.0": fake_tensor}
+    # Engine group 1 is scratch-only and therefore has no registered LMCache
+    # kernel group, while request block tables still carry its empty slot.
+    adapter.engine_group_infos = [
+        EngineGroupInfo(0, (0,)),
+        EngineGroupInfo(2, (2,)),
+    ]
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_store.return_value = MagicMock()
+    adapter.transfer_ctx = transfer_ctx
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[[0, 1], [], [20, 21]],
+        start=0,
+        end=4,
+    )
+
+    adapter.submit_store_request("req-1", op, event=MagicMock())
+
+    assert transfer_ctx.submit_store.call_args.args[3] == [
+        [0, 1],
+        [20, 21],
+    ]
+
+
 def test_store_kv_events_are_reported_after_successful_store(
     fake_adapter,
     monkeypatch,
@@ -741,7 +832,13 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
         start=0,
         end=chunk_size,
     )
-    adapter.submit_store_request("req-1", op, event=None)
+    operation_id = 7
+    adapter.submit_store_request(
+        "req-1",
+        op,
+        event=None,
+        store_operation_id=operation_id,
+    )
     assert adapter.get_kv_events() == []
     if store_result is None:
         # Lose server health while the store is pending.
@@ -751,10 +848,12 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
 
     assert len(adapter.get_kv_events()) == (1 if store_result else 0)
     assert adapter.get_kv_events() == []
-    assert adapter.get_completed_store_requests() == {"req-1": 1}
-    assert adapter.get_completed_store_requests() is None
-    assert adapter.get_failed_store_requests() == (None if store_result else {"req-1"})
-    assert adapter.get_failed_store_requests() is None
+    assert adapter.get_completed_store_operations() == {operation_id: 1}
+    assert adapter.get_completed_store_operations() is None
+    assert adapter.get_failed_store_operations() == (
+        None if store_result else {operation_id}
+    )
+    assert adapter.get_failed_store_operations() is None
 
 
 @pytest.mark.parametrize("lazy_offload", [False, True])
@@ -809,9 +908,16 @@ def test_kv_event_buffer_metrics(
 
     buffered, generated, drained = metrics()
     count = 0
+    operation_id = 0
     for request_id in ("first", "second"):
         future.query.return_value = False
-        adapter.submit_store_request(request_id, op, event=None)
+        adapter.submit_store_request(
+            request_id,
+            op,
+            event=None,
+            store_operation_id=operation_id if lazy_offload else None,
+        )
+        operation_id += 1
         finish()
         assert metrics() == (buffered + count, generated + count, drained)
         future.query.return_value = True
@@ -820,12 +926,23 @@ def test_kv_event_buffer_metrics(
         assert metrics() == (buffered + count, generated + count, drained)
 
     future.result.return_value = False
-    adapter.submit_store_request("failed", op, event=None)
+    adapter.submit_store_request(
+        "failed",
+        op,
+        event=None,
+        store_operation_id=operation_id if lazy_offload else None,
+    )
+    operation_id += 1
     finish()
     assert metrics() == (buffered + count, generated + count, drained)
 
     future.query.return_value = False
-    adapter.submit_store_request("interrupted", op, event=None)
+    adapter.submit_store_request(
+        "interrupted",
+        op,
+        event=None,
+        store_operation_id=operation_id if lazy_offload else None,
+    )
     FakeHeartbeatThread.instances[-1].health_event.clear()
     finish()
     assert metrics() == (buffered + count, generated + count, drained)

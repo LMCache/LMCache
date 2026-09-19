@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     # Third Party
     from vllm.v1.request import Request
 
+    # First Party
+    from lmcache.integration.vllm.kv_cache_groups import KVGroupRetentionSpec
+
 
 class LMCacheMPRequestState(enum.Enum):
     """
@@ -65,6 +68,11 @@ class LMCacheMPRequestTracker:
     # requests.
     num_stored_tokens: int = 0
 
+    # Lazy offload advances each independently stored retention group at its
+    # own pace. The legacy scalar remains the common-prefix cursor used by the
+    # eager all-group path.
+    num_stored_tokens_by_retention_group: dict[int, int] = field(default_factory=dict)
+
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
@@ -90,6 +98,7 @@ class LMCacheMPRequestTracker:
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
+        self.num_stored_tokens_by_retention_group = {}
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
@@ -134,6 +143,34 @@ class LMCacheMPRequestTracker:
         This function will be called when processing the cached requests.
         """
         self.num_stored_tokens += num_new_tokens
+
+    def set_lazy_store_baseline(
+        self,
+        num_tokens: int,
+        retention_group_ids: set[int],
+    ) -> None:
+        """Initialize every lazy retention-group cursor to one cache hit.
+
+        Args:
+            num_tokens: Model-wide safe lookup prefix already available.
+            retention_group_ids: Cacheable groups participating in lookup.
+        """
+        self.num_stored_tokens = num_tokens
+        self.num_stored_tokens_by_retention_group = {
+            group_id: num_tokens for group_id in retention_group_ids
+        }
+
+    def reset_store_progress(self) -> None:
+        """Clear eager and group-aware store cursors after a failed load."""
+        self.num_stored_tokens = 0
+        self.num_stored_tokens_by_retention_group.clear()
+
+    def projected_computed_tokens(self) -> int:
+        """Return tokens whose KV will exist after the current model step."""
+        return self.num_scheduled_tokens + max(
+            self.num_vllm_hit_tokens,
+            self.num_lmcache_hit_tokens,
+        )
 
     def append_block_ids(
         self,
@@ -189,6 +226,8 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    store_operation_id: int | None = None
+    retention_group_id: int | None = None
 
     @staticmethod
     def GetStoreMetadata(
@@ -287,6 +326,129 @@ class LMCacheMPRequestMetadata:
             return ret
 
         return None
+
+    @staticmethod
+    def GetLazyStoreMetadatas(
+        tracker: LMCacheMPRequestTracker,
+        lmcache_tokens_per_chunk: int,
+        group_tokens_per_block: list[int],
+        group_retention_specs: list["KVGroupRetentionSpec"],
+    ) -> list["LMCacheMPRequestMetadata"]:
+        """Generate one independently advancing STORE per retention group.
+
+        Every returned operation selects all engine groups that share one
+        LMCache object-group commit boundary. Scratch groups are omitted.
+        The request's safe lookup prefix seeds every cursor, after which a
+        short-lived group can advance without capping full-attention storage.
+
+        Args:
+            tracker: Request tracker containing tokens and block tables.
+            lmcache_tokens_per_chunk: LMCache object granularity in tokens.
+            group_tokens_per_block: Token span of each engine-group block.
+            group_retention_specs: One retention descriptor per engine group.
+
+        Returns:
+            Zero or one new contiguous operation per cacheable retention group.
+
+        Raises:
+            ValueError: If retention metadata and block geometry disagree.
+        """
+        if len(group_retention_specs) != len(group_tokens_per_block):
+            raise ValueError(
+                "retention metadata must contain one entry per engine group"
+            )
+        retention_groups: dict[int, list[KVGroupRetentionSpec]] = {}
+        for spec in group_retention_specs:
+            if spec.engine_group_id >= len(group_tokens_per_block):
+                raise ValueError(
+                    f"retention spec engine group {spec.engine_group_id} is "
+                    "outside group_tokens_per_block"
+                )
+            if spec.retention_group_id is None:
+                continue
+            retention_groups.setdefault(spec.retention_group_id, []).append(spec)
+
+        if not retention_groups:
+            return []
+        for retention_group_id in retention_groups:
+            tracker.num_stored_tokens_by_retention_group.setdefault(
+                retention_group_id,
+                tracker.num_stored_tokens,
+            )
+
+        computed_tokens = tracker.projected_computed_tokens()
+        all_cacheable_engine_groups = tuple(
+            spec.engine_group_id
+            for spec in group_retention_specs
+            if spec.retention_group_id is not None
+        )
+        use_group_selection = len(retention_groups) > 1
+        metadatas: list[LMCacheMPRequestMetadata] = []
+        allocated_lengths = tracker.num_allocated_blocks()
+        for retention_group_id, specs in retention_groups.items():
+            selected_engine_groups = tuple(spec.engine_group_id for spec in specs)
+            if not set(selected_engine_groups).issubset(all_cacheable_engine_groups):
+                raise ValueError(
+                    f"retention group {retention_group_id} selects an unknown "
+                    "cacheable engine group"
+                )
+            allocated_tokens = min(
+                allocated_lengths.get(spec.engine_group_id, 0) * spec.tokens_per_block
+                for spec in specs
+            )
+            available_tokens = min(
+                len(tracker.all_token_ids),
+                allocated_tokens,
+                computed_tokens,
+            )
+            if tracker.max_offload_tokens is not None:
+                available_tokens = min(
+                    available_tokens,
+                    tracker.max_offload_tokens,
+                )
+            start_token_idx = tracker.num_stored_tokens_by_retention_group[
+                retention_group_id
+            ]
+            num_chunks = (
+                available_tokens - start_token_idx
+            ) // lmcache_tokens_per_chunk
+            if num_chunks < 1:
+                continue
+            end_token_idx = start_token_idx + num_chunks * lmcache_tokens_per_chunk
+            block_ids = slice_block_ids_per_group(
+                tracker.allocated_block_ids,
+                group_tokens_per_block,
+                start_token_idx,
+                end_token_idx,
+            )
+            op = LoadStoreOp(
+                token_ids=tracker.get_token_ids(),
+                block_ids=block_ids,
+                start=start_token_idx,
+                end=end_token_idx,
+                selected_engine_group_ids=(
+                    selected_engine_groups if use_group_selection else None
+                ),
+            )
+            metadatas.append(
+                LMCacheMPRequestMetadata(
+                    request_id=tracker.request_id,
+                    direction="STORE",
+                    op=op,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                    retention_group_id=retention_group_id,
+                )
+            )
+            tracker.num_stored_tokens_by_retention_group[retention_group_id] = (
+                end_token_idx
+            )
+
+        tracker.num_stored_tokens = min(
+            tracker.num_stored_tokens_by_retention_group.values(),
+            default=tracker.num_stored_tokens,
+        )
+        return metadatas
 
     @staticmethod
     def GetRetrieveMetadata(
@@ -415,8 +577,10 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             failure breaks the chain even when the other ranks succeeded.
     """
 
-    completed_store_requests: dict[str, int]
+    completed_store_requests: dict[str, int] = field(default_factory=dict)
     failed_store_requests: set[str] = field(default_factory=set)
+    completed_store_operations: dict[int, int] = field(default_factory=dict)
+    failed_store_operations: set[int] = field(default_factory=set)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -434,9 +598,18 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        merged_operations = dict(self.completed_store_operations)
+        for operation_id, count in other.completed_store_operations.items():
+            merged_operations[operation_id] = (
+                merged_operations.get(operation_id, 0) + count
+            )
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
+            ),
+            completed_store_operations=merged_operations,
+            failed_store_operations=(
+                self.failed_store_operations | other.failed_store_operations
             ),
         )

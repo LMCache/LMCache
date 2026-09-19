@@ -7,7 +7,7 @@ Generation, receipt, pin and orphaned are defined in
 """
 
 # Standard
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import enum
 
 
@@ -23,6 +23,9 @@ class SubmittedStoreBatch:
     """The blocks pinned by one submitted store batch.
 
     Attributes:
+        operation_id: Scheduler-assigned identity carried through worker
+            receipts.
+        retention_group_id: Cache retention group stored by this batch.
         block_ids: The GPU blocks this batch pinned at submission. Its
             completion receipt unpins exactly these.
         orphaned: Whether a preemption reset or an id reuse detached the
@@ -31,6 +34,8 @@ class SubmittedStoreBatch:
             current generation.
     """
 
+    operation_id: int
+    retention_group_id: int
     block_ids: tuple[int, ...]
     orphaned: bool = False
 
@@ -42,17 +47,15 @@ class RequestSlot:
     Attributes:
         phase: Whether the generation currently holding the id is still
             running or has finished.
-        in_flight: The submitted store batch awaiting its receipt, or None.
-            At most one batch may be open, because worker receipts are keyed
-            by request id alone.
+        in_flight: Submitted store batches awaiting operation-scoped receipts.
     """
 
     phase: RequestPhase = RequestPhase.ACTIVE
-    in_flight: SubmittedStoreBatch | None = None
+    in_flight: dict[int, SubmittedStoreBatch] = field(default_factory=dict)
 
 
 class LazyOffloadRequestRegistry:
-    """Own request lifecycle state and the single submitted batch per id.
+    """Own request lifecycle state and submitted batches by operation id.
 
     A request id outlives one request: vLLM recreates a tracker under the
     same id after preemption, and a later, unrelated request may reuse a
@@ -67,6 +70,7 @@ class LazyOffloadRequestRegistry:
     def __init__(self) -> None:
         """Create an empty registry, holding no request id."""
         self._slots: dict[str, RequestSlot] = {}
+        self._operation_requests: dict[int, str] = {}
 
     ####
     # Update internal states
@@ -116,44 +120,52 @@ class LazyOffloadRequestRegistry:
         slot = self._slots.setdefault(request_id, RequestSlot())
         slot.phase = RequestPhase.FINISHED
 
-    def register_batch(self, request_id: str, block_ids: list[int]) -> None:
+    def register_batch(
+        self,
+        request_id: str,
+        operation_id: int,
+        retention_group_id: int,
+        block_ids: list[int],
+    ) -> None:
         """Record the batch a submission put in flight.
 
         Args:
             request_id: The request whose store batch was submitted.
+            operation_id: Unique identity carried by its worker receipts.
+            retention_group_id: Cache retention group stored by the batch.
             block_ids: The GPU blocks the manager pinned for that batch.
 
         Raises:
-            RuntimeError: If the request already has a batch in flight.
-                Receipts are keyed by request id, so a second open batch
-                would make them ambiguous.
+            RuntimeError: If ``operation_id`` is already registered.
         """
         slot = self._slots.setdefault(request_id, RequestSlot())
-        if slot.in_flight is not None:
-            raise RuntimeError(
-                f"request {request_id!r} already has an in-flight store batch"
-            )
-        slot.in_flight = SubmittedStoreBatch(tuple(block_ids))
+        if operation_id in self._operation_requests:
+            raise RuntimeError(f"store operation {operation_id} is already in flight")
+        slot.in_flight[operation_id] = SubmittedStoreBatch(
+            operation_id=operation_id,
+            retention_group_id=retention_group_id,
+            block_ids=tuple(block_ids),
+        )
+        self._operation_requests[operation_id] = request_id
 
-    def complete_batch(self, request_id: str) -> SubmittedStoreBatch:
-        """Clear the in-flight batch and return it.
+    def complete_batch(self, operation_id: int) -> tuple[str, SubmittedStoreBatch]:
+        """Clear one in-flight batch and return its request and state.
 
         Args:
-            request_id: The request whose batch every worker has reported.
+            operation_id: The batch identity every worker has reported.
 
         Returns:
-            The closed batch, whose ``block_ids`` the caller unpins and
-            whose ``orphaned`` flag says whether it outlived its generation.
+            The request id and closed batch. The batch's ``block_ids`` are
+            the pins to release; ``orphaned`` says whether it outlived its
+            request generation.
 
         Raises:
-            KeyError: If the request has no slot or no batch in flight.
+            KeyError: If the operation is not in flight.
         """
+        request_id = self._operation_requests.pop(operation_id)
         slot = self._slots[request_id]
-        if slot.in_flight is None:
-            raise KeyError(request_id)
-        batch = slot.in_flight
-        slot.in_flight = None
-        return batch
+        batch = slot.in_flight.pop(operation_id)
+        return request_id, batch
 
     def session_ended(self, request_id: str) -> None:
         """Drop the slot of a finished, settled request after its teardown.
@@ -174,8 +186,9 @@ class LazyOffloadRequestRegistry:
         Args:
             slot: The slot whose open batch, if any, is marked orphaned.
         """
-        if slot.in_flight is not None and not slot.in_flight.orphaned:
-            slot.in_flight = replace(slot.in_flight, orphaned=True)
+        for operation_id, batch in list(slot.in_flight.items()):
+            if not batch.orphaned:
+                slot.in_flight[operation_id] = replace(batch, orphaned=True)
 
     ####
     # Query internal states
@@ -212,37 +225,47 @@ class LazyOffloadRequestRegistry:
             request_id: The request id to query.
 
         Returns:
-            True while a batch is open, orphaned or not.
+            True while at least one batch is open, orphaned or not.
         """
         slot = self._slots.get(request_id)
-        return slot is not None and slot.in_flight is not None
+        return slot is not None and bool(slot.in_flight)
 
-    def in_flight_is_orphaned(self, request_id: str) -> bool:
-        """Whether a preemption reset or an id reuse detached the batch.
+    def in_flight_is_orphaned(self, operation_id: int) -> bool:
+        """Whether a preemption reset or id reuse detached one batch.
 
         Args:
-            request_id: The request id to query.
+            operation_id: The store operation identity to query.
 
         Returns:
             True only when a batch is in flight and it no longer belongs to
             the generation currently using the id, which is when its failure
             must not break that generation's prefix chain.
         """
-        slot = self._slots.get(request_id)
-        return (
-            slot is not None and slot.in_flight is not None and slot.in_flight.orphaned
-        )
+        request_id = self._operation_requests.get(operation_id)
+        if request_id is None:
+            return False
+        return self._slots[request_id].in_flight[operation_id].orphaned
 
     def in_flight_request_ids(self) -> set[str]:
         """The ids that must stay buffered because a batch is open.
 
         Returns:
-            One drain signal's worth of blocked ids, as a new set.
+            Request ids with at least one open operation, as a new set.
         """
         return {
-            request_id
+            request_id for request_id, slot in self._slots.items() if slot.in_flight
+        }
+
+    def in_flight_operation_ids(self) -> set[int]:
+        """Return scheduler-assigned identities awaiting worker receipts."""
+        return set(self._operation_requests)
+
+    def in_flight_retention_groups(self) -> set[tuple[str, int]]:
+        """Return request/group pairs that already have a batch in flight."""
+        return {
+            (request_id, batch.retention_group_id)
             for request_id, slot in self._slots.items()
-            if slot.in_flight is not None
+            for batch in slot.in_flight.values()
         }
 
     def can_end_session(self, request_id: str) -> bool:
@@ -260,5 +283,5 @@ class LazyOffloadRequestRegistry:
         return (
             slot is not None
             and slot.phase is RequestPhase.FINISHED
-            and slot.in_flight is None
+            and not slot.in_flight
         )
