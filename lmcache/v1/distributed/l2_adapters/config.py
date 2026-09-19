@@ -263,6 +263,7 @@ class L2AdapterConfigBase(ABC):
         return EvictionConfig(
             eviction_policy=policy,
             trigger_watermark=float(eviction_dict.get("trigger_watermark", 0.8)),
+            target_watermark=float(eviction_dict.get("target_watermark", 0.0)),
             eviction_ratio=float(eviction_dict.get("eviction_ratio", 0.2)),
         )
 
