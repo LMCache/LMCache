@@ -69,10 +69,9 @@ The frontend accepts requests on port 8000. The vLLM worker uses
 ``LMCacheMPConnector`` to store and retrieve KV cache through the server
 on port 5555.
 
-You can also start the whole demo with either `launch script
+You can also start the whole demo with a `script
 <https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/local>`_.
-Run one command on the host from the root of the LMCache repository,
-instead of the manual steps above:
+On the host, run one of these commands from the root of the LMCache repository:
 
 .. code-block:: bash
 
