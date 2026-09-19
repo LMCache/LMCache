@@ -11,6 +11,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.group_view import PARTIAL_STORE_GROUPS_CAPABILITY
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.periodic_thread import (
@@ -157,7 +158,10 @@ class ManagementModule:
             The enabled experimental intermediate tensor transfer types.
             See ``lmcache.v1.multiprocess.modules.experimental.__init__``.
         """
-        return list(self._experimental_transfer)
+        capabilities = list(self._experimental_transfer)
+        if self._ctx.separate_object_groups:
+            capabilities.append(PARTIAL_STORE_GROUPS_CAPABILITY)
+        return capabilities
 
     @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
     def clear(self, force: bool = False) -> None:

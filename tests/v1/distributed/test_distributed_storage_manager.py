@@ -26,6 +26,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
 )
@@ -240,6 +241,26 @@ class TestStorageManagerBasic:
             assert key in ret
             assert ret[key] is not None
 
+        storage_manager.close()
+
+    def test_reserve_write_with_status_accepts_complete_existing_key(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """The detailed API separates existing data from new reservations."""
+        storage_manager = StorageManager(basic_storage_manager_config)
+        existing_key = make_object_key(1)
+        new_key = make_object_key(2)
+        first = storage_manager.reserve_write([existing_key], basic_layout, mode="new")
+        storage_manager.finish_write(list(first))
+
+        result = storage_manager.reserve_write_with_status(
+            [existing_key, new_key], basic_layout, mode="new"
+        )
+
+        assert result[existing_key] == (L1Error.KEY_ALREADY_EXISTS, None)
+        assert result[new_key][0] == L1Error.SUCCESS
+        assert result[new_key][1] is not None
+        storage_manager.abort_write([new_key])
         storage_manager.close()
 
     def test_reserve_write_oom(self, small_storage_manager_config, large_layout):

@@ -5,6 +5,7 @@ import msgspec
 # First Party
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
+    engine_group_layer_indices,
     expand_engine_block_ids,
     get_engine_group_indices,
     num_engine_group_infos,
@@ -41,6 +42,25 @@ def test_engine_group_infos_expand_engine_block_ids():
         [10, 11],
         [10, 11],
         [20, 21],
+    ]
+
+
+def test_engine_group_infos_expand_across_scratch_gap():
+    """Excluded scratch groups keep their engine-side list position.
+
+    LMCache kernel groups omit the scratch tensors, but the serving engine's
+    block table remains indexed by the original engine group ids.
+    """
+    groups = [
+        EngineGroupInfo(0, (0,)),
+        EngineGroupInfo(2, (2,)),
+    ]
+
+    assert num_engine_groups(groups) == 3
+    assert engine_group_layer_indices(groups) == [[0], [], [2]]
+    assert expand_engine_block_ids(groups, [[10, 11], [], [30, 31]]) == [
+        [10, 11],
+        [30, 31],
     ]
 
 

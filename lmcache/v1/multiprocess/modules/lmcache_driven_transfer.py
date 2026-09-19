@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -180,6 +181,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         self._device_host_func_dispatcher.register(
             "finish_write",
             self._ctx.storage_manager.finish_write,
+            payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.register(
+            "abort_write",
+            self._ctx.storage_manager.abort_write,
             payload_type=list[ObjectKey],
         )
         self._device_host_func_dispatcher.register(
@@ -529,6 +535,46 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
+        """Store every registered KV-cache object group."""
+        return self._store(
+            key,
+            instance_id,
+            gpu_block_ids,
+            event_ipc_handle,
+            selected_engine_group_ids=None,
+        )
+
+    @request_handler(
+        RequestType.STORE_GROUPS,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
+    @_lmcache_nvtx_annotate
+    def store_groups(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        selected_engine_group_ids: list[int],
+    ) -> tuple[bytes, bool]:
+        """Store complete object groups selected by engine-group identity."""
+        return self._store(
+            key,
+            instance_id,
+            gpu_block_ids,
+            event_ipc_handle,
+            selected_engine_group_ids=selected_engine_group_ids,
+        )
+
+    def _store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        selected_engine_group_ids: list[int] | None,
+    ) -> tuple[bytes, bool]:
         """Store the GPU KV cache blocks to CPU.
 
         Args:
@@ -538,6 +584,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
             event_ipc_handle: The IPC handle of the event to wait on.
+            selected_engine_group_ids: Engine groups to store, or ``None``
+                for all registered groups.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -578,11 +626,78 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if event_backend is None:
             raise RuntimeError("Registered cache context has no event backend")
 
-        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
-        obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
-            key, list(range(num_object_groups))
+        kv_groups_manager = cache_context.kv_layer_groups_manager
+        num_object_groups = kv_groups_manager.num_object_groups
+        if len(gpu_block_ids) != kv_groups_manager.num_kernel_groups:
+            logger.warning(
+                "Rejecting STORE for request_id=%s: got %d block-id groups, "
+                "expected %d",
+                key.request_id,
+                len(gpu_block_ids),
+                kv_groups_manager.num_kernel_groups,
+            )
+            return b"", False
+        selected_object_group_ids = list(range(num_object_groups))
+        if selected_engine_group_ids is not None:
+            if not self._ctx.separate_object_groups:
+                logger.warning(
+                    "Rejecting partial STORE for request_id=%s because the "
+                    "server was not started with --separate-object-groups",
+                    key.request_id,
+                )
+                return b"", False
+            selected_engine_groups = set(selected_engine_group_ids)
+            known_engine_groups = {
+                group.engine_group_idx for group in kv_groups_manager.kernel_groups
+            }
+            if not selected_engine_groups or not selected_engine_groups.issubset(
+                known_engine_groups
+            ):
+                logger.warning(
+                    "Rejecting partial STORE for request_id=%s: selected engine "
+                    "groups %s are empty or outside registered groups %s",
+                    key.request_id,
+                    sorted(selected_engine_groups),
+                    sorted(known_engine_groups),
+                )
+                return b"", False
+            selected_object_group_ids = []
+            covered_engine_groups: set[int] = set()
+            for object_group_id, object_group in enumerate(
+                kv_groups_manager.object_groups
+            ):
+                object_engine_groups = {
+                    kv_groups_manager.kernel_groups[kernel_group_id].engine_group_idx
+                    for kernel_group_id in object_group.kernel_group_indices
+                }
+                if not object_engine_groups & selected_engine_groups:
+                    continue
+                if not object_engine_groups.issubset(selected_engine_groups):
+                    logger.warning(
+                        "Rejecting partial STORE for request_id=%s: engine groups "
+                        "%s select only part of object group %d (%s)",
+                        key.request_id,
+                        sorted(selected_engine_groups),
+                        object_group_id,
+                        sorted(object_engine_groups),
+                    )
+                    return b"", False
+                selected_object_group_ids.append(object_group_id)
+                covered_engine_groups.update(object_engine_groups)
+            if covered_engine_groups != selected_engine_groups:
+                logger.warning(
+                    "Rejecting partial STORE for request_id=%s: selected engine "
+                    "groups %s did not resolve to complete object groups",
+                    key.request_id,
+                    sorted(selected_engine_groups),
+                )
+                return b"", False
+
+        resolved_keys = self._ctx.resolve_obj_keys(key, selected_object_group_ids)
+        obj_keys_by_group = dict(
+            zip(selected_object_group_ids, resolved_keys, strict=True)
         )
-        num_chunks = len(obj_keys_per_obj_group[0])
+        num_chunks = len(resolved_keys[0])
 
         # NOTE: different engine groups may have different block sizes, so
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
@@ -608,10 +723,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # complete. Checked on the raw block ids, before cutting drops the
             # per-chunk blocks that sliding-window groups do not need.
             if any(
-                len(group_block_ids) < num_chunks * bpc
-                for group_block_ids, bpc in zip(
-                    gpu_block_ids, blocks_per_chunk, strict=True
-                )
+                len(gpu_block_ids[kernel_group_id])
+                < num_chunks * blocks_per_chunk[kernel_group_id]
+                for object_group_id in selected_object_group_ids
+                for kernel_group_id in kv_groups_manager.object_groups[
+                    object_group_id
+                ].kernel_group_indices
             ):
                 logger.warning(
                     "STORE block ID underflow for request_id=%s: each group needs "
@@ -662,7 +779,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
                 EventType.MP_TOKENS
             ):
-                self._publish_token_bindings(key, obj_keys_per_obj_group[0])
+                self._publish_token_bindings(key, resolved_keys[0])
 
             transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
@@ -684,8 +801,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             total_bytes: int = 0
             store_succeeded = False
             try:
-                for obj_group_id in range(num_object_groups):
-                    obj_keys = obj_keys_per_obj_group[obj_group_id]
+                for obj_group_id in selected_object_group_ids:
+                    obj_keys = obj_keys_by_group[obj_group_id]
                     skip_mask = skipped_chunks[obj_group_id]
                     keys_to_reserve = [
                         k for i, k in enumerate(obj_keys) if not skip_mask[i]
@@ -695,10 +812,39 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
-                    reserved_dict = self._ctx.storage_manager.reserve_write(
+                    storage_manager = self._ctx.storage_manager
+                    reserve_result = storage_manager.reserve_write_with_status(
                         keys_to_reserve, layout_desc, "new"
                     )
+                    reserved_dict = {
+                        obj_key: memory_obj
+                        for obj_key, (error, memory_obj) in reserve_result.items()
+                        if error == L1Error.SUCCESS and memory_obj is not None
+                    }
                     all_dict.update(reserved_dict)
+                    missing_results = set(keys_to_reserve) - set(reserve_result)
+                    failed_reservations = {
+                        obj_key: error
+                        for obj_key, (error, _) in reserve_result.items()
+                        if error not in (L1Error.SUCCESS, L1Error.KEY_ALREADY_EXISTS)
+                    }
+                    if missing_results:
+                        raise RuntimeError(
+                            "write reservation returned no status for "
+                            f"{len(missing_results)} object(s)"
+                        )
+                    if failed_reservations:
+                        failure_counts: dict[L1Error, int] = {}
+                        for error in failed_reservations.values():
+                            failure_counts[error] = failure_counts.get(error, 0) + 1
+                        details = ", ".join(
+                            f"{count} {strerror(error)}"
+                            for error, count in failure_counts.items()
+                        )
+                        raise RuntimeError(
+                            "could not reserve every object in selected group "
+                            f"{obj_group_id}: {details}"
+                        )
                     if reserved_dict:
                         total_bytes += next(
                             iter(reserved_dict.values())
@@ -739,6 +885,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
+                    if all_dict:
+                        # Earlier object groups may already have queued D2H
+                        # copies when a later group fails. Delete every
+                        # reservation only after those stream operations have
+                        # completed, and never expose the partial store.
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "abort_write",
+                            list(all_dict.keys()),
+                        )
                 num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,

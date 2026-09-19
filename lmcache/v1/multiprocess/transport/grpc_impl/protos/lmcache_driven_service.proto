@@ -37,6 +37,18 @@ message StoreResponse {
   EventIpcHandleResult result = 1;
 }
 
+message StoreGroupsRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  repeated BlockIdGroup gpu_block_ids = 3;
+  bytes event_ipc_handle = 4;
+  repeated int64 selected_engine_group_ids = 5;
+}
+
+message StoreGroupsResponse {
+  EventIpcHandleResult result = 1;
+}
+
 message RetrieveRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
@@ -54,5 +66,6 @@ service LMCacheDrivenService {
   rpc UnregisterKvCache(UnregisterKvCacheRequest)
       returns (UnregisterKvCacheResponse);
   rpc Store(StoreRequest) returns (StoreResponse);
+  rpc StoreGroups(StoreGroupsRequest) returns (StoreGroupsResponse);
   rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
 }

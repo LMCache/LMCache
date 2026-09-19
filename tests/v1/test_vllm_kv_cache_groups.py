@@ -8,7 +8,9 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
+    KVGroupRetentionKind,
     create_engine_group_infos_from_vllm,
+    create_kv_group_retention_specs,
 )
 from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
@@ -531,3 +533,66 @@ def test_conversion_skips_format_discovery_for_scratch_layers():
 
     assert [g.engine_group_id for g in spec] == [0]
     assert get_engine_group_indices(spec, 2) == [0, EXCLUDED_ENGINE_GROUP]
+
+
+def test_retention_specs_classify_and_bucket_hybrid_groups():
+    """Retention descriptors preserve every engine group and object bucket."""
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["full"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(
+                ["sliding.0"],
+                SlidingWindowSpec(block_size=16, sliding_window=384),
+            ),
+            MockKVCacheGroup(
+                ["sliding.1"],
+                SlidingWindowSpec(block_size=16, sliding_window=400),
+            ),
+            MockKVCacheGroup(["recurrent"], MambaSpec(block_size=16)),
+            MockKVCacheGroup(["scratch"], CircularBufferSpec(block_size=8)),
+        ]
+    )
+
+    specs = create_kv_group_retention_specs(
+        config,
+        [16, 16, 16, 16, 0],
+        lmcache_tokens_per_chunk=256,
+    )
+
+    assert [spec.kind for spec in specs] == [
+        KVGroupRetentionKind.FULL_ATTENTION,
+        KVGroupRetentionKind.SLIDING_WINDOW,
+        KVGroupRetentionKind.SLIDING_WINDOW,
+        KVGroupRetentionKind.RECURRENT,
+        KVGroupRetentionKind.SCRATCH,
+    ]
+    assert [spec.window_size_tokens for spec in specs] == [
+        None,
+        384,
+        400,
+        16,
+        None,
+    ]
+    # Both sliding windows occupy two chunks and therefore share one LMCache
+    # object group. Recurrent state stays separate even when its window count
+    # happens to match an attention group.
+    assert [spec.retention_group_id for spec in specs] == [0, 1, 1, 2, None]
+    assert [spec.cacheable for spec in specs] == [True, True, True, True, False]
+
+
+def test_retention_specs_reject_mixed_contract_in_one_engine_group():
+    """One engine group cannot mix full and sliding-window retention."""
+    mixed = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "full": FullAttentionSpec(block_size=16),
+            "sliding": SlidingWindowSpec(block_size=16, sliding_window=128),
+        },
+    )
+
+    with pytest.raises(ValueError, match="incompatible retention contracts"):
+        create_kv_group_retention_specs(
+            MockKVCacheConfig([MockKVCacheGroup(["full", "sliding"], mixed)]),
+            [16],
+            lmcache_tokens_per_chunk=256,
+        )

@@ -104,6 +104,24 @@ class ZmqMultiprocessClient(RequestClient):
             RequestType.STORE, key, instance_id, block_ids, event_ipc_handle
         )
 
+    def store_groups(
+        self,
+        key: Any,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        engine_group_ids: list[int],
+    ) -> MessagingFuture[Any]:
+        """Store selected engine KV-cache groups."""
+        return self._call(
+            RequestType.STORE_GROUPS,
+            key,
+            instance_id,
+            block_ids,
+            event_ipc_handle,
+            engine_group_ids,
+        )
+
     def retrieve(
         self,
         key: Any,

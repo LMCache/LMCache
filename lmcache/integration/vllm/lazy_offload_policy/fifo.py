@@ -39,7 +39,7 @@ class FIFOOffloadPolicy(OffloadPolicy):
                 two keys above are read; missing keys keep their defaults of
                 100 eligible requests and 10 requests per drain.
         """
-        self._pending_items: dict[str, PendingStoreItem] = {}
+        self._pending_items: dict[tuple[str, int], PendingStoreItem] = {}
         # int() does the conversion; the cast only narrows ConfigValue to
         # what int() accepts, since a JSON config may carry the number as a
         # string.
@@ -64,6 +64,9 @@ class FIFOOffloadPolicy(OffloadPolicy):
         self,
         meta: "LMCacheMPRequestMetadata",
         block_hashes: BlockHashes,
+        *,
+        requires_prefix: bool = True,
+        retire_at_token: int | None = None,
     ) -> None:
         """Queue one store operation under its request id.
 
@@ -73,11 +76,18 @@ class FIFOOffloadPolicy(OffloadPolicy):
                 for the manager to re-validate. This policy does not read
                 them, so it never drops an operation whose blocks were
                 recycled.
+            requires_prefix: Unused; FIFO does not inspect prefix validity.
+            retire_at_token: Unused; FIFO drains finished requests only.
         """
-        item = self._pending_items.get(meta.request_id)
+        retention_group_id = meta.retention_group_id or 0
+        key = (meta.request_id, retention_group_id)
+        item = self._pending_items.get(key)
         if item is None:
-            item = PendingStoreItem(request_id=meta.request_id)
-            self._pending_items[meta.request_id] = item
+            item = PendingStoreItem(
+                request_id=meta.request_id,
+                retention_group_id=retention_group_id,
+            )
+            self._pending_items[key] = item
         item.metadatas.append((meta, block_hashes))
 
     def drain(self, signals: DrainSignals) -> LazyOffloadDrain:
@@ -96,20 +106,45 @@ class FIFOOffloadPolicy(OffloadPolicy):
         """
         eligible_ids = signals.finished_request_ids - signals.blocked_request_ids
         eligible_count = sum(
-            request_id in self._pending_items for request_id in eligible_ids
+            any(
+                request_id == key[0] and key not in signals.blocked_retention_groups
+                for key in self._pending_items
+            )
+            for request_id in eligible_ids
         )
         if eligible_count < self._threshold:
             return LazyOffloadDrain()
         items: list[PendingStoreItem] = []
-        for request_id in list(self._pending_items):
-            if request_id not in eligible_ids:
+        selected_requests: set[str] = set()
+        selected_request_order: list[str] = []
+        for key in list(self._pending_items):
+            request_id, _ = key
+            if (
+                request_id not in eligible_ids
+                or key in signals.blocked_retention_groups
+            ):
                 continue
-            items.append(self._pending_items.pop(request_id))
-            if len(items) >= self._select_count:
+            if (
+                request_id not in selected_requests
+                and len(selected_requests) >= self._select_count
+            ):
+                continue
+            if request_id not in selected_requests:
+                selected_requests.add(request_id)
+                selected_request_order.append(request_id)
+            items.append(self._pending_items.pop(key))
+            if len(selected_requests) >= self._select_count and not any(
+                pending_key[0] in selected_requests
+                for pending_key in self._pending_items
+            ):
                 break
         return LazyOffloadDrain(
             items=items,
-            emptied_request_ids=[item.request_id for item in items],
+            emptied_request_ids=[
+                request_id
+                for request_id in selected_request_order
+                if not any(key[0] == request_id for key in self._pending_items)
+            ],
         )
 
     def has_pending_request(self, request_id: str) -> bool:
@@ -121,7 +156,7 @@ class FIFOOffloadPolicy(OffloadPolicy):
         Returns:
             True while at least one of its operations is buffered.
         """
-        return request_id in self._pending_items
+        return any(key[0] == request_id for key in self._pending_items)
 
     def drop_request(self, request_id: str) -> int:
         """Discard operations invalidated by a preemption reset.
@@ -132,8 +167,8 @@ class FIFOOffloadPolicy(OffloadPolicy):
         Returns:
             The number of buffered operations discarded.
         """
-        item = self._pending_items.pop(request_id, None)
-        return len(item.metadatas) if item is not None else 0
+        keys = [key for key in self._pending_items if key[0] == request_id]
+        return sum(len(self._pending_items.pop(key).metadatas) for key in keys)
 
     def discard_for_reuse(self, request_id: str) -> None:
         """Discard what the finished holder of this id left buffered.
@@ -150,12 +185,19 @@ class FIFOOffloadPolicy(OffloadPolicy):
             request_id: The request whose session was torn down. Unused.
         """
 
-    def mark_store_failed(self, request_id: str) -> int:
+    def mark_store_failed(
+        self,
+        request_id: str,
+        retention_group_id: int = 0,
+        *,
+        requires_prefix: bool = True,
+    ) -> int:
         """FIFO drains a request whole, so nothing of it is left buffered.
 
         Args:
-            request_id: The request whose submitted store failed. Unused:
-                this policy keeps no prefix-chain state.
+            request_id: The request whose submitted store failed. Unused.
+            retention_group_id: The independently stored group. Unused.
+            requires_prefix: Whether later ranges need the failed one. Unused.
 
         Returns:
             Always zero.

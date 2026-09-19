@@ -916,6 +916,45 @@ class TestReserveWrite:
 
         manager.close()
 
+    def test_reserve_write_can_distinguish_complete_existing_key(
+        self, basic_l1_config, basic_layout
+    ):
+        """Detailed new-mode reservations identify reusable existing data."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+        manager.reserve_write([key], [False], basic_layout, mode="new")
+        manager.finish_write([key])
+
+        result = manager.reserve_write(
+            [key],
+            [False],
+            basic_layout,
+            mode="new",
+            distinguish_existing=True,
+        )
+
+        assert result[key] == (L1Error.KEY_ALREADY_EXISTS, None)
+        manager.close()
+
+    def test_reserve_write_does_not_accept_inflight_existing_key(
+        self, basic_l1_config, basic_layout
+    ):
+        """A write-locked key is not a valid pre-existing store result."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+        manager.reserve_write([key], [False], basic_layout, mode="new")
+
+        result = manager.reserve_write(
+            [key],
+            [False],
+            basic_layout,
+            mode="new",
+            distinguish_existing=True,
+        )
+
+        assert result[key] == (L1Error.KEY_NOT_WRITABLE, None)
+        manager.close()
+
     def test_reserve_write_update_mode(self, basic_l1_config, basic_layout):
         """Test that reserve_write returns KEY_NOT_WRITABLE for new keys."""
         manager = L1Manager(basic_l1_config)

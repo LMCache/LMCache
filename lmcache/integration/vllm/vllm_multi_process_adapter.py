@@ -38,6 +38,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
+    PARTIAL_STORE_GROUPS_CAPABILITY,
     EngineGroupInfo,
     expand_engine_block_ids,
 )
@@ -607,6 +608,44 @@ class LoadStoreOp:
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
+    selected_engine_group_ids: tuple[int, ...] | None = None
+    """Engine KV-cache groups selected for this operation.
+
+    ``None`` preserves the legacy all-group operation. A non-empty tuple is
+    used by group-aware lazy offload to store only complete retention groups.
+    Scratch groups are never selected.
+    """
+
+    @property
+    def block_ids_per_engine_group(self) -> list[list[int]]:
+        """Return block IDs in an unambiguous per-engine-group shape."""
+        if not self.block_ids:
+            return []
+        if isinstance(self.block_ids[0], int):
+            return [list(self.block_ids)]
+        return [list(group_block_ids) for group_block_ids in self.block_ids]
+
+    @property
+    def selected_group_block_ids(self) -> list[tuple[int, int]]:
+        """Return selected block IDs qualified by their engine group."""
+        per_group = self.block_ids_per_engine_group
+        selected = (
+            range(len(per_group))
+            if self.selected_engine_group_ids is None
+            else self.selected_engine_group_ids
+        )
+        refs: list[tuple[int, int]] = []
+        for engine_group_id in selected:
+            if engine_group_id < 0 or engine_group_id >= len(per_group):
+                raise ValueError(
+                    f"selected engine group {engine_group_id} is outside "
+                    f"block_ids range [0, {len(per_group)})"
+                )
+            refs.extend(
+                (engine_group_id, block_id) for block_id in per_group[engine_group_id]
+            )
+        return refs
+
     @property
     def flat_block_ids(self) -> list[int]:
         """Return all block IDs flattened for group-blind error paths.
@@ -617,14 +656,9 @@ class LoadStoreOp:
         process boundaries (e.g. ``[[20, 21]]`` → ``[20, 21]``).
         Returns an empty list when ``block_ids`` is empty.
         """
-        if not self.block_ids:
-            return []
-        # Defend against IPC serialization flattening [[20, 21, …]] → [20, 21, …]
-        if isinstance(self.block_ids[0], int):
-            return list(self.block_ids)
         return [
             block_id
-            for group_block_ids in self.block_ids
+            for group_block_ids in self.block_ids_per_engine_group
             for block_id in group_block_ids
         ]
 
@@ -696,6 +730,7 @@ class LMCacheMPSchedulerAdapter:
                 ExtraConfigDefault.nonblocking_lookup_status.name
             ]
         self._mq_timeout = mq_timeout
+        self._server_capabilities: dict[str, set[str]] | None = None
 
         # Lookup state tracking:
         # - _pending_lookups: request_ids submitted but not yet resolved
@@ -772,6 +807,7 @@ class LMCacheMPSchedulerAdapter:
         # Events must be reported by all world_size workers before considered complete.
         self._expected_worker_count = parallel_strategy.vllm_world_size
         self._store_request_pending_counts: dict[str, int] = {}
+        self._store_operation_pending_counts: dict[int, int] = {}
 
     @property
     def world_size(self) -> int:
@@ -787,6 +823,31 @@ class LMCacheMPSchedulerAdapter:
     def is_healthy(self) -> bool:
         """True iff every backing LMCache server is healthy."""
         return all(ev.is_set() for ev in self._health_events.values())
+
+    def require_capability(self, capability: str) -> None:
+        """Require every backing server to advertise one capability.
+
+        Args:
+            capability: Capability name returned by ``GET_EXPERIMENTAL``.
+
+        Raises:
+            RuntimeError: If at least one server does not advertise it.
+        """
+        if self._server_capabilities is None:
+            self._server_capabilities = {
+                url: get_experimental(client, timeout=self._mq_timeout)
+                for url, client in self.req_clients.items()
+            }
+        missing = sorted(
+            url
+            for url, capabilities in self._server_capabilities.items()
+            if capability not in capabilities
+        )
+        if missing:
+            raise RuntimeError(
+                f"LMCache capability {capability!r} is required on every "
+                f"configured server; missing on {missing}"
+            )
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first use."""
@@ -1258,6 +1319,33 @@ class LMCacheMPSchedulerAdapter:
             self._store_request_pending_counts[req_id] = total
             return False
 
+    def update_pending_store_operation_count(
+        self, operation_id: int, count: int, /
+    ) -> bool:
+        """Record worker receipts for one scheduler-assigned store operation.
+
+        Args:
+            operation_id: Unique identity assigned by ``LazyOffloadManager``.
+            count: Newly reported worker completions.
+
+        Returns:
+            ``True`` once all expected workers have completed the operation.
+
+        Raises:
+            ValueError: If ``count`` would exceed the configured worker count.
+        """
+        total = self._store_operation_pending_counts.get(operation_id, 0) + count
+        if total > self._expected_worker_count:
+            raise ValueError(
+                f"store operation {operation_id} received {total} completions, "
+                f"expected {self._expected_worker_count}"
+            )
+        if total == self._expected_worker_count:
+            self._store_operation_pending_counts.pop(operation_id, None)
+            return True
+        self._store_operation_pending_counts[operation_id] = total
+        return False
+
     def _mark_lookup_timed_out(self, url: str) -> None:
         """Log and mark ``url`` unhealthy after an unacknowledged LOOKUP."""
         logger.warning(
@@ -1383,6 +1471,9 @@ class LMCacheMPWorkerAdapter:
 
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
+        self._lazy_store_futures: dict[
+            int, tuple[str, MessagingFuture[StoreResult]]
+        ] = {}
         # request_id -> (future, block_ids)
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
@@ -1390,6 +1481,7 @@ class LMCacheMPWorkerAdapter:
         # The IPC handle is not enough by itself; CUDA needs the exporting
         # event object to stay alive until the consumer is done with it.
         self.store_events: dict[str, _IpcEvent] = {}
+        self._lazy_store_events: dict[int, _IpcEvent] = {}
         self.retrieve_events: dict[str, _IpcEvent] = {}
 
         # Block IDs that failed due to retrieve timeout
@@ -1430,7 +1522,7 @@ class LMCacheMPWorkerAdapter:
             if enable_kv_events
             else None
         )
-        self._pending_store_kv_events: dict[str, list[CacheStoreEvent]] = {}
+        self._pending_store_kv_events: dict[str | int, list[CacheStoreEvent]] = {}
         self._kv_events: list[CacheStoreEvent] = []
         if enable_kv_events:
             labels = (model_name, parallel_strategy.vllm_worker_id)
@@ -1502,6 +1594,8 @@ class LMCacheMPWorkerAdapter:
         # or dropped while unhealthy). Reported alongside the completion
         # receipts so the scheduler can break their stored-prefix chains.
         self._failed_store_requests: set[str] = set()
+        self._completed_store_operations: dict[int, int] = {}
+        self._failed_store_operations: set[int] = set()
 
     @property
     def is_healthy(self) -> bool:
@@ -1730,7 +1824,9 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent | None,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-    ):
+        *,
+        store_operation_id: int | None = None,
+    ) -> None:
         """
         Submit a KV cache store request to LMCache
 
@@ -1748,13 +1844,36 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            store_operation_id: Scheduler-assigned identity required in lazy
+                mode. It keeps concurrent group stores and their receipts
+                unambiguous even when they share one request id.
+
+        Raises:
+            ValueError: If lazy mode receives no operation identity, or the
+                identity is already in flight on this worker.
         """
         self._ensure_heartbeat_started()
+
+        if self.lazy_offload:
+            if store_operation_id is None:
+                raise ValueError("lazy offload store requires store_operation_id")
+            if store_operation_id in self._lazy_store_futures:
+                raise ValueError(
+                    f"duplicate lazy store operation id {store_operation_id}"
+                )
+            if (
+                op.selected_engine_group_ids is not None
+                and PARTIAL_STORE_GROUPS_CAPABILITY not in self.experimental
+            ):
+                raise RuntimeError(
+                    "group-aware lazy offload requires an LMCache server with "
+                    "--separate-object-groups and partial-store support"
+                )
 
         if not self.is_kv_writer:
             # Non-writer ranks (MLA) never store anything.
             if self.lazy_offload:
-                self._completed_store_requests[request_id] = 1
+                self._record_lazy_store_completion(store_operation_id, failed=False)
             return
 
         if not self.is_healthy:
@@ -1765,8 +1884,7 @@ class LMCacheMPWorkerAdapter:
                     "are unpinned",
                     request_id,
                 )
-                self._completed_store_requests[request_id] = 1
-                self._failed_store_requests.add(request_id)
+                self._record_lazy_store_completion(store_operation_id, failed=True)
             return
 
         assert op.token_ids is not None
@@ -1783,6 +1901,9 @@ class LMCacheMPWorkerAdapter:
                 "Transfer context is not initialized. "
                 "Call register_kv_caches() before submitting store requests."
             )
+        submit_kwargs: dict[str, Any] = {}
+        if op.selected_engine_group_ids is not None:
+            submit_kwargs["selected_engine_group_ids"] = op.selected_engine_group_ids
         future = self.transfer_ctx.submit_store(
             request_id,
             key,
@@ -1790,12 +1911,24 @@ class LMCacheMPWorkerAdapter:
             self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
+            **submit_kwargs,
         )
-        self.store_futures[request_id] = future
-        if event is not None:
-            self.store_events[request_id] = event
-        if self._kv_events_enabled:
-            self._pending_store_kv_events.setdefault(request_id, []).extend(
+        event_key: str | int = request_id
+        if self.lazy_offload:
+            assert store_operation_id is not None
+            self._lazy_store_futures[store_operation_id] = (request_id, future)
+            event_key = store_operation_id
+            if event is not None:
+                self._lazy_store_events[store_operation_id] = event
+        else:
+            self.store_futures[request_id] = future
+            if event is not None:
+                self.store_events[request_id] = event
+        # A vLLM KV event advertises a reusable model-wide cache entry. A
+        # selected-group store only materializes part of that entry, so it must
+        # not publish the same event even after its device copy succeeds.
+        if self._kv_events_enabled and op.selected_engine_group_ids is None:
+            self._pending_store_kv_events.setdefault(event_key, []).extend(
                 self._build_store_kv_events(key)
             )
 
@@ -1866,7 +1999,8 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
         request_configs_list: list[dict[str, Any] | None] | None = None,
-    ):
+        store_operation_ids: list[int | None] | None = None,
+    ) -> None:
         """
         Submit a batched store request to LMCache
 
@@ -1881,23 +2015,33 @@ class LMCacheMPWorkerAdapter:
                 request_ids.
             request_configs_list: Optional LMCache request configs, one per
                 request.
+            store_operation_ids: Scheduler-assigned operation identities,
+                one per request. Required by lazy offload.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
         if request_configs_list is None:
             request_configs_list = [None] * len(request_ids)
+        if store_operation_ids is None:
+            store_operation_ids = [None] * len(request_ids)
         if not (
             len(request_ids)
             == len(ops)
             == len(cache_salts)
             == len(request_configs_list)
+            == len(store_operation_ids)
         ):
             raise ValueError(
-                "request_ids, ops, cache_salts, and request_configs_list "
-                "must have the same length"
+                "request_ids, ops, cache_salts, request_configs_list, and "
+                "store_operation_ids must have the same length"
             )
-        for request_id, op, salt, request_configs in zip(
-            request_ids, ops, cache_salts, request_configs_list, strict=True
+        for request_id, op, salt, request_configs, store_operation_id in zip(
+            request_ids,
+            ops,
+            cache_salts,
+            request_configs_list,
+            store_operation_ids,
+            strict=True,
         ):
             self.submit_store_request(
                 request_id,
@@ -1905,6 +2049,7 @@ class LMCacheMPWorkerAdapter:
                 event,
                 cache_salt=salt,
                 request_configs=request_configs,
+                store_operation_id=store_operation_id,
             )
 
     @_lmcache_nvtx_annotate
@@ -2117,8 +2262,7 @@ class LMCacheMPWorkerAdapter:
     def get_finished_with_lazy_offload(
         self,
     ) -> tuple[set[str] | None, set[str] | None]:
-        """
-        Check and get the finished store and retrieve requests in lazy offload mode.
+        """Poll operation-scoped lazy stores and asynchronous retrieves.
 
         Returns:
             A tuple of two sets:
@@ -2136,9 +2280,10 @@ class LMCacheMPWorkerAdapter:
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "reclaim")
 
-        # If unhealthy, drain all pending futures immediately
+        # If unhealthy, every pending operation is terminal but failed. The
+        # scheduler receives the operation identities and releases exactly
+        # the pins owned by each batch.
         if not self.is_healthy:
-            finished_stores = set(self.store_futures.keys())
             finished_retrieves = set()
             for request_id, (
                 _r_future,
@@ -2146,9 +2291,11 @@ class LMCacheMPWorkerAdapter:
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
-            self.store_futures.clear()
+            for operation_id in self._lazy_store_futures:
+                self._record_lazy_store_completion(operation_id, failed=True)
+            self._lazy_store_futures.clear()
             self.retrieve_futures.clear()
-            self.store_events.clear()
+            self._lazy_store_events.clear()
             self.retrieve_events.clear()
             self._pending_store_kv_events.clear()
 
@@ -2161,32 +2308,30 @@ class LMCacheMPWorkerAdapter:
             self._dropped_retrieves = set()
             finished_retrieves.update(dropped)
 
-            for req_id in finished_stores:
-                self._completed_store_requests[req_id] = 1
-                # The drained future's outcome is unknown; the data cannot
-                # be assumed stored.
-                self._failed_store_requests.add(req_id)
             return None, finished_retrieves
 
-        finished_stores = set()
+        finished_store_operations: set[int] = set()
+        finished_store_requests: set[str] = set()
         finished_retrieves = set()
-        for request_id, s_future in self.store_futures.items():
+        for operation_id, (request_id, s_future) in self._lazy_store_futures.items():
             if not s_future.query():
                 continue
 
             s_result = s_future.result(timeout=60)
-            finished_stores.add(request_id)
+            finished_store_operations.add(operation_id)
+            finished_store_requests.add(request_id)
 
             if not s_result:
-                self._pending_store_kv_events.pop(request_id, None)
+                self._pending_store_kv_events.pop(operation_id, None)
                 logger.error(
-                    "Something went wrong when processing the "
-                    "store request for request_id=%s",
+                    "Store operation %d failed for request_id=%s",
+                    operation_id,
                     request_id,
                 )
-                self._failed_store_requests.add(request_id)
+                self._record_lazy_store_completion(operation_id, failed=True)
             else:
-                self._publish_store_kv_events(request_id)
+                self._publish_store_kv_events(operation_id)
+                self._record_lazy_store_completion(operation_id, failed=False)
 
         for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
@@ -2204,10 +2349,10 @@ class LMCacheMPWorkerAdapter:
                     r_result,
                 )
 
-        # Remove the finished requests from the tracking dicts
-        for request_id in finished_stores:
-            self.store_futures.pop(request_id, None)
-            self.store_events.pop(request_id, None)
+        # Remove terminal operations and release their retained event objects.
+        for operation_id in finished_store_operations:
+            self._lazy_store_futures.pop(operation_id, None)
+            self._lazy_store_events.pop(operation_id, None)
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
             self.retrieve_events.pop(request_id, None)
@@ -2225,16 +2370,13 @@ class LMCacheMPWorkerAdapter:
         # the invocation of `get_finished` means that
         # these requests' KV caches are already fully stored.
         # or the requests normally ends without any store.
-        if finished_stores:
+        if finished_store_requests:
             self.request_telemetry.on_request_store_finished(
-                request_ids_set=finished_stores,
+                request_ids_set=finished_store_requests,
                 model_name=self.model_name,
                 world_size=self.world_size,
                 kv_rank=self.worker_id,
             )
-
-        for req_id in finished_stores:
-            self._completed_store_requests[req_id] = 1
         return None, finished_retrieves
 
     def get_completed_store_requests(self) -> dict[str, int] | None:
@@ -2244,6 +2386,14 @@ class LMCacheMPWorkerAdapter:
         completed_store_requests = self._completed_store_requests
         self._completed_store_requests = {}
         return completed_store_requests
+
+    def get_completed_store_operations(self) -> dict[int, int] | None:
+        """Return lazy STORE operation receipts since the previous call."""
+        if not self._completed_store_operations:
+            return None
+        completed = self._completed_store_operations
+        self._completed_store_operations = {}
+        return completed
 
     def get_kv_events(self) -> list[CacheStoreEvent]:
         """Return completed store events since the last call.
@@ -2278,6 +2428,14 @@ class LMCacheMPWorkerAdapter:
         failed_store_requests = self._failed_store_requests
         self._failed_store_requests = set()
         return failed_store_requests
+
+    def get_failed_store_operations(self) -> set[int] | None:
+        """Return failed lazy STORE operation identities once."""
+        if not self._failed_store_operations:
+            return None
+        failed = self._failed_store_operations
+        self._failed_store_operations = set()
+        return failed
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -2391,13 +2549,28 @@ class LMCacheMPWorkerAdapter:
         self.request_telemetry.close()
 
     # Helper functions
-    def _publish_store_kv_events(self, request_id: str) -> None:
+    def _publish_store_kv_events(self, store_key: str | int) -> None:
         """Buffer successful store events and update metrics without a drain."""
-        events = self._pending_store_kv_events.pop(request_id, [])
+        events = self._pending_store_kv_events.pop(store_key, [])
         if events:
             self._kv_events.extend(events)
             self._kv_events_generated.inc(len(events))
             self._kv_events_buffered.set(len(self._kv_events))
+
+    def _record_lazy_store_completion(
+        self,
+        operation_id: int | None,
+        *,
+        failed: bool,
+    ) -> None:
+        """Queue one worker receipt for a lazy STORE operation."""
+        if operation_id is None:
+            raise ValueError("lazy store completion requires an operation id")
+        if operation_id in self._completed_store_operations:
+            raise RuntimeError(f"lazy store operation {operation_id} completed twice")
+        self._completed_store_operations[operation_id] = 1
+        if failed:
+            self._failed_store_operations.add(operation_id)
 
     def _update_and_get_finished_store(
         self,

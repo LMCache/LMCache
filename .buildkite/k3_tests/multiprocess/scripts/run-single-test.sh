@@ -3,7 +3,8 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | lazy_offload | gds_smoke_test
+#              | restart_recovery | lazy_offload | hybrid_lazy_offload
+#              | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -55,7 +56,8 @@ if [ "$TEST_NAME" = "hma_lm_eval_gemma4" ]; then
     # pipeline sets ATTENTION_BACKEND=auto; its ~63GB of weights also need a
     # higher GPU_MEMORY_UTILIZATION than the default (all set in pipeline.yml).
     export MODEL="${MODEL:-google/gemma-4-31B-it}"
-elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
+elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ] \
+    || [ "$TEST_NAME" = "hybrid_lazy_offload" ]; then
     # Qwen3.5-0.8B is a Mamba/GDN + full-attention hybrid (caches re-viewed at
     # registration; see lmcache/integration/vllm/kv_cache_group_edits.py).
     export MODEL="${MODEL:-Qwen/Qwen3.5-0.8B}"
@@ -72,7 +74,31 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     # (~1/sqrt(LIMIT)) well inside it.
     export BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
     export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
-    export LIMIT="${LIMIT:-300}"
+    if [ "$TEST_NAME" = "hybrid_lazy_offload" ]; then
+        # Exercise the combined path: hybrid full-attention + recurrent cache
+        # groups, partial object-group stores, and eviction-aware scheduling.
+        # A small deterministic block pool creates real free-queue pressure
+        # without depending on the physical GPU's memory capacity.
+        export LMCACHE_MP_LAZY_OFFLOAD=true
+        export LMCACHE_MP_LAZY_OFFLOAD_POLICY=EVICTION_AWARE
+        export LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-8.0}"
+        export LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP="${LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP:-64}"
+        export LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS=0
+        export SEPARATE_OBJECT_GROUPS=true
+        export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-16}"
+        # Keep the configured sequence length within the deterministic
+        # 16-block test pool. 4096 comfortably covers GSM8K while leaving the
+        # pool small enough to force the intended eviction pressure.
+        export MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+        # Each live Mamba sequence needs one cache block. Match the 16-block
+        # pool while leaving headroom above this workload's concurrency of 8.
+        export MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
+        export NUM_CONCURRENT="${NUM_CONCURRENT:-8}"
+        export LIMIT="${LIMIT:-40}"
+        export EXPECT_LAZY_OFFLOAD_PRESSURE=true
+    else
+        export LIMIT="${LIMIT:-300}"
+    fi
 elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
     # Self-contained test: run-kimi-linear-tp.sh owns the server lifecycle and
     # all launch flags (TP=2, trust-remote-code, align, chunk/batch sizes). Only
@@ -176,6 +202,9 @@ case "$TEST_NAME" in
     hma_lm_eval_qwen3_5)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
+    hybrid_lazy_offload)
+        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
+        ;;
     vllm_bench)
         exec_script="${SCRIPT_DIR}/run-vllm-bench.sh"
         ;;
@@ -220,7 +249,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, hma_lm_eval_qwen3_5, hybrid_lazy_offload, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac
