@@ -416,7 +416,9 @@ def add_l2_adapters_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     Example:
         >>> parser = argparse.ArgumentParser()
         >>> add_l2_adapters_args(parser)
-        >>> args = parser.parse_args(["--l2-adapter", '{"type":"disk","path":"/data"}'])
+        >>> args = parser.parse_args(
+        ...     ["--l2-adapter", '{"type":"fs","base_path":"/data"}']
+        ... )
         >>> config = parse_args_to_l2_adapters_config(args)
     """
     group = parser.add_argument_group(
@@ -432,7 +434,7 @@ def add_l2_adapters_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         type=str,
         metavar="JSON",
         help='Adapter spec as JSON with a "type" field and adapter-specific configs'
-        ', e.g. \'{"type":"disk","path":"/data"}\'.'
+        ', e.g. \'{"type":"fs","base_path":"/data"}\'.'
         "Repeat for multiple adapters."
         "Supported adapters are: ["
         + ", ".join(sorted(get_registered_l2_adapter_types()))
