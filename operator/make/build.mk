@@ -40,11 +40,9 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 build-installer: manifests helm ## Render the chart as a standalone YAML installer.
 	mkdir -p dist
 	@$(helm-image-args) \
+	printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n' "$(NAMESPACE)" > dist/install.yaml; \
 	"$(HELM)" template "$(RELEASE)" "$(CHART)" --namespace "$(NAMESPACE)" \
-		--set-string "image.repository=$${image%:*}" --set-string "image.tag=$${image##*:}" $(HELM_EXTRA_ARGS) > dist/operator.yaml
-	@printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n' "$(NAMESPACE)" > dist/install.yaml
-	@cat dist/operator.yaml >> dist/install.yaml
-	@rm dist/operator.yaml
+		--set-string "image.repository=$${image%:*}" --set-string "image.tag=$${image##*:}" $(HELM_EXTRA_ARGS) >> dist/install.yaml
 
 VERSION ?= v0.5.5
 CHART_VERSION = $(shell printf '%s' '$(VERSION)' | sed -E \
