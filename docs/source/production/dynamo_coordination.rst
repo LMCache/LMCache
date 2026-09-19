@@ -14,12 +14,13 @@ We recommend starting with a single NVIDIA GPU and Dynamo's
 ``vllm-runtime`` container. The commands below use vLLM to serve
 ``Qwen/Qwen3-0.6B``.
 
-Start NATS and etcd first if they are not already running. Run this command
-from the Dynamo checkout root on the host:
+Start NATS and etcd first if they are not already running. The local
+example includes a Compose file and its NATS configuration. Run this
+command from the LMCache checkout root on the host:
 
 .. code-block:: bash
 
-   docker compose -f dev/docker-compose.yml up -d
+   docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
 
 Use a runtime image containing an LMCache build compatible with its vLLM
 version; see the :doc:`compatibility table </getting_started/compatibility>`.
@@ -76,7 +77,7 @@ Use the launch scripts
 
 Once the container is ready and NATS and etcd are running, you can use the
 `launch scripts
-<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/launch>`_
+<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/local>`_
 to start LMCache, the Dynamo frontend, and the vLLM workers together. The
 scripts wait for LMCache to become healthy and stop the processes when you
 press ``Ctrl+C``. They also set a GPU KV cache memory budget for the example
@@ -88,7 +89,7 @@ Replace the paths below with the locations of your checkouts:
 
 .. code-block:: bash
 
-   cp /path/to/LMCache/examples/dynamo_integration/launch/*_lmcache_mp.sh \
+   cp /path/to/LMCache/examples/dynamo_integration/local/*_lmcache_mp.sh \
        /path/to/dynamo/examples/backends/vllm/launch/
    cd /path/to/dynamo/examples/backends/vllm
 
@@ -151,15 +152,15 @@ Kubernetes
 ----------
 
 The `Kubernetes manifests
-<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/deploy>`_
+<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/kubernetes>`_
 deploy the same model with Dynamo's vLLM backend. After preparing the
 cluster and image tags described below, run these two commands from the
 LMCache checkout root:
 
 .. code-block:: bash
 
-   kubectl apply -n default -f examples/dynamo_integration/deploy/lmcache_engine.yaml
-   kubectl apply -n default -f examples/dynamo_integration/deploy/agg_lmcache_mp.yaml
+   kubectl apply -n default -f examples/dynamo_integration/kubernetes/lmcache_engine.yaml
+   kubectl apply -n default -f examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
 
 The first command creates the shared cache service. The second creates a
 Dynamo frontend and one vLLM worker. The LMCache operator generates the
@@ -198,7 +199,7 @@ How the YAML connects the services
 
 ``lmcache_engine.yaml`` defines the cache server image and CPU cache size:
 
-.. literalinclude:: ../../../examples/dynamo_integration/deploy/lmcache_engine.yaml
+.. literalinclude:: ../../../examples/dynamo_integration/kubernetes/lmcache_engine.yaml
    :language: yaml
 
 The operator creates a server DaemonSet, a Service, and the
@@ -206,7 +207,7 @@ The operator creates a server DaemonSet, a Service, and the
 node, which lets multiple workers on that node share the CPU cache.
 
 The `aggregated Dynamo manifest
-<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/deploy/agg_lmcache_mp.yaml>`_
+<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml>`_
 contains a ``Frontend`` service and a ``VllmDecodeWorker`` service. Despite
 its name, this worker handles both prefill and decode because no
 ``--disaggregation-mode`` is set.

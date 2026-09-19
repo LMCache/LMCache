@@ -12,15 +12,60 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 
 | Path | What it is |
 |------|------------|
-| [`deploy/lmcache_engine.yaml`](deploy/lmcache_engine.yaml) | `LMCacheEngine` CR for the shared MP server. Apply **before** the workers. |
-| [`deploy/agg_lmcache_mp.yaml`](deploy/agg_lmcache_mp.yaml) | Kubernetes `DynamoGraphDeployment`, aggregated (single worker). |
-| [`deploy/disagg_lmcache_mp.yaml`](deploy/disagg_lmcache_mp.yaml) | Kubernetes `DynamoGraphDeployment`, disaggregated (prefill + decode workers). |
-| [`launch/agg_lmcache_mp.sh`](launch/agg_lmcache_mp.sh) | Local single-node launch script, aggregated (1 GPU). |
-| [`launch/disagg_lmcache_mp.sh`](launch/disagg_lmcache_mp.sh) | Local single-node launch script, disaggregated (2 GPUs). |
+| [`local/docker-compose.yml`](local/docker-compose.yml) | Starts NATS and etcd on the host. |
+| [`local/nats-server.conf`](local/nats-server.conf) | NATS configuration mounted by Docker Compose. |
+| [`local/agg_lmcache_mp.sh`](local/agg_lmcache_mp.sh) | Local single-node launch script, aggregated (1 GPU). |
+| [`local/disagg_lmcache_mp.sh`](local/disagg_lmcache_mp.sh) | Local single-node launch script, disaggregated (2 GPUs). |
+| [`kubernetes/lmcache_engine.yaml`](kubernetes/lmcache_engine.yaml) | `LMCacheEngine` CR for the shared MP server. Apply **before** the workers. |
+| [`kubernetes/agg_lmcache_mp.yaml`](kubernetes/agg_lmcache_mp.yaml) | Kubernetes `DynamoGraphDeployment`, aggregated (single worker). |
+| [`kubernetes/disagg_lmcache_mp.yaml`](kubernetes/disagg_lmcache_mp.yaml) | Kubernetes `DynamoGraphDeployment`, disaggregated (prefill + decode workers). |
 
-## The LMCacheEngine (shared prerequisite)
+## Local
 
-[`deploy/lmcache_engine.yaml`](deploy/lmcache_engine.yaml) declares the MP
+Start NATS and etcd on the host, from the LMCache checkout root:
+
+```bash
+docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
+```
+
+Run the inference processes inside a prepared Dynamo `vllm-runtime` container
+with GPU access and compatible LMCache and vLLM versions. The container must
+be able to reach the host's NATS and etcd services, for example through
+Docker's `--network host` option.
+
+The launch scripts need Dynamo's `examples/common/gpu_utils.sh` and
+`examples/common/launch_utils.sh` helpers. Inside the runtime container, copy
+the scripts into the Dynamo checkout so their relative helper paths resolve.
+Replace the paths below with your checkout locations:
+
+```bash
+cp /path/to/LMCache/examples/dynamo_integration/local/*_lmcache_mp.sh \
+    /path/to/dynamo/examples/backends/vllm/launch/
+cd /path/to/dynamo/examples/backends/vllm
+```
+
+For aggregated serving on one GPU:
+
+```bash
+LMCACHE_L1_SIZE_GB=16 ./launch/agg_lmcache_mp.sh
+```
+
+For separate prefill and decode workers on two GPUs in the same node, stop
+the aggregated deployment first, then run:
+
+```bash
+LMCACHE_L1_SIZE_GB=16 ./launch/disagg_lmcache_mp.sh
+```
+
+Each script starts LMCache, the Dynamo frontend, and the vLLM workers. Press
+`Ctrl+C` to stop those processes. NATS and etcd run separately through Docker
+Compose and remain running.
+
+## Kubernetes
+
+### LMCacheEngine
+
+[`kubernetes/lmcache_engine.yaml`](kubernetes/lmcache_engine.yaml) declares the MP
 server that both the aggregated and disaggregated workers attach to. The
 LMCache operator reconciles the CR into:
 
@@ -40,26 +85,21 @@ guide-validated server build `nightly-2026-04-25` (lmcache `0.4.5.dev31`, a
 pre-stable build wire-compatible with that worker). Replace `my-tag` in each
 manifest accordingly.
 
-## Usage
+### Deploy
 
-The `deploy/` manifests are applied with `kubectl` against a cluster that
+The `kubernetes/` manifests are applied with `kubectl` against a cluster that
 already has the Dynamo platform and the LMCache operator installed. Apply the
-`LMCacheEngine` first, then one of the worker manifests:
+`LMCacheEngine` first, then one of the worker manifests. Run these commands
+from the LMCache checkout root:
 
 ```bash
-kubectl apply -n default -f deploy/lmcache_engine.yaml
-kubectl apply -n default -f deploy/disagg_lmcache_mp.yaml   # or agg_lmcache_mp.yaml
+kubectl apply -n default -f examples/dynamo_integration/kubernetes/lmcache_engine.yaml
+kubectl apply -n default -f examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml   # or agg_lmcache_mp.yaml
 ```
 
-See the [Kubernetes deployment guide](../../docs/source/mp/deployment.rst) for
-the full step-by-step (platform install, operator, namespace, HF token Secret,
-then `kubectl apply`).
+See the [Dynamo integration guide](../../docs/source/production/dynamo_coordination.rst)
+for cluster prerequisites, manifest settings, and verification commands.
 
-The `launch/` scripts are the single-node local equivalents. They run **inside
-the Dynamo `vllm-runtime` container** and source Dynamo's
-`examples/common/{gpu_utils,launch_utils}.sh` helpers, so run them from a Dynamo
-checkout (or copy them into `examples/backends/vllm/launch/`).
-
-> The deploy manifests pin the worker image to `my-tag` and the
+> The Kubernetes manifests pin the worker image to `my-tag` and the
 > `LMCacheEngine` image separately; keep the two wire-compatible (see the
-> validated pairings in the deployment guide).
+> version pairing above).
