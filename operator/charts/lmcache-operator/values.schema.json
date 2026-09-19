@@ -32,6 +32,22 @@
       "type": "object",
       "additionalProperties": {"type": "string"}
     },
+    "podLabels": {
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "control-plane",
+            "app.kubernetes.io/name",
+            "app.kubernetes.io/instance",
+            "app.kubernetes.io/version",
+            "app.kubernetes.io/managed-by",
+            "helm.sh/chart"
+          ]
+        }
+      },
+      "additionalProperties": {"type": "string"}
+    },
     "resources": {
       "type": "object",
       "additionalProperties": false,

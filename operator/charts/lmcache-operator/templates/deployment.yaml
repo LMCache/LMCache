@@ -15,7 +15,7 @@ spec:
       annotations:
         {{- mergeOverwrite (dict "kubectl.kubernetes.io/default-container" "manager") .Values.podAnnotations | toYaml | nindent 8 }}
       labels:
-        {{- include "lmcache-operator.labels" . | nindent 8 }}
+        {{- mergeOverwrite (dict) .Values.podLabels (include "lmcache-operator.labels" . | fromYaml) | toYaml | nindent 8 }}
     spec:
       serviceAccountName: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager") }}
       {{- with .Values.imagePullSecrets }}

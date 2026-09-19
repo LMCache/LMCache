@@ -8,6 +8,8 @@ image:
 replicaCount: 1
 imagePullSecrets: []
 podAnnotations: {}
+# Additional Pod labels; built-in chart labels are reserved.
+podLabels: {}
 
 resources:
   limits:
