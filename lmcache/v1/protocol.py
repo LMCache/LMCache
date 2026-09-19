@@ -50,6 +50,8 @@ DTYPE_TO_INT = {
     torch.uint8: 6,
     torch.float8_e4m3fn: 7,
     torch.float8_e5m2: 8,
+    # Quantized keys (e.g. the li_c8 sparse indexer) are stored as int8.
+    torch.int8: 9,
 }
 
 INT_TO_DTYPE = {
@@ -62,6 +64,7 @@ INT_TO_DTYPE = {
     6: torch.uint8,
     7: torch.float8_e4m3fn,
     8: torch.float8_e5m2,
+    9: torch.int8,
 }
 
 # TODO (Jiayi): Add more backends
