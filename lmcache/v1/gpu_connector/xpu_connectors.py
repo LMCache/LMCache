@@ -1293,9 +1293,9 @@ class SGLangXPUConnector(GPUConnectorInterface):
             kv_caches, EngineType.SGLANG
         )
 
-        # For TWO_X_NL_X_NBBS_NH_HS format, kv_caches is [[k_list], [v_list]]
-        # We need to flatten it to [k0, k1, ..., v0, v1, ...]
-        if self.engine_kv_format == lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        # Key/value-list formats normalize to [[k_list], [v_list]], while the
+        # XPU pointer table expects one flat [k0, ..., v0, ...] sequence.
+        if self.engine_kv_format.is_kv_list:
             flat_kv_caches = kv_caches[0] + kv_caches[1]  # [k_list] + [v_list]
             device = flat_kv_caches[0].device
         else:

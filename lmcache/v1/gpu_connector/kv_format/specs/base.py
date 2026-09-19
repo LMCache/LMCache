@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-format geometry interface for GPU KV caches.
 
-Each :class:`KVFormatSpec` owns everything that is true of one
-``EngineKVFormat``: the geometry accessors (methods that read shape off a
-normalized ``kv_caches``) plus the static layout facts (``is_mla``, ``is_hnd``,
-the structural shape, ...) as class attributes. The facts are mirrored for the
-device kernels in ``csrc/engine_kv_format.h``; Python call sites read them from
-the spec via ``get_spec_class`` instead of re-listing formats inline, and
+Each :class:`KVFormatSpec` owns everything that is true of one KV layout: the
+geometry accessors (methods that read shape off a normalized ``kv_caches``)
+plus the static layout facts (``is_mla``, ``is_hnd``, the structural shape,
+...) as class attributes. The facts are mirrored for the device kernels in
+``csrc/engine_kv_format.h``; Python call sites read them from the spec via
+``get_spec_class`` instead of re-listing layouts inline, and
 ``tests/v1/gpu_connector/test_kv_format_classification.py`` pins the two sides
-together. The enum is the single source of truth for which formats exist;
-engine identity lives only in detection. The format -> spec table is in
-``registry.py``.
+together. Engine identity lives only in detection. The layout -> spec table is
+in ``registry.py``.
 """
 
 # Standard
@@ -23,48 +22,13 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
+from lmcache.v1.kv_layout_meta import (
+    AXIS_ACCESSORS,
+    concrete_axis_groups,
+    describe_axis_groups,
+    parse_axis_groups,
+)
 import lmcache.lmcache_native as lmcache_native
-
-# A format's enum name *is* its shape: ``_``-joined tokens, with ``X`` marking a
-# list level. ``TWO_X_NL_X_NBBS_NH_HS`` reads as ``2 x NL x [PBS, NH, HS]``.
-# describe_shape and concrete_shape both render from it, so they can never drift.
-_LABELS = {
-    "ONE": "1",
-    "TWO": "2",
-    "NP": "NP",
-    "NBBS": "PBS",
-    "NB": "NB",
-    "NL": "NL",
-    "BS": "BS",
-    "NH": "NH",
-    "HS": "HS",
-    "CS": "CS",
-    # Blocked-scale indexer cache: per-block value / scale regions. Rendered
-    # symbolically; the logical per-layer tensor is [NB, BS, HS(=132)].
-    "BSV": "BSxVALS",
-    "BSS": "BSxSCALES",
-}
-_ACCESSORS = {
-    "NB": "num_blocks",
-    "NL": "num_layers",
-    "BS": "block_size",
-    "NH": "num_heads",
-    "HS": "head_size",
-    "CS": "head_size",
-    "PBS": "page_buffer_size",
-    # Blocked-scale regions: sized by tokens per block (the value/scale byte
-    # widths are format constants, not per-model geometry).
-    "BSxVALS": "block_size",
-    "BSxSCALES": "block_size",
-}
-
-
-def _render_shape(
-    fmt: "lmcache_native.EngineKVFormat", token: Callable[[str], str]
-) -> str:
-    *lists, inner = fmt.name.split("_X_")
-    body = ", ".join(token(t) for t in inner.split("_"))
-    return " x ".join([token(t) for t in lists] + [f"[{body}]"])
 
 
 def describe_shape(fmt: "lmcache_native.EngineKVFormat") -> str:
@@ -74,7 +38,7 @@ def describe_shape(fmt: "lmcache_native.EngineKVFormat") -> str:
     unrelated :class:`device_ops.PageBufferShapeDesc` and its ``shape_desc``
     instances used on the transfer path.
     """
-    return _render_shape(fmt, lambda t: _LABELS[t])
+    return describe_axis_groups(parse_axis_groups(fmt.name))
 
 
 def concrete_shape(
@@ -85,10 +49,7 @@ def concrete_shape(
     E.g. ``NL_X_TWO_NB_BS_NH_HS`` with ``NL=32, NB=2048, BS=16, NH=8, HS=128``
     -> ``32 x [2, 2048, 16, 8, 128]``.
     """
-    return _render_shape(
-        fmt,
-        lambda t: _LABELS[t] if t in ("ONE", "TWO", "NP") else str(size(_LABELS[t])),
-    )
+    return concrete_axis_groups(parse_axis_groups(fmt.name), size)
 
 
 class KVFormatSpec(ABC):
@@ -231,5 +192,5 @@ class KVFormatSpec(ABC):
     def concrete_shape_str(self) -> str:
         """``describe_shape`` with real dims, e.g. ``80 x [2, 2048, 128, 8, 128]``."""
         return concrete_shape(
-            self.engine_kv_format, lambda label: getattr(self, _ACCESSORS[label])()
+            self.engine_kv_format, lambda label: getattr(self, AXIS_ACCESSORS[label])()
         )

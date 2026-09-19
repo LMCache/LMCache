@@ -22,24 +22,22 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache.lmcache_native import GPUKVFormat  # noqa: F401
-from lmcache.lmcache_native import (
-    EngineKVFormat,
-    TransferDirection,
-    is_cross_layer,
-    is_kv_list,
-    is_mla,
-)
+from lmcache.kv_layout import KVLayout
 from lmcache.logging import init_logger
 from lmcache.v1.platform._device_detect import (
     current_device_spec,
     get_torch_device,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
+    EngineKVFormat = lmcache_native.EngineKVFormat
+    GPUKVFormat = lmcache_native.GPUKVFormat
+else:
+    EngineKVFormat = KVLayout
+    GPUKVFormat = KVLayout
+TransferDirection = lmcache_native.TransferDirection
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -372,27 +370,6 @@ def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     return aligned_view, aligned_view.data_ptr()
 
 
-def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
-    """Return the spec class owning *engine_kv_format*'s static layout facts.
-
-    Args:
-        engine_kv_format: The format to look up.
-
-    Returns:
-        The ``KVFormatSpec`` subclass declared for the format.
-
-    Raises:
-        ValueError: If the format has no spec.
-    """
-    # Imported lazily, not at module scope: the specs package reads
-    # ``lmcache.device_ops``, which is resolved only once this module (the
-    # torch baseline behind it) has been imported.
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
-
-    return get_spec_class(engine_kv_format)
-
-
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
     On XPU, uses pin_memory=True (SYCL USM host allocation) for fast transfers.
@@ -577,9 +554,12 @@ def multi_layer_kv_transfer(
 
     # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
     # NL_X_NB_TWO_NH_BS_HS) as next step.
-    if int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
-        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
+    if (
+        engine_kv_format.is_hnd
+        and engine_kv_format.is_layer_list
+        and engine_kv_format.has_inner_axis("TWO")
+        and not engine_kv_format.has_inner_axis("ONE")
+        and not engine_kv_format.is_fused_packed
     ):
         raise NotImplementedError(
             "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
@@ -606,8 +586,12 @@ def multi_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
-    is_mla = _format_spec(engine_kv_format).is_mla
-    is_flash_infer = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS)
+    is_mla = engine_kv_format.is_mla
+    is_flash_infer = (
+        engine_kv_format.inner_axes[:2] == ("NB", "TWO")
+        and not engine_kv_format.is_hnd
+        and not engine_kv_format.is_fused_packed
+    )
 
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
@@ -714,7 +698,7 @@ def multi_layer_kv_transfer_unilateral(
         H2D = LMCache  -> PagedBuffer
         D2H = PagedBuffer -> LMCache
     """
-    is_mla = _format_spec(engine_kv_format).is_mla
+    is_mla = engine_kv_format.is_mla
 
     # MLA case collapses back to multi_layer_kv_transfer
     # (vLLM and SGLang indexing are compatible)
@@ -765,33 +749,33 @@ def multi_layer_kv_transfer_unilateral(
 
 def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a KV format stores heads before block tokens (HND)."""
-    return _format_spec(engine_kv_format).is_hnd
+    return engine_kv_format.is_hnd
 
 
 def _is_fused_kv_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True for formats whose K/V pair is packed in the trailing dim
     (kv_size == 1, shape_desc.hs == 2 * head_size)."""
-    return _format_spec(engine_kv_format).is_fused_packed
+    return engine_kv_format.is_fused_packed
 
 
 def _is_two_major_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when the size-2 K/V axis precedes the block axis."""
-    return _format_spec(engine_kv_format).is_two_major
+    return engine_kv_format.is_two_major
 
 
 def _is_pbs_fused_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when num_blocks and block_size are one folded PBS axis."""
-    return _format_spec(engine_kv_format).is_pbs_fused
+    return engine_kv_format.is_pbs_fused
 
 
 def _is_kv_second_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when each per-layer entry is a (K, V) tuple."""
-    return _format_spec(engine_kv_format).is_kv_second_tuple
+    return engine_kv_format.is_kv_second_tuple
 
 
 def _is_mla_plane_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when each per-layer entry is a tuple of NP >= 1 MLA planes."""
-    return _is_kv_second_tuple_format(engine_kv_format) and is_mla(engine_kv_format)
+    return engine_kv_format.is_plane_tuple
 
 
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
@@ -835,32 +819,7 @@ def _per_layer_paged_shape(
         A tuple representing the shape needed to reconstruct one layer's tensor
         from a raw pointer via :func:`_tensor_from_ptr`.
     """
-    fmt = int(engine_kv_format)
-    if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
-        return (nb * bs, 1, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
-        return (nb, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
-        return (2, nb, nh, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
-        return (nb, 2, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
-    ):
-        # Blocks-first fused KV (HND): the desc's hs is the packed
-        # 2 * head_size, so each layer is the raw [NB, NH, BS, 2 * HS].
-        return (nb, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
-    ):
-        # Blocks-first fused KV (NHD): tokens before heads.
-        return (nb, bs, nh, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
-        return (2, nb, bs, nh, hs)
-    # Covers NL_X_NB_TWO_BS_NH_HS and any future NHD variants.
-    return (nb, 2, bs, nh, hs)
+    return engine_kv_format.paged_tensor_shape(nb=nb, bs=bs, nh=nh, hs=hs)
 
 
 def _infer_kv_dtype(
@@ -936,7 +895,7 @@ def _normalize_paged_layers(
           ``NL_X_NP_X_NB_BS_ONE_HS``.
         - ``list[torch.Tensor]`` (per-layer) for all other formats.
     """
-    if is_cross_layer(engine_kv_format):
+    if engine_kv_format.is_cross_layer:
         if isinstance(paged_buffer_ptrs_tensor, torch.Tensor):
             if _is_ptr_tensor(paged_buffer_ptrs_tensor):
                 # 1-D pointer tensor with a single entry → reconstruct full tensor.
@@ -961,7 +920,7 @@ def _normalize_paged_layers(
             "Cross-layer formats require a single torch.Tensor input; "
             "got: " + type(paged_buffer_ptrs_tensor).__name__
         )
-    if is_kv_list(engine_kv_format):
+    if engine_kv_format.is_kv_list:
         if _is_ptr_tensor(paged_buffer_ptrs_tensor):
             # 1-D pointer tensor [K_L0,...,K_LN-1, V_L0,...,V_LN-1] → nested list.
             if shape_desc is None or device is None or dtype is None:
@@ -1107,7 +1066,7 @@ def _normalize_lmcache_objects(
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
         chunk_tokens = lmcache_chunk_size
-        if is_mla(engine_kv_format):
+        if engine_kv_format.is_mla:
             chunk_shape: tuple[int, ...] = (nl, chunk_tokens, hs)
         elif _is_fused_kv_format(engine_kv_format):
             # Single plane: hs is the packed 2 * head_size.
@@ -1207,7 +1166,7 @@ def multi_layer_block_kv_transfer(
     blocks_per_object = lmcache_chunk_size // int(shape_desc.bs)
     block_size = int(shape_desc.bs)
 
-    if is_cross_layer(engine_kv_format):
+    if engine_kv_format.is_cross_layer:
         _transfer_cross_layer(
             normalized,
             object_tensors,
@@ -1219,7 +1178,7 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif is_kv_list(engine_kv_format):
+    elif engine_kv_format.is_kv_list:
         _transfer_sglang_mha(
             normalized,
             object_tensors,
@@ -1247,7 +1206,7 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif is_mla(engine_kv_format):
+    elif engine_kv_format.is_mla:
         _transfer_per_layer_mla(
             normalized,
             object_tensors,
@@ -2081,7 +2040,7 @@ def single_layer_kv_transfer(
     valid_token_indices = torch.nonzero(valid_mask_kv, as_tuple=True)[0]
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
-    is_mla = _format_spec(engine_kv_format).is_mla
+    is_mla = engine_kv_format.is_mla
 
     if is_mla:
         # ── MLA format ──

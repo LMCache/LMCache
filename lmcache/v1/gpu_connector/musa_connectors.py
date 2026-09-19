@@ -47,16 +47,24 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_SUPPORTED_MUSA_KV_FORMATS = (
-    lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-    lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
-)
-
 ALLOWED_FORMAT_TRANSITIONS = {
     (None, MemoryFormat.KV_MLA_FMT),
     (MemoryFormat.KV_MLA_FMT, MemoryFormat.KV_MLA_FMT),
     (MemoryFormat.KV_T2D, MemoryFormat.KV_MLA_FMT),
 }
+
+
+def _supports_nonlayerwise_musa_layout(
+    engine_kv_format: lmcache_native.EngineKVFormat,
+) -> bool:
+    return (
+        engine_kv_format.is_layer_list
+        and not engine_kv_format.is_hnd
+        and not engine_kv_format.is_cross_layer
+        and not engine_kv_format.is_kv_list
+        and not engine_kv_format.is_fused_packed
+        and not engine_kv_format.is_kv_second_tuple
+    )
 
 
 def _copy_tensor_at_pin_boundaries(
@@ -435,13 +443,13 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             ValueError: If the active KV cache layout is unsupported by the
                 non-layerwise torch-based MUSA path.
         """
-        if self.engine_kv_format not in _SUPPORTED_MUSA_KV_FORMATS:
-            supported = ", ".join(fmt.name for fmt in _SUPPORTED_MUSA_KV_FORMATS)
+        if not _supports_nonlayerwise_musa_layout(self.engine_kv_format):
             raise ValueError(
-                "VLLMPagedMemMUSAConnectorV2 supports only vLLM MUSA layouts "
-                f"{supported}; got {self.engine_kv_format.name}. Unsupported "
-                "layouts include flash-infer, HND, cross-layer, connector v3, "
-                "and MP GPU-transfer kernel layouts."
+                "VLLMPagedMemMUSAConnectorV2 supports only unfused vLLM "
+                "per-layer NHD layouts on MUSA; got "
+                f"{self.engine_kv_format.name}. Unsupported layouts include "
+                "flash-infer, HND, cross-layer, tuple/plane-tuple, connector "
+                "v3, and MP GPU-transfer kernel layouts."
             )
 
     def _initialize_attributes(self, kv_caches: List[torch.Tensor]) -> None:
@@ -471,7 +479,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             normalized_kv_caches, self.engine_kv_format
         )
         self.head_size = get_head_size(normalized_kv_caches, self.engine_kv_format)
-        self.use_mla = lmcache_native.is_mla(self.engine_kv_format)
+        self.use_mla = self.engine_kv_format.is_mla
         self.dtype = get_dtype(normalized_kv_caches, self.engine_kv_format)
         self.num_heads = (
             1
@@ -959,10 +967,10 @@ def _layer_views(
     hidden_dim_size: int,
 ) -> list[tuple[torch.Tensor, torch.Tensor | None]]:
     """Create token-major views of every SGLang KV-cache layer."""
-    if engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS:
+    if engine_kv_format.is_mla and engine_kv_format.is_pbs_fused:
         layers = cast(list[torch.Tensor], kvcaches)
         return [(tensor.view(-1, hidden_dim_size), None) for tensor in layers]
-    if engine_kv_format == lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+    if engine_kv_format.is_kv_list and engine_kv_format.is_pbs_fused:
         key_layers, value_layers = cast(list[list[torch.Tensor]], kvcaches)
         return [
             (
@@ -973,7 +981,7 @@ def _layer_views(
         ]
     raise ValueError(
         "SGLang MUSA in-process transfer supports only "
-        "TWO_X_NL_X_NBBS_NH_HS and NL_X_NBBS_ONE_HS; "
+        "PBS-fused MLA and PBS-fused key/value-list layouts; "
         f"got {engine_kv_format!r}"
     )
 
@@ -1047,14 +1055,19 @@ def _prepare_kvcaches(
         kvcaches,
         EngineType.SGLANG,
     )
-    expected_format = (
-        lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS
+    is_expected_layout = (
+        engine_kv_format.is_layer_list
+        and engine_kv_format.is_mla
+        and engine_kv_format.is_pbs_fused
         if use_mla
-        else lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
+        else engine_kv_format.is_kv_list
+        and not engine_kv_format.is_mla
+        and engine_kv_format.is_pbs_fused
     )
-    if engine_kv_format != expected_format:
+    if not is_expected_layout:
         raise ValueError(
-            f"SGLang MUSA expected {expected_format!r}, got {engine_kv_format!r}"
+            "SGLang MUSA expected a PBS-fused %s layout, got %r"
+            % ("MLA per-layer" if use_mla else "K/V-list MHA", engine_kv_format)
         )
     discovered_layers = get_num_layers(normalized, engine_kv_format)
     if discovered_layers != num_layers:

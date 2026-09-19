@@ -12,14 +12,14 @@ the CUDA host-callback ABI.
 from __future__ import annotations
 
 # Standard
-from typing import ClassVar, TypeAlias, cast
+from typing import Any, ClassVar, TypeAlias, cast
 import ctypes
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.lmcache_native import EngineKVFormat, TransferDirection, is_kv_list
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.musa import native_kv_transfer
@@ -28,16 +28,32 @@ from lmcache.v1.platform.musa.tensor_from_ptr import (
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
-_MUSA_MP_BLOCK_TRANSFER_FORMATS = {
-    int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS),
-    int(EngineKVFormat.NL_X_NB_BS_HS),
-    int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS),
-}
-
 _PagedBufferOperand: TypeAlias = (
     torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]]
 )
 _PagedLayers: TypeAlias = list[torch.Tensor] | list[list[torch.Tensor]]
+
+
+def _supports_musa_mp_block_transfer(engine_kv_format: EngineKVFormat) -> bool:
+    return (
+        (
+            engine_kv_format.is_mla
+            and engine_kv_format.is_layer_list
+            and not engine_kv_format.is_pbs_fused
+            and not engine_kv_format.is_kv_second_tuple
+        )
+        or (
+            engine_kv_format.is_layer_list
+            and engine_kv_format.is_two_major
+            and not engine_kv_format.is_hnd
+            and not engine_kv_format.is_fused_packed
+        )
+        or (
+            engine_kv_format.is_kv_list
+            and not engine_kv_format.is_pbs_fused
+            and not engine_kv_format.is_kv_second_tuple
+        )
+    )
 
 
 def _current_musa_device() -> torch.device:
@@ -60,11 +76,10 @@ def _validate_musa_mp_block_transfer_format(
     engine_kv_format: EngineKVFormat,
 ) -> None:
     """Reject MUSA handle-transfer layouts outside the validated scope."""
-    if int(engine_kv_format) not in _MUSA_MP_BLOCK_TRANSFER_FORMATS:
+    if not _supports_musa_mp_block_transfer(engine_kv_format):
         raise ValueError(
-            "MUSA MP block transfer supports only "
-            "NL_X_TWO_NB_BS_NH_HS, NL_X_NB_BS_HS, and "
-            "TWO_X_NL_X_NB_BS_NH_HS layouts; "
+            "MUSA MP block transfer supports only unfused non-HND per-layer "
+            "layouts and the unfused split-NB/BS SGLang key/value-list layout; "
             f"got {engine_kv_format!r}"
         )
 
@@ -168,14 +183,14 @@ def _paged_shape_and_stride(
     bs = int(shape_desc.bs)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BS_HS):
+    if engine_kv_format.is_mla:
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
-        return (nb, bs, hs), (block_stride or bs * hs, hs, 1)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
-        return (2, nb, bs, nh, hs), None
-    if int(engine_kv_format) == int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS):
-        return (nb, bs, nh, hs), None
-    raise ValueError(f"Unsupported MUSA paged layout: {engine_kv_format!r}")
+        return engine_kv_format.inner_shape(nb=nb, bs=bs, nh=nh, hs=hs), (
+            block_stride or bs * hs,
+            hs,
+            1,
+        )
+    return engine_kv_format.inner_shape(nb=nb, bs=bs, nh=nh, hs=hs), None
 
 
 def _staging_shape(
@@ -187,7 +202,7 @@ def _staging_shape(
     nl = int(shape_desc.nl)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BS_HS):
+    if engine_kv_format.is_mla:
         return (nl, lmcache_chunk_size, hs)
     return (2, nl, lmcache_chunk_size, nh * hs)
 
@@ -212,7 +227,7 @@ def _reconstruct_paged_layers(
 ) -> _PagedLayers:
     """Normalize pointer-form paged operands to non-owning MUSA views."""
     expected_layers = int(shape_desc.nl)
-    separate_kv_lists = is_kv_list(engine_kv_format)
+    separate_kv_lists = engine_kv_format.is_kv_list
     if separate_kv_lists:
         nested_layers = _kv_layer_lists(value)
         if nested_layers is not None:
@@ -353,7 +368,7 @@ class TorchMusaBlockTransfer:
             direction,
             shape_desc,
             lmcache_chunk_size,
-            engine_kv_format,
+            cast(Any, engine_kv_format),
             skip_prefix_n_blocks,
         )
 

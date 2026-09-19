@@ -22,7 +22,6 @@ from lmcache.v1.gpu_connector.kv_format import (
     describe_shape,
     detect_format,
     extract_kv_cache_shapes,
-    get_spec,
     get_spec_class,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
@@ -131,7 +130,7 @@ def get_concrete_engine_kv_shape(
     this returns ``80 x [2, 2048, 128, 8, 128]``.
     """
     try:
-        return get_spec(kv_caches, engine_kv_format).concrete_shape_str()
+        return engine_kv_format.concrete_shape_from(kv_caches)
     except ValueError:
         return f"Unknown ({engine_kv_format})"
 
@@ -284,7 +283,7 @@ def normalize_and_discover_per_layer_formats(
         whole_format, whole_normalized = detect_format(
             kv_caches, serving_engine, layout_hints
         )
-        if not lmcache_native.is_layer_list(whole_format):
+        if not whole_format.is_layer_list:
             return whole_normalized, [whole_format] * get_num_layers(
                 whole_normalized, whole_format
             )
@@ -327,7 +326,7 @@ def get_num_layers(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the number of layers from ``kv_caches``."""
-    return get_spec(kv_caches, engine_kv_format).num_layers()
+    return engine_kv_format.num_layers(kv_caches)
 
 
 def get_num_blocks(
@@ -338,7 +337,7 @@ def get_num_blocks(
     Raises:
         ValueError: For NBBS-fused formats with no separate block axis.
     """
-    return get_spec(kv_caches, engine_kv_format).num_blocks()
+    return engine_kv_format.num_blocks(kv_caches)
 
 
 def get_block_size(
@@ -356,7 +355,7 @@ def get_block_size(
     Raises:
         ValueError: For NBBS-fused formats with no separate block axis.
     """
-    return get_spec(kv_caches, engine_kv_format).block_size(layer_idx)
+    return engine_kv_format.block_size(kv_caches, layer_idx)
 
 
 @lmcache_deprecate(
@@ -367,14 +366,14 @@ def get_page_buffer_size(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the page buffer size (num_blocks * block_size) from ``kv_caches``."""
-    return get_spec(kv_caches, engine_kv_format).page_buffer_size()
+    return engine_kv_format.page_buffer_size(kv_caches)
 
 
 def get_kv_size(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the K/V axis size (2 for split K/V, 1 for fused)."""
-    return get_spec(kv_caches, engine_kv_format).kv_size()
+    return engine_kv_format.kv_size(kv_caches)
 
 
 def get_num_heads(
@@ -383,7 +382,7 @@ def get_num_heads(
     layer_idx: int = 0,
 ) -> int:
     """Return the number of heads for a layer (defaults to layer 0)."""
-    return get_spec(kv_caches, engine_kv_format).num_heads(layer_idx)
+    return engine_kv_format.num_heads(kv_caches, layer_idx)
 
 
 def get_hidden_dim_size(
@@ -392,7 +391,7 @@ def get_hidden_dim_size(
     layer_idx: int = 0,
 ) -> int:
     """Return the hidden dimension for a layer (defaults to layer 0)."""
-    return get_spec(kv_caches, engine_kv_format).hidden_dim(layer_idx)
+    return engine_kv_format.hidden_dim(kv_caches, layer_idx)
 
 
 def get_head_size(
@@ -401,21 +400,21 @@ def get_head_size(
     layer_idx: int = 0,
 ) -> int:
     """Return the head size for a layer (defaults to layer 0)."""
-    return get_spec(kv_caches, engine_kv_format).head_size(layer_idx)
+    return engine_kv_format.head_size(kv_caches, layer_idx)
 
 
 def get_tokens_per_layer(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the number of tokens per layer (num_blocks * block_size)."""
-    return get_spec(kv_caches, engine_kv_format).tokens_per_layer()
+    return engine_kv_format.tokens_per_layer(kv_caches)
 
 
 def get_elements_per_layer(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the number of elements per layer (both K and V for non-MLA)."""
-    return get_spec(kv_caches, engine_kv_format).elements_per_layer()
+    return engine_kv_format.elements_per_layer(kv_caches)
 
 
 def get_dtype(
@@ -424,7 +423,7 @@ def get_dtype(
     layer_idx: int = 0,
 ) -> torch.dtype:
     """Return the dtype for a layer (defaults to layer 0)."""
-    return get_spec(kv_caches, engine_kv_format).dtype(layer_idx)
+    return engine_kv_format.dtype(kv_caches, layer_idx)
 
 
 def get_group_data_ptrs(
@@ -448,7 +447,7 @@ def get_group_data_ptrs(
     Raises:
         ValueError: If *engine_kv_format* is not recognized.
     """
-    return get_spec(kv_caches, engine_kv_format).data_ptrs(layer_indices)
+    return engine_kv_format.data_ptrs(kv_caches, layer_indices)
 
 
 def assert_is_vllm_flash_attn_or_flash_infer(
@@ -458,18 +457,7 @@ def assert_is_vllm_flash_attn_or_flash_infer(
     Ensure that we have an Engine KV Cache Format
     that is either vLLM's flash attention or flash infer.
     """
-    assert engine_kv_format in (
-        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
-        lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
-        # Blocks-first fused K/V (HND and NHD): per-layer non-MLA layouts that
-        # share this transfer path even though they are not literally flash-*.
-        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
-    )
+    assert _supports_vllm_layer_buffer_layout(engine_kv_format, allow_mla=False)
 
 
 def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
@@ -489,14 +477,7 @@ def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
     Raises:
         AssertionError: If *engine_kv_format* is not one of the accepted formats.
     """
-    assert engine_kv_format in (
-        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
-        lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
-    )
+    assert _supports_vllm_layer_buffer_layout(engine_kv_format, allow_mla=True)
 
 
 def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
@@ -512,10 +493,24 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
     return probe.device
 
 
-# Formats whose per-layer tensor dim-0 is the *block* axis AND for
-# which we currently support dim-0 padding (e.g. DeepSeek V4
-# compressor / indexer caches sharing a KV pool with larger attn
-# groups).
+def _supports_vllm_layer_buffer_layout(
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    *,
+    allow_mla: bool,
+) -> bool:
+    """Return whether the in-process layerwise buffer helpers support *fmt*."""
+    if (
+        not engine_kv_format.is_layer_list
+        or engine_kv_format.is_kv_second_tuple
+        or engine_kv_format.has_inner_axis("ONE")
+    ):
+        return False
+    return allow_mla or not engine_kv_format.is_mla
+
+
+# Layouts whose representative tensor leaf uses dim-0 as the *block* axis AND
+# for which we currently support dim-0 padding (e.g. DeepSeek V4 compressor /
+# indexer caches sharing a KV pool with larger attn groups).
 #
 # ``NL_X_NP_X_NB_BS_ONE_HS`` (vLLM-Ascend MLA/DSA plane tuples; NP
 # means num_planes, NP = 1 latent-only, 2 MLA, 3 DSA, HS possibly
@@ -532,18 +527,6 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 # any padded tensor of that format will fail loudly via the
 # non-block-axis dim-0-padding check below. Revisit and add a
 # properly-tested branch when a concrete use case lands.
-_BLOCK_AXIS_FORMATS: frozenset = frozenset(
-    {
-        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
-        lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
-        # Under vLLM's blocks-first layouts (BLHNC / BLNHC) these views'
-        # stride(0) spans every layer's bytes for the block; when the cache
-        # is layer-compact, stride(0) is simply the tight per-block step.
-        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
-    }
-)
 
 
 def resolve_block_stride_and_log_layout(
@@ -559,10 +542,10 @@ def resolve_block_stride_and_log_layout(
     a one-shot layout audit line. All ``EngineKVFormat``-aware reasoning is
     kept here so callers never touch a "representative KV cache" tensor.
 
-    * Block-axis formats (:data:`_BLOCK_AXIS_FORMATS`): ``stride(0)`` is
-      the per-block step and is returned as-is. A value larger than the
-      tight stride indicates dim-0 padding (e.g. DeepSeek V4 compressor
-      caches sharing a KV pool with larger attn groups).
+    * Layouts with ``supports_dim0_block_padding=True``: ``stride(0)`` is the
+      per-block step and is returned as-is. A value larger than the tight
+      stride indicates dim-0 padding (e.g. DeepSeek V4 compressor caches
+      sharing a KV pool with larger attn groups).
     * Other formats: dim-0 is not the block axis, so ``None`` is
       returned and ``shape_desc`` falls back to the tight stride. Any
       dim-0 padding in such formats is rejected with ``ValueError``
@@ -591,23 +574,23 @@ def resolve_block_stride_and_log_layout(
         # - SGL MHA: outer list is K/V (length 2), inner list is
         #   per-layer; K & V share shape/stride by construction.
         # - Other formats: ``kv_caches`` is already a per-layer list.
-        if lmcache_native.is_cross_layer(engine_kv_format):
+        if engine_kv_format.is_cross_layer:
             if not isinstance(kv_caches, torch.Tensor):
                 raise TypeError(
                     "Cross-layer EngineKVFormat expects a single backing "
                     f"torch.Tensor, got {type(kv_caches).__name__}."
                 )
             return kv_caches
-        if lmcache_native.is_kv_list(engine_kv_format):
+        if engine_kv_format.is_kv_list:
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
-        if lmcache_native.is_kv_second_tuple(engine_kv_format):
+        if engine_kv_format.is_kv_second_tuple:
             return kv_caches[layer_idx][0]  # type: ignore[index,return-value]
         return kv_caches[layer_idx]  # type: ignore[index,return-value]
 
     rep = _pick_layout_probe_tensor()
 
     block_stride_elems: Optional[int]
-    if engine_kv_format in _BLOCK_AXIS_FORMATS and rep.ndim > 0:
+    if engine_kv_format.supports_dim0_block_padding and rep.ndim > 0:
         block_stride_elems = int(rep.stride(0))
     else:
         # Non-block-axis format: detect forbidden dim-0 padding.
@@ -708,7 +691,7 @@ def make_page_buffer_shape_desc(
     desc.bs = block_size
     desc.nh = (
         1
-        if lmcache_native.is_mla(engine_kv_format)
+        if engine_kv_format.is_mla
         else get_num_heads(kv_caches, engine_kv_format, layer_idx)
     )
     desc.hs = get_head_size(kv_caches, engine_kv_format, layer_idx)
@@ -786,26 +769,31 @@ def _get_head_size_view(
     if t.dim() != 5:
         raise ValueError(f"Expected 5D tensor for non-MLA, got {t.shape}")
 
-    # If we have the format enum, decode explicitly.
+    # If we have the format, decode from its axis structure.
     if engine_kv_format is not None:
-        if engine_kv_format == lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
-            # per-layer: [2, NB, BS, NH, HS]
+        if engine_kv_format.is_mla:
+            raise NotImplementedError(
+                f"engine_kv_format={engine_kv_format} is MLA and must not reach "
+                "the non-MLA path here."
+            )
+        if engine_kv_format.is_kv_second_tuple or engine_kv_format.has_inner_axis(
+            "ONE"
+        ):
+            raise NotImplementedError(
+                f"engine_kv_format={engine_kv_format} not supported in non-MLA "
+                "path here. Normalize to (k,v) tuple [NB,BS,NH,HS] per-layer "
+                "before calling."
+            )
+        kv_axis = engine_kv_format.inner_axis_index("TWO")
+        if kv_axis == 0:
             if t.shape[0] != 2:
-                raise ValueError(
-                    f"{engine_kv_format} expects [2,NB,BS,NH,HS], got {t.shape}"
-                )
-            k, v = t[0], t[1]  # [NB,BS,NH,HS]
-
-        elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
-            # per-layer: [NB, 2, BS, NH, HS]
+                raise ValueError(f"{engine_kv_format} expects axis0==2, got {t.shape}")
+            k, v = t[0], t[1]
+        elif kv_axis == 1:
             if t.shape[1] != 2:
-                raise ValueError(
-                    f"{engine_kv_format} expects [NB,2,BS,NH,HS], got {t.shape}"
-                )
-            k, v = t[:, 0], t[:, 1]  # [NB,BS,NH,HS]
-
+                raise ValueError(f"{engine_kv_format} expects axis1==2, got {t.shape}")
+            k, v = t[:, 0], t[:, 1]
         else:
-            # Other formats are either MLA-only or require upstream normalization.
             raise NotImplementedError(
                 f"engine_kv_format={engine_kv_format} not supported in non-MLA "
                 "path here. Normalize to (k,v) tuple [NB,BS,NH,HS] per-layer "

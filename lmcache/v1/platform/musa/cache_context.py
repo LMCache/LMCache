@@ -13,7 +13,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.lmcache_native import EngineKVFormat
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
@@ -211,7 +210,13 @@ class _TempMUSABuffer:
             self._kv_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
             * num_chunks
         )
-        if group.engine_kv_format == EngineKVFormat.NL_X_NB_BS_HS:
+        engine_kv_format = group.engine_kv_format
+        assert engine_kv_format is not None
+        if (
+            engine_kv_format.is_mla
+            and not engine_kv_format.is_kv_second_tuple
+            and not engine_kv_format.is_pbs_fused
+        ):
             return torch.Size((group.num_layers, num_slots, group.hidden_dim_size))
         return torch.Size(
             (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)

@@ -61,16 +61,6 @@ import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
-#: The layout the RBLN-tuned op sequence below is written for: the native
-#: vLLM-RBLN per-layer HND format the vLLM detector reports for an RBLN
-#: attention KV cache.
-_HND_FORMAT = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
-
-#: The MLA layout vLLM-RBLN's MLA attention backend allocates
-#: (``[NB, BS, HS]``). Moved by its own functional op sequence -- see the
-#: module docstring for why the shared torch path cannot be reused here.
-_MLA_FORMAT = lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
-
 
 class RblnDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "rbln"
@@ -119,20 +109,18 @@ class RblnDeviceOps(DeviceOps):
                 "form is only produced for compiled backends, and RBLN has "
                 "no compiled block-transfer extension in tree."
             )
-        is_mla = lmcache_native.is_mla(engine_kv_format)
+        is_mla = engine_kv_format.is_mla
         if is_mla:
-            # is_mla() admits every MLA layout; only NL_X_NB_BS_HS has an
-            # RBLN op sequence, so reject the others here with a format
-            # error rather than a shape mismatch in validate_mla_layers.
-            if int(engine_kv_format) != int(_MLA_FORMAT):
+            if engine_kv_format.inner_axes != ("NB", "BS", "HS"):
                 raise ValueError(
-                    "RBLN block transfer supports only the "
-                    f"{_MLA_FORMAT.name} MLA layout; got {engine_kv_format!r}"
+                    "RBLN block transfer supports only MLA layouts with "
+                    "per-layer shape [NB, BS, HS]; "
+                    f"got {engine_kv_format!r}"
                 )
-        elif int(engine_kv_format) != int(_HND_FORMAT):
+        elif engine_kv_format.inner_axes != ("TWO", "NB", "NH", "ONE", "BS", "HS"):
             raise ValueError(
-                "RBLN block transfer supports only "
-                f"{_HND_FORMAT.name} and {_MLA_FORMAT.name}; "
+                "RBLN block transfer supports only the native HND leaf "
+                "shape [2, NB, NH, 1, BS, HS] and MLA [NB, BS, HS]; "
                 f"got {engine_kv_format!r}"
             )
 
