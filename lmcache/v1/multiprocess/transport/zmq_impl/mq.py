@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+"""Low-level ZMQ message queue transport for multiprocess requests."""
+
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
