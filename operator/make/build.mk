@@ -47,13 +47,12 @@ build-installer: manifests helm ## Render the chart as a standalone YAML install
 	@rm dist/operator.yaml
 
 VERSION ?= v0.5.5
+CHART_VERSION ?= $(patsubst v%,%,$(VERSION))
 .PHONY: package-chart
-package-chart: manifests helm ## Package the chart for an Operator VERSION (stable, rc, or nightly).
-	@chart_version="$$(python3 hack/chart-version.py "$(VERSION)")"; \
-	"$(HELM)" package "$(CHART)" --destination dist --version "$$chart_version" --app-version "$(VERSION)"
+package-chart: manifests helm ## Package the chart; pass CHART_VERSION explicitly for compact prerelease or nightly image tags.
+	"$(HELM)" package "$(CHART)" --destination dist --version "$(CHART_VERSION)" --app-version "$(VERSION)"
 
 .PHONY: test-chart
 test-chart: manifests helm ## Lint the chart and test its rendered deployment contract.
 	"$(HELM)" lint "$(CHART)" --strict
 	HELM="$(HELM)" go test ./test/chart -v
-	python3 -m unittest discover -s hack -p 'test_chart_version.py'

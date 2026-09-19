@@ -39,13 +39,19 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Validate release version
+      - name: Compute release versions
         id: version
         run: |
           # Strip "operator-" prefix from tag to get version (e.g. operator-v0.4.8rc1 -> v0.4.8rc1).
           VERSION="${GITHUB_REF_NAME#operator-}"
-          CHART_VERSION="$(python3 hack/chart-version.py "${VERSION}")"
+          # Restrict characters before passing tag-derived values to Make.
+          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*$ ]]; then
+            echo "Invalid Operator version: ${VERSION}" >&2
+            exit 1
+          fi
+          CHART_VERSION="$(printf '%s' "${VERSION#v}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)(alpha|beta|rc)([0-9]+)$/\1-\2.\3/')"
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "CHART_VERSION=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
           # All prereleases get the floating ":latest-rc" tag and must
           # never move the stable ":latest" image tag or the "operator-latest" alias.
           # Detect from normalized SemVer rather than the GitHub "pre-release" flag
@@ -57,16 +63,6 @@ jobs:
             echo "FLOATING_TAG=latest" >> "$GITHUB_OUTPUT"
             echo "IS_PRERELEASE=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: operator
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
-            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.FLOATING_TAG }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -81,12 +77,23 @@ jobs:
       - name: Build installer and Helm chart
         id: artifacts
         run: |
-          make package-chart VERSION=${{ steps.version.outputs.VERSION }}
+          # Helm validates chart SemVer before any image is pushed.
+          make package-chart VERSION=${{ steps.version.outputs.VERSION }} CHART_VERSION=${{ steps.version.outputs.CHART_VERSION }}
           chart_packages=(dist/lmcache-operator-*.tgz)
           test "${#chart_packages[@]}" -eq 1
           test -f "${chart_packages[0]}"
           make build-installer CHART="${chart_packages[0]}" IMG=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
           echo "CHART_FILE=$(basename "${chart_packages[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: operator
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.FLOATING_TAG }}
 
       - name: Attach installer and chart to GitHub Release
         uses: softprops/action-gh-release@v2

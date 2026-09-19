@@ -290,6 +290,13 @@ make package-chart VERSION=v0.5.5                     # Package the Helm chart
 
 The chart is the deployment template source for both distribution formats. Operator release workflows attach `install.yaml` and the chart archive to GitHub releases; there is no Helm repository index or OCI chart registry. Nightly image versions such as `nightly-2026-09-19` use chart version `0.0.0-nightly.20260919`, while `appVersion` keeps the original image version.
 
+For local packaging, `CHART_VERSION` defaults to `VERSION` without its leading `v`. Pass an explicit SemVer for compact prerelease or nightly image tags:
+
+```bash
+make package-chart VERSION=v0.4.8rc1 CHART_VERSION=0.4.8-rc.1
+make package-chart VERSION=nightly-2026-09-19 CHART_VERSION=0.0.0-nightly.20260919
+```
+
 ### End-to-End Tests
 
 Four `make` targets cover the e2e tiers. The `-kind` variants create

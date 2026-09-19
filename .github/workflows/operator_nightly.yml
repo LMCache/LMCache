@@ -43,16 +43,7 @@ jobs:
         run: |
           DATE=$(date -u +%Y-%m-%d)
           echo "TAG=nightly-${DATE}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: operator
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
-            ${{ env.IMAGE_NAME }}:nightly
+          echo "CHART_VERSION=0.0.0-nightly.${DATE//-/}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -67,12 +58,22 @@ jobs:
       - name: Build installer and Helm chart
         id: artifacts
         run: |
-          make package-chart VERSION=${{ steps.tag.outputs.TAG }}
+          make package-chart VERSION=${{ steps.tag.outputs.TAG }} CHART_VERSION=${{ steps.tag.outputs.CHART_VERSION }}
           chart_packages=(dist/lmcache-operator-*.tgz)
           test "${#chart_packages[@]}" -eq 1
           test -f "${chart_packages[0]}"
           make build-installer CHART="${chart_packages[0]}" IMG=${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
           echo "CHART_FILE=$(basename "${chart_packages[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: operator
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
+            ${{ env.IMAGE_NAME }}:nightly
 
       - name: Update nightly release
         uses: softprops/action-gh-release@v2

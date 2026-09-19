@@ -1951,9 +1951,17 @@ The Helm chart is the deployment template source for both release formats:
 These commands create ``dist/install.yaml`` and
 ``dist/lmcache-operator-0.5.5.tgz``. The release workflows attach both to
 GitHub releases; there is no Helm repository index or OCI chart registry.
-Chart versions normalize Operator versions to SemVer: ``v0.4.8rc1`` becomes
+Release workflows normalize Operator versions to chart SemVer: ``v0.4.8rc1`` becomes
 ``0.4.8-rc.1`` and ``nightly-2026-09-19`` becomes
 ``0.0.0-nightly.20260919``. ``appVersion`` keeps the original image version.
+
+For local packaging, ``CHART_VERSION`` defaults to ``VERSION`` without its
+leading ``v``. Pass an explicit SemVer for compact prerelease or nightly tags:
+
+.. code-block:: bash
+
+    make package-chart VERSION=v0.4.8rc1 CHART_VERSION=0.4.8-rc.1
+    make package-chart VERSION=nightly-2026-09-19 CHART_VERSION=0.0.0-nightly.20260919
 
 Pushing a custom operator image:
 
