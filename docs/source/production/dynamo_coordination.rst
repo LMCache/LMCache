@@ -10,10 +10,13 @@ requests.
 Local
 -----
 
-The local example uses Dynamo's vLLM backend to serve ``Qwen/Qwen3-0.6B``.
-Use three terminals in the same Dynamo ``vllm-runtime`` container, with one
-NVIDIA GPU, compatible LMCache and vLLM versions, and NATS and etcd already
-running. Start each process with the following commands:
+We recommend starting with a single NVIDIA GPU and Dynamo's
+``vllm-runtime`` container. The commands below use vLLM to serve
+``Qwen/Qwen3-0.6B``.
+
+Before you start, make sure NATS and etcd are running and the container has
+compatible LMCache and vLLM versions. Then open three terminal sessions in
+the same container and run one command in each:
 
 .. code-block:: bash
 
