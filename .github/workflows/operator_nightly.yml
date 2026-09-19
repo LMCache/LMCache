@@ -97,17 +97,6 @@ jobs:
 
             **Image:** `${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}`
 
-            Install cert-manager before installing the operator.
-
-            ```bash
-            helm upgrade --install lmcache-operator \
-              ${{ env.CHART_REGISTRY }}/lmcache-operator-chart \
-              --version ${{ steps.tag.outputs.CHART_VERSION }} \
-              --namespace lmcache-operator-system --create-namespace --wait
-            ```
-
-            Or use the rendered YAML:
-
             ```bash
             kubectl apply -f https://github.com/${{ github.repository }}/releases/download/operator-nightly-latest/install.yaml
             ```
