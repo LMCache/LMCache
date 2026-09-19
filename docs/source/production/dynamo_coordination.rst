@@ -98,8 +98,7 @@ Deploy the LMCache server
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``lmcache_engine.yaml`` defines an ``LMCacheEngine`` custom resource with
-16 GiB of CPU cache per server. It uses ``lmcache/standalone:v0.5.2``,
-which supports ``linux/amd64``. The operator creates a server DaemonSet,
+16 GiB of CPU cache per server. The operator creates a server DaemonSet,
 a Service, and a ``lmcache-mp-connection`` ConfigMap for the workers.
 
 .. literalinclude:: ../../../examples/dynamo_integration/kubernetes/lmcache_engine.yaml
