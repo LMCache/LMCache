@@ -73,6 +73,9 @@ class _FakeStorageManager:
     def finish_write(self, keys: list[object]) -> None:
         return None
 
+    def abort_write(self, keys: list[object]) -> None:
+        return None
+
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
 
