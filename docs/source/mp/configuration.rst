@@ -47,6 +47,31 @@ request metadata throughout the request lifecycle.
    feature explicitly documents support for it.  The in-process
    ``LMCacheConnectorV1`` may interpret these values differently.
 
+Connector-enforced request configs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A subset of ``lmcache.*`` request configs are acted upon by the
+``LMCacheMPConnector`` itself (client side) rather than the MP server, so they
+take effect even when no server-side feature opts into the key:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Key
+     - Type
+     - Description
+   * - ``lmcache.max_offload_tokens``
+     - integer
+     - Upper bound (in tokens) on how many tokens of this request the
+       connector will stage for offload to the LMCache MP server. The
+       connector clips the store window to
+       ``min(<already-computed prefix>, lmcache.max_offload_tokens)``
+       before chunking, so nothing beyond the cap is submitted. Omit the key
+       (or set it to ``None``) to leave offloading uncapped. Enforced by
+       ``LMCacheMPRequestMetadata.GetStoreMetadata`` in
+       ``lmcache/integration/vllm/lmcache_mp_metadata.py``.
+
 MP Server
 ---------
 
