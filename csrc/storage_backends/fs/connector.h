@@ -17,8 +17,9 @@ namespace connector {
 // Key encoding constants — must match fs_l2_adapter.py
 static constexpr const char* TMP_EXT = ".tmp";
 
-// Per-worker connection state for the FS connector.
-// Each worker maintains its own I/O buffer for O_DIRECT.
+// Per-worker connection state for the FS connector. O_DIRECT is enabled per
+// request only when both the transfer length and caller-owned buffer address
+// meet the filesystem block-alignment requirement; otherwise I/O is buffered.
 struct WorkerFSConn {
   std::filesystem::path base_path;
   std::filesystem::path tmp_dir;  // empty if not configured
