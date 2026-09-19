@@ -575,15 +575,12 @@ def multi_layer_kv_transfer(
             f"Expected torch.Tensor or list, but got {type(key_value_ptrs).__name__}"
         )
 
-    # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
-    # NL_X_NB_TWO_NH_BS_HS) as next step.
-    if int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
-        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
-    ):
+    format_spec = _format_spec(engine_kv_format)
+
+    # TODO: Implement head_size support for HND layouts as next step.
+    if format_spec.is_hnd:
         raise NotImplementedError(
-            "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
-            "are not supported in the non-CUDA fallback. "
+            "HND layouts are not supported in the non-CUDA fallback. "
             "head_size parameter is required but not implemented in this path."
         )
     # 1. Filter out invalid slots.
@@ -606,14 +603,21 @@ def multi_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
-    is_mla = _format_spec(engine_kv_format).is_mla
-    is_flash_infer = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS)
+    is_mla = format_spec.is_mla
+    has_interleaved_kv_blocks = (
+        format_spec.is_layer_list
+        and not format_spec.is_mla
+        and not format_spec.is_fused_packed
+        and not format_spec.is_two_major
+        and not format_spec.is_kv_second_tuple
+    )
 
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
 
-    # For the flash_infer interleaved layout, pre-compute block-level indices.
-    if is_flash_infer:
+    # For layouts with K/V interleaved after the block axis, pre-compute
+    # block-level indices.
+    if has_interleaved_kv_blocks:
         block_indices = valid_slots // block_size
         block_offsets = valid_slots % block_size
 
@@ -623,7 +627,7 @@ def multi_layer_kv_transfer(
 
     if is_mla:
         layer_shape = (page_buffer_size, hidden_size)
-    elif is_flash_infer:
+    elif has_interleaved_kv_blocks:
         num_blocks = page_buffer_size // block_size
         layer_shape = (num_blocks, 2, block_size, hidden_size)
     else:
@@ -655,7 +659,7 @@ def multi_layer_kv_transfer(
                 key_value[0, layer_id, valid_mask_kv, :] = gathered.to(
                     kv_device, non_blocking=False
                 )
-        elif is_flash_infer:
+        elif has_interleaved_kv_blocks:
             # Paged layout : [num_blocks, 2, block_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]
             if int(direction) == int(TransferDirection.H2D):
@@ -813,54 +817,6 @@ def _is_ptr_tensor(x: object) -> bool:
         and x.dtype in (torch.int64, torch.uint64)
         and x.ndim == 1
     )
-
-
-def _per_layer_paged_shape(
-    engine_kv_format: EngineKVFormat,
-    nb: int,
-    bs: int,
-    nh: int,
-    hs: int,
-) -> tuple[int, ...]:
-    """Return the logical shape of a single per-layer paged buffer tensor.
-
-    Args:
-        engine_kv_format: The format enum that describes how K/V tokens are laid out.
-        nb: Number of blocks in the paged buffer (``shape_desc.nb``).
-        bs: Tokens per block / block size (``shape_desc.bs``).
-        nh: Number of attention heads (``shape_desc.nh``).
-        hs: Per-head hidden size (``shape_desc.hs``).
-
-    Returns:
-        A tuple representing the shape needed to reconstruct one layer's tensor
-        from a raw pointer via :func:`_tensor_from_ptr`.
-    """
-    fmt = int(engine_kv_format)
-    if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
-        return (nb * bs, 1, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
-        return (nb, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
-        return (2, nb, nh, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
-        return (nb, 2, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
-    ):
-        # Blocks-first fused KV (HND): the desc's hs is the packed
-        # 2 * head_size, so each layer is the raw [NB, NH, BS, 2 * HS].
-        return (nb, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
-    ):
-        # Blocks-first fused KV (NHD): tokens before heads.
-        return (nb, bs, nh, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
-        return (2, nb, bs, nh, hs)
-    # Covers NL_X_NB_TWO_BS_NH_HS and any future NHD variants.
-    return (nb, 2, bs, nh, hs)
 
 
 def _infer_kv_dtype(
@@ -1043,7 +999,7 @@ def _normalize_paged_layers(
         bs = int(shape_desc.bs)
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
-        per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
+        per_shape = _format_spec(engine_kv_format).paged_layer_shape(nb, bs, nh, hs)
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0) or 0)
         if block_stride and block_stride != bs * nh * hs:
             raise NotImplementedError(
