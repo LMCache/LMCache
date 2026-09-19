@@ -574,10 +574,19 @@ class LMCacheEngine:
         )
         tot_time = store_stats.time_to_store()
 
+        region_tokens: dict[str, int] = {}
+        for mo, s, e in zip(memory_objs, starts, ends):
+            rname = self.storage_manager.region_of(mo)
+            region_tokens[rname] = region_tokens.get(rname, 0) + (e - s)
+        region_str = ", ".join(
+            f"{name}: {cnt}" for name, cnt in region_tokens.items()
+        )
+
         logger.info(
             "[req_id=%s] Stored %d out of total %d tokens. "
             "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms",
+            "offload_time: %.4f ms, put_time: %.4f ms. "
+            "regions [%s]",
             req_id,
             tot_token_num,
             num_to_store_tokens,
@@ -586,6 +595,7 @@ class LMCacheEngine:
             tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
             (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
             store_stats.put_time * 1000,
+            region_str,
         )
 
     @_lmcache_nvtx_annotate
@@ -756,15 +766,28 @@ class LMCacheEngine:
                 )
 
             tot_time = time.perf_counter() - t_start
+
+            # Collect per-region token counts (first layer suffices since
+            # all layers of a chunk share the same region)
+            region_tokens: dict[str, int] = {}
+            for mo, s, e in zip(memory_objs[0], starts, ends):
+                rname = self.storage_manager.region_of(mo)
+                region_tokens[rname] = region_tokens.get(rname, 0) + (e - s)
+            region_str = ", ".join(
+                f"{name}: {cnt}" for name, cnt in region_tokens.items()
+            )
+
             logger.info(
                 "[req_id=%s] Stored %d out of total %d tokens. "
-                "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s",
+                "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s. "
+                "regions [%s]",
                 req_id,
                 tot_token_num,
                 len(tokens),
                 tot_kv_size / 1024**3,
                 tot_time * 1000,
                 tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
+                region_str,
             )
         else:
             # If no cache are found, we still need to yield to avoid
@@ -955,10 +978,18 @@ class LMCacheEngine:
         # need_to_load: 512 - 288 = 224 tokens
         # retrieved: 256 tokens
         if not self._is_passive():
+            region_tokens: dict[str, int] = {}
+            for _, memory_obj, s, e in reordered_chunks:
+                rname = self.storage_manager.region_of(memory_obj)
+                region_tokens[rname] = region_tokens.get(rname, 0) + (e - s)
+            region_str = ", ".join(
+                f"{name}: {cnt}" for name, cnt in region_tokens.items()
+            )
             logger.info(
                 "[req_id=%s] Retrieved %d out of %d required tokens "
                 "(from %d total tokens). size: %.4f gb, "
-                "cost %.4f ms, throughput: %.4f GB/s;",
+                "cost %.4f ms, throughput: %.4f GB/s. "
+                "regions [%s]",
                 req_id,
                 retrieved_tokens,
                 num_required_tokens,
@@ -966,6 +997,7 @@ class LMCacheEngine:
                 tot_kv_size / 1024**3,
                 onload_time * 1000,
                 tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
+                region_str,
             )
         return ret_mask
 
@@ -1075,6 +1107,7 @@ class LMCacheEngine:
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
+            region_tokens: dict[str, int] = {}
             to_count_down = []
             for layer_id in range(self.num_layers):
                 task = next(get_generator)
@@ -1091,6 +1124,12 @@ class LMCacheEngine:
                 mem_objs_layer = task.result()
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
+
+                # Collect per-region token counts from the first layer only
+                if layer_id == 0:
+                    for mo, s, e in zip(mem_objs_layer, starts, ends):
+                        rname = self.storage_manager.region_of(mo)
+                        region_tokens[rname] = region_tokens.get(rname, 0) + (e - s)
 
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
@@ -1116,12 +1155,17 @@ class LMCacheEngine:
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         if not self._is_passive():
+            region_str = ", ".join(
+                f"{name}: {cnt}" for name, cnt in region_tokens.items()
+            )
             logger.info(
-                "[req_id=%s] Retrieved %d out of %d out of total %d tokens",
+                "[req_id=%s] Retrieved %d out of %d out of total %d tokens. "
+                "regions [%s]",
                 req_id,
                 retrieved_tokens,
                 num_required_tokens,
                 len(tokens),
+                region_str,
             )
 
         yield ret_mask

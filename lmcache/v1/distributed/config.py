@@ -129,6 +129,10 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    resource_manifest: str | None = None
+    """ Path to a resource manifest file. When set, L1 is backed by PCIe BAR
+    memory (and optionally DRAM) described in the manifest. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
@@ -148,6 +152,29 @@ class L1MemoryManagerConfig:
         if self.devdax_path and self.shm_name:
             raise ValueError(
                 'l1-devdax-path requires SHM to be disabled. Please set --shm-name "".'
+            )
+
+        if self.resource_manifest is not None:
+            self.resource_manifest = self.resource_manifest.strip() or None
+
+        if self.resource_manifest and self.use_lazy:
+            logger.info(
+                "Resource manifest disables lazy allocation automatically."
+            )
+            self.use_lazy = False
+
+        if self.resource_manifest and self.devdax_path:
+            raise ValueError(
+                "resource-manifest cannot be used with l1-devdax-path."
+            )
+
+        has_pcie_bar = bool(self.resource_manifest) or bool(
+            os.environ.get("PCIE_BAR_DEVICES")
+        )
+        if self.size_in_bytes <= 0 and not has_pcie_bar:
+            raise ValueError(
+                "--l1-size-gb is required when no resource manifest "
+                "or PCIE_BAR_DEVICES is configured."
             )
 
         # LazyMemoryAllocator requires pinned memory support.
@@ -216,6 +243,37 @@ class L1ManagerConfig:
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
 
 
+def _get_pcie_bar_configured_capacity(
+    memory_config: L1MemoryManagerConfig,
+) -> dict[L1BackendType, int]:
+    """Compute configured capacity when PCIe BAR resources are active."""
+    from lmcache.v1.resource_manifest import (
+        parse_pcie_bar_env_vars,
+        resolve_manifest_from_path,
+    )
+
+    if memory_config.resource_manifest:
+        manifest = resolve_manifest_from_path(memory_config.resource_manifest)
+    else:
+        manifest = parse_pcie_bar_env_vars(memory_config.size_in_bytes / 1024**3)
+
+    if manifest is None:
+        return {}
+
+    capacities: dict[L1BackendType, int] = {}
+    for res in manifest.resources:
+        size_bytes = int(res.capacity_gb * 1024**3)
+        if res.type == "pcie_bar":
+            capacities[L1BackendType.PCIE_BAR] = (
+                capacities.get(L1BackendType.PCIE_BAR, 0) + size_bytes
+            )
+        elif res.type == "dram":
+            capacities[L1BackendType.DRAM] = (
+                capacities.get(L1BackendType.DRAM, 0) + size_bytes
+            )
+    return capacities
+
+
 def get_configured_capacity_bytes(
     config: L1ManagerConfig,
 ) -> dict[L1BackendType, int]:
@@ -244,6 +302,10 @@ def get_configured_capacity_bytes(
         return {L1BackendType.GDS: size} if size > 0 else {}
 
     memory_config = config.memory_config
+
+    if memory_config.resource_manifest or os.environ.get("PCIE_BAR_DEVICES"):
+        return _get_pcie_bar_configured_capacity(memory_config)
+
     if memory_config.devdax_path:
         # Mirrors DevDaxL1MemoryManager.__init__: an unset devdax size means
         # the whole tier is Device-DAX, else size_in_bytes is the DRAM half.
@@ -385,12 +447,16 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
 
     Returns:
         ``True`` if L1 is a single registerable memory region, ``False`` for
-        GDS L1 or Device-DAX L1.
+        GDS L1, Device-DAX L1, or PCIe BAR L1.
     """
     l1_config = config.l1_manager_config
     if l1_config.gds_l1_config is not None:
         return False
     if l1_config.memory_config.devdax_path:
+        return False
+    if l1_config.memory_config.resource_manifest:
+        return False
+    if os.environ.get("PCIE_BAR_DEVICES"):
         return False
     return True
 
@@ -427,8 +493,8 @@ def add_storage_manager_args(
     memory_group.add_argument(
         "--l1-size-gb",
         type=float,
-        required=True,
-        help="The size of L1 memory in GB.",
+        default=0,
+        help="The size of L1 memory in GB. Required unless --resource-manifest is set.",
     )
     memory_group.add_argument(
         "--l1-use-lazy",
@@ -447,6 +513,18 @@ def add_storage_manager_args(
         type=int,
         default=4096,
         help="The alignment size in bytes. Default is 4KB (4096 bytes).",
+    )
+    memory_group.add_argument(
+        "--resource-manifest",
+        type=str,
+        default=None,
+        help=(
+            "Path to a resource manifest YAML file describing PCIe BAR "
+            "memory resources (and optionally DRAM). When set, L1 uses the "
+            "VirtualMemoryAllocator with BAR-backed regions. Falls back to "
+            "RESOURCE_MANIFEST env var. Also supports PCIE_BAR_DEVICES "
+            "env var for quick testing."
+        ),
     )
     memory_group.add_argument(
         "--l1-devdax-path",
@@ -622,6 +700,10 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
+    manifest_path = getattr(args, "resource_manifest", None)
+    if manifest_path is None:
+        manifest_path = os.environ.get("RESOURCE_MANIFEST")
+
     shm_name = getattr(args, "shm_name", None)
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
@@ -630,6 +712,7 @@ def parse_args_to_config(
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
             devdax_path=args.l1_devdax_path,
+            resource_manifest=manifest_path,
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -639,6 +722,7 @@ def parse_args_to_config(
             align_bytes=args.l1_align_bytes,
             shm_name=shm_name,
             devdax_path=args.l1_devdax_path,
+            resource_manifest=manifest_path,
         )
 
     gds_l1_config: GdsL1Config | None = None
