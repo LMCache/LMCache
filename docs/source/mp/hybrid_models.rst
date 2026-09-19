@@ -38,6 +38,9 @@ Recipe pages for the validated hybrid-attention architectures:
    * - Qwen3.5 / Qwen3.6 / Qwen3.8 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
+   * - Qwen3.8-Flash-Next
+     - GDN linear-attention + QSA sparse full (scratch ring)
+     - :doc:`/recipes/qwen3_8_flash_next`
    * - Kimi-Linear
      - KDA linear-attention + MLA full
      - :doc:`/recipes/kimi_linear`
@@ -47,9 +50,15 @@ Recipe pages for the validated hybrid-attention architectures:
    * - DeepSeek-V4-Flash
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
+   * - DeepSeek-V4.1-Flash
+     - Sparse-MLA + per-layer sliding window (9 KV groups, scratch ring)
+     - :doc:`/recipes/deepseek_v41_flash`
    * - GLM 5.1/5.2
      - Dynamic Sparse Attention (multiple KV groups)
      - :doc:`/recipes/glm5_2`
+   * - GLM-5.3
+     - Dynamic Sparse Attention (single KV group)
+     - :doc:`/recipes/glm5_3`
    * - MiniMax-M3
      - Sparse attention + lightning indexer (mixed KV formats in one group)
      - :doc:`/recipes/minimax_m3`
@@ -62,10 +71,13 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gemma4
    /recipes/gpt_oss
    /recipes/qwen3_5
+   /recipes/qwen3_8_flash_next
    /recipes/kimi_linear
    /recipes/kimi_k3
    /recipes/deepseek_v4_flash
+   /recipes/deepseek_v41_flash
    /recipes/glm5_2
+   /recipes/glm5_3
    /recipes/minimax_m3
 
 What Works
