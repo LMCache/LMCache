@@ -1,6 +1,13 @@
 Hidden states
 =============
 
+.. warning::
+
+   The ``HiddenStateStore`` integration documented here uses the deprecated
+   in-process KV-cache engine. MP feature parity has not been established;
+   retain this configuration when it is required and see
+   :doc:`/legacy/migration_to_mp` before changing modes.
+
 The **HiddenStateStore** caches per-token *hidden-state* tensors
 (intermediate activations from an inference forward pass) alongside
 the KV cache, keyed by the same chunk keys. It exists to support any

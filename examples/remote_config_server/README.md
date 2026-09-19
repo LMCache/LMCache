@@ -1,5 +1,9 @@
 # Remote Config Server Example
 
+> **In-process mode (deprecated):** This workflow uses legacy engine
+> configuration. Prefer MP for new deployments where the required feature is
+> supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This example provides a reference implementation of a remote config server
 that can be used with LMCache's dynamic configuration feature.
 

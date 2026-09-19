@@ -1,10 +1,12 @@
 Encoder caching
 ===============
 
-.. warning::
+.. note::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
-
+   Encoder caching uses a separate ``ECCacheEngine`` and currently has no MP
+   equivalent. The in-process KV-cache deprecation does not change this encoder
+   runtime; retain its connector and configuration. See
+   :doc:`/legacy/migration_to_mp` for the distinction from decoder KV caching.
 
 The **Encoder Cache (EC)** stores the output of a multimodal model's
 encoder stage, keyed by vLLM's per-input ``mm_hash``. When two

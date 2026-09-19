@@ -1,5 +1,9 @@
 # Mock Remote Connector
 
+> **In-process mode (deprecated):** The launch command below uses
+> `LMCacheConnectorV1`. Prefer an MP L2 adapter for new deployments where
+> supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 LMCache provides a mock remote connector that allows you to manually set the peeking latency, read throughput, and write throughput inside of the remote url. It will create copies of your KV cache in unmanaged local RAM.
 
 

@@ -1,10 +1,12 @@
 Basic Check Tool
 ================
 
-.. warning::
+.. note::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
-
+   The ``test_remote``, ``test_storage_manager``, and ``gen`` examples below use
+   deprecated in-process storage. The tool also provides ``test_l2_adapter``
+   mode with ``--l2-adapter`` JSON for MP L2 checks. See
+   :doc:`/mp/l2_storage/index` and :doc:`/legacy/migration_to_mp`.
 
 The LMCache Basic Check Tool is a testing and validation utility that helps you verify your LMCache installation, configuration, and functionality. It provides multiple testing modes to validate different components of the LMCache system.
 

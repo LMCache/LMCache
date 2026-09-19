@@ -29,6 +29,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.deprecation import warn_in_process_mode_deprecated
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_telemetry import InitializeUsageContext
@@ -106,6 +107,7 @@ class LMCacheEngine:
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
     ):
+        warn_in_process_mode_deprecated()
         logger.info("Creating LMCacheEngine with config: %s", config)
         self.config = config
         self.metadata = metadata

@@ -1,4 +1,9 @@
 # P2P KV Cache Sharing
+
+> **In-process mode (deprecated):** This workflow uses the legacy controller and
+> `LMCacheConnectorV1`. Prefer MP P2P for new deployments; see the
+> [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This is an example to demonstrate P2P KV cache sharing.
 ## Prerequisites
 Your server should have at least 2 GPUs.

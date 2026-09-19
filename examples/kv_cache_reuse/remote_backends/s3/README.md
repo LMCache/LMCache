@@ -1,5 +1,9 @@
 ## LMCache can use [Amazon S3](https://aws.amazon.com/s3/) as a backend storage.
 
+> **In-process mode (deprecated):** The launch command below uses
+> `LMCacheConnectorV1`. Prefer the MP S3 adapter for new deployments; see the
+> [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 Amazon Simple Storage Service (Amazon S3) is an object storage service offering industry-leading scalability, data availability, security, and performance.
 
 To maximize S3 performance, it's recommended to use [Amazon S3 Express One Zone storage class](https://aws.amazon.com/s3/storage-classes/express-one-zone/) and colocate your S3 bucket and [Amazon EC2 compute instance](https://aws.amazon.com/ec2/) in the same availability zone. 

@@ -1,4 +1,9 @@
 # Examples vLLM + LMCache w. local backends
+
+> **In-process mode (deprecated):** These scripts select the legacy vLLM
+> connectors. Prefer MP for new deployments where the required feature is
+> supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 LMCache should be able to reduce the generation time of the second and following calls.
 ## CPU offloading
 - `python offload.py -v v0` - CPU offloading implementation for vLLM v0

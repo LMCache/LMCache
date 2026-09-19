@@ -1,6 +1,12 @@
 Runtime Plugins
 ===============
 
+.. note::
+
+   The YAML and role filtering below describe deprecated in-process KV-cache
+   mode. Runtime plugins also work with MP; see the runtime plugin options in
+   :doc:`/mp/configuration` and :doc:`/legacy/migration_to_mp` when switching modes.
+
 The LMCache runtime plugin system provides the ability to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``RuntimePluginLauncher`` class.
 
 Key Use Cases

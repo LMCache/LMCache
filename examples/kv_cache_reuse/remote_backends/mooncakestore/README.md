@@ -1,5 +1,9 @@
 lmcache could use [mooncakestore](https://github.com/kvcache-ai/Mooncake) as a backend storage.
 
+> **In-process mode (deprecated):** The launch command below uses
+> `LMCacheConnectorV1`. Prefer the MP Mooncake Store adapter for new deployments;
+> see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 Mooncakestore is a memory storage which support RDMA and TCP. lmcache's mooncakestore connector can use TCP/RDMA transport for now.
 
 This is a simple instruction how to use lmcache with mooncakestore

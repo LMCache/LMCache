@@ -1,4 +1,9 @@
 # Cache with configs
+
+> **In-process mode (deprecated):** The launch command below uses
+> `LMCacheConnectorV1`. Prefer MP for new deployments where the required feature
+> is supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This is an example to cache with configs, includes tags and the other configs.
 - tags will be used to generate the key
 - configs will be used to interact with the backends, such as set the ttl

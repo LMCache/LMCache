@@ -1,4 +1,9 @@
 # LMCache Health Check
+
+> **In-process mode (deprecated):** This controller workflow remains available for
+> existing deployments. Prefer MP for new deployments; see the
+> [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This example demonstrates how to check the health status of the LMCache controller.
 
 ## Prerequisites

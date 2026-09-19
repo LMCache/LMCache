@@ -1,6 +1,12 @@
 Azure Blob Storage Backend
 ==========================
 
+.. warning::
+
+   This page documents Azure storage for deprecated in-process KV-cache mode.
+   There is no built-in MP Azure L2 adapter yet; keep this path when Azure is
+   required and review :doc:`/legacy/migration_to_mp` before changing modes.
+
 LMCache can offload KV cache to Azure Blob Storage via an async-native
 connector (parity with the S3 backend, no NIXL dependency). The connector is
 selected by an ``azure://`` ``remote_url``.

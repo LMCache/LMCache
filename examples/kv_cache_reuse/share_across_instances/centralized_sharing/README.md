@@ -1,4 +1,9 @@
 # Sharing KV cache across multiple vLLM instances
+
+> **In-process mode (deprecated):** This workflow uses `lmcache_server` and
+> `LMCacheConnectorV1`. Prefer the standalone MP server for new deployments;
+> see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This shows how to share KV across different vLLM instances using LMCache.  
 ## Prerequisites
 Your server should have at least 2 GPUs.  

@@ -1,6 +1,13 @@
 Hugging Face Buckets Backend
 ============================
 
+.. note::
+
+   The ``remote_storage_plugins`` configuration below is for deprecated
+   in-process KV-cache mode. For MP, use :doc:`/mp/l2_storage/hfbucket` or the
+   MP Mode Configuration section on this page. See :doc:`/legacy/migration_to_mp`
+   before migrating an existing deployment.
+
 The Hugging Face Buckets backend stores LMCache chunks in a Hugging Face Bucket
 using LMCache's built-in remote storage plugin framework. This is a persistent
 remote backend that fits warm and cold KV cache persistence better than the

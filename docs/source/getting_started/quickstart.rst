@@ -3,7 +3,10 @@
 Quickstart
 ==========
 
-This guide helps you get LMCache running end-to-end in a couple of minutes. Use the tabs below to switch the engine. Steps are the same; only the libraries and launch commands change.
+This guide gets LMCache running end-to-end in a few minutes. Multiprocess (MP)
+mode is the primary setup for new deployments. If you already use the
+deprecated in-process runtime, see :doc:`../legacy/migration_to_mp` before
+changing connectors or storage configuration.
 
 .. tab-set::
    :sync-group: engine
@@ -24,9 +27,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
         standalone service and vLLM attaches via ``LMCacheMPConnector``.
         Scales better, exposes management/observability endpoints, and
         supports sharing one cache across multiple engine instances.
-      - **In-process mode** -- LMCache runs inside the vLLM process via
-        ``LMCacheConnectorV1``. Single command, convenient for quick
-        single-node experiments.
+      - **In-process mode (deprecated)** -- LMCache runs inside the vLLM
+        process via ``LMCacheConnectorV1``. It remains available for existing
+        deployments and features without MP support.
 
       .. tab-set::
          :sync-group: vllm-mode
@@ -65,6 +68,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             .. code-block:: bash
 
                vllm serve Qwen/Qwen3-8B \
+                   --no-enable-prefix-caching \
                    --port 8000 --kv-transfer-config \
                    '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "localhost", "lmcache.mp.port": 5555}}'
 
@@ -85,15 +89,19 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                  .. code-block:: bash
 
                     vllm serve Qwen/Qwen3-8B \
+                        --no-enable-prefix-caching \
                         --port 8000 --kv-transfer-config \
-                        '{"kv_connector":"LMCacheMPConnector", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_role":"kv_both"}'
+                        '{"kv_connector":"LMCacheMPConnector", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_role":"kv_both", "kv_connector_extra_config":{"lmcache.mp.host":"localhost", "lmcache.mp.port":5555}}'
 
                  The LMCache-shipped connector tracks the latest LMCache server
                  protocol and ships fixes/features ahead of the version vendored
                  into vLLM, so prefer it whenever you are on vLLM 0.20.0 or newer.
 
             **Test** -- open a new terminal and send two requests whose
-            prompts share a prefix:
+            prompts share a prefix. The commands above disable vLLM's own
+            prefix cache so reuse must come from LMCache. After the first
+            request, wait for ``Stored <N> tokens`` in the LMCache server log
+            before sending the second request:
 
             **First request**
 
@@ -148,8 +156,12 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             For request-level statistics (hit ratio, bytes transferred) see
             :doc:`../mp/observability/index`.
 
-         .. tab-item:: In-process mode
+         .. tab-item:: In-process (deprecated)
             :sync: inproc
+
+            Use this retained path only when an existing deployment or a
+            feature gap requires it. For new deployments, use MP mode above;
+            see :doc:`../legacy/migration_to_mp` for migration guidance.
 
             Start vLLM with LMCache embedded in the engine process:
 
@@ -165,7 +177,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                To customize further, create a config file. See
                :doc:`../api_reference/configurations` for all options.
 
-            **Alternative simpler command:**
+            **vLLM offloading shorthand (also in-process and deprecated):**
 
             .. code-block:: bash
 
@@ -233,12 +245,6 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
    .. tab-item:: SGLang
 
-      .. note::
-         The SGLang integration now defaults to MP (multi-process) mode.
-         Please refer to `examples/sgl_integration/README.md`_ for the current setup instructions.
-
-      .. _examples/sgl_integration/README.md: https://github.com/LMCache/LMCache/blob/dev/examples/sgl_integration/README.md
-
       **Install SGLang**
 
       .. code-block:: bash
@@ -247,92 +253,118 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          source .venv/bin/activate
          uv pip install --prerelease=allow lmcache "sglang"
 
-      **Start SGLang with LMCache**
+      Use a SGLang revision that selects ``LMCacheMPConnector``. The YAML keys
+      ``mp_host`` and ``mp_port`` set its server address; they do not select
+      the connector mode. The values must match the standalone server.
+
+      .. tab-set::
+         :sync-group: sglang-mode
+
+         .. tab-item:: MP mode (recommended)
+            :sync: mp
+
+            Create a separate client configuration, preserving any existing
+            in-process YAML:
+
+            .. code-block:: bash
+
+               cat > lmcache_mp.yaml <<'EOF'
+               mp_host: 127.0.0.1
+               mp_port: 5556
+               EOF
+
+            Start LMCache in the first terminal. The demo chunk size is one
+            SGLang page; use a larger aligned value such as 256 in production:
+
+            .. code-block:: bash
+
+               lmcache server --host 127.0.0.1 --port 5556 \
+                   --l1-size-gb 4 --eviction-policy LRU --chunk-size 32
+
+            Start SGLang in a second terminal:
+
+            .. code-block:: bash
+
+               python -m sglang.launch_server \
+                   --model-path Qwen/Qwen3-8B \
+                   --host 0.0.0.0 --port 30000 --page-size 32 \
+                   --enable-lmcache \
+                   --lmcache-config-file lmcache_mp.yaml
+
+         .. tab-item:: In-process (deprecated)
+            :sync: inproc
+
+            Keep the SGLang revision and mode selection used by your existing
+            in-process deployment. Removing ``mp_host`` and ``mp_port`` alone
+            does not switch an MP build to in-process mode. The following
+            configuration requires a build that selects the retained
+            ``LMCacheLayerwiseConnector``; see the
+            `SGLang connector instructions
+            <https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/storage/lmcache/README.md>`_
+            for version-specific mode selection and
+            :doc:`../legacy/migration_to_mp` for migration guidance.
+
+            .. code-block:: bash
+
+               cat > lmcache_inprocess.yaml <<'EOF'
+               chunk_size: 32
+               local_cpu: true
+               max_local_cpu_size: 10
+               use_layerwise: true
+               EOF
+
+               python -m sglang.launch_server \
+                   --model-path Qwen/Qwen3-8B \
+                   --host 0.0.0.0 --port 30000 --page-size 32 \
+                   --enable-lmcache \
+                   --lmcache-config-file lmcache_inprocess.yaml
+
+      **Test** -- send a request with a prefix longer than one chunk:
 
       .. code-block:: bash
 
-         cat > lmc_config.yaml <<'EOF'
-         chunk_size: 8  # demo only; use 256 for production
-         local_cpu: true
-         use_layerwise: true
-         max_local_cpu_size: 10  # GB
-         EOF
+         python - <<'PY'
+         import json
+         from urllib.request import Request, urlopen
 
-         export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
+         request = Request(
+             "http://127.0.0.1:30000/v1/chat/completions",
+             data=json.dumps({
+                 "model": "Qwen/Qwen3-8B",
+                 "messages": [{
+                     "role": "user",
+                     "content": "LMCache verification uses a long shared prefix. " * 160,
+                 }],
+                 "max_tokens": 8,
+                 "temperature": 0,
+             }).encode(),
+             headers={"Content-Type": "application/json"},
+         )
+         print(urlopen(request).read().decode())
+         PY
 
-         python -m sglang.launch_server \
-           --model-path Qwen/Qwen3-8B \
-           --host 0.0.0.0 \
-           --port 30000 \
-           --enable-lmcache
+      In MP mode, wait for ``Stored <N> tokens`` in the ``lmcache server`` log,
+      then stop and restart only SGLang before repeating the request.
+      Restarting the engine prevents SGLang's own Radix cache from hiding the
+      LMCache retrieval; the server log must then report ``Retrieved <N>
+      tokens`` with a nonzero token count. In the retained in-process setup,
+      keep SGLang running and repeat the request; its logs report LMCache hit
+      tokens, although Radix may already hold them on the GPU.
+      The complete current example is in
+      `examples/sgl_integration/README.md`_, and feature gaps are listed in
+      :doc:`../legacy/migration_to_mp`.
 
-      .. note::
-         Configure LMCache via the config file. See :doc:`../api_reference/configurations` for the full list.
-
-      **Test** -- open a new terminal and send two requests whose prompts
-      share a prefix:
-
-      **First request**
-
-      .. code-block:: bash
-
-         curl http://localhost:30000/v1/chat/completions \
-           -H "Content-Type: application/json" \
-           -d '{
-             "model": "Qwen/Qwen3-8B",
-             "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
-             "max_tokens": 100,
-             "temperature": 0.7
-           }'
-
-      **Second request**
-
-      .. code-block:: bash
-
-         curl http://localhost:30000/v1/chat/completions \
-           -H "Content-Type: application/json" \
-           -d '{
-             "model": "Qwen/Qwen3-8B",
-             "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models"}],
-             "max_tokens": 100,
-             "temperature": 0.7
-           }'
-
-      **You should see LMCache logs like this:**
-
-      **First request** -- prompt plus generated tokens are stored:
-
-      .. code-block:: text
-
-         Prefill batch, #new-seq: 1, #new-token: 35, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 74, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1.63, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 114, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
-         LMCache INFO: Stored 128 out of total 135 tokens. size: 0.0195 GB, cost 12.8890 ms, throughput: 1.5153 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
-
-      **Second request** -- Radix Cache and LMCache share the prefix; only the new portion is stored:
-
-      .. code-block:: text
-
-         Prefill batch, #new-seq: 1, #new-token: 10, #cached-token: 30, token usage: 0.00, #running-req: 0, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 64, token usage: 0.00, cuda graph: True, gen throughput (token/s): 8.29, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 104, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 144, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.89, #queue-req: 0,
-         LMCache INFO: Stored 112 out of total 140 tokens. size: 0.0171 GB, cost 11.1986 ms, throughput: 1.5261 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
-
-      - **Total tokens 140**: SGLang stores KV cache for both prefill and decode tokens together, so total = 40 prompt + 100 generated = 140 tokens.
-      - **Cached tokens: 30**: SGLang's Radix Attention Cache reused 30 tokens from the first request.
-      - **LMCache hit tokens: 24**: LMCache detected 24 tokens (3 full 8-token chunks) stored from the first request. Since Radix Cache already provides 30 tokens in GPU memory, these 24 tokens don't need to be loaded from LMCache or stored again.
-      - **New tokens: 10**: Only 10 prompt tokens need prefill computation (40 prompt - 30 cached = 10).
-      - **Stored 112 out of 140**: 24 tokens (3 full chunks) are already in LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token chunks) are stored.
+      .. _examples/sgl_integration/README.md: https://github.com/LMCache/LMCache/blob/dev/examples/sgl_integration/README.md
 
    .. tab-item:: TensorRT-LLM
 
       .. note::
-         This integration depends on the connector preset registry from
+         The commands below require the connector preset registry from
          `NVIDIA/TensorRT-LLM PR #12626
          <https://github.com/NVIDIA/TensorRT-LLM/pull/12626>`_ and the
-         matching LMCache adapter, neither of which has shipped in a
-         stable release yet. Until they do, install both from source:
+         matching LMCache adapter. TensorRT-LLM 1.2.1 does not provide these
+         presets. Use compatible source revisions when your installed release
+         lacks them:
 
          .. code-block:: bash
 
@@ -345,30 +377,63 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             # TensorRT-LLM from source — see NVIDIA's build guide:
             # https://nvidia.github.io/TensorRT-LLM/installation/build-from-source-linux.html
 
-         Once both ship in a stable release, the install command will be:
-
-         .. code-block:: bash
-
-            uv pip install lmcache "tensorrt_llm>=<version>" \
-                --extra-index-url https://pypi.nvidia.com
-
       LMCache integrates with TensorRT-LLM via TRT-LLM's
       **KV Cache Connector** API and supports two deployment modes:
 
-      - **In-process mode** (``connector: lmcache``) -- LMCache runs as
-        a singleton inside the TRT-LLM process. Simplest setup; no
-        extra service to manage.
-      - **MP mode** (``connector: lmcache-mp``) -- LMCache runs as a
+      - **MP mode (recommended)** (``connector: lmcache-mp``) -- LMCache runs as a
         standalone server. Multiple TRT-LLM workers on the same node
         can share the cache, and the cache survives a TRT-LLM crash.
+      - **In-process mode (deprecated)** (``connector: lmcache``) -- LMCache
+        runs as a singleton inside the TRT-LLM process. It remains available
+        for existing deployments and MP feature gaps.
 
       .. tab-set::
          :sync-group: trtllm-mode
 
-         .. tab-item:: In-process mode
+         .. tab-item:: MP mode (recommended)
+            :sync: mp
+
+            Start the LMCache server:
+
+            .. code-block:: bash
+
+               lmcache server \
+                   --l1-size-gb 10 --eviction-policy LRU --chunk-size 256
+
+            In a separate terminal, point TRT-LLM at the server via
+            ``server_url``:
+
+            .. code-block:: bash
+
+               python run_trtllm.py
+
+            where ``run_trtllm.py`` contains:
+
+            .. code-block:: python
+
+               from tensorrt_llm import LLM, SamplingParams
+               from tensorrt_llm.llmapi.llm_args import (
+                   KvCacheConfig, KvCacheConnectorConfig,
+               )
+
+               llm = LLM(
+                   model="Qwen/Qwen2-1.5B-Instruct",
+                   backend="pytorch",
+                   kv_cache_config=KvCacheConfig(enable_block_reuse=True),
+                   kv_connector_config=KvCacheConnectorConfig(
+                       connector="lmcache-mp",
+                       server_url="tcp://localhost:5555",
+                   ),
+               )
+
+               out = llm.generate(["Your prompt here"], SamplingParams(max_tokens=64))
+               print(out[0].outputs[0].text)
+
+         .. tab-item:: In-process (deprecated)
             :sync: inproc
 
-            Configure LMCache via env vars:
+            Configure LMCache through environment variables only when an
+            existing deployment or an MP feature gap requires this path:
 
             .. code-block:: bash
 
@@ -396,57 +461,12 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                out = llm.generate(["Your prompt here"], SamplingParams(max_tokens=64))
                print(out[0].outputs[0].text)
 
-         .. tab-item:: MP mode
-            :sync: mp
-
-            ``PYTHONHASHSEED=0`` must be set in **both** terminals --
-            chunk hashing depends on a stable ``hash()``, and the
-            server and client must agree on the seed.
-
-            Start the LMCache server:
-
-            .. code-block:: bash
-
-               export PYTHONHASHSEED=0
-               lmcache server \
-                   --l1-size-gb 10 --eviction-policy LRU --chunk-size 256
-
-            In a separate terminal, point TRT-LLM at the server via
-            ``server_url``:
-
-            .. code-block:: bash
-
-               export PYTHONHASHSEED=0
-               python run_trtllm.py
-
-            where ``run_trtllm.py`` contains:
-
-            .. code-block:: python
-
-               from tensorrt_llm import LLM, SamplingParams
-               from tensorrt_llm.llmapi.llm_args import (
-                   KvCacheConfig, KvCacheConnectorConfig,
-               )
-
-               llm = LLM(
-                   model="Qwen/Qwen2-1.5B-Instruct",
-                   backend="pytorch",
-                   kv_cache_config=KvCacheConfig(enable_block_reuse=True),
-                   kv_connector_config=KvCacheConnectorConfig(
-                       connector="lmcache-mp",
-                       server_url="tcp://localhost:5555",
-                   ),
-               )
-
-               out = llm.generate(["Your prompt here"], SamplingParams(max_tokens=64))
-               print(out[0].outputs[0].text)
-
       .. note::
-         The TRT-LLM adapter reads :class:`LMCacheEngineConfig` the
-         same way the vLLM adapter does: ``LMCACHE_CONFIG_FILE`` for
-         a YAML file, otherwise individual ``LMCACHE_*`` environment
-         variables. See :doc:`../api_reference/configurations` for
-         all options.
+         The deprecated in-process TRT-LLM adapter reads
+         :class:`LMCacheEngineConfig` from ``LMCACHE_CONFIG_FILE`` or
+         individual ``LMCACHE_*`` environment variables. MP storage is
+         configured on ``lmcache server`` instead; see
+         :doc:`../mp/configuration`.
 
 🎉 **You now have LMCache caching and reusing KV caches across all three engines.**
 
@@ -477,7 +497,8 @@ maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
 copy path that the server only loads when started with
 ``--supported-transfer-mode engine_driven`` or ``auto``).
 
-**Docker** -- see :doc:`../production/docker_deployment`.
+**Deployment** -- see the MP :doc:`../mp/deployment` guide for Docker and
+Kubernetes options.
 
 **HTTP management endpoints** (health, clear-cache, status) -- see
 :doc:`../mp/http_api`.

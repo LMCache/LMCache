@@ -1,4 +1,9 @@
 # Online chat with frontend and context
+
+> **In-process mode (deprecated):** This workflow uses `lmcache_server` and
+> `LMCacheConnectorV1`. Prefer an MP deployment for new installations; see the
+> [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This will help you set up vLLM + LMCache and a QA frontend.  
 The default context is a ffmpeg man page.  
 ## Prerequisites
@@ -16,4 +21,4 @@ Wait until it's ready.
 ```streamlit run frontend.py```  
 Then open that URL of Streamlit app in browser.  
 ## What to expect
-LMCache should be able to reduce the response delay since the second question.  
+LMCache should be able to reduce the response delay since the second question.

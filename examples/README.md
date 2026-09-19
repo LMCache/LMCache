@@ -2,6 +2,13 @@
 
 This directory contains runnable examples organized by use case. The table below describes what each example does, its hardware requirements, and a recommended learning order for infrastructure engineers getting started with LMCache.
 
+> **Deployment mode:** New deployments should use LMCache's standalone
+> multiprocess (MP) server where the required features are supported; start with
+> the [MP quickstart](https://docs.lmcache.ai/getting_started/quickstart.html).
+> Examples that use `LMCacheConnectorV1`,
+> `lmcache_server`, or direct `LMCacheEngine` APIs are retained for legacy
+> in-process deployments (deprecated); see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 > **Single-node vs. multi-node:** Examples marked with NIXL or UCX require a
 > high-bandwidth interconnect (NVLink or PCIe Gen4/5). Running them on a
 > single machine with two GPUs is simpler than a true multi-node setup, but
@@ -89,6 +96,6 @@ Focus: deploying, monitoring, and operating LMCache in production.
 | Example | What it does | Hardware |
 |---------|-------------|----------|
 | [`lmc_external_l2_adapter/`](lmc_external_l2_adapter/) and [`lmc_external_native_connector/`](lmc_external_native_connector/) | Templates for writing a custom L2 storage adapter (Python) or a native C++ GPU connector plugin. | Depends on implementation |
-| [`runtime_plugins/`](runtime_plugins/) and [`mp_runtime_plugins/`](mp_runtime_plugins/) | Sidecar scripts (Python or shell) that run alongside LMCache workers: heartbeats, metric reporters, alert hooks. Filename prefix controls which role (`scheduler`, `worker_0`, `all`) runs the script. | None |
+| [`runtime_plugins/`](runtime_plugins/) and [`mp_runtime_plugins/`](mp_runtime_plugins/) | Scripts for heartbeats, metric reporters, and alert hooks. The in-process examples use filename prefixes to select scheduler/worker roles; MP plugins run with the standalone server and do not use role filtering. | None |
 | [`basic_check/`](basic_check/) | CLI tool for verifying storage backend health and generating test keys. Useful in CI and for on-call diagnostics. | Optional GPU |
 | [`agents/`](agents/) | Script for analyzing prefix-hash distribution of a prompt dataset. Useful for estimating cache efficiency before deployment. | None |

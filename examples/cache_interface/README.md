@@ -1,4 +1,9 @@
 # User Controllable Caching
+
+> **In-process mode (deprecated):** The launch command below uses
+> `LMCacheConnectorV1`. Prefer MP for new deployments where the required feature
+> is supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This is an example to demonstrate user controllable caching (e.g., specify whether to cache a request or not).
 
 ## Prerequisites

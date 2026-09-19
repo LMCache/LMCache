@@ -1,5 +1,9 @@
 # ValkeyConnector Benchmarking
 
+> **In-process mode (deprecated):** The deployment commands in this document use
+> `LMCacheConnectorV1`. For current deployments, use the [MP Valkey guide](README.md)
+> and consult the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 ## Executive Summary
 
 This document benchmarks the `ValkeyConnector` after adding cluster mode, TLS support, and optimized large-value handling, using [valkey-glide](https://github.com/valkey-io/valkey-glide) as the underlying client.

@@ -1,4 +1,9 @@
 # LMCache Clear
+
+> **In-process mode (deprecated):** This workflow remains available for existing
+> deployments. Prefer MP for new deployments where the required feature is
+> supported; see the [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This is an example to demonstrate how to clear KV cache in an LMCacheEngine externally.
 
 ## Prerequisites

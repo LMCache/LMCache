@@ -21,6 +21,12 @@ Reads copy data back into CPU-backed memory objects.
 Configuration
 -------------
 
+.. note::
+
+   This YAML configures deprecated in-process KV-cache mode. For MP, use the
+   Multiprocess Mode section below or :doc:`/mp/l2_storage/dax`. See
+   :doc:`/legacy/migration_to_mp` before changing an existing deployment.
+
 .. code-block:: yaml
 
    local_cpu: true

@@ -1,6 +1,13 @@
 Storage Plugins
 ===============
 
+.. note::
+
+   The ``StoragePluginInterface`` and YAML examples below apply to deprecated
+   in-process KV-cache mode. For MP, use :doc:`/mp/l2_storage/plugin` or the
+   MP-Mode L2 Adapter Plugins section on this page. See
+   :doc:`/legacy/migration_to_mp` when adapting an existing backend.
+
 LMCache supports out of the box storage backends like Mooncake, S3 and NIXL.
 The LMCache storage plugin system provides the ability to add custom storage backends through dynamic loading or plug and play capability. In other words, extending cache storage capabilities without modifying core code.
 

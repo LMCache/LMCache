@@ -1,6 +1,12 @@
 musa-aiter with LMCache on MUSA
 ================================
 
+.. warning::
+
+   This guide uses the deprecated in-process vLLM connector. Verify MP support
+   for your vLLM and MUSA versions before changing modes; the SGLang MUSA
+   restrictions in :doc:`/legacy/migration_to_mp` describe a different integration.
+
 This guide shows how to install ``musa-aiter`` and use its optional LMCache KV-transfer
 adapter with vLLM on MUSA.
 

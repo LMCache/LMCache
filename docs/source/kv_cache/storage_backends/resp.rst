@@ -221,6 +221,9 @@ config object** and **never printed in startup logs**.
 
 **Example — Non-MP mode with env vars:**
 
+This example uses deprecated in-process KV-cache mode; prefer the MP example
+above for new deployments. See :doc:`/legacy/migration_to_mp`.
+
 .. code-block:: bash
 
     export LMCACHE_RESP_USERNAME="default"
@@ -239,6 +242,11 @@ config object** and **never printed in startup logs**.
 
 Non-MP Mode (Single Process)
 -----------------------------
+
+.. note::
+
+   This section uses deprecated in-process KV-cache mode. For MP, use
+   `MP Mode (Multiprocess)`_ below or :doc:`/mp/l2_storage/resp`.
 
 In non-MP mode, the RESP connector is used directly as a remote storage backend
 via the ``RESPClient`` asyncio wrapper.

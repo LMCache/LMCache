@@ -1,5 +1,9 @@
 # Disaggregated Prefill Examples for LMCache with vLLM v1
 
+> **In-process mode (deprecated):** For new deployments, start with the
+> [MP disaggregated-prefill example](../disagg_prefill_mp/) and consult the
+> [migration guide](https://docs.lmcache.ai/legacy/migration_to_mp.html).
+
 This directory contains examples demonstrating how to run LMCache with disaggregated prefill using NIXL. Disaggregated prefill allows you to separate the prefill (prompt processing) and decode (token generation) phases of LLM inference across different GPU instances, enabling better resource utilization and scalability.
 
 ## Overview
@@ -78,4 +82,4 @@ For detailed troubleshooting, check the log files generated in each example dire
 
 - [LMCache Documentation](https://github.com/LMCache/LMCache)
 - [NIXL Documentation](https://github.com/ai-dynamo/nixl)
-- [vLLM Documentation](https://docs.vllm.ai/) 
+- [vLLM Documentation](https://docs.vllm.ai/)
