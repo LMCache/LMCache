@@ -8,6 +8,7 @@ package -- consumers go through :class:`DeviceOps`, never this module directly.
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Optional, Tuple, cast
 import ctypes
@@ -85,7 +86,7 @@ def _tensor_from_ptr(
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """
-    Create a tensor view over a raw pointer (zero-copy where possible).
+    Create a non-owning tensor view over a raw pointer.
 
     Supports CPU, CUDA, and MUSA device pointers.
 
@@ -102,14 +103,13 @@ def _tensor_from_ptr(
     Returns:
         A tensor that shares memory with the original pointer.
         For CPU: always zero-copy via ctypes + torch.frombuffer.
-        For CUDA: zero-copy via torch._C._construct_storage_from_data_pointer
-                  (PyTorch >= 2.0) or __cuda_array_interface__, with a
-                  cudaMemcpy D2D fallback.
+        For CUDA: a write-through __cuda_array_interface__ view, or an error
+                  if the requested dtype or alias cannot be preserved.
         For MUSA: a non-owning view created from external device storage.
 
     Raises:
         ValueError: if ptr is 0.
-        RuntimeError: If MUSA cannot construct a non-owning view for ``ptr``.
+        RuntimeError: If CUDA or MUSA cannot construct a non-owning view.
 
     Warning:
         The caller is responsible for keeping the underlying memory alive
@@ -146,7 +146,7 @@ def _tensor_from_ptr(
     # CUDA path                                                          #
     # ------------------------------------------------------------------ #
     if device.type == "cuda":
-        return _tensor_from_cuda_ptr(ptr, shape, dtype, device, numel, total_bytes)
+        return _tensor_from_cuda_ptr(ptr, shape, dtype, device, numel)
 
     # ------------------------------------------------------------------ #
     # MUSA path                                                          #
@@ -190,71 +190,46 @@ def _tensor_from_cuda_ptr(
     dtype: torch.dtype,
     device: torch.device,
     numel: int,
-    total_bytes: int,
 ) -> torch.Tensor:
-    """Zero-copy CUDA tensor from a raw device pointer."""
+    """Construct a write-through CUDA view, never a detached copy."""
+    dtype_to_typestr = {
+        torch.float16: "<f2",
+        torch.float32: "<f4",
+        torch.float64: "<f8",
+        torch.int8: "|i1",
+        torch.int16: "<i2",
+        torch.int32: "<i4",
+        torch.int64: "<i8",
+        torch.uint8: "|u1",
+        torch.bool: "|b1",
+    }
+    is_bf16 = dtype == torch.bfloat16
+    typestr = "<i2" if is_bf16 else dtype_to_typestr.get(dtype)
+    if typestr is None:
+        raise ValueError(f"Unsupported CUDA pointer dtype: {dtype}")
+
+    class _CudaArrayWrapper:
+        def __init__(self):
+            self.__cuda_array_interface__ = {
+                "data": (ptr, False),
+                "shape": (numel,),
+                "typestr": typestr,
+                "version": 3,
+            }
 
     try:
-        _DTYPE_TO_TYPESTR = {
-            torch.float16: "<f2",
-            torch.float32: "<f4",
-            torch.float64: "<f8",
-            torch.int8: "|i1",
-            torch.int16: "<i2",
-            torch.int32: "<i4",
-            torch.int64: "<i8",
-            torch.uint8: "|u1",
-            torch.bool: "|b1",
-        }
-        is_bf16 = dtype == torch.bfloat16
-
-        # Determine the correct typestr, smuggle bfloat16 as int16
-        typestr = "<i2" if is_bf16 else _DTYPE_TO_TYPESTR.get(dtype, "|u1")
-
-        class _CudaArrayWrapper:
-            def __init__(self, ptr_int: int, shape_tuple: tuple, type_str: str):
-                self.__cuda_array_interface__ = {
-                    "data": (ptr_int, False),
-                    "shape": shape_tuple,
-                    "typestr": type_str,
-                    "version": 3,
-                }
-
-        t = torch.as_tensor(_CudaArrayWrapper(ptr, (numel,), typestr), device=device)
-        if is_bf16:
-            t = t.view(torch.bfloat16)
-
-        return t.view(*shape)
-    except Exception:
-        pass
-
-    # Strategy 2: cudaMemcpy Device-to-Device (Fallback)
-    libcudart = _get_copy_lib()
-    if libcudart is None:
-        raise RuntimeError("Failed to load libcudart/libamdhip")
-
-    cudaMemcpy = libcudart.cudaMemcpy
-    cudaMemcpy.restype = ctypes.c_int
-    cudaMemcpy.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_int,
-    ]
-    _MEMCPY_D2D = 3
-
-    dst = torch.empty(numel, dtype=dtype, device=device)
-
-    err = cudaMemcpy(
-        ctypes.c_void_p(dst.data_ptr()),
-        ctypes.c_void_p(ptr),
-        ctypes.c_size_t(total_bytes),
-        ctypes.c_int(_MEMCPY_D2D),
-    )
-    if err != 0:
-        raise RuntimeError(f"cudaMemcpy D2D failed with error code {err}.")
-
-    return dst.view(*shape)
+        tensor = torch.as_tensor(_CudaArrayWrapper(), device=device)
+    except Exception as exc:
+        raise RuntimeError("Cannot construct a CUDA pointer view") from exc
+    if is_bf16:
+        tensor = tensor.view(torch.bfloat16)
+    if (
+        tensor.device.type != "cuda"
+        or tensor.dtype != dtype
+        or (numel and tensor.data_ptr() != ptr)
+    ):
+        raise RuntimeError("CUDA pointer construction did not preserve its alias")
+    return tensor.view(*shape)
 
 
 # ====================================================================== #
@@ -815,6 +790,136 @@ def _is_ptr_tensor(x: object) -> bool:
     )
 
 
+def _is_block_axis_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when dim-0 of every per-layer tensor is exactly the block axis.
+
+    Mirrors ``lmcache.v1.gpu_connector.utils._BLOCK_AXIS_FORMATS``: the
+    per-layer MLA formats whose only leading axis is ``NB`` (``[NB, BS, HS]``),
+    i.e. ``NL_X_NB_BS_HS`` and its blocked-scale twin ``NL_X_NB_BSV_BSS``.
+    These are the formats for which ``PageBufferShapeDesc.block_stride_elems``
+    carries a physical dim-0 step (vLLM blocks-first pools).
+    """
+    fmt = int(engine_kv_format)
+    return fmt in (
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NB_BSV_BSS),
+    )
+
+
+def _is_blocked_scale_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for the DSA indexer k-cache page layout ``[BSxVALS][BSxSCALES]``."""
+    return int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BSV_BSS)
+
+
+def _tensor_from_ptr_block_strided(
+    ptr: int,
+    shape: tuple[int, ...],
+    block_stride_elems: int,
+    dtype: torch.dtype,
+    device: torch.device | str,
+) -> torch.Tensor:
+    """Zero-copy view over a dim-0-padded per-layer buffer.
+
+    ``shape[0]`` is the block axis; block ``b`` lives at element offset
+    ``b * block_stride_elems`` and the inner dims are tightly packed. Only
+    the bytes actually addressed by the view are mapped: the last block's
+    trailing padding is not part of the span, so a pool whose final page is
+    not fully padded is never over-read.
+    """
+    nb = int(shape[0])
+    inner = 1
+    for d in shape[1:]:
+        inner *= int(d)
+    span = (nb - 1) * block_stride_elems + inner if nb > 0 else 0
+    base = _tensor_from_ptr(ptr, (span,), dtype, device)
+    strides = (block_stride_elems,) + _contiguous_element_strides(tuple(shape[1:]))
+    return torch.as_strided(base, tuple(shape), strides)
+
+
+# cudaMemoryType values. HIP/MUSA raw-pointer residency is not inferred from
+# these values; callers on unqualified runtimes must supply tensor objects.
+_MEMORY_TYPE_UNREGISTERED = 0
+_MEMORY_TYPE_HOST = 1
+_MEMORY_TYPE_DEVICE = 2
+_MEMORY_TYPE_MANAGED = 3
+
+
+class _CudaPointerAttributesV12(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("device", ctypes.c_int),
+        ("devicePointer", ctypes.c_void_p),
+        ("hostPointer", ctypes.c_void_p),
+    ]
+
+
+class _CudaPointerAttributesV13(_CudaPointerAttributesV12):
+    # CUDA 13 driver_types.h adds this reserved tail to the CUDA 12 prefix.
+    _fields_ = [("reserved", ctypes.c_long * 8)]
+
+
+@lru_cache(maxsize=4)
+def _cuda_pointer_query(lib):
+    """Bind only a known, correctly aligned CUDA pointer-attribute ABI."""
+    version_query = getattr(lib, "cudaRuntimeGetVersion", None)
+    query = getattr(lib, "cudaPointerGetAttributes", None)
+    if version_query is None or query is None:
+        raise RuntimeError("CUDA pointer residency query is unavailable")
+    version_query.restype = ctypes.c_int
+    version_query.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    version = ctypes.c_int()
+    err = version_query(ctypes.byref(version))
+    if err:
+        raise RuntimeError(f"cudaRuntimeGetVersion failed with error code {err}")
+    if 12000 <= version.value < 13000:
+        attributes = _CudaPointerAttributesV12
+    elif 13000 <= version.value < 14000:
+        attributes = _CudaPointerAttributesV13
+    else:
+        raise NotImplementedError(
+            f"Unqualified CUDA pointer-attribute ABI: {version.value}"
+        )
+    query.restype = ctypes.c_int
+    query.argtypes = [ctypes.POINTER(attributes), ctypes.c_void_p]
+    return query, attributes
+
+
+def _resolve_ptr_device(ptr: int, hint: torch.device) -> torch.device:
+    """Classify raw chunk pointers without interpreting unknown memory as host.
+
+    CPU transfers use CPU pointers. GPU transfers can use host, managed, or
+    device chunks, so CUDA 12/13 must positively identify their residency.
+    Older runtimes' ambiguous invalid-value/pageable-host behavior is not
+    supported. Query failures and other accelerator ABIs fail before access.
+    """
+    cpu = torch.device("cpu")
+    if hint.type == "cpu":
+        return cpu
+    if hint.type != "cuda" or torch.version.hip is not None:
+        raise NotImplementedError("Raw chunk-pointer residency requires CUDA")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA pointer residency requires an available device")
+    lib = _get_copy_lib()
+    if lib is None:
+        raise RuntimeError("CUDA pointer residency runtime is unavailable")
+    query, attributes = _cuda_pointer_query(lib)
+    attrs = attributes()
+    err = query(ctypes.byref(attrs), ctypes.c_void_p(ptr))
+    if err:
+        # In particular, do not clear an illegal-address/no-device error and
+        # then dereference a possibly-device pointer through a CPU view.
+        raise RuntimeError(f"cudaPointerGetAttributes failed with error code {err}")
+    if attrs.type == _MEMORY_TYPE_DEVICE:
+        if attrs.device < 0:
+            raise RuntimeError("CUDA pointer has an invalid device ordinal")
+        return torch.device("cuda", attrs.device)
+    if attrs.type == _MEMORY_TYPE_MANAGED:
+        return hint
+    if attrs.type in (_MEMORY_TYPE_HOST, _MEMORY_TYPE_UNREGISTERED):
+        return cpu
+    raise RuntimeError(f"Unknown CUDA pointer memory type: {attrs.type}")
+
+
 def _per_layer_paged_shape(
     engine_kv_format: EngineKVFormat,
     nb: int,
@@ -838,7 +943,13 @@ def _per_layer_paged_shape(
     fmt = int(engine_kv_format)
     if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
         return (nb * bs, 1, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
+    if fmt in (
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NB_BSV_BSS),
+    ):
+        # Per-layer MLA and the DSA indexer k-cache both register as
+        # [NB, BS, HS]; the blocked-scale page layout only changes how the
+        # bytes inside a block are read, not the tensor geometry.
         return (nb, bs, hs)
     if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
         return (2, nb, nh, bs, hs)
@@ -1045,12 +1156,33 @@ def _normalize_paged_layers(
         hs = int(shape_desc.hs)
         per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0) or 0)
-        if block_stride and block_stride != bs * nh * hs:
-            raise NotImplementedError(
-                "Non-tight per-block strides (vLLM blocks-first pools) are "
-                "not supported when reconstructing paged tensors from raw "
-                "pointers in the non-CUDA fallback."
-            )
+        tight_stride = bs * nh * hs
+        if block_stride and block_stride != tight_stride:
+            if not _is_block_axis_format(engine_kv_format):
+                raise NotImplementedError(
+                    "Non-tight per-block strides are only supported for the "
+                    "block-axis MLA formats (NL_X_NB_BS_HS, NL_X_NB_BSV_BSS) "
+                    "when reconstructing paged tensors from raw pointers in "
+                    f"the non-CUDA fallback; got {engine_kv_format!r} with "
+                    f"block_stride_elems={block_stride}, tight={tight_stride}."
+                )
+            if block_stride < tight_stride:
+                raise ValueError(
+                    f"block_stride_elems={block_stride} is smaller than the "
+                    f"tight per-block stride {tight_stride}; blocks would overlap."
+                )
+            # vLLM blocks-first pools (e.g. DeepSeek V4 indexer / compressor
+            # caches sharing a page with larger groups) register each layer
+            # as a dim-0-padded view: block ``b`` starts at
+            # ``b * block_stride_elems``, only the first ``bs * hs`` elements
+            # of each page belong to this layer. Rebuild exactly that view so
+            # reads hit the right block and writes never touch the padding.
+            return [
+                _tensor_from_ptr_block_strided(
+                    int(p.item()), per_shape, block_stride, dtype, device
+                )
+                for p in paged_buffer_ptrs_tensor
+            ]
         return [
             _tensor_from_ptr(int(p.item()), per_shape, dtype, device)
             for p in paged_buffer_ptrs_tensor
@@ -1073,13 +1205,19 @@ def _normalize_lmcache_objects(
     lmcache_chunk_size: "int | None" = None,
     engine_kv_format: "EngineKVFormat | None" = None,
     dtype: "torch.dtype | None" = None,
+    device: "torch.device | str | None" = None,
 ) -> list[torch.Tensor]:
     """Normalize LMCache object inputs to chunk tensors.
 
-    Accepts either a list of chunk tensors or a ``list[int]`` of raw CPU pointers.
+    Accepts either a list of chunk tensors or a ``list[int]`` of raw pointers.
     When a pointer list is provided *shape_desc*, *lmcache_chunk_size*,
     *engine_kv_format*, and *dtype* must be supplied so the tensors can be
-    reconstructed via :func:`_tensor_from_ptr` on the CPU.
+    reconstructed via :func:`_tensor_from_ptr`. Each pointer is placed on the
+    device it really lives on (see :func:`_resolve_ptr_device`): pinned-host
+    chunk memory from in-process connectors stays on the CPU, device temp
+    buffers from the multiprocess cache-driven path become device tensors.
+    *device* is the paged-buffer device of the transfer and is only used as
+    the residency hint.
     """
     if not isinstance(lmcache_objects_ptrs, list):
         raise TypeError(
@@ -1091,7 +1229,7 @@ def _normalize_lmcache_objects(
     if isinstance(lmcache_objects_ptrs[0], torch.Tensor):
         return lmcache_objects_ptrs  # type: ignore[return-value]
     if isinstance(lmcache_objects_ptrs[0], int):
-        # Pointer mode: reconstruct chunk tensors (always on CPU).
+        # Pointer mode: reconstruct chunk tensors where they actually live.
         if (
             shape_desc is None
             or lmcache_chunk_size is None
@@ -1114,8 +1252,9 @@ def _normalize_lmcache_objects(
             chunk_shape = (nl, chunk_tokens, nh * hs)
         else:
             chunk_shape = (2, nl, chunk_tokens, nh * hs)
+        hint = torch.device("cpu") if device is None else torch.device(device)
         return [
-            _tensor_from_ptr(ptr, chunk_shape, dtype, "cpu")
+            _tensor_from_ptr(ptr, chunk_shape, dtype, _resolve_ptr_device(ptr, hint))
             for ptr in lmcache_objects_ptrs
         ]
     raise TypeError(
@@ -1198,6 +1337,7 @@ def multi_layer_block_kv_transfer(
         lmcache_chunk_size=lmcache_chunk_size,
         engine_kv_format=engine_kv_format,
         dtype=kv_dtype,
+        device=device,
     )
     n_block_ids = (
         int(block_ids.numel())
@@ -1581,6 +1721,85 @@ def _transfer_per_layer_kv_tuple(
                     layer_t.index_copy_(0, eff_idx, src_blocks)
 
 
+def _check_mla_layers(
+    layer_tensors: list[torch.Tensor],
+    block_size: int,
+    is_flat: bool,
+    engine_kv_format: EngineKVFormat,
+) -> int:
+    """Validate the per-layer MLA geometry and return the shared hidden size.
+
+    Every layer must be rank 3 (``[NB, BS, HS]``, or ``[NB*BS, 1, HS]`` when
+    the block axis is folded) with one hidden size across the group. This is
+    checked up front because the transfer body gathers into pre-shaped views
+    (``index_select(out=)``) and scatters with ``index_copy_``: a mismatched
+    layer would either be silently resized away from the staging buffer
+    (D2H) or fail deep inside torch with a rank error (H2D).
+    """
+    hidden_size = int(layer_tensors[0].shape[-1])
+    expected_dim1 = 1 if is_flat else block_size
+    for layer_idx, layer in enumerate(layer_tensors):
+        if (
+            layer.ndim != 3
+            or int(layer.shape[1]) != expected_dim1
+            or int(layer.shape[-1]) != hidden_size
+        ):
+            raise ValueError(
+                f"{engine_kv_format!r} layer {layer_idx} has shape "
+                f"{tuple(layer.shape)}; expected rank-3 "
+                f"[{'NB*BS' if is_flat else 'NB'}, {expected_dim1}, {hidden_size}]"
+            )
+    return hidden_size
+
+
+# Per-token scale width of the DSA indexer k-cache page (fp32 scale).
+_BLOCKED_SCALE_BYTES = 4
+
+
+def _blocked_scale_split(hidden_size: int, dtype: torch.dtype) -> tuple[int, int]:
+    """Return ``(value_bytes, scale_bytes)`` of one token row for BSV_BSS."""
+    row_bytes = hidden_size * dtype.itemsize
+    if row_bytes <= _BLOCKED_SCALE_BYTES or row_bytes % 4 != 0:
+        raise ValueError(
+            "NL_X_NB_BSV_BSS rows must be a multiple of 4 bytes wider than "
+            f"the {_BLOCKED_SCALE_BYTES}-byte scale; got hidden_size="
+            f"{hidden_size} dtype={dtype} ({row_bytes} bytes)"
+        )
+    return row_bytes - _BLOCKED_SCALE_BYTES, _BLOCKED_SCALE_BYTES
+
+
+def _blocked_scale_pages_to_rows(pages: torch.Tensor) -> torch.Tensor:
+    """``[N, BS, HS]`` engine pages -> ``[N*BS, HS]`` token-major chunk rows.
+
+    An engine page stores all ``BS`` value vectors first, then all ``BS``
+    scales: ``[BS x val_bytes][BS x 4]``. The LMCache chunk keeps one
+    ``[val_bytes | 4]`` row per token, which is what the native kernel writes
+    and what every consumer of the chunk (offload, blend, compressor) reads.
+    """
+    n, bs, hs = pages.shape
+    val_bytes, scale_bytes = _blocked_scale_split(hs, pages.dtype)
+    row_bytes = val_bytes + scale_bytes
+    page_bytes = pages.contiguous().view(torch.uint8).reshape(n, bs * row_bytes)
+    vals = page_bytes[:, : bs * val_bytes].reshape(n, bs, val_bytes)
+    scales = page_bytes[:, bs * val_bytes :].reshape(n, bs, scale_bytes)
+    rows = torch.cat([vals, scales], dim=2).reshape(n * bs, row_bytes)
+    return rows.view(pages.dtype)
+
+
+def _blocked_scale_rows_to_pages(rows: torch.Tensor, bs: int) -> torch.Tensor:
+    """Inverse of :func:`_blocked_scale_pages_to_rows`: ``[N*BS, HS]`` ->
+    ``[N, BS, HS]``."""
+    hs = int(rows.shape[-1])
+    val_bytes, scale_bytes = _blocked_scale_split(hs, rows.dtype)
+    n = rows.shape[0] // bs
+    row_bytes = rows.contiguous().view(torch.uint8)
+    row_bytes = row_bytes.reshape(n, bs, val_bytes + scale_bytes)
+    vals = row_bytes[:, :, :val_bytes].reshape(n, bs * val_bytes)
+    scales = row_bytes[:, :, val_bytes:].reshape(n, bs * scale_bytes)
+    pages = torch.cat([vals, scales], dim=1)
+    return pages.view(rows.dtype).reshape(n, bs, hs)
+
+
 def _transfer_per_layer_mla(
     layer_tensors: list[torch.Tensor],
     object_tensors: list[torch.Tensor],
@@ -1592,11 +1811,22 @@ def _transfer_per_layer_mla(
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
-    """Handle MLA per-layer formats: [NB, BS, HS]."""
+    """Handle MLA per-layer formats: [NB, BS, HS].
+
+    Layers may be dim-0-padded views (vLLM blocks-first pools); gathers and
+    scatters go through ``index_select`` / ``index_copy_`` on dim 0, which
+    honour the view's strides, so padding is never read or written.
+    ``NL_X_NB_BSV_BSS`` pages are additionally repacked between the blocked
+    ``[BS x vals][BS x scales]`` page layout and token-major chunk rows.
+    """
     if not layer_tensors or not object_tensors:
         return
 
     is_flat = _is_pbs_fused_format(engine_kv_format)
+    is_blocked_scale = _is_blocked_scale_format(engine_kv_format)
+    hidden_size = _check_mla_layers(
+        layer_tensors, block_size, is_flat, engine_kv_format
+    )
     target_device = layer_tensors[0].device
     if is_flat:
         token_offsets = torch.arange(block_size, dtype=torch.long, device=target_device)
@@ -1622,7 +1852,6 @@ def _transfer_per_layer_mla(
             ).reshape(-1)
 
         if is_d2h:
-            hidden_size = layer_tensors[0].shape[-1]
             chunk_gpu = torch.empty(
                 len(layer_tensors),
                 n_valid * block_size,
@@ -1636,6 +1865,9 @@ def _transfer_per_layer_mla(
                         n_valid * block_size, 1, hidden_size
                     )
                     torch.index_select(layer, 0, token_indices, out=dst)
+                elif is_blocked_scale:
+                    pages = layer.index_select(0, eff_idx)
+                    chunk_gpu[layer_idx].copy_(_blocked_scale_pages_to_rows(pages))
                 else:
                     dst = chunk_gpu[layer_idx].view(n_valid, block_size, hidden_size)
                     torch.index_select(layer, 0, eff_idx, out=dst)
@@ -1646,10 +1878,13 @@ def _transfer_per_layer_mla(
             )
             for layer_idx, layer in enumerate(layer_tensors):
                 src = chunk_gpu[layer_idx]
-                hidden_size = layer.shape[-1]
                 if is_flat:
                     src_tokens = src.reshape(n_valid * block_size, 1, hidden_size)
                     layer.index_copy_(0, token_indices, src_tokens)
+                elif is_blocked_scale:
+                    layer.index_copy_(
+                        0, eff_idx, _blocked_scale_rows_to_pages(src, block_size)
+                    )
                 else:
                     src_blocks = src.reshape(n_valid, block_size, hidden_size)
                     layer.index_copy_(0, eff_idx, src_blocks)
