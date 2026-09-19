@@ -10,28 +10,19 @@ requests.
 Local
 -----
 
-We recommend starting with a single NVIDIA GPU and Dynamo's
-``vllm-runtime`` container. The commands below use vLLM to serve
-``Qwen/Qwen3-0.6B``.
-
-Start NATS and etcd first if they are not already running. The local
-example includes a Compose file and its NATS configuration. Run this
-command from the LMCache checkout root on the host:
+If you are deploying Dynamo locally, start NATS and etcd first. Run the
+included Compose file from the LMCache checkout root on the host:
 
 .. code-block:: bash
 
    docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
 
-Use a runtime image containing an LMCache build compatible with its vLLM
-version; see the :doc:`compatibility table </getting_started/compatibility>`.
-Give the container access to the GPU and make sure it can reach NATS and
-etcd, for example through Docker's ``--network host`` option. Leave
-``PROMETHEUS_MULTIPROC_DIR`` unset so Dynamo can manage it. This setup is
-needed whether you start the processes manually or use the launch scripts
-below.
+We use ``Qwen/Qwen3-0.6B`` on a single GPU for this demo. Run the commands
+below inside a Dynamo ``vllm-runtime`` container with LMCache installed.
+Give the container GPU access and use ``--network host`` so it can reach
+NATS and etcd.
 
-To start the processes manually, open three terminal sessions in the same
-container and run one command in each:
+Open three terminals in the same container and start one process in each:
 
 .. code-block:: bash
 
@@ -55,16 +46,9 @@ container and run one command in each:
          "kv_connector_extra_config": {"lmcache.mp.port": 5555}
        }'
 
-The frontend accepts inference requests on port 8000. The worker runs the
-model and sends KV cache operations to LMCache on port 5555. LMCache keeps
-up to 16 GiB of KV cache in CPU memory and evicts entries using LRU. Its
-health and metrics endpoints use port 8080; ``DYN_SYSTEM_PORT=8081`` keeps
-the worker's HTTP port separate.
-
-``kv_role=kv_both`` allows the worker to store and retrieve KV cache.
-``lmcache.mp.port`` must match the server's ``--port``. The example limits
-requests to 4,096 tokens and two concurrent sequences, and disables vLLM's
-hybrid KV cache manager.
+The frontend accepts requests on port 8000. The vLLM worker uses
+``LMCacheMPConnector`` to store and retrieve KV cache through the server
+on port 5555. This example gives LMCache 16 GiB of CPU memory.
 
 Before starting the worker, confirm that LMCache is ready:
 
@@ -75,17 +59,14 @@ Before starting the worker, confirm that LMCache is ready:
 Use the launch scripts
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Once the container is ready and NATS and etcd are running, you can use the
-`launch scripts
+To start the same services from one terminal, use the `launch scripts
 <https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/local>`_
-to start LMCache, the Dynamo frontend, and the vLLM workers together. The
-scripts wait for LMCache to become healthy and stop the processes when you
-press ``Ctrl+C``. They also set a GPU KV cache memory budget for the example
-model. Stop any manually launched processes before running a script to
-free their ports and GPU memory.
+inside the runtime container. NATS and etcd must already be running. Stop
+any manually launched LMCache and Dynamo processes before switching to a
+script.
 
-Copy the scripts into the Dynamo checkout inside the runtime container.
-Replace the paths below with the locations of your checkouts:
+The scripts use Dynamo's launch helpers, so copy them into the Dynamo
+checkout as shown below. Replace the paths with your checkout locations:
 
 .. code-block:: bash
 
@@ -93,8 +74,7 @@ Replace the paths below with the locations of your checkouts:
        /path/to/dynamo/examples/backends/vllm/launch/
    cd /path/to/dynamo/examples/backends/vllm
 
-The scripts load helpers from ``examples/common/`` relative to their own
-location, so they must be placed in this directory. Choose one mode:
+Choose one mode:
 
 .. tab-set::
 
@@ -116,10 +96,9 @@ location, so they must be placed in this directory. Choose one mode:
       Both connect to one LMCache server on the same node. This script
       does not configure KV transfer between nodes.
 
-``LMCACHE_L1_SIZE_GB`` sets the CPU cache capacity. The scripts also accept
-``MAX_MODEL_LEN`` and ``MAX_CONCURRENT_SEQS``; their defaults are 4096 and 2.
-These examples use Dynamo's default routing without enabling KV-aware
-routing.
+The scripts wait for LMCache to become healthy before starting the
+workers. Press ``Ctrl+C`` to stop the serving processes. NATS and etcd
+continue running through Docker Compose.
 
 Check the deployment
 ~~~~~~~~~~~~~~~~~~~~
@@ -169,18 +148,19 @@ connection ConfigMap that the worker mounts at startup.
 Prepare the cluster and manifests
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The cluster needs GPU support, the :doc:`LMCache operator </mp/operator>`,
-and the Dynamo platform installed with its infrastructure services. The
-Dynamo operator must serve ``nvidia.com/v1alpha1``, the API used by these
-examples. The aggregated deployment needs one GPU.
+Use a GPU cluster with the Dynamo platform and
+:doc:`LMCache operator </mp/operator>` installed. These manifests require
+a Dynamo operator that serves ``nvidia.com/v1alpha1``. The aggregated demo
+needs one GPU.
 
 Replace ``my-tag`` in each manifest before applying it:
 
 - In ``lmcache_engine.yaml``, choose a tag for ``lmcache/vllm-openai``.
 - In the Dynamo manifest, set the
   ``nvcr.io/nvidia/ai-dynamo/vllm-runtime`` tag for the frontend and every
-  worker. The worker's bundled LMCache must be compatible with the server's
-  MP protocol. Use matching LMCache versions on both sides.
+  worker.
+
+Use server and worker images with matching LMCache versions.
 
 Both Dynamo components reference ``hf-token-secret``. Set ``HF_TOKEN`` in
 your shell and create the Secret before applying the Dynamo manifest:
@@ -190,9 +170,9 @@ your shell and create the Secret before applying the Dynamo manifest:
    kubectl create secret generic hf-token-secret -n default \
        --from-literal=HF_TOKEN="$HF_TOKEN"
 
-Keep the Secret, ``LMCacheEngine``, and Dynamo deployment in the same
-namespace. ``lmcache_engine.yaml`` explicitly sets ``namespace: default``;
-edit that field as well as the commands if you use another namespace.
+The examples use the ``default`` namespace. If you change it, update both
+the manifests and commands so the Secret, cache engine, and Dynamo
+deployment stay in the same namespace.
 
 How the YAML connects the services
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -208,39 +188,15 @@ node, which lets multiple workers on that node share the CPU cache.
 
 The `aggregated Dynamo manifest
 <https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml>`_
-contains a ``Frontend`` service and a ``VllmDecodeWorker`` service. Despite
-its name, this worker handles both prefill and decode because no
-``--disaggregation-mode`` is set.
-
-.. list-table:: Worker configuration
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Field
-     - Purpose
-   * - ``resources.limits.gpu: "1"``
-     - Allocates one GPU to the worker.
-   * - ``lmcache-mp-connection`` volume
-     - Mounts the operator's ConfigMap at ``/etc/lmcache``.
-   * - ``--kv-transfer-config``
-     - Reads ``/etc/lmcache/kv-transfer-config.json`` to configure the
-       connector and server endpoint.
-   * - ``PYTHONHASHSEED: "0"``
-     - Makes builtin token hashing deterministic across processes.
-   * - ``hostIPC: true`` and ``sharedMemory.disabled: true``
-     - Uses the host IPC namespace and avoids a separate Dynamo
-       ``/dev/shm`` mount in this example.
-
-The worker reads its IPC settings from the generated connection JSON.
-The server and worker must use the same IPC mode; see
-:doc:`/mp/deployment` for the shared-memory and isolated IPC settings.
+starts a frontend and one ``VllmDecodeWorker`` that handles both prefill
+and decode. The worker mounts the connection ConfigMap at ``/etc/lmcache``
+and reads ``kv-transfer-config.json`` through ``--kv-transfer-config``.
+This configures ``LMCacheMPConnector`` to connect to the cache server.
 
 For separate prefill and decode workers, use
 ``disagg_lmcache_mp.yaml`` in the second ``kubectl apply`` command instead
-of ``agg_lmcache_mp.yaml``. This manifest adds ``VllmPrefillWorker`` and
-sets ``--disaggregation-mode prefill`` and ``--disaggregation-mode decode``
-on the two workers. Each requests one GPU and mounts the same connection
-ConfigMap.
+of ``agg_lmcache_mp.yaml``. It launches one worker for prefill and one for
+decode, each using one GPU and the same connection ConfigMap.
 
 Run this disaggregated example on a single GPU node with at least two
 GPUs so both workers use the same MP server. The manifest does not force
