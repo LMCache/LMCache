@@ -34,15 +34,37 @@ metadata:
   labels:
     {{- include "lmcache-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [""]
-    resources: [configmaps]
-    verbs: [get, list, watch, create, update, patch, delete]
-  - apiGroups: [coordination.k8s.io]
-    resources: [leases]
-    verbs: [get, list, watch, create, update, patch, delete]
-  - apiGroups: [""]
-    resources: [events]
-    verbs: [create, patch]
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -67,12 +89,18 @@ metadata:
   labels:
     {{- include "lmcache-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [authentication.k8s.io]
-    resources: [tokenreviews]
-    verbs: [create]
-  - apiGroups: [authorization.k8s.io]
-    resources: [subjectaccessreviews]
-    verbs: [create]
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -96,22 +124,75 @@ metadata:
   labels:
     {{- include "lmcache-operator.labels" . | nindent 4 }}
 rules:
-  - nonResourceURLs: [/metrics]
-    verbs: [get]
-{{ range $name, $verbs := dict "admin" (list "*") "editor" (list "create" "delete" "get" "list" "patch" "update" "watch") "viewer" (list "get" "list" "watch") }}
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "lmcache-operator.resourceName" (dict "root" $ "suffix" (printf "lmcacheengine-%s-role" $name)) }}
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "lmcacheengine-admin-role") }}
   labels:
-    {{- include "lmcache-operator.labels" $ | nindent 4 }}
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [lmcache.lmcache.ai]
-    resources: [lmcacheengines]
+  - apiGroups:
+      - lmcache.lmcache.ai
+    resources:
+      - lmcacheengines
     verbs:
-      {{- toYaml $verbs | nindent 6 }}
-  - apiGroups: [lmcache.lmcache.ai]
-    resources: [lmcacheengines/status]
-    verbs: [get]
-{{ end -}}
+      - "*"
+  - apiGroups:
+      - lmcache.lmcache.ai
+    resources:
+      - lmcacheengines/status
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "lmcacheengine-editor-role") }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - lmcache.lmcache.ai
+    resources:
+      - lmcacheengines
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - lmcache.lmcache.ai
+    resources:
+      - lmcacheengines/status
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "lmcacheengine-viewer-role") }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - lmcache.lmcache.ai
+    resources:
+      - lmcacheengines
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - lmcache.lmcache.ai
+    resources:
+      - lmcacheengines/status
+    verbs:
+      - get
