@@ -90,7 +90,7 @@ Prerequisites
   manages LMCache servers and creates the connection configuration used
   by the workers.
 - Install `Dynamo
-  <https://docs.nvidia.com/dynamo/dev/kubernetes/installation/install-dynamo>`_.
+  <https://docs.nvidia.com/dynamo/dev/kubernetes/installation/install-dynamo#install-the-dynamo-platform>`_.
   Its Kubernetes operator manages the frontend and inference workers
   defined in a ``DynamoGraphDeployment`` resource.
 
