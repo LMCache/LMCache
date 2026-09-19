@@ -53,11 +53,11 @@ jobs:
           CHART_VERSION="$(printf '%s' "${VERSION#v}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)(alpha|beta|rc)([0-9]+)$/\1-\2.\3/')"
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "CHART_VERSION=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
-          # All prereleases get the floating ":latest-rc" tag and must
+          # Pre-releases (rc/alpha/beta) get the floating ":latest-rc" tag and must
           # never move the stable ":latest" image tag or the "operator-latest" alias.
-          # Detect from normalized SemVer rather than the GitHub "pre-release" flag
+          # Detect from the version string rather than the GitHub "pre-release" flag
           # so behavior is robust whether or not that box is ticked in the UI.
-          if [[ "${CHART_VERSION}" == *-* ]]; then
+          if [[ "${VERSION}" =~ (rc|alpha|beta) ]]; then
             echo "FLOATING_TAG=latest-rc" >> "$GITHUB_OUTPUT"
             echo "IS_PRERELEASE=true" >> "$GITHUB_OUTPUT"
           else
@@ -113,7 +113,7 @@ jobs:
             operator/dist/${{ steps.artifacts.outputs.CHART_FILE }}
 
       - name: Update latest release alias
-        # Skip for prereleases: they must not repoint the stable
+        # Skip for pre-releases: an rc/alpha/beta must not repoint the stable
         # "operator-latest" alias (or its install.yaml) at a pre-release build.
         if: steps.version.outputs.IS_PRERELEASE == 'false'
         uses: softprops/action-gh-release@v2
