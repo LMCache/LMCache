@@ -60,24 +60,25 @@ def _hipify_wrapper(source_names: list[str]) -> list[str]:
         hipify_extra_files_only=True,
     )
     hipified_sources: list[str] = []
+    unhipified: list[str] = []
     for source_name in source_names:
         s_abs = os.path.abspath(os.path.join(HIPIFY_OUT_DIR, source_name))
-        hipified_s_abs = (
-            hipify_result[s_abs].hipified_path
-            if (
-                s_abs in hipify_result
-                and hipify_result[s_abs].hipified_path is not None
-            )
-            else s_abs
-        )
+        result = hipify_result.get(s_abs)
+        hipified_s_abs = result.hipified_path if result is not None else None
+        if hipified_s_abs is None:
+            unhipified.append(source_name)
+            continue
         hipified_sources.append(
             os.path.relpath(hipified_s_abs, ROOT_DIR).replace(os.sep, "/")
         )
 
-    if len(hipified_sources) != len(source_names):
+    if unhipified:
+        # Returning the input path instead would hand setuptools the original
+        # CUDA source, so the ROCm build would compile CUDA under hipcc. The
+        # count check this replaces could never fire: the list gains exactly one
+        # entry per requested source, so the two lengths always matched.
         raise RuntimeError(
-            "Hipify failed: expected %d sources, got %d"
-            % (len(source_names), len(hipified_sources))
+            "Hipify did not yield a path for: %s" % ", ".join(unhipified)
         )
     return hipified_sources
 
