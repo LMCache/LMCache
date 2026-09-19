@@ -4,12 +4,14 @@
 # Standard
 from typing import Any, Optional
 import json
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 
 _MAX_ERR = 65536
+_HTTP_STATUS_RE = re.compile(r"\bHTTP (\d{3})\b")
 MetricValue = tuple[str, Any]
 MetricMap = dict[str, MetricValue]
 _METRIC_NAMES = {
@@ -180,10 +182,14 @@ def _stream(
             t1 = time.time()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        _raise_json_blob_error(err_body)
-        raise RuntimeError(
-            _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
-        ) from e
+        http_prefix = f"POST {url} failed (HTTP {e.code})"
+        try:
+            _raise_json_blob_error(err_body)
+        except RuntimeError as json_err:
+            # Keep the status in the message so fallback can tell 404/405
+            # from auth, rate-limit, and server errors.
+            raise RuntimeError(_clip(f"{http_prefix}: {json_err}")) from e
+        raise RuntimeError(_clip(f"{http_prefix}:\n{_clip(err_body)}")) from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"POST {url} failed: {getattr(e, 'reason', e)}") from e
 
@@ -252,6 +258,24 @@ def _weak_completions_error(msg: str) -> bool:
     )
 
 
+def _http_status(exc: BaseException) -> Optional[int]:
+    """Return the HTTP status embedded in a request error, if any."""
+    match = _HTTP_STATUS_RE.search(str(exc))
+    return int(match.group(1)) if match else None
+
+
+def _should_fallback_to_chat(exc: BaseException) -> bool:
+    """True when ``/v1/completions`` is unsupported or returned no usable output.
+
+    Authentication, transport, rate-limit, and 5xx failures must not retry
+    ``/v1/chat/completions`` — those are real request errors, not a missing
+    completions endpoint.
+    """
+    if _http_status(exc) in (404, 405):
+        return True
+    return _weak_completions_error(str(exc))
+
+
 class Request:
     """Build and send one query request against an OpenAI-compatible endpoint."""
 
@@ -317,7 +341,14 @@ class Request:
         return str(first["id"])
 
     def _query_with_fallback(self, request_data: dict[str, Any]) -> dict[str, Any]:
-        """Send one query and fallback between completions/chat endpoints."""
+        """Send one query, falling back only when the first endpoint is unsupported.
+
+        Default order is ``/v1/completions`` then ``/v1/chat/completions``.
+        The chat fallback runs only when completions returned HTTP 404/405 or
+        produced no completion output. Authentication, transport, rate-limit,
+        and server errors are raised immediately. ``chat_first`` still falls
+        back to completions only when the chat API reports a missing template.
+        """
         if request_data["completions_only"]:
             return self._query(request_data, chat=False)
         try:
@@ -330,6 +361,8 @@ class Request:
                     "chat API failed (no chat template); retrying with /v1/completions"
                 )
                 return self._query(request_data, chat=False)
+            if not _should_fallback_to_chat(first_err):
+                raise
             _info("/v1/completions failed; retrying with /v1/chat/completions")
             try:
                 return self._query(request_data, chat=True)
