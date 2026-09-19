@@ -94,11 +94,6 @@ Prerequisites
   Its Kubernetes operator manages the frontend and inference workers
   defined in a ``DynamoGraphDeployment`` resource.
 
-Run the commands below from the root of the LMCache repository. Deploy
-the LMCache server first, then choose aggregated or disaggregated serving.
-Keep the cache engine and Dynamo deployment in the same namespace; these
-examples use ``default``.
-
 Deploy the LMCache server
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
