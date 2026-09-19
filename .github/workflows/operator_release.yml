@@ -45,11 +45,6 @@ jobs:
         run: |
           # Strip "operator-" prefix from tag to get version (e.g. operator-v0.4.8rc1 -> v0.4.8rc1).
           VERSION="${GITHUB_REF_NAME#operator-}"
-          # Restrict characters before passing tag-derived values to Make.
-          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*$ ]]; then
-            echo "Invalid Operator version: ${VERSION}" >&2
-            exit 1
-          fi
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
           # Pre-releases (rc/alpha/beta) get the floating ":latest-rc" tag and must
           # never move the stable ":latest" image tag or the "operator-latest" alias.
