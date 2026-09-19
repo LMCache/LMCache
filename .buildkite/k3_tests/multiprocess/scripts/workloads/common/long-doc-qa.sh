@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Run long_doc_qa workload test against both vLLM servers.
-# Compares performance between LMCache-enabled and baseline vLLM.
+# Run long_doc_qa workload test against LMCache and baseline inference-engine servers.
+# Compares performance between LMCache-enabled and baseline engine.
 # Adapted from the old Docker-based run-long-doc-qa.sh.
 set -e
 set -o pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-
-source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+COMMON_WORKLOAD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${COMMON_WORKLOAD_DIR}/../helpers.sh"
 
 # Configuration
-VLLM_PORT="${VLLM_PORT:-8000}"
-VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
+ENGINE_PORT="${ENGINE_PORT:-8000}"
+ENGINE_BASELINE_PORT="${ENGINE_BASELINE_PORT:-9000}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
@@ -38,8 +36,8 @@ LONG_DOC_QA_DIR="$RESULTS_DIR/long_doc_qa"
 
 echo "=== Long Doc QA Test ==="
 echo "Model: $MODEL"
-echo "vLLM Port (with LMCache): $VLLM_PORT"
-echo "vLLM Baseline Port (without LMCache): $VLLM_BASELINE_PORT"
+echo "Engine Port (with LMCache): $ENGINE_PORT"
+echo "${ENGINE_NAME} Baseline Port (without LMCache): $ENGINE_BASELINE_PORT"
 echo "Document length: $DOCUMENT_LENGTH"
 echo "Number of documents: $NUM_DOCUMENTS"
 echo "Output length: $OUTPUT_LEN"
@@ -231,15 +229,15 @@ EOF
 
 # Run benchmark against baseline
 echo "============================================"
-echo "=== Benchmark: Baseline vLLM (without LMCache) ==="
+echo "=== Benchmark: Baseline ${ENGINE_NAME} (without LMCache) ==="
 echo "============================================"
-run_long_doc_qa "$VLLM_BASELINE_PORT" "$LONG_DOC_QA_DIR/baseline_result.json" "baseline"
+run_long_doc_qa "$ENGINE_BASELINE_PORT" "$LONG_DOC_QA_DIR/baseline_result.json" "baseline"
 
-# Run benchmark against vLLM with LMCache
+# Run benchmark against the inference engine with LMCache.
 echo "============================================"
-echo "=== Benchmark: vLLM with LMCache ==="
+echo "=== Benchmark: ${ENGINE_NAME} with LMCache ==="
 echo "============================================"
-run_long_doc_qa "$VLLM_PORT" "$LONG_DOC_QA_DIR/lmcache_result.json" "lmcache"
+run_long_doc_qa "$ENGINE_PORT" "$LONG_DOC_QA_DIR/lmcache_result.json" "lmcache"
 
 # Compare
 echo "============================================"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test LMCache server restart recovery: vLLM workers should re-register
+# Test LMCache server restart recovery: engine workers should re-register
 # their KV caches with the new LMCache server (driven by the heartbeat
 # thread's recover callback) and resume successful stores.
 #
@@ -17,18 +17,12 @@
 # run2 is the absolute count for the post-restart benchmark only.
 set -o pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-
-source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+COMMON_WORKLOAD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${COMMON_WORKLOAD_DIR}/../helpers.sh"
 
 # ── Configuration (inherited from run-single-test.sh) ─────────
-VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
-MODEL="${MODEL:-Qwen/Qwen3-14B}"
-BUILD_ID="${BUILD_ID:-local_$$}"
-RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
 
@@ -49,7 +43,7 @@ PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 
 echo "=== Restart Recovery Test ==="
 echo "Model: $MODEL"
-echo "vLLM URL: http://localhost:${VLLM_PORT}"
+echo "${ENGINE_NAME} URL: http://localhost:${ENGINE_PORT}"
 echo "LMCache HTTP URL: http://localhost:${LMCACHE_HTTP_PORT}"
 echo "Bench: ${NUM_REQUESTS} requests x ${REQUEST_LEN} tokens"
 echo "Recovery timeout: ${RECOVER_TIMEOUT}s"
@@ -65,7 +59,7 @@ run_bench_round() {
     echo "--- bench round: $label ---"
 
     if ! lmcache bench engine \
-        --engine-url "http://localhost:${VLLM_PORT}" \
+        --engine-url "http://localhost:${ENGINE_PORT}" \
         --lmcache-url "http://localhost:${LMCACHE_HTTP_PORT}" \
         --workload random-prefill \
         --rp-num-requests "$NUM_REQUESTS" \
@@ -143,7 +137,7 @@ wait_for_lmcache_http() {
 
 wait_for_worker_reregister() {
     # Poll /status until cache_context_meta has at least one entry,
-    # which proves the vLLM worker re-registered with the new server.
+    # which proves an engine worker re-registered with the new server.
     local deadline=$(( $(date +%s) + RECOVER_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local count
@@ -182,7 +176,12 @@ restart_lmcache() {
     sleep 60
 
     echo "Relaunching LMCache on port ${LMCACHE_PORT} / HTTP ${LMCACHE_HTTP_PORT}..."
-    lmcache server \
+    local -a server_environment=()
+    if [[ "${ENGINE_USE_ALL_DEVICES:-false}" != "true" ]]; then
+        server_environment+=("${DEVICE_AFFINITY_VAR}=${GPU_FOR_ENGINE}")
+    fi
+    engine_add_lmcache_server_environment server_environment
+    env "${server_environment[@]}" lmcache server \
         --transport "$LMCACHE_REQUEST_TRANSPORT" \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
@@ -237,8 +236,8 @@ fi
 if ! wait_for_worker_reregister; then
     echo "--- new lmcache log (last 80 lines) ---"
     tail -80 "/tmp/build_${BUILD_ID}_lmcache_restart.log" 2>/dev/null || true
-    echo "--- vllm log (last 80 lines) ---"
-    tail -80 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
+    echo "--- ${ENGINE_NAME} log (last 80 lines) ---"
+    tail -80 "$ENGINE_LOG_FILE" 2>/dev/null || true
     exit 1
 fi
 
@@ -249,8 +248,8 @@ echo "=== Round 2: bench against restarted server ==="
 echo "============================================"
 if ! run_bench_round "round2" "42"; then
     echo "FAIL: round 2 bench failed"
-    echo "--- vllm log (last 80 lines) ---"
-    tail -80 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
+    echo "--- ${ENGINE_NAME} log (last 80 lines) ---"
+    tail -80 "$ENGINE_LOG_FILE" 2>/dev/null || true
     exit 1
 fi
 
