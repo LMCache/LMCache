@@ -70,6 +70,7 @@ from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
     allocation: tuple[int, str, list[BlockAllocationRecord]] | None = None
+    clear_force: bool | None = None
 
 
 class _TestDeviceIPCWrapper(DeviceIPCWrapper):
@@ -154,6 +155,10 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         @request_handler(RequestType.PING, HandlerType.BLOCKING)
         def ping(self, instance_id: int | None) -> bool:
             return instance_id == 7
+
+        @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
+        def clear(self, force: bool = False) -> None:
+            calls.clear_force = force
 
         @request_handler(RequestType.NOOP)
         def debug(self) -> str:
@@ -250,6 +255,14 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     )
     assert store_codec.response_type == tuple[bytes, bool]
 
+    clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
+    assert clear_codec.request_type is RequestType.CLEAR
+    assert clear_codec.payload_types == (bool,)
+    assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (False,)
+    assert clear_codec.request_decoder(
+        clear_codec.request_encoder((), {"force": True})
+    ) == (True,)
+
     registration_codec = registry.by_full_name[
         "lmcache.mp.EngineDrivenService.RegisterKvCacheEngineDrivenContext"
     ]
@@ -313,7 +326,6 @@ import importlib.abc
 import sys
 
 banned = (
-    "lmcache.v1.multiprocess.mq",
     "lmcache.v1.multiprocess.transport.zmq_impl",
 )
 
@@ -494,6 +506,10 @@ def test_generated_grpc_services_communicate_end_to_end(
     ).result(5)
     assert registration == RegisterEngineDrivenContextResponse("shared-memory", 4096)
     assert client.ping(7).result(5) is True
+    assert client.clear().result(5) is None
+    assert calls.clear_force is False
+    assert client.clear(force=True).result(5) is None
+    assert calls.clear_force is True
     assert client.noop().result(5) == "ok"
 
     records = [BlockAllocationRecord("request", [4], [5, 6])]

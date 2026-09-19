@@ -6,12 +6,12 @@ from typing import Any
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_response_class,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
 
 
 class ZmqMultiprocessClient(RequestClient):
@@ -180,9 +180,9 @@ class ZmqMultiprocessClient(RequestClient):
         """Commit an engine-driven retrieve."""
         return self._call(RequestType.COMMIT_RETRIEVE, key, instance_id)
 
-    def clear(self) -> MessagingFuture[Any]:
+    def clear(self, force: bool = False) -> MessagingFuture[Any]:
         """Clear all server caches."""
-        return self._call(RequestType.CLEAR)
+        return self._call(RequestType.CLEAR, force)
 
     def get_chunk_size(self) -> MessagingFuture[Any]:
         """Return the server chunk size."""

@@ -85,6 +85,14 @@ def test_every_request_type_has_a_definition() -> None:
     assert set(definitions) == set(RequestType)
 
 
+def test_clear_protocol_carries_optional_force_flag() -> None:
+    definitions = initialize_protocols()
+    definition = definitions[RequestType.CLEAR]
+
+    assert definition.payload_classes == [bool]
+    assert definition.response_class is None
+
+
 def test_blend_requests_are_registered() -> None:
     definitions = initialize_protocols()
     for name in CB_REQUESTS:
