@@ -86,7 +86,10 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ] \
         export LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS=0
         export SEPARATE_OBJECT_GROUPS=true
         export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-16}"
-        export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+        # Keep the configured sequence length within the deterministic
+        # 16-block test pool. 4096 comfortably covers GSM8K while leaving the
+        # pool small enough to force the intended eviction pressure.
+        export MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
         export NUM_CONCURRENT="${NUM_CONCURRENT:-8}"
         export LIMIT="${LIMIT:-40}"
         export EXPECT_LAZY_OFFLOAD_PRESSURE=true
