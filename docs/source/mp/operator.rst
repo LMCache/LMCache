@@ -1865,37 +1865,6 @@ Development
     make test         # Run unit tests
     make lint         # Run golangci-lint
 
-The Helm chart is the deployment template source for both release formats:
-
-.. code-block:: bash
-
-    make build-installer IMG=lmcache/lmcache-operator:v0.5.5
-    make package-chart VERSION=v0.5.5
-
-These commands create ``dist/install.yaml`` and
-``dist/lmcache-operator-chart-0.5.5.tgz``. The release and nightly workflows
-push the chart to
-``oci://registry-1.docker.io/lmcache/lmcache-operator-chart`` and attach both
-artifacts to GitHub releases.
-Release workflows normalize Operator versions to chart SemVer: ``v0.4.8rc1`` becomes
-``0.4.8-rc.1`` and ``nightly-2026-09-19`` becomes
-``0.0.0-nightly.20260919``. ``appVersion`` keeps the original image version.
-
-Before publishing, create the Docker Hub repository
-``lmcache/lmcache-operator-chart`` and make it public for anonymous Helm pulls.
-Both workflows reuse the GitHub variable ``DOCKERHUB_USERNAME`` and secret
-``DOCKERHUB_TOKEN`` used for image publishing. That credential must also have
-write access to the chart repository; no additional publishing secret is
-required.
-
-For local packaging, ``CHART_VERSION`` defaults to ``VERSION`` without its
-leading ``v``. Pass an explicit SemVer for compact prerelease or nightly tags:
-
-.. code-block:: bash
-
-    make package-chart VERSION=v0.4.8rc1 CHART_VERSION=0.4.8-rc.1
-    make package-chart VERSION=nightly-2026-09-19 CHART_VERSION=0.0.0-nightly.20260919
-
 Pushing a custom operator image:
 
 .. code-block:: bash
