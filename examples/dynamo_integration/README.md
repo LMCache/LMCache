@@ -36,15 +36,15 @@ Start NATS and etcd on the host. From the root of the LMCache repository, run:
 docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
 ```
 
-From the same directory on the host, start the Dynamo container. Replace
-`my-tag` with the tag of a `vllm-runtime` image that includes LMCache:
+From the same directory on the host, start the Dynamo container. The
+`vllm-runtime:1.4.2` image includes LMCache 0.5.2:
 
 ```bash
 docker run --rm -it --name dynamo-lmcache \
     --gpus all --network host --ipc host \
     --ulimit memlock=-1 \
     -v "$PWD:/workspace/LMCache:ro" \
-    nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag bash
+    nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2 bash
 ```
 
 The container mounts your LMCache repository at `/workspace/LMCache` and

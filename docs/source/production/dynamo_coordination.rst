@@ -26,9 +26,9 @@ repository:
 
    docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
 
-We use ``Qwen/Qwen3-0.6B`` on a single GPU for this demo. From the same
-directory on the host, start the Dynamo container. Replace ``my-tag`` with
-the tag of a ``vllm-runtime`` image that includes LMCache:
+We use ``Qwen/Qwen3-0.6B`` on a single GPU for this demo. The
+``vllm-runtime:1.4.2`` image includes LMCache 0.5.2. From the same directory
+on the host, start the Dynamo container:
 
 .. code-block:: bash
 
@@ -36,7 +36,7 @@ the tag of a ``vllm-runtime`` image that includes LMCache:
        --gpus all --network host --ipc host \
        --ulimit memlock=-1 \
        -v "$PWD:/workspace/LMCache:ro" \
-       nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag bash
+       nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2 bash
 
 This opens a shell in the container. For manual startup, open two more
 terminals on the host and enter the same container in each:
