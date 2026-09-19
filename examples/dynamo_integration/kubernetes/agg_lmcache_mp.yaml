@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -29,7 +29,7 @@ spec:
             ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: PYTHONHASHSEED

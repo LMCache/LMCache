@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -32,7 +32,7 @@ spec:
         # mp mode: CUDA IPC between vLLM and the LMCache process
         hostIPC: true
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: PYTHONHASHSEED
@@ -71,7 +71,7 @@ spec:
       extraPodSpec:
         hostIPC: true
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: PYTHONHASHSEED

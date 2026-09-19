@@ -70,12 +70,11 @@ LMCache operator reconciles the CR into:
 It must live in the **same namespace** as the workers (`default`) so the
 connection ConfigMap is created where the workers can mount it.
 
-**Version pinning**: the server's bundled lmcache must be wire-compatible with
-the worker's. The worker image `vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3`
-ships lmcache `0.4.4` (vLLM `0.20.1`), and the recipe pairs it with the
-guide-validated server build `nightly-2026-04-25` (lmcache `0.4.5.dev31`, a
-pre-stable build wire-compatible with that worker). Replace `my-tag` in each
-manifest accordingly.
+The manifests use `lmcache/standalone:v0.5.2` for the cache server and
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2` for Dynamo. Both include
+LMCache 0.5.2. The server image supports `linux/amd64`, so use x86_64 GPU
+nodes. The engine sets `isolatedIPC: false` to share the host's `/dev/shm`
+with the workers, as required by this LMCache version.
 
 ### Deploy
 
@@ -91,7 +90,3 @@ kubectl apply -n default -f examples/dynamo_integration/kubernetes/disagg_lmcach
 
 See the [Dynamo integration guide](../../docs/source/production/dynamo_coordination.rst)
 for cluster prerequisites, manifest settings, and verification commands.
-
-> The Kubernetes manifests pin the worker image to `my-tag` and the
-> `LMCacheEngine` image separately; keep the two wire-compatible (see the
-> version pairing above).

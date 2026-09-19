@@ -86,8 +86,8 @@ Kubernetes
 The `Kubernetes manifests
 <https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/kubernetes>`_
 deploy the same model with Dynamo's vLLM backend. After preparing the
-cluster and image tags described below, run these two commands from the
-root of the LMCache repository:
+cluster as described below, run these two commands from the root of the
+LMCache repository:
 
 .. code-block:: bash
 
@@ -98,22 +98,17 @@ The first command creates the shared cache service. The second creates a
 Dynamo frontend and one vLLM worker. The LMCache operator generates the
 connection ConfigMap that the worker mounts at startup.
 
-Prepare the cluster and manifests
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Prepare the cluster
+~~~~~~~~~~~~~~~~~~~
 
-Use a GPU cluster with the Dynamo platform and
-:doc:`LMCache operator </mp/operator>` installed. These manifests require
-a Dynamo operator that serves ``nvidia.com/v1alpha1``. The aggregated demo
-needs one GPU.
+Use a cluster with x86_64 NVIDIA GPU nodes. Install the Dynamo platform
+and :doc:`LMCache operator </mp/operator>` before applying these manifests.
+The Dynamo operator must serve ``nvidia.com/v1alpha1``. The aggregated
+demo needs one GPU.
 
-Replace ``my-tag`` in each manifest before applying it:
-
-- In ``lmcache_engine.yaml``, choose a tag for ``lmcache/vllm-openai``.
-- In the Dynamo manifest, set the
-  ``nvcr.io/nvidia/ai-dynamo/vllm-runtime`` tag for the frontend and every
-  worker.
-
-Use server and worker images with matching LMCache versions.
+The manifests use ``lmcache/standalone:v0.5.2`` for the cache server and
+``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2`` for Dynamo. Both include
+LMCache 0.5.2. The server image supports ``linux/amd64``.
 
 Both Dynamo components reference ``hf-token-secret``. Set ``HF_TOKEN`` in
 your shell and create the Secret before applying the Dynamo manifest:
@@ -138,6 +133,9 @@ How the YAML connects the services
 The operator creates a server DaemonSet, a Service, and the
 ``lmcache-mp-connection`` ConfigMap. Workers use the server on their own
 node, which lets multiple workers on that node share the CPU cache.
+The engine sets ``isolatedIPC: false`` to share the host's ``/dev/shm``
+with the workers, as required by LMCache 0.5.2. The workers use
+``hostIPC: true`` to access the same shared memory.
 
 The `aggregated Dynamo manifest
 <https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml>`_
