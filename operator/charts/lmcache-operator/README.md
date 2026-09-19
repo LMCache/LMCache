@@ -1,6 +1,6 @@
 # LMCache Operator
 
-Requires Helm 3.17+ and cert-manager installed and ready.
+LMCache Operator automates the deployment and lifecycle management of LMCache cache servers on Kubernetes.
 
 ```sh
 helm upgrade --install lmcache-operator \
@@ -8,8 +8,3 @@ helm upgrade --install lmcache-operator \
   --version "<chart-version>" \
   --namespace lmcache-operator-system --create-namespace --wait
 ```
-
-Use `-f operator-values.yaml` to customize the settings in `values.yaml`.
-The operator watches all namespaces; install only one release per cluster.
-
-For development and publishing, see the [operator development guide](../../README.md#development).
