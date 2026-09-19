@@ -110,16 +110,8 @@ The manifests use ``lmcache/standalone:v0.5.2`` for the cache server and
 ``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2`` for Dynamo. Both include
 LMCache 0.5.2. The server image supports ``linux/amd64``.
 
-Both Dynamo components reference ``hf-token-secret``. Set ``HF_TOKEN`` in
-your shell and create the Secret before applying the Dynamo manifest:
-
-.. code-block:: bash
-
-   kubectl create secret generic hf-token-secret -n default \
-       --from-literal=HF_TOKEN="$HF_TOKEN"
-
 The examples use the ``default`` namespace. If you change it, update both
-the manifests and commands so the Secret, cache engine, and Dynamo
+the manifests and commands so the cache engine and Dynamo
 deployment stay in the same namespace.
 
 How the YAML connects the services

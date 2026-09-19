@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      envFromSecret: hf-token-secret
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
     VllmDecodeWorker:
-      envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
       sharedMemory:
