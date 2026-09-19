@@ -10,8 +10,17 @@ requests.
 Local
 -----
 
-If you are deploying Dynamo locally, start NATS and etcd first. On the
-host, run the included Compose file from the root of the LMCache repository:
+If you are deploying Dynamo locally, start NATS and etcd first. The demo
+runs commands in two places:
+
+- On the host, use ``docker compose`` to start NATS and etcd, then
+  ``docker run`` to start the Dynamo container.
+- Inside the Dynamo ``vllm-runtime`` Docker container, run the LMCache
+  server, Dynamo frontend, and vLLM worker. LMCache must already be
+  installed in the container.
+
+On the host, run the included Compose file from the root of the LMCache
+repository:
 
 .. code-block:: bash
 

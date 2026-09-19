@@ -22,6 +22,14 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 
 ## Local
 
+Run the commands in these two locations:
+
+- On the host, use `docker compose` to start NATS and etcd, then
+  `docker run` to start the Dynamo container.
+- Inside the Dynamo `vllm-runtime` Docker container, run the LMCache
+  server, Dynamo frontend, and vLLM workers. LMCache must already be
+  installed in the container.
+
 Start NATS and etcd on the host. From the root of the LMCache repository, run:
 
 ```bash
