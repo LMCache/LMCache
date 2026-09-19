@@ -17,12 +17,26 @@ host, run the included Compose file from the root of the LMCache repository:
 
    docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
 
-We use ``Qwen/Qwen3-0.6B`` on a single GPU for this demo. Run the commands
-below inside a Dynamo ``vllm-runtime`` container with LMCache installed.
-Give the container GPU access and use ``--network host`` so it can reach
-NATS and etcd.
+We use ``Qwen/Qwen3-0.6B`` on a single GPU for this demo. From the same
+directory on the host, start the Dynamo container. Replace ``my-tag`` with
+the tag of a ``vllm-runtime`` image that includes LMCache:
 
-Open three terminals in the same container and start one process in each:
+.. code-block:: bash
+
+   docker run --rm -it --name dynamo-lmcache \
+       --gpus all --network host --ipc host \
+       --ulimit memlock=-1 \
+       -v "$PWD:/workspace/LMCache:ro" \
+       nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag bash
+
+This opens a shell in the container. For manual startup, open two more
+terminals on the host and enter the same container in each:
+
+.. code-block:: bash
+
+   docker exec -it dynamo-lmcache bash
+
+In the three container shells, start one process in each:
 
 .. code-block:: bash
 
@@ -65,14 +79,15 @@ inside the runtime container. NATS and etcd must already be running. Stop
 any manually launched LMCache and Dynamo processes before switching to a
 script.
 
-The scripts use Dynamo's launch helpers, so copy them into the Dynamo
-checkout as shown below. Replace the paths with your checkout locations:
+The container mounts your LMCache repository at ``/workspace/LMCache``
+and includes Dynamo's launch helpers under ``/workspace/examples``.
+Inside the container, copy the scripts into Dynamo's launch directory:
 
 .. code-block:: bash
 
-   cp /path/to/LMCache/examples/dynamo_integration/local/*_lmcache_mp.sh \
-       /path/to/dynamo/examples/backends/vllm/launch/
-   cd /path/to/dynamo/examples/backends/vllm
+   cp /workspace/LMCache/examples/dynamo_integration/local/*_lmcache_mp.sh \
+       /workspace/examples/backends/vllm/launch/
+   cd /workspace/examples/backends/vllm
 
 Choose one mode:
 

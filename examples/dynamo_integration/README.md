@@ -28,20 +28,25 @@ Start NATS and etcd on the host. From the root of the LMCache repository, run:
 docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
 ```
 
-Run the inference processes inside a prepared Dynamo `vllm-runtime` container
-with GPU access and compatible LMCache and vLLM versions. The container must
-be able to reach the host's NATS and etcd services, for example through
-Docker's `--network host` option.
-
-The launch scripts need Dynamo's `examples/common/gpu_utils.sh` and
-`examples/common/launch_utils.sh` helpers. Inside the runtime container, copy
-the scripts into the Dynamo checkout so their relative helper paths resolve.
-Replace the paths below with your checkout locations:
+From the same directory on the host, start the Dynamo container. Replace
+`my-tag` with the tag of a `vllm-runtime` image that includes LMCache:
 
 ```bash
-cp /path/to/LMCache/examples/dynamo_integration/local/*_lmcache_mp.sh \
-    /path/to/dynamo/examples/backends/vllm/launch/
-cd /path/to/dynamo/examples/backends/vllm
+docker run --rm -it --name dynamo-lmcache \
+    --gpus all --network host --ipc host \
+    --ulimit memlock=-1 \
+    -v "$PWD:/workspace/LMCache:ro" \
+    nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag bash
+```
+
+The container mounts your LMCache repository at `/workspace/LMCache` and
+includes Dynamo's launch helpers under `/workspace/examples`. In the
+container shell, copy the scripts into Dynamo's launch directory:
+
+```bash
+cp /workspace/LMCache/examples/dynamo_integration/local/*_lmcache_mp.sh \
+    /workspace/examples/backends/vllm/launch/
+cd /workspace/examples/backends/vllm
 ```
 
 For aggregated serving on one GPU:
