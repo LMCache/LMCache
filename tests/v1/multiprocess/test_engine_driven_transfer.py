@@ -2,6 +2,7 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
@@ -389,7 +390,7 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     )
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.devices.cpu  # noqa: F401
 
     context = create_transfer_context(
         {"layer_0": torch.randn(2, 2)},
@@ -691,7 +692,7 @@ def test_create_transfer_context_env_var_overrides_default(
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory,
     # which is required by the lmcache-driven (handle) path.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.devices.cpu  # noqa: F401
 
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "lmcache_driven")
     context = create_transfer_context(
@@ -1188,6 +1189,12 @@ def stub_lmcache_native() -> Any:
     module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]
         "PeriodicEventNotifier", (), {}
     )
+
+    class TransferDirection(IntEnum):
+        H2D = 0
+        D2H = 1
+
+    module.TransferDirection = TransferDirection  # type: ignore[attr-defined]
     with patch.dict(
         sys.modules,
         {
