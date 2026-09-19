@@ -10,6 +10,8 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.query import QueryCommand
+from lmcache.cli.commands.query._request import Request
+import lmcache.cli.commands.query._request as request_module
 
 
 def _engine_metric_map(
@@ -242,3 +244,74 @@ class TestQueryCommandExecute:
         err = capsys.readouterr().err
         assert "Unknown documents" in err
         assert "unknown_corpus" in err
+
+
+class TestQueryRequestFallback:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("POST failed (HTTP 401): unauthorized"),
+            RuntimeError("POST failed (HTTP 500): server error"),
+            RuntimeError("POST failed: timed out"),
+        ],
+    )
+    def test_send_request_does_not_retry_noncompatibility_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        error: RuntimeError,
+    ) -> None:
+        """Propagate genuine completion failures without sending a chat retry."""
+        calls: list[bool] = []
+
+        def fail_stream(
+            _url: str,
+            _body: dict[str, object],
+            _timeout: float,
+            *,
+            chat: bool,
+            max_tokens: int,
+        ) -> dict[str, object]:
+            calls.append(chat)
+            raise error
+
+        monkeypatch.setattr(request_module, "_stream", fail_stream)
+        request = Request("http://engine.test", "model", 1, 1.0)
+
+        with pytest.raises(RuntimeError, match="POST failed"):
+            request.send_request("prompt")
+
+        assert calls == [False]
+
+    @pytest.mark.parametrize("status", [404, 405])
+    def test_send_request_retries_when_completions_endpoint_is_unsupported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        status: int,
+    ) -> None:
+        """Retry via chat only when the completions endpoint is unsupported."""
+        calls: list[bool] = []
+
+        def stream(
+            _url: str,
+            _body: dict[str, object],
+            _timeout: float,
+            *,
+            chat: bool,
+            max_tokens: int,
+        ) -> dict[str, object]:
+            calls.append(chat)
+            if not chat:
+                raise RuntimeError(f"POST failed (HTTP {status}): unsupported")
+            return {
+                "answer": "response",
+                "prompt_tokens": 1,
+                "output_tokens": 1,
+            }
+
+        monkeypatch.setattr(request_module, "_stream", stream)
+        request = Request("http://engine.test", "model", 1, 1.0)
+
+        answer, _ = request.send_request("prompt")
+
+        assert answer == "response"
+        assert calls == [False, True]
