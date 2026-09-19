@@ -44,7 +44,7 @@ In the three container shells, start one process in each:
 
 .. code-block:: bash
 
-   # Terminal 1: start the LMCache server.
+   # Terminal 1: start the LMCache server with 16 GiB of CPU cache.
    lmcache server --l1-size-gb 16 --eviction-policy LRU \
        --port 5555 --http-port 8080
 
