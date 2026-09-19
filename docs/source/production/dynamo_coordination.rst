@@ -10,8 +10,8 @@ requests.
 Local
 -----
 
-If you are deploying Dynamo locally, start NATS and etcd first. Run the
-included Compose file from the LMCache checkout root on the host:
+If you are deploying Dynamo locally, start NATS and etcd first. On the
+host, run the included Compose file from the root of the LMCache repository:
 
 .. code-block:: bash
 
@@ -134,7 +134,7 @@ The `Kubernetes manifests
 <https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/kubernetes>`_
 deploy the same model with Dynamo's vLLM backend. After preparing the
 cluster and image tags described below, run these two commands from the
-LMCache checkout root:
+root of the LMCache repository:
 
 .. code-block:: bash
 

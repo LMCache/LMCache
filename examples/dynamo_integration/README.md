@@ -22,7 +22,7 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 
 ## Local
 
-Start NATS and etcd on the host, from the LMCache checkout root:
+Start NATS and etcd on the host. From the root of the LMCache repository, run:
 
 ```bash
 docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
@@ -90,7 +90,7 @@ manifest accordingly.
 The `kubernetes/` manifests are applied with `kubectl` against a cluster that
 already has the Dynamo platform and the LMCache operator installed. Apply the
 `LMCacheEngine` first, then one of the worker manifests. Run these commands
-from the LMCache checkout root:
+from the root of the LMCache repository:
 
 ```bash
 kubectl apply -n default -f examples/dynamo_integration/kubernetes/lmcache_engine.yaml
