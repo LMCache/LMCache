@@ -25,7 +25,13 @@ Configuration
 -------------
 
 Create two configuration files for the P2P sharing setup.
- 
+
+Async lookup submission and polling no longer sleep once per request.
+The old ``extra_config.lookup_backoff_time`` option is deprecated and ignored;
+remove it from existing configurations. Idle polling backoff belongs in the
+serving engine, after an empty engine step, so pending lookups do not delay
+runnable requests. Older vLLM versions without an engine-level yield may poll
+more frequently and use more CPU while lookups are pending.
 
 **Instance 1 Configuration (example1.yaml)**:
 
@@ -50,9 +56,6 @@ Create two configuration files for the P2P sharing setup.
     controller_reply_url: "localhost:8400"
     lmcache_worker_ports: 8500
 
-    extra_config:
-      lookup_backoff_time: 0.001
-
 **Instance 2 Configuration (example2.yaml)**:
 
 .. code-block:: yaml
@@ -75,9 +78,6 @@ Create two configuration files for the P2P sharing setup.
     controller_pull_url: "localhost:8300"
     controller_reply_url: "localhost:8400"
     lmcache_worker_ports: 8501
-
-    extra_config:
-      lookup_backoff_time: 0.001
 
 Setup and Usage
 ---------------
@@ -234,4 +234,3 @@ Second instance metrics:
     Query round successful prompt count: 50
 
 In this example, the warm-up round metric in long_doc_qa is used because no existing KV cache is reused within an instance to benefit solely from P2P sharing. With LMCache P2P sharing enabled, the time to first token (TTFT) is reduced by 54.7%, from 2.286 s to 1.036 s, with a 63.6% reduction in total inference time (37.957 s → 13.814 s).
-
