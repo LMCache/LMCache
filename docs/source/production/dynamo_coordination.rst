@@ -116,15 +116,11 @@ Aggregated serving
 
 ``agg_lmcache_mp.yaml`` defines a ``DynamoGraphDeployment`` with a frontend
 and one vLLM worker. The worker serves ``Qwen/Qwen3-0.6B`` on one GPU and
-handles both prefill and decode. Both containers use
-``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2``, which includes the same
-LMCache 0.5.2 version as the cache server.
+handles both prefill and decode.
 
 The worker mounts ``lmcache-mp-connection`` at ``/etc/lmcache`` and reads
 ``kv-transfer-config.json`` through ``--kv-transfer-config``. This sets up
 ``LMCacheMPConnector`` to connect to the server on its node.
-``hostIPC: true`` and ``sharedMemory.disabled: true`` let the worker use
-the same shared memory as the server.
 
 .. literalinclude:: ../../../examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml
    :language: yaml
@@ -139,22 +135,15 @@ Apply the aggregated deployment:
 Disaggregated serving
 ~~~~~~~~~~~~~~~~~~~~~
 
-``disagg_lmcache_mp.yaml`` defines a ``DynamoGraphDeployment`` with a
-frontend and separate prefill and decode workers. Each worker uses one
-GPU, with ``--disaggregation-mode`` set to ``prefill`` or ``decode``.
-Both workers use the same image and connection ConfigMap as the
-aggregated example and connect to the LMCache server created above.
-
-Use a cluster with a single GPU node and at least two GPUs so both
-workers connect to the same server. The manifest does not force worker
-co-location or configure cache sharing between nodes.
+``disagg_lmcache_mp.yaml`` starts a frontend and separate prefill and
+decode workers. Use a cluster with one GPU node and at least two GPUs.
+Each worker uses one GPU and connects to the same LMCache server.
 
 .. literalinclude:: ../../../examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml
    :language: yaml
    :caption: disagg_lmcache_mp.yaml
 
-To use disaggregated serving, apply this manifest instead of the
-aggregated deployment:
+For disaggregated serving, use this manifest in place of the aggregated one:
 
 .. code-block:: bash
 
