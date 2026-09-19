@@ -701,6 +701,14 @@ class RustRawBlockBackend(StoragePluginInterface):
             raise RuntimeError("RustRawBlockBackend requires local_cpu_backend")
         return self.local_cpu_backend
 
+    def io_path_stats(self) -> dict[str, int]:
+        """Return a snapshot of low-level I/O path counters."""
+        return self._core.io_path_stats()
+
+    def reset_io_path_stats(self) -> None:
+        """Reset all low-level I/O path counters."""
+        self._core.reset_io_path_stats()
+
     def close(self) -> None:
         deadline = time.monotonic() + 10.0
         while True:
