@@ -8,6 +8,7 @@ Configuration for distributed storage manager
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 import argparse
+import math
 import os
 
 # First Party
@@ -361,9 +362,14 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
     """
-    if config.prefetch_load_timeout is not None and config.prefetch_load_timeout <= 0:
+    if config.prefetch_load_timeout is not None and not (
+        math.isfinite(config.prefetch_load_timeout) and config.prefetch_load_timeout > 0
+    ):
+        # NaN compares false under every ordering and ``inf > 0`` is true, so
+        # the check is written as "must be finite and positive" rather than
+        # "must not be <= 0".
         raise ValueError(
-            "prefetch_load_timeout must be a positive number of seconds "
+            "prefetch_load_timeout must be a finite positive number of seconds "
             f"or None to disable (got {config.prefetch_load_timeout})"
         )
 
