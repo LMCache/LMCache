@@ -15,10 +15,10 @@ _path_filter_xpu_should_skip() {
         .buildkite/k3_tests/*/*)
             return 0
             ;;
-        tests/v1/platform/base/*|tests/v1/platform/xpu/*|tests/v1/platform/devices/xpu/*)
+        tests/v1/platform/base/*|tests/v1/platform/devices/xpu/*)
             return 1
             ;;
-        lmcache/v1/platform/base/*|lmcache/v1/platform/xpu/*)
+        lmcache/v1/platform/base/*)
             return 1
             ;;
         lmcache/v1/platform/devices/__init__.py|lmcache/v1/platform/devices/xpu/*)

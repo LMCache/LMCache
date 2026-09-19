@@ -15,13 +15,13 @@ _path_filter_amd_should_skip() {
         .buildkite/k3_tests/*/*)
             return 0
             ;;
-        tests/v1/platform/base/*|tests/v1/platform/cuda/*|tests/v1/platform/rocm/*)
+        tests/v1/platform/base/*)
             return 1
             ;;
         tests/v1/platform/devices/cuda/*|tests/v1/platform/devices/rocm/*)
             return 1
             ;;
-        lmcache/v1/platform/base/*|lmcache/v1/platform/cuda/*|lmcache/v1/platform/rocm/*)
+        lmcache/v1/platform/base/*|lmcache/v1/platform/cuda/*)
             return 1
             ;;
         lmcache/v1/platform/devices/__init__.py|lmcache/v1/platform/devices/cuda/*|lmcache/v1/platform/devices/rocm/*)
