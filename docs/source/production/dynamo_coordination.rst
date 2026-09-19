@@ -14,9 +14,23 @@ We recommend starting with a single NVIDIA GPU and Dynamo's
 ``vllm-runtime`` container. The commands below use vLLM to serve
 ``Qwen/Qwen3-0.6B``.
 
-Before you start, make sure NATS and etcd are running and the container has
-compatible LMCache and vLLM versions. Then open three terminal sessions in
-the same container and run one command in each:
+Start NATS and etcd first if they are not already running. Run this command
+from the Dynamo checkout root on the host:
+
+.. code-block:: bash
+
+   docker compose -f dev/docker-compose.yml up -d
+
+Use a runtime image containing an LMCache build compatible with its vLLM
+version; see the :doc:`compatibility table </getting_started/compatibility>`.
+Give the container access to the GPU and make sure it can reach NATS and
+etcd, for example through Docker's ``--network host`` option. Leave
+``PROMETHEUS_MULTIPROC_DIR`` unset so Dynamo can manage it. This setup is
+needed whether you start the processes manually or use the launch scripts
+below.
+
+To start the processes manually, open three terminal sessions in the same
+container and run one command in each:
 
 .. code-block:: bash
 
@@ -57,28 +71,17 @@ Before starting the worker, confirm that LMCache is ready:
 
    curl -fsS http://localhost:8080/healthcheck
 
-If NATS and etcd are not running, start them from the Dynamo checkout root
-on the host before launching the processes:
-
-.. code-block:: bash
-
-   docker compose -f dev/docker-compose.yml up -d
-
-The runtime container must be able to reach these services, for example
-through Docker's ``--network host`` option. Use a runtime image containing
-an LMCache build compatible with its vLLM version; see the
-:doc:`compatibility table </getting_started/compatibility>`. Leave
-``PROMETHEUS_MULTIPROC_DIR`` unset so Dynamo can manage it.
-
 Use the launch scripts
 ~~~~~~~~~~~~~~~~~~~~~~
 
-The `launch scripts
+Once the container is ready and NATS and etcd are running, you can use the
+`launch scripts
 <https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/launch>`_
-start the same components, wait for LMCache to become healthy, and stop the
-processes when you press ``Ctrl+C``. They also set a GPU KV cache memory
-budget for the example model. Stop any manually launched processes before
-running a script to free their ports and GPU memory.
+to start LMCache, the Dynamo frontend, and the vLLM workers together. The
+scripts wait for LMCache to become healthy and stop the processes when you
+press ``Ctrl+C``. They also set a GPU KV cache memory budget for the example
+model. Stop any manually launched processes before running a script to
+free their ports and GPU memory.
 
 Copy the scripts into the Dynamo checkout inside the runtime container.
 Replace the paths below with the locations of your checkouts:
