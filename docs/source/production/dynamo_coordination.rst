@@ -36,7 +36,6 @@ From the same directory, start the Dynamo container:
    docker run --rm -it --name dynamo-lmcache \
        --gpus all --network host --ipc host \
        --ulimit memlock=-1 \
-       -v "$PWD:/workspace/LMCache:ro" \
        nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2 bash
 
 This opens a shell in the container, where LMCache is already installed.
