@@ -1,11 +1,11 @@
 Dynamo Integration
 ==================
 
-`NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ is an open-source
-framework for distributed LLM inference that coordinates request routing
-and prefill/decode serving across GPUs and nodes. It can use LMCache as a
-KV cache layer for vLLM workers to offload cache beyond GPU memory and
-reuse it across requests.
+`NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ is an open-source,
+datacenter-scale inference stack. It orchestrates inference engines such
+as vLLM, SGLang, and TensorRT-LLM across multiple nodes. LMCache provides a
+KV cache layer for Dynamo's vLLM workers, allowing them to offload cache
+beyond GPU memory and reuse it across requests.
 
 Local
 -----
