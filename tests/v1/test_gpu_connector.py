@@ -13,6 +13,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.gpu_connector.gpu_connectors import (
     SGLangGPUConnector,
+    SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemGPUConnectorV3,
@@ -925,3 +926,100 @@ def _create_metadata(use_mla, kv_caches, engine_kv_format):
         engine_kv_formats=[engine_kv_format] * len(kv_list),
     )
     return metadata
+
+
+def test_sglang_layerwise_connector_direct_roundtrip():
+    """The direct layerwise path round-trips 3-D per-layer SGLang caches."""
+    num_blocks = 64
+    block_size = 16
+    num_layers = 4
+    num_heads = 8
+    head_size = 128
+    num_tokens = 512
+    chunk_size = 256
+    dtype = torch.bfloat16
+
+    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    gpu_kv_src = generate_sglang_kv_cache_paged_list_tensors(
+        num_layers=num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
+        head_size=head_size,
+        use_mla=False,
+        device=torch_device_type,
+        dtype=dtype,
+    )
+    gpu_kv_dst = generate_sglang_kv_cache_paged_list_tensors(
+        num_layers=num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
+        head_size=head_size,
+        use_mla=False,
+        device=torch_device_type,
+        dtype=dtype,
+    )
+    slot_mapping = torch.randperm(
+        num_blocks * block_size,
+        device=torch_device_type,
+        dtype=torch.int64,
+    )[:num_tokens]
+    starts = list(range(0, num_tokens, chunk_size))
+    ends = [min(start + chunk_size, num_tokens) for start in starts]
+
+    connector = SGLangLayerwiseGPUConnector(
+        num_heads * head_size,
+        num_layers,
+        use_gpu=False,
+        chunk_size=chunk_size,
+        dtype=dtype,
+        device=torch_device_type,
+    )
+    memory_objs = []
+    for _ in range(num_layers):
+        layer_objs = []
+        for start, end in zip(starts, ends, strict=False):
+            memory_obj = allocator.allocate(
+                connector.get_shape(end - start), dtype, MemoryFormat.KV_T2D
+            )
+            assert memory_obj is not None
+            layer_objs.append(memory_obj)
+        memory_objs.append(layer_objs)
+
+    gather = connector.batched_from_gpu(
+        memory_objs,
+        starts,
+        ends,
+        kvcaches=gpu_kv_src,
+        slot_mapping=slot_mapping,
+        sync=True,
+    )
+    for _ in range(num_layers + 1):
+        next(gather)
+    with pytest.raises(StopIteration):
+        next(gather)
+
+    scatter = connector.batched_to_gpu(
+        starts,
+        ends,
+        kvcaches=gpu_kv_dst,
+        slot_mapping=slot_mapping,
+        sync=True,
+    )
+    next(scatter)
+    for layer_objs in memory_objs:
+        scatter.send(layer_objs)
+    with pytest.raises(StopIteration):
+        next(scatter)
+
+    torch.cuda.synchronize()
+    check_sglang_paged_kv_cache_equal(
+        gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
+    )
+
+    for layer_objs in memory_objs:
+        for memory_obj in layer_objs:
+            allocator.free(memory_obj)
+    assert allocator.memcheck()
+    allocator.close()
