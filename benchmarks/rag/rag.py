@@ -342,10 +342,15 @@ class RAGManager:
         total_time = end_time - start_time
         thput = cnt / total_time
         logger.info(
-            f"Summary: {cnt} requests, average_ttft={avg_ttft} (second)\n"
-            f" average_tpot={avg_tpot} (second)\n"
-            f"throughput={thput} (req/s)\n"
-            f"average_quality={avg_quality}\n"
+            "Summary: %s requests, average_ttft=%s (second)\n"
+            " average_tpot=%s (second)\n"
+            "throughput=%s (req/s)\n"
+            "average_quality=%s\n",
+            cnt,
+            avg_ttft,
+            avg_tpot,
+            thput,
+            avg_quality,
         )
         return df
 
@@ -400,7 +405,7 @@ def run_rag(args):
 
     AsyncLoopWrapper.StopLoop()
 
-    logger.info(f"Finished benchmarking, dumping summary to {args.output}")
+    logger.info("Finished benchmarking, dumping summary to %s", args.output)
     summary = manager.summary(start_time, time.time())
     summary.to_csv(args.output, index=False)
 
