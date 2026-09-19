@@ -121,17 +121,19 @@ the ZMQ or gRPC request server selected by ``--transport``, registers handlers
 for every ``RequestType`` exposed by the loaded modules, and blocks in a
 keep-alive loop.
 
-**``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
-blend pipeline that enables non-prefix KV cache reuse (e.g. across
-document paragraphs) on the sparse-prefetch path. KV-cache registration
-rides the standard ``REGISTER_KV_CACHE``; the module adds only the CB RPCs
-(``CB_REGISTER_ROPE``, ``CB_UNREGISTER_ROPE``,
-``CB_RETRIEVE_PRE_COMPUTED``, ``CB_UNIFIED_LOOKUP``) and wraps
-``STORE`` to register chunk fingerprints, reusing the existing
-``LMCacheDrivenTransferModule`` and ``LookupModule``. Selected by passing
-``--engine-type blend`` to ``lmcache server``; requires
-``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto`` and
-refuses to load when it is ``engine_driven``.
+**``modules/blend/``** -- Package that defines ``BlendModule`` (in
+``modules/blend/module.py``, re-exported from the package's
+``__init__.py``), the paged-aware blend pipeline that enables non-prefix
+KV cache reuse (e.g. across document paragraphs) on the sparse-prefetch
+path. KV-cache registration rides the standard ``REGISTER_KV_CACHE``; the
+module adds only the CB RPCs (``CB_REGISTER_ROPE``,
+``CB_UNREGISTER_ROPE``, ``CB_RETRIEVE_PRE_COMPUTED``,
+``CB_UNIFIED_LOOKUP``) and wraps ``STORE`` to register chunk
+fingerprints, reusing the existing ``LMCacheDrivenTransferModule`` and
+``LookupModule``. Selected by passing ``--engine-type blend`` to
+``lmcache server``; requires ``--supported-transfer-mode`` to be
+``lmcache_driven`` or ``auto`` and refuses to load when it is
+``engine_driven``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
@@ -593,9 +595,10 @@ Key Source Files
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), and ``blend.py``
+       (``EngineDrivenTransferModule``), and the ``blend/`` package
        (``BlendModule``, the paged-aware blend pipeline selected by
-       ``--engine-type blend``).
+       ``--engine-type blend``; the public class is re-exported from
+       ``blend/__init__.py`` and lives in ``blend/module.py``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``
