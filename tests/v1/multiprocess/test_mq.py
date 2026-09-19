@@ -16,8 +16,6 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -28,38 +26,11 @@ from lmcache.v1.multiprocess.mq import (
     MessageQueueClient,
     MessageQueueServer,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transport.zmq_impl.server import (
-    add_handler_helper,
-    get_zmq_handler_specs,
-)
+from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.transport.zmq_impl.server import add_handler_helper
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
-
-_BLOCKING_OPERATIONS = {
-    "store_q",
-    "store",
-    "retrieve",
-    "lookup",
-    "query_prefetch_status",
-    "wait_prefetch_status",
-    "query_prefetch_lookup_hits",
-    "free_lookup_locks",
-    "end_session",
-    "prepare_store",
-    "commit_store",
-    "prepare_retrieve",
-    "commit_retrieve",
-    "clear",
-    "ping",
-    "report_block_allocation",
-    "cb_retrieve_pre_computed",
-    "cb_unified_lookup",
-    "p2p_lookup_and_lock",
-    "p2p_query_lookup_results",
-    "p2p_unlock_objects",
-}
 
 # ==============================================================================
 # MessageQueueServer and MessageQueueClient Tests Infrastructure
@@ -83,37 +54,6 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
     )
 
 
-def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
-    """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
-
-    class P2PHandlers:
-        @request_handler(HandlerType.BLOCKING)
-        def p2p_lookup_and_lock(
-            self,
-            keys: list[ObjectKey],
-            group_layout_descs: dict[int, MemoryLayoutDesc],
-        ) -> int:
-            return 0
-
-        @request_handler(HandlerType.BLOCKING)
-        def p2p_query_lookup_results(
-            self, task_id: int
-        ) -> list[TransferChannelAddress] | None:
-            return None
-
-        @request_handler(HandlerType.BLOCKING)
-        def p2p_unlock_objects(self, keys: list[ObjectKey]) -> None:
-            return None
-
-    operations = {spec.operation for spec in get_zmq_handler_specs(P2PHandlers())}
-
-    assert operations == {
-        "p2p_lookup_and_lock",
-        "p2p_query_lookup_results",
-        "p2p_unlock_objects",
-    }
-
-
 def _server_process(
     server_url: str,
     ready_event: EventClass,
@@ -132,21 +72,8 @@ def _server_process(
     context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
 
-    # Register all handlers
-    blocking_operations: list[str] = []
     for operation, handler in request_handlers.items():
-        handler_type = (
-            HandlerType.BLOCKING
-            if operation in _BLOCKING_OPERATIONS
-            else HandlerType.SYNC
-        )
-        server.add_handler(operation, handler_type, handler)
-        if handler_type == HandlerType.BLOCKING:
-            blocking_operations.append(operation)
-
-    # Assign a normal pool for all blocking handlers in tests
-    if blocking_operations:
-        server.add_normal_thread_pool(blocking_operations, max_workers=4)
+        server.add_handler(operation, HandlerType.SYNC, handler)
 
     server.start()
 

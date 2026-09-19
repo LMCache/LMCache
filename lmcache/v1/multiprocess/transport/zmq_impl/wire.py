@@ -11,9 +11,8 @@ import msgspec
 # First Party
 from lmcache.v1.multiprocess.rpc import RpcOperation
 
-# These values were emitted by RequestType before operation-name routing. Keep
-# this table frozen so current clients remain wire-compatible with old servers.
-# New operations intentionally use their string name and must not be added here.
+# RequestType emitted these IDs before operation-name routing. Keep the table
+# frozen; new operations use their string name and must not be added here.
 LEGACY_OPERATION_IDS = MappingProxyType(
     {
         "register_kv_cache": 1,
@@ -55,31 +54,13 @@ _LEGACY_ID_TO_OPERATION = {value: key for key, value in LEGACY_OPERATION_IDS.ite
 
 
 def encode_operation(operation: RpcOperation) -> bytes:
-    """Encode an operation using its legacy ID when one exists.
-
-    Args:
-        operation: Stable snake-case RPC name.
-
-    Returns:
-        Msgpack bytes containing a legacy integer or the operation string.
-    """
+    """Encode an operation as its legacy ID or stable string name."""
     wire_value: int | str = LEGACY_OPERATION_IDS.get(operation, operation)
     return msgspec.msgpack.encode(wire_value)
 
 
 def decode_operation(data: bytes) -> RpcOperation:
-    """Decode both legacy integer IDs and extensible operation names.
-
-    Args:
-        data: Msgpack-encoded operation identifier.
-
-    Returns:
-        Stable snake-case RPC name.
-
-    Raises:
-        ValueError: If a legacy integer ID is unknown.
-        TypeError: If the wire value is neither an integer nor a string.
-    """
+    """Decode a legacy integer ID or string operation name."""
     wire_value: Any = msgspec.msgpack.decode(data)
     if isinstance(wire_value, int):
         try:

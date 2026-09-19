@@ -25,15 +25,7 @@ class HandlerType(Enum):
 
 @dataclass(frozen=True)
 class RequestHandlerOptions:
-    """Describe how a transport-neutral request handler is executed.
-
-    Args:
-        operation: RPC operation handled by the method. ``None`` means infer
-            the operation from the decorated method name.
-        handler_type: Whether to run the method inline or on a worker.
-        requires_client_affinity: Whether requests from one client must use
-            the same worker.
-    """
+    """Scheduling metadata for a decorated request handler."""
 
     operation: RpcOperation | None
     handler_type: HandlerType
@@ -42,13 +34,7 @@ class RequestHandlerOptions:
 
 @dataclass(frozen=True)
 class BoundRequestHandler:
-    """Pair a bound module method with its resolved handler metadata.
-
-    Args:
-        operation: RPC operation implemented by the handler.
-        handler: Bound module method that handles the request.
-        options: Transport-neutral scheduling metadata for the method.
-    """
+    """A bound module method plus its resolved operation metadata."""
 
     operation: RpcOperation
     handler: Callable[..., Any]
@@ -61,24 +47,7 @@ def request_handler(
     operation: RpcOperation | None = None,
     requires_client_affinity: bool = False,
 ) -> Callable[[F], F]:
-    """Mark a module method as a transport-neutral request handler.
-
-    The RPC operation defaults to the decorated method name. An explicit name
-    is only needed when a legacy implementation method cannot be renamed.
-
-    Args:
-        handler_type: Whether to execute inline or on a worker.
-        operation: Optional RPC operation override.
-        requires_client_affinity: Whether requests from one client must use
-            the same worker.
-
-    Returns:
-        A decorator that attaches immutable handler metadata to a method.
-
-    Raises:
-        ValueError: If client affinity is requested for a handler that is not
-            ``HandlerType.BLOCKING``.
-    """
+    """Attach scheduling metadata; operation defaults to the method name."""
     if requires_client_affinity and handler_type is not HandlerType.BLOCKING:
         raise ValueError("Client affinity requires HandlerType.BLOCKING")
 
@@ -98,15 +67,7 @@ def request_handler(
 def get_request_handler_options(
     handler: Callable[..., Any],
 ) -> RequestHandlerOptions | None:
-    """Return transport-neutral metadata attached to a handler.
-
-    Args:
-        handler: Bound or unbound callable to inspect.
-
-    Returns:
-        Handler metadata, or ``None`` if the callable is not a request
-        handler.
-    """
+    """Return handler metadata, if the callable is decorated."""
     source = getattr(handler, "__func__", handler)
     return getattr(source, _HANDLER_OPTIONS_ATTR, None)
 
@@ -141,19 +102,7 @@ def _validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> N
 
 
 def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
-    """Discover and validate request handlers exposed by a module.
-
-    Args:
-        module: Business module whose decorated methods should be discovered.
-
-    Returns:
-        Bound request handlers ordered by method name.
-
-    Raises:
-        KeyError: If a handler names an unknown RPC operation.
-        TypeError: If handler annotations differ from the RPC contract.
-        ValueError: If one module registers an operation more than once.
-    """
+    """Discover decorated module handlers and validate them against RPC specs."""
     handlers: list[BoundRequestHandler] = []
     seen: set[RpcOperation] = set()
     module_type = module if inspect.isclass(module) else type(module)

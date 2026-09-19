@@ -535,13 +535,9 @@ Adding an observability subscriber
 Adding a new RPC
 ~~~~~~~~~~~~~~~~
 
-1. Add a typed ``@rpc_method`` to ``RequestClient``. The method name, parameter
-   annotations, and ``MessagingFuture[T]`` response form the shared Python
-   contract.
-2. Add the protobuf request, response, and service method used by gRPC.
-3. Implement a same-named ``@request_handler`` method on the appropriate
-   ``EngineModule`` and select its ``HandlerType``. ZMQ and gRPC both discover
-   it automatically.
+1. Add a typed ``@rpc_method`` to ``RequestClient``.
+2. Add the gRPC protobuf request, response, and service method.
+3. Add a same-named ``@request_handler`` on the appropriate ``EngineModule``.
 
 Existing ZMQ operations retain their frozen numeric wire IDs. New operations
 use their string name and do not extend the legacy compatibility table.

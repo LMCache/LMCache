@@ -30,24 +30,10 @@ truth. The method name is the stable operation name, its parameters define the
 ordered payload types, and `MessagingFuture[T]` defines the response type.
 `get_rpc_specs()` discovers these contracts at startup.
 
-Business modules use `@request_handler` to declare only scheduling behavior:
-
-```python
-@request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
-def store(
-    self,
-    key: IPCCacheServerKey,
-    instance_id: int,
-    block_ids: list[list[int]],
-    event_ipc_handle: bytes,
-) -> tuple[bytes, bool]:
-    ...
-```
-
-The operation normally comes from the handler name. The decorator accepts an
-explicit `operation=` only for legacy implementation methods whose names cannot
-yet match the public RPC. Discovery validates handler annotations against the
-shared contract before either server starts.
+Business modules use `@request_handler` only for scheduling. The operation
+defaults to the handler name; `operation=` is for legacy method names.
+Discovery validates handler annotations against the shared contract before
+either server starts.
 
 ## Transport implementations
 

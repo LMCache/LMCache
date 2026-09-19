@@ -19,28 +19,14 @@ _RPC_METHOD_ATTR = "__lmcache_rpc_method__"
 
 
 def rpc_method(func: F) -> F:
-    """Mark a request-client method as part of the RPC contract.
-
-    Args:
-        func: Typed method on ``RequestClient``.
-
-    Returns:
-        The unchanged method with RPC metadata attached.
-    """
+    """Mark a typed ``RequestClient`` method as an RPC contract member."""
     setattr(func, _RPC_METHOD_ATTR, True)
     return func
 
 
 @dataclass(frozen=True)
 class RpcSpec:
-    """Describe one transport-neutral RPC.
-
-    Args:
-        operation: Stable snake-case operation name.
-        signature: Client-call signature without ``self``.
-        payload_types: Declared payload types in parameter order.
-        response_type: Value type returned through ``MessagingFuture``.
-    """
+    """Transport-neutral RPC name, call signature, payloads, and response."""
 
     operation: RpcOperation
     signature: Signature
@@ -50,18 +36,7 @@ class RpcSpec:
     def bind_payloads(
         self, args: tuple[Any, ...], kwargs: Mapping[str, Any]
     ) -> tuple[Any, ...]:
-        """Bind a client invocation to ordered transport payloads.
-
-        Args:
-            args: Positional client arguments.
-            kwargs: Keyword client arguments.
-
-        Returns:
-            Payload values in the order declared by the RPC contract.
-
-        Raises:
-            TypeError: If the invocation does not match the contract signature.
-        """
+        """Bind args/kwargs/defaults to the contract's ordered payloads."""
         bound = self.signature.bind(*args, **kwargs)
         bound.apply_defaults()
         return tuple(bound.arguments.values())
@@ -106,15 +81,7 @@ def _build_rpc_spec(operation: str, method: Callable[..., Any]) -> RpcSpec:
 
 @lru_cache(maxsize=1)
 def get_rpc_specs() -> Mapping[RpcOperation, RpcSpec]:
-    """Discover all RPC contracts declared on ``RequestClient``.
-
-    Returns:
-        A read-only mapping from operation names to RPC specifications.
-
-    Raises:
-        TypeError: If a declared RPC has an incomplete or unsupported signature.
-    """
-    # Local import avoids a cycle while RequestClient applies @rpc_method.
+    """Return RPC specs discovered from marked ``RequestClient`` methods."""
     # First Party
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
@@ -127,15 +94,5 @@ def get_rpc_specs() -> Mapping[RpcOperation, RpcSpec]:
 
 
 def get_rpc_spec(operation: RpcOperation) -> RpcSpec:
-    """Return the contract for one operation.
-
-    Args:
-        operation: Stable snake-case RPC name.
-
-    Returns:
-        The matching RPC specification.
-
-    Raises:
-        KeyError: If the operation is not part of the request-client contract.
-    """
+    """Return the RPC spec for ``operation`` or raise ``KeyError``."""
     return get_rpc_specs()[operation]
