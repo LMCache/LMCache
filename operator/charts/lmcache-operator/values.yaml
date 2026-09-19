@@ -20,13 +20,3 @@ resources:
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
-metrics:
-  # Requires the Prometheus Operator CRDs. The manager serves HTTPS metrics
-  # using its generated self-signed certificate and Kubernetes authorization.
-  serviceMonitor:
-    enabled: false
-    labels: {}
-    interval: 30s
-    tlsConfig:
-      insecureSkipVerify: true
