@@ -6,7 +6,7 @@ both **aggregated** and **disaggregated** modes.
 
 In mp mode LMCache runs as an out-of-process cache engine. vLLM workers attach
 to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
-`sharedMemory` is disabled (LMCache owns `/dev/shm`) and `hostIPC` is enabled.
+`sharedMemorySize` is set to `"0"` (LMCache owns `/dev/shm`) and `hostIPC` is enabled.
 
 ## Layout
 
