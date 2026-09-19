@@ -254,6 +254,14 @@ class PickleTransferStrategy(TransferStrategy):
         finally:
             if written_keys:
                 self._storage_manager.finish_write(written_keys)
+            written_set = set(written_keys)
+            skipped_keys = [k for k in reserved_dict if k not in written_set]
+            if skipped_keys:
+                # Reservations that will never be filled must be aborted, not
+                # left write-locked (they would pin L1 memory and wedge future
+                # reserves) and not finish_write'd (a store listener would
+                # persist the unwritten contents).
+                self._storage_manager.abort_write(skipped_keys)
 
         success = len(written_keys) == len(reserved_dict)
         if not success:
@@ -383,7 +391,10 @@ class ShmTransferStrategy(TransferStrategy):
                 obj_key for obj_key in reserved if obj_key not in reserved_keys_set
             ]
             if unused_keys:
-                self._storage_manager.finish_write(unused_keys)
+                # These reservations never get SHM slots, so the worker will
+                # never write them: abort instead of finish_write, which would
+                # publish empty objects for lookups and L2 store listeners.
+                self._storage_manager.abort_write(unused_keys)
         if not reserved_keys:
             return PrepareStoreResponse(context={"slots": [], "chunk_indices": []})
         transfer_key = self._transfer_key_factory(key, instance_id)
