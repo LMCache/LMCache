@@ -8,7 +8,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
-- Helm 3.8+ for chart installation or deploying from source
+- Helm 3.17+ for chart installation or deploying from source
 - [cert-manager](https://cert-manager.io/docs/installation/) installed and ready
 - For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
@@ -273,7 +273,7 @@ make test-e2e-gpu-cluster    IMG=<registry/image:tag>  # existing GPU cluster
 |---|---|
 | `test-e2e-kind` | `kind`, `kubectl`, `docker`, `helm` |
 | `test-e2e-cluster` | `kubectl`, `helm` (cluster access via `KUBECONFIG`) |
-| `test-e2e-gpu-kind` | `kind`, `kubectl`, `docker`, `helm` (v3) |
+| `test-e2e-gpu-kind` | `kind`, `kubectl`, `docker`, `helm` (3.17+) |
 | `test-e2e-gpu-cluster` | `kubectl`, `helm` (cluster access via `KUBECONFIG`) |
 
 ```bash

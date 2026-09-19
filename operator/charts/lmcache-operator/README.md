@@ -1,6 +1,6 @@
 # LMCache Operator
 
-Requires Helm 3.8+ and cert-manager installed and ready.
+Requires Helm 3.17+ and cert-manager installed and ready.
 
 ```sh
 helm upgrade --install lmcache-operator \

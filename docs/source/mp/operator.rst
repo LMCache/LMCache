@@ -42,7 +42,7 @@ Prerequisites
 
 - Kubernetes 1.20+
 - ``kubectl`` configured to access your cluster
-- Helm 3.8+ for chart installation or deploying from source
+- Helm 3.17+ for chart installation or deploying from source
 - `cert-manager <https://cert-manager.io/docs/installation/>`_ installed and ready
 - NVIDIA GPU Operator on NVIDIA clusters (default). Classic installs
   register RuntimeClass ``nvidia``. CDI+NRI installs often have no
