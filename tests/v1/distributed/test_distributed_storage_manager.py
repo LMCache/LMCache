@@ -180,6 +180,18 @@ def wait_for_prefetch_status(
     return None
 
 
+def clear_l1_and_wait(sm: StorageManager, timeout: float = 10.0) -> None:
+    """Clear L1, retrying until background store read locks are released."""
+
+    def clear_and_check() -> bool:
+        sm.clear()
+        return sm.report_status()["l1_manager"]["memory_used_bytes"] == 0
+
+    assert wait_for_condition(clear_and_check, timeout=timeout), (
+        "L1 should be empty after StoreController releases its read locks"
+    )
+
+
 def wait_for_sparse_found(
     sm: StorageManager,
     handle,
@@ -574,19 +586,18 @@ class TestStorageManagerL2Prefetch:
         )
         assert ok, "Keys should be stored in L2 by StoreController"
 
-    def test_prefetch_from_l2(self, l2_storage_manager_config, basic_layout):
+    def test_prefetch_from_l2(
+        self,
+        l2_storage_manager_config: StorageManagerConfig,
+        basic_layout: MemoryLayoutDesc,
+    ) -> None:
         """Write to L1 → store to L2 → clear L1 → prefetch from L2."""
         sm = StorageManager(l2_storage_manager_config)
         keys = [make_object_key(i) for i in range(5)]
 
         self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
 
-        # Brief sleep to let StoreController release read locks
-        # after L2 store completion, then clear L1
-        time.sleep(0.05)
-        sm.clear()
-        used, _ = sm._l1_manager.get_memory_usage()
-        assert used == 0, f"L1 should be empty after clear, but {used} bytes used"
+        clear_l1_and_wait(sm)
 
         # Prefetch — L1 has 0 hits, L2 should have all 5
         handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: basic_layout}))
@@ -647,7 +658,11 @@ class TestStorageManagerL2Prefetch:
 
         sm.close()
 
-    def test_warm_skip_l2_is_noop(self, l2_storage_manager_config, basic_layout):
+    def test_warm_skip_l2_is_noop(
+        self,
+        l2_storage_manager_config: StorageManagerConfig,
+        basic_layout: MemoryLayoutDesc,
+    ) -> None:
         """``mode=WARM`` + ``skip_l2=True`` submits no controller request.
 
         Regression: the WARM branch must honor ``skip_l2`` (it previously
@@ -662,7 +677,7 @@ class TestStorageManagerL2Prefetch:
         # Put the keys in L2 so a non-skip warm would have something to load,
         # then clear L1 so a load would be the only way they could reappear.
         self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
-        sm.clear()
+        clear_l1_and_wait(sm)
 
         handle = sm.submit_prefetch_task(
             PrefetchRequestSpec(keys, {0: basic_layout}, mode=PrefetchMode.WARM),
@@ -677,8 +692,10 @@ class TestStorageManagerL2Prefetch:
         sm.close()
 
     def test_sparse_skip_l2_locks_only_l1(
-        self, l2_storage_manager_config, basic_layout
-    ):
+        self,
+        l2_storage_manager_config: StorageManagerConfig,
+        basic_layout: MemoryLayoutDesc,
+    ) -> None:
         """``policy=SPARSE`` + ``skip_l2=True`` submits no controller request.
 
         Only L1-resident keys are locked and reported found; keys present only
@@ -689,9 +706,12 @@ class TestStorageManagerL2Prefetch:
 
         # All keys reach L2; delete key 1 from L1 so it is L2-only.
         self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
-        time.sleep(0.05)
-        deleted, skipped = sm.delete_l1_keys([all_keys[1]])
-        assert (deleted, skipped) == (1, 0)
+        # L2 visibility precedes StoreController releasing its L1 read locks.
+        # Retry the non-force delete until that cleanup has actually completed.
+        assert wait_for_condition(
+            lambda: sm.delete_l1_keys([all_keys[1]]) == (1, 0),
+            timeout=10.0,
+        ), "L1 key should be deleted after StoreController releases its read lock"
 
         handle = sm.submit_prefetch_task(
             PrefetchRequestSpec(all_keys, {0: basic_layout}, policy=TrimPolicy.SPARSE),
@@ -710,7 +730,11 @@ class TestStorageManagerL2Prefetch:
         sm.finish_read_prefetched([all_keys[0], all_keys[2]])
         sm.close()
 
-    def test_prefetch_l2_partial_prefix(self, l2_storage_manager_config, basic_layout):
+    def test_prefetch_l2_partial_prefix(
+        self,
+        l2_storage_manager_config: StorageManagerConfig,
+        basic_layout: MemoryLayoutDesc,
+    ) -> None:
         """L2 has keys {0,1,3,4} but not 2 → L2 returns prefix of 2."""
         sm = StorageManager(l2_storage_manager_config)
 
@@ -719,12 +743,7 @@ class TestStorageManagerL2Prefetch:
         keys_to_write = [all_keys[i] for i in [0, 1, 3, 4]]
         self._write_keys_and_wait_for_l2(sm, keys_to_write, basic_layout)
 
-        # Brief sleep to let StoreController release read locks
-        # after L2 store completion, then clear L1
-        time.sleep(0.05)
-        sm.clear()
-        used, _ = sm._l1_manager.get_memory_usage()
-        assert used == 0, f"L1 should be empty after clear, but {used} bytes used"
+        clear_l1_and_wait(sm)
 
         handle = sm.submit_prefetch_task(
             PrefetchRequestSpec(all_keys, {0: basic_layout})
@@ -771,8 +790,10 @@ class TestStorageManagerL2Prefetch:
         sm.close()
 
     def test_prefetch_l2_with_sliding_window(
-        self, l2_storage_manager_config, basic_layout
-    ):
+        self,
+        l2_storage_manager_config: StorageManagerConfig,
+        basic_layout: MemoryLayoutDesc,
+    ) -> None:
         """L2 fold respects sliding windows: only in-window SW keys retained."""
         sm = StorageManager(l2_storage_manager_config)
 
@@ -789,8 +810,7 @@ class TestStorageManagerL2Prefetch:
         self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
 
         # Clear L1 entirely so everything must come from L2
-        time.sleep(0.05)
-        sm.clear()
+        clear_l1_and_wait(sm)
 
         handle = sm.submit_prefetch_task(
             PrefetchRequestSpec(
@@ -1052,8 +1072,10 @@ class TestStorageManagerSparsePrefetch:
         sm.close()
 
     def test_sparse_from_l2_loads_all_found(
-        self, l2_storage_manager_config, basic_layout
-    ):
+        self,
+        l2_storage_manager_config: StorageManagerConfig,
+        basic_layout: MemoryLayoutDesc,
+    ) -> None:
         """Sparse prefetch from L2 loads every found key (controller skips the
         prefix-only trim), not just the prefix before a gap."""
         sm = StorageManager(l2_storage_manager_config)
@@ -1067,10 +1089,7 @@ class TestStorageManagerSparsePrefetch:
             lambda: all(adapter.debug_has_key(k) for k in existing),  # type: ignore
             timeout=10.0,
         )
-        time.sleep(0.05)
-        sm.clear()
-        used, _ = sm._l1_manager.get_memory_usage()
-        assert used == 0
+        clear_l1_and_wait(sm)
 
         handle = sm.submit_prefetch_task(
             PrefetchRequestSpec(all_keys, {0: basic_layout}, policy=TrimPolicy.SPARSE)
