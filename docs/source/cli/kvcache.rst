@@ -20,7 +20,7 @@ server.
 
    options:
      -h, --help       show this help message and exit
-     --format FORMAT  Stdout output format (default: terminal). Available: terminal, json.
+     --format FORMAT  Stdout output format (default: terminal). Available: terminal, json, csv.
      --output PATH    Save metrics to a file at PATH (format chosen by --format).
      -q, --quiet      Suppress stdout output. Exit code only.
 
@@ -78,7 +78,7 @@ Options
      - URL of the LMCache MP HTTP server (e.g. ``http://localhost:8000``).
    * - ``--format``
      - No
-     - Output format: ``terminal`` (default) or ``json``.
+     - Output format: ``terminal`` (default), ``json``, or ``csv``.
    * - ``--output``
      - No
      - Save output to a file (uses the format chosen by ``--format``).

@@ -236,7 +236,9 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         metavar="FORMAT",
-        help=("Stdout output format (default: terminal). Available: terminal, json."),
+        help=(
+            "Stdout output format (default: terminal). Available: terminal, json, csv."
+        ),
     )
     parser.add_argument(
         "--output",
