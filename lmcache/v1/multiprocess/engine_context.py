@@ -16,12 +16,19 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.object_group_classifier import ObjectGroupClassifier
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.gpu_connector.gds_context import (
     get_gds_context,
     initialize_gds_context,
 )
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
+from lmcache.v1.multiprocess.commit_policy import (
+    DEFAULT_COMMIT_CONFIG,
+    CommitPolicy,
+    CommitPolicyConfig,
+    create_commit_policy,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -57,12 +64,49 @@ class LayoutDescRegistry:
     for prefetch tasks. Multiple worker instances can share the same
     ``(model_name, world_size)`` entry, so the registry keeps the descriptor
     until the last matching registration is unregistered.
+
+    This registry is also the hook that feeds the storage layer's
+    :class:`ObjectGroupClassifier`: every registration forwards its
+    ``attn_desc`` to the classifier and drops it again on unregistration, so
+    object-group-aware store policies learn the attention layout from the same
+    call that registers the KV cache and the ``distributed`` layer needs no
+    import of ``lmcache.v1.multiprocess``.
+
+    The classifier keys on the model name alone and rejects two incompatible
+    layouts under one name, while this registry keys on
+    ``(model_name, world_size)`` and lets a re-registration replace the
+    windows. A registration the classifier rejects is therefore logged and
+    dropped instead of propagated: the model keeps the layout it was first
+    registered with, or classifies as ``UNKNOWN``, and ``defer_windowed``
+    falls back to writing everything through — the safe direction. The
+    forwarded registrations are counted in ``self._classifier_refs`` so that
+    a rejected one is not unregistered later.
+
+    Thread safety: ``self._lock`` guards ``self._registry`` and
+    ``self._classifier_refs`` and is never held while calling into the
+    classifier (which takes its own lock), so the two locks are never nested.
+
+    Args:
+        object_group_classifier: Classifier to forward attention descriptors
+            to, normally ``StorageManager.object_group_classifier``. Defaults
+            to a private classifier that nothing else reads, which keeps
+            standalone registries (tests, tools) working.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, object_group_classifier: ObjectGroupClassifier | None = None
+    ) -> None:
         # Key: (model_name, world_size) -> layout descriptor entry
         self._registry: dict[tuple[str, int], _LayoutDescEntry] = {}
+        # Key: model_name -> registrations the classifier accepted, so that
+        # only those are unregistered again.
+        self._classifier_refs: dict[str, int] = {}
         self._lock = threading.Lock()
+        self._object_group_classifier = (
+            object_group_classifier
+            if object_group_classifier is not None
+            else ObjectGroupClassifier()
+        )
 
     def register(
         self,
@@ -94,6 +138,7 @@ class LayoutDescRegistry:
             group_layout_descs = {
                 gid: layout_desc for gid in range(attn_desc.num_object_groups)
             }
+        self._forward_registration(model_name, attn_desc)
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
@@ -128,9 +173,50 @@ class LayoutDescRegistry:
 
             if entry.ref_count <= 1:
                 self._registry.pop(key)
-                return
+            else:
+                entry.ref_count -= 1
 
-            entry.ref_count -= 1
+            classifier_refs = self._classifier_refs.get(model_name, 0)
+            if classifier_refs <= 1:
+                self._classifier_refs.pop(model_name, None)
+            else:
+                self._classifier_refs[model_name] = classifier_refs - 1
+
+        # Mirror the drop in the classifier, which reference counts per model
+        # name across world sizes.
+        if classifier_refs > 0:
+            self._object_group_classifier.unregister(model_name)
+
+    def _forward_registration(self, model_name: str, attn_desc: AttnWindowDesc) -> None:
+        """Push one attention layout into the object-group classifier.
+
+        A layout the classifier refuses (another layout is already registered
+        under the same model name) is logged and dropped rather than raised:
+        this registry allows a re-registration to replace the windows, and a
+        failed KV-cache registration would be far worse than a model that
+        classifies conservatively.
+
+        Args:
+            model_name: The model name.
+            attn_desc: The attention-window descriptor to forward.
+        """
+        try:
+            self._object_group_classifier.register(model_name, attn_desc)
+        except ValueError:
+            logger.error(
+                "Attention layout %s registered for model %r conflicts with "
+                "the layout already registered under that name; object-group "
+                "classification for this model keeps the earlier layout.",
+                attn_desc.num_chunks_in_sw,
+                model_name,
+                exc_info=True,
+            )
+            return
+
+        with self._lock:
+            self._classifier_refs[model_name] = (
+                self._classifier_refs.get(model_name, 0) + 1
+            )
 
     def find(self, model_name: str, world_size: int) -> MemoryLayoutDesc | None:
         """Look up a layout descriptor by (model_name, world_size).
@@ -197,6 +283,11 @@ class MPCacheServerContext:
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             False.
+        commit_config: How the ``END_SESSION`` handler decides whether a
+            finished request's final window is copied to L2 right away.
+            Defaults to ``turn_end`` accepting any stop token. A model
+            without windowed object groups never has anything to commit,
+            whatever the policy.
     """
 
     def __init__(
@@ -206,10 +297,13 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        commit_config: CommitPolicyConfig = DEFAULT_COMMIT_CONFIG,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._commit_config = commit_config
+        self._commit_policy = create_commit_policy(commit_config)
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -224,7 +318,9 @@ class MPCacheServerContext:
         )
         self._session_manager = SessionManager(self._token_hasher)
         self._event_bus = get_event_bus()
-        self._layout_desc_registry = LayoutDescRegistry()
+        self._layout_desc_registry = LayoutDescRegistry(
+            self._storage_manager.object_group_classifier
+        )
 
     def close(self) -> None:
         """
@@ -250,6 +346,16 @@ class MPCacheServerContext:
     def full_sw_kv(self) -> bool:
         """Whether sliding-window groups cache full per-chunk KV (no window cutting)."""
         return self._full_sw_kv
+
+    @property
+    def commit_config(self) -> CommitPolicyConfig:
+        """How this server decides and places window commits."""
+        return self._commit_config
+
+    @property
+    def commit_policy(self) -> CommitPolicy:
+        """The configured commit policy."""
+        return self._commit_policy
 
     @property
     def storage_manager(self) -> StorageManager:
@@ -297,6 +403,7 @@ class MPCacheServerContext:
         """
         session = self.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
+        session.note_resolved(key.end)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         chunk_hashes = [

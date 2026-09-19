@@ -20,7 +20,16 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.commit_policy import (
+    CommitContext,
+    resolve_anchor,
+    resolve_commit,
+)
+from lmcache.v1.multiprocess.custom_types import (
+    NO_SESSION_END_INFO,
+    IPCCacheServerKey,
+    SessionEndInfo,
+)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
@@ -516,6 +525,27 @@ class LookupModule:
         )
 
     @request_handler(RequestType.END_SESSION, HandlerType.BLOCKING)
+    def handle_end_session(
+        self,
+        request_id: str,
+        end_info: SessionEndInfo = NO_SESSION_END_INFO,
+    ) -> None:
+        """Handle ``END_SESSION``: commit the window, then end the session.
+
+        Two steps that know nothing about each other, in this order because
+        the commit reads the session :meth:`end_session` removes. Splitting
+        them here keeps the commit out of :meth:`end_session`, whose L1
+        bookkeeping is a separate concern with its own tests.
+
+        Args:
+            request_id: The request ID that finished.
+            end_info: How the engine says the request finished. Only the
+                commit reads it. Defaults to "nothing known", which every
+                built-in policy reads as "do not commit".
+        """
+        self._maybe_commit_window(request_id, end_info)
+        self.end_session(request_id)
+
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.
 
@@ -556,6 +586,89 @@ class LookupModule:
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _maybe_commit_window(
+        self,
+        request_id: str,
+        end_info: SessionEndInfo,
+    ) -> None:
+        """Copy the finished request's live window to L2 if it earned it.
+
+        Whether the store path writes windowed chunks to L2 is the
+        store policy's decision; a window that only L1 holds is lost when L1
+        evicts it, and the next turn of the same conversation pays a full
+        prefill. A commit does not depend on that decision: when a request
+        ends where a follow-up will resume -- a chat turn boundary -- its
+        final window is copied to L2 during the idle time before that
+        follow-up arrives.
+
+        It is a copy, not a move: the L1 window stays, so the follow-up is
+        still an L1 hit and only the window's durability changed. Nothing else
+        about the session's bookkeeping changes, and a commit that never
+        happens costs timeliness, not correctness.
+
+        Which chunks: for every windowed object group with window ``w``, the
+        ``w`` chunks ending at each anchor. Whole-prefix groups are skipped --
+        the store path already wrote them through. Anchors come
+        from :func:`resolve_anchor`, which is why this method, and not the
+        caller, knows about ``w``: an anchor is an end offset and each group
+        derives its own start from it.
+
+        Args:
+            request_id: The finished request, whose session is still
+                registered: this runs before :meth:`end_session` removes it.
+            end_info: How the engine says the request finished.
+        """
+        commit_config = self._ctx.commit_config
+        session = self._ctx.session_manager.get(request_id)
+        if session is None:
+            return
+        key = session.lookup_ipc_key
+        if key is None:
+            return
+
+        chunk_size = session.hasher.chunk_size
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        )
+        ctx = CommitContext(
+            request_id=session.request_id,
+            end_info=end_info,
+            model_name=key.model_name,
+            prompt_end=session.lookup_end,
+            stored_end=session.resolved_end,
+            hit_chunks=session.prefetch_hit_chunks,
+            attn_desc=attn_desc,
+            anchor=commit_config.anchor,
+        )
+        if not resolve_commit(ctx, self._ctx.commit_policy):
+            return
+
+        anchor = resolve_anchor(ctx, chunk_size)
+        if anchor <= 0:
+            return
+
+        anchor_chunk = anchor // chunk_size
+        hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0, anchor)]
+        commit_keys: list[ObjectKey] = []
+        for group_id, window in enumerate(attn_desc.num_chunks_in_sw):
+            if window < 0:
+                continue  # whole prefix: already written through
+            lo = max(0, anchor_chunk - window)
+            commit_keys.extend(
+                ipc_key_to_object_keys(key, hashes[lo:anchor_chunk], [group_id])[0]
+            )
+
+        if not commit_keys:
+            return
+
+        logger.debug(
+            "Committing %d windowed key(s) for request %s at anchor %d",
+            len(commit_keys),
+            session.request_id,
+            anchor,
+        )
+        self._ctx.storage_manager.copy_l1_keys_to_l2(commit_keys)
 
     def _chunk_major_object_keys(
         self,

@@ -5,6 +5,10 @@
 from typing import Any
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import (
+    NO_SESSION_END_INFO,
+    SessionEndInfo,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -144,9 +148,23 @@ class ZmqMultiprocessClient(RequestClient):
         """Release read locks acquired by lookup."""
         return self._call(RequestType.FREE_LOOKUP_LOCKS, key, tp_size)
 
-    def end_session(self, request_id: str) -> MessagingFuture[Any]:
-        """End a request session."""
-        return self._call(RequestType.END_SESSION, request_id)
+    def end_session(
+        self,
+        request_id: str,
+        end_info: SessionEndInfo = NO_SESSION_END_INFO,
+    ) -> MessagingFuture[Any]:
+        """End a request session.
+
+        Args:
+            request_id: The finished request.
+            end_info: How the engine says the request finished, for the
+                server's commit policy. Defaults to "nothing known",
+                which every built-in policy reads as "do not commit".
+
+        Returns:
+            The future for the END_SESSION call.
+        """
+        return self._call(RequestType.END_SESSION, request_id, end_info)
 
     def register_kv_cache_engine_driven_context(
         self, payload: Any

@@ -9,6 +9,7 @@ The store policy makes two decisions after data is written to L1:
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # First Party
@@ -17,6 +18,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     get_type_name_for_config,
 )
+from lmcache.v1.distributed.object_group_classifier import ObjectGroupClassifier
 
 
 @dataclass(frozen=True)
@@ -93,10 +95,18 @@ class StorePolicy(ABC):
 
 
 # -----------------------------------------------------------------------------
-# Registry: store policy name -> policy class
+# Registry: store policy name -> store policy factory
 # -----------------------------------------------------------------------------
 
-_STORE_POLICY_REGISTRY: dict[str, type[StorePolicy]] = {}
+StorePolicyFactory = Callable[[ObjectGroupClassifier], StorePolicy]
+"""Builds a store policy from the storage manager's object-group classifier.
+
+Policies that do not classify object groups ignore the argument; the
+classifier is passed to every factory so that ``create_store_policy`` needs no
+per-policy knowledge.
+"""
+
+_STORE_POLICY_REGISTRY: dict[str, StorePolicyFactory] = {}
 
 
 def register_store_policy(
@@ -104,17 +114,43 @@ def register_store_policy(
     policy_cls: type[StorePolicy],
 ) -> None:
     """
-    Register a store policy class under a name.
+    Register a store policy class that is constructed without arguments.
 
-    Each policy module should call this at import time.
+    Each policy module should call this at import time. Policies that need the
+    object-group classifier must use :func:`register_store_policy_factory`
+    instead.
 
     Args:
         name: Policy name (e.g. "default").
-        policy_cls: A concrete StorePolicy subclass.
+        policy_cls: A concrete StorePolicy subclass with a no-argument
+            constructor.
+
+    Raises:
+        ValueError: If a policy is already registered under the given name.
+    """
+    register_store_policy_factory(name, lambda classifier: policy_cls())
+
+
+def register_store_policy_factory(
+    name: str,
+    factory: StorePolicyFactory,
+) -> None:
+    """
+    Register a store policy factory under a name.
+
+    Use this for policies that need the object-group classifier; the factory
+    receives the classifier owned by the storage manager.
+
+    Args:
+        name: Policy name (e.g. "defer_windowed").
+        factory: Callable building a StorePolicy from a classifier.
+
+    Raises:
+        ValueError: If a policy is already registered under the given name.
     """
     if name in _STORE_POLICY_REGISTRY:
         raise ValueError(f"Store policy already registered: {name!r}")
-    _STORE_POLICY_REGISTRY[name] = policy_cls
+    _STORE_POLICY_REGISTRY[name] = factory
 
 
 def get_registered_store_policies() -> list[str]:
@@ -122,12 +158,17 @@ def get_registered_store_policies() -> list[str]:
     return list(_STORE_POLICY_REGISTRY)
 
 
-def create_store_policy(name: str) -> StorePolicy:
+def create_store_policy(
+    name: str,
+    classifier: ObjectGroupClassifier,
+) -> StorePolicy:
     """
     Create a store policy instance by name.
 
     Args:
         name: Registered policy name.
+        classifier: The object-group classifier the policy should consult.
+            Policies that do not classify object groups ignore it.
 
     Returns:
         A new StorePolicy instance.
@@ -138,7 +179,7 @@ def create_store_policy(name: str) -> StorePolicy:
     if name not in _STORE_POLICY_REGISTRY:
         known = ", ".join(sorted(_STORE_POLICY_REGISTRY)) or "(none)"
         raise ValueError(f"Unknown store policy {name!r}. Known: {known}")
-    return _STORE_POLICY_REGISTRY[name]()
+    return _STORE_POLICY_REGISTRY[name](classifier)
 
 
 class DefaultStorePolicy(StorePolicy):
