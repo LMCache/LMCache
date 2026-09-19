@@ -1,4 +1,5 @@
 //go:build e2e
+// +build e2e
 
 /*
 Copyright 2026.
@@ -103,12 +104,12 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 
 		By("validating the DaemonSet pod template shape")
 		ds := &appsv1.DaemonSet{}
-		Expect(k8sClient.Get(ctx, key, ds)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName(key), ds)).To(Succeed())
 		assertDaemonSetShape(ds, 5555 /* default server port */)
 
 		By("validating the lookup Service shape")
 		svc := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, key, svc)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName(key), svc)).To(Succeed())
 		assertLookupServiceShape(svc, 5555)
 
 		By("validating the connection ConfigMap matches the documented contract")
@@ -139,7 +140,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 
 		By("validating the DaemonSet pod template")
 		ds := &appsv1.DaemonSet{}
-		Expect(k8sClient.Get(ctx, key, ds)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName(key), ds)).To(Succeed())
 		assertDaemonSetShape(ds, 6555 /* spec.server.port */)
 
 		args := containerArgs(ds)
@@ -148,7 +149,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 
 		By("validating the lookup Service uses the custom port")
 		svc := &corev1.Service{}
-		Expect(k8sClient.Get(ctx, key, svc)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName(key), svc)).To(Succeed())
 		assertLookupServiceShape(svc, 6555)
 
 		By("validating the ConfigMap reflects the custom port")
@@ -158,9 +159,9 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 	})
 })
 
-// assertDaemonSetShape verifies the default NVIDIA isolated-IPC contract:
-// driver-level CUDA IPC without host IPC or shared host /dev/shm, GPU visibility
-// through the nvidia runtime, and a non-privileged container on the requested port.
+// assertDaemonSetShape verifies the default NVIDIA pod settings: isolated IPC
+// without host IPC or a host /dev/shm mount, runtimeClassName=nvidia, a
+// non-privileged container, and --host 0.0.0.0 with the expected server port.
 func assertDaemonSetShape(ds *appsv1.DaemonSet, expectedServerPort int32) {
 	GinkgoHelper()
 	pod := ds.Spec.Template.Spec
