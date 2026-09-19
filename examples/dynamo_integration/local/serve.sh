@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Container entry point used by docker-compose.dynamo.yml.
+# Container entry point used by the local launch scripts.
 set -euo pipefail
 
 PIDS=()
@@ -38,15 +38,6 @@ wait_for_http() {
   return 1
 }
 
-start_worker() {
-  local gpu=$1
-  local port=$2
-  shift 2
-  CUDA_VISIBLE_DEVICES="$gpu" DYN_SYSTEM_PORT="$port" \
-    python3 -m dynamo.vllm "${WORKER_ARGS[@]}" "$@" &
-  PIDS+=("$!")
-}
-
 if [[ $# -ne 1 ]]; then
   echo "Usage: serve.sh aggregated|disaggregated" >&2
   exit 2
@@ -72,7 +63,7 @@ lmcache server \
 PIDS+=("$!")
 wait_for_http LMCache "http://localhost:$LMCACHE_HTTP_PORT/healthcheck"
 
-python3 -m dynamo.frontend --http-port "${DYN_HTTP_PORT:-8000}" &
+python3 -m dynamo.frontend &
 PIDS+=("$!")
 
 WORKER_ARGS=(
@@ -84,10 +75,19 @@ WORKER_ARGS=(
 )
 
 if [[ "$MODE" == aggregated ]]; then
-  start_worker 0 "${DYN_SYSTEM_PORT:-8081}"
+  DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" CUDA_VISIBLE_DEVICES=0 \
+    python3 -m dynamo.vllm "${WORKER_ARGS[@]}" &
+  PIDS+=("$!")
 else
-  start_worker 0 "${DYN_SYSTEM_PORT1:-8081}" --disaggregation-mode decode
-  start_worker 1 "${DYN_SYSTEM_PORT2:-8082}" --disaggregation-mode prefill
+  # Run the decode worker on GPU 0.
+  DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" CUDA_VISIBLE_DEVICES=0 \
+    python3 -m dynamo.vllm "${WORKER_ARGS[@]}" --disaggregation-mode decode &
+  PIDS+=("$!")
+
+  # Run the prefill worker on GPU 1.
+  DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" CUDA_VISIBLE_DEVICES=1 \
+    python3 -m dynamo.vllm "${WORKER_ARGS[@]}" --disaggregation-mode prefill &
+  PIDS+=("$!")
 fi
 
 # Stop the whole demo if any serving process exits, preserving its failure code.

@@ -13,7 +13,6 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 | Path | What it is |
 |------|------------|
 | [`local/docker-compose.yml`](local/docker-compose.yml) | Defines NATS and etcd. |
-| [`local/docker-compose.dynamo.yml`](local/docker-compose.dynamo.yml) | Defines the Dynamo runtime container used by the local scripts. |
 | [`local/nats-server.conf`](local/nats-server.conf) | NATS configuration mounted by Docker Compose. |
 | [`local/agg_lmcache_mp.sh`](local/agg_lmcache_mp.sh) | Local single-node launch script, aggregated (1 GPU). |
 | [`local/disagg_lmcache_mp.sh`](local/disagg_lmcache_mp.sh) | Local single-node launch script, disaggregated (2 GPUs). |
@@ -24,7 +23,7 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 
 ## Local
 
-Use a Linux host with NVIDIA GPUs, Docker Compose 2.30 or newer, and the
+Use a Linux host with NVIDIA GPUs, Docker Compose, and the
 NVIDIA Container Toolkit installed. From the root of the LMCache repository,
 run one script.
 
@@ -41,8 +40,9 @@ the aggregated deployment first, then run:
 ./examples/dynamo_integration/local/disagg_lmcache_mp.sh
 ```
 
-Each script starts NATS and etcd, creates a GPU-enabled Dynamo container,
-and launches LMCache, the Dynamo frontend, and the vLLM workers. Press
+Each script uses Docker Compose to start NATS and etcd, then `docker run`
+to start a GPU-enabled Dynamo container. Inside the container, it launches
+LMCache, the Dynamo frontend, and the vLLM workers. Press
 `Ctrl+C` to stop the whole demo, including NATS and etcd.
 
 Both modes serve `Qwen/Qwen3-0.6B` with 16 GiB of CPU cache. They use
