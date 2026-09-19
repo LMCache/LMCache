@@ -280,21 +280,25 @@ class VllmServiceFactory(BaseServiceFactory):
             self.metadata,
         )
 
-    def maybe_create_offload_server(self) -> Optional[ZMQOffloadServer]:
-        # Only worker needs offload server
+    def maybe_create_offload_server(self) -> ZMQOffloadServer | None:
+        """Create this worker's offload RPC server.
+
+        Use ``parallel_config.rank``, matching the lookup service. TP-local
+        ranks repeat across pipeline stages and can collide in a shared IPC
+        namespace.
+
+        Returns:
+            The offload server when this factory serves the ``"worker"``
+            role, ``None`` for every other role.
+        """
         if self.role != "worker":
             return None
-
-        # Third Party
-        from vllm.distributed.parallel_state import (
-            get_tensor_model_parallel_rank,
-        )
 
         self._ensure_engine()
         assert self.lmcache_engine is not None
         return ZMQOffloadServer(
             self.lmcache_engine,
-            get_tensor_model_parallel_rank(),
+            self.vllm_config.parallel_config.rank,
         )
 
     def maybe_create_runtime_plugin_launcher(
