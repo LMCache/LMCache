@@ -8,7 +8,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
-- Helm 3.8+ for chart installation or deploying from source; Helm 3.17+ for adopting an existing YAML installation. Installing the release `install.yaml` only needs `kubectl`.
+- Helm 3.8+ for chart installation or deploying from source. Installing the release `install.yaml` only needs `kubectl`.
 - [cert-manager](https://cert-manager.io/docs/installation/) installed and ready **before installing the operator**, for its webhook serving certificate
 - For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
@@ -80,40 +80,6 @@ make helm-deploy IMG=<your-registry>/lmcache-operator:latest
 ```
 
 Both entry points use the same [chart templates and values](charts/lmcache-operator/values.yaml).
-
-### Upgrade, uninstall, and existing YAML installations
-
-For a Helm upgrade, repeat the Helm command with the new `--version` (or downloaded chart archive) and your values file (`-f operator-values.yaml`, if used). Helm updates the CRD schemas as part of the release. Review the Operator release notes before upgrading: changes to CRD schemas or reconciliation can affect existing engines.
-
-To remove a Helm installation:
-
-```bash
-helm uninstall lmcache-operator --namespace lmcache-operator-system
-# From the source tree, the equivalent is: make helm-undeploy
-```
-
-The CRDs carry `helm.sh/resource-policy: keep`, so Helm uninstall retains the three CRDs, their custom resources, and the cache workloads they own. The namespace also remains. Reconciliation and admission injection stop until the operator is installed again.
-
-**YAML cleanup is destructive:** `make undeploy` renders the full installer again and runs `kubectl delete -f dist/install.yaml`. This deletes the operator namespace and all three CRDs, including their instances and owned workloads. The `helm.sh/resource-policy: keep` annotation does not prevent `kubectl delete`. Use the same namespace and rendering settings as the YAML installation, and only run this target when removing those resources. `make uninstall` is a separate CRD-only cleanup that also deletes all instances of the three CRDs across the cluster.
-
-An existing `kubectl apply` installation is **not adopted automatically**. To move it to Helm, use the same release name and namespace and first compare the chart's rendered resources with the installed objects:
-
-```bash
-# Run from the repository root, using the chart version you intend to install.
-helm template lmcache-operator operator/charts/lmcache-operator \
-  --namespace lmcache-operator-system > /tmp/lmcache-operator-helm.yaml
-kubectl diff -f /tmp/lmcache-operator-helm.yaml
-```
-
-After reviewing the diff and confirming that these objects belong to this operator installation, explicitly transfer ownership with Helm 3.17+:
-
-```bash
-helm upgrade --install lmcache-operator operator/charts/lmcache-operator \
-  --namespace lmcache-operator-system --create-namespace \
-  --take-ownership --wait
-```
-
-Pass the same values file to both commands if you customize the chart. Do not delete the existing `install.yaml` resources to migrate: that would delete the CRDs and namespace, including workloads you intend to retain. Once adopted, manage the operator through Helm instead of applying the old installer.
 
 ### 2. Deploy an LMCacheEngine
 
