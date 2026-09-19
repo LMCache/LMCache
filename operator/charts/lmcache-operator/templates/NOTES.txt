@@ -1,2 +1,2 @@
-Check the operator deployment status:
+Check the LMCache operator deployment status:
   kubectl rollout status deployment/{{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager") }} -n {{ .Release.Namespace }}
