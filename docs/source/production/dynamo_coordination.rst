@@ -27,8 +27,11 @@ repository:
    docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
 
 We use ``Qwen/Qwen3-0.6B`` on a single GPU for this demo. The
-``vllm-runtime:1.4.2`` image includes LMCache 0.5.2. From the same directory
-on the host, start the Dynamo container:
+``vllm-runtime:1.4.2`` image includes LMCache 0.5.2. You can find the latest
+image tags on `NVIDIA NGC
+<https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/-/tags>`_.
+
+From the same directory on the host, start the Dynamo container:
 
 .. code-block:: bash
 
