@@ -14,8 +14,7 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 |------|------------|
 | [`local/docker-compose.yml`](local/docker-compose.yml) | Defines NATS and etcd. |
 | [`local/nats-server.conf`](local/nats-server.conf) | NATS configuration mounted by Docker Compose. |
-| [`local/agg_lmcache_mp.sh`](local/agg_lmcache_mp.sh) | Local single-node launch script, aggregated (1 GPU). |
-| [`local/disagg_lmcache_mp.sh`](local/disagg_lmcache_mp.sh) | Local single-node launch script, disaggregated (2 GPUs). |
+| [`local/launch_lmcache_mp.sh`](local/launch_lmcache_mp.sh) | Local single-node script: `aggregated` (1 GPU) or `disaggregated` (2 GPUs). |
 | [`local/serve.sh`](local/serve.sh) | Container entry point that waits for dependencies and starts LMCache and Dynamo. |
 | [`kubernetes/lmcache_engine.yaml`](kubernetes/lmcache_engine.yaml) | `LMCacheEngine` CR for the shared MP server. Apply **before** the workers. |
 | [`kubernetes/agg_lmcache_mp.yaml`](kubernetes/agg_lmcache_mp.yaml) | Kubernetes `DynamoGraphDeployment`, aggregated (single worker). |
@@ -25,22 +24,22 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 
 Use a Linux host with NVIDIA GPUs, Docker Compose, and the
 NVIDIA Container Toolkit installed. From the root of the LMCache repository,
-run one script.
+run the script with a serving mode.
 
 For aggregated serving on one GPU:
 
 ```bash
-./examples/dynamo_integration/local/agg_lmcache_mp.sh
+./examples/dynamo_integration/local/launch_lmcache_mp.sh aggregated
 ```
 
 For separate prefill and decode workers on two GPUs in the same node, stop
 the aggregated deployment first, then run:
 
 ```bash
-./examples/dynamo_integration/local/disagg_lmcache_mp.sh
+./examples/dynamo_integration/local/launch_lmcache_mp.sh disaggregated
 ```
 
-Each script uses Docker Compose to start NATS and etcd, then `docker run`
+The script uses Docker Compose to start NATS and etcd, then `docker run`
 to start a GPU-enabled Dynamo container. Inside the container, it launches
 LMCache, the Dynamo frontend, and the vLLM workers. Press
 `Ctrl+C` to stop the whole demo, including NATS and etcd.
@@ -52,7 +51,7 @@ You can find the latest image tags on
 
 To start each process yourself, follow the
 [manual startup steps](../../docs/source/production/dynamo_coordination.rst#local)
-instead of running a launch script.
+instead of running the script.
 
 ## Kubernetes
 

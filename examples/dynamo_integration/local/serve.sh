@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Container entry point used by the local launch scripts.
+# Container entry point used by the local launch script.
 set -euo pipefail
 
 PIDS=()

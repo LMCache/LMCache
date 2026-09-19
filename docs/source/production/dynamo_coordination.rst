@@ -69,16 +69,16 @@ The frontend accepts requests on port 8000. The vLLM worker uses
 on port 5555.
 
 You can also start the whole demo with a `script
-<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/local>`_.
+<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/local/launch_lmcache_mp.sh>`_.
 On the host, run one of these commands from the root of the LMCache repository:
 
 .. code-block:: bash
 
    # Aggregated: 1 GPU.
-   ./examples/dynamo_integration/local/agg_lmcache_mp.sh
+   ./examples/dynamo_integration/local/launch_lmcache_mp.sh aggregated
 
    # Disaggregated: 2 GPUs on the same node.
-   ./examples/dynamo_integration/local/disagg_lmcache_mp.sh
+   ./examples/dynamo_integration/local/launch_lmcache_mp.sh disaggregated
 
 Kubernetes
 ----------
