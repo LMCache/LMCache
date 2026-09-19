@@ -291,6 +291,7 @@ class ConnectorBase : public IStorageConnector {
 
     if (need_shared) {
       workers_.reserve(static_cast<size_t>(num_workers_));
+      shared_live_workers_.store(num_workers_, std::memory_order_relaxed);
       for (int i = 0; i < num_workers_; i++) {
         workers_.emplace_back([this]() { this->worker_loop(); });
       }
@@ -370,6 +371,12 @@ class ConnectorBase : public IStorageConnector {
     std::condition_variable cv;
     std::queue<Request> requests;
     std::vector<std::thread> workers;
+    // Number of worker threads still running on this lane. Set before the
+    // threads are spawned so it is never observed too low.
+    std::atomic<int> live_workers{0};
+    // Set by the last worker to leave, under mu, after it has drained the
+    // queue. Guards enqueue_request against handing work to nobody.
+    bool drained = false;
   };
 
   void validate_batch_inputs(const std::vector<std::string>& keys,
@@ -435,17 +442,35 @@ class ConnectorBase : public IStorageConnector {
     if (it != lanes_.end()) {
       {
         std::lock_guard<std::mutex> lk(it->second->mu);
-        it->second->requests.push(std::move(req));
+        if (!it->second->drained) {
+          it->second->requests.push(std::move(req));
+          it->second->cv.notify_one();
+          return;
+        }
       }
-      it->second->cv.notify_one();
+      fail_unservable_request(req);
       return;
     }
 
     {
       std::lock_guard<std::mutex> lk(req_mu_);
-      requests_.push(std::move(req));
+      if (!shared_drained_) {
+        requests_.push(std::move(req));
+        req_cv_.notify_one();
+        return;
+      }
     }
-    req_cv_.notify_one();
+    fail_unservable_request(req);
+  }
+
+  // Reached when every worker for this queue has already exited and drained.
+  // Queueing here would strand the future_id forever, so it fails now.
+  void fail_unservable_request(const Request& req) {
+    Completion comp;
+    comp.future_id = req.future_id;
+    comp.ok = false;
+    comp.error = "connector has no live worker for this operation";
+    handle_tile_completion(req, comp);
   }
 
   void push_completion(Completion&& c) {
@@ -496,10 +521,12 @@ class ConnectorBase : public IStorageConnector {
   void start_lane_workers(WorkerLane& lane, int num_workers) {
     lane.workers.reserve(static_cast<size_t>(num_workers));
     WorkerLane* lane_ptr = &lane;
+    lane.live_workers.store(num_workers, std::memory_order_relaxed);
     for (int i = 0; i < num_workers; i++) {
       lane.workers.emplace_back([this, lane_ptr]() {
         this->worker_loop_for_queue(lane_ptr->mu, lane_ptr->cv,
-                                    lane_ptr->requests);
+                                    lane_ptr->requests, lane_ptr->live_workers,
+                                    lane_ptr->drained);
       });
     }
   }
@@ -519,11 +546,42 @@ class ConnectorBase : public IStorageConnector {
     }
   }
 
-  void worker_loop() { worker_loop_for_queue(req_mu_, req_cv_, requests_); }
+  void worker_loop() {
+    worker_loop_for_queue(req_mu_, req_cv_, requests_, shared_live_workers_,
+                          shared_drained_);
+  }
+
+  // Fails every request still sitting in a queue whose workers have all gone.
+  // Each one already owns a future_id on the Python side, so it must produce a
+  // completion rather than be dropped.
+  void fail_orphaned_requests(std::mutex& req_mu,
+                              std::queue<Request>& requests, bool& drained) {
+    for (;;) {
+      Request req;
+      {
+        std::lock_guard<std::mutex> lk(req_mu);
+        if (requests.empty()) {
+          // Publish the flag under the same mutex that enqueue_request takes,
+          // so no request can be queued after the final drain.
+          drained = true;
+          return;
+        }
+        req = std::move(requests.front());
+        requests.pop();
+      }
+
+      Completion comp;
+      comp.future_id = req.future_id;
+      comp.ok = false;
+      comp.error = "connector worker exited before the request was executed";
+      handle_tile_completion(req, comp);
+    }
+  }
 
   void worker_loop_for_queue(std::mutex& req_mu,
                              std::condition_variable& req_cv,
-                             std::queue<Request>& requests) {
+                             std::queue<Request>& requests,
+                             std::atomic<int>& live_workers, bool& drained) {
     try {
       // create connection (derived class specific)
       ConnectionType conn = create_connection();
@@ -546,6 +604,7 @@ class ConnectorBase : public IStorageConnector {
 
         Completion comp;
         comp.future_id = req.future_id;
+        bool stopping = false;
 
         // 2. execute the requested operation
         try {
@@ -574,18 +633,35 @@ class ConnectorBase : public IStorageConnector {
           comp.ok = false;
           comp.error = e.what();
           // if shutting down, errors are expected
-          if (stop_.load(std::memory_order_acquire)) {
-            break;  // exit without pushing completion
-          }
+          stopping = stop_.load(std::memory_order_acquire);
+        } catch (...) {
+          // An unknown exception must fail this tile only. Letting it unwind
+          // would kill the worker and orphan every future_id behind it.
+          comp.ok = false;
+          comp.error = "unknown exception in connector worker";
+          stopping = stop_.load(std::memory_order_acquire);
         }
 
-        // 3. update shared batch state and push completion when done
+        // 3. update shared batch state and push completion when done.
+        // Runs on every path, including shutdown, so the batch that owns this
+        // tile always reaches zero remaining tiles and reports.
         handle_tile_completion(req, comp);
+
+        if (stopping) {
+          break;
+        }
       }
     } catch (const std::exception& e) {
       fprintf(stderr, "[LMCache Connector Worker Error] %s\n", e.what());
     } catch (...) {
       fprintf(stderr, "[LMCache Connector Worker Error] Unknown exception\n");
+    }
+
+    // The last worker to leave this queue owns whatever is still in it. Until
+    // then the surviving workers are still draining, so stealing their work
+    // here would be wrong.
+    if (live_workers.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      fail_orphaned_requests(req_mu, requests, drained);
     }
   }
 
@@ -642,6 +718,10 @@ class ConnectorBase : public IStorageConnector {
   std::mutex req_mu_;
   std::condition_variable req_cv_;
   std::queue<Request> requests_;
+
+  // Shared-pool counterparts of WorkerLane::live_workers and ::drained.
+  std::atomic<int> shared_live_workers_{0};
+  bool shared_drained_ = false;
 
   // completion queue (CQ)
   std::mutex comp_mu_;
