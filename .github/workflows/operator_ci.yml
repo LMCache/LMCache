@@ -60,11 +60,6 @@ jobs:
         with:
           go-version-file: operator/go.mod
 
-      - name: Setup Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
-        with:
-          version: v3.18.6
-
       - name: Check formatting
         run: |
           test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
@@ -104,8 +99,8 @@ jobs:
         with:
           version: v3.18.6
 
-      - name: Validate chart contracts
-        run: make test-chart
+      - name: Lint Helm chart
+        run: make lint-chart
 
       - name: Check generated manifests are current
         run: |

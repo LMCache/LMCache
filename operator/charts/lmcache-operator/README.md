@@ -37,5 +37,6 @@ ServiceMonitors in the release namespace.
 
 For contributors: `make manifests` in `operator/` generates the CRD schemas,
 controller RBAC, and webhook definitions directly from Go markers into `files/`.
-Tests, CRD installation, and Helm all use these files. Do not edit them directly. `make test-chart`
-validates the chart; `make build-installer` renders the same templates as YAML.
+Tests, CRD installation, and Helm all use these files. Do not edit them directly.
+`make lint-chart` lints the chart; `make build-installer` renders the same templates
+as YAML.

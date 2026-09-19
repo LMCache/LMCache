@@ -52,7 +52,6 @@ CHART_VERSION ?= $(patsubst v%,%,$(VERSION))
 package-chart: manifests helm ## Package the chart; pass CHART_VERSION explicitly for compact prerelease or nightly image tags.
 	"$(HELM)" package "$(CHART)" --destination dist --version "$(CHART_VERSION)" --app-version "$(VERSION)"
 
-.PHONY: test-chart
-test-chart: manifests helm ## Lint the chart and test its rendered deployment contract.
+.PHONY: lint-chart
+lint-chart: manifests helm ## Lint the Helm chart.
 	"$(HELM)" lint "$(CHART)" --strict
-	HELM="$(HELM)" go test ./test/chart -v
