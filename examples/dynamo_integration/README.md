@@ -12,69 +12,48 @@ to it through the `LMCacheMPConnector` and share KV tensors over CUDA IPC, so
 
 | Path | What it is |
 |------|------------|
-| [`local/docker-compose.yml`](local/docker-compose.yml) | Starts NATS and etcd on the host. |
+| [`local/docker-compose.yml`](local/docker-compose.yml) | Defines NATS, etcd, and the Dynamo runtime container. |
 | [`local/nats-server.conf`](local/nats-server.conf) | NATS configuration mounted by Docker Compose. |
 | [`local/agg_lmcache_mp.sh`](local/agg_lmcache_mp.sh) | Local single-node launch script, aggregated (1 GPU). |
 | [`local/disagg_lmcache_mp.sh`](local/disagg_lmcache_mp.sh) | Local single-node launch script, disaggregated (2 GPUs). |
+| [`local/serve.sh`](local/serve.sh) | Container entry point that waits for dependencies and starts LMCache and Dynamo. |
 | [`kubernetes/lmcache_engine.yaml`](kubernetes/lmcache_engine.yaml) | `LMCacheEngine` CR for the shared MP server. Apply **before** the workers. |
 | [`kubernetes/agg_lmcache_mp.yaml`](kubernetes/agg_lmcache_mp.yaml) | Kubernetes `DynamoGraphDeployment`, aggregated (single worker). |
 | [`kubernetes/disagg_lmcache_mp.yaml`](kubernetes/disagg_lmcache_mp.yaml) | Kubernetes `DynamoGraphDeployment`, disaggregated (prefill + decode workers). |
 
 ## Local
 
-Run the commands in these two locations:
-
-- On the host, use `docker compose` to start NATS and etcd, then
-  `docker run` to start the Dynamo container.
-- Inside the Dynamo `vllm-runtime` Docker container, run the LMCache
-  server, Dynamo frontend, and vLLM workers. LMCache must already be
-  installed in the container.
-
-Start NATS and etcd on the host. From the root of the LMCache repository, run:
-
-```bash
-docker compose -f examples/dynamo_integration/local/docker-compose.yml up -d
-```
-
-The `vllm-runtime:1.4.2` image includes LMCache 0.5.2. You can find the latest
-image tags on [NVIDIA NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/-/tags).
-
-From the same directory on the host, start the Dynamo container:
-
-```bash
-docker run --rm -it --name dynamo-lmcache \
-    --gpus all --network host --ipc host \
-    --ulimit memlock=-1 \
-    -v "$PWD:/workspace/LMCache:ro" \
-    nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2 bash
-```
-
-The container mounts your LMCache repository at `/workspace/LMCache` and
-includes Dynamo's launch helpers under `/workspace/examples`. In the
-container shell, copy the scripts into Dynamo's launch directory:
-
-```bash
-cp /workspace/LMCache/examples/dynamo_integration/local/*_lmcache_mp.sh \
-    /workspace/examples/backends/vllm/launch/
-cd /workspace/examples/backends/vllm
-```
+Use a Linux host with NVIDIA GPUs, Docker Compose 2.30 or newer, and the
+NVIDIA Container Toolkit installed. From the root of the LMCache repository,
+run one script.
 
 For aggregated serving on one GPU:
 
 ```bash
-LMCACHE_L1_SIZE_GB=16 ./launch/agg_lmcache_mp.sh
+./examples/dynamo_integration/local/agg_lmcache_mp.sh
 ```
 
 For separate prefill and decode workers on two GPUs in the same node, stop
 the aggregated deployment first, then run:
 
 ```bash
-LMCACHE_L1_SIZE_GB=16 ./launch/disagg_lmcache_mp.sh
+./examples/dynamo_integration/local/disagg_lmcache_mp.sh
 ```
 
-Each script starts LMCache, the Dynamo frontend, and the vLLM workers. Press
-`Ctrl+C` to stop those processes. NATS and etcd run separately through Docker
-Compose and remain running.
+Each script starts NATS and etcd, creates a GPU-enabled Dynamo container,
+and launches LMCache, the Dynamo frontend, and the vLLM workers. Press
+`Ctrl+C` to stop the whole demo, including NATS and etcd.
+
+Both modes serve `Qwen/Qwen3-0.6B` with 16 GiB of CPU cache. They use
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2`, which includes LMCache 0.5.2.
+You can find the latest image tags on
+[NVIDIA NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/-/tags).
+
+To start each process yourself, follow the
+[manual startup steps](../../docs/source/production/dynamo_coordination.rst#start-processes-manually)
+instead of running a launch script. The
+[Dynamo integration guide](../../docs/source/production/dynamo_coordination.rst#check-the-deployment)
+also includes inference and cache-hit checks.
 
 ## Kubernetes
 
