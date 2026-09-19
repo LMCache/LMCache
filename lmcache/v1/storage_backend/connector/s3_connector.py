@@ -402,6 +402,11 @@ class S3Connector(RemoteConnector):
             if not is_connection_error:
                 # Log non-connection errors
                 logger.error("Failed to download %s from S3: %s", key_str, e)
+                # The object could not be fetched (e.g. deleted out-of-band by a
+                # lifecycle policy, a TTL, or another writer). Drop the stale
+                # size-cache entry so a later exists()/get() re-validates against
+                # the store instead of reporting a permanent false-positive hit.
+                self.object_size_cache.pop(key_str, None)
 
             memory_obj.ref_count_down()
             return None
@@ -420,6 +425,7 @@ class S3Connector(RemoteConnector):
         memory_objs: List[Optional[MemoryObj]] = []
         futures = []
         future_to_memobj_idx = []
+        future_to_key: List[str] = []
 
         for idx, key in enumerate(keys):
             key_str = key.to_string()
@@ -467,6 +473,7 @@ class S3Connector(RemoteConnector):
             fut = asyncio.wrap_future(s3_req.finished_future)
             futures.append(fut)
             future_to_memobj_idx.append(len(memory_objs) - 1)
+            future_to_key.append(key_str)
 
         # Use return_exceptions to prevent one failure from stopping all downloads
         results = await asyncio.gather(*futures, return_exceptions=True)
@@ -488,6 +495,10 @@ class S3Connector(RemoteConnector):
                         memobj_idx,
                         error_msg,
                     )
+                    # Object missing out-of-band: drop the stale size-cache entry
+                    # so a later exists()/get() re-validates instead of reporting
+                    # a permanent false-positive hit.
+                    self.object_size_cache.pop(future_to_key[future_idx], None)
                 # Release the memory object for failed download
                 memobj = memory_objs[memobj_idx]
                 if memobj is not None:
