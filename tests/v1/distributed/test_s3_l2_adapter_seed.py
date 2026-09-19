@@ -118,9 +118,11 @@ def _install_stubs() -> None:
 
 _install_stubs()
 
+# First Party
 # First Party  (imported after stubs are in place)
 from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
 from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod  # noqa: E402
+from lmcache.v1.mp_observability.event_bus import get_event_bus  # noqa: E402
 
 _parse_s3_last_modified = s3mod._parse_s3_last_modified
 _parse_list_response_xml_with_mtime = s3mod._parse_list_response_xml_with_mtime
@@ -216,10 +218,14 @@ def _bare_adapter(track_access_order: bool = False) -> S3L2Adapter:
 
     Only the attributes the seeding code paths touch are populated.
     """
+    # Standard
     import threading
 
     adapter = object.__new__(S3L2Adapter)
     adapter._listeners = []
+    adapter._backend_name = "test-s3"
+    adapter._shared = False
+    adapter._event_bus = get_event_bus()
     adapter._max_capacity_bytes = 0
     adapter._total_bytes_used = 0
     adapter._bytes_by_cache_salt = {}
@@ -347,6 +353,7 @@ def test_sidecar_corrupt_json_is_none():
 
 
 def test_sidecar_unknown_version_is_none():
+    # Standard
     import json
 
     body = json.dumps({"version": 999, "entries": []}).encode()
@@ -354,6 +361,7 @@ def test_sidecar_unknown_version_is_none():
 
 
 def test_sidecar_wrong_top_level_shape_is_none():
+    # Standard
     import json
 
     assert _deserialize_lru_index(json.dumps([1, 2, 3]).encode()) is None
@@ -361,6 +369,7 @@ def test_sidecar_wrong_top_level_shape_is_none():
 
 
 def test_sidecar_partial_rows_skipped_not_fatal():
+    # Standard
     import json
 
     payload = {
@@ -470,6 +479,7 @@ if __name__ == "__main__":
                 print(f"PASS {name}")
             except Exception as exc:  # noqa: BLE001
                 failures += 1
+                # Standard
                 import traceback
 
                 print(f"FAIL {name}: {exc}")
