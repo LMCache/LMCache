@@ -90,6 +90,9 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ] \
         # 16-block test pool. 4096 comfortably covers GSM8K while leaving the
         # pool small enough to force the intended eviction pressure.
         export MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+        # Each live Mamba sequence needs one cache block. Match the 16-block
+        # pool while leaving headroom above this workload's concurrency of 8.
+        export MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
         export NUM_CONCURRENT="${NUM_CONCURRENT:-8}"
         export LIMIT="${LIMIT:-40}"
         export EXPECT_LAZY_OFFLOAD_PRESSURE=true
