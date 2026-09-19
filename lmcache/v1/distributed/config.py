@@ -31,9 +31,13 @@ _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
 }
 
 
-def _requires_single_l1_memory_region(
+def requires_single_l1_memory_region(
     adapter_config: L2AdapterConfigBase,
 ) -> str | None:
+    """Return the adapter type requiring a single L1 memory region, if any."""
+    inner_config = getattr(adapter_config, "inner_config", None)
+    if isinstance(inner_config, L2AdapterConfigBase):
+        return requires_single_l1_memory_region(inner_config)
     type_name = get_type_name_for_config(adapter_config)
     if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
         return type_name
@@ -219,14 +223,15 @@ class L1ManagerConfig:
 def get_configured_capacity_bytes(
     config: L1ManagerConfig,
 ) -> dict[L1BackendType, int]:
-    """Return the configured L1 capacity of each backing medium.
+    """Return the boot-configured L1 capacity of each backing medium.
 
-    The single source for "how large is L1". Unlike
+    The boot-time source for "how large is L1". Unlike
     ``L1Manager.get_memory_usage()``, whose total is the grown heap on the
     lazy tier, this is stable from boot. Keyed per medium because a hybrid
     Device-DAX tier spans two, matching how L1 events tag placements.
     Reports the *configured* topology, so devices added later via
-    ``add_device`` are not counted.
+    ``add_device`` are not counted. ``L1Manager`` overlays live Device-DAX
+    arena capacity when it builds a runtime declaration.
 
     Expects a **normalized** config: ``normalize_storage_manager_config``
     back-fills ``devdax_size_in_bytes`` from a matching DAX L2 adapter,
@@ -366,7 +371,7 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     incompatible_adapters = [
         adapter_name
         for adapter_config in config.l2_adapter_config.adapters
-        if (adapter_name := _requires_single_l1_memory_region(adapter_config))
+        if (adapter_name := requires_single_l1_memory_region(adapter_config))
         is not None
     ]
     if incompatible_adapters:

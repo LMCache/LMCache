@@ -57,10 +57,10 @@ class EventType(Enum):
     # L2 Eviction Controller events
     L2_KEYS_EVICTED = "l2.keys.evicted"
 
-    # L2 adapter key-level events.
-    # Capacity topology changed (adapter added/removed/reconfigured).
+    # StorageManager capacity topology changed (L1 arena or L2 adapter).
     SM_CAPACITY_CHANGED = "sm.capacity.changed"
 
+    # L2 adapter key-level events.
     L2_KEYS_STORED = "l2.keys.stored"
     L2_KEYS_ACCESSED = "l2.keys.accessed"
     L2_KEYS_DELETED = "l2.keys.deleted"
