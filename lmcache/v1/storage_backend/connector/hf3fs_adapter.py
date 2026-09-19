@@ -50,14 +50,14 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
         # Legacy URL mode: extract base_paths_str from URL
         if context.plugin_name is None:
             self.base_paths_str = context.url[len(self.schema) :]
-            logger.info("Extract base_path from URL: %s", context.url)
+            logger.info(f"Extract base_path from URL: {context.url}")
         # Plugin mode: extract base_paths_str from extra_config
         else:
             key_prefix = context.plugin_name or PLUGIN_TYPE
             item = f"remote_storage_plugin.{key_prefix}.base_path"
             self.base_paths_str = self.extra_config.get(item)
             if self.base_paths_str is not None:
-                logger.info("Extract base_path from extra_config by %s", item)
+                logger.info(f"Extract base_path from extra_config by {item}")
             else:
                 self.base_paths_str = self.extra_config.get("hf3fs_base_path")
                 logger.info("Extract base_path from extra_config by hf3fs_base_path")
@@ -76,21 +76,14 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
         self.hf3fs_io_thread_num = self._get_positive_int("hf3fs_io_thread_num", 4)
 
         logger.info(
-            "HF3fSConnector Config:\n"
-            "base_paths_str = %s\n"
-            "hf3fs_mount_point = %s\n"
-            "hf3fs_iov_size = %s\n"
-            "hf3fs_ior_entries = %s\n"
-            "hf3fs_io_depth = %s\n"
-            "hf3fs_numa_id = %s\n"
-            "hf3fs_io_thread_num = %s\n",
-            self.base_paths_str,
-            self.hf3fs_mount_point,
-            self.hf3fs_iov_size,
-            self.hf3fs_ior_entries,
-            self.hf3fs_io_depth,
-            self.hf3fs_numa_id,
-            self.hf3fs_io_thread_num,
+            f"HF3fSConnector Config:\n"
+            f"base_paths_str = {self.base_paths_str}\n"
+            f"hf3fs_mount_point = {self.hf3fs_mount_point}\n"
+            f"hf3fs_iov_size = {self.hf3fs_iov_size}\n"
+            f"hf3fs_ior_entries = {self.hf3fs_ior_entries}\n"
+            f"hf3fs_io_depth = {self.hf3fs_io_depth}\n"
+            f"hf3fs_numa_id = {self.hf3fs_numa_id}\n"
+            f"hf3fs_io_thread_num = {self.hf3fs_io_thread_num}\n"
         )
 
         # check config
@@ -98,7 +91,7 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
             logger.error("Invalid configuration of HF3fsConnector")
             raise ValueError("Invalid configuration of hf3fsConnector")
 
-        logger.info("Creating HF3fsConnector by base_paths: %s", self.base_paths_str)
+        logger.info(f"Creating HF3fsConnector by base_paths: {self.base_paths_str}")
         return HF3fsConnector(
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
@@ -127,13 +120,11 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
         try:
             int_value = int(value)
             if int_value <= 0:
-                logger.error("%s must be positive, got %s", key, int_value)
+                logger.error(f"{key} must be positive, got {int_value}")
                 raise ValueError(f"{key} must be positive, got {int_value}")
             return int_value
         except (TypeError, ValueError) as e:
-            logger.error(
-                "Invalid value for %s: %s, must be positive integer", key, value
-            )
+            logger.error(f"Invalid value for {key}: {value}, must be positive integer")
             raise ValueError(
                 f"Invalid value for {key}: {value}, must be positive integer"
             ) from e
@@ -171,9 +162,8 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
 
         if not (100 * 1024 * 1024) <= self.hf3fs_iov_size <= (2 * 1024 * 1024 * 1024):
             logger.error(
-                "hf3fs_iov_size must in range [%s(100MB), %s(2GB)]",
-                100 * 1024 * 1024,
-                2 * 1024 * 1024 * 1024,
+                f"hf3fs_iov_size must in range [{100 * 1024 * 1024}(100MB), "
+                f"{2 * 1024 * 1024 * 1024}(2GB)]"
             )
             result = False
 
@@ -184,8 +174,7 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
         max_numa_id = self._get_numa_node_count() - 1
         if not -1 <= self.hf3fs_numa_id <= max_numa_id:
             logger.error(
-                "hf3fs_numa_id must in range [-1, %s] in current server",
-                max_numa_id,
+                f"hf3fs_numa_id must in range [-1, {max_numa_id}] in current server"
             )
             result = False
 
@@ -204,20 +193,18 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
             parent_path = Path(mount_point_path_str).resolve()
             if not parent_path.exists():
                 logger.error(
-                    "Invalid mount point:%s which is not exist",
-                    mount_point_path_str,
+                    f"Invalid mount point:{mount_point_path_str} which is not exist"
                 )
                 return False
 
             if not parent_path.is_dir():
                 logger.error(
-                    "Invalid mount point:%s which is not dir",
-                    mount_point_path_str,
+                    f"Invalid mount point:{mount_point_path_str} which is not dir"
                 )
                 return False
         except Exception as e:
             # invalidate path
-            logger.error("Invalid mount point:%s, %s", mount_point_path_str, e)
+            logger.error(f"Invalid mount point:{mount_point_path_str}, {e}")
             return False
 
         try:
@@ -230,7 +217,7 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
                 self.base_paths = [Path(base_paths_str.strip())]
         except Exception as e:
             # invalidate path
-            logger.error("Invalid base_paths_str:%s, %s", base_paths_str, e)
+            logger.error(f"Invalid base_paths_str:{base_paths_str}, {e}")
             return False
 
         for path in self.base_paths:
@@ -239,14 +226,12 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
                 resolved = path.resolve()
                 if not resolved.is_relative_to(parent_path):
                     logger.error(
-                        "Invalid path:%s, is not subdirectory of "
-                        "mount point:%s",
-                        str(path),
-                        mount_point_path_str,
+                        f"Invalid path:{str(path)}, is not subdirectory of "
+                        f"mount point:{mount_point_path_str}"
                     )
                     return False
             except Exception as e:
-                logger.error("Invalid path %s, %s", str(path), e)
+                logger.error(f"Invalid path {str(path)}, {e}")
                 return False
         return True
 
