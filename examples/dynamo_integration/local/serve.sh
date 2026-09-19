@@ -6,6 +6,7 @@ set -euo pipefail
 
 PIDS=()
 
+# Stop all processes started by this script and preserve its exit status.
 cleanup() {
   local status=$?
   trap - EXIT
@@ -16,6 +17,7 @@ cleanup() {
   exit "$status"
 }
 
+# Wait for a health endpoint, stopping early if any started process exits.
 wait_for_http() {
   local service=$1
   local endpoint=$2
@@ -51,20 +53,22 @@ esac
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Let Dynamo manage its Prometheus multiprocess directory.
 unset PROMETHEUS_MULTIPROC_DIR
 
+# Wait for the NATS and etcd services started by the host launcher.
 wait_for_http NATS http://localhost:8222/healthz
 wait_for_http etcd http://localhost:2379/health
 
+# Start the LMCache MP server with 16 GiB of CPU cache.
 lmcache server --l1-size-gb 16 --eviction-policy LRU \
   --port 5555 --http-port 8080 &
 PIDS+=("$!")
 wait_for_http LMCache http://localhost:8080/healthcheck
 
-python3 -m dynamo.frontend &
-PIDS+=("$!")
-
+# Connect vLLM workers to LMCache on port 5555 through LMCacheMPConnector.
 if [[ "$MODE" == aggregated ]]; then
+  # Run prefill and decode in one vLLM worker on GPU 0.
   DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
@@ -77,8 +81,9 @@ if [[ "$MODE" == aggregated ]]; then
       "kv_connector_extra_config": {"lmcache.mp.port": 5555}
     }' &
   PIDS+=("$!")
+  wait_for_http "aggregated worker" http://localhost:8081/health 600
 else
-  # Run the decode worker on GPU 0.
+  # Start the vLLM decode worker on GPU 0.
   DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
@@ -96,7 +101,7 @@ else
   # Wait for decode to finish downloading and loading the model before prefill.
   wait_for_http "decode worker" http://localhost:8081/health 600
 
-  # Run the prefill worker on GPU 1.
+  # Start the vLLM prefill worker on GPU 1, using the cached model files.
   DYN_SYSTEM_PORT=8082 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
@@ -110,7 +115,12 @@ else
       "kv_connector_extra_config": {"lmcache.mp.port": 5555}
     }' &
   PIDS+=("$!")
+  wait_for_http "prefill worker" http://localhost:8082/health 600
 fi
+
+# Start the HTTP frontend on port 8000 once all workers are ready.
+python3 -m dynamo.frontend &
+PIDS+=("$!")
 
 # Stop the whole demo if any serving process exits, preserving its failure code.
 while true; do
