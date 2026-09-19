@@ -183,6 +183,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         block_ids: list[list[int]],
         _event: IPCEvent | None,
         blocks_in_chunk: int,
+        selected_engine_group_ids: tuple[int, ...] | None = None,
     ) -> MessagingFuture:
         """Three-phase async store (prepare, gather and commit all in background).
 
@@ -199,6 +200,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
             _event: Synchronization event; ``wait()`` is called in background.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            selected_engine_group_ids: Unsupported for engine-driven transfer.
 
         Returns:
             An unresolved :class:`MessagingFuture` that resolves to ``True``
@@ -207,6 +209,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         Raises:
             RuntimeError: If register() was not called first.
         """
+        if selected_engine_group_ids is not None:
+            raise RuntimeError(
+                "engine-driven transfer does not support selected KV-cache groups"
+            )
         if self._engine_driven_context is None:
             raise RuntimeError(
                 "Engine-driven transfer context is not registered. "

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 # First Party
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -88,6 +89,203 @@ def test_object_group_null_only_when_all_its_kernel_groups_null():
     )
     # chunk 0: kg0=0 and kg1=0 -> null; chunk 1: kg0=0 but kg1=4 -> not null.
     assert masks == [[True, False]]
+
+
+# ------------------------------------------------------------------ #
+#  selected-group store atomicity                                     #
+# ------------------------------------------------------------------ #
+
+
+def _make_store_module(monkeypatch, *, separate_object_groups=True):
+    """Build a two-group store harness and capture transfers/callbacks."""
+    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    kvlgm = SimpleNamespace(
+        num_object_groups=2,
+        num_kernel_groups=2,
+        kernel_groups=[
+            SimpleNamespace(engine_group_idx=0),
+            SimpleNamespace(engine_group_idx=1),
+        ],
+        object_groups=[_og([0]), _og([1])],
+    )
+    cache_context = MagicMock()
+    cache_context.kv_layer_groups_manager = kvlgm
+    cache_context.calculate_num_blocks.return_value = 1
+    entry = SimpleNamespace(
+        cache_context=cache_context,
+        model_name="model",
+        event_backend=MagicMock(),
+    )
+    entry.event_backend.export_event.return_value = b"done"
+    module.get_and_touch_context_entry = MagicMock(return_value=entry)
+
+    ctx = MagicMock()
+    ctx.chunk_size = 256
+    ctx.separate_object_groups = separate_object_groups
+    ctx.resolve_obj_keys.side_effect = lambda _key, group_ids: [
+        [f"g{group_id}"] for group_id in group_ids
+    ]
+    ctx.event_bus.has_subscribers.return_value = False
+    module._ctx = ctx
+
+    transfers: list[int] = []
+    callbacks: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        mod,
+        "downsample_and_stage_block_ids",
+        lambda _cache_context, block_ids: block_ids,
+    )
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        mod,
+        "transfer_kv_per_object_group",
+        lambda *args, object_group_id, **kwargs: transfers.append(object_group_id),
+    )
+    monkeypatch.setattr(
+        mod,
+        "submit_callback_to_stream",
+        lambda _stream, kind, keys: callbacks.append((kind, list(keys))),
+    )
+    monkeypatch.setattr(mod, "torch_dev", MagicMock())
+    monkeypatch.setattr(mod, "Event", MagicMock())
+    return module, ctx, transfers, callbacks
+
+
+def test_selected_group_store_commits_only_that_complete_object_group(monkeypatch):
+    module, ctx, transfers, callbacks = _make_store_module(monkeypatch)
+    memory_obj = MagicMock()
+    memory_obj.get_size.return_value = 10
+    ctx.storage_manager.reserve_write_with_status.return_value = {
+        "g1": (L1Error.SUCCESS, memory_obj)
+    }
+
+    handle, ok = module.store_groups(
+        key=SimpleNamespace(request_id="req", worker_id=1),
+        instance_id=1,
+        gpu_block_ids=[[11], [22]],
+        event_ipc_handle=b"producer",
+        selected_engine_group_ids=[1],
+    )
+
+    assert (handle, ok) == (b"done", True)
+    assert transfers == [1]
+    assert callbacks == [("finish_write", ["g1"])]
+
+
+def test_partial_object_group_selection_is_rejected(monkeypatch):
+    module, ctx, transfers, callbacks = _make_store_module(monkeypatch)
+    cache_context = module.get_and_touch_context_entry.return_value.cache_context
+    cache_context.kv_layer_groups_manager.object_groups = [_og([0, 1])]
+    cache_context.kv_layer_groups_manager.num_object_groups = 1
+
+    handle, ok = module.store_groups(
+        key=SimpleNamespace(request_id="req", worker_id=1),
+        instance_id=1,
+        gpu_block_ids=[[11], [22]],
+        event_ipc_handle=b"producer",
+        selected_engine_group_ids=[0],
+    )
+
+    assert (handle, ok) == (b"", False)
+    assert transfers == []
+    assert callbacks == []
+    ctx.storage_manager.reserve_write_with_status.assert_not_called()
+
+
+def test_partial_store_requires_separate_object_groups(monkeypatch):
+    module, ctx, transfers, callbacks = _make_store_module(
+        monkeypatch, separate_object_groups=False
+    )
+
+    handle, ok = module.store_groups(
+        key=SimpleNamespace(request_id="req", worker_id=1),
+        instance_id=1,
+        gpu_block_ids=[[11], [22]],
+        event_ipc_handle=b"producer",
+        selected_engine_group_ids=[1],
+    )
+
+    assert (handle, ok) == (b"", False)
+    assert transfers == []
+    assert callbacks == []
+    ctx.storage_manager.reserve_write_with_status.assert_not_called()
+
+
+def test_later_group_failure_aborts_every_reservation(monkeypatch):
+    module, ctx, transfers, callbacks = _make_store_module(monkeypatch)
+    group0_obj = MagicMock()
+    group1_obj = MagicMock()
+    group0_obj.get_size.return_value = 10
+    group1_obj.get_size.return_value = 10
+    ctx.storage_manager.reserve_write_with_status.side_effect = [
+        {"g0": (L1Error.SUCCESS, group0_obj)},
+        {"g1": (L1Error.SUCCESS, group1_obj)},
+    ]
+
+    def fail_second_group(*args, object_group_id, **kwargs):
+        transfers.append(object_group_id)
+        if object_group_id == 1:
+            raise RuntimeError("copy failed")
+
+    monkeypatch.setattr(mod, "transfer_kv_per_object_group", fail_second_group)
+
+    handle, ok = module.store_groups(
+        key=SimpleNamespace(request_id="req", worker_id=1),
+        instance_id=1,
+        gpu_block_ids=[[11], [22]],
+        event_ipc_handle=b"producer",
+        selected_engine_group_ids=[0, 1],
+    )
+
+    assert (handle, ok) == (b"done", False)
+    assert transfers == [0, 1]
+    assert callbacks == [("abort_write", ["g0", "g1"])]
+
+
+def test_partial_reservation_aborts_and_skips_copy(monkeypatch):
+    module, ctx, transfers, callbacks = _make_store_module(monkeypatch)
+    cache_context = module.get_and_touch_context_entry.return_value.cache_context
+    cache_context.calculate_num_blocks.return_value = 1
+    ctx.resolve_obj_keys.side_effect = lambda _key, group_ids: [
+        [f"g{group_id}c0", f"g{group_id}c1"] for group_id in group_ids
+    ]
+    reserved = MagicMock()
+    reserved.get_size.return_value = 10
+    ctx.storage_manager.reserve_write_with_status.return_value = {
+        "g1c0": (L1Error.SUCCESS, reserved),
+        "g1c1": (L1Error.OUT_OF_MEMORY, None),
+    }
+
+    handle, ok = module.store_groups(
+        key=SimpleNamespace(request_id="req", worker_id=1),
+        instance_id=1,
+        gpu_block_ids=[[11, 12], [21, 22]],
+        event_ipc_handle=b"producer",
+        selected_engine_group_ids=[1],
+    )
+
+    assert (handle, ok) == (b"done", False)
+    assert transfers == []
+    assert callbacks == [("abort_write", ["g1c0"])]
+
+
+def test_complete_existing_objects_satisfy_selected_store(monkeypatch):
+    module, ctx, transfers, callbacks = _make_store_module(monkeypatch)
+    ctx.storage_manager.reserve_write_with_status.return_value = {
+        "g1": (L1Error.KEY_ALREADY_EXISTS, None)
+    }
+
+    handle, ok = module.store_groups(
+        key=SimpleNamespace(request_id="req", worker_id=1),
+        instance_id=1,
+        gpu_block_ids=[[11], [22]],
+        event_ipc_handle=b"producer",
+        selected_engine_group_ids=[1],
+    )
+
+    assert (handle, ok) == (b"done", True)
+    assert transfers == [1]
+    assert callbacks == []
 
 
 # ------------------------------------------------------------------ #

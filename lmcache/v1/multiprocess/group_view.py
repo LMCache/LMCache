@@ -4,8 +4,9 @@
 An *engine group* is one distinct paged-block address space exposed by the
 serving engine (e.g. one of vLLM's hybrid KV cache groups): block IDs are only
 meaningful within a single group, and layers from different groups must never be
-merged into one LMCache KV group. Engine group ids are assumed dense and
-consecutive starting from 0.
+merged into one LMCache KV group. Engine group ids preserve the serving
+engine's indices. Gaps are allowed when an engine group is intentionally
+excluded from transfer (for example, a scratch-only group).
 
 LMCache's neutral KV cache spec is simply a ``list[EngineGroupInfo]`` (passed as
 a ``Sequence[EngineGroupInfo]`` where only order matters). The group order is
@@ -22,6 +23,9 @@ from typing import cast
 # Third Party
 import msgspec
 
+PARTIAL_STORE_GROUPS_CAPABILITY = "partial_store_groups"
+"""Capability advertised when the server can commit selected object groups."""
+
 
 class EngineGroupInfo(msgspec.Struct, frozen=True):
     """One LMCache KV group: layers of one engine group that share a copy kernel.
@@ -36,7 +40,8 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
 
     engine_group_id: int
     """Engine group these layers live in (one distinct paged-block address
-    space). Selects which request block-id list applies. Dense from 0."""
+    space). Selects which request block-id list applies. Gaps are allowed for
+    engine groups excluded from transfer."""
 
     layer_indices: tuple[int, ...] = ()
     """Registered KV tensor indices assigned to this group."""
@@ -68,7 +73,8 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
 
-    Engine group ids are assumed dense and consecutive from 0.
+    The returned count includes any gaps left by excluded engine groups so it
+    remains the required length of an engine-side block-id vector.
 
     Args:
         groups: The LMCache KV groups, in protocol order.

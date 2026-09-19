@@ -443,6 +443,8 @@ class L1Manager:
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
         mode: Literal["new", "update", "all"] = "all",
+        *,
+        distinguish_existing: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve write access for the given keys.
 
@@ -456,6 +458,10 @@ class L1Manager:
             - "new": Reserve only new objects that do not exist.
             - "update": Reserve only existing objects for update.
             - "all": Reserve all writable objects regardless of existence.
+            distinguish_existing: In ``new`` mode, report a complete,
+                persistent, readable object as ``KEY_ALREADY_EXISTS`` rather
+                than the legacy ``KEY_NOT_WRITABLE`` result. Write-locked and
+                temporary objects remain ``KEY_NOT_WRITABLE``.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -463,6 +469,8 @@ class L1Manager:
 
         Errors:
             KEY_NOT_WRITABLE: The key exists but is not writable.
+            KEY_ALREADY_EXISTS: The key already names a complete persistent
+                object and ``distinguish_existing`` is true.
             OUT_OF_MEMORY: Not enough memory to allocate for the object.
         """
         need_to_allocate: list[tuple[ObjectKey, bool]] = []
@@ -476,7 +484,14 @@ class L1Manager:
                 continue
 
             if mode == "new":
-                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
+                error = L1Error.KEY_NOT_WRITABLE
+                if (
+                    distinguish_existing
+                    and not entry.is_temporary
+                    and entry.available_for_read()
+                ):
+                    error = L1Error.KEY_ALREADY_EXISTS
+                ret[key] = (error, None)
                 continue
 
             if not entry.available_for_write():

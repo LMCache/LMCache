@@ -398,6 +398,7 @@ class TransferContext(ABC):
         block_ids: list[list[int]],
         event: IPCEvent | None,
         blocks_in_chunk: int,
+        selected_engine_group_ids: tuple[int, ...] | None = None,
     ) -> MessagingFuture:
         """Submit a store request and return a completion future.
 
@@ -409,6 +410,8 @@ class TransferContext(ABC):
             event: Synchronization event object, or ``None`` when the concrete
                 context does not require one.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            selected_engine_group_ids: Engine groups to store, or ``None``
+                for the legacy all-group operation.
 
         Returns:
             A future compatible with adapter-side ``query()``/``result()`` flow.
@@ -589,6 +592,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         block_ids: list[list[int]],
         event: IPCEvent | None,
         _blocks_in_chunk: int,
+        selected_engine_group_ids: tuple[int, ...] | None = None,
     ) -> MessagingFuture:
         """Submit a handle-based store ordered by ``event``.
 
@@ -600,6 +604,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             block_ids: Engine block IDs indexed by LMCache KV group.
             event: Producer event that orders reads of the engine KV cache.
             _blocks_in_chunk: Engine blocks per chunk (unused by this transport).
+            selected_engine_group_ids: Engine groups to commit, or ``None``
+                to commit every group.
 
         Returns:
             A device-event-aware future for the server response.
@@ -616,9 +622,18 @@ class LMCacheDrivenTransferContext(TransferContext):
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._req_client.store(
-            key, self._instance_id, block_ids, event_ipc_handle
-        ).to_device_future(
+        request = (
+            self._req_client.store(key, self._instance_id, block_ids, event_ipc_handle)
+            if selected_engine_group_ids is None
+            else self._req_client.store_groups(
+                key,
+                self._instance_id,
+                block_ids,
+                event_ipc_handle,
+                list(selected_engine_group_ids),
+            )
+        )
+        return request.to_device_future(
             device=self._device,
             event_backend=self._event_backend,
         )
@@ -864,7 +879,12 @@ class EngineDrivenTransferContext(TransferContext):
         block_ids: list[list[int]],
         _event: IPCEvent | None,
         blocks_in_chunk: int,
+        selected_engine_group_ids: tuple[int, ...] | None = None,
     ) -> MessagingFuture:
+        if selected_engine_group_ids is not None:
+            raise RuntimeError(
+                "engine-driven transfer does not support selected KV-cache groups"
+            )
         if self._engine_driven_context is None:
             raise RuntimeError(
                 "Engine-driven transfer context is not registered. "

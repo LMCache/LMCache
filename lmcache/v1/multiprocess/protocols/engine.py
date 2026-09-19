@@ -48,6 +48,7 @@ REQUEST_NAMES = [
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
+    "STORE_GROUPS",
 ]
 
 # Type alias for cache keys
@@ -141,6 +142,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   The handle is empty when the server submitted no device work.
         "STORE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes],
+            response_class=tuple[bytes, bool],
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Store selected engine KV-cache groups. The server maps engine groups
+        # to complete object groups and rejects any partial-object selection.
+        "STORE_GROUPS": ProtocolDefinition(
+            payload_classes=[KeyType, int, list[list[int]], bytes, list[int]],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),

@@ -32,7 +32,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import L1Manager, L1OperationResult
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
@@ -202,38 +202,41 @@ class StorageManager:
                 reserved memory objects. Note that not all requested keys could be
                 reserved (e.g., out of memory or write conflict)
         """
-        reserve_result = self._l1_manager.reserve_write(
-            keys=keys,
-            is_temporary=[False] * len(keys),
-            layout_desc=layout_desc,
-            mode=mode,
+        reserve_result = self._reserve_write_with_status(keys, layout_desc, mode)
+        return {
+            key: memory_obj
+            for key, (_, memory_obj) in reserve_result.items()
+            if memory_obj is not None
+        }
+
+    @enable_tracing()
+    def reserve_write_with_status(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+        mode: Literal["new", "update", "all"],
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Reserve writes and retain the status for every requested key.
+
+        Unlike :meth:`reserve_write`, this method distinguishes an existing,
+        complete object from a write conflict in ``new`` mode. Callers that
+        require all-or-nothing behavior can accept ``KEY_ALREADY_EXISTS`` and
+        abort newly reserved objects after any other failure.
+
+        Args:
+            keys: Object keys to reserve.
+            layout_desc: Memory layout for newly allocated objects.
+            mode: Reservation mode; see :meth:`reserve_write`.
+
+        Returns:
+            A status and optional newly reserved memory object for every key.
+        """
+        return self._reserve_write_with_status(
+            keys,
+            layout_desc,
+            mode,
+            distinguish_existing=True,
         )
-
-        result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
-        successful_keys = list(result.keys())
-        failed_keys = [k for k, (e, m) in reserve_result.items() if m is None]
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_WRITE_RESERVED,
-                metadata={
-                    "succeeded_keys": successful_keys,
-                    "failed_keys": failed_keys,
-                },
-            )
-        )
-
-        oom_keys = [
-            k for k, (e, _) in reserve_result.items() if e == L1Error.OUT_OF_MEMORY
-        ]
-        if oom_keys:
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L1_ALLOCATION_FAILED,
-                    metadata={"during": "l1_store", "keys": oom_keys},
-                )
-            )
-
-        return result
 
     @enable_tracing()
     def finish_write(
@@ -260,6 +263,27 @@ class StorageManager:
         )
 
         # TODO: global key states update
+
+    @enable_tracing()
+    def abort_write(self, keys: list[ObjectKey]) -> None:
+        """Discard objects reserved by a store that failed before commit.
+
+        The L1 operation unlocks and deletes each object in one critical
+        section, so no reader can observe data copied by only part of a
+        multi-object-group store.
+
+        Args:
+            keys: Write-reserved object keys that must not become visible.
+        """
+        abort_result = self._l1_manager.finish_write_and_delete(keys)
+        failed_keys = [
+            key for key, error in abort_result.items() if error != L1Error.SUCCESS
+        ]
+        if failed_keys:
+            logger.warning(
+                "Failed to abort %d write reservation(s)",
+                len(failed_keys),
+            )
 
     @contextmanager
     def read_prefetched_results(
@@ -1280,3 +1304,59 @@ class StorageManager:
         if adapter_index < 0 or adapter_index >= len(adapters):
             raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
         return adapters[adapter_index][1]
+
+    def _reserve_write_with_status(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+        mode: Literal["new", "update", "all"],
+        *,
+        distinguish_existing: bool = False,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Reserve writes and publish the common reservation events."""
+        reserve_result = self._l1_manager.reserve_write(
+            keys=keys,
+            is_temporary=[False] * len(keys),
+            layout_desc=layout_desc,
+            mode=mode,
+            distinguish_existing=distinguish_existing,
+        )
+        successful_keys = [
+            key
+            for key, (_, memory_obj) in reserve_result.items()
+            if memory_obj is not None
+        ]
+        existing_keys = [
+            key
+            for key, (error, _) in reserve_result.items()
+            if error == L1Error.KEY_ALREADY_EXISTS
+        ]
+        failed_keys = [
+            key
+            for key, (error, memory_obj) in reserve_result.items()
+            if memory_obj is None and error != L1Error.KEY_ALREADY_EXISTS
+        ]
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_RESERVED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "existing_keys": existing_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
+
+        oom_keys = [
+            key
+            for key, (error, _) in reserve_result.items()
+            if error == L1Error.OUT_OF_MEMORY
+        ]
+        if oom_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "l1_store", "keys": oom_keys},
+                )
+            )
+        return reserve_result
