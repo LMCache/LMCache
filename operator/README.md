@@ -258,8 +258,6 @@ make package-chart VERSION=v0.4.8rc1 CHART_VERSION=0.4.8-rc.1
 make package-chart VERSION=nightly-2026-09-19 CHART_VERSION=0.0.0-nightly.20260919
 ```
 
-Publishing uses `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, with write access to the public `lmcache/lmcache-operator-chart` Docker Hub repository.
-
 ### End-to-End Tests
 
 Four `make` targets cover the e2e tiers. The `-kind` variants create
