@@ -83,9 +83,16 @@ On the host, run one of these commands from the root of the LMCache repository:
 Kubernetes
 ----------
 
-For Kubernetes, install the :doc:`LMCache operator </mp/operator>` and
-the Dynamo platform before applying the examples. Use x86_64 NVIDIA GPU
-nodes and a Dynamo operator that serves ``nvidia.com/v1alpha1``.
+Prerequisites
+~~~~~~~~~~~~~
+
+- Install the :doc:`LMCache Operator </mp/operator>`. It deploys and
+  manages LMCache servers and creates the connection configuration used
+  by the workers.
+- Install `Dynamo
+  <https://docs.nvidia.com/dynamo/dev/kubernetes/installation/install-dynamo>`_.
+  Its Kubernetes operator manages the frontend and inference workers
+  defined in a ``DynamoGraphDeployment`` resource.
 
 Run the commands below from the root of the LMCache repository. Deploy
 the LMCache server first, then choose aggregated or disaggregated serving.
