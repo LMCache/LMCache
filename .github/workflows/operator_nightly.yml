@@ -63,6 +63,7 @@ jobs:
           CHART_FILE="lmcache-operator-chart-${CHART_VERSION}.tgz"
           test -f "dist/${CHART_FILE}"
           make build-installer CHART="dist/${CHART_FILE}" IMG=${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
+          echo "CHART_VERSION=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
           echo "CHART_FILE=${CHART_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
@@ -96,6 +97,13 @@ jobs:
             Automated nightly operator build from `dev` branch.
 
             **Image:** `${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}`
+
+            ```bash
+            helm upgrade --install lmcache-operator \
+              ${{ env.CHART_REGISTRY }}/lmcache-operator-chart \
+              --version ${{ steps.artifacts.outputs.CHART_VERSION }} \
+              --namespace lmcache-operator-system --create-namespace --wait
+            ```
 
             ```bash
             kubectl apply -f https://github.com/${{ github.repository }}/releases/download/operator-nightly-latest/install.yaml
