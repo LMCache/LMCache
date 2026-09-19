@@ -1,9 +1,2 @@
 Check the operator:
   kubectl rollout status deployment/{{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager") }} -n {{ .Release.Namespace }}
-
-Create LMCacheEngine, CacheBlendEngine, or LMCacheCoordinator resources separately.
-{{- if .Values.metrics.serviceMonitor.enabled }}
-
-Authorize your Prometheus ServiceAccount to read HTTPS metrics by binding the
-ClusterRole {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "metrics-reader") }}.
-{{- end }}
