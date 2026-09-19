@@ -147,7 +147,7 @@ Each worker uses one GPU and connects to the same LMCache server.
    :language: yaml
    :caption: disagg_lmcache_mp.yaml
 
-For disaggregated serving, use this manifest in place of the aggregated one:
+Apply the disaggregated deployment:
 
 .. code-block:: bash
 
