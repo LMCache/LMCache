@@ -130,7 +130,6 @@ ignore = [
 "examples/token_dropping/random_token_dropping.ipynb" = ["G004"]
 "examples/token_dropping/rkv_colab.ipynb" = ["G004"]
 "examples/token_dropping/rkv_token_dropping.ipynb" = ["G004"]
-"examples/token_dropping/rkv_variants/**" = ["G004"]
 "examples/token_dropping/snapkv_colab.ipynb" = ["G004"]
 "examples/token_dropping/snapkv_token_dropping.ipynb" = ["G004"]
 "lmcache/integration/vllm/utils.py" = ["G004"]
