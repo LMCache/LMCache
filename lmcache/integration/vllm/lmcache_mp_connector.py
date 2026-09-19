@@ -1450,7 +1450,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
-        kv_cache_events = connector_output.kv_cache_events
+        # Compatibility shims may provide only worker metadata. Treat KV
+        # events as optional so lazy-offload receipts still get processed.
+        kv_cache_events = getattr(connector_output, "kv_cache_events", None)
         if kv_cache_events and isinstance(kv_cache_events, LMCacheMPKVEvents):
             if self._kv_cache_events is None:
                 self._kv_cache_events = kv_cache_events

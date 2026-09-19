@@ -223,6 +223,15 @@ def _make_connector() -> _Harness:
     connector.lazy_offload = True
     connector.request_trackers = {}
     connector._group_tokens_per_block = [TOKENS_PER_BLOCK]
+    connector._group_retention_specs = [
+        KVGroupRetentionSpec(
+            engine_group_id=0,
+            tokens_per_block=TOKENS_PER_BLOCK,
+            kind=KVGroupRetentionKind.FULL_ATTENTION,
+            window_size_tokens=None,
+            retention_group_id=0,
+        )
+    ]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
     connector._lazy_offload_manager = manager  # type: ignore[assignment]
     connector.scheduler_adapter = adapter  # type: ignore[assignment]
