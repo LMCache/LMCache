@@ -96,6 +96,17 @@ async def _async_readinto_full(
     return total
 
 
+def _group_objects_by_key(
+    keys: list[ObjectKey],
+    objects: list[MemoryObj],
+) -> dict[ObjectKey, list[tuple[int, MemoryObj]]]:
+    """Group key-object pairs while preserving input and occurrence order."""
+    grouped: dict[ObjectKey, list[tuple[int, MemoryObj]]] = {}
+    for index, (key, obj) in enumerate(zip(keys, objects, strict=True)):
+        grouped.setdefault(key, []).append((index, obj))
+    return grouped
+
+
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Build a reversible, filesystem-safe filename.
 
@@ -597,6 +608,67 @@ class FSL2Adapter(L2AdapterInterface):
 
     # ---- store ----------------------------------------------------------
 
+    async def _store_one(
+        self,
+        key: ObjectKey,
+        obj: MemoryObj,
+    ) -> tuple[bool, int]:
+        """Store a single key's bytes atomically.
+
+        Writes to a per-key temp path, then ``rename``s onto the final
+        path. Returns ``(success, bytes_written)`` where
+        ``bytes_written == 0`` on either a skipped (already-present) or
+        failed write; ``success`` is False only on I/O errors — a
+        skipped key is not a failure.
+        """
+        file_path, tmp_path = self._key_to_file_and_tmp_path(key)
+
+        if await aiofiles.os.path.exists(file_path):
+            return True, 0
+
+        buf = obj.byte_array
+        size = len(buf)
+
+        try:
+            do_odirect = self._use_odirect
+            if do_odirect:
+                aligned = self._os_disk_bs > 0 and size % self._os_disk_bs == 0
+                if not aligned:
+                    logger.warning(
+                        "Cannot use O_DIRECT for writing size %d, "
+                        "not aligned to block size %d.",
+                        size,
+                        self._os_disk_bs,
+                    )
+                    do_odirect = False
+
+            if do_odirect:
+                await self._loop.run_in_executor(
+                    None,
+                    self._write_with_odirect,
+                    tmp_path,
+                    buf,
+                )
+            else:
+                async with aiofiles.open(tmp_path, "wb") as f:
+                    await f.write(buf)
+
+            await aiofiles.os.replace(tmp_path, file_path)
+            logger.debug(
+                "FSL2Adapter stored key %s (%d bytes)",
+                file_path.name,
+                size,
+            )
+            return True, size
+        except Exception:
+            logger.exception("FSL2Adapter failed to store %s", file_path)
+            if await aiofiles.os.path.exists(tmp_path):
+                try:
+                    await aiofiles.os.unlink(tmp_path)
+                except OSError:
+                    pass
+            return False, 0
+
     async def _execute_store(
         self,
         keys: list[ObjectKey],
@@ -607,66 +679,62 @@ class FSL2Adapter(L2AdapterInterface):
         bytes_written = 0
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+
         try:
-            for key, obj in zip(keys, objects, strict=True):
-                file_path, tmp_path = self._key_to_file_and_tmp_path(key)
-
-                # Skip if already stored on disk
-                if await aiofiles.os.path.exists(file_path):
-                    continue
-                buf = obj.byte_array
-                size = len(buf)
-
-                try:
-                    # Decide whether O_DIRECT is usable
-                    do_odirect = self._use_odirect
-                    if do_odirect:
-                        aligned = self._os_disk_bs > 0 and size % self._os_disk_bs == 0
-                        if not aligned:
-                            logger.warning(
-                                "Cannot use O_DIRECT for "
-                                "writing size %d, not "
-                                "aligned to block size "
-                                "%d.",
-                                size,
-                                self._os_disk_bs,
-                            )
-                            do_odirect = False
-
-                    if do_odirect:
-                        await self._loop.run_in_executor(
-                            None,
-                            self._write_with_odirect,
-                            tmp_path,
-                            buf,
-                        )
-                    else:
-                        async with aiofiles.open(tmp_path, "wb") as f:
-                            await f.write(buf)
-
-                    await aiofiles.os.replace(tmp_path, file_path)
-                    bytes_written += size
-                    stored_keys.append(key)
-                    stored_sizes.append(size)
-                    logger.debug(
-                        "FSL2Adapter stored key %s (%d bytes)",
-                        file_path.name,
-                        size,
-                    )
-                except Exception:
-                    logger.exception(
-                        "FSL2Adapter failed to store %s",
-                        file_path,
-                    )
-                    if await aiofiles.os.path.exists(tmp_path):
-                        await aiofiles.os.unlink(tmp_path)
-                    success = False
-        except Exception:
+            grouped = _group_objects_by_key(keys, objects)
+        except ValueError:
             logger.exception(
-                "FSL2Adapter store task %s failed",
+                "FSL2Adapter store task %s has mismatched key/object counts",
                 task_id,
             )
+            grouped = {}
             success = False
+
+        # Fan out one write per unique key. Keeping the first object for
+        # duplicates preserves the previous serial behavior, where the first
+        # occurrence created the final file and later occurrences skipped it.
+        unique_pairs = [
+            (key, occurrences[0][1]) for key, occurrences in grouped.items()
+        ]
+        if len(unique_pairs) == 1:
+            key, obj = unique_pairs[0]
+            try:
+                ok, nbytes = await self._store_one(key, obj)
+            except Exception:
+                logger.exception(
+                    "FSL2Adapter store coroutine for key %s raised",
+                    self._key_to_path(key).name,
+                )
+                ok, nbytes = False, 0
+            if not ok:
+                success = False
+            bytes_written += nbytes
+            if nbytes:
+                stored_keys.append(key)
+                stored_sizes.append(nbytes)
+        elif unique_pairs:
+            results = await asyncio.gather(
+                *(self._store_one(key, obj) for key, obj in unique_pairs),
+                return_exceptions=True,
+            )
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "FSL2Adapter store coroutine for key %s raised: %r",
+                        self._key_to_path(unique_pairs[i][0]).name,
+                        result,
+                    )
+                    success = False
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+                ok, nbytes = result
+                if not ok:
+                    success = False
+                bytes_written += nbytes
+                if nbytes:
+                    stored_keys.append(unique_pairs[i][0])
+                    stored_sizes.append(nbytes)
 
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
@@ -682,17 +750,112 @@ class FSL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         task_id: L2TaskId,
     ) -> None:
+        # Check keys concurrently; avoid gather overhead for a single key.
         bitmap = Bitmap(len(keys))
-        for i, key in enumerate(keys):
-            if not await self._key_exists_on_disk(key):
-                continue
-            bitmap.set(i)
+        if len(keys) == 1:
+            try:
+                if await self._key_exists_on_disk(keys[0]):
+                    bitmap.set(0)
+            except Exception:
+                logger.exception(
+                    "FSL2Adapter lookup coroutine for %s raised",
+                    self._key_to_path(keys[0]).name,
+                )
+        elif keys:
+            results = await asyncio.gather(
+                *(self._key_exists_on_disk(k) for k in keys),
+                return_exceptions=True,
+            )
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "FSL2Adapter lookup coroutine for %s raised: %r",
+                        self._key_to_path(keys[i]).name,
+                        result,
+                    )
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+                if result:
+                    bitmap.set(i)
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
         self._lookup_efd.notify()
 
     # ---- load -----------------------------------------------------------
+
+    async def _load_one(
+        self,
+        key: ObjectKey,
+        mem_obj: MemoryObj,
+    ) -> bool:
+        """Load a single key's file into ``mem_obj``'s byte buffer.
+
+        Returns True on a complete read matching the buffer size, False
+        on a missing file, short read, or any I/O error. Errors are
+        logged; the caller uses the boolean to set the result bitmap.
+        """
+        file_path = self._key_to_path(key)
+        try:
+            dst_buf = mem_obj.byte_array
+            expected = len(dst_buf)
+
+            if self._use_odirect:
+                num_read = await self._loop.run_in_executor(
+                    None,
+                    self._read_with_odirect,
+                    file_path,
+                    dst_buf,
+                )
+                if num_read != expected:
+                    logger.warning(
+                        "Incomplete O_DIRECT read for %s: expected %d, got %d",
+                        file_path.name,
+                        expected,
+                        num_read or 0,
+                    )
+                    return False
+                logger.debug(
+                    "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
+                    file_path.name,
+                    num_read,
+                )
+                return True
+
+            async with aiofiles.open(file_path, "rb") as f:
+                if self._read_ahead_size is None:
+                    num_read = await _async_readinto_full(f, dst_buf)
+                else:
+                    if not isinstance(dst_buf, memoryview):
+                        dst_buf = memoryview(dst_buf)
+                    ra = self._read_ahead_size
+                    n_head = await _async_readinto_full(f, dst_buf[:ra])
+                    if n_head == ra:
+                        n_tail = await _async_readinto_full(f, dst_buf[ra:])
+                        num_read = n_head + n_tail
+                    else:
+                        num_read = n_head
+
+                if num_read != expected:
+                    logger.warning(
+                        "Incomplete read for %s: expected %d, got %d",
+                        file_path.name,
+                        expected,
+                        num_read,
+                    )
+                    return False
+                logger.debug(
+                    "FSL2Adapter loaded key %s (%d bytes)",
+                    file_path.name,
+                    num_read,
+                )
+                return True
+        except FileNotFoundError:
+            return False
+        except Exception:
+            logger.exception("FSL2Adapter failed to load %s", file_path)
+            return False
 
     async def _execute_load(
         self,
@@ -701,79 +864,80 @@ class FSL2Adapter(L2AdapterInterface):
         task_id: L2TaskId,
     ) -> None:
         bitmap = Bitmap(len(keys))
-        for i, key in enumerate(keys):
-            file_path = self._key_to_path(key)
+
+        try:
+            grouped = _group_objects_by_key(keys, objects)
+        except ValueError:
+            logger.exception(
+                "FSL2Adapter load task %s has mismatched key/object counts",
+                task_id,
+            )
+            grouped = {}
+
+        # Read each unique key into its first destination, then copy those
+        # bytes to the remaining destinations for that key. The bitmap remains
+        # positional, so every successfully populated occurrence gets a bit.
+        unique_loads = list(grouped.items())
+        if len(unique_loads) == 1:
+            key, occurrences = unique_loads[0]
             try:
-                dst_buf = objects[i].byte_array
-                expected = len(dst_buf)
-                num_read: Optional[int] = None
+                results: list[bool | BaseException] = [
+                    await self._load_one(key, occurrences[0][1])
+                ]
+            except Exception as exc:
+                results = [exc]
+        elif unique_loads:
+            results = await asyncio.gather(
+                *(
+                    self._load_one(key, occurrences[0][1])
+                    for key, occurrences in unique_loads
+                ),
+                return_exceptions=True,
+            )
+        else:
+            results = []
 
-                # O_DIRECT path (sync, via executor)
-                if self._use_odirect:
-                    num_read = await self._loop.run_in_executor(
-                        None,
-                        self._read_with_odirect,
-                        file_path,
-                        dst_buf,
-                    )
-                    if num_read != expected:
-                        logger.warning(
-                            "Incomplete O_DIRECT read for %s: expected %d, got %d",
-                            file_path.name,
-                            expected,
-                            num_read or 0,
-                        )
-                    else:
-                        bitmap.set(i)
-                        logger.debug(
-                            "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
-                            file_path.name,
-                            num_read,
-                        )
-                    continue
-
-                # Standard async path with optional
-                # read-ahead
-                expected = len(dst_buf)
-                async with aiofiles.open(file_path, "rb") as f:
-                    if self._read_ahead_size is None:
-                        num_read = await _async_readinto_full(f, dst_buf)
-                    else:
-                        if not isinstance(dst_buf, memoryview):
-                            dst_buf = memoryview(dst_buf)
-                        # Trigger readahead with a
-                        # small initial read
-                        ra = self._read_ahead_size
-                        n_head = await _async_readinto_full(f, dst_buf[:ra])
-                        if n_head == ra:
-                            n_tail = await _async_readinto_full(f, dst_buf[ra:])
-                            num_read = n_head + n_tail
-                        else:
-                            num_read = n_head
-
-                    if num_read != expected:
-                        logger.warning(
-                            "Incomplete read for %s: expected %d, got %d",
-                            file_path.name,
-                            expected,
-                            num_read,
-                        )
-                        continue
-
-                    bitmap.set(i)
-                    logger.debug(
-                        "FSL2Adapter loaded key %s (%d bytes)",
-                        file_path.name,
-                        num_read,
-                    )
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.exception(
-                    "FSL2Adapter failed to load %s",
-                    file_path,
+        for group_index, result in enumerate(results):
+            key, occurrences = unique_loads[group_index]
+            if isinstance(result, Exception):
+                logger.error(
+                    "FSL2Adapter load coroutine for %s raised: %r",
+                    self._key_to_path(key).name,
+                    result,
                 )
                 continue
+            if isinstance(result, BaseException):
+                raise result
+            if not result:
+                continue
+
+            source_obj = occurrences[0][1]
+            source_buf = memoryview(source_obj.byte_array).cast("B")
+            for input_index, destination_obj in occurrences:
+                if destination_obj is not source_obj:
+                    try:
+                        destination_buf = memoryview(destination_obj.byte_array).cast(
+                            "B"
+                        )
+                        if len(destination_buf) != len(source_buf):
+                            logger.warning(
+                                "Cannot fan out load for %s at index %d: "
+                                "source size %d != destination size %d",
+                                self._key_to_path(key).name,
+                                input_index,
+                                len(source_buf),
+                                len(destination_buf),
+                            )
+                            continue
+                        destination_buf[:] = source_buf
+                    except Exception:
+                        logger.exception(
+                            "FSL2Adapter failed to fan out load for %s at index %d",
+                            self._key_to_path(key).name,
+                            input_index,
+                        )
+                        continue
+                bitmap.set(input_index)
 
         loaded_keys = [keys[i] for i in bitmap.get_indices_list()]
         if loaded_keys:
