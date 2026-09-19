@@ -29,7 +29,7 @@ there is no separate observation that can go stale.
 Vocabulary: **lock** = take an L1 read lock; **unlock** = return the read
 lock; **loading** = L1 write reservation carrying an L2 lookup lock. A
 loading buffer is an L1 *staging object* tagged with the request id
-(`prefetch_write_tag`): invisible to readers and to other requests until the
+(`_get_prefetch_write_tag`): invisible to readers and to other requests until the
 load lands and `finish_write*` admits it (see `../l1_manager.md`).
 
 **LRU is decoupled from locking**: locking and unlocking never refresh

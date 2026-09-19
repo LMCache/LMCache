@@ -205,10 +205,6 @@ class StorageManager:
             dict[ObjectKey, MemoryObj]: A dictionary mapping object keys to their
                 reserved memory objects. Note that not all requested keys could be
                 reserved (e.g., out of memory or write conflict)
-
-        Note:
-            Newly reserved objects become visible to readers only when
-            :meth:`finish_write` admits them.
         """
         reserve_result = self._l1_manager.reserve_write(
             keys=keys,
@@ -910,17 +906,6 @@ class StorageManager:
             Tuple of ``(used_bytes, total_bytes)``.
         """
         return self._l1_manager.get_memory_usage()
-
-    def get_l1_staging_usage(self) -> int:
-        """Bytes held by L1 objects that are write-reserved but not admitted.
-
-        Returns:
-            The staging area size in bytes.
-
-        Note:
-            The value is part of :meth:`get_l1_usage`'s used bytes.
-        """
-        return self._l1_manager.get_staging_memory_usage()
 
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.

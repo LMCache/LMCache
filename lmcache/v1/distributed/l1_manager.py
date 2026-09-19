@@ -148,22 +148,14 @@ class L1Manager:
     A write of a key that is not resident yet creates a *staging object*,
     owned by the writer's ``tag``. Staging objects are kept apart from the
     resident objects: readers of the key do not see them, and writers with
-    different tags may stage the same key at the same time. ``finish_write``
-    (and its ``_and_reserve_read`` / ``_and_delete`` variants) is the
-    *admission* step: the staging object becomes the resident object and the
-    tag is dropped. If the key became resident in the meantime, the staging
-    object is discarded and the resident one is kept.
-
-    A write of a key that is already resident (``mode="update"``, or
-    ``mode="all"`` on a resident key) write-locks the resident object in
-    place, as before.
+    different tags may stage the same key at the same time.
 
           +--------+
           |  None  | <---------------------------------------+
           +--------+                                         |
             |   ^                                            |
-            |   | (write lock expired: evictable,            | delete()
-            |   |  or taken over by the same tag)            |
+            |   | (write lock expired: evictable)            | delete()
+            |   |                                            |
     reserve |   |                                            |
     write() |   |                                            |
     (key,   v   |                                            |
@@ -507,9 +499,7 @@ class L1Manager:
         Note:
             A staging object is invisible to readers and to other tags until
             it is admitted. Different tags may stage the same key at the same
-            time; one tag holds at most one staging object per key. If that
-            reservation's write lock expired, the buffer is handed over to
-            the new reservation instead of failing.
+            time.
         """
         if len(keys) != len(is_temporary):
             raise ValueError(
@@ -788,8 +778,8 @@ class L1Manager:
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is write-locked or read-locked (or only
-                live staging objects remain) and cannot be deleted. Never
+            KEY_IS_LOCKED: The key is write-locked or read-locked, or a live
+                staging object exists for it, so it cannot be deleted. Never
                 returned when ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
@@ -798,17 +788,20 @@ class L1Manager:
         gone_keys: list[ObjectKey] = []
 
         for key in keys:
-            reclaimed = self._reclaim_staging(key, force)
-
             entry = self._objects.get(key, None)
+            if entry is None and key not in self._staging:
+                ret[key] = L1Error.KEY_NOT_EXIST
+                continue
+
+            self._reclaim_staging(key, force)
+            if key in self._staging:
+                # A live reservation still pins the key.
+                ret[key] = L1Error.KEY_IS_LOCKED
+                continue
             if entry is None:
-                if key in self._staging:
-                    ret[key] = L1Error.KEY_IS_LOCKED
-                elif reclaimed:
-                    ret[key] = L1Error.SUCCESS
-                    gone_keys.append(key)
-                else:
-                    ret[key] = L1Error.KEY_NOT_EXIST
+                # Only expired reservations existed; they are gone now.
+                ret[key] = L1Error.SUCCESS
+                gone_keys.append(key)
                 continue
 
             locked = entry.read_lock.is_locked() or entry.write_lock.is_locked()

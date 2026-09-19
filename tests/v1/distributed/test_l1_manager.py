@@ -2175,34 +2175,6 @@ class TestStagingReservation:
 
         manager.close()
 
-    def test_expired_reservation_is_taken_over(
-        self, short_write_ttl_l1_config, basic_layout
-    ):
-        """After the write TTL expires the same tag re-reserves the key and
-        receives the same buffer; the stale writer's finish fails."""
-        manager = L1Manager(short_write_ttl_l1_config)
-        key = make_object_key(1)
-
-        first = manager.reserve_write([key], [False], basic_layout, tag="w")
-        assert first[key][0] == L1Error.SUCCESS
-        time.sleep(1.2)
-
-        # The stale writer cannot admit an expired reservation.
-        assert manager.finish_write([key], tag="w")[key] == L1Error.KEY_IN_WRONG_STATE
-        assert manager.get_object_state(key) is None
-
-        second = manager.reserve_write([key], [True], basic_layout, tag="w")
-        assert second[key][0] == L1Error.SUCCESS
-        assert second[key][1] is first[key][1]
-        assert manager.report_status()["staging_object_count"] == 1
-
-        assert manager.finish_write([key], tag="w")[key] == L1Error.SUCCESS
-        state = manager.get_object_state(key)
-        assert state is not None
-        assert state.is_temporary is True
-
-        manager.close()
-
 
 class TestStagingAdmission:
     """finish_write variants admit or discard staging objects."""
@@ -2264,23 +2236,21 @@ class TestStagingAdmission:
         manager.finish_read([key], read_locks=2)
         manager.close()
 
-    def test_admission_after_resident_deleted(self, basic_l1_config, basic_layout):
-        """A staging object survives deletion of the resident object."""
+    def test_live_staging_pins_resident_key(self, basic_l1_config, basic_layout):
+        """A key with a live staging object cannot be deleted, even when its
+        resident object is unlocked; it can once the reservation is gone."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(1)
-        staged = manager.reserve_write([key], [False], basic_layout, tag="w")
+        manager.reserve_write([key], [False], basic_layout, tag="w")
         write_ready(manager, [key], basic_layout)
-        # The resident object is unlocked and goes; the live staging object
-        # is untouched.
-        assert manager.delete([key])[key] == L1Error.SUCCESS
-        assert manager.get_object_state(key) is None
+
+        assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+        assert manager.get_object_state(key) is not None
         assert manager.report_status()["staging_object_count"] == 1
 
-        assert manager.finish_write([key], tag="w")[key] == L1Error.SUCCESS
-
-        state = manager.get_object_state(key)
-        assert state is not None
-        assert state.memory_obj is staged[key][1]
+        assert manager.finish_write_and_delete([key], tag="w")[key] == L1Error.SUCCESS
+        assert manager.delete([key])[key] == L1Error.SUCCESS
+        assert manager.get_object_state(key) is None
 
         manager.close()
 

@@ -208,7 +208,6 @@ class TestStorageManagerReportStatus:
         assert l1["staging_object_count"] == 3
         assert l1["staging_bytes"] > 0
         assert l1["memory_used_bytes"] >= l1["staging_bytes"]
-        assert storage_manager_no_l2.get_l1_staging_usage() == l1["staging_bytes"]
 
         # Finish writes: admission empties the staging area.
         storage_manager_no_l2.finish_write(keys)
@@ -217,7 +216,6 @@ class TestStorageManagerReportStatus:
         assert l1["write_locked_count"] == 0
         assert l1["staging_object_count"] == 0
         assert l1["staging_bytes"] == 0
-        assert storage_manager_no_l2.get_l1_staging_usage() == 0
 
     def test_health_propagation(self, storage_manager_no_l2):
         """Top-level is_healthy should be True when all children are healthy."""

@@ -181,7 +181,7 @@ PREFETCH_LOOP_POLL_TIMEOUT_MS = 500
 PrefetchRequestId = int
 
 
-def prefetch_write_tag(request_id: PrefetchRequestId) -> str:
+def _get_prefetch_write_tag(request_id: PrefetchRequestId) -> str:
     """Return the L1 write tag of one prefetch request.
 
     Args:
@@ -1095,7 +1095,7 @@ class PrefetchController(StorageControllerInterface):
                 is_temporary=[not retention_map[k] for k in group_keys],
                 layout_desc=gld,
                 mode="new",
-                tag=prefetch_write_tag(request.request_id),
+                tag=_get_prefetch_write_tag(request.request_id),
             )
             write_results.update(gr)
 
@@ -1356,7 +1356,7 @@ class PrefetchController(StorageControllerInterface):
         # |       -        |     -      |       -        |load→locked |     -      |
         # SW keys in L1:
         # |     unlock     |   unlock   |     unlock     |   locked   |   unlock   |
-        write_tag = prefetch_write_tag(request.request_id)
+        write_tag = _get_prefetch_write_tag(request.request_id)
         if loaded_keys:
             if request.mode is PrefetchMode.WARM:
                 # Warm: admit (make ready), lock nothing.
@@ -1497,7 +1497,7 @@ class PrefetchController(StorageControllerInterface):
                 if request.write_reserved_keys:
                     l1_mgr.finish_write_and_delete(
                         request.write_reserved_keys,
-                        tag=prefetch_write_tag(request.request_id),
+                        tag=_get_prefetch_write_tag(request.request_id),
                     )
             self._release_l2_locks(request, keep={})
             if request.l1_readlocks.popcount() > 0:

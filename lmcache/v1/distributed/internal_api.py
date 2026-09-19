@@ -73,10 +73,6 @@ class L1ManagerListener(EventListener):
 
         Args:
             keys (list[ObjectKey]): The keys that have been successfully reserved
-
-        Note:
-            A reserved key is not readable yet. A key that never becomes
-            readable is reported through ``on_l1_keys_deleted_by_manager``.
         """
         pass
 
@@ -113,10 +109,6 @@ class L1ManagerListener(EventListener):
 
         Args:
             keys (list[ObjectKey]): The keys that have been deleted
-
-        Note:
-            Also reported for a reserved key that is dropped before it ever
-            became readable.
         """
         pass
 

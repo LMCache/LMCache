@@ -52,13 +52,13 @@ finish exactly as before.
 **Expiry and eviction.** A staging object keeps its write TTL lock. Once the
 lock expires the reservation is abandoned:
 
-- the same tag may `reserve_write` the key again and gets the buffer back
-  (takeover, warned);
 - `finish_write*` on it returns `KEY_IN_WRONG_STATE` and leaves it in place;
 - `is_key_evictable(key)` is true and `delete([key])` reclaims every expired
-  staging object of the key (all of them with `force=True`), returning
-  `SUCCESS` when nothing is left and `KEY_IS_LOCKED` while live staging
-  objects remain. `clear()` reclaims expired staging objects too.
+  staging object of the key (all of them with `force=True`). `delete` then
+  returns `SUCCESS` when nothing is left for the key, and `KEY_IS_LOCKED`
+  while a live staging object remains -- a live reservation pins the key
+  even if its resident object is unlocked. `clear()` reclaims expired
+  staging objects too.
 
 The eviction policy learns about the key from `on_l1_keys_reserved_write`
 (`L1EvictionPolicy` maps it to `on_keys_created`), so the regular eviction
@@ -84,8 +84,8 @@ of an admitted object.
 ## Staging area accounting
 
 `get_staging_memory_usage()` returns the bytes held by staging objects (a
-subset of `get_memory_usage()`'s used bytes); `StorageManager.get_l1_staging_usage()`
-exposes it, `report_status()` adds `staging_object_count` / `staging_bytes`,
+subset of `get_memory_usage()`'s used bytes); `report_status()` adds
+`staging_object_count` / `staging_bytes`,
 and the gauge `lmcache_mp.l1_staging_bytes` is registered next to the L1
 usage gauges. It is meant for observability and for future in-flight
 prefetch planning (how much L1 is committed to loads that have not landed).
