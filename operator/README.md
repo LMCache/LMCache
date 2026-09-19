@@ -34,7 +34,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 ### 1. Install the Operator
 
-**Option A: Helm chart**
+**Option A: Helm chart (recommended)**
 
 ```bash
 helm upgrade --install lmcache-operator \

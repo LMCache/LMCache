@@ -53,7 +53,7 @@ Prerequisites
 Installing the Operator
 -----------------------
 
-**Option A: Helm chart**
+**Option A: Helm chart (recommended)**
 
 .. code-block:: bash
 
