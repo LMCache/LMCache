@@ -1,18 +1,19 @@
 Dynamo Integration
 ==================
 
-Dynamo's vLLM workers use ``LMCacheMPConnector`` to store and retrieve KV
-cache through a separate LMCache server. The examples below use
-``Qwen/Qwen3-0.6B`` and the scripts and manifests in
-`examples/dynamo_integration
-<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration>`_.
+`NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ is an open-source
+framework for distributed LLM inference that coordinates request routing
+and prefill/decode serving across GPUs and nodes. It can use LMCache as a
+KV cache layer for vLLM workers to offload cache beyond GPU memory and
+reuse it across requests.
 
 Local
 -----
 
-Use three terminals in the same Dynamo ``vllm-runtime`` container, with
-one NVIDIA GPU, compatible LMCache and vLLM versions, and NATS and etcd
-already running. Start each process with the following commands:
+The local example serves ``Qwen/Qwen3-0.6B``. Use three terminals in the
+same Dynamo ``vllm-runtime`` container, with one NVIDIA GPU, compatible
+LMCache and vLLM versions, and NATS and etcd already running. Start each
+process with the following commands:
 
 .. code-block:: bash
 
@@ -69,10 +70,12 @@ an LMCache build compatible with its vLLM version; see the
 Use the launch scripts
 ~~~~~~~~~~~~~~~~~~~~~~
 
-The scripts start the same components, wait for LMCache to become healthy,
-and stop the processes when you press ``Ctrl+C``. They also set a GPU KV
-cache memory budget for the example model. Stop any manually launched
-processes before running a script to free their ports and GPU memory.
+The `launch scripts
+<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/launch>`_
+start the same components, wait for LMCache to become healthy, and stop the
+processes when you press ``Ctrl+C``. They also set a GPU KV cache memory
+budget for the example model. Stop any manually launched processes before
+running a script to free their ports and GPU memory.
 
 Copy the scripts into the Dynamo checkout inside the runtime container.
 Replace the paths below with the locations of your checkouts:
@@ -141,8 +144,10 @@ LMCache hit.
 Kubernetes
 ----------
 
-After preparing the cluster and image tags described below, run these two
-commands from the LMCache checkout root:
+The `Kubernetes manifests
+<https://github.com/LMCache/LMCache/tree/dev/examples/dynamo_integration/deploy>`_
+deploy the same model. After preparing the cluster and image tags described
+below, run these two commands from the LMCache checkout root:
 
 .. code-block:: bash
 
