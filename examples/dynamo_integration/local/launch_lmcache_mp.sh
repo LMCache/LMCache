@@ -37,7 +37,7 @@ trap 'exit 143' TERM
 "${COMPOSE[@]}" up -d
 
 docker run --rm --init --name "$CONTAINER_NAME" \
-  --gpus all --network host --ipc host --ulimit memlock=-1 \
+  --gpus all --network host --ipc host \
   -v "$SCRIPT_DIR:/opt/dynamo-lmcache:ro" \
   nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2 \
   bash /opt/dynamo-lmcache/serve.sh "$MODE" &
