@@ -3,12 +3,15 @@
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 import importlib
 import subprocess
 import sys
+import threading
+import time
 
 # Third Party
 import pytest
@@ -431,6 +434,126 @@ def test_build_grpc_request_server_uses_configured_server_workers(
 
     assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
     assert server.modules is modules
+
+
+def test_grpc_normal_blocking_handlers_respect_max_cpu_workers() -> None:
+    """Normal blocking gRPC handlers must honor the CPU worker limit."""
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    class SlowModule:
+        @request_handler(RequestType.PING, HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.05)
+                return instance_id == 7
+            finally:
+                with lock:
+                    active -= 1
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        grpc_server_workers=4,
+    )
+    server.add_modules([SlowModule()])
+    server.start()
+    target_url = f"grpc://127.0.0.1:{server.bound_port}"
+    clients = [
+        GrpcMultiprocessClient(target_url),  # type: ignore[abstract]
+        GrpcMultiprocessClient(target_url),  # type: ignore[abstract]
+    ]
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda client: client.ping(7).result(5), clients))
+    finally:
+        for client in clients:
+            client.close()
+        server.close()
+
+    assert results == [True, True]
+    assert max_active == 1
+
+
+def test_grpc_future_query_caches_completed_response(
+    grpc_client: tuple[GrpcMultiprocessClient, _Calls],
+) -> None:
+    """Polling should observe a fully decoded gRPC future."""
+    client, _calls = grpc_client
+    future = client.ping(7)
+    deadline = time.monotonic() + 5
+    while not future.query() and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    assert future.query() is True
+    assert future.result(timeout=0) is True
+
+
+def test_shared_grpc_stream_preserves_logical_client_affinity() -> None:
+    """Logical clients sharing one stream should keep distinct affinity keys."""
+    thread_names: list[str] = []
+
+    class AffinityModule:
+        @request_handler(
+            RequestType.STORE,
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
+        def store(
+            self,
+            key: IPCCacheServerKey,
+            instance_id: int,
+            block_ids: list[list[int]],
+            event_ipc_handle: bytes,
+        ) -> tuple[bytes, bool]:
+            thread_names.append(threading.current_thread().name)
+            return event_ipc_handle, key.model_name == "model"
+
+        @request_handler(RequestType.PING, HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            return instance_id == 7
+
+    key = IPCCacheServerKey(
+        model_name="model",
+        world_size=1,
+        worker_id=None,
+        token_ids=(1, 2),
+        start=0,
+        end=2,
+        request_id="request",
+        cache_salt="tenant",
+        request_configs={},
+        num_kv_readers=1,
+    )
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=2,
+        max_gpu_workers=2,
+        grpc_server_workers=4,
+    )
+    server.add_modules([AffinityModule()])
+    server.start()
+    target_url = f"grpc://127.0.0.1:{server.bound_port}"
+    client_a = GrpcMultiprocessClient(target_url)  # type: ignore[abstract]
+    client_b = GrpcMultiprocessClient(target_url)  # type: ignore[abstract]
+    try:
+        assert client_a.store(key, 7, [[1]], b"a").result(5) == (b"a", True)
+        assert client_b.store(key, 7, [[2]], b"b").result(5) == (b"b", True)
+        client_a.close()
+        assert client_b.ping(7).result(5) is True
+    finally:
+        client_a.close()
+        client_b.close()
+        server.close()
+
+    assert len(thread_names) == 2
+    assert thread_names[0] != thread_names[1]
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:

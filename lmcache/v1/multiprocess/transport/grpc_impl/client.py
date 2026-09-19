@@ -6,8 +6,12 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
+from itertools import count
 from typing import Any, Callable
 from urllib.parse import urlparse
+import queue
+import threading
+import time
 import uuid
 
 # Third Party
@@ -24,12 +28,24 @@ from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     GrpcMethodCodec,
     get_method_codec_registry,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import ResponseDecoder
+from lmcache.v1.multiprocess.transport.grpc_impl.stream import (
+    STREAM_METHOD,
+    get_stream_method_ids,
+    identity_bytes,
+    pack_batch,
+    pack_request_frame,
+    unpack_batch,
+    unpack_response_frame,
+)
 
 _GRPC_OPTIONS = (
     ("grpc.max_send_message_length", -1),
     ("grpc.max_receive_message_length", -1),
 )
 _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
+_STREAM_BATCH_DELAY_SECONDS = 0.000005
+_STREAM_MAX_BATCH = 64
 
 
 def parse_grpc_target(server_url: str) -> str:
@@ -64,38 +80,196 @@ def parse_grpc_target(server_url: str) -> str:
 
 @dataclass(frozen=True)
 class _ClientRpc:
-    stub_method: Any
     codec: GrpcMethodCodec
+    method_id: int
+
+
+@dataclass(frozen=True)
+class _PendingStreamResponse:
+    future: MessagingFuture[Any]
+    response_message_class: type[Any]
+    response_decoder: ResponseDecoder
 
 
 ClientRpcCallable = Callable[..., MessagingFuture[Any]]
+
+
+class _GrpcStreamTransport:
+    """Shared persistent gRPC stream for one target."""
+
+    def __init__(self, target: str) -> None:
+        self._target = target
+        self._channel = grpc.insecure_channel(target, options=_GRPC_OPTIONS)
+        self._metadata = ((_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
+        self._closed = threading.Event()
+        self._stream_requests: queue.Queue[bytes | None] = queue.Queue()
+        self._stream_pending: dict[int, _PendingStreamResponse] = {}
+        self._stream_lock = threading.Lock()
+        self._stream_request_ids = count(1)
+        self._ref_count = 0
+        stream_callable = self._channel.stream_stream(
+            STREAM_METHOD,
+            request_serializer=identity_bytes,
+            response_deserializer=identity_bytes,
+        )
+        self._stream_call = stream_callable(
+            self._iter_stream_batches(),
+            metadata=self._metadata,
+            wait_for_ready=True,
+        )
+        self._stream_reader = threading.Thread(
+            target=self._read_stream_responses,
+            name="lmcache-grpc-stream-reader",
+            daemon=True,
+        )
+        self._stream_reader.start()
+
+    def add_ref(self) -> None:
+        self._ref_count += 1
+
+    @property
+    def closed(self) -> bool:
+        """Return whether this shared stream transport is closed."""
+        return self._closed.is_set()
+
+    def release_ref(self) -> bool:
+        self._ref_count -= 1
+        return self._ref_count == 0
+
+    def submit(
+        self,
+        client_key: int,
+        rpc: _ClientRpc,
+        request: Any,
+    ) -> MessagingFuture[Any]:
+        future: MessagingFuture[Any] = MessagingFuture()
+        with self._stream_lock:
+            if self._closed.is_set():
+                future.set_exception(RuntimeError("gRPC client is closed"))
+                return future
+            request_id = next(self._stream_request_ids)
+            self._stream_pending[request_id] = _PendingStreamResponse(
+                future=future,
+                response_message_class=rpc.codec.response_message_class,
+                response_decoder=rpc.codec.response_decoder,
+            )
+        self._stream_requests.put(
+            pack_request_frame(
+                request_id,
+                client_key,
+                rpc.method_id,
+                request.SerializeToString(),
+            )
+        )
+        return future
+
+    def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self._stream_requests.put(None)
+        self._stream_call.cancel()
+        self._channel.close()
+        self._stream_reader.join(timeout=1)
+        self._fail_pending_streams(RuntimeError("gRPC client stream closed"))
+
+    def _iter_stream_batches(self) -> Any:
+        while True:
+            frame = self._stream_requests.get()
+            if frame is None:
+                return
+            frames = [frame]
+            deadline = time.perf_counter() + _STREAM_BATCH_DELAY_SECONDS
+            while len(frames) < _STREAM_MAX_BATCH:
+                timeout = deadline - time.perf_counter()
+                try:
+                    if timeout > 0:
+                        frame = self._stream_requests.get(timeout=timeout)
+                    else:
+                        frame = self._stream_requests.get_nowait()
+                except queue.Empty:
+                    break
+                if frame is None:
+                    self._stream_requests.put(None)
+                    break
+                frames.append(frame)
+            yield pack_batch(frames)
+
+    def _read_stream_responses(self) -> None:
+        try:
+            for batch in self._stream_call:
+                for frame in unpack_batch(batch):
+                    self._handle_stream_response(frame)
+        except BaseException as exc:
+            if not self._closed.is_set():
+                self._closed.set()
+                self._fail_pending_streams(exc)
+
+    def _handle_stream_response(self, frame: bytes) -> None:
+        request_id, ok, payload = unpack_response_frame(frame)
+        with self._stream_lock:
+            pending = self._stream_pending.pop(request_id, None)
+        if pending is None:
+            return
+        if not ok:
+            pending.future.set_exception(RuntimeError(payload.decode(errors="replace")))
+            return
+        try:
+            response = pending.response_message_class.FromString(payload)
+            pending.future.set_result(pending.response_decoder(response))
+        except BaseException as exc:
+            pending.future.set_exception(exc)
+
+    def _fail_pending_streams(self, exc: BaseException) -> None:
+        with self._stream_lock:
+            pending_responses = tuple(self._stream_pending.values())
+            self._stream_pending.clear()
+        for pending in pending_responses:
+            pending.future.set_exception(exc)
+
+
+_STREAM_TRANSPORTS: dict[str, _GrpcStreamTransport] = {}
+_STREAM_TRANSPORTS_LOCK = threading.Lock()
+
+
+def _acquire_stream_transport(target: str) -> _GrpcStreamTransport:
+    with _STREAM_TRANSPORTS_LOCK:
+        transport = _STREAM_TRANSPORTS.get(target)
+        if transport is None or transport.closed:
+            transport = _GrpcStreamTransport(target)
+            _STREAM_TRANSPORTS[target] = transport
+        transport.add_ref()
+        return transport
+
+
+def _release_stream_transport(target: str, transport: _GrpcStreamTransport) -> None:
+    with _STREAM_TRANSPORTS_LOCK:
+        if not transport.release_ref():
+            return
+        if _STREAM_TRANSPORTS.get(target) is transport:
+            _STREAM_TRANSPORTS.pop(target, None)
+    transport.close()
 
 
 class GrpcMultiprocessClient(RequestClient):
     """Expose every generated unary RPC as a snake-case client method."""
 
     def __init__(self, server_url: str) -> None:
-        self._channel = grpc.insecure_channel(
-            parse_grpc_target(server_url), options=_GRPC_OPTIONS
-        )
-        stubs: dict[str, Any] = {}
+        self._target = parse_grpc_target(server_url)
+        self._transport = _acquire_stream_transport(self._target)
+        self._client_key = int.from_bytes(uuid.uuid4().bytes[:8], "big")
         self._rpc_methods: dict[str, _ClientRpc] = {}
         codec_registry = get_method_codec_registry()
-        for binding, method in iter_methods():
-            service_name = binding.descriptor.name
-            stub = stubs.get(service_name)
-            if stub is None:
-                stub_class = getattr(binding.grpc_module, f"{service_name}Stub")
-                stub = stub_class(self._channel)
-                stubs[service_name] = stub
+        stream_method_ids = get_stream_method_ids()
+        for _binding, method in iter_methods():
             name = client_method_name(method.name)
             if name in self._rpc_methods:
                 raise RuntimeError(f"Duplicate gRPC client method: {name}")
             self._rpc_methods[name] = _ClientRpc(
-                stub_method=getattr(stub, method.name),
                 codec=codec_registry.by_full_name[method.full_name],
+                method_id=stream_method_ids[method.full_name],
             )
-        self._metadata = ((_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
+        self._closed = False
 
     def __getattr__(self, name: str) -> ClientRpcCallable:
         """Resolve a generated RPC as a method-oriented client call."""
@@ -130,7 +304,10 @@ class GrpcMultiprocessClient(RequestClient):
 
     def close(self) -> None:
         """Close the underlying gRPC channel."""
-        self._channel.close()
+        if self._closed:
+            return
+        self._closed = True
+        _release_stream_transport(self._target, self._transport)
 
     def _call(
         self,
@@ -139,23 +316,11 @@ class GrpcMultiprocessClient(RequestClient):
         kwargs: dict[str, Any],
     ) -> MessagingFuture[Any]:
         request = rpc.codec.request_encoder(args, kwargs)
-        future: MessagingFuture[Any] = MessagingFuture()
-        call = rpc.stub_method.future(
-            request,
-            metadata=self._metadata,
-            wait_for_ready=True,
-        )
-
-        def on_done(grpc_future: grpc.Future[Any]) -> None:
-            try:
-                result = rpc.codec.response_decoder(grpc_future.result())
-            except BaseException as exc:
-                future.set_exception(exc)
-            else:
-                future.set_result(result)
-
-        call.add_done_callback(on_done)
-        return future
+        if self._closed:
+            future: MessagingFuture[Any] = MessagingFuture()
+            future.set_exception(RuntimeError("gRPC client is closed"))
+            return future
+        return self._transport.submit(self._client_key, rpc, request)
 
 
 def _make_client_rpc_method(name: str) -> ClientRpcCallable:
