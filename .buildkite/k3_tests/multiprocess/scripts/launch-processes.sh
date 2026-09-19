@@ -94,6 +94,13 @@ fi
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
 MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
 
+# Optional deterministic block-pool size for eviction-pressure tests. This is
+# a vLLM testing hook; ordinary jobs leave it unset and use profiled capacity.
+NUM_GPU_BLOCKS_OVERRIDE_ARG=""
+if [ -n "${NUM_GPU_BLOCKS_OVERRIDE:-}" ]; then
+    NUM_GPU_BLOCKS_OVERRIDE_ARG="--num-gpu-blocks-override ${NUM_GPU_BLOCKS_OVERRIDE}"
+fi
+
 # LMCache server chunk size in tokens. Empty -> server default.
 CHUNK_SIZE_ARG=""
 if [ -n "${CHUNK_SIZE:-}" ]; then
@@ -218,8 +225,12 @@ KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
     LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    LMCACHE_MP_LAZY_OFFLOAD_POLICY="${LMCACHE_MP_LAZY_OFFLOAD_POLICY:-FIFO}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
+    LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-2.5}" \
+    LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP="${LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP:-64}" \
+    LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS="${LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS:-0}" \
     python3 - <<'PY'
 import json
 import os
@@ -230,18 +241,40 @@ extra_config = {
     "lmcache.mp.mq_timeout": 10,
 }
 if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
+    policy = os.environ["LMCACHE_MP_LAZY_OFFLOAD_POLICY"].upper()
     extra_config.update(
         {
             "lmcache.mp.lazy_offload": True,
-            "lmcache.mp.lazy_offload_policy": "FIFO",
-            "lmcache.mp.lazy_offload_threshold": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
-            ),
-            "lmcache.mp.lazy_offload_select_count": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
-            ),
+            "lmcache.mp.lazy_offload_policy": policy,
         }
     )
+    if policy == "FIFO":
+        extra_config.update(
+            {
+                "lmcache.mp.lazy_offload_threshold": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
+                ),
+                "lmcache.mp.lazy_offload_select_count": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
+                ),
+            }
+        )
+    elif policy == "EVICTION_AWARE":
+        extra_config.update(
+            {
+                "lmcache.mp.lazy_offload_horizon_steps": float(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS"]
+                ),
+                "lmcache.mp.lazy_offload_max_drain_per_step": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_MAX_DRAIN_PER_STEP"]
+                ),
+                "lmcache.mp.lazy_offload_max_deferral_seconds": float(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_MAX_DEFERRAL_SECONDS"]
+                ),
+            }
+        )
+    else:
+        raise ValueError(f"Unknown lazy-offload policy: {policy}")
 
 print(
     json.dumps(
@@ -270,6 +303,7 @@ env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
         --port "$vllm_port" \
         --no-async-scheduling \
         $MAX_MODEL_LEN_ARG \
+        $NUM_GPU_BLOCKS_OVERRIDE_ARG \
         $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
         $MAMBA_ARGS \

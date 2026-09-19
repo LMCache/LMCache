@@ -50,6 +50,7 @@ BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 # LMCache MP server log, scanned to confirm the retrieve run hit LMCache.
 LMCACHE_LOG="${LMCACHE_LOG:-/tmp/build_${BUILD_ID}_lmcache.log}"
+VLLM_LOG="${VLLM_LOG:-/tmp/build_${BUILD_ID}_vllm.log}"
 
 HMA_DIR="$RESULTS_DIR/hma_lm_eval"
 VLLM_RUN_DIR="$HMA_DIR/vllm_run"
@@ -251,6 +252,75 @@ print(
     f"LMCache served {retrieves_after - retrieves_before} retrieves."
 )
 PYEOF
+
+if [ "${EXPECT_LAZY_OFFLOAD_PRESSURE:-false}" = "true" ]; then
+    echo "=== Verifying eviction-aware hybrid lazy offload ==="
+    if ! grep -q "lazy offload enabled with EVICTION_AWARE policy" "$VLLM_LOG"; then
+        echo "FAILED: vLLM did not enable eviction-aware lazy offload"
+        tail -100 "$VLLM_LOG" || true
+        exit 1
+    fi
+
+    ledger_line="$(grep -E 'Lazy offload (final )?counters:' "$VLLM_LOG" | tail -1 || true)"
+    if [ -z "$ledger_line" ]; then
+        echo "FAILED: no lazy-offload counter ledger was logged"
+        tail -100 "$VLLM_LOG" || true
+        exit 1
+    fi
+    echo "$ledger_line"
+
+    python3 - "$ledger_line" <<'PYEOF'
+import re
+import sys
+
+line = sys.argv[1]
+counters = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", line)}
+required = {
+    "admitted",
+    "emitted",
+    "emitted_overdue",
+    "dropped_evicted",
+    "dropped_on_request_drop",
+    "dropped_failed_store",
+    "dropped_id_reuse",
+    "pending",
+}
+missing = required - counters.keys()
+if missing:
+    raise SystemExit(f"missing lazy-offload counters: {sorted(missing)}")
+if counters["admitted"] <= 0:
+    raise SystemExit("hybrid workload admitted no lazy stores")
+if counters["emitted"] <= 0:
+    raise SystemExit("hybrid workload emitted no stores under eviction pressure")
+if counters["emitted_overdue"] != 0:
+    raise SystemExit(
+        "stores were deadline-driven rather than eviction-driven: "
+        f"emitted_overdue={counters['emitted_overdue']}"
+    )
+accounted = (
+    counters["emitted"]
+    + counters["dropped_evicted"]
+    + counters["dropped_on_request_drop"]
+    + counters["dropped_failed_store"]
+    + counters["dropped_id_reuse"]
+    + counters["pending"]
+)
+if counters["admitted"] != accounted:
+    raise SystemExit(
+        f"lazy-offload ledger does not close: admitted={counters['admitted']} "
+        f"accounted={accounted}"
+    )
+if counters["dropped_failed_store"] != 0:
+    raise SystemExit(
+        f"hybrid lazy stores failed: {counters['dropped_failed_store']}"
+    )
+print(
+    "PASS: hybrid workload emitted eviction-driven stores and its ledger closes "
+    f"(admitted={counters['admitted']}, emitted={counters['emitted']}, "
+    f"pending={counters['pending']})"
+)
+PYEOF
+fi
 
 echo ""
 echo "============================================"
