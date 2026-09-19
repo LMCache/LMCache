@@ -251,11 +251,11 @@ make build-installer IMG=lmcache/lmcache-operator:v0.5.5 # Render dist/install.y
 make package-chart VERSION=v0.5.5                     # Package the Helm chart
 ```
 
-For prerelease or nightly packaging, pass an explicit `CHART_VERSION`:
+Chart versions are derived from `VERSION`, including prerelease and nightly tags:
 
 ```bash
-make package-chart VERSION=v0.4.8rc1 CHART_VERSION=0.4.8-rc.1
-make package-chart VERSION=nightly-2026-09-19 CHART_VERSION=0.0.0-nightly.20260919
+make package-chart VERSION=v0.4.8rc1
+make package-chart VERSION=nightly-2026-09-19
 ```
 
 ### End-to-End Tests

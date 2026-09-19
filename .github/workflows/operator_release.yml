@@ -40,7 +40,7 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Compute release versions
+      - name: Extract version from tag
         id: version
         run: |
           # Strip "operator-" prefix from tag to get version (e.g. operator-v0.4.8rc1 -> v0.4.8rc1).
@@ -50,9 +50,7 @@ jobs:
             echo "Invalid Operator version: ${VERSION}" >&2
             exit 1
           fi
-          CHART_VERSION="$(printf '%s' "${VERSION#v}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)(alpha|beta|rc)([0-9]+)$/\1-\2.\3/')"
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "CHART_VERSION=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
           # Pre-releases (rc/alpha/beta) get the floating ":latest-rc" tag and must
           # never move the stable ":latest" image tag or the "operator-latest" alias.
           # Detect from the version string rather than the GitHub "pre-release" flag
@@ -79,8 +77,9 @@ jobs:
         id: artifacts
         run: |
           # Helm validates chart SemVer before any image is pushed.
-          make package-chart VERSION=${{ steps.version.outputs.VERSION }} CHART_VERSION=${{ steps.version.outputs.CHART_VERSION }}
-          CHART_FILE="lmcache-operator-chart-${{ steps.version.outputs.CHART_VERSION }}.tgz"
+          make package-chart VERSION=${{ steps.version.outputs.VERSION }}
+          CHART_VERSION="$(make --no-print-directory -s print-chart-version VERSION=${{ steps.version.outputs.VERSION }})"
+          CHART_FILE="lmcache-operator-chart-${CHART_VERSION}.tgz"
           test -f "dist/${CHART_FILE}"
           make build-installer CHART="dist/${CHART_FILE}" IMG=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
           echo "CHART_FILE=${CHART_FILE}" >> "$GITHUB_OUTPUT"

@@ -47,9 +47,17 @@ build-installer: manifests helm ## Render the chart as a standalone YAML install
 	@rm dist/operator.yaml
 
 VERSION ?= v0.5.5
-CHART_VERSION ?= $(patsubst v%,%,$(VERSION))
+CHART_VERSION = $(shell printf '%s' '$(VERSION)' | sed -E \
+	-e 's/^v//' \
+	-e 's/^([0-9]+\.[0-9]+\.[0-9]+)(alpha|beta|rc)([0-9]+)$$/\1-\2.\3/' \
+	-e 's/^nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})$$/0.0.0-nightly.\1\2\3/')
+
+.PHONY: print-chart-version
+print-chart-version:
+	@printf '%s\n' "$(CHART_VERSION)"
+
 .PHONY: package-chart
-package-chart: manifests helm ## Package the chart; pass CHART_VERSION explicitly for compact prerelease or nightly image tags.
+package-chart: manifests helm ## Package the chart using the Operator VERSION.
 	"$(HELM)" package "$(CHART)" --destination dist --version "$(CHART_VERSION)" --app-version "$(VERSION)"
 
 .PHONY: lint-chart

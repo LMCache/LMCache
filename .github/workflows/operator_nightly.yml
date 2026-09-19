@@ -44,7 +44,6 @@ jobs:
         run: |
           DATE=$(date -u +%Y-%m-%d)
           echo "TAG=nightly-${DATE}" >> "$GITHUB_OUTPUT"
-          echo "CHART_VERSION=0.0.0-nightly.${DATE//-/}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -59,8 +58,9 @@ jobs:
       - name: Build installer and Helm chart
         id: artifacts
         run: |
-          make package-chart VERSION=${{ steps.tag.outputs.TAG }} CHART_VERSION=${{ steps.tag.outputs.CHART_VERSION }}
-          CHART_FILE="lmcache-operator-chart-${{ steps.tag.outputs.CHART_VERSION }}.tgz"
+          make package-chart VERSION=${{ steps.tag.outputs.TAG }}
+          CHART_VERSION="$(make --no-print-directory -s print-chart-version VERSION=${{ steps.tag.outputs.TAG }})"
+          CHART_FILE="lmcache-operator-chart-${CHART_VERSION}.tgz"
           test -f "dist/${CHART_FILE}"
           make build-installer CHART="dist/${CHART_FILE}" IMG=${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
           echo "CHART_FILE=${CHART_FILE}" >> "$GITHUB_OUTPUT"
