@@ -59,14 +59,14 @@ class _GeneratedServicer:
         self,
         binding: ServiceBinding,
         handlers: dict[str, _GrpcRequestHandler],
-        normal_pool: ThreadPoolExecutor,
+        normal_slots: threading.BoundedSemaphore,
         affinity_pool: AffinityThreadPool,
         affinity_submit_lock: threading.Lock,
         sync_handler_lock: threading.Lock,
     ) -> None:
         self._binding = binding
         self._handlers = handlers
-        self._normal_pool = normal_pool
+        self._normal_slots = normal_slots
         self._affinity_pool = affinity_pool
         self._affinity_submit_lock = affinity_submit_lock
         self._sync_handler_lock = sync_handler_lock
@@ -111,9 +111,8 @@ class _GeneratedServicer:
                     )
                 result = future.result()
             elif registered.handler_type is HandlerType.BLOCKING:
-                result = self._normal_pool.submit(
-                    registered.handler, *payloads
-                ).result()
+                with self._normal_slots:
+                    result = registered.handler(*payloads)
             else:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
@@ -143,10 +142,7 @@ class GrpcMultiprocessServer(RequestServer):
     ) -> None:
         self._bind_url = bind_url
         self._handlers: dict[str, _GrpcRequestHandler] = {}
-        self._normal_pool = ThreadPoolExecutor(
-            max_workers=max_cpu_workers,
-            thread_name_prefix="grpc-normal",
-        )
+        self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
         self._affinity_pool = AffinityThreadPool(
             max_workers=max_gpu_workers,
             thread_name_prefix="grpc-affinity",
@@ -225,7 +221,7 @@ class GrpcMultiprocessServer(RequestServer):
         servicer = _GeneratedServicer(
             binding,
             service_handlers,
-            self._normal_pool,
+            self._normal_slots,
             self._affinity_pool,
             self._affinity_submit_lock,
             self._sync_handler_lock,
@@ -247,7 +243,6 @@ class GrpcMultiprocessServer(RequestServer):
             return
         self._closed.set()
         self._server.stop(grace=None)
-        self._normal_pool.shutdown(wait=False)
         self._affinity_pool.shutdown(wait=False)
         self._executor.shutdown(wait=False)
 

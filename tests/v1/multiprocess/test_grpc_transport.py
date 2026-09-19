@@ -3,12 +3,15 @@
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 import importlib
 import subprocess
 import sys
+import threading
+import time
 
 # Third Party
 import pytest
@@ -431,6 +434,51 @@ def test_build_grpc_request_server_uses_configured_server_workers(
 
     assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
     assert server.modules is modules
+
+
+def test_grpc_normal_blocking_handlers_respect_max_cpu_workers() -> None:
+    """Normal blocking gRPC handlers must honor the CPU worker limit."""
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    class SlowModule:
+        @request_handler(RequestType.PING, HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.05)
+                return instance_id == 7
+            finally:
+                with lock:
+                    active -= 1
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        grpc_server_workers=4,
+    )
+    server.add_modules([SlowModule()])
+    server.start()
+    target_url = f"grpc://127.0.0.1:{server.bound_port}"
+    clients = [
+        GrpcMultiprocessClient(target_url),  # type: ignore[abstract]
+        GrpcMultiprocessClient(target_url),  # type: ignore[abstract]
+    ]
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda client: client.ping(7).result(5), clients))
+    finally:
+        for client in clients:
+            client.close()
+        server.close()
+
+    assert results == [True, True]
+    assert max_active == 1
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:
