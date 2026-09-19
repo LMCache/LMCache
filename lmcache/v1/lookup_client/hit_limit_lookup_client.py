@@ -30,6 +30,7 @@ class HitLimitLookupClient(LookupClientInterface):
         assert config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1
         self.actual_lookup_client = actual_lookup_client
         self.config = config
+        self._lookup_token_counts: dict[str, int] = {}
         logger.info(
             "create HitLimitLookupClient succeed, "
             "the hit ratio upper is %s, chunk size is %s",
@@ -38,7 +39,11 @@ class HitLimitLookupClient(LookupClientInterface):
         )
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
-        return self.actual_lookup_client.lookup_cache(lookup_id)
+        result = self.actual_lookup_client.lookup_cache(lookup_id)
+        token_count = self._lookup_token_counts.get(lookup_id)
+        if token_count is None:
+            return result
+        return self._limit_hit_tokens(result, token_count)
 
     def lookup(
         self,
@@ -46,20 +51,29 @@ class HitLimitLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
+        total_tokens_length = len(token_ids)
         # get real hit tokens
         result = self.actual_lookup_client.lookup(
             token_ids,
             lookup_id,
             request_configs,
         )
+        self._lookup_token_counts[lookup_id] = total_tokens_length
+        return self._limit_hit_tokens(result, total_tokens_length)
+
+    def _limit_hit_tokens(
+        self, result: Optional[int], total_tokens_length: int
+    ) -> Optional[int]:
+        hit_miss_ratio = self.config.hit_miss_ratio
+        if hit_miss_ratio is None:
+            return result
         if result is not None:
-            total_tokens_length = len(token_ids)
             assert result <= total_tokens_length
             current_hit_ratio = 0.0
             if total_tokens_length > 0:
                 current_hit_ratio = result / total_tokens_length
             # limit the hit tokens
-            hit_ratio_upper = 1 - self.config.hit_miss_ratio
+            hit_ratio_upper = 1 - hit_miss_ratio
             if current_hit_ratio > hit_ratio_upper:
                 origin_result = result
                 # align to chunk size
@@ -81,9 +95,13 @@ class HitLimitLookupClient(LookupClientInterface):
 
     def clear_lookup_status(self, lookup_id: str) -> None:
         self.actual_lookup_client.clear_lookup_status(lookup_id)
+        self._lookup_token_counts.pop(lookup_id, None)
 
     def supports_producer_reuse(self) -> bool:
         return self.actual_lookup_client.supports_producer_reuse()
 
     def close(self) -> None:
-        self.actual_lookup_client.close()
+        try:
+            self.actual_lookup_client.close()
+        finally:
+            self._lookup_token_counts.clear()
