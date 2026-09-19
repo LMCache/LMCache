@@ -6,6 +6,7 @@ on:
 
 env:
   IMAGE_NAME: lmcache/lmcache-operator
+  CHART_REGISTRY: oci://registry-1.docker.io/lmcache
 
 permissions:
   contents: write
@@ -79,11 +80,10 @@ jobs:
         run: |
           # Helm validates chart SemVer before any image is pushed.
           make package-chart VERSION=${{ steps.version.outputs.VERSION }} CHART_VERSION=${{ steps.version.outputs.CHART_VERSION }}
-          chart_packages=(dist/lmcache-operator-*.tgz)
-          test "${#chart_packages[@]}" -eq 1
-          test -f "${chart_packages[0]}"
-          make build-installer CHART="${chart_packages[0]}" IMG=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
-          echo "CHART_FILE=$(basename "${chart_packages[0]}")" >> "$GITHUB_OUTPUT"
+          CHART_FILE="lmcache-operator-chart-${{ steps.version.outputs.CHART_VERSION }}.tgz"
+          test -f "dist/${CHART_FILE}"
+          make build-installer CHART="dist/${CHART_FILE}" IMG=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+          echo "CHART_FILE=${CHART_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -95,12 +95,22 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
             ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.FLOATING_TAG }}
 
+      - name: Publish Helm chart to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          CHART_FILE: ${{ steps.artifacts.outputs.CHART_FILE }}
+        run: |
+          printf '%s' "$DOCKERHUB_TOKEN" | helm registry login registry-1.docker.io \
+            --username "$DOCKERHUB_USERNAME" --password-stdin
+          helm push "dist/${CHART_FILE}" "$CHART_REGISTRY"
+
       - name: Attach installer and chart to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             operator/dist/install.yaml
-            operator/dist/lmcache-operator-*.tgz
+            operator/dist/${{ steps.artifacts.outputs.CHART_FILE }}
 
       - name: Update latest release alias
         # Skip for prereleases: they must not repoint the stable
@@ -120,7 +130,8 @@ jobs:
 
             ```bash
             helm upgrade --install lmcache-operator \
-              https://github.com/${{ github.repository }}/releases/download/operator-latest/${{ steps.artifacts.outputs.CHART_FILE }} \
+              ${{ env.CHART_REGISTRY }}/lmcache-operator-chart \
+              --version ${{ steps.version.outputs.CHART_VERSION }} \
               --namespace lmcache-operator-system --create-namespace --wait
             ```
 
@@ -131,4 +142,4 @@ jobs:
             ```
           files: |
             operator/dist/install.yaml
-            operator/dist/lmcache-operator-*.tgz
+            operator/dist/${{ steps.artifacts.outputs.CHART_FILE }}

@@ -8,7 +8,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
-- Helm 3 for chart installation; Helm 3.17+ for adopting an existing YAML installation
+- Helm 3.8+ for chart installation; Helm 3.17+ for adopting an existing YAML installation
 - [cert-manager](https://cert-manager.io/docs/installation/) installed and ready **before installing the operator**, for its webhook serving certificate
 - For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
@@ -34,13 +34,22 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 ### 1. Install the Operator
 
-**Option A: Helm chart from an Operator release (recommended)**
+**Option A: Helm chart from Docker Hub (recommended)**
 
-Download the chart archive attached to the desired [Operator release](https://github.com/LMCache/LMCache/releases). Chart versions track Operator versions: for example, Operator `v0.5.5` uses chart `0.5.5`, and `v0.4.8rc1` uses chart `0.4.8-rc.1`.
+Install the OCI chart from Docker Hub, selecting a version from the [Operator releases](https://github.com/LMCache/LMCache/releases). Chart versions track Operator versions: for example, Operator `v0.5.5` uses chart `0.5.5`, and `v0.4.8rc1` uses chart `0.4.8-rc.1`.
 
 ```bash
 helm upgrade --install lmcache-operator \
-  "./lmcache-operator-<chart-version>.tgz" \
+  oci://registry-1.docker.io/lmcache/lmcache-operator-chart \
+  --version "<chart-version>" \
+  --namespace lmcache-operator-system --create-namespace --wait
+```
+
+The same chart archive is attached to the Operator release. To install a downloaded archive:
+
+```bash
+helm upgrade --install lmcache-operator \
+  "./lmcache-operator-chart-<chart-version>.tgz" \
   --namespace lmcache-operator-system --create-namespace --wait
 ```
 
@@ -72,7 +81,7 @@ If you enable `metrics.serviceMonitor.enabled`, bind the `<release>-metrics-read
 
 ### Upgrade, uninstall, and existing YAML installations
 
-For a Helm upgrade, repeat the Helm command with the new chart archive and your values file (`-f operator-values.yaml`, if used). Helm updates the CRD schemas as part of the release. Review the Operator release notes before upgrading: changes to CRD schemas or reconciliation can affect existing engines.
+For a Helm upgrade, repeat the Helm command with the new `--version` (or downloaded chart archive) and your values file (`-f operator-values.yaml`, if used). Helm updates the CRD schemas as part of the release. Review the Operator release notes before upgrading: changes to CRD schemas or reconciliation can affect existing engines.
 
 To remove the operator:
 
@@ -288,7 +297,9 @@ make build-installer IMG=lmcache/lmcache-operator:v0.5.5 # Render dist/install.y
 make package-chart VERSION=v0.5.5                     # Package the Helm chart
 ```
 
-The chart is the deployment template source for both distribution formats. Operator release workflows attach `install.yaml` and the chart archive to GitHub releases; there is no Helm repository index or OCI chart registry. Nightly image versions such as `nightly-2026-09-19` use chart version `0.0.0-nightly.20260919`, while `appVersion` keeps the original image version.
+The chart is the deployment template source for both distribution formats. Operator release and nightly workflows push the chart to Docker Hub at `oci://registry-1.docker.io/lmcache/lmcache-operator-chart` and attach `install.yaml` plus `lmcache-operator-chart-<chart-version>.tgz` to GitHub releases. Nightly image versions such as `nightly-2026-09-19` use chart version `0.0.0-nightly.20260919`, while `appVersion` keeps the original image version.
+
+Before publishing, create the Docker Hub repository `lmcache/lmcache-operator-chart` and make it public for anonymous Helm pulls. Both workflows reuse the GitHub variable `DOCKERHUB_USERNAME` and secret `DOCKERHUB_TOKEN` used for image publishing; that credential must also have write access to the chart repository. No additional publishing secret is required.
 
 For local packaging, `CHART_VERSION` defaults to `VERSION` without its leading `v`. Pass an explicit SemVer for compact prerelease or nightly image tags:
 

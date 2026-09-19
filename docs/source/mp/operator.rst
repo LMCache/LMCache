@@ -42,7 +42,7 @@ Prerequisites
 
 - Kubernetes 1.20+
 - ``kubectl`` configured to access your cluster
-- Helm 3 for chart installation; Helm 3.17+ for adopting an existing YAML
+- Helm 3.8+ for chart installation; Helm 3.17+ for adopting an existing YAML
   installation
 - `cert-manager <https://cert-manager.io/docs/installation/>`_ installed and
   ready **before installing the operator**, for its webhook serving certificate
@@ -55,15 +55,26 @@ Prerequisites
 Installing the Operator
 -----------------------
 
-**Option A: Helm chart from an Operator release (recommended)**
+**Option A: Helm chart from Docker Hub (recommended)**
 
-Operator releases attach a Helm chart archive alongside ``install.yaml``.
+Install the OCI chart from Docker Hub, selecting a version from the
+`Operator releases <https://github.com/LMCache/LMCache/releases>`_.
 For example, Operator ``v0.5.5`` uses chart ``0.5.5``:
 
 .. code-block:: bash
 
     helm upgrade --install lmcache-operator \
-      "./lmcache-operator-<chart-version>.tgz" \
+      oci://registry-1.docker.io/lmcache/lmcache-operator-chart \
+      --version "<chart-version>" \
+      --namespace lmcache-operator-system --create-namespace --wait
+
+The same chart archive is attached to the Operator release alongside
+``install.yaml``. To install a downloaded archive:
+
+.. code-block:: bash
+
+    helm upgrade --install lmcache-operator \
+      "./lmcache-operator-chart-<chart-version>.tgz" \
       --namespace lmcache-operator-system --create-namespace --wait
 
 The chart installs the operator, its three CRDs (``LMCacheEngine``,
@@ -109,8 +120,9 @@ cert-manager must also be installed before using this option:
 Upgrading and Uninstalling
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For a Helm upgrade, repeat the installation command with the new chart
-archive and your values file (``-f operator-values.yaml``, if used). Helm
+For a Helm upgrade, repeat the installation command with the new
+``--version`` (or downloaded chart archive) and your values file
+(``-f operator-values.yaml``, if used). Helm
 updates the CRD schemas as part of the release. Review the Operator release
 notes before upgrading: schema and reconciliation changes can affect
 existing engines.
@@ -1949,11 +1961,20 @@ The Helm chart is the deployment template source for both release formats:
     make package-chart VERSION=v0.5.5
 
 These commands create ``dist/install.yaml`` and
-``dist/lmcache-operator-0.5.5.tgz``. The release workflows attach both to
-GitHub releases; there is no Helm repository index or OCI chart registry.
+``dist/lmcache-operator-chart-0.5.5.tgz``. The release and nightly workflows
+push the chart to
+``oci://registry-1.docker.io/lmcache/lmcache-operator-chart`` and attach both
+artifacts to GitHub releases.
 Release workflows normalize Operator versions to chart SemVer: ``v0.4.8rc1`` becomes
 ``0.4.8-rc.1`` and ``nightly-2026-09-19`` becomes
 ``0.0.0-nightly.20260919``. ``appVersion`` keeps the original image version.
+
+Before publishing, create the Docker Hub repository
+``lmcache/lmcache-operator-chart`` and make it public for anonymous Helm pulls.
+Both workflows reuse the GitHub variable ``DOCKERHUB_USERNAME`` and secret
+``DOCKERHUB_TOKEN`` used for image publishing. That credential must also have
+write access to the chart repository; no additional publishing secret is
+required.
 
 For local packaging, ``CHART_VERSION`` defaults to ``VERSION`` without its
 leading ``v``. Pass an explicit SemVer for compact prerelease or nightly tags:
