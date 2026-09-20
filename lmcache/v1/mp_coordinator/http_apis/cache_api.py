@@ -8,7 +8,8 @@ Warm-prefetch dispatch to a named MP server, thin over the
 unreachable or rejects a proxied call.
 
 Quota writes, combined quota+usage status, and usage-event ingestion are
-accounting concerns and live in the ``/quota`` group (:mod:`quota_api`).
+accounting concerns and belong to the eviction controller, which brings
+them itself (:mod:`lmcache.v1.mp_coordinator.controllers.eviction_http_api`).
 """
 
 # Standard
@@ -32,8 +33,6 @@ from lmcache.v1.mp_coordinator.http_apis.dependencies import (
 from lmcache.v1.mp_coordinator.schemas import (
     DeleteRequest,
     DeleteResponse,
-    PinRequest,
-    PinResponse,
     PrefetchRequest,
     PrefetchResponse,
 )
@@ -144,86 +143,6 @@ async def get_prefetch_status(
     return JSONResponse(status_code=code, content=payload)
 
 
-# -- Pin / unpin (L2 eviction protection) ------------------------------------
-
-
-@router.post("/cache/pins")
-async def request_pin(body: PinRequest, request: Request) -> PinResponse:
-    """Pin a token sequence's keys in the L2 eviction plan.
-
-    The coordinator resolves the token sequence to its object keys locally and
-    records them so they are excluded from its L2 eviction plan (fleet-wide,
-    per ``cache_salt``). No MP-server round-trip.
-
-    Args:
-        body: model/world_size, token_ids, cache_salt.
-
-    Returns:
-        ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys pinned.
-
-    Raises:
-        HTTPException: 400 if the token cap is exceeded or a key field is invalid.
-    """
-    ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
-    try:
-        resolved, chunks = resolve_object_keys(
-            ctx.token_hasher,
-            body.model_name,
-            body.world_size,
-            body.token_ids,
-            body.cache_salt,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-    eviction.pin(resolved)
-    ctx.metadata_persister.save()
-    return PinResponse(
-        requested=chunks,
-        affected=len(resolved),
-        status="pinned",
-    )
-
-
-@router.delete("/cache/pins")
-async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
-    """Unpin a token sequence's keys from the L2 eviction plan.
-
-    Symmetric with pin: resolves the keys locally and releases them, making them
-    eligible for L2 eviction again.
-
-    Args:
-        body: model/world_size, token_ids, cache_salt.
-
-    Returns:
-        ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys unpinned.
-
-    Raises:
-        HTTPException: 400 if the token cap is exceeded or a key field is invalid.
-    """
-    ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
-    try:
-        resolved, chunks = resolve_object_keys(
-            ctx.token_hasher,
-            body.model_name,
-            body.world_size,
-            body.token_ids,
-            body.cache_salt,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-    eviction.unpin(resolved)
-    ctx.metadata_persister.save()
-    return PinResponse(
-        requested=chunks,
-        affected=len(resolved),
-        status="unpinned",
-    )
-
-
 # -- Delete dispatch ---------------------------------------------------------
 
 
@@ -238,7 +157,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
     Returns:
         ``DeleteResponse`` with ``requested`` chunks, ``affected`` keys removed,
         and ``skipped`` keys refused (L1 locks reported by the node, plus L2 pins
-        held back by the coordinator).
+        held back by the coordinator; none, if it runs no eviction controller).
 
     Raises:
         HTTPException: 400 if the token cap is exceeded or a key field is invalid;
@@ -246,7 +165,10 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
             unreachable or rejects the delete.
     """
     ctx = get_context(request)
-    eviction = ctx.controllers.get(FleetEvictionController)
+    # Consulted, not spoken for: deleting is a cache operation, and a
+    # coordinator with no eviction controller simply holds no pins to
+    # respect. So this degrades rather than 404s the way ``/cache/pins`` does.
+    eviction = ctx.controllers.find(FleetEvictionController)
     target = ctx.views.get(InstanceRegistry).get(body.instance_id)
     if target is None:
         raise HTTPException(
@@ -277,7 +199,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
     # dropped from the delete set entirely, so a pinned key is retained in both
     # tiers; ``force`` deletes them and clears the pins.
     touches_l2 = body.tier in (Tier.L2, Tier.ALL)
-    if touches_l2 and not body.force:
+    if touches_l2 and not body.force and eviction is not None:
         delete_keys = eviction.filter_unpinned(resolved)
         pin_skipped = len(resolved) - len(delete_keys)
     else:
@@ -307,7 +229,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
         node_deleted = result.get("deleted", 0)
         node_skipped = result.get("skipped", 0)
 
-    if touches_l2 and body.force:
+    if touches_l2 and body.force and eviction is not None:
         eviction.drop_pins(resolved)
         ctx.metadata_persister.save()
 

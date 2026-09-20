@@ -192,13 +192,30 @@ class GDSContext:
         nbytes = buf.numel()
         max_region = ca.get_max_registered_region_bytes()
         with self._registry_lock:
+            stream_registered = False
+            registered_regions: list[torch.Tensor] = []
             if raw_stream not in self._registered_streams:
                 ca.register_stream(raw_stream)
                 self._registered_streams.add(raw_stream)
-            for start in range(0, nbytes, max_region):
-                self._register_region_locked(
-                    buf[start : min(start + max_region, nbytes)]
-                )
+                stream_registered = True
+            try:
+                for start in range(0, nbytes, max_region):
+                    region = buf[start : min(start + max_region, nbytes)]
+                    self._register_region_locked(region)
+                    registered_regions.append(region)
+            except BaseException:
+                for region in reversed(registered_regions):
+                    try:
+                        self._deregister_region_locked(region)
+                    except Exception:
+                        logger.exception("Failed to roll back GDS buffer registration")
+                if stream_registered:
+                    try:
+                        ca.deregister_stream(raw_stream)
+                    except Exception:
+                        logger.exception("Failed to roll back GDS stream registration")
+                    self._registered_streams.discard(raw_stream)
+                raise
 
     def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
         """Reverse of :meth:`register_gpu_buffer`: deregister its regions + stream.
@@ -399,6 +416,8 @@ class GDSContext:
         """
         base = buffer.data_ptr()
         idx = bisect.bisect_left(self._base_ptrs, base)
+        if idx == len(self._base_ptrs) or self._base_ptrs[idx] != base:
+            raise RuntimeError(f"GDS buffer region at 0x{base:x} is not registered")
         try:
             ca.deregister_buffer(self._buffers[idx])
         except Exception as e:

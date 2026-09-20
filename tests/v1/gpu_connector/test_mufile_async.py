@@ -145,6 +145,44 @@ class TestRegisterHandle:
         assert fh.value == 0x1234
         assert handle not in ma._handle_descr_registry
 
+    def test_deregister_handle_keeps_descr_alive_during_c_call(self, _fake_lib):
+        """The descriptor remains owned until muFileHandleDeregister returns."""
+
+        def _register(fh_ref, descr_ref):
+            fh_ref._obj.value = 0x5678
+            return _ok()
+
+        observed = {}
+
+        def _deregister(fh):
+            observed["owned_during_call"] = 0x5678 in ma._handle_descr_registry
+            return _ok()
+
+        _fake_lib.muFileHandleRegister = _register
+        _fake_lib.muFileHandleDeregister = _deregister
+        handle = ma.register_handle(99)
+
+        ma.deregister_handle(handle)
+
+        assert observed["owned_during_call"] is True
+        assert handle not in ma._handle_descr_registry
+
+    def test_deregister_handle_keeps_descr_on_failure(self, _fake_lib):
+        """A failed deregistration keeps the descriptor available for retry."""
+
+        def _register(fh_ref, descr_ref):
+            fh_ref._obj.value = 0x9ABC
+            return _ok()
+
+        _fake_lib.muFileHandleRegister = _register
+        _fake_lib.muFileHandleDeregister = lambda fh: _err(7)
+        handle = ma.register_handle(99)
+
+        with pytest.raises(RuntimeError, match="muFileHandleDeregister"):
+            ma.deregister_handle(handle)
+
+        assert handle in ma._handle_descr_registry
+
 
 class TestBufferRegistration:
     def test_rejects_non_musa_tensor(self):

@@ -323,12 +323,15 @@ def deregister_handle(handle: int) -> None:
     Raises:
         RuntimeError: If ``muFileHandleDeregister`` reports a non-success status.
     """
+    # SmartIO may retain a pointer into the caller-owned descriptor. Keep the
+    # ctypes object strongly reachable until the C call has returned; retain it
+    # on failure so a caller can retry deregistration safely.
     with _handle_registry_lock:
+        _check(
+            _lib().muFileHandleDeregister(ctypes.c_void_p(handle)),
+            "muFileHandleDeregister",
+        )
         _handle_descr_registry.pop(handle, None)
-    _check(
-        _lib().muFileHandleDeregister(ctypes.c_void_p(handle)),
-        "muFileHandleDeregister",
-    )
 
 
 # --- Buffer / stream registration ----------------------------------

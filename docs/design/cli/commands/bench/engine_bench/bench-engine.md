@@ -517,11 +517,12 @@ its output is deliberately agnostic of engine-side metrics. Confirm the cache
 was exercised from the engine's own `/metrics` if a run needs that evidence.
 
 **Scoring.** The model wraps its answer in `<final_answer>…</final_answer>`;
-the *last complete* region is taken, since reasoning models may echo an
-example while thinking. An unterminated region counts as no answer —
-generation was cut off, so scoring the reasoning before it would report an
-answer never produced. Answers are scored by SQuAD-normalized token-overlap
-F1, best over the gold answers.
+the *last* region is considered, including an unfinished one, since reasoning
+models may echo an example while thinking. If that region has no closing
+tag, it counts as no answer; the parser does not fall back to an earlier
+complete region. Such a sample is exported with `parsed: false`, an empty
+answer, and `f1: null`. Completed answers are scored by SQuAD-normalized
+token-overlap F1, best over the gold answers.
 
 `f1_mean` covers **parsed samples only** and is always reported beside
 `parse_rate`: a high F1 over a third of the samples is a different result from
