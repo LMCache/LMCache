@@ -14,7 +14,7 @@ import pytest
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
-    ObjectKey,
+    GroupedKeys,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
@@ -136,7 +136,7 @@ def _make_module_with_job(
     request_id = "req-1"
     job = _PrefetchJob(
         handle=handle,
-        world_size=world_size,
+        row_windows=(-1,) * world_size,
         request_id=request_id,
         requested_tokens=0,
         num_object_groups=num_object_groups,
@@ -232,7 +232,7 @@ def test_server_handler_registered():
 
 
 # ============================================================================
-# Chunk-major key layout
+# Grouped key layout
 # ============================================================================
 
 
@@ -250,14 +250,14 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
     )
 
 
-def _captured_lookup_object_keys(
+def _captured_lookup_key_groups(
     world_size: int, num_groups: int, chunk_hashes: list[bytes]
-) -> list[ObjectKey]:
-    """Drive the public ``lookup()`` and return the object keys it submits.
+) -> list[GroupedKeys]:
+    """Drive the public ``lookup()`` and return the key rows it submits.
 
-    The engine context is mocked so ``lookup()`` runs end-to-end; the
-    chunk-major key list it builds is recovered from the ``submit_prefetch_task``
-    call rather than by reaching into a private helper.
+    The engine context is mocked so ``lookup()`` runs end-to-end; the rows
+    are recovered from the ``submit_prefetch_task`` call rather than by
+    reaching into a private helper.
     """
     ctx = MagicMock()
     ctx.chunk_size = 16
@@ -277,40 +277,46 @@ def _captured_lookup_object_keys(
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
 
     ctx.storage_manager.submit_prefetch_task.assert_called_once()
-    return ctx.storage_manager.submit_prefetch_task.call_args.args[0].keys
+    spec = ctx.storage_manager.submit_prefetch_task.call_args.args[0]
+    assert spec.fetching_policy == "prefix"
+    return spec.key_groups
 
 
-def test_lookup_lays_keys_out_chunk_then_group_then_rank():
-    """lookup() submits keys laid out chunk -> object group -> kv_rank, so each
-    chunk's keys are contiguous (the property that makes a leading-ones prefix
-    equal to the full-attention model-wide hit)."""
-    keys = _captured_lookup_object_keys(
+def test_lookup_submits_one_row_per_group_and_rank_group_major():
+    """lookup() submits one chunk-ordered key row per (object group, kv_rank),
+    group-major / rank-minor, each row carrying its own group id."""
+    rows = _captured_lookup_key_groups(
         world_size=2, num_groups=2, chunk_hashes=[b"c0", b"c1"]
     )
 
-    # 2 chunks * 2 groups * 2 ranks.
-    assert len(keys) == 8
-    # Each chunk's 4 keys are contiguous.
-    assert [k.chunk_hash for k in keys[:4]] == [b"c0"] * 4
-    assert [k.chunk_hash for k in keys[4:]] == [b"c1"] * 4
-    # Within a chunk, group 0 (both ranks) precedes group 1 (both ranks).
-    assert [k.object_group_id for k in keys[:4]] == [0, 0, 1, 1]
-    assert [k.object_group_id for k in keys[4:]] == [0, 0, 1, 1]
-    # The two ranks within one (chunk, group) cell are distinct.
-    assert keys[0].kv_rank != keys[1].kv_rank
+    # 2 groups * 2 ranks rows, each of 2 chunks.
+    assert len(rows) == 4
+    assert [row.object_group_id for row in rows] == [0, 0, 1, 1]
+    for row in rows:
+        assert [k.chunk_hash for k in row.keys] == [b"c0", b"c1"]
+        assert {k.object_group_id for k in row.keys} == {row.object_group_id}
+        assert len({k.kv_rank for k in row.keys}) == 1
+    # The two rank rows of one group address distinct kv_ranks.
+    assert rows[0].keys[0].kv_rank != rows[1].keys[0].kv_rank
+    # Every group's rows use the same rank order.
+    assert [r.keys[0].kv_rank for r in rows[:2]] == [
+        r.keys[0].kv_rank for r in rows[2:]
+    ]
 
 
-def test_lookup_single_group_matches_single_group_layout():
-    """With one object group the submitted layout is byte-identical to the
-    single-group layout (the object-group-separation-disabled / non-hybrid
-    case)."""
+def test_lookup_single_group_matches_single_group_expansion():
+    """With one object group the submitted keys are exactly the single-group
+    expansion, one row per kv_rank (the object-group-separation-disabled /
+    non-hybrid case)."""
     chunk_hashes = [b"c0", b"c1"]
-    keys = _captured_lookup_object_keys(
+    rows = _captured_lookup_key_groups(
         world_size=2, num_groups=1, chunk_hashes=chunk_hashes
     )
 
     expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
-    assert keys == expected
+    assert len(rows) == 2
+    submitted = [k for row in rows for k in row.keys]
+    assert sorted(submitted, key=repr) == sorted(expected, key=repr)
 
 
 def test_lookup_hashing_stops_at_key_end() -> None:

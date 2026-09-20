@@ -16,7 +16,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, ipc_key_to_object_keys
+from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    GroupedKeys,
+    MemoryLayoutDesc,
+    ObjectKey,
+    ipc_key_to_grouped_keys,
+    ipc_key_to_object_keys,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 if TYPE_CHECKING:
@@ -61,6 +68,69 @@ def resolve_object_keys(
         ValueError: ``token_ids`` exceeds the per-request cap, or a key field
             (e.g. ``cache_salt``) is invalid.
     """
+    ipc_key, chunk_hashes = _resolve_ipc_key_and_hashes(
+        token_hasher, model_name, world_size, token_ids, cache_salt
+    )
+    if not chunk_hashes:
+        return [], 0
+    obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes, [0])[0]
+    return obj_keys, len(chunk_hashes)
+
+
+def resolve_grouped_keys(
+    token_hasher: TokenHasher,
+    model_name: str,
+    world_size: int,
+    token_ids: list[int],
+    cache_salt: str,
+    layout_desc: MemoryLayoutDesc,
+) -> tuple[list[GroupedKeys], int]:
+    """Resolve a token sequence to prefetch key rows, one per kv rank.
+
+    Hashes ``token_ids`` and lays the complete-chunk keys of the single object
+    group (``0``, full attention) out as one :class:`GroupedKeys` row per kv
+    rank in rank order, each chunk-ordered.
+
+    Args:
+        token_hasher: Hasher configured to match the fleet's chunk size and
+            hash algorithm.
+        model_name: Model whose rank fan-out to use.
+        world_size: Tensor-parallel world size selecting the per-rank fan-out.
+        token_ids: The token sequence to resolve.
+        cache_salt: Per-tenant isolation salt.
+        layout_desc: Memory layout of the object group's objects.
+
+    Returns:
+        ``(key_groups, chunk_count)``. ``key_groups`` is empty (with
+        ``chunk_count`` 0) when the sequence is shorter than one chunk.
+
+    Raises:
+        ValueError: ``token_ids`` exceeds the per-request cap, or a key field
+            (e.g. ``cache_salt``) is invalid.
+    """
+    ipc_key, chunk_hashes = _resolve_ipc_key_and_hashes(
+        token_hasher, model_name, world_size, token_ids, cache_salt
+    )
+    if not chunk_hashes:
+        return [], 0
+    key_groups = ipc_key_to_grouped_keys(
+        ipc_key, chunk_hashes, [0], {0: layout_desc}, DEFAULT_ATTN_WINDOW_DESC
+    )
+    return key_groups, len(chunk_hashes)
+
+
+def _resolve_ipc_key_and_hashes(
+    token_hasher: TokenHasher,
+    model_name: str,
+    world_size: int,
+    token_ids: list[int],
+    cache_salt: str,
+) -> tuple[IPCCacheServerKey, list[bytes]]:
+    """Build the lookup-side IPC key and hash the complete chunks.
+
+    Raises:
+        ValueError: ``token_ids`` exceeds the per-request cap.
+    """
     if len(token_ids) > MAX_TOKEN_IDS:
         raise ValueError(
             f"too many token_ids in a single request "
@@ -77,7 +147,4 @@ def resolve_object_keys(
         cache_salt=cache_salt,
     )
     chunk_hashes = token_hasher.compute_chunk_hashes(list(token_ids))
-    if not chunk_hashes:
-        return [], 0
-    obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes, [0])[0]
-    return obj_keys, len(chunk_hashes)
+    return ipc_key, chunk_hashes
