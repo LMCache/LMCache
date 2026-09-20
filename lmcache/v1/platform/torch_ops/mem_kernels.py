@@ -44,15 +44,12 @@ def multi_layer_kv_transfer(
             f"Expected torch.Tensor or list, but got {type(key_value_ptrs).__name__}"
         )
 
-    # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
-    # NL_X_NB_TWO_NH_BS_HS) as next step.
-    if int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
-        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
-    ):
+    format_spec = _format_spec(engine_kv_format)
+
+    # TODO: Implement head_size support for HND layouts as next step.
+    if format_spec.is_hnd:
         raise NotImplementedError(
-            "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
-            "are not supported in the non-CUDA fallback. "
+            "HND layouts are not supported in the non-CUDA fallback. "
             "head_size parameter is required but not implemented in this path."
         )
     # 1. Filter out invalid slots.

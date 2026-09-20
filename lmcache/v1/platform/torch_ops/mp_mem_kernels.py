@@ -17,6 +17,7 @@ from lmcache.lmcache_native import (
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.torch_ops._kv_format import (
+    _format_spec,
     _is_fused_kv_format,
     _is_hnd_format,
     _is_kv_second_tuple_format,
@@ -45,54 +46,6 @@ def _is_ptr_tensor(x: object) -> bool:
         and x.dtype in (torch.int64, torch.uint64)
         and x.ndim == 1
     )
-
-
-def _per_layer_paged_shape(
-    engine_kv_format: EngineKVFormat,
-    nb: int,
-    bs: int,
-    nh: int,
-    hs: int,
-) -> tuple[int, ...]:
-    """Return the logical shape of a single per-layer paged buffer tensor.
-
-    Args:
-        engine_kv_format: The format enum that describes how K/V tokens are laid out.
-        nb: Number of blocks in the paged buffer (``shape_desc.nb``).
-        bs: Tokens per block / block size (``shape_desc.bs``).
-        nh: Number of attention heads (``shape_desc.nh``).
-        hs: Per-head hidden size (``shape_desc.hs``).
-
-    Returns:
-        A tuple representing the shape needed to reconstruct one layer's tensor
-        from a raw pointer via :func:`_tensor_from_ptr`.
-    """
-    fmt = int(engine_kv_format)
-    if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
-        return (nb * bs, 1, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
-        return (nb, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
-        return (2, nb, nh, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
-        return (nb, 2, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
-    ):
-        # Blocks-first fused KV (HND): the desc's hs is the packed
-        # 2 * head_size, so each layer is the raw [NB, NH, BS, 2 * HS].
-        return (nb, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
-    ):
-        # Blocks-first fused KV (NHD): tokens before heads.
-        return (nb, bs, nh, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
-        return (2, nb, bs, nh, hs)
-    # Covers NL_X_NB_TWO_BS_NH_HS and any future NHD variants.
-    return (nb, 2, bs, nh, hs)
 
 
 def _infer_kv_dtype(
@@ -270,7 +223,7 @@ def _normalize_paged_layers(
         bs = int(shape_desc.bs)
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
-        per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
+        per_shape = _format_spec(engine_kv_format).paged_layer_shape(nb, bs, nh, hs)
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0) or 0)
         if block_stride and block_stride != bs * nh * hs:
             raise NotImplementedError(
