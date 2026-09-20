@@ -18,6 +18,7 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace lmcache {
@@ -276,7 +277,8 @@ class ConnectorBase : public IStorageConnector {
       if (!lane_ptr) {
         lane_ptr = std::make_unique<WorkerLane>();
       }
-      start_lane_workers(*lane_ptr, count);
+      lane_ptr->state.live_workers.store(count, std::memory_order_release);
+      start_lane_workers(key, *lane_ptr, count);
     }
 
     // Start shared pool if any lane key in the registry is not configured.
@@ -290,6 +292,8 @@ class ConnectorBase : public IStorageConnector {
     }
 
     if (need_shared) {
+      shared_queue_state_.live_workers.store(num_workers_,
+                                             std::memory_order_release);
       workers_.reserve(static_cast<size_t>(num_workers_));
       for (int i = 0; i < num_workers_; i++) {
         workers_.emplace_back([this]() { this->worker_loop(); });
@@ -365,7 +369,14 @@ class ConnectorBase : public IStorageConnector {
   }
 
  private:
+  struct WorkerQueueState {
+    std::atomic<int> live_workers{0};
+    bool failed = false;
+    std::string fatal_error;
+  };
+
   struct WorkerLane {
+    WorkerQueueState state;
     std::mutex mu;
     std::condition_variable cv;
     std::queue<Request> requests;
@@ -433,19 +444,38 @@ class ConnectorBase : public IStorageConnector {
     const std::string& key = lane_key_for_op(req.op);
     auto it = lanes_.find(key);
     if (it != lanes_.end()) {
-      {
-        std::lock_guard<std::mutex> lk(it->second->mu);
-        it->second->requests.push(std::move(req));
-      }
-      it->second->cv.notify_one();
+      enqueue_request_for_queue(std::move(req), it->second->state,
+                                it->second->mu, it->second->cv,
+                                it->second->requests);
       return;
     }
 
+    enqueue_request_for_queue(std::move(req), shared_queue_state_, req_mu_,
+                              req_cv_, requests_);
+  }
+
+  void enqueue_request_for_queue(Request&& req, WorkerQueueState& state,
+                                 std::mutex& req_mu,
+                                 std::condition_variable& req_cv,
+                                 std::queue<Request>& requests) {
+    bool fail_now = false;
+    std::string error;
     {
-      std::lock_guard<std::mutex> lk(req_mu_);
-      requests_.push(std::move(req));
+      std::lock_guard<std::mutex> lk(req_mu);
+      if (state.failed) {
+        fail_now = true;
+        error = state.fatal_error;
+      } else {
+        requests.push(std::move(req));
+      }
     }
-    req_cv_.notify_one();
+
+    if (fail_now) {
+      fail_request(req, format_queue_unavailable(error));
+      return;
+    }
+
+    req_cv.notify_one();
   }
 
   void push_completion(Completion&& c) {
@@ -493,13 +523,14 @@ class ConnectorBase : public IStorageConnector {
     return it->second;
   }
 
-  void start_lane_workers(WorkerLane& lane, int num_workers) {
+  void start_lane_workers(const std::string& queue_name, WorkerLane& lane,
+                          int num_workers) {
     lane.workers.reserve(static_cast<size_t>(num_workers));
     WorkerLane* lane_ptr = &lane;
     for (int i = 0; i < num_workers; i++) {
-      lane.workers.emplace_back([this, lane_ptr]() {
-        this->worker_loop_for_queue(lane_ptr->mu, lane_ptr->cv,
-                                    lane_ptr->requests);
+      lane.workers.emplace_back([this, lane_ptr, queue_name]() {
+        this->worker_loop_for_queue(queue_name, lane_ptr->state, lane_ptr->mu,
+                                    lane_ptr->cv, lane_ptr->requests);
       });
     }
   }
@@ -519,11 +550,18 @@ class ConnectorBase : public IStorageConnector {
     }
   }
 
-  void worker_loop() { worker_loop_for_queue(req_mu_, req_cv_, requests_); }
+  void worker_loop() {
+    worker_loop_for_queue("shared", shared_queue_state_, req_mu_, req_cv_,
+                          requests_);
+  }
 
-  void worker_loop_for_queue(std::mutex& req_mu,
+  void worker_loop_for_queue(const std::string& queue_name,
+                             WorkerQueueState& queue_state, std::mutex& req_mu,
                              std::condition_variable& req_cv,
                              std::queue<Request>& requests) {
+    bool abnormal_exit = false;
+    std::string fatal_error;
+
     try {
       // create connection (derived class specific)
       ConnectionType conn = create_connection();
@@ -535,9 +573,11 @@ class ConnectorBase : public IStorageConnector {
         {
           std::unique_lock<std::mutex> lk(req_mu);
           req_cv.wait(lk, [&] {
-            return stop_.load(std::memory_order_acquire) || !requests.empty();
+            return stop_.load(std::memory_order_acquire) ||
+                   queue_state.failed || !requests.empty();
           });
-          if (stop_.load(std::memory_order_acquire) && requests.empty()) {
+          if ((stop_.load(std::memory_order_acquire) || queue_state.failed) &&
+              requests.empty()) {
             break;  // exit loop
           }
           req = std::move(requests.front());
@@ -571,21 +611,93 @@ class ConnectorBase : public IStorageConnector {
               break;
           }
         } catch (const std::exception& e) {
-          comp.ok = false;
-          comp.error = e.what();
-          // if shutting down, errors are expected
           if (stop_.load(std::memory_order_acquire)) {
-            break;  // exit without pushing completion
+            break;  // exit without pushing completion during shutdown
           }
+          comp.ok = false;
+          comp.error = format_worker_failure(e.what());
+        } catch (...) {
+          if (stop_.load(std::memory_order_acquire)) {
+            break;  // exit without pushing completion during shutdown
+          }
+          comp.ok = false;
+          comp.error = format_worker_failure("unknown exception");
         }
 
         // 3. update shared batch state and push completion when done
         handle_tile_completion(req, comp);
       }
     } catch (const std::exception& e) {
-      fprintf(stderr, "[LMCache Connector Worker Error] %s\n", e.what());
+      if (!stop_.load(std::memory_order_acquire)) {
+        abnormal_exit = true;
+        fatal_error = format_worker_failure(e.what());
+      }
     } catch (...) {
-      fprintf(stderr, "[LMCache Connector Worker Error] Unknown exception\n");
+      if (!stop_.load(std::memory_order_acquire)) {
+        abnormal_exit = true;
+        fatal_error = format_worker_failure("unknown exception");
+      }
+    }
+
+    handle_worker_exit(queue_name, queue_state, req_mu, req_cv, requests,
+                       abnormal_exit, std::move(fatal_error));
+  }
+
+  static std::string format_worker_failure(const std::string& reason) {
+    return "native connector worker failed: " + reason;
+  }
+
+  static std::string format_queue_unavailable(const std::string& reason) {
+    if (reason.empty()) {
+      return "native connector worker queue unavailable";
+    }
+    return "native connector worker queue unavailable: " + reason;
+  }
+
+  void fail_request(const Request& req, const std::string& error) {
+    Completion comp;
+    comp.future_id = req.future_id;
+    comp.ok = false;
+    comp.error = error;
+    handle_tile_completion(req, comp);
+  }
+
+  void handle_worker_exit(const std::string& queue_name,
+                          WorkerQueueState& queue_state, std::mutex& req_mu,
+                          std::condition_variable& req_cv,
+                          std::queue<Request>& requests, bool abnormal_exit,
+                          std::string fatal_error) {
+    int previous_live =
+        queue_state.live_workers.fetch_sub(1, std::memory_order_acq_rel);
+    int remaining_live = previous_live - 1;
+
+    if (!abnormal_exit || stop_.load(std::memory_order_acquire)) {
+      return;
+    }
+
+    fprintf(stderr, "[LMCache Connector Worker Error] queue=%s %s\n",
+            queue_name.c_str(), fatal_error.c_str());
+
+    if (remaining_live > 0) {
+      return;
+    }
+
+    std::queue<Request> failed_requests;
+    {
+      std::lock_guard<std::mutex> lk(req_mu);
+      if (queue_state.failed) {
+        return;
+      }
+      queue_state.failed = true;
+      queue_state.fatal_error = fatal_error;
+      failed_requests.swap(requests);
+    }
+    req_cv.notify_all();
+
+    std::string error = format_queue_unavailable(fatal_error);
+    while (!failed_requests.empty()) {
+      fail_request(failed_requests.front(), error);
+      failed_requests.pop();
     }
   }
 
@@ -642,6 +754,7 @@ class ConnectorBase : public IStorageConnector {
   std::mutex req_mu_;
   std::condition_variable req_cv_;
   std::queue<Request> requests_;
+  WorkerQueueState shared_queue_state_;
 
   // completion queue (CQ)
   std::mutex comp_mu_;
