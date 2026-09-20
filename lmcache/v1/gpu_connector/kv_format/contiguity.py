@@ -77,6 +77,8 @@ def attempt_permute_to_contiguous_view(
     preserved.
     """
     if isinstance(kv_caches, torch.Tensor):
+        if kv_caches.numel() == 0:
+            return kv_caches
         strides = kv_caches.stride()
         shape = kv_caches.shape
         # A size-1 dim can tie on stride with its neighbour (e.g. one head
