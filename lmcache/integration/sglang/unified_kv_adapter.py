@@ -305,6 +305,29 @@ class SGLangUnifiedKVAdapter:
         if c128_buffers:
             tensors.extend(tensor for tensor in c128_buffers if tensor.numel() > 0)
 
+        # Compressed pools reserve the dummy FULL page in their own physical
+        # page units, so C4, C128, and indexer buffers may have different
+        # amounts of trailing padding. Their valid row IDs still share the
+        # FULL allocator's logical block space, including dummy block 0.
+        full_size = kv_pool.full_size
+        if full_size is None or full_size % self.page_size != 0:
+            raise ValueError(
+                "DeepSeek V4 requires a page-aligned FULL pool size, got "
+                f"full_size={full_size}, page_size={self.page_size}"
+            )
+        full_block_count = full_size // self.page_size + 1
+        short_tensors = [
+            tuple(tensor.shape)
+            for tensor in tensors
+            if tensor.shape[0] < full_block_count
+        ]
+        if short_tensors:
+            raise ValueError(
+                "DeepSeek V4 FULL sidecar buffers are shorter than the logical "
+                f"FULL block space {full_block_count}: {short_tensors}"
+            )
+        tensors = [tensor[:full_block_count] for tensor in tensors]
+
         resolved = self._validate_page_native_tensors("FULL sidecar", tuple(tensors))
         if not resolved:
             raise NotImplementedError(
