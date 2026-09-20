@@ -72,14 +72,21 @@ def multi_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
-    is_mla = _format_spec(engine_kv_format).is_mla
-    is_flash_infer = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS)
+    is_mla = format_spec.is_mla
+    has_interleaved_kv_blocks = (
+        format_spec.is_layer_list
+        and not format_spec.is_mla
+        and not format_spec.is_fused_packed
+        and not format_spec.is_two_major
+        and not format_spec.is_kv_second_tuple
+    )
 
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
 
-    # For the flash_infer interleaved layout, pre-compute block-level indices.
-    if is_flash_infer:
+    # For layouts with K/V interleaved after the block axis, pre-compute
+    # block-level indices.
+    if has_interleaved_kv_blocks:
         block_indices = valid_slots // block_size
         block_offsets = valid_slots % block_size
 
@@ -89,7 +96,7 @@ def multi_layer_kv_transfer(
 
     if is_mla:
         layer_shape = (page_buffer_size, hidden_size)
-    elif is_flash_infer:
+    elif has_interleaved_kv_blocks:
         num_blocks = page_buffer_size // block_size
         layer_shape = (num_blocks, 2, block_size, hidden_size)
     else:
@@ -121,7 +128,7 @@ def multi_layer_kv_transfer(
                 key_value[0, layer_id, valid_mask_kv, :] = gathered.to(
                     kv_device, non_blocking=False
                 )
-        elif is_flash_infer:
+        elif has_interleaved_kv_blocks:
             # Paged layout : [num_blocks, 2, block_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]
             if int(direction) == int(TransferDirection.H2D):
