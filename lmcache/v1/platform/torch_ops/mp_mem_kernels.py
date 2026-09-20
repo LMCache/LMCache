@@ -17,6 +17,7 @@ from lmcache.v1.platform.torch_ops._kv_format import (
     _is_fused_kv_format,
     _is_hnd_format,
     _is_kv_second_tuple_format,
+    _is_mla_plane_tuple_format,
     _is_pbs_fused_format,
     _is_two_major_format,
 )
@@ -242,9 +243,10 @@ def _normalize_paged_layers(
             "got: " + type(paged_buffer_ptrs_tensor).__name__
         )
     if _is_kv_second_tuple_format(engine_kv_format):
+        is_mla_plane_tuple = _is_mla_plane_tuple_format(engine_kv_format)
         if isinstance(paged_buffer_ptrs_tensor, list) and all(
             isinstance(t, (list, tuple))
-            and len(t) == 2
+            and (len(t) >= 1 if is_mla_plane_tuple else len(t) == 2)
             and all(isinstance(x, torch.Tensor) for x in t)
             for t in paged_buffer_ptrs_tensor
         ):

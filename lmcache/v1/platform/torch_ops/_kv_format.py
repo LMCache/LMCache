@@ -17,6 +17,7 @@ __all__ = [
     "_is_two_major_format",
     "_is_pbs_fused_format",
     "_is_kv_second_tuple_format",
+    "_is_mla_plane_tuple_format",
 ]
 
 
@@ -65,3 +66,11 @@ def _is_pbs_fused_format(engine_kv_format: EngineKVFormat) -> bool:
 def _is_kv_second_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when each per-layer entry is a (K, V) tuple."""
     return _format_spec(engine_kv_format).is_kv_second_tuple
+
+
+def _is_mla_plane_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when each per-layer entry is a tuple of NP >= 1 MLA planes."""
+    return (
+        _is_kv_second_tuple_format(engine_kv_format)
+        and _format_spec(engine_kv_format).is_mla
+    )
