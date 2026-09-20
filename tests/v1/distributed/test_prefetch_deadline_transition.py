@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Transition-level deadline tests; native buffer lifetimes are covered elsewhere."""
+
+# Standard
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+# Third Party
 import pytest
 
+# First Party
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
     PrefetchPhase,
@@ -35,9 +39,7 @@ def make_controller_and_request(
         )
     req = SimpleNamespace(
         phase=phase,
-        resource_state=(
-            ResourceState.DRAINING if draining else ResourceState.ACTIVE
-        ),
+        resource_state=(ResourceState.DRAINING if draining else ResourceState.ACTIVE),
         deadline_at=deadline,
         published_retained=object(),
         all_lookups_done=lambda: done,
@@ -58,9 +60,7 @@ def test_late_lookup_cannot_submit_new_load(now):
 
 @pytest.mark.parametrize("deadline", [None, 0.2])
 def test_unexpired_or_unarmed_lookup_can_submit(deadline):
-    ctrl, req, signaled, calls = make_controller_and_request(
-        deadline=deadline, now=0.1
-    )
+    ctrl, req, signaled, calls = make_controller_and_request(deadline=deadline, now=0.1)
     if deadline is None:
         ctrl._clock.side_effect = AssertionError("unarmed path read clock")
     ctrl._advance_request(req, signaled)
