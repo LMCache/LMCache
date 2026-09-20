@@ -2,10 +2,10 @@ lmcache server
 ==============
 
 The ``lmcache server`` command launches the standalone LMCache
-Multi-Process (MP) server, which exposes a ZMQ control plane and an HTTP
-frontend (status, healthcheck, cache-clear, checksum APIs). It is the server
-that ``lmcache describe``, ``lmcache ping kvcache``, ``lmcache kvcache``, and
-``lmcache bench server`` talk to.
+Multi-Process (MP) server, which exposes a configurable ZMQ or gRPC request
+endpoint and an HTTP frontend (status, healthcheck, cache-clear, checksum
+APIs). It is the server that ``lmcache describe``, ``lmcache ping kvcache``,
+``lmcache kvcache``, and ``lmcache bench server`` talk to.
 
 .. note::
 
@@ -47,10 +47,12 @@ Commonly used flags include:
 
    * - Flag
      - Description
+   * - ``--transport {zmq,grpc}``
+     - Request transport exposed by the server (default: ``zmq``).
    * - ``--host HOST``
      - Bind address for the server.
    * - ``--port PORT``
-     - ZMQ control-plane port.
+     - Request-transport port.
    * - ``--chunk-size N``
      - KV cache chunk size in tokens.
    * - ``--l1-size-gb GB``
@@ -62,7 +64,9 @@ Commonly used flags include:
    * - ``--eviction-ratio RATIO``
      - Fraction of L1 cleared per eviction cycle.
    * - ``--max-workers N``
-     - Number of server worker processes.
+     - Base number of request worker threads.
+   * - ``--grpc-server-workers N``
+     - gRPC dispatch threads (used only with ``--transport grpc``).
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See

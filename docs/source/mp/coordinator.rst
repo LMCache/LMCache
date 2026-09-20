@@ -104,9 +104,12 @@ keeps the default below.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
-       view or controller looks for them. ``controller_packages`` is read by
-       the coordinator itself: a list of importable paths to load
-       out-of-tree controllers from.
+       view or controller looks for them. Two keys are read by the
+       coordinator itself: ``controller_packages``, a list of importable
+       paths to load out-of-tree controllers from, and
+       ``disabled_controllers``, a list of class names to leave unbuilt --
+       which is how one of those takes a built-in controller's place
+       instead of running beside it.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
@@ -201,6 +204,20 @@ that outgrows one file can be a directory — or a single module. A name that
 does not import raises at startup; a controller that raises while starting is
 logged and skipped. Views cannot be added this way: they are the coordinator's
 own shared state, which your controller reads.
+
+**Disabling a built-in controller.** Name its class in
+``disabled_controllers`` and it is not built, taking its endpoints with it —
+which is how a controller of your own replaces one rather than running beside
+it:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "disabled_controllers": ["FleetEvictionController"]
+    }'
+
+A name matching no discovered controller raises at startup.
 
 Coordinator metrics export
 --------------------------
@@ -341,8 +358,11 @@ startup.
        when it is not in P2P.
    * - ``mq_port``
      - int
-     - Optional (default ``0``). ZMQ message-queue port P2P peers send
-       lookup/unlock RPCs to; ``0`` when P2P is disabled.
+     - Optional (default ``0``). Request-server port P2P peers send
+       lookup/unlock RPCs to. The field name is retained for compatibility;
+       the server's configured ZMQ or gRPC transport is used. ``0`` when P2P
+       is disabled.
+
 **Response** (``200 OK``):
 
 .. code-block:: json
