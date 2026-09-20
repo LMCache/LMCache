@@ -32,8 +32,7 @@ For aggregated serving on one GPU:
 ./examples/dynamo_integration/local/launch_lmcache_mp.sh aggregated
 ```
 
-For separate prefill and decode workers on two GPUs in the same node, stop
-the aggregated deployment first, then run:
+For disaggregated serving on two GPUs in the same node:
 
 ```bash
 ./examples/dynamo_integration/local/launch_lmcache_mp.sh disaggregated
