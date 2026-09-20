@@ -730,3 +730,101 @@ class TestLocalCPUBackendAllocatorAlignment:
             assert kwargs.get("align_bytes") == 4096
         finally:
             backend.memory_allocator.close()
+
+
+def test_residency_snapshot_replay_and_recreation(
+    local_cpu_backend: LocalCPUBackend,
+) -> None:
+    """Only actual insertion is readable; no-op puts do not create replicas."""
+    backend = local_cpu_backend
+    snapshot = backend.residency_snapshot(max_events=4)
+    assert snapshot.entries == ()
+    key = create_test_key("residency")
+    memory = create_test_memory_obj()
+    backend.submit_put_task(key, memory)
+    backend.submit_put_task(key, memory)
+    first = backend.residency_events(snapshot.source_epoch, snapshot.cut_seq)
+    assert len(first.events) == 1
+    assert first.events[0].readable
+    assert first.events[0].size_bytes == memory.get_size()
+    assert backend.remove(key)
+    backend.submit_put_task(key, memory)
+    events = backend.residency_events(snapshot.source_epoch, first.cut_seq)
+    assert [event.readable for event in events.events] == [False, True]
+    assert [event.seq for event in events.events] == [2, 3]
+    assert snapshot.entries == ()
+    current = backend.residency_snapshot()
+    assert current.entries == (events.events[-1],)
+    memory.ref_count_down()
+
+
+def test_residency_log_expiry_and_epoch_require_snapshot(
+    local_cpu_backend: LocalCPUBackend,
+) -> None:
+    from lmcache.v1.storage_backend.residency import ResidencySnapshotRequired
+
+    backend = local_cpu_backend
+    initial = backend.residency_snapshot(max_events=1)
+    key = create_test_key("expiry")
+    memory = create_test_memory_obj()
+    backend.submit_put_task(key, memory)
+    backend.remove(key)
+    with pytest.raises(ResidencySnapshotRequired):
+        backend.residency_events(initial.source_epoch, initial.cut_seq)
+    with pytest.raises(ResidencySnapshotRequired):
+        backend.residency_events("old-boot", 2)
+    assert backend.residency_snapshot().entries == ()
+    memory.ref_count_down()
+
+
+def test_residency_clear_keeps_pinned_readable_objects(
+    local_cpu_backend: LocalCPUBackend,
+) -> None:
+    backend = local_cpu_backend
+    key = create_test_key("pinned")
+    memory = create_test_memory_obj()
+    backend.submit_put_task(key, memory)
+    memory.ref_count_down()
+    backend.pin(key)
+    snapshot = backend.residency_snapshot()
+    backend.clear()
+    assert backend.residency_snapshot().entries == snapshot.entries
+    backend.unpin(key)
+    backend.clear()
+    assert backend.residency_snapshot().entries == ()
+    events = backend.residency_events(snapshot.source_epoch, snapshot.cut_seq)
+    assert len(events.events) == 1 and not events.events[0].readable
+
+
+def test_residency_concurrent_writers_replay_matches_snapshot(
+    local_cpu_backend: LocalCPUBackend,
+) -> None:
+    """A cut plus concurrent replay converges to the public readable set."""
+    # Standard
+    from concurrent.futures import ThreadPoolExecutor
+
+    backend = local_cpu_backend
+    initial = backend.residency_snapshot(max_events=256)
+
+    def mutate(index: int) -> None:
+        key = create_test_key(f"concurrent-{index}")
+        memory = create_test_memory_obj()
+        backend.submit_put_task(key, memory)
+        if index % 2:
+            backend.remove(key)
+        memory.ref_count_down()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(mutate, range(40)))
+    replay = backend.residency_events(initial.source_epoch, initial.cut_seq)
+    readable = {event.key for event in initial.entries}
+    for event in replay.events:
+        if event.readable:
+            readable.add(event.key)
+        else:
+            readable.remove(event.key)
+    final = backend.residency_snapshot()
+    assert replay.cut_seq == final.cut_seq
+    assert readable == {event.key for event in final.entries}
+    assert len(readable) == 20
+    backend.clear()

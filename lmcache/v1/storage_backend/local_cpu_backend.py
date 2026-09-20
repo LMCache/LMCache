@@ -30,6 +30,11 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
+from lmcache.v1.storage_backend.residency import (
+    ResidencyEvents,
+    ResidencyJournal,
+    ResidencySnapshot,
+)
 from lmcache.v1.system_detection import NUMADetector, SystemMemoryDetector
 
 if TYPE_CHECKING:
@@ -75,6 +80,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
+        self._residency: Optional[ResidencyJournal] = None
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -168,6 +174,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             self.hot_cache[key] = memory_obj
 
             self.cache_policy.update_on_put(key)
+            if self._residency is not None:
+                self._residency.commit(key, True, memory_obj.get_size())
 
             # Push kv admit msg with batching
             if self.batched_msg_sender is not None:
@@ -278,6 +286,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 return False
 
             memory_obj = self.hot_cache.pop(key)
+            if self._residency is not None:
+                self._residency.commit(key, False)
             memory_obj.ref_count_down()
 
             if force:
@@ -817,6 +827,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                             for key in evict_key_all_layer:
                                 self.cache_policy.update_on_force_evict(key)
                                 self.hot_cache.pop(key, None)
+                                if self._residency is not None:
+                                    self._residency.commit(key, False)
 
                             self.memory_allocator.batched_free(old_mem_objs)
 
@@ -930,6 +942,49 @@ class LocalCPUBackend(AllocatorBackendInterface):
         """
         with self.cpu_lock:
             return list(self.hot_cache.keys())
+
+    def residency_snapshot(self, max_events: int = 16384) -> ResidencySnapshot:
+        """Enable observations and capture actual readable CPU objects.
+
+        Args:
+            max_events: Positive replay capacity, used on the first call only.
+
+        Returns:
+            Immutable native keys, versions, sizes, boot epoch and replay cut.
+
+        Raises:
+            ValueError: If the initial replay capacity is not positive.
+
+        The snapshot and cursor use the put/evict lock. This API neither pins
+        objects nor changes LRU order. Submission and remote/disk completion
+        never establish local residency. Snapshot entries contain metadata
+        only and do not retain MemoryObjs or their underlying allocation.
+        """
+        with self.cpu_lock:
+            if self._residency is None:
+                self._residency = ResidencyJournal(max_events)
+                for key, memory_obj in self.hot_cache.items():
+                    self._residency.commit(key, True, memory_obj.get_size())
+            return self._residency.snapshot()
+
+    def residency_events(self, source_epoch: str, after_seq: int) -> ResidencyEvents:
+        """Poll committed CPU mutations without invoking lookup or prefetch.
+
+        Args:
+            source_epoch: Boot epoch from residency_snapshot().
+            after_seq: Last applied sequence from the snapshot or replay page.
+
+        Returns:
+            Contiguous mutations through the returned cut_seq, even when idle.
+
+        Raises:
+            RuntimeError: If observations have not been enabled by a snapshot.
+            ResidencySnapshotRequired: If the epoch/cursor needs a new snapshot.
+        """
+        with self.cpu_lock:
+            if self._residency is None:
+                raise RuntimeError("call residency_snapshot before residency_events")
+            return self._residency.events(source_epoch, after_seq)
 
     def clear(self) -> int:
         """
