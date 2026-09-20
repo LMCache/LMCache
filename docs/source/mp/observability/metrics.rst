@@ -766,6 +766,64 @@ For the full design rationale and the in-process accessors that back
 each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 ``docs/design/v1/mp_observability/event-bus.md`` in the source tree.
 
+gRPC Runtime Metrics
+~~~~~~~~~~~~~~~~~~~~
+
+When metrics are enabled and the MP request transport is gRPC, LMCache also
+registers gRPC Python's OpenTelemetry observability plugin against the same
+OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
+existing LMCache EventBus metrics remain unchanged. The plugin is provided by
+``grpcio-observability`` and is installed only on Linux, which is the platform
+currently supported by that upstream package. On non-Linux developer hosts the
+integration is skipped unless the package is available locally. Use
+``--disable-grpc-metrics`` to suppress the integration explicitly while
+keeping LMCache's EventBus metrics enabled.
+
+These metrics describe the gRPC transport itself, not cache hit/miss behavior.
+They use the upstream ``grpc.*`` namespace. On Prometheus, ``.`` is converted
+to ``_`` and counters get a ``_total`` suffix.
+
+.. list-table:: gRPC Runtime Metrics
+   :header-rows: 1
+   :widths: 34 34 16 16
+
+   * - OTel metric name
+     - Prometheus name
+     - Type
+     - Unit
+   * - ``grpc.client.attempt.started``
+     - ``grpc_client_attempt_started_total``
+     - Counter
+     - ``{attempt}``
+   * - ``grpc.client.attempt.duration``
+     - ``grpc_client_attempt_duration_seconds``
+     - Histogram
+     - seconds
+   * - ``grpc.client.attempt.sent_total_compressed_message_size``
+     - ``grpc_client_attempt_sent_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.client.attempt.rcvd_total_compressed_message_size``
+     - ``grpc_client_attempt_rcvd_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.server.call.started``
+     - ``grpc_server_call_started_total``
+     - Counter
+     - ``{call}``
+   * - ``grpc.server.call.duration``
+     - ``grpc_server_call_duration_seconds``
+     - Histogram
+     - seconds
+   * - ``grpc.server.call.sent_total_compressed_message_size``
+     - ``grpc_server_call_sent_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.server.call.rcvd_total_compressed_message_size``
+     - ``grpc_server_call_rcvd_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

@@ -1,26 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# First Party
-from lmcache.v1.mp_observability.subscribers.logging import (
-    L1LoggingSubscriber,
-    MPServerLoggingSubscriber,
-    SMLoggingSubscriber,
-)
-from lmcache.v1.mp_observability.subscribers.metrics import (
-    L0LifecycleSubscriber,
-    L1LifecycleSubscriber,
-    L1MetricsSubscriber,
-)
-from lmcache.v1.mp_observability.subscribers.tracing import (
-    MPServerTracingSubscriber,
-)
+"""MP observability subscriber packages.
 
-__all__ = [
-    "L0LifecycleSubscriber",
-    "L1LifecycleSubscriber",
-    "L1LoggingSubscriber",
-    "L1MetricsSubscriber",
-    "MPServerLoggingSubscriber",
-    "MPServerTracingSubscriber",
-    "SMLoggingSubscriber",
-]
+Import concrete subscribers from their concern-specific packages
+(``subscribers.metrics``, ``subscribers.logging``, or
+``subscribers.tracing``) so loading a logging-only path does not import
+native-extension-backed metrics modules.
+"""

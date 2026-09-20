@@ -13,7 +13,6 @@ background thread.
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -22,6 +21,7 @@ import json
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_observability.config import LookupHashLogConfig
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
@@ -38,35 +38,6 @@ def _format_timestamp(ts: float) -> str:
     """
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     return dt.strftime("%Y%m%d_%H%M%S")
-
-
-@dataclass
-class LookupHashLogConfig:
-    """Configuration for lookup hash file logging.
-
-    When ``output_dir`` is non-empty, chunk hashes computed during
-    lookup are written to rotating JSONL files for offline analysis.
-    """
-
-    output_dir: str = ""
-    """Directory to write lookup hash JSONL files.
-    Empty string disables logging."""
-
-    rotation_interval_sec: int = 6 * 3600
-    """Time interval in seconds before rotating to a new file
-    (default 6 hours)."""
-
-    rotation_max_size: int = 100 * 1024 * 1024
-    """Max file size in bytes before rotating even if the time
-    interval has not elapsed (default 100MB)."""
-
-    max_files: int = 100
-    """Max number of log files to keep before deleting oldest."""
-
-    @property
-    def enabled(self) -> bool:
-        """Whether lookup hash logging is enabled."""
-        return bool(self.output_dir)
 
 
 class LookupHashLoggingSubscriber(EventSubscriber):
