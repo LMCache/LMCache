@@ -2,10 +2,10 @@ HTTP API
 ========
 
 When the MP server is started via ``lmcache server`` (the recommended entry
-point), a FastAPI-based HTTP frontend is exposed alongside the ZMQ socket
-used by vLLM. This HTTP API is intended for operators, orchestrators
-(e.g. Kubernetes), and debugging tools — it is **not** on the inference
-data path.
+point), a FastAPI-based HTTP frontend is exposed alongside the selected ZMQ or
+gRPC request endpoint used by vLLM. This HTTP API is intended for operators,
+orchestrators (e.g. Kubernetes), and debugging tools — it is **not** on the
+inference data path.
 
 Where the routes come from
 --------------------------

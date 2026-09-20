@@ -1,9 +1,10 @@
 name: PR Full Build
 
-# Build all release artifacts (sdist + CUDA wheel, CLI wheel, cu129 wheel)
-# on PRs carrying the `full` label. The `full` label is added automatically
-# by automerge-labeler.yml when auto-merge is enabled on a code-change PR,
-# so this acts as a pre-merge sanity check that wheels still build.
+# Build all release artifacts (sdist + CUDA wheel, CLI wheel, cu129 wheel,
+# standard ROCm wheel, ROCm torch 2.10 wheel) on PRs carrying the `full` label.
+# The `full` label is added automatically by automerge-labeler.yml when
+# auto-merge is enabled on a code-change PR, so this acts as a pre-merge sanity
+# check that wheels still build.
 #
 # No tests, no code-quality checks, no publishing — those are covered by
 # test.yml / code_quality_checks.yml (per-PR) and publish.yml (on merge).
@@ -56,3 +57,15 @@ jobs:
         # step in build_cu129_artifacts.yml guards on the token being non-empty.
         secrets:
             dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    build-rocm:
+        name: Build ROCm
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_rocm_artifacts.yml
+        secrets: inherit
+
+    build-rocm-torch210:
+        name: Build ROCm torch 2.10
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_rocm_torch210_artifacts.yml
+        secrets: inherit

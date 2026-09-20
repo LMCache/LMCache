@@ -6,12 +6,12 @@ from typing import Any
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_response_class,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
 
 
 class ZmqMultiprocessClient(RequestClient):
