@@ -36,9 +36,21 @@ import os
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.gpu_connector._gds_backend import GDSAsyncBackend, TorchPlatform
+
 if TYPE_CHECKING:
     # Third Party
     from cufile.bindings import CUfileError
+
+
+class CuFileAsyncBackend(GDSAsyncBackend):
+    """Async GDS backend implemented by the cuFile wrapper in this module."""
+
+    name = "cufile"
+    required_platforms = frozenset({TorchPlatform.CUDA})
+    auto_platforms = frozenset({TorchPlatform.CUDA})
+
 
 # ``cufile.bindings`` dlopens ``libcufile.so`` at import time, which is absent
 # on CPU-only / macOS hosts. Importing this module (transitively pulled in by

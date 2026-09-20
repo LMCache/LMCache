@@ -52,12 +52,20 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector._gds_backend import GDSAsyncBackend, TorchPlatform
 
 logger = init_logger(__name__)
 
 # --- libphxfile.so lazy loading ------------------------------------------
 
 _lib: Optional[ctypes.CDLL] = None
+
+
+class PhxAsyncBackend(GDSAsyncBackend):
+    """Async GDS backend implemented by the Phoenix wrapper in this module."""
+
+    name = "phx"
+    required_platforms = frozenset({TorchPlatform.CUDA, TorchPlatform.ROCM})
 
 
 def _declare_signatures(lib: ctypes.CDLL, path_hint: str) -> None:

@@ -39,6 +39,18 @@ import threading
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.gpu_connector._gds_backend import GDSAsyncBackend, TorchPlatform
+
+
+class HipFileAsyncBackend(GDSAsyncBackend):
+    """Async GDS backend implemented by the hipFile wrapper in this module."""
+
+    name = "hipfile"
+    required_platforms = frozenset({TorchPlatform.ROCM})
+    auto_platforms = frozenset({TorchPlatform.ROCM})
+
+
 # ``libhipfile.so`` is dlopened lazily (see ``_lib``) so importing this module
 # on a CPU-only / NVIDIA host -- it is transitively pulled in by the GDS
 # dispatch shim during CLI command discovery -- does not require the ROCm GPU

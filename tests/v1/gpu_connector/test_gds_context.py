@@ -372,9 +372,7 @@ class TestUgdsInitialization:
 
         monkeypatch.setattr(ca, "select_backend", lambda name: "ugds")
         monkeypatch.setattr(ca, "register_handle", register_handle)
-        monkeypatch.setattr(
-            ca, "get_ugds_device_capacity", lambda fd, handle: 128 << 20
-        )
+        monkeypatch.setattr(ca, "get_device_capacity", lambda fd, handle: 128 << 20)
         monkeypatch.setattr(ca, "AsyncHandle", FakeAsyncHandle)
         monkeypatch.setattr(
             gds_context.logger,
@@ -426,7 +424,7 @@ class TestUgdsInitialization:
 
         monkeypatch.setattr(ca, "select_backend", lambda name: "ugds")
         monkeypatch.setattr(ca, "register_handle", lambda fd: 0xBEEF)
-        monkeypatch.setattr(ca, "get_ugds_device_capacity", lambda fd, handle: 32 << 20)
+        monkeypatch.setattr(ca, "get_device_capacity", lambda fd, handle: 32 << 20)
         monkeypatch.setattr(ca, "deregister_handle", deregistered.append)
         monkeypatch.setattr(
             ca.AsyncHandle,

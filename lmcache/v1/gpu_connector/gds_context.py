@@ -303,7 +303,7 @@ class GDSContext:
         try:
             handle = ca.register_handle(fd)
             if self._backend == "ugds":
-                device_capacity = ca.get_ugds_device_capacity(fd, handle)
+                device_capacity = ca.get_device_capacity(fd, handle)
                 if self._slab_size > device_capacity:
                     raise ValueError(
                         "GDS L1 slab size "

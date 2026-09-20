@@ -24,9 +24,23 @@ import os
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.gpu_connector._gds_backend import GDSAsyncBackend, TorchPlatform
+
 # --- libugds.so lazy loading -----------------------------------------
 
 _lib: Optional[ctypes.CDLL] = None
+
+
+class UgdsAsyncBackend(GDSAsyncBackend):
+    """Async GDS backend implemented by the uGDS wrapper in this module."""
+
+    name = "ugds"
+    required_platforms = frozenset({TorchPlatform.CUDA, TorchPlatform.ROCM})
+
+    def get_device_capacity(self, fd: int, handle: int) -> int:
+        """Return usable raw-device capacity reported by uGDS."""
+        return get_device_capacity(fd, handle)
 
 
 def _get_lib() -> ctypes.CDLL:
