@@ -446,6 +446,18 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
+    elif _is_kv_second_tuple_format(engine_kv_format):
+        _transfer_per_layer_kv_tuple(
+            normalized,
+            object_tensors,
+            block_ids,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            engine_kv_format,
+            is_d2h,
+            skip_prefix_n_blocks,
+        )
     elif is_mla(engine_kv_format):
         _transfer_per_layer_mla(
             normalized,
@@ -474,18 +486,6 @@ def multi_layer_block_kv_transfer(
         )
     elif _is_hnd_format(engine_kv_format):
         _transfer_per_layer_hnd(
-            normalized,
-            object_tensors,
-            block_ids,
-            n_block_ids,
-            blocks_per_object,
-            block_size,
-            engine_kv_format,
-            is_d2h,
-            skip_prefix_n_blocks,
-        )
-    elif _is_kv_second_tuple_format(engine_kv_format):
-        _transfer_per_layer_kv_tuple(
             normalized,
             object_tensors,
             block_ids,
