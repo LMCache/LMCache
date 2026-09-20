@@ -474,14 +474,8 @@ class TestQueryChecksum:
 
 @pytest.fixture
 def router_endpoint() -> str:
-    """Allocate an ephemeral inproc/tcp endpoint for the ROUTER."""
-    # Use tcp with port=0 so the OS assigns a free port.
-    ctx = zmq.Context.instance()
-    probe = ctx.socket(zmq.ROUTER)
-    probe.bind("tcp://127.0.0.1:0")
-    endpoint = probe.getsockopt_string(zmq.LAST_ENDPOINT)
-    probe.close(linger=0)
-    return endpoint
+    """Request an ephemeral TCP port when the ROUTER binds."""
+    return "tcp://127.0.0.1:0"
 
 
 # ------------------------------------------------------------------ #
@@ -615,6 +609,7 @@ class _LookupRouter:
         self._ctx = zmq.Context.instance()
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.bind(endpoint)
+        self.endpoint = self._router.getsockopt_string(zmq.LAST_ENDPOINT)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -660,7 +655,7 @@ class TestLookupProtocol:
         router = _LookupRouter(router_endpoint)
         router.start()
         try:
-            client = self._make_client(router_endpoint)
+            client = self._make_client(router.endpoint)
             key = _make_key((1, 9906, 9906), request_id="req-void")
             assert _send_lookup(client, key) is True
             client.close()
@@ -679,7 +674,7 @@ class TestLookupProtocol:
         )
         router.start()
         try:
-            client = self._make_client(router_endpoint)
+            client = self._make_client(router.endpoint)
             hit = _poll_prefetch_status(
                 client,
                 "req-42",
