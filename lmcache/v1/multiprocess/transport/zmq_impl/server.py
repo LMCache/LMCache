@@ -12,7 +12,6 @@ import zmq
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
@@ -20,6 +19,7 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
 
 
 class ThreadPoolType(Enum):

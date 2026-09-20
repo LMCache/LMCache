@@ -218,7 +218,8 @@ PYBIND11_MODULE(cuda_ops, m) {
                  int block_size, int head_size, uintptr_t slot_mapping_base,
                  int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
                  int rot_dim, int rope_num_kv_heads, int64_t rope_head_stride,
-                 int key_scalar_type, bool is_neox, int64_t rope_base_offset) {
+                 int key_scalar_type, bool is_neox, int64_t rope_base_offset,
+                 int64_t block_stride_elems) {
                 return CBGroupSpec{
                     paged_kv_ptrs,
                     std::move(temp_buffer_ptrs),
@@ -230,6 +231,7 @@ PYBIND11_MODULE(cuda_ops, m) {
                     page_buffer_size,
                     block_size,
                     head_size,
+                    block_stride_elems,
                     slot_mapping_base,
                     slot_mapping_capacity,
                     cos_sin_cache,
@@ -249,7 +251,7 @@ PYBIND11_MODULE(cuda_ops, m) {
           py::arg("cos_sin_cache"), py::arg("rot_dim"),
           py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
           py::arg("key_scalar_type"), py::arg("is_neox"),
-          py::arg("rope_base_offset") = 0)
+          py::arg("rope_base_offset") = 0, py::arg("block_stride_elems") = 0)
       // Mutable so the Python planner can cache one spec per (context, group)
       // and re-stamp only the per-request slot-mapping tensor between calls;
       // every other field is invariant for the life of the paged registration.

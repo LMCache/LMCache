@@ -47,7 +47,14 @@ def test_clear_delegates_to_management_module() -> None:
     mgmt = MagicMock(spec=ManagementModule)
     engine = MPCacheServer(MagicMock(), modules=[MagicMock(), mgmt])
     engine.clear()
-    mgmt.clear.assert_called_once_with()
+    mgmt.clear.assert_called_once_with(force=False)
+
+
+def test_force_clear_delegates_to_management_module() -> None:
+    mgmt = MagicMock(spec=ManagementModule)
+    engine = MPCacheServer(MagicMock(), modules=[MagicMock(), mgmt])
+    engine.clear(force=True)
+    mgmt.clear.assert_called_once_with(force=True)
 
 
 def test_clear_raises_without_management_module() -> None:

@@ -29,10 +29,10 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     """
     return {
         # Clear all caches
-        # Payload: None
+        # Payload: [force] - whether to clear locked objects too
         # Returns: None
         "CLEAR": ProtocolDefinition(
-            payload_classes=[],
+            payload_classes=[bool],
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),

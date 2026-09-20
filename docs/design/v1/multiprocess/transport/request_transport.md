@@ -30,7 +30,9 @@ MP integration / SDK / benchmark
 `RequestClient` defines named methods such as `lookup()`, `store()`, and
 `retrieve()`. The ZMQ facade translates each method back to the existing
 `RequestType`, payload order, and response type, so this refactor does not
-change the ZMQ wire protocol.
+change the ZMQ wire protocol. Its low-level sockets, polling loop, multipart
+frames, msgspec codecs, and worker-pool dispatch live in `zmq_impl/mq.py` so
+the shared multiprocess package does not expose ZMQ runtime internals.
 
 `RequestClientFactory` normalizes an endpoint and selects an implementation by
 scheme:
@@ -46,6 +48,13 @@ implementation through `--transport zmq` or `--transport grpc`.
 
 This abstraction covers MP request RPCs only. It does not select the mechanism
 used to move KV data between an engine worker and the server.
+
+The server follows the same boundary. `server.py` builds transport-neutral
+engine modules and passes them to `create_request_server()`, which returns the
+`RequestServer` protocol implemented by either `MessageQueueServer` or
+`GrpcMultiprocessServer`. Shared runtime code starts and closes only that
+protocol; concrete server classes are accessed only inside their transport
+packages and implementation-level tests.
 
 ### gRPC codecs
 
