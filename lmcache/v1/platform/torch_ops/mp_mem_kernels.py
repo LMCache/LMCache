@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+# Standard
+from typing import cast
+
 # Third Party
 import torch
 
@@ -446,8 +449,22 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif _is_kv_second_tuple_format(engine_kv_format):
-        _transfer_per_layer_kv_tuple(
+    elif _is_mla_plane_tuple_format(engine_kv_format):
+        _transfer_per_layer_mla_tuple(
+            cast(
+                "list[tuple[torch.Tensor, ...] | list[torch.Tensor]]",
+                normalized,
+            ),
+            object_tensors,
+            block_ids,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            is_d2h,
+            skip_prefix_n_blocks,
+        )
+    elif is_mla(engine_kv_format):
+        _transfer_per_layer_mla(
             normalized,
             object_tensors,
             block_ids,
@@ -458,8 +475,8 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif is_mla(engine_kv_format):
-        _transfer_per_layer_mla(
+    elif _is_kv_second_tuple_format(engine_kv_format):
+        _transfer_per_layer_kv_tuple(
             normalized,
             object_tensors,
             block_ids,
@@ -717,6 +734,84 @@ def _transfer_sglang_mha(
                         # [N*BS, NH, HS] -> [N, BS, NH, HS]
                         src_blocks = src_shaped.reshape(n_valid, block_size, nh, hs)
                         layer_t.index_copy_(0, eff_idx, src_blocks)
+
+
+def _token_rows_as_uint8(rows: torch.Tensor, n_tokens: int) -> torch.Tensor:
+    """View ``[n_tokens, hidden_elems]`` as ``[n_tokens, hidden_bytes]`` uint8."""
+    contiguous = rows.contiguous()
+    return contiguous.view(torch.uint8).view(n_tokens, -1)
+
+
+def _transfer_per_layer_mla_tuple(
+    layer_planes: "list[tuple[torch.Tensor, ...] | list[torch.Tensor]]",
+    object_tensors: list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
+    n_block_ids: int,
+    blocks_per_object: int,
+    block_size: int,
+    is_d2h: bool,
+    skip_prefix_n_blocks: int,
+) -> None:
+    """Handle the MLA/DSA plane-tuple format: NL x planes x [NB, BS, 1, W_p].
+
+    Planes are carved out of the staging object's hidden axis by byte
+    offset; ``W_p`` and the dtype may differ per plane.
+    """
+    if not layer_planes or not object_tensors:
+        return
+
+    target_device = layer_planes[0][0].device
+    block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
+
+    for object_idx, obj in enumerate(object_tensors):
+        valid = _valid_block_range_indices(
+            object_idx,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            skip_prefix_n_blocks,
+        )
+        if valid is None:
+            continue
+        idx_start, idx_end, offset_in_object = valid
+        n_valid = idx_end - idx_start
+        n_tokens = n_valid * block_size
+        token_end = offset_in_object + n_tokens
+        eff_idx = block_ids_dev[idx_start:idx_end]
+
+        if is_d2h:
+            for layer_idx, planes in enumerate(layer_planes):
+                row_u8 = _token_rows_as_uint8(
+                    obj[layer_idx, offset_in_object:token_end], n_tokens
+                )
+                byte_off = 0
+                for plane in planes:
+                    width = int(plane.shape[-1])
+                    nbytes = width * int(plane.element_size())
+                    selected = (
+                        torch.index_select(plane, 0, eff_idx)
+                        .reshape(n_tokens, -1)
+                        .contiguous()
+                    )
+                    selected_u8 = selected.view(torch.uint8).view(n_tokens, nbytes)
+                    row_u8[:, byte_off : byte_off + nbytes].copy_(
+                        selected_u8, non_blocking=True
+                    )
+                    byte_off += nbytes
+        else:
+            chunk_gpu = obj[:, offset_in_object:token_end].to(
+                target_device, non_blocking=True
+            )
+            for layer_idx, planes in enumerate(layer_planes):
+                row_u8 = _token_rows_as_uint8(chunk_gpu[layer_idx], n_tokens)
+                byte_off = 0
+                for plane in planes:
+                    width = int(plane.shape[-1])
+                    nbytes = width * int(plane.element_size())
+                    src_u8 = row_u8[:, byte_off : byte_off + nbytes].contiguous()
+                    src = src_u8.view(plane.dtype).view(n_valid, *plane.shape[1:])
+                    plane.index_copy_(0, eff_idx, src)
+                    byte_off += nbytes
 
 
 def _transfer_per_layer_kv_tuple(
