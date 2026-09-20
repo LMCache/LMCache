@@ -44,9 +44,6 @@ __all__ = [
 from typing import TYPE_CHECKING, Any
 import os
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform._device_detect import (
@@ -64,6 +61,10 @@ from lmcache.v1.platform._device_detect import (
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 if TYPE_CHECKING:
+    # Third Party
+    import torch
+
+    # First Party
     from lmcache.v1.platform.base.device_ops import DeviceOps
 
 # First Party
@@ -209,6 +210,10 @@ def synchronize_device(device: torch.device) -> None:
     """
     if device.type == "cpu":
         return
+
+    # Third Party
+    import torch
+
     spec = _resolve_device_spec(device.type)
     getattr(torch, spec.torch_module_name).synchronize(device)
 
