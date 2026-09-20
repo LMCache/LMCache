@@ -41,6 +41,14 @@ class ObservabilityConfig:
     metrics_enabled: bool = True
     """Register metrics subscribers (OTel counters / histograms)."""
 
+    grpc_metrics_enabled: bool | None = None
+    """Register gRPC Python runtime metrics with the OTel provider.
+
+    ``None`` means the MP server resolves this from its request transport:
+    enabled for gRPC, disabled for ZMQ. Non-MP callers leave it disabled
+    unless they opt in explicitly.
+    """
+
     logging_enabled: bool = True
     """Register logging subscribers."""
 
@@ -127,6 +135,16 @@ def add_observability_args(
         action="store_true",
         default=False,
         help="Disable metrics subscribers (OTel counters).",
+    )
+    group.add_argument(
+        "--disable-grpc-metrics",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable gRPC Python runtime metrics. Has no effect when "
+            "--disable-metrics is set. By default, MP server enables "
+            "these metrics only when --transport grpc is selected."
+        ),
     )
     group.add_argument(
         "--disable-logging",
@@ -302,6 +320,7 @@ def parse_args_to_observability_config(
         enabled=not args.disable_observability,
         max_queue_size=args.event_bus_queue_size,
         metrics_enabled=not args.disable_metrics,
+        grpc_metrics_enabled=False if args.disable_grpc_metrics else None,
         logging_enabled=not args.disable_logging,
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
@@ -340,6 +359,24 @@ def parse_args_to_observability_config(
         raise ValueError("--extra-logging-interval must be > 0.")
 
     return config
+
+
+def resolve_grpc_metrics_enabled(
+    grpc_metrics_enabled: bool | None,
+    transport: str,
+) -> bool:
+    """Resolve the gRPC runtime metrics auto setting for a request transport.
+
+    Args:
+        grpc_metrics_enabled: User/programmatic setting. ``None`` means auto.
+        transport: MP request transport name.
+
+    Returns:
+        True when gRPC runtime metrics should be registered.
+    """
+    if grpc_metrics_enabled is not None:
+        return grpc_metrics_enabled
+    return transport == "grpc"
 
 
 def init_observability(
@@ -382,6 +419,7 @@ def init_observability(
             prometheus_port=obs_config.prometheus_port,
             resource_attributes=resource_attrs,
             start_http_server=start_prometheus_http_server,
+            enable_grpc_metrics=bool(obs_config.grpc_metrics_enabled),
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:
