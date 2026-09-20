@@ -210,6 +210,7 @@ def slice_block_ids_per_group(
     sliced: list[list[int]] = []
     for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block):
         if tokens_per_block == 0:
+            # Scratch group: covers no tokens, so it slices to an empty list.
             sliced.append([])
             continue
         if start_token_idx % tokens_per_block != 0 or (
