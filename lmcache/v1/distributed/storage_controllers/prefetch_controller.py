@@ -1355,6 +1355,16 @@ class PrefetchController(StorageControllerInterface):
                 if request.all_lookups_done():
                     self._finish_drain(request)
             elif request.all_lookups_done():
+                # Completion handling precedes the loop's expiry sweep. A late
+                # lookup may be consumed now, but must not start a new load
+                # after the request's waiting budget has expired.
+                if request.deadline_at is not None:
+                    now = self._clock()
+                    if request.deadline_at <= now:
+                        self._enter_drain_only(request, now)
+                        # Every lookup has returned and no load was submitted.
+                        self._finish_drain(request)
+                        return
                 self._transition_to_load_phase(request)
         elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
             self._poll_load_results(request, phase_adapters)
