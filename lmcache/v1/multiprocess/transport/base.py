@@ -65,6 +65,15 @@ class RequestClient(Protocol):
         event_ipc_handle: bytes,
     ) -> MessagingFuture[Any]: ...
 
+    def store_groups(
+        self,
+        key: Any,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        engine_group_ids: list[int],
+    ) -> MessagingFuture[Any]: ...
+
     def retrieve(
         self,
         key: Any,

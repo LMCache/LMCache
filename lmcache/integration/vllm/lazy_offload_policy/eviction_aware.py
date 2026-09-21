@@ -22,6 +22,7 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
     LazyOffloadDrain,
     OffloadPolicy,
     PendingStoreItem,
+    RetentionGroupKey,
 )
 from lmcache.utils import init_logger
 
@@ -48,6 +49,11 @@ _EMA_ALPHA = 0.3
 # missing the deadline costs latency, missing an eviction costs the data.
 _OVERDUE_RANK = 1 << 62
 
+# A retention deadline means the next scheduler step may recycle data even
+# when the block is not near the global free-queue head. Serve it before
+# ordinary free-queue candidates at the same drain.
+_RETIREMENT_RANK = -1
+
 _STATS_LOG_INTERVAL_S = 5.0  # Minimum seconds between ledger log lines.
 _DROP_LOG_SAMPLE_REQUESTS = 8  # Dropped requests named in the drop line.
 
@@ -65,11 +71,18 @@ class PendingStoreOp:
             mismatch means the block was recycled and the data is gone.
         admitted_at_time: Monotonic clock read when the operation was
             buffered, against which ``max_deferral_seconds`` is measured.
+        requires_prefix: Whether a lost range makes this group's later ranges
+            unreachable. Full-attention groups require this; windowed and
+            recurrent groups can become useful again after a gap.
+        retire_at_token: Request progress at which the operation must be
+            emitted before its selected group's blocks can be retired.
     """
 
     store_metadata: "LMCacheMPRequestMetadata"
     block_hashes: BlockHashes
     admitted_at_time: float = 0.0
+    requires_prefix: bool = True
+    retire_at_token: int | None = None
 
 
 @dataclass(frozen=True)
@@ -198,9 +211,9 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         self._pool = pool
         # Insertion order is admission order (a re-entering request goes to
         # the back), so the dict is also the drain's tie-break order.
-        self._pending: dict[str, list[PendingStoreOp]] = {}
+        self._pending: dict[RetentionGroupKey, list[PendingStoreOp]] = {}
         # Prefix validity is policy; phase and batches are the manager's.
-        self._broken_prefixes: set[str] = set()
+        self._broken_prefixes: set[RetentionGroupKey] = set()
         self._blocks_per_step_ema = 0.0
         self._ema_initialized = False
         self._next_step_estimate = 0
@@ -213,6 +226,9 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         self,
         meta: "LMCacheMPRequestMetadata",
         block_hashes: BlockHashes,
+        *,
+        requires_prefix: bool = True,
+        retire_at_token: int | None = None,
     ) -> None:
         """Buffer one store operation; see ``OffloadPolicy.add``.
 
@@ -222,8 +238,14 @@ class EvictionAwareStoreQueue(OffloadPolicy):
                 admission. A None among them rejects the operation and
                 breaks the request's prefix chain, since a block whose hash
                 is gone cannot be checked for eviction later.
+            requires_prefix: Whether a missing range invalidates every later
+                range of this retention group.
+            retire_at_token: Request progress at which this operation becomes
+                urgent because its group's blocks can be retired next step.
         """
-        if meta.request_id in self._broken_prefixes:
+        retention_group_id = meta.retention_group_id or 0
+        key = (meta.request_id, retention_group_id)
+        if key in self._broken_prefixes:
             self._counters.rejected_prefix_broken += 1
             # DEBUG, not INFO: the site that broke the chain already logged
             # the cause, and every later operation lands here.
@@ -238,21 +260,25 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         if any(block_hash is None for block_hash in block_hashes.values()):
             # The tracker has advanced past this range, so later operations
             # would be stored without their prefix: the chain is broken.
-            self._broken_prefixes.add(meta.request_id)
+            if requires_prefix:
+                self._broken_prefixes.add(key)
             self._counters.rejected_unhashed += 1
             logger.warning(
-                "Lazy offload: skipping store for request %s tokens [%d, %d) "
-                "and every later operation of it: covered blocks carry no "
-                "prefix-cache hash, so their eviction could not be detected. "
-                "Prefix caching is off, or a sliding-window or hybrid model "
-                "left a hash-less null block in the block table. "
-                "rejected_unhashed and rejected_prefix_broken count these.",
+                "Lazy offload: skipping store for request %s tokens [%d, %d): "
+                "covered blocks carry no prefix-cache hash, so their eviction "
+                "could not be detected.%s rejected_unhashed and "
+                "rejected_prefix_broken count these.",
                 meta.request_id,
                 meta.op.start,
                 meta.op.end,
+                (
+                    " The retention group's later operations are skipped too."
+                    if requires_prefix
+                    else " Later windowed snapshots remain eligible."
+                ),
             )
             return
-        self._pending.setdefault(meta.request_id, []).append(
+        self._pending.setdefault(key, []).append(
             PendingStoreOp(
                 store_metadata=meta,
                 block_hashes=block_hashes,
@@ -260,6 +286,8 @@ class EvictionAwareStoreQueue(OffloadPolicy):
                 # the first drain, and after an idle gap, that clock is
                 # stale and would make a fresh op instantly overdue.
                 admitted_at_time=time.monotonic(),
+                requires_prefix=requires_prefix,
+                retire_at_token=retire_at_token,
             )
         )
         self._counters.admitted += 1
@@ -273,7 +301,7 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         Returns:
             True while at least one of its operations is buffered.
         """
-        return request_id in self._pending
+        return any(key[0] == request_id for key in self._pending)
 
     def drop_request(self, request_id: str) -> int:
         """Discard buffered operations invalidated by a tracker reset.
@@ -287,10 +315,13 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         Returns:
             The number of buffered operations discarded.
         """
-        dropped = self._pending.pop(request_id, [])
-        self._broken_prefixes.discard(request_id)
-        self._counters.dropped_on_request_drop += len(dropped)
-        return len(dropped)
+        keys = [key for key in self._pending if key[0] == request_id]
+        dropped = sum(len(self._pending.pop(key)) for key in keys)
+        self._broken_prefixes = {
+            key for key in self._broken_prefixes if key[0] != request_id
+        }
+        self._counters.dropped_on_request_drop += dropped
+        return dropped
 
     def discard_for_reuse(self, request_id: str) -> None:
         """Discard the buffered state of the id's previous holder.
@@ -299,9 +330,12 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             request_id: The reused request id, whose previous holder's
                 buffer and broken-chain marker are dropped.
         """
-        dropped = self._pending.pop(request_id, [])
-        self._broken_prefixes.discard(request_id)
-        self._counters.dropped_id_reuse += len(dropped)
+        keys = [key for key in self._pending if key[0] == request_id]
+        dropped = sum(len(self._pending.pop(key)) for key in keys)
+        self._broken_prefixes = {
+            key for key in self._broken_prefixes if key[0] != request_id
+        }
+        self._counters.dropped_id_reuse += dropped
 
     def release_request(self, request_id: str) -> None:
         """Forget non-pending policy state after session teardown.
@@ -312,9 +346,17 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         Args:
             request_id: The request whose session was torn down.
         """
-        self._broken_prefixes.discard(request_id)
+        self._broken_prefixes = {
+            key for key in self._broken_prefixes if key[0] != request_id
+        }
 
-    def mark_store_failed(self, request_id: str) -> int:
+    def mark_store_failed(
+        self,
+        request_id: str,
+        retention_group_id: int = 0,
+        *,
+        requires_prefix: bool = True,
+    ) -> int:
         """Break the request's prefix chain; see ``OffloadPolicy``.
 
         The manager filters out orphaned batches first: a failure that
@@ -323,13 +365,18 @@ class EvictionAwareStoreQueue(OffloadPolicy):
 
         Args:
             request_id: The request whose submitted store failed.
+            retention_group_id: The independently stored group that failed.
+            requires_prefix: Whether later ranges depend on this store.
 
         Returns:
             The number of buffered operations dropped.
         """
-        dropped = self._pending.pop(request_id, [])
+        if not requires_prefix:
+            return 0
+        key = (request_id, retention_group_id)
+        dropped = self._pending.pop(key, [])
         self._counters.dropped_failed_store += len(dropped)
-        self._broken_prefixes.add(request_id)
+        self._broken_prefixes.add(key)
         return len(dropped)
 
     def drain(self, signals: DrainSignals) -> LazyOffloadDrain:
@@ -374,51 +421,58 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         drain = LazyOffloadDrain()
         dropped_ops = 0
         dropped_ids: list[str] = []
-        # Due now, as (imminence rank, admission order, request id).
-        candidates: list[tuple[int, int, str]] = []
+        # Due now, as (imminence rank, admission order, request/group key).
+        candidates: list[tuple[int, int, RetentionGroupKey]] = []
         # Of those, the ones the deadline alone made due: they release their
         # whole buffer, not just the segment sitting in the danger window.
-        overdue_ids: set[str] = set()
-        for order, request_id in enumerate(list(self._pending)):
-            if request_id in signals.blocked_request_ids:
+        overdue_keys: set[RetentionGroupKey] = set()
+        retirement_keys: set[RetentionGroupKey] = set()
+        for order, key in enumerate(list(self._pending)):
+            request_id, _ = key
+            if (
+                request_id in signals.blocked_request_ids
+                or key in signals.blocked_retention_groups
+            ):
                 continue
-            ops = self._pending[request_id]
-            surviving = self._drop_evicted_suffix(request_id, ops)
+            ops = self._pending[key]
+            surviving = self._drop_evicted_ops(key, ops)
             if len(surviving) != len(ops):
                 dropped_ops += len(ops) - len(surviving)
-                dropped_ids.append(request_id)
+                dropped_ids.append(f"{request_id}/g{key[1]}")
                 if not surviving:
-                    del self._pending[request_id]
-                    drain.emptied_request_ids.append(request_id)
+                    del self._pending[key]
+                    if not self.has_pending_request(request_id):
+                        drain.emptied_request_ids.append(request_id)
                     continue
-                self._pending[request_id] = surviving
+                self._pending[key] = surviving
             overdue = (
                 self._config.max_deferral_seconds > 0.0
                 and surviving[0].admitted_at_time <= overdue_cutoff
             )
+            progress = signals.request_progress_tokens.get(request_id, 0)
+            retirement_due = any(
+                op.retire_at_token is not None and progress >= op.retire_at_token
+                for op in surviving
+            )
             in_window = [
                 rank
                 for op in surviving
-                for block_id in op.block_hashes
+                for _, block_id in op.block_hashes
                 if (rank := ranks.get(block_id)) is not None
             ]
-            if in_window:
+            if retirement_due:
+                candidates.append((_RETIREMENT_RANK, order, key))
+                retirement_keys.add(key)
+            elif in_window:
                 # A block the engine is about to recycle outranks a passed
                 # deadline, and sizes the release too: a request past both
                 # emits its due front segment, which always holds the op that
                 # made it overdue. The ops behind it keep their own admission
                 # clocks and come due on their own deadlines.
-                # TODO: free-queue pressure is the only retirement mechanism
-                # modelled here. A sliding-window layer retires a block on a
-                # token schedule instead, which is predictable but invisible
-                # in the free queue, so such an op waits for its deadline
-                # rather than being released when its data is about to go.
-                # Size the release per attention type: one due-predictor per
-                # mechanism, emit up to the last index any of them marks due.
-                candidates.append((min(in_window), order, request_id))
+                candidates.append((min(in_window), order, key))
             elif overdue:
-                candidates.append((_OVERDUE_RANK, order, request_id))
-                overdue_ids.add(request_id)
+                candidates.append((_OVERDUE_RANK, order, key))
+                overdue_keys.add(key)
         if dropped_ops:
             # INFO, not DEBUG: each drop is a unit of cache-quality loss and
             # production rarely runs at DEBUG. One line per drain, so a burst
@@ -431,28 +485,37 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             )
         candidates.sort()
         ops_left = self._config.max_drain_per_step
-        for rank, _, request_id in candidates:
+        for rank, _, key in candidates:
             if ops_left <= 0:
                 break
-            ops = self._pending[request_id]
-            is_overdue = request_id in overdue_ids
-            due = ops if is_overdue else self._due_front_segment(ops, ranks)
+            request_id, retention_group_id = key
+            ops = self._pending[key]
+            is_overdue = key in overdue_keys
+            if key in retirement_keys:
+                progress = signals.request_progress_tokens.get(request_id, 0)
+                due = self._due_front_segment(ops, ranks, progress)
+            else:
+                due = ops if is_overdue else self._due_front_segment(ops, ranks)
             emitted = due[:ops_left]
             ops_left -= len(emitted)
             self._counters.emitted += len(emitted)
             if is_overdue:
                 self._counters.emitted_overdue += len(emitted)
-            item = PendingStoreItem(request_id=request_id)
+            item = PendingStoreItem(
+                request_id=request_id,
+                retention_group_id=retention_group_id,
+            )
             item.metadatas.extend(
                 (op.store_metadata, op.block_hashes) for op in emitted
             )
             drain.items.append(item)
             remaining = ops[len(emitted) :]
             if remaining:
-                self._pending[request_id] = remaining
+                self._pending[key] = remaining
             else:
-                del self._pending[request_id]
-                drain.emptied_request_ids.append(request_id)
+                del self._pending[key]
+                if not self.has_pending_request(request_id):
+                    drain.emptied_request_ids.append(request_id)
         self._maybe_log_stats()
         return drain
 
@@ -499,36 +562,41 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             block = block.next_free_block
         return ranks
 
-    def _drop_evicted_suffix(
-        self, request_id: str, ops: list[PendingStoreOp]
+    def _drop_evicted_ops(
+        self, key: RetentionGroupKey, ops: list[PendingStoreOp]
     ) -> list[PendingStoreOp]:
-        """Drop ops from the first one whose data was lost; return survivors.
+        """Drop operations whose data was lost, respecting group semantics.
 
-        A hash mismatch means the block was recycled; that op and every later
-        op of the request go, and further admissions are rejected. The caller
-        installs the survivors and reports the count.
+        For a full-attention group, a hash mismatch breaks its prefix chain,
+        so that operation and its suffix are dropped. Sliding-window and
+        recurrent groups can serve later prefixes after a gap, so only their
+        individually stale operations are dropped.
 
         Args:
-            request_id: The request the operations belong to, marked
-                prefix-broken when anything is dropped.
+            key: Request and retention group owning the operations.
             ops: Its buffered operations, in prefix order.
 
         Returns:
-            The leading operations whose snapshots are still intact, which
-            is ``ops`` itself when nothing was lost.
+            Surviving operations in their original order. Full-attention
+            groups retain only the intact prefix; windowed and recurrent
+            groups retain every individually intact snapshot.
         """
-        first_lost = next(
-            (i for i, op in enumerate(ops) if not self._snapshot_intact(op)),
-            len(ops),
-        )
-        if first_lost == len(ops):
+        lost = [index for index, op in enumerate(ops) if not self._snapshot_intact(op)]
+        if not lost:
             return ops
-        self._counters.dropped_evicted += len(ops) - first_lost
-        self._broken_prefixes.add(request_id)
-        return ops[:first_lost]
+        first_lost = lost[0]
+        if ops[first_lost].requires_prefix:
+            self._counters.dropped_evicted += len(ops) - first_lost
+            self._broken_prefixes.add(key)
+            return ops[:first_lost]
+        self._counters.dropped_evicted += len(lost)
+        return [op for index, op in enumerate(ops) if index not in set(lost)]
 
     def _due_front_segment(
-        self, ops: list[PendingStoreOp], ranks: dict[int, int]
+        self,
+        ops: list[PendingStoreOp],
+        ranks: dict[int, int],
+        request_progress_tokens: int = 0,
     ) -> list[PendingStoreOp]:
         """The front segment up to the last op with a block in the window.
 
@@ -538,13 +606,22 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             ops: One request's buffered operations, in prefix order.
             ranks: The danger window, as returned by
                 :meth:`_free_queue_ranks`. Only membership is read here.
+            request_progress_tokens: Projected request progress after the
+                current step. Windowed operations whose retirement boundary
+                has been reached are due even outside the free queue.
 
         Returns:
             The due prefix of ``ops``, empty when none of them is due.
         """
         last_due = -1
         for index, op in enumerate(ops):
-            if any(block_id in ranks for block_id in op.block_hashes):
+            retirement_due = (
+                op.retire_at_token is not None
+                and request_progress_tokens >= op.retire_at_token
+            )
+            if retirement_due or any(
+                block_id in ranks for _, block_id in op.block_hashes
+            ):
                 last_due = index
         return ops[: last_due + 1]
 
@@ -558,15 +635,9 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             False once any covered block was recycled, which means the
             operation's data is gone.
         """
-        # TODO: an operation's blocks span every KV cache group, so on a
-        # hybrid model the shortest-lived group decides for all layers: one
-        # recycled sliding-window block drops the operation and the request's
-        # whole tail, including full-attention layers whose data is still
-        # live. Splitting the check needs per-group token ranges in
-        # LoadStoreOp.
         return all(
             self._pool.blocks[block_id].block_hash == snapshot
-            for block_id, snapshot in op.block_hashes.items()
+            for (_, block_id), snapshot in op.block_hashes.items()
         )
 
     def log_final_stats(self) -> None:

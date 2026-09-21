@@ -50,6 +50,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    create_kv_group_retention_specs,
     get_tokens_per_block,
     is_scratch_spec,
 )
@@ -73,6 +74,7 @@ from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.group_view import PARTIAL_STORE_GROUPS_CAPABILITY
 
 try:
     # First Party
@@ -748,6 +750,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # the engine's base block size when no group metadata is available
         # (single non-hybrid group).
         self._group_tokens_per_block = group_tokens_per_block
+        self._group_retention_specs = []
         cached_spans = [span for span in group_tokens_per_block if span > 0]
         if not cached_spans or min(group_tokens_per_block) < 0:
             raise ValueError(
@@ -771,10 +774,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                         f"tokens_per_block {tokens_per_block}"
                     )
             if self.lazy_offload:
+                self._group_retention_specs = create_kv_group_retention_specs(
+                    kv_cache_config,
+                    self._group_tokens_per_block,
+                    lmcache_tokens_per_chunk,
+                )
+                retention_group_ids = {
+                    spec.retention_group_id
+                    for spec in self._group_retention_specs
+                    if spec.retention_group_id is not None
+                }
+                if len(retention_group_ids) > 1:
+                    self.scheduler_adapter.require_capability(
+                        PARTIAL_STORE_GROUPS_CAPABILITY
+                    )
                 self._lazy_offload_manager = LazyOffloadManager(
                     vllm_config.kv_transfer_config.kv_connector_extra_config,
                     self._group_tokens_per_block,
                     self.scheduler_adapter,
+                    group_retention_specs=self._group_retention_specs,
+                    lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
                 )
 
     @property
@@ -947,6 +966,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         ops = []
         cache_salts = []
         request_configs_list = []
+        store_operation_ids = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
@@ -954,6 +974,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
             request_configs_list.append(meta.request_configs)
+            store_operation_ids.append(meta.store_operation_id)
 
         if len(request_ids) == 0:
             if self.dispatcher is not None:
@@ -968,6 +989,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             event,
             cache_salts=cache_salts,
             request_configs_list=request_configs_list,
+            store_operation_ids=store_operation_ids,
         )
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
@@ -1025,12 +1047,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self):
         if not self.lazy_offload:
             return None
-        completed_store_requests = self.worker_adapter.get_completed_store_requests()
-        failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests:
+        completed_store_operations = (
+            self.worker_adapter.get_completed_store_operations()
+        )
+        failed_store_operations = self.worker_adapter.get_failed_store_operations()
+        if completed_store_operations or failed_store_operations:
             return LMCacheMPWorkerMetadata(
-                completed_store_requests=completed_store_requests or {},
-                failed_store_requests=failed_store_requests or set(),
+                completed_store_operations=completed_store_operations or {},
+                failed_store_operations=failed_store_operations or set(),
             )
         else:
             return None
@@ -1203,7 +1227,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
             tracker.allocated_block_ids.clear()
-            tracker.num_stored_tokens = 0
+            tracker.reset_store_progress()
             tracker.num_vllm_hit_tokens = 0
             tracker.num_lmcache_hit_tokens = 0
             tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
@@ -1244,7 +1268,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
         # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
+        if self.lazy_offload:
+            tracker.set_lazy_store_baseline(
+                ret,
+                {
+                    spec.retention_group_id
+                    for spec in self._group_retention_specs
+                    if spec.retention_group_id is not None
+                },
+            )
+        else:
+            tracker.increase_num_stored_tokens(ret)
 
         tracker.num_lmcache_hit_tokens = ret
 
@@ -1392,7 +1426,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._process_cached_requests(scheduler_output, metadata)
 
         if self.lazy_offload:
-            actions = self._lazy_offload_manager.on_scheduler_step(scheduler_output)
+            actions = self._lazy_offload_manager.on_scheduler_step(
+                scheduler_output,
+                request_progress_tokens={
+                    request_id: tracker.projected_computed_tokens()
+                    for request_id, tracker in self.request_trackers.items()
+                },
+            )
             for store_metadata in actions.stores_to_submit:
                 metadata.add_request_metadata(store_metadata)
             for request_id in actions.sessions_to_end:
@@ -1414,7 +1454,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
-        kv_cache_events = connector_output.kv_cache_events
+        # Compatibility shims may provide only worker metadata. Treat KV
+        # events as optional so lazy-offload receipts still get processed.
+        kv_cache_events = getattr(connector_output, "kv_cache_events", None)
         if kv_cache_events and isinstance(kv_cache_events, LMCacheMPKVEvents):
             if self._kv_cache_events is None:
                 self._kv_cache_events = kv_cache_events
@@ -1430,8 +1472,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not isinstance(meta, LMCacheMPWorkerMetadata):
             return
         actions = self._lazy_offload_manager.on_store_results(
-            meta.failed_store_requests,
-            meta.completed_store_requests,
+            meta.failed_store_operations,
+            meta.completed_store_operations,
         )
         for request_id in actions.sessions_to_end:
             self.scheduler_adapter.end_session(request_id)
@@ -1619,17 +1661,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if not self._can_store:
                 continue
 
-            r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker,
-                lmcache_tokens_per_chunk,
-                self._group_tokens_per_block,
-            )
-            if r_meta is not None:
-                # In lazy_offload mode, add to pending queue instead of immediate store
-                if self.lazy_offload:
-                    self._lazy_offload_manager.add_store_candidate(r_meta)
-                else:
-                    metadata.add_request_metadata(r_meta)
+            if self.lazy_offload:
+                for lazy_meta in LMCacheMPRequestMetadata.GetLazyStoreMetadatas(
+                    request_tracker,
+                    lmcache_tokens_per_chunk,
+                    self._group_tokens_per_block,
+                    self._group_retention_specs,
+                ):
+                    self._lazy_offload_manager.add_store_candidate(lazy_meta)
+            else:
+                eager_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
+                    request_tracker,
+                    lmcache_tokens_per_chunk,
+                    self._group_tokens_per_block,
+                )
+                if eager_meta is not None:
+                    metadata.add_request_metadata(eager_meta)
 
     def _process_cached_requests(
         self,
@@ -1655,18 +1702,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if not self._can_store:
                 continue
 
-            r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker,
-                lmcache_tokens_per_chunk,
-                self._group_tokens_per_block,
-            )
-
-            if r_meta is not None:
-                # In lazy_offload mode, add to pending queue instead of immediate store
-                if self.lazy_offload:
-                    self._lazy_offload_manager.add_store_candidate(r_meta)
-                else:
-                    metadata.add_request_metadata(r_meta)
+            if self.lazy_offload:
+                for lazy_meta in LMCacheMPRequestMetadata.GetLazyStoreMetadatas(
+                    request_tracker,
+                    lmcache_tokens_per_chunk,
+                    self._group_tokens_per_block,
+                    self._group_retention_specs,
+                ):
+                    self._lazy_offload_manager.add_store_candidate(lazy_meta)
+            else:
+                eager_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
+                    request_tracker,
+                    lmcache_tokens_per_chunk,
+                    self._group_tokens_per_block,
+                )
+                if eager_meta is not None:
+                    metadata.add_request_metadata(eager_meta)
 
     def _report_block_allocation_deltas(
         self,

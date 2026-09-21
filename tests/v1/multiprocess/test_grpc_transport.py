@@ -116,6 +116,25 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             return b"output-event", key.model_name == "model"
 
         @request_handler(
+            RequestType.STORE_GROUPS,
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
+        def store_groups(
+            self,
+            key: IPCCacheServerKey,
+            instance_id: int,
+            block_ids: list[list[int]],
+            event_ipc_handle: bytes,
+            selected_engine_group_ids: list[int],
+        ) -> tuple[bytes, bool]:
+            assert instance_id == 7
+            assert block_ids == [[1, 2], [3]]
+            assert event_ipc_handle == b"input-event"
+            assert selected_engine_group_ids == [1]
+            return b"output-event", key.model_name == "model"
+
+        @request_handler(
             RequestType.PREPARE_STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
@@ -233,6 +252,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert "EngineService" not in bindings
     assert {method.name for _, method in iter_methods()} >= {
         "Store",
+        "StoreGroups",
         "PrepareStore",
         "Lookup",
         "StoreQ",
@@ -254,6 +274,19 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         bytes,
     )
     assert store_codec.response_type == tuple[bytes, bool]
+
+    store_groups_codec = registry.by_full_name[
+        "lmcache.mp.LMCacheDrivenService.StoreGroups"
+    ]
+    assert store_groups_codec.request_type is RequestType.STORE_GROUPS
+    assert store_groups_codec.payload_types == (
+        IPCCacheServerKey,
+        int,
+        list[list[int]],
+        bytes,
+        list[int],
+    )
+    assert store_groups_codec.response_type == tuple[bytes, bool]
 
     clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
     assert clear_codec.request_type is RequestType.CLEAR
@@ -483,6 +516,13 @@ def test_generated_grpc_services_communicate_end_to_end(
         b"output-event",
         True,
     )
+    assert client.store_groups(
+        key,
+        7,
+        [[1, 2], [3]],
+        b"input-event",
+        [1],
+    ).result(5) == (b"output-event", True)
     assert client.prepare_store(key, 7).result(5) == PrepareStoreResponse(
         context={"slots": [{"offset": 8}], "chunk_indices": [2]}
     )

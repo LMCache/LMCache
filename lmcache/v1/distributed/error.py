@@ -32,6 +32,9 @@ class L1Error(enum.Enum):
     OUT_OF_MEMORY = enum.auto()
     """ Not enough memory to complete the operation. """
 
+    KEY_ALREADY_EXISTS = enum.auto()
+    """ The key already names a complete, readable object. """
+
 
 ErrorType = L1Error
 
@@ -60,5 +63,7 @@ def strerror(error: ErrorType) -> str:
             return "The specified key is locked and cannot perform the operation."
         elif error == L1Error.OUT_OF_MEMORY:
             return "Not enough memory to complete the operation."
+        elif error == L1Error.KEY_ALREADY_EXISTS:
+            return "The specified key already exists and is readable."
 
     return "Unknown error."

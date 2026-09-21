@@ -312,6 +312,20 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      # Real hybrid-model eviction pressure: Qwen3.5 combines full-attention
+      # and recurrent cache groups. A deterministic small block pool forces
+      # eviction-aware partial-group stores; the second pass must retrieve from
+      # LMCache with matching gsm8k quality and a closed scheduler ledger.
+      - label: ":compression: hybrid_lazy_offload / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh hybrid_lazy_offload
+        matrix: *request-transport-matrix
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: http_api / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
         matrix: *request-transport-matrix

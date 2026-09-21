@@ -230,6 +230,39 @@ def test_ranked_full_plus_sw_expands_all_ranks():
     assert mask.get_indices_list() == [0, 1, 4, 5, 8, 9, 12, 13, 14, 15]
 
 
+def test_ranked_partial_group_presence_cannot_report_model_wide_hit():
+    """A complete full-attention prefix is insufficient without the other group."""
+    full = [(chunk, rank) for chunk in range(4) for rank in range(2)]
+    found = _make_ranked(4, 2, [full, []])
+
+    hit, mask = fold_unfold_ranked(
+        found,
+        4,
+        2,
+        [FULL_ATTENTION_WINDOW, 1],
+    )
+
+    assert hit == 0
+    assert mask.get_indices_list() == []
+
+
+def test_ranked_windowed_group_needs_only_the_candidate_suffix():
+    """A windowed group's older absent chunks do not invalidate a safe hit."""
+    full = [(chunk, rank) for chunk in range(4) for rank in range(2)]
+    sliding = [(3, 0), (3, 1)]
+    found = _make_ranked(4, 2, [full, sliding])
+
+    hit, mask = fold_unfold_ranked(
+        found,
+        4,
+        2,
+        [FULL_ATTENTION_WINDOW, 1],
+    )
+
+    assert hit == 4
+    assert mask.get_indices_list() == [0, 1, 4, 5, 8, 9, 12, 13, 14, 15]
+
+
 def test_ranked_invalid_num_ranks_raises():
     with pytest.raises(ValueError):
         fold_unfold_ranked(Bitmap(0), 0, 0, [FULL_ATTENTION_WINDOW])

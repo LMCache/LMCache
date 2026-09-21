@@ -29,6 +29,10 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 # First Party
+from lmcache.integration.vllm.kv_cache_groups import (
+    KVGroupRetentionKind,
+    KVGroupRetentionSpec,
+)
 from lmcache.integration.vllm.lazy_offload_policy import create_offload_policy
 from lmcache.integration.vllm.lazy_offload_policy.base import (
     BlockHashes,
@@ -69,6 +73,12 @@ class StoreCompletionTracker(Protocol):
         Returns:
             True once the submitted batch has every expected completion.
         """
+        ...
+
+    def update_pending_store_operation_count(
+        self, operation_id: int, count: int, /
+    ) -> bool:
+        """Record worker receipts for one scheduler-assigned store operation."""
         ...
 
 
@@ -119,8 +129,8 @@ def _coalesce_store_metadata(
 ) -> LMCacheMPRequestMetadata:
     """Merge one request's contiguous STORE metadata, in prefix order, into one.
 
-    The worker tracks one in-flight store future per request, so a drained
-    batch must be submitted as a single operation.
+    Each retention group permits one in-flight store operation, so its
+    contiguous drained ranges are submitted as one operation.
 
     Args:
         request_metas: One request's buffered STORE metadata, in prefix
@@ -144,6 +154,11 @@ def _coalesce_store_metadata(
     merged_block_ids: list[list[int]] = [list(group) for group in first.op.block_ids]
     expected_start = first.op.end
     for meta in request_metas[1:]:
+        if meta.op.selected_engine_group_ids != first.op.selected_engine_group_ids:
+            raise ValueError(
+                f"selected cache groups changed within store batch for request "
+                f"{first.request_id}"
+            )
         if meta.op.start != expected_start:
             raise ValueError(
                 f"non-contiguous store ops for request {first.request_id}: "
@@ -162,13 +177,12 @@ def _coalesce_store_metadata(
         block_ids=merged_block_ids,
         start=first.op.start,
         end=last.op.end,
+        selected_engine_group_ids=first.op.selected_engine_group_ids,
     )
-    return LMCacheMPRequestMetadata(
-        request_id=first.request_id,
-        direction="STORE",
-        op=merged_op,
-        cache_salt=first.cache_salt,
-    )
+    # Preserve request-scoped keying options (including request_configs) from
+    # the first range. Reconstructing the metadata here used to silently drop
+    # those options whenever two or more ranges were coalesced.
+    return replace(first, op=merged_op)
 
 
 class LazyOffloadManager:
@@ -186,6 +200,9 @@ class LazyOffloadManager:
         configs: dict[str, ConfigValue] | None,
         group_tokens_per_block: list[int],
         completion_tracker: StoreCompletionTracker,
+        *,
+        group_retention_specs: list[KVGroupRetentionSpec] | None = None,
+        lmcache_tokens_per_chunk: int | None = None,
     ) -> None:
         """Create an unbound scheduler-side manager.
 
@@ -194,14 +211,43 @@ class LazyOffloadManager:
             group_tokens_per_block: Token capacity per KV-cache group, used
                 to estimate the next step's block pressure.
             completion_tracker: Adapter view aggregating per-worker receipts.
+            group_retention_specs: Retention behavior of each engine group.
+                Omitted by legacy callers until they provide hybrid metadata.
+            lmcache_tokens_per_chunk: Store granularity used to predict when
+                windowed groups will retire the first live block of an op.
         """
         self._configs = dict(configs or {})
         self._group_tokens_per_block = list(group_tokens_per_block)
+        if group_retention_specs is None:
+            self._group_retention_specs = [
+                KVGroupRetentionSpec(
+                    engine_group_id=engine_group_id,
+                    tokens_per_block=tokens_per_block,
+                    kind=KVGroupRetentionKind.FULL_ATTENTION,
+                    window_size_tokens=None,
+                    retention_group_id=0,
+                )
+                for engine_group_id, tokens_per_block in enumerate(
+                    group_tokens_per_block
+                )
+                if tokens_per_block > 0
+            ]
+        else:
+            self._group_retention_specs = list(group_retention_specs)
+        self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._retention_specs: dict[int, list[KVGroupRetentionSpec]] = {}
+        for spec in self._group_retention_specs:
+            if spec.retention_group_id is not None:
+                self._retention_specs.setdefault(spec.retention_group_id, []).append(
+                    spec
+                )
         self._completion_tracker = completion_tracker
         # Both are set by bind_block_pool: the policy reads the pool.
         self._gpu_block_pool: "BlockPool | None" = None
         self._policy: OffloadPolicy | None = None
         self._requests = LazyOffloadRequestRegistry()
+        self._next_store_operation_id = 0
+        self._failed_store_operations: set[int] = set()
         # One token ledger per request whose operations are buffered.
         self._token_ledgers: dict[str, list[int]] = {}
 
@@ -249,14 +295,48 @@ class LazyOffloadManager:
                 mutated; a rebound copy is buffered instead.
         """
         pool = self._require_block_pool()
-        block_hashes: BlockHashes = {
-            block_id: pool.blocks[block_id].block_hash
-            for block_id in metadata.op.flat_block_ids
-        }
-        self._require_policy().add(self._rebind_tokens(metadata), block_hashes)
+        retention_group_id = metadata.retention_group_id or 0
+        specs = self._retention_specs.get(retention_group_id)
+        if not specs:
+            raise ValueError(
+                f"unknown lazy-offload retention group {retention_group_id}"
+            )
+        expected_engine_groups = tuple(spec.engine_group_id for spec in specs)
+        selected_engine_groups = metadata.op.selected_engine_group_ids
+        if selected_engine_groups is not None and (
+            tuple(selected_engine_groups) != expected_engine_groups
+        ):
+            raise ValueError(
+                f"retention group {retention_group_id} selects engine groups "
+                f"{selected_engine_groups}, expected {expected_engine_groups}"
+            )
+        block_hashes: BlockHashes = {}
+        for engine_group_id, block_id in metadata.op.selected_group_block_ids:
+            block = pool.blocks[block_id]
+            if getattr(block, "is_null", False):
+                continue
+            block_hashes[(engine_group_id, block_id)] = block.block_hash
+
+        kind = specs[0].kind
+        if any(spec.kind is not kind for spec in specs):
+            raise ValueError(
+                f"retention group {retention_group_id} mixes retention kinds"
+            )
+        # An all-null recurrent range represents no reusable snapshot. Advance
+        # its tracker cursor but do not enqueue a zero-object store.
+        if not block_hashes and kind is KVGroupRetentionKind.RECURRENT:
+            return
+        self._require_policy().add(
+            self._rebind_tokens(metadata),
+            block_hashes,
+            requires_prefix=kind is KVGroupRetentionKind.FULL_ATTENTION,
+            retire_at_token=self._retirement_token(metadata, specs),
+        )
 
     def on_scheduler_step(
-        self, scheduler_output: "SchedulerOutput"
+        self,
+        scheduler_output: "SchedulerOutput",
+        request_progress_tokens: dict[str, int] | None = None,
     ) -> LazyOffloadActions:
         """Drain stores made due by one token-producing scheduler step.
 
@@ -278,12 +358,16 @@ class LazyOffloadManager:
         """
         if not scheduler_output.total_num_scheduled_tokens:
             return LazyOffloadActions()
-        return self._drain(scheduler_output, self._require_block_pool())
+        return self._drain(
+            scheduler_output,
+            self._require_block_pool(),
+            request_progress_tokens or {},
+        )
 
     def on_store_results(
         self,
-        failed_request_ids: set[str],
-        completed_store_counts: dict[str, int],
+        failed_operation_ids: set[int],
+        completed_store_counts: dict[int, int],
     ) -> LazyOffloadActions:
         """Apply failed stores and fully aggregated completion receipts.
 
@@ -292,45 +376,51 @@ class LazyOffloadManager:
         ``completed_store_counts`` are filtered here.
 
         Args:
-            failed_request_ids: Requests whose submitted store failed on at
-                least one worker.
+            failed_operation_ids: Scheduler-assigned store operations that
+                failed on at least one worker.
             completed_store_counts: Worker completions newly reported this
-                round, keyed by request id. A batch settles once its count
+                round, keyed by operation id. A batch settles once its count
                 reaches the number of workers.
 
         Returns:
             Sessions made releasable by completed batches.
         """
         pool = self._require_block_pool()
-        for request_id in failed_request_ids:
-            if not self._requests.has_in_flight(request_id):
-                continue
-            if self._requests.in_flight_is_orphaned(request_id):
-                # A reset or id reuse detached the batch: it still owns its
-                # pins, but cannot break the current prefix chain.
-                continue
-            dropped = self._require_policy().mark_store_failed(request_id)
-            logger.warning(
-                "Store failed for request %s; dropped %d held-back store "
-                "op(s) that would lack their stored prefix",
-                request_id,
-                dropped,
-            )
+        self._failed_store_operations.update(
+            failed_operation_ids & self._requests.in_flight_operation_ids()
+        )
         actions = LazyOffloadActions()
-        for request_id, count in completed_store_counts.items():
-            if not self._requests.has_in_flight(request_id):
+        for operation_id, count in completed_store_counts.items():
+            if operation_id not in self._requests.in_flight_operation_ids():
                 logger.warning(
-                    "Ignoring store-completion receipt for request %s with "
-                    "no in-flight store batch",
-                    request_id,
+                    "Ignoring completion receipt for unknown store operation %d",
+                    operation_id,
                 )
                 continue
-            if not self._completion_tracker.update_pending_store_count(
-                request_id, count
+            if not self._completion_tracker.update_pending_store_operation_count(
+                operation_id, count
             ):
                 continue
-            batch = self._requests.complete_batch(request_id)
+            request_id, batch = self._requests.complete_batch(operation_id)
             pool.free_blocks([pool.blocks[block_id] for block_id in batch.block_ids])
+            if operation_id in self._failed_store_operations:
+                self._failed_store_operations.discard(operation_id)
+                if not batch.orphaned:
+                    specs = self._retention_specs[batch.retention_group_id]
+                    dropped = self._require_policy().mark_store_failed(
+                        request_id,
+                        batch.retention_group_id,
+                        requires_prefix=(
+                            specs[0].kind is KVGroupRetentionKind.FULL_ATTENTION
+                        ),
+                    )
+                    logger.warning(
+                        "Store operation %d failed for request %s; dropped %d "
+                        "held-back store op(s) that would lack their prefix",
+                        operation_id,
+                        request_id,
+                        dropped,
+                    )
             if not self._require_policy().has_pending_request(
                 request_id
             ) and self._requests.can_end_session(request_id):
@@ -420,7 +510,7 @@ class LazyOffloadManager:
         Returns:
             True while at least one submitted batch awaits its receipt.
         """
-        return bool(self._requests.in_flight_request_ids())
+        return bool(self._requests.in_flight_operation_ids())
 
     def log_final_stats(self) -> None:
         """Write the policy's final counter ledger, when one was built."""
@@ -431,6 +521,7 @@ class LazyOffloadManager:
         self,
         scheduler_output: "SchedulerOutput",
         pool: "BlockPool",
+        request_progress_tokens: dict[str, int],
     ) -> LazyOffloadActions:
         """Apply one policy-neutral drain plan and its GPU side effects.
 
@@ -460,25 +551,30 @@ class LazyOffloadManager:
                     for tokens_per_block in self._group_tokens_per_block
                 ),
                 finished_request_ids=self._requests.finished_request_ids(),
-                blocked_request_ids=self._requests.in_flight_request_ids(),
+                blocked_retention_groups=(self._requests.in_flight_retention_groups()),
+                request_progress_tokens=request_progress_tokens,
             )
         )
         actions = LazyOffloadActions()
         for item in drain.items:
-            if self._requests.has_in_flight(item.request_id):
+            key = (item.request_id, item.retention_group_id)
+            if key in self._requests.in_flight_retention_groups():
                 raise RuntimeError(
-                    f"request {item.request_id!r} emitted while a store batch "
-                    "is still in flight"
+                    f"request {item.request_id!r} retention group "
+                    f"{item.retention_group_id} emitted while a store batch "
+                    "for that group is still in flight"
                 )
             valid_metas: list[LMCacheMPRequestMetadata] = []
             valid_block_ids: list[int] = []
             for metadata, old_block_hashes in item.metadatas:
-                gpu_block_ids = list(old_block_hashes)
+                gpu_block_ids = list(
+                    dict.fromkeys(block_id for _, block_id in old_block_hashes)
+                )
                 blocks = [pool.blocks[block_id] for block_id in gpu_block_ids]
                 pool.touch(blocks)
                 new_block_hashes = {
-                    block_id: pool.blocks[block_id].block_hash
-                    for block_id in gpu_block_ids
+                    block_ref: pool.blocks[block_ref[1]].block_hash
+                    for block_ref in old_block_hashes
                 }
                 if (
                     any(block_hash is None for block_hash in new_block_hashes.values())
@@ -495,13 +591,79 @@ class LazyOffloadManager:
                 valid_block_ids.extend(gpu_block_ids)
             if not valid_metas:
                 continue
-            actions.stores_to_submit.append(_coalesce_store_metadata(valid_metas))
-            self._requests.register_batch(item.request_id, valid_block_ids)
+            operation_id = self._next_store_operation_id
+            self._next_store_operation_id += 1
+            try:
+                metadata = replace(
+                    _coalesce_store_metadata(valid_metas),
+                    store_operation_id=operation_id,
+                    retention_group_id=item.retention_group_id,
+                )
+            except Exception:
+                # Coalescing validates cross-range invariants after the
+                # individual ranges have been pinned. Restore every matching
+                # touch before surfacing a malformed policy result.
+                pool.free_blocks(
+                    [pool.blocks[block_id] for block_id in valid_block_ids]
+                )
+                raise
+            actions.stores_to_submit.append(metadata)
+            self._requests.register_batch(
+                item.request_id,
+                operation_id,
+                item.retention_group_id,
+                valid_block_ids,
+            )
         for request_id in drain.emptied_request_ids:
             if self._requests.can_end_session(request_id):
                 actions.sessions_to_end.append(request_id)
                 self._release_session(request_id)
         return actions
+
+    def _retirement_token(
+        self,
+        metadata: LMCacheMPRequestMetadata,
+        specs: list[KVGroupRetentionSpec],
+    ) -> int | None:
+        """Return the first progress value that makes one store urgent.
+
+        vLLM removes window-expired blocks before allocating the following
+        scheduler step. The connector submits stores after the current model
+        step, so a windowed operation must drain once current projected
+        progress reaches the point the next scheduling pass can retire its
+        first block. Recurrent state is submitted at every completed chunk
+        boundary because only the latest snapshot remains reusable.
+
+        Args:
+            metadata: Candidate store range.
+            specs: Engine groups sharing its retention/commit boundary.
+
+        Returns:
+            Token progress that makes the operation due, or ``None`` for full
+            attention where global free-queue pressure remains authoritative.
+        """
+        kind = specs[0].kind
+        if kind is KVGroupRetentionKind.FULL_ATTENTION:
+            return None
+        if kind is KVGroupRetentionKind.RECURRENT:
+            return metadata.op.end
+        if kind is KVGroupRetentionKind.SCRATCH:
+            raise ValueError("scratch groups cannot produce store metadata")
+
+        chunk_size = self._lmcache_tokens_per_chunk
+        if chunk_size is None:
+            # Legacy direct callers do not provide chunk geometry. Immediate
+            # release is conservative and cannot miss the retirement boundary.
+            return metadata.op.end
+        retirements: list[int] = []
+        for spec in specs:
+            window = spec.window_size_tokens
+            if window is None:
+                raise ValueError("sliding-window group has no window size")
+            kept_tokens = min(chunk_size, window)
+            first_kept_token = metadata.op.start + chunk_size - kept_tokens
+            retirements.append(first_kept_token + window + spec.tokens_per_block - 1)
+        return min(retirements)
 
     def _rebind_tokens(
         self, metadata: LMCacheMPRequestMetadata

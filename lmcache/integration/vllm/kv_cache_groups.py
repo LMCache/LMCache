@@ -6,7 +6,10 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+import enum
+import math
 
 if TYPE_CHECKING:
     # First Party
@@ -17,6 +20,46 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
+
+
+class KVGroupRetentionKind(str, enum.Enum):
+    """How one engine KV-cache group stops retaining old request state."""
+
+    FULL_ATTENTION = "full_attention"
+    SLIDING_WINDOW = "sliding_window"
+    RECURRENT = "recurrent"
+    SCRATCH = "scratch"
+
+
+@dataclass(frozen=True)
+class KVGroupRetentionSpec:
+    """Scheduler-visible retention contract for one engine KV-cache group.
+
+    Attributes:
+        engine_group_id: Dense vLLM cache-group index used by request block
+            tables.
+        tokens_per_block: Global token span of one block ID. Zero marks a
+            scratch group that is not cacheable.
+        kind: The mechanism that retires or replaces this group's state.
+        window_size_tokens: Retention window for sliding-window attention,
+            or one snapshot interval for recurrent state. ``None`` for full
+            attention and scratch groups.
+        retention_group_id: Groups with the same non-``None`` value are
+            stored atomically because they map to the same LMCache object
+            group when ``--separate-object-groups`` is enabled. ``None`` for
+            scratch groups.
+    """
+
+    engine_group_id: int
+    tokens_per_block: int
+    kind: KVGroupRetentionKind
+    window_size_tokens: int | None
+    retention_group_id: int | None
+
+    @property
+    def cacheable(self) -> bool:
+        """Whether this group participates in store and retrieve operations."""
+        return self.kind is not KVGroupRetentionKind.SCRATCH
 
 
 def _is_attention_spec(spec: Any) -> bool:
@@ -92,6 +135,131 @@ def _is_cachable_mamba_spec(spec: Any) -> bool:
     return any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__) and getattr(
         spec, "mamba_cache_mode", "none"
     ) in ("align", "all")
+
+
+def _leaf_kv_cache_specs(spec: Any) -> tuple[Any, ...]:
+    """Return the concrete per-layer specs represented by ``spec``."""
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        return tuple(inner.values())
+    return (spec,)
+
+
+def _retention_kind_and_window(
+    spec: Any,
+    tokens_per_block: int,
+) -> tuple[KVGroupRetentionKind, int | None]:
+    """Classify one vLLM group and validate its per-layer retention contract."""
+    contracts: set[tuple[KVGroupRetentionKind, int | None]] = set()
+    for leaf in _leaf_kv_cache_specs(spec):
+        if is_scratch_spec(leaf):
+            contracts.add((KVGroupRetentionKind.SCRATCH, None))
+        elif _is_cachable_mamba_spec(leaf):
+            contracts.add((KVGroupRetentionKind.RECURRENT, tokens_per_block))
+        elif _is_sliding_window_spec(leaf):
+            contracts.add((KVGroupRetentionKind.SLIDING_WINDOW, leaf.sliding_window))
+        else:
+            contracts.add((KVGroupRetentionKind.FULL_ATTENTION, None))
+    if len(contracts) != 1:
+        raise ValueError(
+            "one vLLM KV cache group contains incompatible retention "
+            f"contracts: {sorted((kind.value, window) for kind, window in contracts)}"
+        )
+    return contracts.pop()
+
+
+def create_kv_group_retention_specs(
+    kv_cache_config: Any,
+    group_tokens_per_block: Sequence[int],
+    lmcache_tokens_per_chunk: int,
+) -> list[KVGroupRetentionSpec]:
+    """Build scheduler retention descriptors from vLLM KV-cache metadata.
+
+    The ``retention_group_id`` mirrors the regular-object bucketing used by
+    :class:`KVLayerGroupsManager`: full attention shares one bucket, while
+    sliding-window and recurrent groups are bucketed separately by their
+    cross-chunk retention window. This lets lazy offload select complete
+    object groups without importing server-side tensor layout details.
+
+    Args:
+        kv_cache_config: vLLM ``KVCacheConfig`` or ``None`` for a legacy
+            single-group model.
+        group_tokens_per_block: Effective token span of each engine group.
+        lmcache_tokens_per_chunk: LMCache chunk size used to normalize window
+            sizes to the object-group buckets used by the server.
+
+    Returns:
+        One descriptor per engine group, including scratch groups.
+
+    Raises:
+        ValueError: If the geometry is invalid or group metadata disagrees
+            with ``group_tokens_per_block``.
+    """
+    if lmcache_tokens_per_chunk <= 0:
+        raise ValueError("lmcache_tokens_per_chunk must be positive")
+    spans = list(group_tokens_per_block)
+    groups = (
+        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+        if kv_cache_config is not None
+        else ()
+    )
+    if not groups:
+        if len(spans) != 1 or spans[0] <= 0:
+            raise ValueError(
+                "a legacy single-group cache requires one positive token span"
+            )
+        return [
+            KVGroupRetentionSpec(
+                engine_group_id=0,
+                tokens_per_block=spans[0],
+                kind=KVGroupRetentionKind.FULL_ATTENTION,
+                window_size_tokens=None,
+                retention_group_id=0,
+            )
+        ]
+    if len(groups) != len(spans):
+        raise ValueError(
+            f"got {len(spans)} group token spans for {len(groups)} KV cache groups"
+        )
+
+    bucket_ids: dict[tuple[KVGroupRetentionKind, int], int] = {}
+    descriptors: list[KVGroupRetentionSpec] = []
+    for engine_group_id, (group, tokens_per_block) in enumerate(
+        zip(groups, spans, strict=True)
+    ):
+        kind, window_size_tokens = _retention_kind_and_window(
+            group.kv_cache_spec, tokens_per_block
+        )
+        if kind is KVGroupRetentionKind.SCRATCH:
+            if tokens_per_block != 0:
+                raise ValueError(
+                    f"scratch group {engine_group_id} must have token span 0, "
+                    f"got {tokens_per_block}"
+                )
+            retention_group_id = None
+        else:
+            if tokens_per_block <= 0:
+                raise ValueError(
+                    f"cacheable group {engine_group_id} must have a positive "
+                    f"token span, got {tokens_per_block}"
+                )
+            window_chunks = (
+                -1
+                if window_size_tokens is None
+                else math.ceil(window_size_tokens / lmcache_tokens_per_chunk)
+            )
+            bucket = (kind, window_chunks)
+            retention_group_id = bucket_ids.setdefault(bucket, len(bucket_ids))
+        descriptors.append(
+            KVGroupRetentionSpec(
+                engine_group_id=engine_group_id,
+                tokens_per_block=tokens_per_block,
+                kind=kind,
+                window_size_tokens=window_size_tokens,
+                retention_group_id=retention_group_id,
+            )
+        )
+    return descriptors
 
 
 def _resolve_per_layer_sw_sizes(
