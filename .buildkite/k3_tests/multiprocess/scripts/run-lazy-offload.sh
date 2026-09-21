@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Verify FIFO lazy offload against a live GPU vLLM + LMCache MP deployment.
+# Verify lazy offload against a live GPU vLLM + LMCache MP deployment.
 #
-# The launcher configures threshold=2 and select_count=1. This test sends
-# three completed, cacheable requests and checks the L1-write metric after
-# each: requests 1 and 2 must not write; request 3 must drain request 1.
+# FIFO retains its threshold behavior check. EVICTION_AWARE verifies that
+# allocation pressure emits a store, a warm replay reads it from L1 with
+# byte-identical output, and the policy counter ledger closes.
 set -euo pipefail
 
 VLLM_PORT="${VLLM_PORT:-8000}"
@@ -14,6 +14,8 @@ RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 TEST_DIR="${RESULTS_DIR}/lazy_offload"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 LMCACHE_CHUNK_SIZE="${CHUNK_SIZE:-16}"
+LAZY_OFFLOAD_POLICY="${LMCACHE_MP_LAZY_OFFLOAD_POLICY:-FIFO}"
+LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache.log"
 
 mkdir -p "${TEST_DIR}"
 
@@ -147,11 +149,237 @@ assert response["choices"], "vLLM response had no choices"
 PY
 }
 
-echo "=== GPU FIFO Lazy Offload Integration Test ==="
+count_retrieves() {
+    python3 - "${LMCACHE_LOG}" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if not path.exists():
+    print(0)
+else:
+    pattern = re.compile(r"Retrieved \d+ tokens in ")
+    print(sum(bool(pattern.search(line)) for line in path.read_text(errors="ignore").splitlines()))
+PY
+}
+
+wait_for_write_delta() {
+    local writes_before="$1"
+    local minimum_delta="$2"
+    local writes_after="$writes_before"
+
+    for _ in $(seq 1 30); do
+        writes_after="$(scrape_l1_write_chunks)"
+        if [ $((writes_after - writes_before)) -ge "${minimum_delta}" ]; then
+            echo "${writes_after}"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for ${minimum_delta} lazy-offload L1 write chunks" >&2
+    return 1
+}
+
+enable_cached_token_stats() {
+    local request_number="$1"
+    local body_file="${TEST_DIR}/request_${request_number}.json"
+
+    python3 - "${body_file}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path) as source:
+    request = json.load(source)
+request["kv_transfer_params"] = {"cached_token_stats": True}
+with open(path, "w") as output:
+    json.dump(request, output)
+PY
+}
+
+reset_vllm_prefix_cache() {
+    local status_code
+    status_code="$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+        "http://127.0.0.1:${VLLM_PORT}/reset_prefix_cache")"
+    if [ "${status_code}" != "200" ]; then
+        echo "reset_prefix_cache failed with HTTP ${status_code}" >&2
+        return 1
+    fi
+}
+
+validate_warm_replay() {
+    local cold_file="$1"
+    local warm_file="$2"
+    local retrieves_before="$3"
+    local retrieves_after="$4"
+
+    python3 - "${cold_file}" "${warm_file}" "${retrieves_before}" "${retrieves_after}" <<'PY'
+import json
+import sys
+
+cold_path, warm_path, before_text, after_text = sys.argv[1:5]
+with open(cold_path) as source:
+    cold = json.load(source)
+with open(warm_path) as source:
+    warm = json.load(source)
+
+cold_text = cold["choices"][0]["text"]
+warm_text = warm["choices"][0]["text"]
+if cold_text != warm_text:
+    raise AssertionError(
+        f"warm output differs from cold output: {cold_text!r} != {warm_text!r}"
+    )
+
+stats = (warm.get("kv_transfer_params") or {}).get("cached_token_stats")
+if stats is None:
+    raise AssertionError("warm response has no cached_token_stats")
+cached = stats.get("num_lmcache_cached_tokens", 0)
+if not isinstance(cached, int) or cached <= 0:
+    raise AssertionError(f"warm replay reported no LMCache-cached tokens: {stats}")
+
+before = int(before_text)
+after = int(after_text)
+if after <= before:
+    raise AssertionError(
+        f"LMCache retrieve log did not grow during warm replay: {before} -> {after}"
+    )
+print(f"Warm replay matched exactly and retrieved {cached} cached tokens")
+PY
+}
+
+validate_eviction_aware_ledger() {
+    python3 - "${VLLM_LOG}" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text(errors="ignore").splitlines()
+ledgers = []
+for line in lines:
+    if "Lazy offload counters:" not in line and "Lazy offload final counters:" not in line:
+        continue
+    ledgers.append({key: int(value) for key, value in re.findall(r"([a-z_]+)=(\d+)", line)})
+
+ledger = next((item for item in reversed(ledgers) if item.get("emitted", 0) > 0), None)
+if ledger is None:
+    raise AssertionError("no eviction-aware counter ledger recorded an emitted store")
+drops = sum(
+    ledger.get(key, 0)
+    for key in (
+        "dropped_evicted",
+        "dropped_on_request_drop",
+        "dropped_failed_store",
+        "dropped_id_reuse",
+    )
+)
+accounted = ledger.get("pending", 0) + ledger["emitted"] + drops
+if ledger["admitted"] != accounted:
+    raise AssertionError(f"lazy-offload ledger does not close: {ledger}")
+unexpected = {
+    key: ledger.get(key, 0)
+    for key in (
+        "emitted_overdue",
+        "dropped_evicted",
+        "rejected_unhashed",
+        "rejected_prefix_broken",
+        "dropped_on_request_drop",
+        "dropped_failed_store",
+        "dropped_id_reuse",
+    )
+    if ledger.get(key, 0)
+}
+if unexpected:
+    raise AssertionError(f"eviction-aware test recorded unexpected outcomes: {unexpected}")
+print(f"Eviction-aware ledger closes: {ledger}")
+PY
+}
+
+assert_no_runtime_faults() {
+    python3 - "${VLLM_LOG}" "${LMCACHE_LOG}" <<'PY'
+import pathlib
+import sys
+
+markers = (
+    "gpu fault",
+    "memory access fault",
+    "illegal memory access",
+    "hsa_status_error_exception",
+    "block hashes missing or mismatched",
+)
+for filename in sys.argv[1:]:
+    path = pathlib.Path(filename)
+    text = path.read_text(errors="ignore").lower() if path.exists() else ""
+    found = [marker for marker in markers if marker in text]
+    if found:
+        raise AssertionError(f"{path} contains runtime fault markers: {found}")
+PY
+}
+
+run_eviction_aware_test() {
+    local target_chunks
+    local writes_before
+    local writes_after
+    local retrieves_before
+    local retrieves_after
+    local cold_response="${TEST_DIR}/eviction_aware_cold.json"
+    local warm_response="${TEST_DIR}/eviction_aware_warm.json"
+
+    if ! grep -q "lazy offload enabled with EVICTION_AWARE policy" "${VLLM_LOG}"; then
+        echo "FAIL: vLLM did not enable EVICTION_AWARE lazy offload"
+        tail -100 "${VLLM_LOG}" || true
+        return 1
+    fi
+
+    curl -fsS -X POST "http://localhost:${LMCACHE_HTTP_PORT}/metrics/reset" >/dev/null
+    target_chunks="$(prepare_request 1 256)"
+    enable_cached_token_stats 1
+    prepare_request 2 512 >/dev/null
+
+    writes_before="$(scrape_l1_write_chunks)"
+    send_request 1
+    cp "${TEST_DIR}/response_1.json" "${cold_response}"
+
+    # The stats logger is throttled to five seconds. Waiting here ensures the
+    # pressure step records the emission ledger rather than only admission.
+    sleep 6
+    send_request 2
+    writes_after="$(wait_for_write_delta "${writes_before}" "${target_chunks}")"
+    echo "Eviction pressure wrote $((writes_after - writes_before)) L1 chunks"
+
+    sleep 2
+    reset_vllm_prefix_cache
+    sleep 2
+    retrieves_before="$(count_retrieves)"
+    send_request 1
+    cp "${TEST_DIR}/response_1.json" "${warm_response}"
+    sleep 2
+    retrieves_after="$(count_retrieves)"
+
+    validate_warm_replay \
+        "${cold_response}" "${warm_response}" \
+        "${retrieves_before}" "${retrieves_after}"
+    validate_eviction_aware_ledger
+    assert_no_runtime_faults
+    echo "PASS: eviction pressure emitted stores and warm L1 replay matched exactly"
+}
+
+echo "=== GPU ${LAZY_OFFLOAD_POLICY} Lazy Offload Integration Test ==="
 echo "Model: ${MODEL}"
 echo "vLLM: http://localhost:${VLLM_PORT}"
 echo "LMCache metrics: http://localhost:${LMCACHE_HTTP_PORT}/metrics"
 echo "LMCache chunk size: ${LMCACHE_CHUNK_SIZE}"
+
+if [ "${LAZY_OFFLOAD_POLICY}" = "EVICTION_AWARE" ]; then
+    run_eviction_aware_test
+    exit 0
+fi
+
+if [ "${LAZY_OFFLOAD_POLICY}" != "FIFO" ]; then
+    echo "Unknown lazy-offload policy: ${LAZY_OFFLOAD_POLICY}" >&2
+    exit 2
+fi
 
 if ! grep -q "lazy offload enabled with FIFO policy, offload threshold: 2" "${VLLM_LOG}"; then
     echo "FAIL: vLLM did not enable FIFO lazy offload with threshold 2"
