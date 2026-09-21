@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""cufile implementation of the object-based async GDS interface.
-
-Native libraries are loaded lazily. The backend owns driver state; its handles
-keep it alive, and the context retains submissions until their DMA completes.
-"""
+"""NVIDIA cuFile implementation of the shared GDS contracts."""
 
 # Standard
 from typing import TYPE_CHECKING, Any
@@ -14,9 +10,9 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector._gds_async import GDSHandle, Submission
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
 
 if TYPE_CHECKING:
     # Third Party
@@ -81,16 +77,13 @@ class Backend(FileGDSBackend):
 
     @classmethod
     def is_default(cls) -> bool:
-        """Preserve the existing default choice for this PyTorch build."""
         return torch.version.cuda is not None and torch.version.hip is None
 
     def validate_environment(self) -> None:
-        """Preserve this implementation's existing PyTorch-build requirement."""
         if torch.version.cuda is None:
             raise ValueError("cufile requires a CUDA PyTorch build")
 
     def open_handle(self, fd: int, path: str) -> "AsyncHandle":
-        """Take ownership of fd and register it; close fd on registration failure."""
         try:
             handle = self.register_handle(fd)
         except Exception:
@@ -99,7 +92,6 @@ class Backend(FileGDSBackend):
         return AsyncHandle(self, fd, handle, path)
 
     def close_driver(self) -> None:
-        """Release this backend's driver ownership after its IO has completed."""
         if not self._driver_opened:
             return
         # Third Party
@@ -111,11 +103,6 @@ class Backend(FileGDSBackend):
             self._driver_opened = False
 
     def register_handle(self, fd: int) -> Any:
-        """Register an open fd with cuFile and return the ``CUfileHandle_t``.
-
-        Opens the cuFile driver on first use. The returned handle is accepted
-        directly as the first argument of ``cuFileReadAsync`` / ``cuFileWriteAsync``.
-        """
         self._ensure_driver_open()
         # Third Party
         from cufile.bindings import cuFileHandleRegister
@@ -123,24 +110,13 @@ class Backend(FileGDSBackend):
         return cuFileHandleRegister(fd)
 
     def deregister_handle(self, handle: Any) -> None:
-        """Reverse of :meth:`register_handle` (``cuFileHandleDeregister``)."""
         # Third Party
         from cufile.bindings import cuFileHandleDeregister
 
         cuFileHandleDeregister(handle)
 
     def register_buffer(self, buf: torch.Tensor) -> None:
-        """Register a device tensor with cuFile for GDS DMA.
-
-        Must be called before any ``read_async`` / ``write_async`` whose
-        ``buf_base`` falls inside this tensor's allocation. Implicitly
-        opens the cuFile driver on first use.
-
-        Uses ``libcufile.cuFileBufRegister`` directly (not the
-        ``cufile.bindings`` wrapper) because the wrapper hides the error
-        code by raising internally — we want the raw status so callers
-        see ``cuFileError(err=…, cu_err=…)`` instead of a Python re-raise.
-        """
+        """Use the raw API to preserve cuFile status codes in raised errors."""
         if not buf.is_cuda:
             raise ValueError("register_buffer: tensor must be on CUDA")
         self._ensure_driver_open()
@@ -158,7 +134,6 @@ class Backend(FileGDSBackend):
         )
 
     def deregister_buffer(self, buf: torch.Tensor) -> None:
-        """Reverse of :meth:`register_buffer`."""
         # Third Party
         from cufile.bindings import libcufile
 
@@ -168,18 +143,7 @@ class Backend(FileGDSBackend):
         )
 
     def register_stream(self, raw_stream: int) -> None:
-        """Register a CUDA stream with cuFile.
-
-        ``raw_stream`` is the integer ``CUstream`` handle — get it via
-        ``torch_dev.current_stream().cuda_stream``.
-
-        Optional for correctness (``read_async`` / ``write_async`` also take the
-        stream per call). We register with the FIXED_* flags (0x7): cuFile still
-        reads the size/offset pointers at stream-execution time -- so their storage
-        must stay alive and unchanged until completion (see ``Submission``) -- but
-        promising the values are fixed at submission lets cuFile skip per-op setup,
-        worth ~12% higher read throughput in our benchmark.
-        """
+        """Use cuFile's FIXED_* flags (0x7) for per-submission IO parameters."""
         # Third Party
         from cufile.bindings import libcufile
 
@@ -192,7 +156,6 @@ class Backend(FileGDSBackend):
         )
 
     def deregister_stream(self, raw_stream: int) -> None:
-        """Reverse of :meth:`register_stream`."""
         # Third Party
         from cufile.bindings import libcufile
 
@@ -202,7 +165,6 @@ class Backend(FileGDSBackend):
         )
 
     def _ensure_driver_open(self) -> None:
-        """Idempotently open the cuFile driver and declare async signatures."""
         if self._driver_opened:
             return
         self._driver.acquire(self, self._open_driver)
@@ -229,12 +191,6 @@ class AsyncHandle(GDSHandle):
         buf_offset: int,
         raw_stream: int,
     ) -> Submission:
-        """Enqueue a ``cuFileReadAsync`` on the stream.
-
-        ``buf_base`` is the registered base pointer (e.g.
-        ``buf.data_ptr()``). ``buf_offset`` is the byte offset within
-        that registration that the data should land at.
-        """
         # Third Party
         from cufile.bindings import libcufile
 
@@ -261,7 +217,6 @@ class AsyncHandle(GDSHandle):
         buf_offset: int,
         raw_stream: int,
     ) -> Submission:
-        """Enqueue a ``cuFileWriteAsync`` on the stream."""
         # Third Party
         from cufile.bindings import libcufile
 

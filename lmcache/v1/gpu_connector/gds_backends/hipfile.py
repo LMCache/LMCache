@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""hipfile implementation of the object-based async GDS interface.
-
-Native libraries are loaded lazily. The backend owns driver state; its handles
-keep it alive, and the context retains submissions until their DMA completes.
-"""
+"""ROCm hipFile implementation of the shared GDS contracts."""
 
 # Standard
 from typing import Optional
@@ -15,9 +11,9 @@ import threading
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector._gds_async import GDSHandle, Submission
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
 
 _LIBHIPFILE_SONAME = "libhipfile.so"
 
@@ -130,16 +126,13 @@ class Backend(FileGDSBackend):
 
     @classmethod
     def is_default(cls) -> bool:
-        """Preserve the existing default choice for this PyTorch build."""
         return torch.version.hip is not None
 
     def validate_environment(self) -> None:
-        """Preserve this implementation's existing PyTorch-build requirement."""
         if torch.version.hip is None:
             raise ValueError("hipfile requires a ROCm PyTorch build")
 
     def open_handle(self, fd: int, path: str) -> "AsyncHandle":
-        """Take ownership of fd and register it; close fd on registration failure."""
         try:
             handle = self.register_handle(fd)
         except Exception:
@@ -148,11 +141,6 @@ class Backend(FileGDSBackend):
         return AsyncHandle(self, fd, handle, path)
 
     def close_driver(self) -> None:
-        """Release this backend's driver ownership after its IO has completed.
-
-        Raises:
-            RuntimeError: If ``hipFileDriverClose`` reports a non-success status.
-        """
         if not self._driver_opened:
             return
         try:
@@ -161,22 +149,6 @@ class Backend(FileGDSBackend):
             self._driver_opened = False
 
     def register_handle(self, fd: int) -> int:
-        """Register an open fd with hipFile and return the ``hipFileHandle_t``.
-
-        Opens the hipFile driver on first use. The returned handle is the raw
-        ``void *`` value (as an int), accepted directly as the first argument of
-        ``hipFileReadAsync`` / ``hipFileWriteAsync``.
-
-        Args:
-            fd: An open file descriptor for the slab (opened with ``O_DIRECT`` for
-                the GDS fast path).
-
-        Returns:
-            The registered ``hipFileHandle_t`` as an integer.
-
-        Raises:
-            RuntimeError: If ``hipFileHandleRegister`` reports a non-success status.
-        """
         self._ensure_driver_open()
         lib = self.library()
         handle = ctypes.c_void_p()
@@ -191,27 +163,9 @@ class Backend(FileGDSBackend):
         return handle.value if handle.value is not None else 0
 
     def deregister_handle(self, handle: int) -> None:
-        """Reverse of :meth:`register_handle` (``hipFileHandleDeregister``).
-
-        Args:
-            handle: The ``hipFileHandle_t`` (as an int) from :meth:`register_handle`.
-        """
         self.library().hipFileHandleDeregister(ctypes.c_void_p(handle))
 
     def register_buffer(self, buf: torch.Tensor) -> None:
-        """Register a device tensor with hipFile for GPUDirect Storage DMA.
-
-        Must be called before any ``read_async`` / ``write_async`` whose
-        ``buf_base`` falls inside this tensor's allocation. Implicitly opens the
-        hipFile driver on first use.
-
-        Args:
-            buf: A GPU (HIP device) tensor to register for DMA.
-
-        Raises:
-            ValueError: If ``buf`` is not on the GPU.
-            RuntimeError: If ``hipFileBufRegister`` reports a non-success status.
-        """
         if not buf.is_cuda:
             raise ValueError("register_buffer: tensor must be on the GPU")
         self._ensure_driver_open()
@@ -227,38 +181,13 @@ class Backend(FileGDSBackend):
         )
 
     def deregister_buffer(self, buf: torch.Tensor) -> None:
-        """Reverse of :meth:`register_buffer`.
-
-        Args:
-            buf: A tensor previously passed to :meth:`register_buffer`.
-
-        Raises:
-            RuntimeError: If ``hipFileBufDeregister`` reports a non-success status.
-        """
         self.check_error(
             self.library().hipFileBufDeregister(ctypes.c_void_p(buf.data_ptr())),
             "hipFileBufDeregister",
         )
 
     def register_stream(self, raw_stream: int) -> None:
-        """Register a HIP stream with hipFile.
-
-        ``raw_stream`` is the integer ``hipStream_t`` handle — get it via
-        ``torch_dev.current_stream().cuda_stream`` (torch reports the HIP stream
-        through the same attribute on ROCm).
-
-        Optional for correctness (``read_async`` / ``write_async`` also take the
-        stream per call). Registered with the FIXED_* flags (0x7): hipFile still
-        reads the size/offset pointers at stream-execution time -- so their storage
-        must stay alive and unchanged until completion (see ``Submission``) -- but
-        promising the values are fixed at submission lets hipFile skip per-op setup.
-
-        Args:
-            raw_stream: The integer ``hipStream_t`` handle to register.
-
-        Raises:
-            RuntimeError: If ``hipFileStreamRegister`` reports a non-success status.
-        """
+        """Use hipFile's FIXED_* flags (0x7) for per-submission IO parameters."""
         self._ensure_driver_open()
         self.check_error(
             self.library().hipFileStreamRegister(
@@ -268,28 +197,13 @@ class Backend(FileGDSBackend):
         )
 
     def deregister_stream(self, raw_stream: int) -> None:
-        """Reverse of :meth:`register_stream`.
-
-        Args:
-            raw_stream: The ``hipStream_t`` handle passed to :meth:`register_stream`.
-
-        Raises:
-            RuntimeError: If ``hipFileStreamDeregister`` reports a non-success status.
-        """
         self.check_error(
             self.library().hipFileStreamDeregister(ctypes.c_void_p(raw_stream)),
             "hipFileStreamDeregister",
         )
 
     def library(self) -> ctypes.CDLL:
-        """dlopen ``libhipfile.so`` once and declare signatures. Idempotent.
-
-        Thread-safe via double-checked locking: the common case (already loaded)
-        returns without taking ``self._init_lock``, so the per-DMA path stays lock-free.
-
-        Returns:
-            This backend's cached ``libhipfile.so`` handle.
-        """
+        """Load libhipfile once; cached per-DMA lookups do not acquire the lock."""
         if self._lib_handle is not None:
             return self._lib_handle
         with self._init_lock:
@@ -309,11 +223,6 @@ class Backend(FileGDSBackend):
             )
 
     def _ensure_driver_open(self) -> None:
-        """Idempotently open the hipFile driver (thread-safe).
-
-        Raises:
-            RuntimeError: If ``hipFileDriverOpen`` reports a non-success status.
-        """
         if self._driver_opened:
             return
         self._driver.acquire(self, self._open_driver)
@@ -344,12 +253,6 @@ class AsyncHandle(GDSHandle):
         buf_offset: int,
         raw_stream: int,
     ) -> Submission:
-        """Enqueue a ``hipFileReadAsync`` on the stream.
-
-        ``buf_base`` is the registered base pointer (e.g. ``buf.data_ptr()``).
-        ``buf_offset`` is the byte offset within that registration that the data
-        should land at.
-        """
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
         self._backend.check_error(
             self._backend.library().hipFileReadAsync(
@@ -373,7 +276,6 @@ class AsyncHandle(GDSHandle):
         buf_offset: int,
         raw_stream: int,
     ) -> Submission:
-        """Enqueue a ``hipFileWriteAsync`` on the stream."""
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
         self._backend.check_error(
             self._backend.library().hipFileWriteAsync(

@@ -30,8 +30,8 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import GdsL1Config
-from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle, Submission
 from lmcache.v1.gpu_connector._gds_backends import create_backend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle, Submission
 from lmcache.v1.memory_management import GDSMemoryObject
 
 logger = init_logger(__name__)

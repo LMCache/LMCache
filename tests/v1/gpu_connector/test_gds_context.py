@@ -27,8 +27,8 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
-from lmcache.v1.gpu_connector._gds_async import GDSBackend
 from lmcache.v1.gpu_connector._gds_backends import create_backend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend
 from lmcache.v1.gpu_connector.gds_context import (
     GDSContext,
     SlabDirection,

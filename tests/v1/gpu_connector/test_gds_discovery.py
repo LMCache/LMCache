@@ -48,6 +48,7 @@ def test_lazy_imports_in_fresh_interpreter(
                 name.removeprefix(prefix) for name in sys.modules
                 if name.startswith(prefix)
                 and not name.removeprefix(prefix).startswith("_")
+                and name.removeprefix(prefix) != "base"
             }
 
         assert loaded() == set(), loaded()
@@ -60,6 +61,7 @@ def test_lazy_imports_in_fresh_interpreter(
         else:
             names = factory.available_backends()
             assert names and all(not name.startswith("_") for name in names)
+            assert "base" not in names
             assert loaded() == set(), loaded()
             if selection == "missing":
                 try:

@@ -11,7 +11,7 @@ import pkgutil
 
 # First Party
 from lmcache.v1.gpu_connector import gds_backends
-from lmcache.v1.gpu_connector._gds_async import GDSBackend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend
 
 
 def available_backends() -> tuple[str, ...]:
@@ -20,7 +20,7 @@ def available_backends() -> tuple[str, ...]:
         sorted(
             module.name
             for module in pkgutil.iter_modules(gds_backends.__path__)
-            if not module.name.startswith("_")
+            if not module.name.startswith("_") and module.name != "base"
         )
     )
 

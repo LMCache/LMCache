@@ -5,7 +5,7 @@
 import os
 
 # First Party
-from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle
 
 
 class FileGDSBackend(GDSBackend):

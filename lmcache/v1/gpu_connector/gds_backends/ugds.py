@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""ugds implementation of the object-based async GDS interface.
-
-Native libraries are loaded lazily. The backend owns driver state; its handles
-keep it alive, and the context retains submissions until their DMA completes.
-"""
+"""uGDS implementation for finite-capacity raw NVMe devices."""
 
 # Standard
 from typing import Optional
@@ -17,8 +13,8 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle, Submission
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle, Submission
 
 logger = init_logger(__name__)
 
@@ -172,12 +168,10 @@ class Backend(GDSBackend):
         return slab
 
     def validate_environment(self) -> None:
-        """Preserve this implementation's existing PyTorch-build requirement."""
         if torch.version.hip is None and torch.version.cuda is None:
             raise ValueError("ugds requires a ROCm or CUDA PyTorch build")
 
     def open_handle(self, fd: int, path: str) -> "AsyncHandle":
-        """Take ownership of fd and register it; close fd on registration failure."""
         try:
             handle = self.register_handle(fd)
         except Exception:
@@ -186,7 +180,6 @@ class Backend(GDSBackend):
         return AsyncHandle(self, fd, handle, path)
 
     def close_driver(self) -> None:
-        """Release this backend's driver ownership after its IO has completed."""
         if not self._driver_opened:
             return
         try:
@@ -195,12 +188,6 @@ class Backend(GDSBackend):
             self._driver_opened = False
 
     def register_handle(self, fd: int) -> int:
-        """Register an open uGDS device fd and return the raw uGDSHandle_t.
-
-        The caller owns the fd (typically an O_RDWR open of /dev/ugds_drvX)
-        and closes it on registration failure. open_handle() also takes
-        ownership of the fd.
-        """
         self._ensure_driver_open()
         lib = self.library()
         handle = ctypes.c_void_p()
@@ -216,23 +203,13 @@ class Backend(GDSBackend):
         return handle.value
 
     def deregister_handle(self, handle: int) -> None:
-        """Reverse of register_handle (uGDSHandleDeregister)."""
         lib = self.library()
         lib.uGDSHandleDeregister(ctypes.c_void_p(handle))
 
     def get_device_capacity(self, fd: int, handle: int) -> int:
-        """Return the NVMe namespace capacity associated with a uGDS handle.
+        """Return NVMe namespace bytes; raise on query failure or zero capacity.
 
-        Args:
-            fd: Open uGDS character-device descriptor. It is accepted for API
-                consistency with the file-based GDS backends and is not inspected.
-            handle: Registered ``uGDSHandle_t`` whose namespace capacity to query.
-
-        Returns:
-            Usable namespace capacity in bytes.
-
-        Raises:
-            RuntimeError: If uGDS cannot query the device or returns zero capacity.
+        uGDS queries the native handle; the descriptor argument is unused.
         """
         del fd
         capacity_bytes = ctypes.c_uint64()

@@ -770,11 +770,11 @@ msgid ""
 "set. The bytes live on disk; reads/writes DMA directly between the GPU "
 "staging buffer and the slab, driven by the process-global ``GDSContext`` "
 "(``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The "
-"DMA backend is selected by platform via ``gpu_connector/_gds_async.py`` "
+"DMA backend is selected by platform via ``gpu_connector/_gds_backends.py`` "
 "-- cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on"
 " AMD ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the "
 "vendor-specific requirements. The CPU tier is disabled in this mode."
-msgstr "``GDSL1MemoryManager`` -- 当设置了 ``--gds-l1-path`` 时，使用 NVMe 块文件。字节存储在磁盘上；读/写通过 DMA 直接在 GPU 暂存缓冲区和块之间进行，由进程全局的 ``GDSContext``（``gpu_connector/gds_context.py``）驱动，并从 ``gpu_ops`` 派发。DMA 后端由平台通过 ``gpu_connector/_gds_async.py`` 选择 -- NVIDIA 使用 cuFile（``libcufile.so``），AMD ROCm 使用 hipFile（``libhipfile.so``）；有关特定于供应商的要求，请参见 :doc:`configuration` 的 *GDS L1 Tier* 部分。在此模式下，CPU 层被禁用。"
+msgstr "``GDSL1MemoryManager`` -- 当设置了 ``--gds-l1-path`` 时，使用 NVMe 块文件。字节存储在磁盘上；读/写通过 DMA 直接在 GPU 暂存缓冲区和块之间进行，由进程全局的 ``GDSContext``（``gpu_connector/gds_context.py``）驱动，并从 ``gpu_ops`` 派发。DMA 后端由平台通过 ``gpu_connector/_gds_backends.py`` 选择 -- NVIDIA 使用 cuFile（``libcufile.so``），AMD ROCm 使用 hipFile（``libhipfile.so``）；有关特定于供应商的要求，请参见 :doc:`configuration` 的 *GDS L1 Tier* 部分。在此模式下，CPU 层被禁用。"
 
 #: ../../source/mp/index.rst:401
 msgid "L2 Adapters"

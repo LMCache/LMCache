@@ -378,7 +378,7 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
   (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
-  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
+  backend is selected by platform via ``gpu_connector/_gds_backends.py`` --
   cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
   ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
   vendor-specific requirements. The CPU tier is disabled in this mode.

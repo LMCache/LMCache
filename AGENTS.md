@@ -197,6 +197,12 @@ The build must complete **without errors or warnings**. Review the generated HTM
 python -m http.server -d build/html/
 ```
 
+Use `sphinx-build -W --keep-going -w <warning-log>` to retain all diagnostics.
+External intersphinx inventories can fail with truncated downloads; separate
+those network failures from source diagnostics. Check diagnostics against the
+PR base before attributing existing documentation errors to a code-only refactor.
+Generated HTML alone does not mean the strict documentation build passed.
+
 ### Encapsulation
 
 Never access private members (prefixed with `_`) of other classes. Interact only through their public APIs.

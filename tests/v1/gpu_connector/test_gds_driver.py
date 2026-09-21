@@ -14,9 +14,9 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.config import GdsL1Config
-from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle
 from lmcache.v1.gpu_connector._gds_backends import create_backend
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle
 from lmcache.v1.gpu_connector.gds_backends.cufile import Backend as CuFileBackend
 from lmcache.v1.gpu_connector.gds_backends.hipfile import Backend as HipFileBackend
 from lmcache.v1.gpu_connector.gds_backends.hipfile import _HipFileError

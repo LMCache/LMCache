@@ -17,9 +17,9 @@ import torch
 # First Party
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.gpu_connector import gds_backends, gds_context
-from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle, Submission
 from lmcache.v1.gpu_connector._gds_backends import create_backend
 from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle, Submission
 from lmcache.v1.gpu_connector.gds_context import GDSContext, SlabDirection
 from lmcache.v1.memory_management import GDSMemoryObject
 
