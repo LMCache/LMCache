@@ -38,6 +38,12 @@ Centralized KV cache sharing
 
 This section demonstrates how to share KV cache across multiple vLLM instances using a centralized LMCache server.
 
+The ``lm://`` connector makes up to three attempts per operation when a
+connection fails. If the server remains unavailable, the operation fails and
+a later operation can reconnect when the server returns. The protocol does not
+acknowledge PUT requests, so a completed send does not guarantee that the server
+stored or retained that entry. Server restarts can still cause cache misses.
+
 **Important**: For centralized cache sharing (which is cross-process cases), ensure all processes use the same `PYTHONHASHSEED` to keep the hash of the KV cache consistent across processes: ``export PYTHONHASHSEED=0``.
 
 Setup centralized sharing
