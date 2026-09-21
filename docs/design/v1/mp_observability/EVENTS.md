@@ -63,6 +63,10 @@ Producers:
 | `SM_READ_PREFETCHED_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
 | `SM_WRITE_RESERVED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
 | `SM_WRITE_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
+| `SM_CAPACITY_CHANGED` | `snapshot` | `CapacitySnapshot` |
+
+`SM_CAPACITY_CHANGED` carries a whole L1/L2 capacity snapshot, not a delta, and
+is emitted on registration and capacity-changing reconfiguration.
 
 ---
 
