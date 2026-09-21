@@ -127,7 +127,7 @@ def create_lookup_key_rows(
     Create the per-rank key rows of a scheduler-style TP lookup.
 
     Row ``r`` holds worker ``r``'s keys for chunks ``0..num_chunks-1`` in
-    chunk order -- the ``GroupedKeys`` layout the scheduler submits when a
+    chunk order -- the ``GroupedObjectKeys`` layout the scheduler submits when a
     lookup with ``worker_id=None`` is expanded to all workers.
     """
     return [

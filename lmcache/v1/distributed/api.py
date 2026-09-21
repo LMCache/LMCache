@@ -23,6 +23,50 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+FetchingPolicy = Literal["prefix", "full"]
+"""Which found objects a prefetch loads and reports.
+
+``"prefix"`` -- only the longest token prefix every object group can serve
+under its attention window.
+
+``"full"`` -- every found object, gaps included, with no prefix trimming.
+"""
+
+FULL_ATTENTION_WINDOW_CHUNKS = -1
+"""``GroupedObjectKeys.sliding_window_size`` value for a full-attention object
+group: serving a prefix needs every chunk of it present."""
+
+_VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
+
+
+def _lookup_kv_ranks(ipc_key: "IPCCacheServerKey") -> list[int]:
+    """The kv ranks an IPC key addresses, in rank order.
+
+    A key without a ``worker_id`` (a lookup) fans out to every worker of its
+    world size; a worker-specific key addresses that worker's shard only.
+    """
+    if ipc_key.worker_id is None:
+        # For look up request, we want to expand to all workers
+        # TODO (ApostaC): include local world size/rank info
+        # in the future once it's in IPCCacheServerKey
+        return [
+            ObjectKey.ComputeKVRank(
+                world_size=ipc_key.world_size,
+                global_rank=worker_id,
+                local_world_size=ipc_key.world_size,
+                local_rank=worker_id,
+            )
+            for worker_id in range(ipc_key.world_size)
+        ]
+    return [
+        ObjectKey.ComputeKVRank(
+            world_size=ipc_key.world_size,
+            global_rank=ipc_key.worker_id,
+            local_world_size=ipc_key.world_size,
+            local_rank=ipc_key.worker_id,
+        )
+    ]
+
 
 class Tier(str, enum.Enum):
     """A cache tier.
@@ -396,30 +440,13 @@ class PrefetchLockMode(enum.Enum):
     NO_LOCK = enum.auto()
 
 
-FetchingPolicy = Literal["prefix", "full"]
-"""Which found objects a prefetch loads and reports.
-
-``"prefix"`` -- only the longest token prefix every object group can serve
-under its attention window; every key group must have the same number of keys
-so the rows form a chunk grid.
-
-``"full"`` -- every found object, gaps included, with no prefix trimming;
-key groups may differ in length.
-"""
-
-_VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
-
-FULL_ATTENTION_WINDOW_CHUNKS = -1
-"""``GroupedKeys.sliding_window_size`` value for a full-attention object
-group: serving a prefix needs every chunk of it present."""
-
-
 @dataclass(frozen=True)
-class GroupedKeys:
+class GroupedObjectKeys:
     """The object keys of one ``(object group, kv rank)`` row of a prefetch.
 
     Attributes:
-        keys: Chunk-ordered object keys of this row.
+        keys: Chunk-ordered object keys in this ``(object group, kv rank)``
+            group (one row of the request).
         object_group_id: The object group these keys belong to.
         layout_desc: Memory layout of this object group's objects.
         sliding_window_size: Number of trailing prefix chunks this object group
@@ -441,7 +468,7 @@ class GroupedKeys:
     def __post_init__(self) -> None:
         if self.sliding_window_size == 0 or self.sliding_window_size < -1:
             raise ValueError(
-                "GroupedKeys: sliding_window_size must be -1 (full attention) "
+                "GroupedObjectKeys: sliding_window_size must be -1 (full attention) "
                 f"or >= 1 chunk, got {self.sliding_window_size}"
             )
 
@@ -451,7 +478,7 @@ class PrefetchTaskSpec:
     """A prefetch request: which objects to make resident in L1, and how.
 
     Attributes:
-        key_groups: One :class:`GroupedKeys` row per ``(object group, kv
+        key_groups: One :class:`GroupedObjectKeys` row per ``(object group, kv
             rank)``.
         num_kv_readers: Read locks to take per prefetched object -- one per
             reader that will retrieve it. Ignored under ``NO_LOCK``.
@@ -459,16 +486,12 @@ class PrefetchTaskSpec:
         lock_mode: See :class:`PrefetchLockMode`.
 
     Note:
-        ``key_groups`` is group-major and rank-minor: the rows of one object
-        group are adjacent, one per kv rank, in rank order. A request over
-        ``G`` object groups and ``R`` kv ranks has ``G * R`` rows, and row
-        ``g * R + r`` is group ``g`` on rank ``r``. The prefetch result is
-        reported per row, in the same order. Under ``"prefix"`` every row has
-        the same number of keys and every object group the same number of
-        rows; under ``"full"`` rows may be ragged.
+        Every key group holds the same number of keys (``group_size``). The
+        groups may be listed in any order; the prefetch result is reported
+        per group, in the same order as ``key_groups``.
     """
 
-    key_groups: list[GroupedKeys]
+    key_groups: list[GroupedObjectKeys]
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
@@ -486,93 +509,17 @@ class PrefetchTaskSpec:
                 f"PrefetchTaskSpec: num_kv_readers={self.num_kv_readers} "
                 "must be >= 1 (total read locks per key)"
             )
-        seen: set[int] = set()
-        previous_gid: int | None = None
-        for row in self.key_groups:
-            gid = row.object_group_id
-            if gid != previous_gid:
-                if gid in seen:
-                    raise ValueError(
-                        "PrefetchTaskSpec: rows of object group "
-                        f"{gid} must be adjacent in key_groups"
-                    )
-                seen.add(gid)
-                previous_gid = gid
-        if self.fetching_policy == "prefix":
-            if len(set(self.row_lengths)) > 1:
-                raise ValueError(
-                    "PrefetchTaskSpec: 'prefix' fetching requires every key "
-                    f"group to have the same number of keys, got {self.row_lengths}"
-                )
-            rows_per_group = self._rows_per_group()
-            if len(set(rows_per_group.values())) > 1:
-                raise ValueError(
-                    "PrefetchTaskSpec: 'prefix' fetching requires every object "
-                    "group to have the same number of kv-rank rows, got "
-                    f"{rows_per_group}"
-                )
-
-    def _rows_per_group(self) -> dict[int, int]:
-        counts: dict[int, int] = {}
-        for row in self.key_groups:
-            counts[row.object_group_id] = counts.get(row.object_group_id, 0) + 1
-        return counts
-
-    @property
-    def row_lengths(self) -> tuple[int, ...]:
-        """Number of keys in each row of ``key_groups``, in order."""
-        return tuple(len(row.keys) for row in self.key_groups)
-
-    @property
-    def is_uniform(self) -> bool:
-        """Whether every row has the same number of keys (a chunk grid)."""
-        return len(set(self.row_lengths)) <= 1
-
-    @property
-    def object_group_ids(self) -> tuple[int, ...]:
-        """The distinct object group ids, in ``key_groups`` order."""
-        return tuple(self._rows_per_group())
-
-    @property
-    def num_object_groups(self) -> int:
-        """Number of distinct object groups."""
-        return len(self._rows_per_group())
-
-    @property
-    def total_keys(self) -> int:
-        """Total number of keys across all rows."""
-        return sum(self.row_lengths)
-
-    @property
-    def num_chunks(self) -> int:
-        """Number of chunks per row.
-
-        Raises:
-            ValueError: If the rows differ in length (only possible under
-                ``"full"`` fetching).
-        """
-        if not self.is_uniform:
+        sizes = {len(row.keys) for row in self.key_groups}
+        if len(sizes) > 1:
             raise ValueError(
-                "PrefetchTaskSpec: num_chunks is undefined for ragged rows "
-                f"{self.row_lengths}"
+                "PrefetchTaskSpec: every key group must have the same number "
+                f"of keys, got {[len(row.keys) for row in self.key_groups]}"
             )
-        return self.row_lengths[0]
 
     @property
-    def world_size(self) -> int:
-        """Number of kv-rank rows per object group.
-
-        Raises:
-            ValueError: If the object groups differ in their number of rows
-                (only possible under ``"full"`` fetching).
-        """
-        rows_per_group = self._rows_per_group()
-        if len(set(rows_per_group.values())) > 1:
-            raise ValueError(
-                "PrefetchTaskSpec: world_size is undefined when object groups "
-                f"have different row counts {rows_per_group}"
-            )
-        return next(iter(rows_per_group.values()))
+    def group_size(self) -> int:
+        """Number of keys in every key group (the request's chunk count)."""
+        return len(self.key_groups[0].keys)
 
 
 @dataclass(frozen=True)
@@ -606,10 +553,12 @@ class PrefetchHandle:
     """Original-key index of each key submitted to L2; maps the controller's
     local result bitmap back to original positions."""
 
-    row_lengths: tuple[int, ...] = ()
-    """Number of keys in each key row of the request, in row order; the
-    prefetch result is reported per row. Empty means a single row of
-    ``total_requested_keys`` keys."""
+    # TODO (ApostaC): remove once the prefetch controller refactor reports the
+    # result per key group natively instead of splitting a flat bitmap.
+    num_key_groups: int = 1
+    """Number of key groups (rows) in the request; the prefetch result is
+    reported per group, and every group holds
+    ``total_requested_keys // num_key_groups`` keys."""
 
 
 def ipc_key_to_object_keys(
@@ -662,45 +611,16 @@ def ipc_key_to_object_keys(
     ]
 
 
-def _lookup_kv_ranks(ipc_key: "IPCCacheServerKey") -> list[int]:
-    """The kv ranks an IPC key addresses, in rank order.
-
-    A key without a ``worker_id`` (a lookup) fans out to every worker of its
-    world size; a worker-specific key addresses that worker's shard only.
-    """
-    if ipc_key.worker_id is None:
-        # For look up request, we want to expand to all workers
-        # TODO (ApostaC): include local world size/rank info
-        # in the future once it's in IPCCacheServerKey
-        return [
-            ObjectKey.ComputeKVRank(
-                world_size=ipc_key.world_size,
-                global_rank=worker_id,
-                local_world_size=ipc_key.world_size,
-                local_rank=worker_id,
-            )
-            for worker_id in range(ipc_key.world_size)
-        ]
-    return [
-        ObjectKey.ComputeKVRank(
-            world_size=ipc_key.world_size,
-            global_rank=ipc_key.worker_id,
-            local_world_size=ipc_key.world_size,
-            local_rank=ipc_key.worker_id,
-        )
-    ]
-
-
-def ipc_key_to_grouped_keys(
+def ipc_key_to_grouped_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
-) -> list[GroupedKeys]:
+) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 
-    Produces one :class:`GroupedKeys` row per ``(object group, kv rank)``,
+    Produces one :class:`GroupedObjectKeys` row per ``(object group, kv rank)``,
     group-major and rank-minor (all ranks of ``object_group_ids[0]`` first, in
     rank order, then the next group, ...). Every row is chunk-ordered over
     ``chunk_hashes``.
@@ -728,23 +648,23 @@ def ipc_key_to_grouped_keys(
         taken from ``ipc_key``.
     """
     kv_ranks = _lookup_kv_ranks(ipc_key)
-    rows: list[GroupedKeys] = []
+    rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
         layout_desc = group_layout_descs.get(object_group_id)
         if layout_desc is None:
             raise ValueError(
-                f"ipc_key_to_grouped_keys: no layout for object group "
+                f"ipc_key_to_grouped_object_keys: no layout for object group "
                 f"{object_group_id} (have {sorted(group_layout_descs)})"
             )
         if not 0 <= object_group_id < attn_desc.num_object_groups:
             raise ValueError(
-                f"ipc_key_to_grouped_keys: object group {object_group_id} is "
+                f"ipc_key_to_grouped_object_keys: object group {object_group_id} is "
                 f"outside attn_desc's {attn_desc.num_object_groups} groups"
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
         for kv_rank in kv_ranks:
             rows.append(
-                GroupedKeys(
+                GroupedObjectKeys(
                     keys=[
                         ObjectKey(
                             chunk_hash=chunk_hash,

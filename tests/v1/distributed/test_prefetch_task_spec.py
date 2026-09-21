@@ -11,12 +11,12 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
-    GroupedKeys,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchLockMode,
     PrefetchTaskSpec,
-    ipc_key_to_grouped_keys,
+    ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -36,8 +36,8 @@ def _keys(n: int, gid: int = 0, kv_rank: int = 0) -> list[ObjectKey]:
     ]
 
 
-def _row(n: int, gid: int = 0, kv_rank: int = 0, window: int = -1) -> GroupedKeys:
-    return GroupedKeys(
+def _row(n: int, gid: int = 0, kv_rank: int = 0, window: int = -1) -> GroupedObjectKeys:
+    return GroupedObjectKeys(
         keys=_keys(n, gid, kv_rank),
         object_group_id=gid,
         layout_desc=LAYOUT,
@@ -45,7 +45,20 @@ def _row(n: int, gid: int = 0, kv_rank: int = 0, window: int = -1) -> GroupedKey
     )
 
 
-class TestGroupedKeys:
+def _ipc_key(world_size: int, worker_id: int | None = None) -> IPCCacheServerKey:
+    return IPCCacheServerKey(
+        model_name="m",
+        world_size=world_size,
+        worker_id=worker_id,
+        token_ids=(0,),
+        start=0,
+        end=0,
+        request_id="r",
+        cache_salt="salt",
+    )
+
+
+class TestGroupedObjectKeys:
     @pytest.mark.parametrize("window", [-1, 1, 4])
     def test_valid_windows(self, window):
         assert _row(2, window=window).sliding_window_size == window
@@ -75,92 +88,40 @@ class TestPrefetchTaskSpecValidation:
         with pytest.raises(ValueError):
             PrefetchTaskSpec(key_groups=[_row(1)], fetching_policy="sparse")  # type: ignore[arg-type]
 
-    def test_non_adjacent_group_rows_raise(self):
-        rows = [_row(2, gid=0, kv_rank=0), _row(2, gid=1), _row(2, gid=0, kv_rank=1)]
-        with pytest.raises(ValueError):
-            PrefetchTaskSpec(key_groups=rows)
-
-    def test_prefix_requires_equal_row_lengths(self):
+    @pytest.mark.parametrize("policy", ["prefix", "full"])
+    def test_requires_equal_group_sizes(self, policy):
         rows = [_row(2, gid=0), _row(3, gid=1)]
         with pytest.raises(ValueError):
-            PrefetchTaskSpec(key_groups=rows, fetching_policy="prefix")
-        # "full" tolerates ragged rows.
-        spec = PrefetchTaskSpec(key_groups=rows, fetching_policy="full")
-        assert spec.row_lengths == (2, 3)
-        assert not spec.is_uniform
-
-    def test_prefix_requires_equal_rows_per_group(self):
-        rows = [_row(2, gid=0, kv_rank=0), _row(2, gid=0, kv_rank=1), _row(2, gid=1)]
-        with pytest.raises(ValueError):
-            PrefetchTaskSpec(key_groups=rows, fetching_policy="prefix")
-        assert PrefetchTaskSpec(
-            key_groups=rows, fetching_policy="full"
-        ).row_lengths == (
-            2,
-            2,
-            2,
-        )
+            PrefetchTaskSpec(key_groups=rows, fetching_policy=policy)
 
 
 class TestPrefetchTaskSpecShape:
-    def test_grid_properties(self):
+    def test_group_size(self):
         rows = [
             _row(4, gid=0, kv_rank=0),
             _row(4, gid=0, kv_rank=1),
             _row(4, gid=2, kv_rank=0, window=2),
             _row(4, gid=2, kv_rank=1, window=2),
         ]
-        spec = PrefetchTaskSpec(key_groups=rows)
-        assert spec.row_lengths == (4, 4, 4, 4)
-        assert spec.is_uniform
-        assert spec.num_chunks == 4
-        assert spec.world_size == 2
-        assert spec.object_group_ids == (0, 2)
-        assert spec.num_object_groups == 2
-        assert spec.total_keys == 16
+        assert PrefetchTaskSpec(key_groups=rows).group_size == 4
 
-    def test_ragged_shape_properties_raise(self):
-        spec = PrefetchTaskSpec(
-            key_groups=[_row(1, gid=0), _row(3, gid=1)], fetching_policy="full"
-        )
-        assert spec.total_keys == 4
-        with pytest.raises(ValueError):
-            _ = spec.num_chunks
-        # One row per group is still a well-defined fan-out.
-        assert spec.world_size == 1
-
-    def test_uneven_rows_per_group_world_size_raises(self):
-        spec = PrefetchTaskSpec(
-            key_groups=[
-                _row(2, gid=0, kv_rank=0),
-                _row(2, gid=0, kv_rank=1),
-                _row(2, gid=1),
-            ],
-            fetching_policy="full",
-        )
-        with pytest.raises(ValueError):
-            _ = spec.world_size
+    def test_groups_may_appear_in_any_order(self):
+        rows = [_row(3, gid=1), _row(3, gid=0), _row(3, gid=1, kv_rank=1)]
+        for policy in ("prefix", "full"):
+            assert (
+                PrefetchTaskSpec(key_groups=rows, fetching_policy=policy).group_size
+                == 3
+            )
 
 
-def _ipc_key(world_size: int, worker_id: int | None = None) -> IPCCacheServerKey:
-    return IPCCacheServerKey(
-        model_name="m",
-        world_size=world_size,
-        worker_id=worker_id,
-        token_ids=(0,),
-        start=0,
-        end=0,
-        request_id="r",
-        cache_salt="salt",
-    )
-
-
-class TestIpcKeyToGroupedKeys:
+class TestIpcKeyToGroupedObjectKeys:
     def test_rows_are_group_major_rank_minor_and_chunk_ordered(self):
         hashes = [b"c0", b"c1", b"c2"]
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, 2, 1], world_size=2)
         layouts = {0: LAYOUT, 1: LAYOUT, 2: LAYOUT}
-        rows = ipc_key_to_grouped_keys(_ipc_key(2), hashes, [0, 2], layouts, attn)
+        rows = ipc_key_to_grouped_object_keys(
+            _ipc_key(2), hashes, [0, 2], layouts, attn
+        )
 
         assert [r.object_group_id for r in rows] == [0, 0, 2, 2]
         assert [r.sliding_window_size for r in rows] == [-1, -1, 1, 1]
@@ -181,7 +142,7 @@ class TestIpcKeyToGroupedKeys:
         """The rows hold exactly the keys ``ipc_key_to_object_keys`` produces."""
         hashes = [b"c0", b"c1"]
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2)
-        rows = ipc_key_to_grouped_keys(
+        rows = ipc_key_to_grouped_object_keys(
             _ipc_key(2), hashes, [0, 1], {0: LAYOUT, 1: LAYOUT}, attn
         )
         flat = ipc_key_to_object_keys(_ipc_key(2), hashes, [0, 1])
@@ -191,7 +152,7 @@ class TestIpcKeyToGroupedKeys:
 
     def test_worker_specific_key_yields_one_row_per_group(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1], world_size=2)
-        rows = ipc_key_to_grouped_keys(
+        rows = ipc_key_to_grouped_object_keys(
             _ipc_key(2, worker_id=1), [b"c0"], [0], {0: LAYOUT}, attn
         )
         assert len(rows) == 1
@@ -199,9 +160,11 @@ class TestIpcKeyToGroupedKeys:
     def test_missing_layout_raises(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1])
         with pytest.raises(ValueError):
-            ipc_key_to_grouped_keys(_ipc_key(1), [b"c0"], [0, 1], {0: LAYOUT}, attn)
+            ipc_key_to_grouped_object_keys(
+                _ipc_key(1), [b"c0"], [0, 1], {0: LAYOUT}, attn
+            )
 
     def test_group_outside_attn_desc_raises(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1])
         with pytest.raises(ValueError):
-            ipc_key_to_grouped_keys(_ipc_key(1), [b"c0"], [1], {1: LAYOUT}, attn)
+            ipc_key_to_grouped_object_keys(_ipc_key(1), [b"c0"], [1], {1: LAYOUT}, attn)

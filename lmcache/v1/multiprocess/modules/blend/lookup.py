@@ -23,7 +23,7 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
     PrefetchTaskSpec,
-    ipc_key_to_grouped_keys,
+    ipc_key_to_grouped_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
@@ -190,7 +190,7 @@ class LookupMixin:
                 hash_to_col[r.hash] = len(uniq_hashes)
                 uniq_hashes.append(r.hash)
 
-        key_groups = ipc_key_to_grouped_keys(
+        key_groups = ipc_key_to_grouped_object_keys(
             key, uniq_hashes, list(read.blend_gids), layouts, attn_desc
         )
         per_hash_obj_keys: dict[bytes, list] = {
@@ -357,7 +357,7 @@ class LookupMixin:
         # PREFIX leg reads attention + recurrent, never aux: one key row per
         # (read group, kv rank), each with its own attention window.
         spec = PrefetchTaskSpec(
-            key_groups=ipc_key_to_grouped_keys(
+            key_groups=ipc_key_to_grouped_object_keys(
                 key, chunk_hashes, list(read.prefix_gids), layouts, attn_desc
             ),
             num_kv_readers=num_kv_readers,

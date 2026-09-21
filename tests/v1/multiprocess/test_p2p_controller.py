@@ -37,6 +37,8 @@ from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     msgspec_encode,
 )
 
+_INVALID = TransferChannelAddress(offset=-1, size=0)
+
 
 def _make_key(i: int, object_group_id: int = 0) -> ObjectKey:
     return ObjectKey(
@@ -199,8 +201,7 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
 
 def test_lookup_and_lock_groups_keys_per_object_group():
     """Keys of several object groups become one row per group (first-seen
-    order, request order within a row), each with that group's layout; the
-    rows may be ragged."""
+    order, request order within a row), each with that group's layout."""
     controller, ctx = _make_controller()
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
         l1_found_indices=()
@@ -211,16 +212,33 @@ def test_lookup_and_lock_groups_keys_per_object_group():
         _make_key(0, object_group_id=1),
         _make_key(1, object_group_id=0),
         _make_key(2, object_group_id=1),
+        _make_key(3, object_group_id=0),
     ]
     controller.p2p_lookup_and_lock(keys, layouts)
 
     (spec,), _ = ctx.storage_manager.submit_prefetch_task.call_args
     assert [row.object_group_id for row in spec.key_groups] == [1, 0]
     assert spec.key_groups[0].keys == [keys[0], keys[2]]
-    assert spec.key_groups[1].keys == [keys[1]]
+    assert spec.key_groups[1].keys == [keys[1], keys[3]]
     assert spec.key_groups[0].layout_desc is layouts[1]
     assert spec.key_groups[1].layout_desc is layouts[0]
     assert spec.fetching_policy == "full"
+
+
+def test_lookup_and_lock_uneven_object_groups_report_misses():
+    """Object groups with different key counts cannot form a request: the
+    storage manager is never asked and every key resolves to a miss."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.query_prefetch_status.return_value = [Bitmap(0)]
+    layouts = {0: _make_layout_desc(), 1: _make_layout_desc()}
+    keys = [
+        _make_key(0, object_group_id=1),
+        _make_key(1, object_group_id=0),
+        _make_key(2, object_group_id=1),
+    ]
+    task_id = controller.p2p_lookup_and_lock(keys, layouts)
+    ctx.storage_manager.submit_prefetch_task.assert_not_called()
+    assert controller.p2p_query_lookup_results(task_id) == [_INVALID] * 3
 
 
 def test_lookup_and_lock_rejects_key_without_layout():
@@ -306,12 +324,13 @@ def test_query_lookup_results_multi_group_addresses_in_request_order():
         _make_key(0, object_group_id=1),  # row 0 (group 1), col 0
         _make_key(1, object_group_id=0),  # row 1 (group 0), col 0
         _make_key(2, object_group_id=1),  # row 0 (group 1), col 1
+        _make_key(3, object_group_id=0),  # row 1 (group 0), col 1
     ]
     task_id = controller.p2p_lookup_and_lock(keys, layouts)
 
     row_g1 = Bitmap(2)
     row_g1.set(1)  # keys[2] found
-    row_g0 = Bitmap(1, 1)  # keys[1] found
+    row_g0 = Bitmap(2, 1)  # keys[1] found
     ctx.storage_manager.query_prefetch_status.return_value = [row_g1, row_g0]
     obj1 = MagicMock(shm_offset=100, shm_byte_length=10)
     obj2 = MagicMock(shm_offset=200, shm_byte_length=20)
@@ -323,6 +342,7 @@ def test_query_lookup_results_multi_group_addresses_in_request_order():
         TransferChannelAddress(offset=-1, size=0),
         TransferChannelAddress(offset=100, size=10),
         TransferChannelAddress(offset=200, size=20),
+        TransferChannelAddress(offset=-1, size=0),
     ]
 
 

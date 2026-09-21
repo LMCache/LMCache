@@ -430,7 +430,7 @@ everything together.
 #    the remainder is delegated to L2. See ../storage_manager.md.
 handle = sm.submit_prefetch_task(
     PrefetchTaskSpec(
-        key_groups=[GroupedKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)]
+        key_groups=[GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)]
     )
 )
 
@@ -462,7 +462,7 @@ class PrefetchHandle:
     total_requested_keys: int
     submit_time: float              # for latency logging
     l2_orig_indices: tuple[int, ...]
-    row_lengths: tuple[int, ...]    # key-row shape, for per-row status
+    num_key_groups: int             # key-group count, for per-group status
 ```
 
 `submit_prefetch_task` first checks L1 for the prefix every object group can

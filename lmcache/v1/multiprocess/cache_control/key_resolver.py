@@ -18,10 +18,10 @@ from typing import TYPE_CHECKING
 # First Party
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
-    GroupedKeys,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
-    ipc_key_to_grouped_keys,
+    ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -34,6 +34,37 @@ if TYPE_CHECKING:
 # Keeps the request body bounded and the synchronous hashing / key-construction
 # work proportionate.
 MAX_TOKEN_IDS = 1_000_000
+
+
+def _resolve_ipc_key_and_hashes(
+    token_hasher: TokenHasher,
+    model_name: str,
+    world_size: int,
+    token_ids: list[int],
+    cache_salt: str,
+) -> tuple[IPCCacheServerKey, list[bytes]]:
+    """Build the lookup-side IPC key and hash the complete chunks.
+
+    Raises:
+        ValueError: ``token_ids`` exceeds the per-request cap.
+    """
+    if len(token_ids) > MAX_TOKEN_IDS:
+        raise ValueError(
+            f"too many token_ids in a single request "
+            f"(limit={MAX_TOKEN_IDS}, got={len(token_ids)})"
+        )
+    ipc_key = IPCCacheServerKey(
+        model_name=model_name,
+        world_size=world_size,
+        worker_id=None,
+        token_ids=tuple(token_ids),
+        start=0,
+        end=len(token_ids),
+        request_id="",
+        cache_salt=cache_salt,
+    )
+    chunk_hashes = token_hasher.compute_chunk_hashes(list(token_ids))
+    return ipc_key, chunk_hashes
 
 
 def resolve_object_keys(
@@ -77,18 +108,18 @@ def resolve_object_keys(
     return obj_keys, len(chunk_hashes)
 
 
-def resolve_grouped_keys(
+def resolve_grouped_object_keys(
     token_hasher: TokenHasher,
     model_name: str,
     world_size: int,
     token_ids: list[int],
     cache_salt: str,
     layout_desc: MemoryLayoutDesc,
-) -> tuple[list[GroupedKeys], int]:
+) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows, one per kv rank.
 
     Hashes ``token_ids`` and lays the complete-chunk keys of the single object
-    group (``0``, full attention) out as one :class:`GroupedKeys` row per kv
+    group (``0``, full attention) out as one :class:`GroupedObjectKeys` row per kv
     rank in rank order, each chunk-ordered.
 
     Args:
@@ -113,38 +144,7 @@ def resolve_grouped_keys(
     )
     if not chunk_hashes:
         return [], 0
-    key_groups = ipc_key_to_grouped_keys(
+    key_groups = ipc_key_to_grouped_object_keys(
         ipc_key, chunk_hashes, [0], {0: layout_desc}, DEFAULT_ATTN_WINDOW_DESC
     )
     return key_groups, len(chunk_hashes)
-
-
-def _resolve_ipc_key_and_hashes(
-    token_hasher: TokenHasher,
-    model_name: str,
-    world_size: int,
-    token_ids: list[int],
-    cache_salt: str,
-) -> tuple[IPCCacheServerKey, list[bytes]]:
-    """Build the lookup-side IPC key and hash the complete chunks.
-
-    Raises:
-        ValueError: ``token_ids`` exceeds the per-request cap.
-    """
-    if len(token_ids) > MAX_TOKEN_IDS:
-        raise ValueError(
-            f"too many token_ids in a single request "
-            f"(limit={MAX_TOKEN_IDS}, got={len(token_ids)})"
-        )
-    ipc_key = IPCCacheServerKey(
-        model_name=model_name,
-        world_size=world_size,
-        worker_id=None,
-        token_ids=tuple(token_ids),
-        start=0,
-        end=len(token_ids),
-        request_id="",
-        cache_salt=cache_salt,
-    )
-    chunk_hashes = token_hasher.compute_chunk_hashes(list(token_ids))
-    return ipc_key, chunk_hashes

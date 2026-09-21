@@ -51,7 +51,7 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
         l1_hit_chunks=0,
         total_requested_keys=num_chunks * world_size,
         submit_time=0.0,
-        row_lengths=(num_chunks,) * world_size,
+        num_key_groups=world_size,
     )
     ctx = _make_ctx(wait_result=True, found=found)
     module = _make_module(ctx)

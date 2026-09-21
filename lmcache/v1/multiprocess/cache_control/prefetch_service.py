@@ -18,7 +18,9 @@ from lmcache.v1.multiprocess.cache_control.errors import (
     NotFound,
     Unavailable,
 )
-from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_grouped_keys
+from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    resolve_grouped_object_keys,
+)
 from lmcache.v1.multiprocess.warm_prefetch import (
     COMPLETED,
     UNKNOWN,
@@ -76,7 +78,7 @@ class PrefetchService:
                 f"KV cache on this node yet"
             )
         try:
-            key_groups, chunks = resolve_grouped_keys(
+            key_groups, chunks = resolve_grouped_object_keys(
                 ctx.token_hasher,
                 model_name,
                 world_size,

@@ -15,7 +15,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
-    ipc_key_to_grouped_keys,
+    ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
@@ -298,7 +298,7 @@ class LookupModule:
             return
 
         spec = PrefetchTaskSpec(
-            key_groups=ipc_key_to_grouped_keys(
+            key_groups=ipc_key_to_grouped_object_keys(
                 key,
                 chunk_hashes,
                 list(range(attn_desc.num_object_groups)),

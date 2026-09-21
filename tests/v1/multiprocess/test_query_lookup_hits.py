@@ -14,7 +14,7 @@ import pytest
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
-    GroupedKeys,
+    GroupedObjectKeys,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
@@ -252,7 +252,7 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
 
 def _captured_lookup_key_groups(
     world_size: int, num_groups: int, chunk_hashes: list[bytes]
-) -> list[GroupedKeys]:
+) -> list[GroupedObjectKeys]:
     """Drive the public ``lookup()`` and return the key rows it submits.
 
     The engine context is mocked so ``lookup()`` runs end-to-end; the rows

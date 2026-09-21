@@ -9,7 +9,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
-    GroupedKeys,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -98,8 +98,8 @@ class TestPrefetchHandle:
         assert out == h
 
 
-class TestPrefetchHandleRowLengths:
-    def test_row_lengths_roundtrip(self):
+class TestPrefetchHandleKeyGroups:
+    def test_num_key_groups_roundtrip(self):
         h = PrefetchHandle(
             prefetch_request_id=1,
             external_request_id="r",
@@ -108,12 +108,12 @@ class TestPrefetchHandleRowLengths:
             total_requested_keys=4,
             submit_time=1.5,
             l2_orig_indices=(1, 2),
-            row_lengths=(2, 2),
+            num_key_groups=2,
         )
         assert _roundtrip(h) == h
 
-    def test_record_without_row_lengths_decodes_to_empty(self):
-        """Handles recorded before rows existed decode with no row shape."""
+    def test_record_without_num_key_groups_decodes_to_one(self):
+        """Handles recorded before key groups existed decode as one group."""
         encoded = codecs.encode_value(
             PrefetchHandle(
                 prefetch_request_id=-1,
@@ -124,12 +124,12 @@ class TestPrefetchHandleRowLengths:
                 submit_time=0.0,
             )
         )
-        del encoded["v"]["row_lengths"]
-        assert codecs.decode_value(encoded).row_lengths == ()
+        del encoded["v"]["num_key_groups"]
+        assert codecs.decode_value(encoded).num_key_groups == 1
 
 
-def _grouped_keys(gid: int, window: int = -1) -> GroupedKeys:
-    return GroupedKeys(
+def _grouped_object_keys(gid: int, window: int = -1) -> GroupedObjectKeys:
+    return GroupedObjectKeys(
         keys=[
             ObjectKey(
                 chunk_hash=bytes([i]), model_name="m", kv_rank=1, object_group_id=gid
@@ -150,9 +150,9 @@ class TestPrefetchLockMode:
             assert _roundtrip(m) is m
 
 
-class TestGroupedKeys:
+class TestGroupedObjectKeys:
     def test_roundtrip(self):
-        g = _grouped_keys(2, window=4)
+        g = _grouped_object_keys(2, window=4)
         out = _roundtrip(g)
         assert out == g
         assert out.sliding_window_size == 4
@@ -161,7 +161,7 @@ class TestGroupedKeys:
 class TestPrefetchTaskSpec:
     def test_roundtrip(self):
         spec = PrefetchTaskSpec(
-            key_groups=[_grouped_keys(0), _grouped_keys(1, window=2)],
+            key_groups=[_grouped_object_keys(0), _grouped_object_keys(1, window=2)],
             num_kv_readers=2,
             fetching_policy="full",
             lock_mode=PrefetchLockMode.NO_LOCK,

@@ -16,7 +16,7 @@ import httpx
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
-    GroupedKeys,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -47,6 +47,62 @@ _INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
 
 # Consecutive missed polls a peer may be absent before its adapter is removed.
 _MAX_MISSES = 3
+
+
+def _group_keys_by_object_group(
+    keys: list[ObjectKey],
+    group_layout_descs: dict[int, MemoryLayoutDesc],
+) -> list[GroupedObjectKeys]:
+    """Bucket a flat key list into one key row per object group.
+
+    Each object group becomes a single row holding its keys in request
+    order (kv ranks mixed), paired with that group's layout.
+
+    Args:
+        keys: The keys received over RPC, in request order.
+        group_layout_descs: Memory layout per object group id.
+
+    Returns:
+        One :class:`GroupedObjectKeys` per object group, in first-seen order;
+        empty when ``keys`` is empty or the object groups received different
+        numbers of keys (logged as an error).
+
+    Raises:
+        ValueError: If a key's object group has no entry in
+            ``group_layout_descs``.
+
+    Note:
+        The groups carry no chunk layout, so they are only valid for
+        ``"full"`` fetching.
+    """
+    by_group: dict[int, list[ObjectKey]] = {}
+    for key in keys:
+        by_group.setdefault(key.object_group_id, []).append(key)
+    group_sizes = {gid: len(group_keys) for gid, group_keys in by_group.items()}
+    if len(set(group_sizes.values())) > 1:
+        logger.error(
+            "P2P lookup: object groups received different numbers of keys "
+            "(%s); treating all %d keys as misses",
+            group_sizes,
+            len(keys),
+        )
+        return []
+    rows: list[GroupedObjectKeys] = []
+    for object_group_id, group_keys in by_group.items():
+        layout_desc = group_layout_descs.get(object_group_id)
+        if layout_desc is None:
+            raise ValueError(
+                f"P2P lookup: no layout for object group {object_group_id} "
+                f"(have {sorted(group_layout_descs)})"
+            )
+        rows.append(
+            GroupedObjectKeys(
+                keys=group_keys,
+                object_group_id=object_group_id,
+                layout_desc=layout_desc,
+            )
+        )
+    return rows
 
 
 class _P2PState(Enum):
@@ -86,7 +142,7 @@ class _P2PLookupJob:
     keys: list[ObjectKey]
     """ The object keys submitted for this lookup, in request order """
 
-    key_groups: list[GroupedKeys]
+    key_groups: list[GroupedObjectKeys]
     """ The same keys as submitted to the storage manager, one row per
     object group; the status result is one bitmap per row """
 
@@ -228,7 +284,7 @@ class P2PController:
             task_id = self._next_task_id
             self._next_task_id += 1
 
-        key_groups = self._group_keys_by_object_group(keys, group_layout_descs)
+        key_groups = _group_keys_by_object_group(keys, group_layout_descs)
         if key_groups:
             # NOTE: skip_l2=True -- only objects already resident in L1 are
             # locked; "full" keeps every resident key, gaps allowed.
@@ -321,52 +377,6 @@ class P2PController:
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
-
-    @staticmethod
-    def _group_keys_by_object_group(
-        keys: list[ObjectKey],
-        group_layout_descs: dict[int, MemoryLayoutDesc],
-    ) -> list[GroupedKeys]:
-        """Bucket a flat key list into one key row per object group.
-
-        Each object group becomes a single row holding its keys in request
-        order (kv ranks mixed), paired with that group's layout.
-
-        Args:
-            keys: The keys received over RPC, in request order.
-            group_layout_descs: Memory layout per object group id.
-
-        Returns:
-            One :class:`GroupedKeys` per object group, in first-seen order;
-            empty when ``keys`` is empty.
-
-        Raises:
-            ValueError: If a key's object group has no entry in
-                ``group_layout_descs``.
-
-        Note:
-            The rows carry no chunk layout and may differ in length, so they
-            are only valid for ``"full"`` fetching.
-        """
-        by_group: dict[int, list[ObjectKey]] = {}
-        for key in keys:
-            by_group.setdefault(key.object_group_id, []).append(key)
-        rows: list[GroupedKeys] = []
-        for object_group_id, group_keys in by_group.items():
-            layout_desc = group_layout_descs.get(object_group_id)
-            if layout_desc is None:
-                raise ValueError(
-                    f"P2P lookup: no layout for object group {object_group_id} "
-                    f"(have {sorted(group_layout_descs)})"
-                )
-            rows.append(
-                GroupedKeys(
-                    keys=group_keys,
-                    object_group_id=object_group_id,
-                    layout_desc=layout_desc,
-                )
-            )
-        return rows
 
     def _build_addresses(
         self,

@@ -22,7 +22,7 @@ import uuid
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
-    GroupedKeys,
+    GroupedObjectKeys,
     PrefetchHandle,
     PrefetchLockMode,
     PrefetchTaskSpec,
@@ -74,7 +74,7 @@ class WarmPrefetchJobs:
     def submit(
         self,
         storage_manager: StorageManager,
-        key_groups: list[GroupedKeys],
+        key_groups: list[GroupedObjectKeys],
     ) -> str:
         """Start a no-lock retain prefetch and register its handle.
 

@@ -7,7 +7,7 @@ from typing import Any
 
 # First Party
 from lmcache.v1.distributed.api import (
-    GroupedKeys,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchTaskSpec,
@@ -29,7 +29,9 @@ def single_row_spec(
     ``num_kv_readers``, ``fetching_policy``, ``lock_mode``).
     """
     return PrefetchTaskSpec(
-        key_groups=[GroupedKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)],
+        key_groups=[
+            GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)
+        ],
         **spec_kwargs,
     )
 
@@ -46,7 +48,7 @@ def ranked_spec(
     """
     return PrefetchTaskSpec(
         key_groups=[
-            GroupedKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)
+            GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)
             for keys in keys_by_rank
         ],
         **spec_kwargs,

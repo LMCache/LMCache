@@ -13,7 +13,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
-    GroupedKeys,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchLockMode,
@@ -796,10 +796,10 @@ class TestStorageManagerL2Prefetch:
         handle = sm.submit_prefetch_task(
             PrefetchTaskSpec(
                 key_groups=[
-                    GroupedKeys(
+                    GroupedObjectKeys(
                         keys=full_keys, object_group_id=0, layout_desc=basic_layout
                     ),
-                    GroupedKeys(
+                    GroupedObjectKeys(
                         keys=sw_keys,
                         object_group_id=1,
                         layout_desc=basic_layout,
@@ -852,10 +852,10 @@ class TestStorageManagerL2Prefetch:
         handle = sm.submit_prefetch_task(
             PrefetchTaskSpec(
                 key_groups=[
-                    GroupedKeys(
+                    GroupedObjectKeys(
                         keys=full_keys, object_group_id=0, layout_desc=basic_layout
                     ),
-                    GroupedKeys(
+                    GroupedObjectKeys(
                         keys=sw_keys,
                         object_group_id=1,
                         layout_desc=basic_layout,
@@ -1043,7 +1043,7 @@ class TestStorageManagerGroupedRows:
 
         spec = PrefetchTaskSpec(
             key_groups=[
-                GroupedKeys(
+                GroupedObjectKeys(
                     keys=rows_keys[(gid, rank)],
                     object_group_id=gid,
                     layout_desc=basic_layout,
@@ -1055,7 +1055,7 @@ class TestStorageManagerGroupedRows:
         handle = sm.submit_prefetch_task(spec)
         assert handle.prefetch_request_id == -1
         assert handle.l1_hit_chunks == 2
-        assert handle.row_lengths == (3, 3, 3, 3)
+        assert handle.num_key_groups == 4
 
         found = sm.query_prefetch_status(handle)
         assert found is not None
@@ -1075,37 +1075,35 @@ class TestStorageManagerGroupedRows:
         sm.finish_read_prefetched(retained)
         sm.close()
 
-    def test_full_policy_ragged_rows_round_trip(
+    def test_full_policy_two_groups_keep_gaps_per_group(
         self, basic_storage_manager_config, basic_layout
     ):
-        """``"full"`` accepts rows of different lengths (the P2P receiver's
-        one-row-per-object-group shape); each row's bitmap lands on that
-        row's keys, gaps included."""
+        """``"full"`` reports every resident key per group, gaps included."""
         sm = StorageManager(basic_storage_manager_config)
-        short_keys = [make_object_key(1)]
-        long_keys = [make_object_key(10 + c) for c in range(3)]
-        # Resident: the short row's only key and the long row's chunks 0 and 2.
-        resident = [short_keys[0], long_keys[0], long_keys[2]]
+        g0_keys = [make_object_key(c) for c in range(3)]
+        g1_keys = [make_object_key(10 + c) for c in range(3)]
+        # Resident: group 0 chunk 1; group 1 chunks 0 and 2.
+        resident = [g0_keys[1], g1_keys[0], g1_keys[2]]
         ret = sm.reserve_write(resident, basic_layout, mode="new")
         sm.finish_write(list(ret.keys()))
 
         handle = sm.submit_prefetch_task(
             PrefetchTaskSpec(
                 key_groups=[
-                    GroupedKeys(
-                        keys=short_keys, object_group_id=0, layout_desc=basic_layout
+                    GroupedObjectKeys(
+                        keys=g0_keys, object_group_id=0, layout_desc=basic_layout
                     ),
-                    GroupedKeys(
-                        keys=long_keys, object_group_id=1, layout_desc=basic_layout
+                    GroupedObjectKeys(
+                        keys=g1_keys, object_group_id=1, layout_desc=basic_layout
                     ),
                 ],
                 fetching_policy="full",
             )
         )
-        assert handle.row_lengths == (1, 3)
+        assert handle.num_key_groups == 2
         found = sm.query_prefetch_status(handle)
         assert found is not None
-        assert [row.get_indices_list() for row in found] == [[0], [0, 2]]
+        assert [row.get_indices_list() for row in found] == [[1], [0, 2]]
 
         sm.finish_read_prefetched(resident)
         sm.close()

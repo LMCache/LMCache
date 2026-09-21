@@ -13,6 +13,7 @@ import time
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
+from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     CapacitySnapshot,
@@ -76,6 +77,67 @@ from lmcache.v1.mp_observability.trace.decorator import (
 from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
+
+
+@lmcache_deprecate(
+    "transitional adapter to the flat PrefetchRequestSpec; removed with the "
+    "prefetch controller refactor"
+)
+def _flatten_rows(spec: PrefetchTaskSpec) -> list[ObjectKey]:
+    """Flatten the key groups of a request into a single key list.
+
+    Args:
+        spec: The grouped request.
+
+    Returns:
+        The flat key list of ``spec.group_size * len(spec.key_groups)`` keys.
+
+    Note:
+        The groups are interleaved chunk-major: every group's key 0, then
+        every group's key 1, and so on. :func:`_split_rows` is the exact
+        inverse.
+    """
+    rows = spec.key_groups
+    return [row.keys[c] for c in range(spec.group_size) for row in rows]
+
+
+@lmcache_deprecate(
+    "transitional adapter to the flat PrefetchRequestSpec; removed with the "
+    "prefetch controller refactor"
+)
+def _split_rows(found: Bitmap, num_key_groups: int) -> list[Bitmap]:
+    """Split a flat result bitmap into one bitmap per key group.
+
+    Args:
+        found: Bitmap over the flat key list built by :func:`_flatten_rows`.
+        num_key_groups: Number of key groups the flat list interleaves.
+
+    Returns:
+        ``num_key_groups`` bitmaps of ``len(found) // num_key_groups`` bits
+        each; bit ``i`` of bitmap ``k`` is set iff the flat bit of group
+        ``k``'s key ``i`` is set.
+
+    Raises:
+        ValueError: If ``num_key_groups`` is not positive or does not divide
+            the bitmap size.
+    """
+    if num_key_groups < 1:
+        raise ValueError(f"num_key_groups must be >= 1 (got {num_key_groups})")
+    total = len(found)
+    if total % num_key_groups != 0:
+        raise ValueError(
+            f"bitmap of {total} bits cannot be split into {num_key_groups} "
+            "equal key groups"
+        )
+    per_row: list[list[int]] = [[] for _ in range(num_key_groups)]
+    # Chunk-major interleave: flat index i -> (chunk i // R, group i % R).
+    for i in found.get_indices_list():
+        chunk, row_idx = divmod(i, num_key_groups)
+        per_row[row_idx].append(chunk)
+    rows = [Bitmap(total // num_key_groups) for _ in range(num_key_groups)]
+    for bitmap, indices in zip(rows, per_row, strict=True):
+        bitmap.batched_set(indices)
+    return rows
 
 
 class StorageManager:
@@ -435,7 +497,7 @@ class StorageManager:
         Returns:
             PrefetchHandle to track the task.
         """
-        row_lengths = spec.row_lengths
+        num_key_groups = len(spec.key_groups)
         request = self._to_controller_spec(spec)
         keys = request.keys
 
@@ -456,7 +518,7 @@ class StorageManager:
                 l2_orig_indices=(
                     tuple(range(len(keys))) if prefetch_request_id != -1 else ()
                 ),
-                row_lengths=row_lengths,
+                num_key_groups=num_key_groups,
             )
 
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
@@ -509,7 +571,7 @@ class StorageManager:
                 l2_orig_indices=(
                     tuple(sparse_l2_indices) if prefetch_request_id != -1 else ()
                 ),
-                row_lengths=row_lengths,
+                num_key_groups=num_key_groups,
             )
 
         # PREFIX: fold the per-(group, chunk, rank) L1 presence into the
@@ -522,133 +584,10 @@ class StorageManager:
                 l1_read_result,
                 external_request_id,
                 skip_l2,
-                row_lengths,
+                num_key_groups,
             )
 
         raise ValueError(f"Unsupported trim policy: {request.policy}")
-
-    # TODO(prefetch-v2): remove this transitional adapter.
-    def _to_controller_spec(self, spec: PrefetchTaskSpec) -> PrefetchRequestSpec:
-        """Convert a grouped prefetch request into the flat-key payload.
-
-        .. deprecated::
-            Transitional adapter; removed with the prefetch controller
-            refactor.
-
-        Args:
-            spec: The grouped request.
-
-        Returns:
-            The equivalent flat payload.
-
-        Note:
-            The flat key order is defined by :meth:`_flatten_rows`.
-            ``group_layout_descs`` is keyed by the rows' object group ids;
-            ``attn_desc`` lists one window per object group in row order, with
-            ``world_size`` = rows per group (``1`` when groups differ in row
-            count, which only ``"full"`` allows).
-        """
-        num_chunks_in_sw: list[int] = []
-        group_layout_descs: dict[int, MemoryLayoutDesc] = {}
-        rows_per_group: dict[int, int] = {}
-        for row in spec.key_groups:
-            if row.object_group_id not in group_layout_descs:
-                group_layout_descs[row.object_group_id] = row.layout_desc
-                num_chunks_in_sw.append(row.sliding_window_size)
-            rows_per_group[row.object_group_id] = (
-                rows_per_group.get(row.object_group_id, 0) + 1
-            )
-        # Rank fan-out = rows per group; 1 when the groups disagree (only
-        # possible under "full", where the fan-out is unused).
-        row_counts = set(rows_per_group.values())
-        world_size = row_counts.pop() if len(row_counts) == 1 else 1
-        return PrefetchRequestSpec(
-            keys=self._flatten_rows(spec),
-            group_layout_descs=group_layout_descs,
-            num_kv_readers=spec.num_kv_readers,
-            policy=(
-                TrimPolicy.PREFIX
-                if spec.fetching_policy == "prefix"
-                else TrimPolicy.SPARSE
-            ),
-            attn_desc=AttnWindowDesc(
-                num_chunks_in_sw=num_chunks_in_sw,
-                world_size=world_size,
-            ),
-            mode=(
-                PrefetchMode.LOOKUP
-                if spec.lock_mode is PrefetchLockMode.LOCK
-                else PrefetchMode.WARM
-            ),
-        )
-
-    # TODO(prefetch-v2): remove this transitional adapter.
-    @staticmethod
-    def _flatten_rows(spec: PrefetchTaskSpec) -> list[ObjectKey]:
-        """Flatten the key rows into a single key list.
-
-        .. deprecated::
-            Transitional adapter; removed with the prefetch controller
-            refactor.
-
-        Args:
-            spec: The grouped request.
-
-        Returns:
-            The flat key list; ``len == spec.total_keys``.
-
-        Note:
-            Uniform rows are interleaved chunk-major (all rows' chunk 0, then
-            all rows' chunk 1, ...); ragged rows are concatenated.
-            :meth:`_split_rows` is the exact inverse.
-        """
-        rows = spec.key_groups
-        if spec.is_uniform:
-            return [row.keys[c] for c in range(spec.num_chunks) for row in rows]
-        return [key for row in rows for key in row.keys]
-
-    # TODO(prefetch-v2): remove this transitional adapter.
-    @staticmethod
-    def _split_rows(found: Bitmap, row_lengths: tuple[int, ...]) -> list[Bitmap]:
-        """Split a flat result bitmap into one bitmap per key row.
-
-        .. deprecated::
-            Transitional adapter; removed with the prefetch controller
-            refactor.
-
-        Args:
-            found: Bitmap over the flat key list built by :meth:`_flatten_rows`.
-            row_lengths: Number of keys in each row; empty means a single row
-                spanning the whole bitmap.
-
-        Returns:
-            One bitmap per row, ``len(rows[k]) == row_lengths[k]``; bit ``i``
-            of row ``k`` is set iff the flat bit of that row's key ``i`` is
-            set.
-        """
-        if not row_lengths:
-            return [found]
-        num_rows = len(row_lengths)
-        per_row: list[list[int]] = [[] for _ in range(num_rows)]
-        if len(set(row_lengths)) == 1:
-            # Chunk-major interleave: flat index i -> (chunk i // R, row i % R).
-            for i in found.get_indices_list():
-                chunk, row_idx = divmod(i, num_rows)
-                per_row[row_idx].append(chunk)
-        else:
-            # Concatenation: walk the flat indices with the row offsets.
-            offsets = [0]
-            for length in row_lengths:
-                offsets.append(offsets[-1] + length)
-            row_idx = 0
-            for i in found.get_indices_list():
-                while i >= offsets[row_idx + 1]:
-                    row_idx += 1
-                per_row[row_idx].append(i - offsets[row_idx])
-        rows = [Bitmap(length) for length in row_lengths]
-        for bitmap, indices in zip(rows, per_row, strict=True):
-            bitmap.batched_set(indices)
-        return rows
 
     def _submit_prefix_fold(
         self,
@@ -656,7 +595,7 @@ class StorageManager:
         l1_read_result: dict[ObjectKey, tuple[L1Error, "MemoryObj | None"]],
         external_request_id: str,
         skip_l2: bool,
-        row_lengths: tuple[int, ...],
+        num_key_groups: int,
     ) -> PrefetchHandle:
         """PREFIX path: fold L1 presence, retain in-window keys, submit rest to L2.
 
@@ -668,8 +607,8 @@ class StorageManager:
                 read-locked until the fold releases the out-of-window ones.
             external_request_id: Engine-side request id, for logging/trace.
             skip_l2: When True, serve from L1 only (no L2 prefetch).
-            row_lengths: Number of keys in each key row of the request,
-                recorded on the returned handle.
+            num_key_groups: Number of key groups in the request, recorded on
+                the returned handle.
 
         Returns:
             A :class:`PrefetchHandle` carrying the L1 hit (retained indices
@@ -748,7 +687,7 @@ class StorageManager:
             total_requested_keys=len(keys),
             submit_time=submit_time,
             l2_orig_indices=l2_orig_indices,
-            row_lengths=row_lengths,
+            num_key_groups=num_key_groups,
         )
 
     def _combine_found(
@@ -877,7 +816,7 @@ class StorageManager:
                 handle.external_request_id,
                 handle.prefetch_request_id,
             )
-        return self._split_rows(found, handle.row_lengths)
+        return _split_rows(found, handle.num_key_groups)
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
@@ -1422,3 +1361,46 @@ class StorageManager:
         if adapter_index < 0 or adapter_index >= len(adapters):
             raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
         return adapters[adapter_index][1]
+
+    @lmcache_deprecate(
+        "transitional adapter to the flat PrefetchRequestSpec; removed with "
+        "the prefetch controller refactor"
+    )
+    def _to_controller_spec(self, spec: PrefetchTaskSpec) -> PrefetchRequestSpec:
+        """Convert a grouped prefetch request into the flat-key payload.
+
+        Args:
+            spec: The grouped request.
+
+        Returns:
+            The equivalent flat payload.
+
+        Note:
+            The flat key order is defined by :func:`_flatten_rows`. Each key
+            group becomes one fold unit of the flat payload (``attn_desc``
+            lists one window per key group, ``world_size`` 1), so the groups
+            may appear in any order. ``group_layout_descs`` is keyed by the
+            groups' object group ids.
+        """
+        group_layout_descs: dict[int, MemoryLayoutDesc] = {
+            row.object_group_id: row.layout_desc for row in spec.key_groups
+        }
+        return PrefetchRequestSpec(
+            keys=_flatten_rows(spec),
+            group_layout_descs=group_layout_descs,
+            num_kv_readers=spec.num_kv_readers,
+            policy=(
+                TrimPolicy.PREFIX
+                if spec.fetching_policy == "prefix"
+                else TrimPolicy.SPARSE
+            ),
+            attn_desc=AttnWindowDesc(
+                num_chunks_in_sw=[row.sliding_window_size for row in spec.key_groups],
+                world_size=1,
+            ),
+            mode=(
+                PrefetchMode.LOOKUP
+                if spec.lock_mode is PrefetchLockMode.LOCK
+                else PrefetchMode.WARM
+            ),
+        )

@@ -29,7 +29,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
-    GroupedKeys,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -215,7 +215,7 @@ def _enc_prefetch_handle(h: PrefetchHandle) -> dict[str, Any]:
         "total_requested_keys": h.total_requested_keys,
         "submit_time": h.submit_time,
         "l2_orig_indices": list(h.l2_orig_indices),
-        "row_lengths": list(h.row_lengths),
+        "num_key_groups": h.num_key_groups,
     }
 
 
@@ -228,7 +228,7 @@ def _dec_prefetch_handle(d: dict[str, Any]) -> PrefetchHandle:
         total_requested_keys=d["total_requested_keys"],
         submit_time=d["submit_time"],
         l2_orig_indices=tuple(d.get("l2_orig_indices", ())),
-        row_lengths=tuple(d.get("row_lengths", ())),
+        num_key_groups=d.get("num_key_groups", 1),
     )
 
 
@@ -329,7 +329,7 @@ def _dec_prefetch_lock_mode(name: str) -> PrefetchLockMode:
     return PrefetchLockMode[name]
 
 
-def _enc_grouped_keys(g: GroupedKeys) -> dict[str, Any]:
+def _enc_grouped_object_keys(g: GroupedObjectKeys) -> dict[str, Any]:
     return {
         "keys": [encode_value(k) for k in g.keys],
         "object_group_id": g.object_group_id,
@@ -338,8 +338,8 @@ def _enc_grouped_keys(g: GroupedKeys) -> dict[str, Any]:
     }
 
 
-def _dec_grouped_keys(d: dict[str, Any]) -> GroupedKeys:
-    return GroupedKeys(
+def _dec_grouped_object_keys(d: dict[str, Any]) -> GroupedObjectKeys:
+    return GroupedObjectKeys(
         keys=[decode_value(k) for k in d["keys"]],
         object_group_id=d["object_group_id"],
         layout_desc=decode_value(d["layout_desc"]),
@@ -432,11 +432,11 @@ register_codec(
     ),
 )
 register_codec(
-    GroupedKeys,
+    GroupedObjectKeys,
     TypeCodec(
-        tag="GroupedKeys",
-        encode=_enc_grouped_keys,
-        decode=_dec_grouped_keys,
+        tag="GroupedObjectKeys",
+        encode=_enc_grouped_object_keys,
+        decode=_dec_grouped_object_keys,
     ),
 )
 register_codec(

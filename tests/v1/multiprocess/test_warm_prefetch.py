@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 # First Party
-from lmcache.v1.distributed.api import GroupedKeys, ObjectKey, PrefetchLockMode
+from lmcache.v1.distributed.api import GroupedObjectKeys, ObjectKey, PrefetchLockMode
 from lmcache.v1.multiprocess.warm_prefetch import (
     COMPLETED,
     PENDING,
@@ -83,7 +83,7 @@ def test_submit_uses_retain_and_poll_completes_without_release():
     jobs = WarmPrefetchJobs()
 
     request_id = jobs.submit(
-        sm, [GroupedKeys(keys=keys, object_group_id=0, layout_desc=object())]
+        sm, [GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=object())]
     )
     assert sm.submit_args is not None
     assert sm.submit_args["keys"] == keys

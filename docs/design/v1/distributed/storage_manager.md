@@ -22,9 +22,9 @@ is a **row**, and the prefetch result is one bitmap per row.
 
 ```
               chunk 0   chunk 1   chunk 2  ...
-row 0  g0 r0  [ key ]   [ key ]   [ key ]        <- GroupedKeys(object_group_id=0)
+row 0  g0 r0  [ key ]   [ key ]   [ key ]        <- GroupedObjectKeys(object_group_id=0)
 row 1  g0 r1  [ key ]   [ key ]   [ key ]
-row 2  g1 r0  [ key ]   [ key ]   [ key ]        <- GroupedKeys(object_group_id=1,
+row 2  g1 r0  [ key ]   [ key ]   [ key ]        <- GroupedObjectKeys(object_group_id=1,
 row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_size=w)
 ```
 
@@ -32,12 +32,12 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 
 | Type | Purpose |
 |---|---|
-| `GroupedKeys` | One row: `keys` (chunk-ordered, `keys[i]` covers tokens `[i*chunk, (i+1)*chunk)`), `object_group_id`, `layout_desc` (L1 write-buffer layout for L2 loads), `sliding_window_size` (`-1` full attention, `w >= 1` window). |
-| `PrefetchTaskSpec` | `key_groups` (rows, **group-major / rank-minor**: the rows of one object group are adjacent, one per kv rank), `num_kv_readers`, `fetching_policy`, `lock_mode`. |
-| `FetchingPolicy` | `"prefix"`: only the longest prefix every object group can serve under its window; rows must form a chunk grid (equal lengths, equal rows per group). `"full"`: every found object, gaps included; rows may be ragged. |
+| `GroupedObjectKeys` | One row: `keys` (chunk-ordered, `keys[i]` covers tokens `[i*chunk, (i+1)*chunk)`), `object_group_id`, `layout_desc` (L1 write-buffer layout for L2 loads), `sliding_window_size` (`-1` full attention, `w >= 1` window). |
+| `PrefetchTaskSpec` | `key_groups` (one `GroupedObjectKeys` per `(object group, kv rank)`, in any order; all of the same `group_size`), `num_kv_readers`, `fetching_policy`, `lock_mode`. |
+| `FetchingPolicy` | `"prefix"`: only the longest prefix every object group can serve under its window; every object group has the same number of rows. `"full"`: every found object, gaps included. |
 | `PrefetchLockMode` | `LOCK`: the caller reads the objects and releases them with `finish_read_prefetched`. `NO_LOCK`: warm-up, nothing is locked. |
-| `PrefetchHandle` | Opaque; carries `row_lengths` so the result can be reported per row. |
-| `ipc_key_to_grouped_keys` | Builds the rows of a request from an `IPCCacheServerKey`, the chunk hashes, the object groups to read, the per-group layouts and the registration's `AttnWindowDesc`. |
+| `PrefetchHandle` | Opaque; carries `num_key_groups` so the result can be reported per row. |
+| `ipc_key_to_grouped_object_keys` | Builds the rows of a request from an `IPCCacheServerKey`, the chunk hashes, the object groups to read, the per-group layouts and the registration's `AttnWindowDesc`. |
 
 ### Contract
 
@@ -53,18 +53,17 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
   `sliding_window_size`, to get the chunk hit count; no stride arithmetic is
   needed.
 - Validation happens in `PrefetchTaskSpec.__post_init__` and raises
-  `ValueError`: empty `key_groups`, non-adjacent rows of one object group,
-  `num_kv_readers < 1`, and under `"prefix"` ragged rows or object groups with
-  different row counts.
+  `ValueError`: empty `key_groups`, key groups of different sizes, and
+  `num_kv_readers < 1`.
 
 ### Callers
 
 | Caller | Rows | Policy / lock |
 |---|---|---|
-| `multiprocess/modules/lookup.py` (engine lookup) | every registered object group x every kv rank, via `ipc_key_to_grouped_keys` | `"prefix"`, `LOCK` |
+| `multiprocess/modules/lookup.py` (engine lookup) | every registered object group x every kv rank, via `ipc_key_to_grouped_object_keys` | `"prefix"`, `LOCK` |
 | blend prefix leg (`modules/blend/lookup.py`) | the leg's read groups (attention + recurrent) x ranks | `"prefix"`, `LOCK` |
 | blend sparse leg | the blend read groups (attention + aux) x ranks over the de-duplicated matched chunk hashes | `"full"`, `LOCK` |
-| P2P receiver (`modules/p2p_controller.py`) | **one row per object group** holding the peer's keys in request order, ranks mixed. The peer only asks "are these resident"; it carries no chunk layout. Rows may be ragged. | `"full"`, `LOCK`, `skip_l2=True` |
+| P2P receiver (`modules/p2p_controller.py`) | **one row per object group** holding the peer's keys in request order, ranks mixed. The peer only asks "are these resident"; it carries no chunk layout. If the groups receive different numbers of keys the lookup logs an error and reports every key as a miss. | `"full"`, `LOCK`, `skip_l2=True` |
 | warm prefetch (`warm_prefetch.py`, `cache_control/key_resolver.py`) | object group 0 x ranks | `"full"`, `NO_LOCK` |
 
 ### Prerequisite: grouped fold / unfold
@@ -84,16 +83,18 @@ flat, chunk-major `PrefetchRequestSpec`. Three private, **deprecated** shims in
 prefetch-controller-v2 PR (`TODO(prefetch-v2)` markers):
 
 - `_to_controller_spec(spec)` builds the legacy payload: `group_layout_descs`
-  keyed by the rows' real object group ids (the controller allocates L1
+  keyed by the groups' real object group ids (the controller allocates L1
   buffers per `key.object_group_id`), an `AttnWindowDesc` with one window per
-  object group in row order and `world_size = rows per group`,
+  key group in `key_groups` order and `world_size = 1` (each key group is its
+  own fold unit, so the groups may appear in any order),
   `"prefix" -> TrimPolicy.PREFIX`, `"full" -> TrimPolicy.SPARSE`,
   `LOCK -> PrefetchMode.LOOKUP`, `NO_LOCK -> PrefetchMode.WARM`.
-- `_flatten_rows(spec)`: uniform rows are interleaved chunk-major (today's
-  `chunk -> group -> rank` order, which the flat fold expects); ragged rows
-  (`"full"` only, never folded) are concatenated.
-- `_split_rows(found, row_lengths)`: the exact inverse, applied to the flat
-  result bitmap in `query_prefetch_status`.
+- `_flatten_rows(spec)` (module-level): rows are interleaved chunk-major
+  (today's `chunk -> group -> rank` order, which the flat fold expects).
+- `_split_rows(found, num_key_groups)` (module-level): the exact inverse,
+  applied to the flat result bitmap in `query_prefetch_status`.
+
+All three carry `@lmcache_deprecate`.
 
 `TrimPolicy`, `PrefetchMode` and `PrefetchRequestSpec` moved from `api.py` to
 `internal_api.py` and are deprecated: nothing outside the storage manager and
@@ -113,4 +114,4 @@ retention is derived from the per-row result instead.
 - `tests/v1/multiprocess/test_query_lookup_hits.py`, `test_p2p_controller.py`,
   `test_warm_prefetch.py`, blend tests: the rows each caller submits.
 - `tests/v1/mp_observability/trace/test_codecs.py`: trace round-trips of the
-  new types and of `PrefetchHandle.row_lengths`.
+  new types and of `PrefetchHandle.num_key_groups`.
