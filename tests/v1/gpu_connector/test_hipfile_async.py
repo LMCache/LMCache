@@ -11,7 +11,6 @@ covered by the on-hardware roundtrip tests in ``test_gds_context.py``.
 """
 
 # Standard
-from collections.abc import Iterator
 from types import SimpleNamespace
 import ctypes
 
@@ -61,12 +60,11 @@ def backend() -> ha.Backend:
 
 
 @pytest.fixture(autouse=True)
-def _fake_lib(backend: ha.Backend, monkeypatch) -> Iterator[_FakeLib]:
-    """Replace the native library and release ownership before unpatching it."""
+def _fake_lib(backend: ha.Backend, monkeypatch) -> _FakeLib:
+    """Replace the backend's native library with a fresh fake."""
     lib = _FakeLib()
     monkeypatch.setattr(backend, "library", lambda: lib)
-    yield lib
-    backend.close_driver()
+    return lib
 
 
 def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096):

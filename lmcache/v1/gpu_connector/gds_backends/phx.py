@@ -12,7 +12,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
 
@@ -106,11 +105,9 @@ class Backend(FileGDSBackend):
     """Own the phx driver and its registration operations."""
 
     name = "phx"
-    _driver = SharedDriver()
 
     def __init__(self) -> None:
         self._lib: Optional[ctypes.CDLL] = None
-        self._driver_opened = False
 
     def validate_environment(self) -> None:
         if torch.version.hip is None and torch.version.cuda is None:
@@ -186,34 +183,20 @@ class Backend(FileGDSBackend):
         )
 
     def close_driver(self) -> None:
-        if not self._driver_opened:
-            return
-        try:
-            self._driver.release(self, self._close_driver)
-        finally:
-            self._driver_opened = False
+        # Closing the shim sweeps its registration table and all opened devices.
+        if self._lib is not None:
+            _check(self._lib.phxFileDriverClose(), "phxFileDriverClose")
 
     def library(self) -> ctypes.CDLL:
         """Load ``libphxfile.so`` on first use and declare the frozen ABI."""
-        if self._lib is None:
-            search = ctypes.util.find_library("phxfile")
-            path = search or "libphxfile.so"
-            lib = ctypes.CDLL(path)
-            _declare_signatures(lib, path)
-            self._lib = lib
-        if not self._driver_opened:
-            self._driver.acquire(self, self._open_driver)
-            self._driver_opened = True
-        return self._lib
-
-    def _open_driver(self) -> None:
-        # phx opens devices lazily during registration, not at library load.
-        pass
-
-    def _close_driver(self) -> None:
-        # Closing the shim sweeps its registration table and all opened devices.
-        assert self._lib is not None
-        _check(self._lib.phxFileDriverClose(), "phxFileDriverClose")
+        if self._lib is not None:
+            return self._lib
+        search = ctypes.util.find_library("phxfile")
+        path = search or "libphxfile.so"
+        lib = ctypes.CDLL(path)
+        _declare_signatures(lib, path)
+        self._lib = lib
+        return lib
 
 
 class AsyncHandle(GDSHandle):

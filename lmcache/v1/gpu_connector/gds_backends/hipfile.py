@@ -11,7 +11,6 @@ import threading
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
 
@@ -117,7 +116,6 @@ class Backend(FileGDSBackend):
     """Own the hipfile driver and its registration operations."""
 
     name = "hipfile"
-    _driver = SharedDriver()
 
     def __init__(self) -> None:
         self._driver_opened = False
@@ -143,10 +141,14 @@ class Backend(FileGDSBackend):
     def close_driver(self) -> None:
         if not self._driver_opened:
             return
-        try:
-            self._driver.release(self, self._close_driver)
-        finally:
-            self._driver_opened = False
+        lib = self.library()
+        with self._init_lock:
+            if not self._driver_opened:
+                return
+            try:
+                self.check_error(lib.hipFileDriverClose(), "hipFileDriverClose")
+            finally:
+                self._driver_opened = False
 
     def register_handle(self, fd: int) -> int:
         self._ensure_driver_open()
@@ -225,14 +227,13 @@ class Backend(FileGDSBackend):
     def _ensure_driver_open(self) -> None:
         if self._driver_opened:
             return
-        self._driver.acquire(self, self._open_driver)
-        self._driver_opened = True
-
-    def _open_driver(self) -> None:
-        self.check_error(self.library().hipFileDriverOpen(), "hipFileDriverOpen")
-
-    def _close_driver(self) -> None:
-        self.check_error(self.library().hipFileDriverClose(), "hipFileDriverClose")
+        # Load before taking the non-reentrant initialization lock.
+        lib = self.library()
+        with self._init_lock:
+            if self._driver_opened:
+                return
+            self.check_error(lib.hipFileDriverOpen(), "hipFileDriverOpen")
+            self._driver_opened = True
 
     def _op_error_string(self, err_code: int) -> str:
         """Return the human-readable name for a ``hipFileOpError_t`` value."""

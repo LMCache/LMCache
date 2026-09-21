@@ -2,7 +2,6 @@
 """Exercise the cuFile backend against fake native bindings, without CUDA."""
 
 # Standard
-from collections.abc import Iterator
 from unittest.mock import Mock
 import ctypes
 import sys
@@ -33,10 +32,8 @@ def bindings(monkeypatch: pytest.MonkeyPatch) -> Mock:
 
 
 @pytest.fixture
-def backend(bindings: Mock) -> Iterator[CuFileBackend]:
-    backend = CuFileBackend()
-    yield backend
-    backend.close_driver()
+def backend() -> CuFileBackend:
+    return CuFileBackend()
 
 
 def test_driver_opens_once_and_can_reopen_after_close(

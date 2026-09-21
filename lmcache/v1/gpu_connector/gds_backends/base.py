@@ -45,15 +45,14 @@ class GDSBackend(ABC):
     A backend module exports a concrete ``Backend`` subclass whose ``name``
     matches the module's configuration name. Construction, default selection,
     and environment validation must not open a native driver. Load optional
-    dependencies and acquire driver ownership on the first native operation.
+    dependencies lazily when a native operation needs them.
     Platform requirements belong to implementations; this base imposes none.
 
-    Each context exclusively owns its backend instance. Callers must stop new
+    The process's GDS context owns its backend instance. Callers must stop new
     operations and complete outstanding DMA before deregistering buffers and
     streams, closing slab handles, and finally calling ``close_driver``.
-    Separate instances may share a process-wide native driver: releasing one
-    instance must not invalidate another instance's resources. SharedDriver
-    provides this accounting for the built-in implementations.
+    Driver state follows the implementation's native API; this interface does
+    not coordinate driver lifetimes across backend instances.
 
     Implementations propagate native initialization/registration errors.
     Cleanup methods require completed IO; they do not synchronize GPU streams
@@ -88,8 +87,8 @@ class GDSBackend(ABC):
         The implementation interprets the location (for example, a directory
         or raw device) and the direct-IO preference. It must validate capacity
         and prepare/register the backing storage before returning. On failure,
-        close any descriptor or handle created here; the context then releases
-        this backend's driver ownership with ``close_driver``.
+        close any descriptor or handle created here; the context then calls
+        ``close_driver`` to clean up driver state.
         """
 
     @abstractmethod
@@ -106,7 +105,7 @@ class GDSBackend(ABC):
     def register_handle(self, fd: int) -> Any:
         """Register fd and return its backend-specific native handle.
 
-        Acquire driver ownership on first use. This low-level method leaves fd
+        Initialize the driver as needed. This low-level method leaves fd
         ownership with the caller, including on failure; ``open_handle`` wraps
         it when descriptor ownership should transfer to a GDSHandle.
         """
@@ -124,8 +123,8 @@ class GDSBackend(ABC):
         """Register the contiguous GPU allocation described by ``buf`` for DMA.
 
         The region is buf.data_ptr() through numel() * element_size() bytes.
-        Acquire driver ownership on first use. Callers retain the tensor while
-        registered and until all DMA completes; implementations own any device,
+        Call after slab setup. Retain the tensor while registered and until
+        all DMA completes; implementations own any device,
         alignment, and maximum-region-size validation.
         """
 
@@ -141,7 +140,7 @@ class GDSBackend(ABC):
     def register_stream(self, raw_stream: int) -> None:
         """Prepare the integer native stream handle for stream-ordered IO.
 
-        Acquire driver ownership on first use. The caller owns the GPU stream;
+        Initialize driver state as needed. The caller owns the GPU stream;
         implementations may use a native registration or a no-op shim.
         """
 
@@ -154,11 +153,11 @@ class GDSBackend(ABC):
 
     @abstractmethod
     def close_driver(self) -> None:
-        """Release this instance's driver ownership after its resources are closed.
+        """Close native driver state after registrations and handles are closed.
 
-        Repeated calls and calls before first use are no-ops; they must not load
-        a library. Only the last owner may close a shared native driver. Native
-        cleanup errors propagate, but another backend's ownership is unaffected.
+        Calling before first use must not load a library. Implementations keep
+        their native close behavior, including error propagation; the base adds
+        no reference counting or coordination with other backend instances.
         """
 
 
@@ -228,7 +227,7 @@ class GDSHandle(ABC):
 
         Descriptor cleanup still runs if deregistration raises. The handle then
         reports fd == -1 and subsequent closes are no-ops. Does not synchronize
-        streams or release the backend's driver ownership.
+        streams or close the backend's driver.
         """
         if self._fd < 0:
             return
