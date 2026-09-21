@@ -33,12 +33,8 @@ class TestBlendLoggingSubscriber:
         subs = subscriber.get_subscriptions()
         assert EventType.CB_LOOKUP_START in subs
         assert EventType.CB_LOOKUP_END in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_START in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_END in subs
         assert EventType.CB_RETRIEVE_START in subs
         assert EventType.CB_RETRIEVE_END in subs
-        assert EventType.CB_STORE_FINAL_START in subs
-        assert EventType.CB_STORE_FINAL_END in subs
         assert EventType.CB_FINGERPRINTS_REGISTERED in subs
         assert EventType.CB_CHUNKS_EVICTED in subs
 
@@ -46,9 +42,7 @@ class TestBlendLoggingSubscriber:
         subs = subscriber.get_subscriptions()
         assert EventType.CB_REQUEST_START not in subs
         assert EventType.CB_REQUEST_END not in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_SUBMITTED not in subs
         assert EventType.CB_RETRIEVE_SUBMITTED not in subs
-        assert EventType.CB_STORE_FINAL_SUBMITTED not in subs
 
     def test_lookup_start_logs(self, bus, subscriber):
         bus.start()
@@ -80,35 +74,6 @@ class TestBlendLoggingSubscriber:
         time.sleep(0.15)
         bus.stop()
 
-    def test_store_pre_computed_start_logs(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
-                session_id="req-2",
-                metadata={"instance_id": 0, "num_tokens": 64},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_store_pre_computed_end_logs(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
-                session_id="req-2",
-                metadata={
-                    "instance_id": 0,
-                    "num_tokens": 64,
-                    "stored_chunks": 4,
-                    "success": True,
-                },
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
     def test_retrieve_start_logs(self, bus, subscriber):
         bus.start()
         bus.publish(
@@ -128,35 +93,6 @@ class TestBlendLoggingSubscriber:
                 event_type=EventType.CB_RETRIEVE_END,
                 session_id="req-3",
                 metadata={"instance_id": 1, "num_chunks": 3, "success": True},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_store_final_start_logs(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_START,
-                session_id="req-4",
-                metadata={"instance_id": 2, "num_tokens": 512},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_store_final_end_logs(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_END,
-                session_id="req-4",
-                metadata={
-                    "instance_id": 2,
-                    "num_tokens": 512,
-                    "stored_chunks": 32,
-                    "success": True,
-                },
             )
         )
         time.sleep(0.15)

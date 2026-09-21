@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+import itertools
 
 
 class EventType(Enum):
@@ -57,6 +58,9 @@ class EventType(Enum):
     L2_KEYS_EVICTED = "l2.keys.evicted"
 
     # L2 adapter key-level events.
+    # Capacity topology changed (adapter added/removed/reconfigured).
+    SM_CAPACITY_CHANGED = "sm.capacity.changed"
+
     L2_KEYS_STORED = "l2.keys.stored"
     L2_KEYS_ACCESSED = "l2.keys.accessed"
     L2_KEYS_DELETED = "l2.keys.deleted"
@@ -67,6 +71,16 @@ class EventType(Enum):
     # MP Server request-level events (start/end pairs)
     MP_STORE_START = "mp.store.start"
     MP_STORE_END = "mp.store.end"
+    # Gather/DMA phase timings popped from the native plan executor by
+    # TransferPhaseSampler on MP_*_END. Metadata: ``samples`` (list[tuple])
+    # and ``ended_transfer_key`` (str, the ending transfer's key -- its
+    # completion signal, present even when ``samples`` is empty);
+    # one (phase, direction, device_index, elapsed_ms, nbytes, transfer_key,
+    # start_time_s, end_time_s) tuple per finished timed section;
+    # phase/direction are TransferPhase / TransferDirection values and
+    # transfer_key (in the native layer's session_id slot) identifies the
+    # store/retrieve operation, minted by ``next_transfer_key``.
+    MP_TRANSFER_PHASE_SAMPLES = "mp.transfer.phase_samples"
     MP_RETRIEVE_START = "mp.retrieve.start"
     MP_RETRIEVE_END = "mp.retrieve.end"
     MP_LOOKUP_PREFETCH_START = "mp.lookup_prefetch.start"
@@ -108,24 +122,21 @@ class EventType(Enum):
     #                         event later
     TRACE_CALL = "trace.call"
 
-    # Cache Blending (CB) events — GPU operation start/end pairs
+    # Cache Blending (CB) events — lookup / retrieve start/end pairs
     CB_LOOKUP_START = "cb.lookup.start"
     CB_LOOKUP_END = "cb.lookup.end"
-    CB_STORE_PRE_COMPUTED_START = "cb.store_pre_computed.start"
-    CB_STORE_PRE_COMPUTED_END = "cb.store_pre_computed.end"
     CB_RETRIEVE_START = "cb.retrieve.start"
     CB_RETRIEVE_END = "cb.retrieve.end"
-    CB_STORE_FINAL_START = "cb.store_final.start"
-    CB_STORE_FINAL_END = "cb.store_final.end"
     CB_FINGERPRINTS_REGISTERED = "cb.fingerprints.registered"
     CB_CHUNKS_EVICTED = "cb.chunks.evicted"
 
-    # CB V3 lookup sub-spans (CPU) — nest under cb.lookup. Submitted-once but
+    # CB lookup sub-spans (CPU) — nest under cb.lookup. Submitted-once but
     # END may fire on a later poll (the non-blocking lookup re-issues), so the
     # span captures submit→resident incl. poll-wait.
     CB_FINGERPRINT_MATCH_START = "cb.fingerprint_match.start"
     CB_FINGERPRINT_MATCH_END = "cb.fingerprint_match.end"
-    # Prefix leg: blend_v3 owns the submit/poll (direct storage_manager), so the
+    # Prefix leg: the blend module owns the submit/poll (direct
+    # storage_manager), so the
     # prefix lookup is a CB-namespace span under cb.lookup. Its hit tokens ride
     # the CB hit-rate metric via CB_LOOKUP_END (CB requests no longer feed the
     # MP mp.lookup_prefetch span / hit-rate aggregate).
@@ -138,16 +149,22 @@ class EventType(Enum):
     CB_SPARSE_PREFETCH_START = "cb.sparse_prefetch.start"
     CB_SPARSE_PREFETCH_END = "cb.sparse_prefetch.end"
 
-    # CB V3 retrieve sub-span (GPU) — nest under cb.retrieve. Emitted via
+    # CB retrieve sub-span (GPU) — nest under cb.retrieve. Emitted via
     # publish_on_stream for GPU-accurate timing of the L1->paged scatter.
     CB_SCATTER_START = "cb.scatter.start"
     CB_SCATTER_END = "cb.scatter.end"
 
-    # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
+    # CB retrieve that returned success without scattering anything, so the
+    # request degrades to a full recompute. Point event (CPU), published only
+    # when reuse was actually lost. Metadata: ``reason`` (str, a fixed
+    # low-cardinality code — it is a metric attribute), ``dropped_matches``.
+    CB_RETRIEVE_NOOP = "cb.retrieve.noop"
+
+    # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous).
+    # CB_RETRIEVE_SUBMITTED holds cb.request open across the GPU scatter so a
+    # sibling TP worker's early CB_REQUEST_END cannot close the root.
     CB_REQUEST_START = "cb.request.start"
-    CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"
     CB_RETRIEVE_SUBMITTED = "cb.retrieve.submitted"
-    CB_STORE_FINAL_SUBMITTED = "cb.store_final.submitted"
     CB_REQUEST_END = "cb.request.end"
 
 
@@ -171,3 +188,23 @@ class Event:
     timestamp: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str = ""
+
+
+# A request issues several store/retrieve operations (one per chunked-prefill
+# step), so session_id cannot identify a transfer; transfer keys do.
+_TRANSFER_SEQ = itertools.count()
+
+
+def next_transfer_key(request_id: str) -> str:
+    """Mint a key unique to one store/retrieve operation.
+
+    Uniqueness comes from the counter (``next()`` is atomic under the GIL);
+    the request id prefix only keeps the key readable.
+
+    Args:
+        request_id: The request the operation serves.
+
+    Returns:
+        A process-unique key, e.g. ``"req-7#42"``.
+    """
+    return f"{request_id}#{next(_TRANSFER_SEQ)}"

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional
 import uuid
 
 # Third Party
-from sglang.srt.configs.model_config import ModelConfig
 import torch
 import torch.distributed as dist
 
@@ -24,12 +26,29 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
 
+if TYPE_CHECKING:
+    # Third Party
+    from sglang.srt.configs.model_config import ModelConfig
+
 logger = init_logger(__name__)
+
+
+def _model_uses_mla(model_config: ModelConfig) -> bool:
+    """Return whether SGLang classified the model as MLA.
+
+    Args:
+        model_config: SGLang model metadata containing ``attention_arch``.
+
+    Returns:
+        ``True`` when ``attention_arch`` names the MLA architecture.
+    """
+    attention_arch = getattr(model_config, "attention_arch", None)
+    return getattr(attention_arch, "name", attention_arch) == "MLA"
 
 
 @dataclass
 class StoreMetadata:
-    last_node: Any
+    last_node: object
     token_ids: List[int]
     kv_indices: torch.Tensor
     offset: int
@@ -52,6 +71,7 @@ def init_lmcache_engine(
     global_rank: int,
     kv_dtype: torch.dtype,
     config_file: str,
+    kv_head_dim: int | None = None,
 ) -> LMCacheEngine:
     """
     Initialize LMCache engine for SGLang integration.
@@ -63,6 +83,15 @@ def init_lmcache_engine(
         global_rank: Global tensor parallel rank (for metadata)
         kv_dtype: Data type for KV cache tensors
         config_file: Path to the LMCache YAML configuration file
+        kv_head_dim: Actual width of one MLA cache row. Required for MLA
+            callers because it can differ from the attention head dimension.
+
+    Returns:
+        The initialized or existing SGLang LMCache engine.
+
+    Raises:
+        ValueError: If an MLA model does not provide a positive cache-row
+            width.
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
@@ -75,10 +104,15 @@ def init_lmcache_engine(
     # construct kv shape (for mem pool)
     num_layer = model_config.num_hidden_layers
     chunk_size = config.chunk_size
-    num_kv_head = model_config.get_num_kv_heads(tp_size)
-    head_dim = model_config.head_dim
-
-    kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
+    use_mla = _model_uses_mla(model_config)
+    if use_mla:
+        if kv_head_dim is None or kv_head_dim <= 0:
+            raise ValueError("SGLang MLA requires a positive KV-cache row width")
+        kv_shape = (num_layer, 1, chunk_size, 1, kv_head_dim)
+    else:
+        num_kv_head = model_config.get_num_kv_heads(tp_size)
+        head_dim = model_config.head_dim
+        kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
 
     # Change current device using local GPU index
     # Use global rank for metadata (tensor parallel rank)
@@ -90,6 +124,7 @@ def init_lmcache_engine(
         local_worker_id=local_rank,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
+        use_mla=use_mla,
     )
 
     gpu_connector = CreateGPUConnector(config, metadata, EngineType.SGLANG)
@@ -117,6 +152,7 @@ class LMCacheConnector:
     ):
         if not k_pool:
             raise ValueError("k_pool cannot be empty during initialization.")
+        use_mla = _model_uses_mla(sgl_config)
         kv_dtype = k_pool[0].dtype
         if (
             k_pool[0].device.type == torch_device_type
@@ -136,11 +172,12 @@ class LMCacheConnector:
             rank,  # global_rank (tp_rank) for metadata
             kv_dtype,
             config_file,
+            kv_head_dim=k_pool[0].shape[-1] if use_mla else None,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = local_rank  # Use local_rank for torch.device() calls
-        self.kvcaches = k_pool + v_pool
+        self.kvcaches = k_pool if use_mla else k_pool + v_pool
         self.num_layer = sgl_config.num_hidden_layers
 
         self.lmcache_engine.post_init(kvcaches=self.kvcaches)
@@ -298,6 +335,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             mask=load_mask[:retrieve_token_num],
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping[:retrieve_token_num],
+            offset=offset,
             sync=False,
         )
 

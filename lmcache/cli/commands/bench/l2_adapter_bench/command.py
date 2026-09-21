@@ -639,7 +639,8 @@ def _emit_l2_adapter_metrics(
         section_id = f"op_{idx}"
         section = metrics.add_section(section_id, r.operation)
         section.add("operation", "Operation", r.operation)
-        section.add("rounds", "Rounds", len(r.round_durations))
+        section.add("rounds", "Rounds", r.attempted_rounds)
+        section.add("rounds_timed_out", "Rounds timed out", r.timed_out_rounds)
         section.add("keys_per_round", "Keys / round", r.keys_per_round)
         section.add("total_keys", "Total keys", r.total_keys)
         section.add("total_success", "Total success", r.total_success)

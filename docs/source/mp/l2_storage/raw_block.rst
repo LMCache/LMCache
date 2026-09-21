@@ -37,7 +37,10 @@ caller-provided load buffers during prefetch.
 - ``iouring_queue_depth``: Queue depth for ``io_engine="io_uring"``.
 - ``max_data_transfer_size``: Maximum data transfer size for
   ``use_uring_cmd=true``. Large transfers are split into smaller chunks
-  that fit within device limits.
+  that fit within device limits. When left unset (or ``<= 0``), it is
+  auto-detected from the device's sysfs queue limits, bounded by both
+  ``max_hw_sectors_kb`` and ``max_segments * page_size`` (the NVMe passthrough
+  path uses one scatter-gather segment per page).
 - ``fdp_enabled``: Enables NVMe Flexible Data Placement (FDP) discovery
   and non-zero placement identifier registration. ``cache_salt`` values with
   ``":"`` bucket prefixes use FDP placement by default. Requires

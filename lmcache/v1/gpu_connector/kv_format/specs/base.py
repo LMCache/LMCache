@@ -23,7 +23,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 # A format's enum name *is* its shape: ``_``-joined tokens, with ``X`` marking a
 # list level. ``TWO_X_NL_X_NBBS_NH_HS`` reads as ``2 x NL x [PBS, NH, HS]``.
@@ -31,6 +31,7 @@ import lmcache.c_ops as lmc_ops
 _LABELS = {
     "ONE": "1",
     "TWO": "2",
+    "NP": "NP",
     "NBBS": "PBS",
     "NB": "NB",
     "NL": "NL",
@@ -58,30 +59,35 @@ _ACCESSORS = {
 }
 
 
-def _render_shape(fmt: "lmc_ops.EngineKVFormat", token: Callable[[str], str]) -> str:
+def _render_shape(
+    fmt: "lmcache_native.EngineKVFormat", token: Callable[[str], str]
+) -> str:
     *lists, inner = fmt.name.split("_X_")
     body = ", ".join(token(t) for t in inner.split("_"))
     return " x ".join([token(t) for t in lists] + [f"[{body}]"])
 
 
-def describe_shape(fmt: "lmc_ops.EngineKVFormat") -> str:
+def describe_shape(fmt: "lmcache_native.EngineKVFormat") -> str:
     """Symbolic shape of a format, e.g. ``NL_X_NB_BS_HS`` -> ``NL x [NB, BS, HS]``.
 
     Named ``describe_shape`` (not ``shape_desc``) to avoid confusion with the
-    unrelated :class:`lmc_ops.PageBufferShapeDesc` and its ``shape_desc``
+    unrelated :class:`device_ops.PageBufferShapeDesc` and its ``shape_desc``
     instances used on the transfer path.
     """
     return _render_shape(fmt, lambda t: _LABELS[t])
 
 
-def concrete_shape(fmt: "lmc_ops.EngineKVFormat", size: Callable[[str], int]) -> str:
+def concrete_shape(
+    fmt: "lmcache_native.EngineKVFormat", size: Callable[[str], int]
+) -> str:
     """Numeric shape of a format; ``size(label)`` gives each axis's dimension.
 
     E.g. ``NL_X_TWO_NB_BS_NH_HS`` with ``NL=32, NB=2048, BS=16, NH=8, HS=128``
     -> ``32 x [2, 2048, 16, 8, 128]``.
     """
     return _render_shape(
-        fmt, lambda t: _LABELS[t] if t in ("ONE", "TWO") else str(size(_LABELS[t]))
+        fmt,
+        lambda t: _LABELS[t] if t in ("ONE", "TWO", "NP") else str(size(_LABELS[t])),
     )
 
 
@@ -113,6 +119,9 @@ class KVFormatSpec(ABC):
       connectors, none of the MP transfer path): :meth:`page_buffer_size`,
       :meth:`tokens_per_layer`, :meth:`elements_per_layer`. The MP path derives
       these from a per-group :class:`PageBufferShapeDesc` instead.
+    * Used by pointer-backed paged-buffer reconstruction:
+      :meth:`paged_layer_shape`. It is a class method because it uses declared
+      format facts and caller-provided geometry, not borrowed KV tensors.
 
     Lifetime: a spec **borrows** ``kv_caches`` -- it does not own the GPU KV
     tensors. ``get_spec`` builds a fresh instance per call and callers use it
@@ -121,7 +130,7 @@ class KVFormatSpec(ABC):
     object: that would keep the engine's GPU KV tensors alive past disconnect.
     """
 
-    engine_kv_format: ClassVar["lmc_ops.EngineKVFormat"]
+    engine_kv_format: ClassVar["lmcache_native.EngineKVFormat"]
     attention_backends: ClassVar[tuple[str, ...]] = ()
 
     # ── Static layout facts (see the class docstring) ──────────────────
@@ -146,6 +155,49 @@ class KVFormatSpec(ABC):
     # ``num_blocks`` and ``block_size`` are folded into one PBS axis, which
     # leaves both of them undefined for this format.
     is_pbs_fused: ClassVar[bool] = False
+    # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
+    # than a single stacked per-layer tensor.
+    is_kv_second_tuple: ClassVar[bool] = False
+
+    @classmethod
+    def paged_layer_shape(cls, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:
+        """Return one pointer-addressable paged tensor's physical shape.
+
+        This applies only to per-layer formats whose list entry is one tensor.
+        Callers that handle cross-layer tensors, top-level K/V lists, or
+        per-layer K/V tuples must reconstruct those structures themselves.
+
+        Args:
+            nb: Number of paged blocks.
+            bs: Tokens in each block.
+            nh: Number of attention heads.
+            hs: Per-head content size (the packed K/V width when applicable).
+
+        Returns:
+            The physical tensor shape for one paged layer.
+
+        Raises:
+            ValueError: If this format does not use one tensor per layer.
+        """
+        if not cls.is_layer_list or cls.is_kv_second_tuple:
+            raise ValueError(
+                f"{cls.engine_kv_format!r} does not have one paged tensor per layer"
+            )
+        if cls.is_pbs_fused:
+            return (nb * bs, 1, hs)
+        if cls.is_mla:
+            return (nb, bs, hs)
+        if cls.is_fused_packed and cls.is_hnd:
+            return (nb, nh, bs, hs)
+        if cls.is_fused_packed:
+            return (nb, bs, nh, hs)
+        if cls.is_two_major and cls.is_hnd:
+            return (2, nb, nh, bs, hs)
+        if cls.is_two_major:
+            return (2, nb, bs, nh, hs)
+        if cls.is_hnd:
+            return (nb, 2, nh, bs, hs)
+        return (nb, 2, bs, nh, hs)
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The
@@ -211,9 +263,12 @@ class KVFormatSpec(ABC):
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
         """Return device pointers for ``layer_indices`` in kernel-expected order.
 
-        Per-layer formats: one pointer per layer. SGLang two-list MHA: all K
-        pointers then all V. Cross-layer: a single base pointer (the kernel
-        walks layers itself, so ``layer_indices`` is ignored).
+        Per-layer formats: one pointer per layer.
+
+        SGLang two-list MHA: all K pointers, then all V pointers.
+
+        Cross-layer with a K/V axis: a single base pointer; the kernel walks
+        layers itself, so ``layer_indices`` is ignored.
         """
 
     def concrete_shape_str(self) -> str:

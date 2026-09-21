@@ -240,6 +240,24 @@ def test_management_ping_touches_targets() -> None:
     assert target.touched == [42]
 
 
+def test_management_clear_defaults_to_non_force() -> None:
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear()
+
+    ctx.storage_manager.clear.assert_called_once_with(force=False)
+
+
+def test_management_clear_accepts_force() -> None:
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear(force=True)
+
+    ctx.storage_manager.clear.assert_called_once_with(force=True)
+
+
 def test_management_reaper_reaps_and_drops() -> None:
     """The reaper scans targets and calls drop_instance_state for reaped ids."""
     target = _FakeTarget()
@@ -294,13 +312,13 @@ def test_management_report_status_summarizes_liveness() -> None:
 def test_blend_drop_instance_state_drops_rope_state() -> None:
     """drop_instance_state pops the reaped instance's CB rope state.
 
-    The GPU context is no longer mirrored in BlendV3Module (reaping the GPU
+    The GPU context is no longer mirrored in BlendModule (reaping the GPU
     entry frees it directly), so only the rope state is dropped here.
     """
     # First Party
-    from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
+    from lmcache.v1.multiprocess.modules.blend import BlendModule
 
-    module = BlendV3Module.__new__(BlendV3Module)
+    module = BlendModule.__new__(BlendModule)
     module._cb_rope_state = {5: MagicMock()}
 
     module.drop_instance_state(5)

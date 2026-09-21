@@ -764,7 +764,7 @@ class TestMPUsage:
         assert message.chunk_size == 256
         assert message.hash_algorithm == "blake3"
         assert message.engine_type == "default"
-        assert message.supported_transfer_mode == "auto"
+        assert message.supported_transfer_mode == "lmcache_driven"
         assert not message.p2p_enabled
         assert message.l1_size_bytes == 1 << 30
         assert message.l1_medium == "dram"

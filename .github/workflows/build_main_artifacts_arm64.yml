@@ -69,7 +69,7 @@ jobs:
               # job never accidentally emits an x86 wheel.
               env:
                 CIBW_BUILD: "cp3*-manylinux_aarch64"
-                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+                CIBW_TEST_COMMAND: "python -c 'import lmcache.cuda_ops'"
               run: python -m cibuildwheel --output-dir dist
 
             - name: Upload release artifacts to GHA

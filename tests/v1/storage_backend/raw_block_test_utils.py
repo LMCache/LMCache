@@ -197,6 +197,27 @@ def message_contains(exc: BaseException, fragments: tuple[str, ...]) -> bool:
     return any(fragment in msg for fragment in fragments)
 
 
+def is_skip_safe_io_error(exc: BaseException) -> bool:
+    """Return whether io_uring or O_DIRECT is unavailable on the runner."""
+    if getattr(exc, "errno", None) in {
+        errno.EINVAL,
+        errno.ENOSYS,
+        errno.EPERM,
+    }:
+        return True
+    return message_contains(
+        exc,
+        (
+            "function not implemented",
+            "invalid argument",
+            "io_uring init failed",
+            "not supported",
+            "operation not permitted",
+            "unsupported",
+        ),
+    )
+
+
 def is_skip_safe_device_setup_error(exc: BaseException) -> bool:
     """Return whether raw-device setup failed for an external HW/OS reason."""
     if getattr(exc, "errno", None) in {
@@ -338,16 +359,16 @@ def install_lmcache_native_fallback() -> None:
     class TTLLock:
         pass
 
+    class PageBufferShapeDesc:
+        pass
+
+    class KernelGroupSpec:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
     fallback_module = types.ModuleType("lmcache.lmcache_native")
+    fallback_module.__dict__["PageBufferShapeDesc"] = PageBufferShapeDesc
+    fallback_module.__dict__["KernelGroupSpec"] = KernelGroupSpec
     fallback_module.__dict__["Bitmap"] = Bitmap
     fallback_module.__dict__["TTLLock"] = TTLLock
-    # Relocated KV-format / transfer types and format predicates, so
-    # ``lmcache.v1.platform.ops_types`` can import them from the fallback.
-    fallback_module.__dict__["EngineKVFormat"] = object
-    fallback_module.__dict__["GPUKVFormat"] = object
-    fallback_module.__dict__["TransferDirection"] = object
-    fallback_module.__dict__["is_cross_layer"] = lambda _: False
-    fallback_module.__dict__["is_kv_list"] = lambda _: False
-    fallback_module.__dict__["is_layer_list"] = lambda _: False
-    fallback_module.__dict__["is_mla"] = lambda _: False
     sys.modules["lmcache.lmcache_native"] = fallback_module

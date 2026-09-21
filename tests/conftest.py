@@ -806,12 +806,16 @@ def memory_allocator():
 
 
 @pytest.fixture(autouse=True)  # function-scoped by default
-def use_shared_allocator(request, monkeypatch, memory_allocator):
+def use_shared_allocator(request, monkeypatch):
     """Default: patch. Opt out with @pytest.mark.no_shared_allocator."""
     if request.node.get_closest_marker("no_shared_allocator"):
         # do NOT patch for this test
         yield
         return
+
+    # Resolve lazily (after the marker check) so the 5GB session allocator
+    # is only constructed when a test actually uses the shared allocator.
+    memory_allocator = request.getfixturevalue("memory_allocator")
 
     def _create_shared_allocator(config, metadata, numa_mapping):
         return memory_allocator

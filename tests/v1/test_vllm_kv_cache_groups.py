@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.group_view import (
     get_engine_group_indices,
     num_engine_groups,
 )
+import lmcache.lmcache_native as lmcache_native
 
 # Test doubles for the vLLM KV cache spec classes. Unit tests must run
 # without vLLM installed; sliding-window specs are detected by class name,
@@ -27,8 +28,15 @@ class MockKVCacheSpec:
 
 
 @dataclass
-class SlidingWindowSpec:
+class AttentionSpec:
+    """Base of the attention-spec doubles: ``get_tokens_per_block`` detects
+    attention groups by this class name, so the doubles must inherit it."""
+
     block_size: int
+
+
+@dataclass
+class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
 
 
@@ -38,16 +46,13 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
 
 @dataclass
-class FullAttentionSpec:
-    block_size: int
+class FullAttentionSpec(AttentionSpec):
     sliding_window: "int | None" = None
 
 
 @dataclass
-class MLAAttentionSpec:
+class MLAAttentionSpec(AttentionSpec):
     """Key-only, one-vector-per-token spec (an MLA index cache)."""
-
-    block_size: int
 
 
 @dataclass
@@ -345,15 +350,14 @@ def test_group_layers_by_identity_uses_per_layer_format():
     distinction the single global format cannot express."""
     # First Party
     from lmcache.v1.kv_layer_groups import group_layers_by_identity
-    import lmcache.c_ops as lmc_ops
 
     kv_caches = [
         torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
         torch.randn(32, 16, 128, dtype=torch.bfloat16),  # MLA key-only (rank-3)
     ]
     per_layer_format = [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     ]
     groups = group_layers_by_identity(
         kv_caches,
@@ -376,13 +380,154 @@ def test_group_layers_by_identity_rejects_group_idx_length_mismatch():
     """per_layer_engine_group_idx must hold one entry per layer."""
     # First Party
     from lmcache.v1.kv_layer_groups import group_layers_by_identity
-    import lmcache.c_ops as lmc_ops
 
     kv_caches = [torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16)]
     # One layer (one format) but two engine-group ids.
     with pytest.raises(ValueError, match="per_layer_engine_group_idx"):
         group_layers_by_identity(
             kv_caches,
-            [lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
+            [lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
             per_layer_engine_group_idx=[0, 1],
         )
+
+
+def test_aux_pools_with_one_block_size_share_engine_and_kernel_group():
+    """Same-shape pools sharing a block size fold into ONE group.
+
+    The block-size bucket puts them in one engine group; identity grouping
+    then merges the shape-identical tensors into one kernel group.
+    """
+    caches = _same_shape_caches(["layer.0", "layer.1"])
+    caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
+    caches["cb.aux_pool.16.b"] = torch.randn(4, 16, 8, dtype=torch.float16)
+
+    spec = create_engine_group_infos_from_vllm(None, caches)
+
+    aux = [g for g in spec if g.extra_object_group_tag]
+    assert len(aux) == 1
+    assert aux[0].layer_indices == (2, 3)
+    assert aux[0].tokens_per_block == 16
+    assert aux[0].extra_object_group_tag == 1
+    # The regular layers keep engine group 0; the pool group comes after.
+    assert aux[0].engine_group_id > max(
+        g.engine_group_id for g in spec if not g.extra_object_group_tag
+    )
+
+
+def test_aux_pools_with_distinct_block_sizes_get_distinct_groups():
+    """Different block sizes are different paged address spaces: no sharing."""
+    caches = _same_shape_caches(["layer.0"])
+    caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
+    caches["cb.aux_pool.32"] = torch.randn(4, 16, 8, dtype=torch.float16)
+
+    spec = create_engine_group_infos_from_vllm(None, caches)
+
+    aux = sorted(
+        (g for g in spec if g.extra_object_group_tag),
+        key=lambda g: g.engine_group_id,
+    )
+    assert len(aux) == 2
+    assert aux[0].engine_group_id != aux[1].engine_group_id
+    assert {g.tokens_per_block for g in aux} == {16, 32}
+    assert {g.extra_object_group_tag for g in aux} == {1, 2}
+
+
+def test_conversion_scales_attention_tokens_per_block_under_dcp():
+    """tokens_per_block sizes each rank's memory object; unscaled it would
+    be dcp times too large."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+        dcp_size=2,
+    )
+
+    # Attention scaled, Mamba (replicated state) untouched.
+    assert [group.tokens_per_block for group in spec] == [32, 16]
+
+
+def test_conversion_tokens_per_block_unscaled_without_dcp():
+    """dcp_size defaults to 1, leaving every group exactly as before."""
+    groups = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+        ]
+    )
+    caches = ["layer.0", "layer.1"]
+
+    default = create_engine_group_infos_from_vllm(groups, _same_shape_caches(caches))
+    explicit = create_engine_group_infos_from_vllm(
+        groups, _same_shape_caches(caches), dcp_size=1
+    )
+
+    assert [g.tokens_per_block for g in default] == [16, 16]
+    assert [g.tokens_per_block for g in explicit] == [16, 16]
+
+
+@dataclass
+class CircularBufferSpec(AttentionSpec):
+    """Per-request scratch ring (QSA compressor state); opts out of caching."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+def test_conversion_excludes_scratch_group_layers():
+    """Scratch groups cover no tokens: their layers form no info."""
+    # First Party
+    from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
+    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+
+    ring = CircularBufferSpec(block_size=8)
+    assert get_tokens_per_block(ring, 1) == 0
+    assert get_tokens_per_block(MockKVCacheSpec(block_size=8), 1) == 8
+
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=1600)),
+                MockKVCacheGroup(["layer.1"], ring),
+                MockKVCacheGroup(["layer.2"], MambaSpec(block_size=1600)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1", "layer.2"]),
+    )
+
+    assert [g.engine_group_id for g in spec] == [0, 2]
+    assert get_engine_group_indices(spec, 3) == [0, EXCLUDED_ENGINE_GROUP, 2]
+
+
+def test_conversion_skips_format_discovery_for_scratch_layers():
+    """A scratch ring whose layout format discovery would reject must not block
+    registration: its layers skip discovery and stay excluded."""
+    # First Party
+    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+
+    # Interior padding between the two heads (dim-1 stride 700 != tight 560):
+    # a layout format discovery rejects outright.
+    num_blocks, capacity, head_size, block_step = 3, 4, 140, 1400
+    storage = torch.zeros(num_blocks * block_step, dtype=torch.bfloat16)
+    ring_cache = storage.as_strided(
+        (num_blocks, 2, capacity, head_size), (block_step, 700, head_size, 1)
+    )
+    kv_caches = _same_shape_caches(["layer.0"])
+    kv_caches["layer.1"] = ring_cache
+
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], CircularBufferSpec(block_size=capacity)),
+            ]
+        ),
+        kv_caches,
+    )
+
+    assert [g.engine_group_id for g in spec] == [0]
+    assert get_engine_group_indices(spec, 2) == [0, EXCLUDED_ENGINE_GROUP]

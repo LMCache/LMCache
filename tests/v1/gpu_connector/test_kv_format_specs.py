@@ -18,7 +18,7 @@ from lmcache.v1.gpu_connector.kv_format import (
     get_spec,
     get_spec_class,
 )
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 # Distinct dims so a wrong axis surfaces as a wrong number.
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -38,6 +38,9 @@ def _build(name: str):
         "NL_X_TWO_NB_BS_NH_HS": lambda: [_t(2, NB, BS, NH, HS) for _ in range(NL)],
         "NL_X_NB_TWO_BS_NH_HS": lambda: [_t(NB, 2, BS, NH, HS) for _ in range(NL)],
         "NL_X_TWO_NB_NH_BS_HS": lambda: [_t(2, NB, NH, BS, HS) for _ in range(NL)],
+        "NL_X_TWO_NB_NH_ONE_BS_HS": lambda: [
+            _t(2, NB, NH, 1, BS, HS) for _ in range(NL)
+        ],
         "NL_X_NB_TWO_NH_BS_HS": lambda: [_t(NB, 2, NH, BS, HS) for _ in range(NL)],
         "NL_X_NB_BS_HS": lambda: [_t(NB, BS, HS) for _ in range(NL)],
         "TWO_X_NL_X_NBBS_NH_HS": lambda: [
@@ -123,6 +126,19 @@ GOLDEN = {
         tokens_per_layer=PBS,
         elements_per_layer=NB * NH * BS * HS * 2,
         concrete="5 x [2, 7, 2, 3, 4]",
+    ),
+    "NL_X_TWO_NB_NH_ONE_BS_HS": dict(
+        shape_desc="NL x [2, NB, NH, 1, BS, HS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS,
+        head_size=HS,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * NH * BS * HS * 2,
+        concrete="5 x [2, 7, 2, 1, 3, 4]",
     ),
     "NL_X_NB_TWO_NH_BS_HS": dict(
         shape_desc="NL x [NB, 2, NH, BS, HS]",
@@ -246,13 +262,13 @@ GOLDEN = {
 }
 
 # Only formats the installed extension actually exposes.
-FORMAT_NAMES = [n for n in GOLDEN if hasattr(lmc_ops.EngineKVFormat, n)]
+FORMAT_NAMES = [n for n in GOLDEN if hasattr(lmcache_native.EngineKVFormat, n)]
 
 
 @pytest.fixture(params=FORMAT_NAMES)
 def case(request):
     name = request.param
-    return name, getattr(lmc_ops.EngineKVFormat, name), GOLDEN[name]
+    return name, getattr(lmcache_native.EngineKVFormat, name), GOLDEN[name]
 
 
 # Must run before any other test constructs the deprecated specs:
@@ -260,12 +276,12 @@ def case(request):
 def test_deprecated_two_hs_specs_warn():
     for name in ("NL_X_NB_NH_BS_TWO_HS", "NL_X_NB_BS_NH_TWO_HS"):
         with pytest.warns(DeprecationWarning, match=name):
-            get_spec(_build(name), getattr(lmc_ops.EngineKVFormat, name))
+            get_spec(_build(name), getattr(lmcache_native.EngineKVFormat, name))
 
 
 def test_static_metadata(case):
     # The format's static layout flags are pinned in test_kv_format_classification
-    # (read via lmc_ops); here we only freeze the symbolic shape.
+    # (read via device_ops); here we only freeze the symbolic shape.
     name, fmt, gold = case
     assert describe_shape(fmt) == gold["shape_desc"], name
 
@@ -305,9 +321,9 @@ def test_data_ptrs_shape(case):
     kv = _build(name)
     spec = get_spec(kv, fmt)
     ptrs = spec.data_ptrs(list(range(NL)))
-    if lmc_ops.is_cross_layer(fmt):
+    if lmcache_native.is_cross_layer(fmt):
         assert len(ptrs) == 1, name  # single base pointer
-    elif lmc_ops.is_kv_list(fmt):
+    elif lmcache_native.is_kv_list(fmt):
         assert len(ptrs) == 2 * NL, name  # K's then V's
     else:
         assert len(ptrs) == NL, name  # one per layer
@@ -317,7 +333,9 @@ def test_data_ptrs_shape(case):
 def test_all_extension_formats_registered():
     # No silent gaps: every format the extension exposes has a spec.
     for name in FORMAT_NAMES:
-        assert get_spec_class(getattr(lmc_ops.EngineKVFormat, name)) is not None, name
+        assert (
+            get_spec_class(getattr(lmcache_native.EngineKVFormat, name)) is not None
+        ), name
 
 
 def test_spec_carries_attention_backends(case):

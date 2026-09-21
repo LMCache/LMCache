@@ -376,6 +376,34 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._pinned_keys.discard(spec.encoded)
         return removed
 
+    def batched_remove(
+        self,
+        keys: list[CacheEngineKey],
+        force: bool = True,
+    ) -> int:
+        """Remove multiple keys in a single locked batch.
+
+        Acquires ``_pin_lock`` once and issues one ``_core.delete_many`` call
+        for the whole batch, instead of locking per key.
+
+        Args:
+            keys: Cache keys to remove.
+            force: Passed through to ``RawBlockCore.delete_many``. When false,
+                locked entries are preserved.
+
+        Returns:
+            Number of keys that were actually removed.
+        """
+        if not keys:
+            return 0
+        encoded_keys = [encode_legacy_key(key).encoded for key in keys]
+        with self._pin_lock:
+            results = self._core.delete_many(encoded_keys, force=force)
+            for encoded_key, removed in zip(encoded_keys, results, strict=True):
+                if removed:
+                    self._pinned_keys.discard(encoded_key)
+        return sum(results)
+
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
@@ -578,7 +606,6 @@ class RustRawBlockBackend(StoragePluginInterface):
             load_results = self._core.load_many_into(
                 [spec.encoded for spec in load_specs],
                 allocated,
-                raise_on_error=True,
             )
             loaded_count = 0
             for ok in load_results:
@@ -617,7 +644,6 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         Raises:
             RuntimeError: If the local CPU allocator backend is unavailable.
-            Exception: Propagates raw-device load failures from the core.
         """
         if not keys:
             return []
@@ -666,7 +692,6 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         Raises:
             RuntimeError: If the local CPU allocator backend is unavailable.
-            Exception: Propagates raw-device load failures from the core.
         """
         del lookup_id, transfer_spec
         return await asyncio.to_thread(self._batched_get_prefix, keys)

@@ -367,7 +367,7 @@ class NixlStorageAgent:
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
 
-    async def post_non_blocking(self, handle: NixlXferHandle):
+    async def post_non_blocking(self, handle: NixlXferHandle) -> None:
         """Post a Nixl transfer handle and await until the transfer is done."""
 
         state = self.nixl_agent.transfer(handle)
@@ -379,7 +379,8 @@ class NixlStorageAgent:
                 raise
 
             # TODO(Jiayi): Tune this for better perf
-            await asyncio.sleep(0.01)
+            if state != "DONE" and state != "ERR":
+                await asyncio.sleep(0.01)
 
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")

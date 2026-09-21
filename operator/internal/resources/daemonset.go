@@ -29,8 +29,15 @@ import (
 
 const (
 	// nvidiaRuntimeClass is the RuntimeClass name registered by the NVIDIA GPU
-	// Operator; engine pods request it when gpuVendor is nvidia.
+	// Operator; engine pods request it when gpuVendor is nvidia unless
+	// spec.runtimeClassName overrides it.
 	nvidiaRuntimeClass = "nvidia"
+
+	// engineContainerName is the engine container name. GPU Operator NRI/CDI
+	// clusters that omit runtimeClassName must annotate this same name, e.g.
+	// nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all via
+	// spec.podAnnotations.
+	engineContainerName = "lmcache"
 
 	// lmcacheServerBinary is the entrypoint binary for the LMCache server inside
 	// the engine image.
@@ -59,6 +66,26 @@ const (
 // master key, referenced as master_key_path in the serde config.
 const l2EncryptionKeyPath = l2EncryptionKeyMountDir + "/" + l2EncryptionKeyFileName
 
+// startupProbeDefaultFailureThreshold is the baseline startup-probe failure
+// count. With the probe's InitialDelaySeconds=5 and PeriodSeconds=5 this is a
+// ~155s startup window.
+const startupProbeDefaultFailureThreshold int32 = 30
+
+// startupProbeFailureThreshold scales the startup-probe window to L1 size: the
+// engine pre-pins all of L1 before binding its port, so budget ~1 GB/s of pinning
+// (window = FailureThreshold * 5s period), floored at the default.
+func startupProbeFailureThreshold(l1SizeGB float64) int32 {
+	const (
+		pinBudgetGBPerSec  = 1.0 // assumed worst-case L1 pin bandwidth
+		probePeriodSeconds = 5.0 // must match the startup probe's PeriodSeconds
+	)
+	scaled := int32(l1SizeGB / pinBudgetGBPerSec / probePeriodSeconds)
+	if scaled > startupProbeDefaultFailureThreshold {
+		return scaled
+	}
+	return startupProbeDefaultFailureThreshold
+}
+
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
@@ -66,10 +93,11 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 
 // buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
 // CacheBlendEngine controllers. It is the single source of truth for the
-// GPU/security pod-template scaffolding (hostIPC, runtimeClassName, optional
-// privileged (default false, via spec.Privileged), NVIDIA_VISIBLE_DEVICES,
-// resources without a device-plugin GPU claim) so those settings cannot drift
-// between the two engines.
+// GPU/security pod-template scaffolding (host /dev/shm sharing for CUDA IPC —
+// a hostPath mount by default, or the host IPC namespace when spec.HostIPC is
+// true — runtimeClassName, optional privileged (default false, via
+// spec.Privileged), NVIDIA_VISIBLE_DEVICES, resources without a device-plugin
+// GPU claim) so those settings cannot drift between the two engines.
 //
 // Parameters:
 //   - name, namespace: the owning object's identity, used for labels and metadata.
@@ -96,7 +124,25 @@ func buildDaemonSetCore(
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
+	// spec.runtimeClassName wins: "" clears it (default container runtime),
+	// any other value is used as-is. Unset keeps the vendor default.
+	// GPU Operator NRI/CDI clusters also omit runtimeClassName; set
+	// spec.podAnnotations to request the management CDI device. The operator
+	// does not add that annotation itself.
+	if spec.RuntimeClassName != nil {
+		if *spec.RuntimeClassName == "" {
+			runtimeClassName = nil
+		} else {
+			rc := *spec.RuntimeClassName
+			runtimeClassName = &rc
+		}
+	}
 	privileged := derefBool(spec.Privileged, false)
+	// Isolated IPC needs neither the host IPC namespace nor the shared
+	// /dev/shm, and takes priority over spec.hostIPC (see the isolatedIPC
+	// field documentation).
+	isolatedIPC := spec.IsolatedIPCEnabled()
+	hostIPC := derefBool(spec.HostIPC, false) && !isolatedIPC
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -185,11 +231,22 @@ func buildDaemonSetCore(
 	}
 	envVars = append(envVars, spec.Env...)
 
-	// No emptyDir /dev/shm mount — hostIPC: true exposes the host's /dev/shm
-	// directly. An emptyDir mount would shadow it and break CUDA IPC between
-	// LMCache and vLLM pods (cudaIpcOpenMemHandle requires shared /dev/shm).
+	// Cross-pod CUDA IPC needs the engine and vLLM pods to share the host's
+	// /dev/shm tmpfs (PyTorch CUDA IPC handles reference a ref-counter file
+	// there). By default that is a hostPath mount; with spec.hostIPC=true the
+	// shared IPC namespace already exposes the host's /dev/shm, so the mount is
+	// omitted. Never mount an emptyDir at /dev/shm — it would shadow the host's
+	// tmpfs and break CUDA IPC (cudaIpcOpenMemHandle fails with
+	// cudaErrorMapBufferObjectFailed).
+	// Under isolated IPC the handles rendezvous in the kernel driver, so no
+	// /dev/shm sharing is wired at all.
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
+	if !isolatedIPC && !hostIPC &&
+		!HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
+		volumes = append(volumes, BuildDevShmVolume())
+		volumeMounts = append(volumeMounts, BuildDevShmVolumeMount())
+	}
 
 	// Mount the L2 encryption master key (user-created Secret in the engine's
 	// namespace) read-only at the path the serde config references. Only the
@@ -229,13 +286,16 @@ func buildDaemonSetCore(
 		Port: intstr.FromInt32(serverPort),
 	}
 
+	// Scale the startup window to the L1 pin time (see startupProbeFailureThreshold).
+	startupFailureThreshold := startupProbeFailureThreshold(spec.L1.SizeGB)
+
 	startupProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			TCPSocket: tcpProbe,
 		},
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       5,
-		FailureThreshold:    30,
+		FailureThreshold:    startupFailureThreshold,
 	}
 
 	livenessProbe := &corev1.Probe{
@@ -298,7 +358,7 @@ func buildDaemonSetCore(
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					HostIPC:            true,
+					HostIPC:            hostIPC,
 					HostNetwork:        derefBool(spec.HostNetwork, false),
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
@@ -307,9 +367,10 @@ func buildDaemonSetCore(
 					Affinity:           spec.Affinity,
 					Tolerations:        spec.Tolerations,
 					ImagePullSecrets:   spec.ImagePullSecrets,
+					InitContainers:     spec.InitContainers,
 					Containers: []corev1.Container{
 						{
-							Name:            "lmcache",
+							Name:            engineContainerName,
 							Image:           fmt.Sprintf("%s:%s", imgRepo, imgTag),
 							ImagePullPolicy: imgPullPolicy,
 							Command:         containerCommand,

@@ -7,7 +7,7 @@ trap 'echo "ERROR: setup-blend-env.sh failed at line $LINENO (exit code $?)" >&2
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# 1. Full env: vLLM nightly + LMCache(PR) from source (+ c_ops for this GPU).
+# 1. Full env: vLLM nightly + LMCache(PR) from source (+ cuda_ops for this GPU).
 #    setup-env.sh already runs the GPU health pre-check.
 source "${REPO_ROOT}/.buildkite/k3_harness/setup-env.sh"
 

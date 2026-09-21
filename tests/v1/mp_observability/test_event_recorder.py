@@ -16,8 +16,8 @@ pytestmark = pytest.mark.cuda
 if torch_device_type != "cuda" or not torch_dev.is_available():
     pytest.skip("requires available CUDA runtime", allow_module_level=True)
 
-lmc_ops = pytest.importorskip("lmcache.c_ops", reason="lmcache.c_ops not built")
-if not hasattr(lmc_ops, "record_event_on_stream"):
+cuda_ops = pytest.importorskip("lmcache.cuda_ops", reason="lmcache.cuda_ops not built")
+if not hasattr(cuda_ops, "record_event_on_stream"):
     pytest.skip("record_event_on_stream not available", allow_module_level=True)
 
 # Third Party
@@ -54,14 +54,14 @@ def bus():
 
 
 class TestRecordAndDrain:
-    """Low-level tests for lmc_ops.record_event_on_stream / drain."""
+    """Low-level tests for cuda_ops.record_event_on_stream / drain."""
 
     def test_drain_empty(self):
-        events = lmc_ops.drain_recorded_events()
+        events = cuda_ops.drain_recorded_events()
         assert events == []
 
     def test_single_event(self, stream):
-        lmc_ops.record_event_on_stream(
+        cuda_ops.record_event_on_stream(
             stream.ptr,
             "mp.store.start",
             "sess-1",
@@ -70,7 +70,7 @@ class TestRecordAndDrain:
         )
         stream.synchronize()
 
-        events = lmc_ops.drain_recorded_events()
+        events = cuda_ops.drain_recorded_events()
         assert len(events) == 1
         name, sid, ts, str_meta, int_meta = events[0]
         assert name == "mp.store.start"
@@ -80,7 +80,7 @@ class TestRecordAndDrain:
         assert int_meta == {}
 
     def test_int_metadata_preserved(self, stream):
-        lmc_ops.record_event_on_stream(
+        cuda_ops.record_event_on_stream(
             stream.ptr,
             "mp.store.end",
             "sess-2",
@@ -89,7 +89,7 @@ class TestRecordAndDrain:
         )
         stream.synchronize()
 
-        events = lmc_ops.drain_recorded_events()
+        events = cuda_ops.drain_recorded_events()
         assert len(events) == 1
         _, _, _, str_meta, int_meta = events[0]
         assert str_meta == {"device": f"{torch_device_type}:0"}
@@ -97,7 +97,7 @@ class TestRecordAndDrain:
 
     def test_multiple_events_ordered(self, stream):
         for i in range(5):
-            lmc_ops.record_event_on_stream(
+            cuda_ops.record_event_on_stream(
                 stream.ptr,
                 f"mp.test.{i}",
                 f"sess-{i}",
@@ -106,7 +106,7 @@ class TestRecordAndDrain:
             )
         stream.synchronize()
 
-        events = lmc_ops.drain_recorded_events()
+        events = cuda_ops.drain_recorded_events()
         assert len(events) == 5
         for i, (name, sid, ts, _, int_meta) in enumerate(events):
             assert name == f"mp.test.{i}"
@@ -115,21 +115,21 @@ class TestRecordAndDrain:
             assert ts > 0.0
 
     def test_drain_clears_buffer(self, stream):
-        lmc_ops.record_event_on_stream(stream.ptr, "mp.store.start", "s", {}, {})
+        cuda_ops.record_event_on_stream(stream.ptr, "mp.store.start", "s", {}, {})
         stream.synchronize()
 
-        first = lmc_ops.drain_recorded_events()
+        first = cuda_ops.drain_recorded_events()
         assert len(first) == 1
 
-        second = lmc_ops.drain_recorded_events()
+        second = cuda_ops.drain_recorded_events()
         assert second == []
 
     def test_timestamps_monotonic(self, stream):
         for _ in range(3):
-            lmc_ops.record_event_on_stream(stream.ptr, "mp.store.start", "s", {}, {})
+            cuda_ops.record_event_on_stream(stream.ptr, "mp.store.start", "s", {}, {})
         stream.synchronize()
 
-        events = lmc_ops.drain_recorded_events()
+        events = cuda_ops.drain_recorded_events()
         timestamps = [e[2] for e in events]
         assert timestamps == sorted(timestamps)
 
@@ -200,5 +200,5 @@ class TestEventBusIntegration:
         )
         stream.synchronize()
 
-        events = lmc_ops.drain_recorded_events()
+        events = cuda_ops.drain_recorded_events()
         assert events == []

@@ -52,10 +52,16 @@ The SDK runs on **CPU** and hands you KV tensors in ``HND`` order with shape
 Configuration
 -------------
 
-To start the LMCache server with shared-memory transfer enabled, pass
-``--shm-name`` and disable lazy L1 allocation with ``--no-l1-use-lazy``. If
-shared memory is unavailable and these flags are not specified, the SDK falls 
-back to pickle.
+The SDK runs on CPU and talks to the server over the engine-driven
+transfer path, which the server does not load by default -- start the
+server with ``--supported-transfer-mode auto`` so both the vLLM
+(lmcache-driven) and SDK (engine-driven) paths are available.
+The SDK request client supports either ZMQ or gRPC. Its ``url`` scheme and the
+vLLM connector endpoint must match the server's ``--transport`` setting.
+To enable shared-memory transfer, pass ``--shm-name`` and disable lazy
+L1 allocation with ``--no-l1-use-lazy``. If shared memory is
+unavailable and these flags are not specified, the SDK falls back to
+pickle.
 To transfer query tensors, add ``--enable transfer_query`` flag.
 
 .. code-block:: bash
@@ -66,6 +72,7 @@ To transfer query tensors, add ``--enable transfer_query`` flag.
         --chunk-size 256 \
         --port 6555 \
         --http-port 8080 \
+        --supported-transfer-mode auto \
         --shm-name lmcache_kvcache_sdk \
         --no-l1-use-lazy \
         --enable transfer_query
@@ -127,13 +134,13 @@ Each type of tensor (KV, query intermediate) has its own context.
     import lmcache.sdk as lmc_sdk
 
     kv_ctx = lmc_sdk.kvcache.connect(
-        url="tcp://localhost:6555",         # must match --port
+        url="tcp://localhost:6555",         # tcp:// for ZMQ; grpc:// for gRPC
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,
     )
     q_ctx = lmc_sdk.qcache.connect(
-        url="tcp://localhost:6555",         # must match --port
+        url="tcp://localhost:6555",         # tcp:// for ZMQ; grpc:// for gRPC
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,

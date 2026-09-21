@@ -3,16 +3,64 @@
 
 # Standard
 from unittest.mock import MagicMock, PropertyMock
+import asyncio
 
 # Third Party
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess import http_server as http_server_module
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
+
+
+def test_lifespan_owns_transport_neutral_request_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP lifecycle closes RequestServer without exposing ZMQ state."""
+    request_server = MagicMock()
+    engine = MagicMock()
+    event_bus = MagicMock()
+    mp_config = MagicMock()
+    mp_config.runtime_plugin_config.locations = []
+
+    monkeypatch.setattr(
+        http_server_module,
+        "_configs",
+        {
+            "mp": mp_config,
+            "storage_manager": MagicMock(),
+            "observability": MagicMock(),
+        },
+    )
+    monkeypatch.setattr(
+        http_server_module,
+        "run_cache_server",
+        MagicMock(return_value=(request_server, engine)),
+    )
+    monkeypatch.setattr(http_server_module, "build_context", MagicMock())
+    monkeypatch.setattr(
+        http_server_module,
+        "get_event_bus",
+        MagicMock(return_value=event_bus),
+    )
+
+    async def exercise_lifespan() -> None:
+        test_app = FastAPI()
+        async with http_server_module.lifespan(test_app):
+            assert not hasattr(test_app.state, "zmq_server")
+            assert test_app.state.request_server is request_server
+            assert test_app.state.engine is engine
+
+    asyncio.run(exercise_lifespan())
+
+    request_server.close.assert_called_once_with()
+    engine.close.assert_called_once_with()
+    event_bus.stop.assert_called_once_with()
 
 
 def _make_kv_tensors(
@@ -47,7 +95,7 @@ def mock_gpu_ctx():
     type(ctx).block_size = PropertyMock(return_value=4)
     # KV tensors are built as [2, NB, BS, NH, HS] -> NL_X_TWO_NB_BS_NH_HS;
     # one homogeneous kernel group, so every layer reports the same format.
-    fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     ctx.engine_kv_formats.return_value = [fmt]
     ctx.engine_kv_format_per_layer.return_value = [fmt] * len(tensors)
     return ctx
@@ -62,8 +110,8 @@ def mock_mixed_engine():
     kv_idx = torch.randn(4, 4, 8)
     type(ctx).kv_tensors = PropertyMock(return_value=[kv_kv, kv_idx])
     ctx.engine_kv_format_per_layer.return_value = [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     ]
     engine = MagicMock()
     engine.cache_contexts = {0: ctx}
@@ -360,7 +408,7 @@ class TestHealthAndMiscEndpoints:
         """200 and engine.clear() called."""
         resp = client_with_engine.post("/cache/clear", json={"tier": "l1"})
         assert resp.status_code == 200
-        mock_engine.clear.assert_called_once()
+        mock_engine.clear.assert_called_once_with(force=False)
 
     def test_status_no_engine(self, client_no_engine):
         """503 when engine is not set."""

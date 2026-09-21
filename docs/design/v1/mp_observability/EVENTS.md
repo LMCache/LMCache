@@ -184,15 +184,33 @@ to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `int`, `int` |
-| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `str`, `int`, `int` |
+| `MP_STORE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `int`, `int`, `str` |
+| `MP_TRANSFER_PHASE_SAMPLES` | `samples`, `ended_transfer_key` | `list[tuple[int, int, int, float, int, str, float, float]]` — `(phase, direction, device_index, elapsed_ms, nbytes, session_id, start_time_s, end_time_s)` per finished executor section, plus the `transfer_key` (`str`) of the transfer whose END published this event -- its authoritative completion signal, present even when `samples` is empty; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value, the `session_id` slot carries the `transfer_key` of the store/retrieve operation (see `next_transfer_key`), `start_time_s`/`end_time_s` its bounds on the EventRecorder wall clock (empty / `0.0` only if the call's anchor event could not be recorded) |
+| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `model_name`, `cache_salt` | `int`, `int`, `int`, `str`, `str` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+
+### `MP_TRANSFER_PHASE_SAMPLES`
+
+Published by `TransferPhaseSampler` while dispatching `MP_STORE_END` /
+`MP_RETRIEVE_END`: those are stream-published, so every section of the
+ending transfer has completed and `device_ops.pop_completed_phase_timings()`
+returns its full sample set (plus any other transfer's sections that have
+finished meanwhile). Each sample carries its own `session_id`,
+`device_index` and `direction`.
+
+Timing is on when the bus is enabled and this event has a subscriber
+(`EventBus.has_subscribers`), i.e. with metrics or tracing on. Besides the per-section event pairs the
+executor records one anchor event per call plus a host callback stamping the
+EventRecorder wall clock, which gives each sample its `session_id` and
+`start_time_s`/`end_time_s`. `TransferPhaseTracingSubscriber` folds them into
+per-transfer `transfer.kernel_interval` / `transfer.staging` child spans (see
+`docs/design/observability/request-event-span.md`, Example 3).
 
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
 
@@ -213,6 +231,29 @@ know `chunk_size`:
   empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
+- `l1_hit_tokens` and `l2_hit_tokens` split `hit_tokens` by the tier that
+  served it.  `l1_hit_tokens` comes from `PrefetchHandle.l1_hit_chunks` —
+  the prefix L1 alone could serve under each object group's attention
+  window rule — so a chunk whose out-of-window keys were never fetched is
+  still an L1 hit.  `l2_hit_tokens` is the remainder: how much further
+  `found_count` reached once L2 completed.  **Invariant:
+  `l1_hit_tokens + l2_hit_tokens == hit_tokens`, exactly, on every path**,
+  so a dashboard summing the two can never exceed 100%.
+- `early_exit_reason` names the branch of `lookup()` that returned before a
+  prefetch task was submitted.  Always present; `""` on the normal path.
+  Vocabulary:
+
+  | Value | Meaning | Operator action |
+  |---|---|---|
+  | `""` | Normal path (including a genuine cold miss) | None — inspect the hit rate |
+  | `no_gpu_context` | No layout registered for this model / world size | Configuration or registration bug; also logged at `error` |
+  | `empty_chunk_hashes` | Prompt shorter than one chunk | None — a workload property, not a cache failure |
+  | `no_group_layout_descs` | No per-object-group layouts registered for this model / world size | Configuration or registration bug; also logged at `error` |
+
+  Without it `found_count == 0` conflates a cold miss with every early
+  exit.  Extensions are additive: a new value may be added without a
+  dashboard migration, as with the `L2_PREFETCH_FAILED` `reason`
+  vocabulary.
 - `model_name` and `cache_salt` are captured at lookup time from
   `IPCCacheServerKey` and surface as OTel attributes on the
   `lmcache_mp.lookup_*_tokens` counters so the hit rate can be sliced
@@ -242,17 +283,15 @@ inside `metadata` discriminates ops.
 
 ## Blend Server Lifecycle Sentinels
 
-CPU-synchronous sentinels published by `blend_server_v2.py` to bracket
-request scope and guard GPU callback races.  Published via `EventBus.publish()`
-(not `publish_on_stream`).
+CPU-synchronous sentinels published by `modules/blend.py` (`BlendModule`) to
+bracket request scope and guard GPU callback races.  Published via
+`EventBus.publish()` (not `publish_on_stream`).
 
 | EventType | Metadata keys | Types | Published by / when |
 |---|---|---|---|
-| `CB_REQUEST_START` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` — at request arrival |
-| `CB_STORE_PRE_COMPUTED_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_pre_computed` — before GPU store enqueue |
-| `CB_RETRIEVE_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_retrieve_pre_computed` — before GPU retrieve enqueue |
-| `CB_STORE_FINAL_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_final` — before GPU store enqueue |
-| `CB_REQUEST_END` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` (early return: no matches or no GPU context) **or** `BlendEngineV2.cb_store_final` — after SUBMITTED, before GPU work |
+| `CB_REQUEST_START` | *(none)* | — | `BlendModule.cb_unified_lookup` — first (submitting) call |
+| `CB_RETRIEVE_SUBMITTED` | `instance_id` | `int` | `BlendModule.cb_retrieve_pre_computed` — before GPU retrieve enqueue. Holds `cb.request` open across the scatter so a sibling TP worker's early `CB_REQUEST_END` cannot close the root; the root closes on the last `CB_RETRIEVE_END` |
+| `CB_REQUEST_END` | *(none)* | — | `BlendModule.cb_unified_lookup` when the finalized result carries nothing to retrieve (miss / prefix-only — no retrieve will follow), otherwise `BlendModule.cb_retrieve_pre_computed` on every exit (no-op success, read failure, exception, success — the last on the GPU stream) |
 
 ---
 
@@ -265,11 +304,69 @@ These events use `session_id` on the `Event` dataclass (sourced from
 |---|---|---|
 | `CB_LOOKUP_START` | `num_tokens` | `int` |
 | `CB_LOOKUP_END` | `num_tokens`, `requested_tokens`, `hit_tokens`, `fingerprint_hits`, `storage_hits`, `stale_chunks`, `no_gpu_context` | `int`, `int`, `int`, `int`, `int`, `int`, `bool` |
-| `CB_STORE_PRE_COMPUTED_START` | `instance_id`, `num_tokens` | `int`, `int` |
-| `CB_STORE_PRE_COMPUTED_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
-| `CB_RETRIEVE_START` | `instance_id`, `num_chunks` | `int`, `int` |
-| `CB_RETRIEVE_END` | `instance_id`, `num_chunks`, `success` | `int`, `int`, `bool` |
-| `CB_STORE_FINAL_START` | `instance_id`, `num_tokens` | `int`, `int` |
-| `CB_STORE_FINAL_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
+| `CB_RETRIEVE_START` | `num_chunks`, `model_name`, `worker_id` | `int`, `str`, `int \| None` |
+| `CB_RETRIEVE_END` | `success`, `worker_id` | `bool`, `int \| None` |
 | `CB_FINGERPRINTS_REGISTERED` | `num_chunks`, `num_tokens` | `int`, `int` |
 | `CB_CHUNKS_EVICTED` | `num_chunks` | `int` |
+
+`CB_LOOKUP_END` also carries `prefix_hit_tokens`,
+`segmented_prefix_hit_tokens`, `non_prefix_hit_tokens`, `prefix_hits` and
+`prefix_chunks` (all `int`), with `hit_tokens` their sum.  A `no_gpu_context`
+lookup still reports the real `requested_tokens`, so such a request lands in
+the hit-rate denominator as a miss.
+
+`CB_FINGERPRINTS_REGISTERED` is published by the fingerprint-queue
+drainers from what `on_new_token_hashes` returned, so `num_chunks` counts only
+chunks *newly indexed*: it excludes the chunks the store skipped **and** chunks
+the matcher deduplicated (already registered by an earlier store); `num_tokens`
+is `num_chunks × chunk_size`.  A job that indexed nothing (a re-store of known
+content) publishes no event.  `session_id` is the enqueuing store's request —
+generally *not* the request that drained the queue.
+
+The retrieve and scatter events (`CB_RETRIEVE_START/END`,
+`CB_SCATTER_START/END`) also carry `worker_id` (`int | None`, the
+`IPCCacheServerKey.worker_id` of the calling rank).  At TP>1 every rank issues
+its own retrieve under the shared `request_id`, so a consumer that pairs
+START/END by `session_id` alone stitches one interval out of two ranks.  The
+metrics subscriber pairs on `(session_id, worker_id)`; the tracing subscriber
+still keys `cb.retrieve` / `cb.scatter` spans by session only (known follow-up
+— `worker_id` is on the events, so the fix is mechanical).  Two caveats for
+consumers: these events travel through `publish_on_stream`, whose native
+recorder carries non-`int` metadata as strings, so a `None` `worker_id` can
+arrive as the string `"None"` — treat any non-`int` value as "no worker".
+
+### Blend Server sub-phase events
+
+Published by `blend.py` around the legs of the unified lookup and the
+retrieve scatter, correlated by `session_id` (plus `worker_id` for the scatter
+pair, see above).  The scatter pair goes through `publish_on_stream`, so its
+timing is GPU-accurate.
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `CB_FINGERPRINT_MATCH_START` | *(none)* | — |
+| `CB_FINGERPRINT_MATCH_END` | `matches` | `int` |
+| `CB_PREFIX_LOOKUP_START` | *(none)* | — |
+| `CB_PREFIX_LOOKUP_END` | `prefix_chunks` | `int` |
+| `CB_COORDINATOR_MATCH_START` | *(none)* | — |
+| `CB_COORDINATOR_MATCH_END` | `matches`, `timed_out` | `int`, `bool` |
+| `CB_SPARSE_PREFETCH_START` | `n_chunks`, `world_size`, `n_keys`, `l2_keys` | `int`, `int`, `int`, `int` |
+| `CB_SPARSE_PREFETCH_END` | `found_keys`, `l2_keys` | `int`, `int` |
+| `CB_SCATTER_START` | `scattered_tokens`, `n_prefix`, `n_shifted`, `dropped`, `worker_id` | `int`, `int`, `int`, `int`, `int \| None` |
+| `CB_SCATTER_END` | `success`, `worker_id` | `bool`, `int \| None` |
+| `CB_RETRIEVE_NOOP` | `reason`, `dropped_matches` | `str`, `int` |
+
+Notes:
+
+- The fingerprint-match and coordinator-match legs are **mutually exclusive**:
+  with a coordinator configured the fleet directory is the only match source.
+  That leg is async — START at submit, END on the resolving poll or at its
+  deadline (`timed_out=True`).
+- The sparse-prefetch pair is emitted **only when the prefetch reads L2**
+  (`l2_keys > 0`).
+- `CB_RETRIEVE_NOOP` is a point event: the retrieve returned success without
+  scattering anything, so every match degrades to a full recompute.  `reason` is
+  a fixed code (`beyond_slot_bound`, `no_object_keys`), safe as a metric
+  attribute.  Not published when the no-op dropped nothing (ranges already
+  scattered by an earlier retrieve for this worker), so the event always means
+  reuse was lost.

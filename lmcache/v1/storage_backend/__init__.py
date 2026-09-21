@@ -75,7 +75,7 @@ def storage_plugin_launcher(
 
             if not module_path or not class_name:
                 logger.warning(
-                    f"Backend {storage_plugin} missing module_path or class_name"
+                    "Backend %s missing module_path or class_name", storage_plugin
                 )
                 continue
 
@@ -102,10 +102,10 @@ def storage_plugin_launcher(
 
             # Add to storage backends
             storage_backends[storage_plugin] = backend_instance
-            logger.info(f"Created dynamic backend: {storage_plugin}")
+            logger.info("Created dynamic backend: %s", storage_plugin)
 
         except Exception as e:
-            logger.error(f"Failed to create backend {storage_plugin}: {str(e)}")
+            logger.error("Failed to create backend %s: %s", storage_plugin, e)
 
 
 def CreateStorageBackends(
@@ -326,10 +326,10 @@ def CreateStorageBackends(
             if not isinstance(backend, LocalCPUBackend):
                 audited_backend = AuditBackend(backend)
                 audited_backends[name] = audited_backend
-                logger.info(f"Wrapped {name} with AuditBackend")
+                logger.info("Wrapped %s with AuditBackend", name)
             else:
                 audited_backends[name] = backend
-                logger.info(f"Do not wrap {name} as it is a LocalCPUBackend")
+                logger.info("Do not wrap %s as it is a LocalCPUBackend", name)
         return audited_backends
     else:
         # If audit is not enabled, use the original backends
