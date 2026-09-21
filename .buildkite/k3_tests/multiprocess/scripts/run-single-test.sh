@@ -25,46 +25,32 @@ if [[ ! -f "$ENGINE_ADAPTER" ]]; then
     exit 1
 fi
 source "$ENGINE_ADAPTER"
+source "${SCRIPT_DIR}/workload-discovery.sh"
 
-# The workload tree is the engine capability registry. Common workloads are
-# available to every adapter; otherwise the selected engine must provide its
-# own implementation. Only aliases that intentionally share an implementation
-# need to be listed here.
-WORKLOAD_NAME="$TEST_NAME"
-case "$TEST_NAME" in
-    lm_eval_preemption)
-        WORKLOAD_NAME=lm_eval
-        export LM_EVAL_VERIFY_MODE=preemption
-        ;;
-    hma_lm_eval_gemma4 | hma_lm_eval_qwen3_5)
-        WORKLOAD_NAME=hma_lm_eval
-        ;;
-esac
-WORKLOAD_FILE_NAME="${WORKLOAD_NAME//_/-}.sh"
-COMMON_WORKLOAD="${SCRIPT_DIR}/workloads/common/${WORKLOAD_FILE_NAME}"
-ENGINE_WORKLOAD="${SCRIPT_DIR}/workloads/${INFERENCE_ENGINE}/${WORKLOAD_FILE_NAME}"
-if [[ -f "$COMMON_WORKLOAD" ]]; then
-    for unsupported_workload in "${ENGINE_COMMON_WORKLOAD_BLACKLIST[@]-}"; do
-        if [[ "$WORKLOAD_NAME" == "$unsupported_workload" ]]; then
-            echo "Skipping common workload '$TEST_NAME': ${ENGINE_NAME} " \
-                "blacklists '$WORKLOAD_NAME'."
-            exit 0
-        fi
-    done
-    exec_script="$COMMON_WORKLOAD"
-elif [[ -f "$ENGINE_WORKLOAD" ]]; then
-    exec_script="$ENGINE_WORKLOAD"
+# Keep direct run-single-test.sh callers consistent with run.sh. The latter
+# performs this check before dependency installation; this second check keeps
+# the lower-level entry point safe for AMD and local callers.
+if resolve_engine_workload "$TEST_NAME" "$SCRIPT_DIR" "$INFERENCE_ENGINE"; then
+    :
 else
-    echo "Test '$TEST_NAME' is not implemented for ${ENGINE_NAME}." >&2
-    echo "Expected $COMMON_WORKLOAD or $ENGINE_WORKLOAD" >&2
-    exit 1
+    status=$?
+    if [[ "$status" -eq "$WORKLOAD_UNSUPPORTED_STATUS" ]]; then
+        exit 0
+    fi
+    exit "$status"
+fi
+exec_script="$RESOLVED_WORKLOAD_SCRIPT"
+
+if [[ "$TEST_NAME" == "lm_eval_preemption" ]]; then
+    export LM_EVAL_VERIFY_MODE=preemption
 fi
 # Keep this aligned with wait-for-servers.sh. Large-model startup can exceed
 # five minutes on cold or contended CI nodes before the service is unhealthy.
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
-export DEFAULT_MODEL="${DEFAULT_MODEL:-Qwen/Qwen3-14B}"
+export DEFAULT_MODEL="${DEFAULT_MODEL:-${ENGINE_DEFAULT_MODEL:-Qwen/Qwen3-14B}}"
 export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 engine_configure_defaults
 
 case "${LMCACHE_REQUEST_TRANSPORT}" in
@@ -150,6 +136,10 @@ export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 export MAX_WORKERS="${MAX_WORKERS:-4}"
 export LMCACHE_DIR="$REPO_ROOT"
 export RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
+
+if declare -F engine_configure_workload > /dev/null; then
+    engine_configure_workload "$TEST_NAME"
+fi
 
 mkdir -p "$RESULTS_DIR"
 

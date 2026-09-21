@@ -12,6 +12,7 @@ policy can be configured independently:
 ```text
 pipeline.yml
   -> run.sh <test-name>
+     -> engines/<engine>.sh + workload-discovery.sh: preflight capabilities
      -> engines/<engine>.sh: install and configure the engine
      -> scripts/run-single-test.sh
         -> resolve workloads/common or workloads/<engine>
@@ -54,6 +55,7 @@ multiprocess/
     ├── launch-processes.sh      # Shared process launcher
     ├── wait-for-servers.sh      # Readiness checks and diagnostics
     ├── cleanup.sh               # PID, port, log, and result cleanup
+    ├── workload-discovery.sh    # Workload resolution and capability preflight
     └── run-single-test.sh       # Per-test configuration and workload discovery
 ```
 
@@ -79,6 +81,10 @@ adapter has this shape:
 #!/usr/bin/env bash
 
 export ENGINE_NAME="ExampleEngine"
+export ENGINE_DEFAULT_MODEL="example/model"
+
+ENGINE_SUPPORTED_TRANSFER_MODES=(lmcache_driven)
+ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(zmq grpc)
 
 # Use normalized underscore names. Keep this empty when all common workloads
 # are supported.
@@ -96,6 +102,13 @@ engine_configure_defaults() {
     export GPU_FOR_BASELINE="${GPU_FOR_BASELINE:-1}"
     export ENGINE_LOG_FILE="${ENGINE_LOG_FILE:-/tmp/example_engine.log}"
     export ENGINE_BASELINE_LOG_FILE="${ENGINE_BASELINE_LOG_FILE:-/tmp/example_engine_baseline.log}"
+}
+
+engine_configure_workload() {
+    local test_name="$1"
+    if [[ "$test_name" == "long_doc_qa" ]]; then
+        export MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:-0}"
+    fi
 }
 
 engine_prepare_launch() {
@@ -126,6 +139,11 @@ engine_ready_urls() {
     local port="$1"
     printf 'http://127.0.0.1:%s/health\n' "$port"
 }
+
+engine_clear_local_cache() {
+    local port="$1"
+    # Optional: clear only the engine-local prefix/radix cache.
+}
 ```
 
 `engine_launch` must start the process in the background and store its PID in
@@ -133,6 +151,20 @@ engine_ready_urls() {
 using `LMCACHE_REQUEST_SCHEME`, `LMCACHE_PORT`, and any required engine-side
 configuration. In `baseline` mode it must start the same engine without
 LMCache.
+
+`ENGINE_SUPPORTED_TRANSFER_MODES` and
+`ENGINE_SUPPORTED_REQUEST_TRANSPORTS` describe the matrix combinations the
+adapter can run. When either array is omitted, that capability is treated as
+unrestricted for compatibility with external adapters. Unsupported
+combinations and blacklisted common workloads are skipped before
+`engine_setup_environment`, so they do not install packages or start servers.
+
+Use the optional `engine_configure_workload <test-name>` hook for engine-specific
+defaults such as performance thresholds. Keep user- or pipeline-provided values
+authoritative by assigning defaults with `${VAR:-default}`. A workload that
+must distinguish an LMCache retrieval from an engine-local hit can opt in with
+`VERIFY_LMCACHE_RETRIEVAL=true`; its adapter implements
+`engine_clear_local_cache <port>` without clearing LMCache itself.
 
 Workload support requires no adapter allowlist. A common workload is available
 to every adapter; an engine-specific workload is available when its script
@@ -187,15 +219,18 @@ scripts/workloads/<engine>/example-feature.sh
 If the scenario is portable, put the same filename under `workloads/common/`.
 No adapter allowlist or dispatch entry is needed. Add configuration in
 `run-single-test.sh` only when the test needs a custom model, launch profile,
-baseline server, or LMCache setting. Add an alias there only when multiple test
-names intentionally share one workload script.
+baseline server, or LMCache setting. Add an alias to
+`workload-discovery.sh` only when multiple test names intentionally share one
+workload script.
 
 ### 4. Add Buildkite steps
 
-Add the engine to `x-common-inference-engines` after its common workloads are
-ready. Those steps then expand across the engine and request-transport matrix.
-Add separate steps for engine-private workloads and choose pod resources for
-each test:
+Add the engine to `x-common-inference-engines`. Shared steps expand across the
+engine matrix, while the adapter's capability declarations and blacklist remove
+unsupported combinations at preflight. Do not add duplicate shared-workload
+steps for engine-specific defaults; use `engine_configure_workload` instead.
+Add separate steps only for engine-private workloads and choose pod resources
+for each test:
 
 ```yaml
 - label: ":test_tube: {{matrix.inference_engine}} / example_feature / {{matrix.request_transport}}"

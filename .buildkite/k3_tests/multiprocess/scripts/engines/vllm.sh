@@ -2,6 +2,10 @@
 # vLLM adapter for the LMCache multiprocess integration-test harness.
 
 export ENGINE_NAME="vLLM"
+export ENGINE_DEFAULT_MODEL="Qwen/Qwen3-14B"
+
+ENGINE_SUPPORTED_TRANSFER_MODES=(lmcache_driven engine_driven)
+ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(zmq grpc)
 
 # Common workloads that this adapter cannot currently run. Entries use the
 # normalized workload name with underscores, for example: long_doc_qa_l2.
@@ -10,6 +14,9 @@ ENGINE_COMMON_WORKLOAD_BLACKLIST=()
 engine_setup_environment() {
     local repo_root="$1"
     local setup_script="${BK_SETUP_ENV_SCRIPT:-${repo_root}/.buildkite/k3_harness/setup-env.sh}"
+    export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-${TORCH_DEVICE_TYPE:-cuda}}"
+    export GPU_MEMORY_PROBE_ENABLED="${GPU_MEMORY_PROBE_ENABLED:-1}"
+    export BATCH_INVARIANT_DEFAULT="${BATCH_INVARIANT_DEFAULT:-1}"
     source "$setup_script"
 }
 
@@ -216,6 +223,12 @@ engine_ready_urls() {
     local port="$1"
     printf 'http://127.0.0.1:%s/health\n' "$port"
     printf 'http://127.0.0.1:%s/v1/models\n' "$port"
+}
+
+engine_clear_local_cache() {
+    local port="$1"
+    curl --noproxy '*' -fsS --max-time 60 -X POST \
+        "http://127.0.0.1:${port}/reset_prefix_cache" > /dev/null
 }
 
 engine_count_preemptions() {

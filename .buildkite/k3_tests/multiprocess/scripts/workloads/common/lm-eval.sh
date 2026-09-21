@@ -19,6 +19,8 @@ LM_EVAL_VERIFY_MODE="${LM_EVAL_VERIFY_MODE:-${LM_EVAL_VERIFY_MODE_DEFAULT:-sampl
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
 SCORE_MIN="${SCORE_MIN:-${LM_EVAL_SCORE_MIN_DEFAULT:-0.80}}"
 ENGINE_LOG_FILE="${ENGINE_LOG_FILE:-/tmp/build_${BUILD_ID}_engine.log}"
+LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
+VERIFY_LMCACHE_RETRIEVAL="${VERIFY_LMCACHE_RETRIEVAL:-false}"
 
 case "$LM_EVAL_VERIFY_MODE" in
     samples) LM_EVAL_DIR="$RESULTS_DIR/lm_eval" ;;
@@ -105,6 +107,29 @@ verify_samples_match() {
 
 count_preemptions() {
     engine_count_preemptions "$ENGINE_LOG_FILE"
+}
+
+read_l1_retrievals() {
+    curl --noproxy '*' -fsS --max-time 10 \
+        "http://127.0.0.1:${LMCACHE_HTTP_PORT}/metrics" \
+        | awk '
+            /^lmcache_mp_l1_read_chunks_total[ {]/ { total += $NF }
+            END { printf "%d", total + 0 }
+        '
+}
+
+prepare_lmcache_retrieval_run() {
+    if ! declare -F engine_clear_local_cache > /dev/null; then
+        echo "${ENGINE_NAME} cannot clear its local prefix cache" >&2
+        return 1
+    fi
+
+    # Let asynchronous stores drain before removing the engine-local entries.
+    # The next run must then retrieve from LMCache rather than hit only the
+    # inference engine's prefix/radix cache.
+    sleep "${LMCACHE_STORE_SETTLE_SECONDS:-2}"
+    engine_clear_local_cache "$ENGINE_PORT"
+    read_l1_retrievals
 }
 
 verify_preemption() {
@@ -210,12 +235,28 @@ echo "============================================"
 run_lm_eval "first_run" "$FIRST_RUN_DIR"
 [ "$LM_EVAL_VERIFY_MODE" = "preemption" ] && preemptions_after_first=$(count_preemptions)
 
+if [[ "$VERIFY_LMCACHE_RETRIEVAL" == "1" \
+        || "$VERIFY_LMCACHE_RETRIEVAL" == "true" ]]; then
+    retrievals_before_second=$(prepare_lmcache_retrieval_run)
+    echo "L1 retrievals before second run: $retrievals_before_second"
+fi
+
 # Second run -- should use cached results
 echo "============================================"
 echo "=== Second lm_eval run (cache hit) ==="
 echo "============================================"
 run_lm_eval "second_run" "$SECOND_RUN_DIR"
 [ "$LM_EVAL_VERIFY_MODE" = "preemption" ] && preemptions_after_second=$(count_preemptions)
+
+if [[ "$VERIFY_LMCACHE_RETRIEVAL" == "1" \
+        || "$VERIFY_LMCACHE_RETRIEVAL" == "true" ]]; then
+    retrievals_after_second=$(read_l1_retrievals)
+    echo "L1 retrievals after second run: $retrievals_after_second"
+    if ((retrievals_after_second <= retrievals_before_second)); then
+        echo "LMCache served no L1 chunks during the second lm_eval run" >&2
+        exit 1
+    fi
+fi
 
 # Verify consistency
 echo "============================================"

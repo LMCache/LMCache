@@ -23,8 +23,9 @@ x-vllm-bench-retry: &vllm-bench-retry
     - exit_status: "*"
       limit: 3
 
-# Engines that run the shared workloads. Add a new adapter here after its
-# common-workload coverage is ready.
+# Engines that run the shared workloads. Adapter capability declarations and
+# workload blacklists skip unsupported matrix combinations before dependency
+# installation, so adding a shared-workload engine requires only one entry.
 x-common-inference-engines: &common-inference-engines
   - "vllm"
 

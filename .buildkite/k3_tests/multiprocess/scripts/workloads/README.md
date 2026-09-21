@@ -24,7 +24,7 @@ The harness converts a test name from underscores to hyphens and discovers the
 script automatically. For example, `long_doc_qa` resolves to
 `common/long-doc-qa.sh`, while `cache_stats` with `INFERENCE_ENGINE=vllm`
 resolves to `vllm/cache-stats.sh`. Only test names that share an implementation
-need an explicit alias in `run-single-test.sh`.
+need an explicit alias in `../workload-discovery.sh`.
 
 Common workloads use `ENGINE_PORT`, `ENGINE_BASELINE_PORT`, `MODEL`, and
 `RESULTS_DIR`. Engine-specific launch behavior must be exposed by an adapter in
@@ -33,4 +33,6 @@ workloads in its engine-named directory. Tests remain separate Buildkite steps
 because their GPU counts, models, timeouts, and retry policies differ.
 An adapter may temporarily skip unsupported common workloads through
 `ENGINE_COMMON_WORKLOAD_BLACKLIST`; this is an exception list, not a workload
-allowlist.
+allowlist. Transfer-mode and request-transport support is declared separately
+by the adapter, so a common pipeline matrix can safely include engines with
+different capabilities.

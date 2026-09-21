@@ -20,14 +20,12 @@ cd "${REPO_ROOT}"
 
 # ── Device configuration ─────────────────────────────────────
 export TORCH_DEVICE_TYPE="${TORCH_DEVICE_TYPE:-cuda}"
-export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-${TORCH_DEVICE_TYPE}}"
 export DEVICE_AFFINITY_VAR="${DEVICE_AFFINITY_VAR:-CUDA_VISIBLE_DEVICES}"
-export GPU_MEMORY_PROBE_ENABLED="${GPU_MEMORY_PROBE_ENABLED:-1}"
-export BATCH_INVARIANT_DEFAULT="${BATCH_INVARIANT_DEFAULT:-1}"
-export DEFAULT_MODEL="${DEFAULT_MODEL:-Qwen/Qwen3-14B}"
 export LM_EVAL_NUM_CONCURRENT_DEFAULT="${LM_EVAL_NUM_CONCURRENT_DEFAULT:-50}"
 export LM_EVAL_VERIFY_MODE_DEFAULT="${LM_EVAL_VERIFY_MODE_DEFAULT:-samples}"
 export LM_EVAL_SCORE_MIN_DEFAULT="${LM_EVAL_SCORE_MIN_DEFAULT:-0.80}"
+export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 
 # ── Environment setup ────────────────────────────────────────
 if [[ ! -f "$ENGINE_ADAPTER" ]]; then
@@ -35,6 +33,23 @@ if [[ ! -f "$ENGINE_ADAPTER" ]]; then
     exit 1
 fi
 source "$ENGINE_ADAPTER"
+source "${SCRIPT_DIR}/scripts/workload-discovery.sh"
+
+# Capability checks happen before installing the engine and test dependencies.
+# A shared Buildkite matrix can therefore include engines with different
+# feature sets without paying setup cost for unsupported combinations.
+if resolve_engine_workload "$TEST_NAME" "${SCRIPT_DIR}/scripts" \
+        "$INFERENCE_ENGINE"; then
+    :
+else
+    status=$?
+    if [[ "$status" -eq "$WORKLOAD_UNSUPPORTED_STATUS" ]]; then
+        exit 0
+    fi
+    exit "$status"
+fi
+
+export DEFAULT_MODEL="${DEFAULT_MODEL:-${ENGINE_DEFAULT_MODEL:-Qwen/Qwen3-14B}}"
 engine_setup_environment "$REPO_ROOT"
 export INFERENCE_ENGINE
 
