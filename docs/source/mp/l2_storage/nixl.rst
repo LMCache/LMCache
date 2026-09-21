@@ -2,12 +2,15 @@ NIXL
 ====
 
 NIXL-based persistent storage — the primary production L2 backend, using NIXL
-(NVIDIA Interconnect Library) for high-performance storage I/O. Two adapter
+(NVIDIA Interconnect Library) for high-performance storage I/O. Three adapter
 types share this backend:
 
 - ``nixl_store`` — a fixed pool of storage descriptors pre-allocated at init.
 - ``nixl_store_dynamic`` — opens and registers files per operation, adding
   persist/recover across restarts and removing the open-file-descriptor limit.
+- :doc:`nixl_native` — an optional C++20 connector that registers the L1 arena
+  once per worker and supports both generic ``FILE_SEG`` and ``OBJ_SEG``
+  strategies.
 
 .. note::
 
@@ -17,6 +20,10 @@ types share this backend:
    .. code-block:: bash
 
        uv pip install lmcache[nixl]
+
+   ``nixl_native`` additionally requires NIXL 1.3 or newer development headers
+   and a build with ``BUILD_WITH_NIXL=1``. See :doc:`nixl_native` for complete
+   build and operational instructions.
 
 Static pool — ``nixl_store``
 ----------------------------
