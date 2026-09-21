@@ -41,9 +41,10 @@ class MemoryCoordinatorHttpClient:
 
     ``timeout`` is in seconds. Invalid settings raise ValueError; transport
     failures raise httpx.HTTPError; rejected operations raise
-    MemoryCoordinatorError. Epoch changes or ambiguous POSTs permanently fence
+    MemoryCoordinatorError. Epoch changes or ambiguous writes permanently fence
     the client: subsequent operations raise StaleEpochError until a coordinated
     reset constructs a new client. A closed client raises MemoryCoordinatorError.
+    Failed lookups propagate errors without fencing unless the epoch changed.
     """
 
     def __init__(
@@ -167,17 +168,14 @@ class MemoryCoordinatorHttpClient:
     ) -> dict[str, object]:
         with self._lock:
             self._ensure_usable()
+            mutating = method == "POST" and path != "/v1/lookup"
             try:
                 response = self._http.request(method, path, json=payload)
             except httpx.HTTPError:
                 # The server may have committed before the connection failed.
-                self._fenced |= method == "POST"
+                self._fenced |= mutating
                 raise
-            if (
-                method == "POST"
-                and response.status_code >= 500
-                and response.status_code != 507
-            ):
+            if mutating and response.status_code >= 500 and response.status_code != 507:
                 self._fenced = True
             return self._decode(response)
 

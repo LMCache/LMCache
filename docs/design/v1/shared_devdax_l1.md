@@ -125,10 +125,15 @@ establishes visibility, not durability or recovery.
 
 ## Failures and shutdown
 
-POST transport failures and unexpected server errors can leave an ambiguous
+Write transport failures and unexpected server errors can leave an ambiguous
 write outcome. The client fences itself instead of retrying an allocation or
 assuming that commit failed. A stale-epoch response also fences it. Reserved
 bytes are never reused automatically, including during cleanup failures.
+
+Lookup is read-only despite using POST. Transport and server failures propagate
+without fencing the client or becoming cache misses. Later calls still use the
+original epoch; stale-epoch errors or mismatching response epochs still fence.
+The client does not automatically retry.
 
 An epoch cannot revoke a GPU's old mapping. Therefore, startup atomically creates
 a persistent marker with exclusive creation and fsyncs it and its parent. Every

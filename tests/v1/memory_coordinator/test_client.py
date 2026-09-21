@@ -10,6 +10,7 @@ import threading
 import time
 
 # Third Party
+import httpx
 import pytest
 import uvicorn
 
@@ -118,3 +119,64 @@ def test_client_latches_epoch_and_fails_closed_after_restart(
                 MemoryCoordinatorHttpClient(endpoint, reset.token_file)
             ) as replacement:
                 assert replacement.lookup([_key(1)]) == [None]
+
+
+@pytest.mark.parametrize(
+    ("operation", "failure"),
+    [
+        (operation, failure)
+        for operation in ("lookup", "reserve_writes", "finish_writes", "abort_writes")
+        for failure in ("timeout", "server")
+    ]
+    + [("lookup", "stale_epoch"), ("lookup", "changed_epoch")],
+)
+def test_client_fences_ambiguous_writes_but_not_failed_lookups(
+    coordinator_config: MemoryCoordinatorConfig,
+    port: int,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    failure: str,
+) -> None:
+    with (
+        _server(coordinator_config, port),
+        closing(
+            MemoryCoordinatorHttpClient(
+                f"http://127.0.0.1:{port}", coordinator_config.token_file
+            )
+        ) as client,
+    ):
+        requests = []
+
+        def fail_request(
+            _client: httpx.Client, request: httpx.Request, **_kwargs: object
+        ) -> httpx.Response:
+            requests.append(request)
+            if failure == "timeout":
+                raise httpx.ReadTimeout(
+                    "injected lookup/write timeout", request=request
+                )
+            if failure == "stale_epoch":
+                return httpx.Response(409, json={"error": "stale_epoch"})
+            if failure == "changed_epoch":
+                return httpx.Response(200, json={"region_epoch": "other", "hits": []})
+            return httpx.Response(503, text="unavailable")
+
+        fenced = operation != "lookup" or failure in ("stale_epoch", "changed_epoch")
+        with monkeypatch.context() as patch:
+            patch.setattr(httpx.Client, "send", fail_request)
+            error = (
+                httpx.ReadTimeout if failure == "timeout" else MemoryCoordinatorError
+            )
+            with pytest.raises(error):
+                getattr(client, operation)([])
+            if fenced:
+                with pytest.raises(StaleEpochError, match="fenced"):
+                    client.lookup([])
+            assert len(requests) == 1
+
+        if not fenced:
+            assert client.lookup([_key(1)]) == [None]
+            grant = client.reserve_writes([_item(1)])[0]
+            assert grant is not None
+            client.finish_writes([_ref(grant)])
+            assert client.lookup([_key(1)])[0] is not None

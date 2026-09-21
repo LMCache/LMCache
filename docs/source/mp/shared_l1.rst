@@ -163,8 +163,10 @@ Limits and troubleshooting
   Fix the configuration; never bypass the check to make a mapping attach.
 * HTTP 507 means the whole absent-key write batch did not fit. No partial
   allocation is made for that batch.
-* A stale epoch or ambiguous POST failure fences the client. Do not retry by
+* A stale epoch or ambiguous write failure fences the client. Do not retry by
   silently adopting another epoch. Stop and investigate, then reset together.
+  Lookup transport/server errors propagate without fencing or automatic retries;
+  later calls still use the original epoch and fence if it has changed.
 * A visibility or CUDA registration error has no fallback. Verify the platform
   library, device access, mapping geometry, and CUDA registration support.
 * An existing startup marker is a deliberate restart refusal, not a stale file
