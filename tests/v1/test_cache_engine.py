@@ -2065,3 +2065,61 @@ def test_retrieve_cleanup_ref_count_and_unpin() -> None:
 
     mem_obj_not_pinned.ref_count_down.assert_called_once()
     mem_obj_not_pinned.unpin.assert_not_called()
+
+
+class _AlwaysUnhealthyMonitor:
+    """Minimal HealthMonitor stand-in that always reports unhealthy."""
+
+    def is_healthy(self) -> bool:
+        """Report the engine as unhealthy."""
+        return False
+
+
+@pytest.mark.parametrize("skip_reason", ["frozen", "unhealthy"])
+def test_store_layer_yields_full_arity_when_store_is_skipped(
+    skip_reason, autorelease_v1
+):
+    """``store_layer`` yields ``num_layers + 1`` times even when it skips.
+
+    The vLLM v1 connector advances the generator once per model layer in
+    ``save_kv_layer`` and once more in ``wait_for_save``, committing to that
+    count before it can know whether the store will be skipped. Freeze mode is
+    toggled at runtime (the HTTP freeze endpoint, and the controller's own full
+    sync), and the health monitor can flip a live engine to unhealthy, so both
+    skip paths are reachable mid-serving. A path that yields fewer times raises
+    ``StopIteration`` inside the serving loop.
+    """
+    num_layers = 32
+    chunk_size = 256
+    kv_shape = (num_layers, 2, chunk_size, 8, 128)
+
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, use_layerwise=True)
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test",
+            cfg,
+            dumb_metadata(kv_shape),
+            create_gpu_connector(1024, num_layers),
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        )
+    )
+
+    if skip_reason == "frozen":
+        engine.freeze(True)
+        assert engine.is_frozen()
+    else:
+        engine.set_health_monitor(_AlwaysUnhealthyMonitor())
+        assert not engine.is_healthy()
+
+    tokens = generate_tokens(chunk_size * 2, torch_device_type)
+    storer = engine.store_layer(tokens, req_id="arity-check")
+
+    # save_kv_layer advances once per layer ...
+    for layer_id in range(num_layers):
+        next(storer)
+    # ... and wait_for_save advances once more.
+    next(storer)
+
+    with pytest.raises(StopIteration):
+        next(storer)
