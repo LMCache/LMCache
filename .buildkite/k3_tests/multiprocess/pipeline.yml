@@ -28,6 +28,7 @@ x-vllm-bench-retry: &vllm-bench-retry
 # installation, so adding a shared-workload engine requires only one entry.
 x-common-inference-engines: &common-inference-engines
   - "vllm"
+  - "sglang"
 
 # Most scenarios exercise transport-independent behavior, so keep their PR
 # coverage on the default ZMQ transport.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Per-job env setup for the SGLang + LMCache MP integration tests.
-# Drop the fork install once https://github.com/sgl-project/sglang/pull/24089
-# lands.
+# CI callers may override SGLANG_INSTALL_SPEC with a wheel, branch, or
+# commit-pinned git URL.
 set -euo pipefail
 trap 'echo "ERROR: setup-sglang-env.sh failed at line $LINENO (exit code $?)" >&2' ERR
 
@@ -31,8 +31,9 @@ fi
 protoc --version
 
 echo "--- :package: SGLang + LMCache install"
-SGLANG_URL="git+https://github.com/sgl-project/sglang.git@main#subdirectory=python"
-uv pip install "${SGLANG_URL}"
+SGLANG_INSTALL_SPEC="${SGLANG_INSTALL_SPEC:-git+https://github.com/sgl-project/sglang.git@main#subdirectory=python}"
+echo "Installing SGLang from ${SGLANG_INSTALL_SPEC}"
+uv pip install "${SGLANG_INSTALL_SPEC}"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 
 uv pip uninstall cupy-cuda12x 2>/dev/null || true
