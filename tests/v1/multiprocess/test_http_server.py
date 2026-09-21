@@ -13,6 +13,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess import http_server as http_server_module
+from lmcache.v1.multiprocess.config import HTTPFrontendConfig
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
 import lmcache.lmcache_native as lmcache_native
@@ -35,6 +36,7 @@ def test_lifespan_owns_transport_neutral_request_server(
             "mp": mp_config,
             "storage_manager": MagicMock(),
             "observability": MagicMock(),
+            "http": HTTPFrontendConfig(),
         },
     )
     monkeypatch.setattr(
@@ -135,7 +137,7 @@ def client_with_engine(mock_engine):
     ``app.state.engine``.
     """
     app.state.engine = mock_engine
-    app.state.context = build_context(mock_engine)
+    app.state.context = build_context(mock_engine, HTTPFrontendConfig())
     client = TestClient(app)
     yield client
     client.close()
@@ -193,7 +195,7 @@ class TestCacheChecksumsEndpoint:
     def test_mixed_format_supported(self, mock_mixed_engine):
         """Two different KV formats are gathered per layer, not rejected."""
         app.state.engine = mock_mixed_engine
-        app.state.context = build_context(mock_mixed_engine)
+        app.state.context = build_context(mock_mixed_engine, HTTPFrontendConfig())
         client = TestClient(app)
         try:
             resp = client.post(
