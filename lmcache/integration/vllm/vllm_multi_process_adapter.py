@@ -811,7 +811,8 @@ class LMCacheMPSchedulerAdapter:
         token_ids: list[int],
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-    ):
+        reserve_last_token: bool = False,
+    ) -> None:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
@@ -827,6 +828,8 @@ class LMCacheMPSchedulerAdapter:
                 cache_salt values produce separate cache entries.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            reserve_last_token: Whether to exclude the final token before
+                aligning the lookup range.
 
         Returns:
             None
@@ -847,8 +850,9 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
+        lookup_tokens = max(0, len(token_ids) - int(reserve_last_token))
         aligned_end = (
-            len(token_ids) // self.lmcache_tokens_per_chunk
+            lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
 
         key = self._create_key(
