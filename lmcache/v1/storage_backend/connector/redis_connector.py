@@ -473,7 +473,18 @@ class RedisSentinelConnector(RemoteConnector):
         password: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-    ):
+    ) -> None:
+        """Initialize asynchronous Redis Sentinel child clients.
+
+        Args:
+            hosts_and_ports: Sentinel endpoints used for master and replica
+                discovery.
+            username: Redis username forwarded to discovered child clients.
+            password: Redis password forwarded to discovered child clients.
+            loop: Event loop used by the synchronous existence bridge.
+            local_cpu_backend: CPU backend that allocates objects read from
+                Redis.
+        """
         # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
@@ -507,16 +518,46 @@ class RedisSentinelConnector(RemoteConnector):
         )
 
         self.local_cpu_backend = local_cpu_backend
+        self.loop = loop
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return bool(self.slave.exists(key.to_string() + "metadata"))
+        """Return whether a metadata record exists for ``key``.
+
+        Args:
+            key: Cache key whose Redis metadata record is checked.
+
+        Returns:
+            ``True`` when the discovered replica reports the metadata record.
+        """
+        return bool(await self.slave.exists(key.to_string() + "metadata"))
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        return bool(self.slave.exists(key.to_string() + "metadata"))
+        """Synchronously bridge :meth:`exists` onto the configured event loop.
+
+        Args:
+            key: Cache key whose Redis metadata record is checked.
+
+        Returns:
+            ``True`` when the discovered replica reports the metadata record.
+
+        Note:
+            Callers must not invoke this method from ``self.loop``'s thread.
+        """
+        future = asyncio.run_coroutine_threadsafe(self.exists(key), self.loop)
+        return bool(future.result())
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        """Read one cache object from the discovered replica.
+
+        Args:
+            key: Cache key whose metadata and payload are read.
+
+        Returns:
+            A newly allocated memory object on a complete hit, or ``None`` for
+            a miss, allocation failure, or stale metadata without payload.
+        """
         key_str = key.to_string()
-        metadata_bytes = self.slave.get(key_str + "metadata")
+        metadata_bytes = await self.slave.get(key_str + "metadata")
 
         if metadata_bytes is None:
             return None
@@ -535,7 +576,7 @@ class RedisSentinelConnector(RemoteConnector):
             return None
 
         # TODO(Jiayi): Find a way to do `get` inplace
-        kv_bytes = self.slave.get(key_str + "kv_bytes")
+        kv_bytes = await self.slave.get(key_str + "kv_bytes")
 
         assert not inspect.isawaitable(kv_bytes)
 
@@ -548,7 +589,7 @@ class RedisSentinelConnector(RemoteConnector):
                 "Key exists but KV cache does not exist."
                 "Might happen when the cache is evicted by redis."
             )
-            self.master.delete(key_str + "metadata")
+            await self.master.delete(key_str + "metadata")
             return None
 
         if isinstance(memory_obj.byte_array, memoryview):
@@ -569,7 +610,20 @@ class RedisSentinelConnector(RemoteConnector):
 
         return memory_obj
 
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
+        """Persist one cache object through the discovered Redis master.
+
+        Await this payload write before sending the metadata write. The two
+        records are not an atomic transaction and can be evicted separately.
+
+        Args:
+            key: Cache key used to derive the payload and metadata records.
+            memory_obj: Object to serialize and persist. Its caller retains
+                responsibility for releasing the object's reference.
+
+        Returns:
+            ``None`` after both Redis writes complete successfully.
+        """
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
@@ -583,17 +637,26 @@ class RedisSentinelConnector(RemoteConnector):
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
-        self.master.set(key_str + "kv_bytes", kv_bytes)
-        self.master.set(key_str + "metadata", metadata_bytes)
+        await self.master.set(key_str + "kv_bytes", kv_bytes)
+        await self.master.set(key_str + "metadata", metadata_bytes)
 
     # TODO
     @no_type_check
     async def list(self) -> List[str]:
         pass
 
-    async def close(self):
-        self.master.close()
-        self.slave.close()
+    async def close(self) -> None:
+        """Close the asynchronous Redis clients discovered through Sentinel.
+
+        Returns:
+            ``None`` after both child-client close operations complete.
+
+        Note:
+            The Sentinel discovery parent has no expanded lifecycle handling
+            here; this connector owns only the child clients it created.
+        """
+        await self.master.close()
+        await self.slave.close()
 
 
 class RedisClusterConnector(RemoteConnector):
