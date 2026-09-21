@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Exercise the cuFile backend against fake native bindings, without CUDA."""
+"""cuFile tests with fake native bindings."""
 
 # Standard
 from unittest.mock import Mock

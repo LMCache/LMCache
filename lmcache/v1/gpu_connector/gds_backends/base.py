@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared contracts for stream-ordered GPU storage IO.
-
-A GDSContext owns one backend and its slab handle. Submissions retain native
-argument storage until the context observes completion on the issuing stream.
-Importing these interfaces does not load a storage driver.
-"""
+"""Interfaces for stream-ordered GPU storage IO."""
 
 # Standard
 from abc import ABC, abstractmethod
@@ -18,13 +13,10 @@ import torch
 
 
 class Submission:
-    """Native IO arguments and result, kept alive until stream completion.
+    """Native IO arguments retained until the issuing stream completes.
 
-    Native async APIs receive pointers to these fields, not copies. The caller
-    must retain this object and leave size/offset fields unchanged until the
-    issuing stream completes. GDSContext manages this lifetime for its IO.
-    ``bytes_done`` is valid only after completion; a negative value reports a
-    deferred IO error rather than an error from the initial submission call.
+    Keep the pointer-backed fields unchanged while IO is pending. After completion,
+    bytes_done holds the transferred byte count or a negative IO error.
     """
 
     def __init__(self, size: int, file_offset: int, buf_offset: int) -> None:
@@ -40,24 +32,11 @@ class Submission:
 
 
 class GDSBackend(ABC):
-    """Storage operations and registrations owned by one GDS context.
+    """Backend owned by one GDSContext.
 
-    A backend module exports a concrete ``Backend`` subclass whose ``name``
-    matches the module's configuration name. Construction, default selection,
-    and environment validation must not open a native driver. Load optional
-    dependencies lazily when a native operation needs them.
-    Platform requirements belong to implementations; this base imposes none.
-
-    The process's GDS context owns its backend instance. Callers must stop new
-    operations and complete outstanding DMA before deregistering buffers and
-    streams, closing slab handles, and finally calling ``close_driver``.
-    Driver state follows the implementation's native API; this interface does
-    not coordinate driver lifetimes across backend instances.
-
-    Implementations propagate native initialization/registration errors.
-    Cleanup methods require completed IO; they do not synchronize GPU streams
-    on the caller's behalf. Method contracts below are shared by all backends;
-    subclass documentation only needs to describe backend-specific behavior.
+    Construction and selection must not load native drivers. Platform requirements
+    belong to each implementation. Complete DMA before releasing registrations,
+    handles, and driver state; native errors propagate to the caller.
     """
 
     name: ClassVar[str]
@@ -67,101 +46,53 @@ class GDSBackend(ABC):
 
     @classmethod
     def is_default(cls) -> bool:
-        """Return whether this implementation is the default for this environment.
-
-        The factory checks candidates in module-name order, without constructing
-        them, and stops at the first match. The default False means explicit
-        selection is required. This check must not load a native storage driver.
-        """
+        """Whether auto selection may use this backend, without loading its driver."""
         return False
 
     def validate_environment(self) -> None:
-        """Raise ValueError if the runtime cannot use this implementation.
-
-        Called before slab setup for explicit and automatic selection. The
-        default accepts every environment; subclasses own any required checks.
-        """
+        """Raise ValueError for an unsupported runtime; the default accepts all."""
         return None
 
     @abstractmethod
     def open_slab(self, location: str, size: int, direct_io: bool) -> "GDSHandle":
-        """Prepare ``size`` bytes at ``location`` and return an owning GDSHandle.
-
-        The implementation interprets the location (for example, a directory
-        or raw device) and the direct-IO preference. It must validate capacity
-        and prepare/register the backing storage before returning. On failure,
-        close any descriptor or handle created here; the context then calls
-        ``close_driver`` to clean up driver state.
-        """
+        """Prepare and register size bytes at location; release resources on failure."""
 
     @abstractmethod
     def open_handle(self, fd: int, path: str) -> "GDSHandle":
-        """Take ownership of an open descriptor and register it for slab IO.
-
-        ``path`` identifies the backing storage for logging. Ownership transfers
-        at the call: close fd if registration fails, otherwise return a handle
-        that deregisters and closes it. Unlike ``register_handle``, callers
-        must not close fd themselves after this call.
-        """
+        """Take ownership of fd; return a registered handle or close fd on failure."""
 
     @abstractmethod
     def register_handle(self, fd: int) -> Any:
-        """Register fd and return its backend-specific native handle.
-
-        Initialize the driver as needed. This low-level method leaves fd
-        ownership with the caller, including on failure; ``open_handle`` wraps
-        it when descriptor ownership should transfer to a GDSHandle.
-        """
+        """Return a native registration for fd, leaving fd ownership with the caller."""
 
     @abstractmethod
     def deregister_handle(self, handle: Any) -> None:
-        """Release a handle returned by register_handle, without closing its fd.
-
-        All IO using the registration must already be complete. GDSHandle.close
-        calls this before closing its descriptor, even if deregistration raises.
-        """
+        """Release a native registration without closing its descriptor."""
 
     @abstractmethod
     def register_buffer(self, buf: torch.Tensor) -> None:
-        """Register the contiguous GPU allocation described by ``buf`` for DMA.
+        """Register a contiguous GPU tensor for DMA.
 
-        The region is buf.data_ptr() through numel() * element_size() bytes.
-        Call after slab setup. Retain the tensor while registered and until
-        all DMA completes; implementations own any device,
-        alignment, and maximum-region-size validation.
+        Retain the tensor until all IO completes and the region is unregistered.
         """
 
     @abstractmethod
     def deregister_buffer(self, buf: torch.Tensor) -> None:
-        """Release a previously registered buffer region after DMA completes.
-
-        Pass the same base pointer used for registration. This unregisters the
-        region, but does not free the caller's tensor or close the driver.
-        """
+        """Unregister the same base pointer without freeing the caller's tensor."""
 
     @abstractmethod
     def register_stream(self, raw_stream: int) -> None:
-        """Prepare the integer native stream handle for stream-ordered IO.
-
-        Initialize driver state as needed. The caller owns the GPU stream;
-        implementations may use a native registration or a no-op shim.
-        """
+        """Prepare a native stream handle for IO without taking ownership of it."""
 
     @abstractmethod
     def deregister_stream(self, raw_stream: int) -> None:
-        """Release registration for raw_stream after all its IO completes.
-
-        This does not destroy the caller's GPU stream or close the driver.
-        """
+        """Release registration after IO completes, leaving the stream alive."""
 
     def close_driver(self) -> None:
-        """Close native driver state after registrations and handles are closed.
+        """Close an opened driver once, resetting state even if closing fails.
 
-        For explicit-open drivers, call the implementation's ``_close_driver``
-        once, then reset this instance's state even if closing raises. Calls
-        before opening or after closing do nothing and do not load a library.
-        Backends with implicit initialization may override this method instead
-        of using the open-state helpers. No state is shared between instances.
+        Implicit-initialization backends may override this. Calls before opening do
+        nothing; state is local to this instance.
         """
         if not self._driver_opened:
             return
@@ -171,12 +102,10 @@ class GDSBackend(ABC):
             self._driver_opened = False
 
     def _ensure_driver_open(self) -> None:
-        """Open once per instance, leaving failed opens retryable.
+        """Open once per instance; failed opens remain retryable.
 
-        Explicit-open backends call this before native operations that require
-        initialization. Subclasses implement ``_open_driver`` and
-        ``_close_driver``; backends that need neither can ignore these helpers.
-        Any backend-specific synchronization belongs around these calls.
+        Subclasses supply _open_driver/_close_driver and any required synchronization.
+        Backends without explicit initialization can ignore these helpers.
         """
         if self._driver_opened:
             return
@@ -193,23 +122,12 @@ class GDSBackend(ABC):
 
 
 class GDSHandle(ABC):
-    """Own an open slab descriptor and its backend registration.
+    """Own a slab descriptor and its backend registration.
 
-    ``backend`` owns the registration identified by the opaque native ``handle``;
-    this object owns ``fd`` and retains the backend until the handle is closed.
-    ``path`` identifies the backing storage for logging. Closing a handle does
-    not close its backend's driver; the context releases that after all handles,
-    buffer registrations, and stream registrations have been cleaned up.
-
-    Both async methods use the same byte-based arguments: ``buf_base`` is the
-    registered GPU base address, ``buf_offset`` is relative to that base,
-    ``file_offset`` is relative to the slab, and ``size`` is the transfer length.
-    ``raw_stream`` is the integer native GPU stream handle. The caller must keep
-    the buffer, stream, handle, and returned Submission alive until completion.
-    DMA is ordered after prior work on that stream and before work enqueued
-    after it, including GPU operations that produce or consume the buffer data.
-    Submission failures raise immediately; deferred DMA errors are reported by
-    Submission.bytes_done after the issuing stream completes.
+    IO sizes and offsets are in bytes: buf_offset is relative to the registered
+    buf_base, and file_offset is relative to the slab. Operations are ordered on
+    raw_stream. Keep the buffer, stream, handle, and Submission alive until completion.
+    Submission errors raise immediately; deferred errors appear in bytes_done.
     """
 
     def __init__(self, backend: GDSBackend, fd: int, handle: Any, path: str) -> None:
@@ -232,11 +150,7 @@ class GDSHandle(ABC):
         buf_offset: int,
         raw_stream: int,
     ) -> Submission:
-        """Enqueue a slab-to-GPU read using the common IO arguments above.
-
-        Returns the Submission holding native argument storage and the eventual
-        result. Returning from this method does not imply the DMA has finished.
-        """
+        """Enqueue a slab-to-GPU read and return its in-flight Submission."""
 
     @abstractmethod
     def write_async(
@@ -247,18 +161,12 @@ class GDSHandle(ABC):
         buf_offset: int,
         raw_stream: int,
     ) -> Submission:
-        """Enqueue a GPU-to-slab write using the common IO arguments above.
-
-        Returns the Submission holding native argument storage and the eventual
-        result. Read bytes_done only after the issuing stream completes.
-        """
+        """Enqueue a GPU-to-slab write and return its in-flight Submission."""
 
     def close(self) -> None:
-        """Deregister and close fd once, after the caller completes all its IO.
+        """Deregister and close fd once, even if deregistration fails.
 
-        Descriptor cleanup still runs if deregistration raises. The handle then
-        reports fd == -1 and subsequent closes are no-ops. Does not synchronize
-        streams or close the backend's driver.
+        The caller must complete IO first. This does not close the backend's driver.
         """
         if self._fd < 0:
             return

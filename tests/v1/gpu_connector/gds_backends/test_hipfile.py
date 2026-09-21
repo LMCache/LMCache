@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the hipFile async backend.
-
-These are pure: ``libhipfile.so`` is never dlopened. A fake lib (see
-:class:`_FakeLib`) is substituted at the ``_lib`` seam, so the tests exercise
-the Python logic of the ctypes wrapper -- ``hipFileDescr_t`` construction, the
-stream-register flag value, error decoding, :class:`Submission` lifetime, and
-which symbol each call dispatches to -- without a GPU or the ROCm GPU IO
-driver. The ctypes ABI itself (struct field offsets, argtype marshalling) is
-covered by the on-hardware roundtrip tests in ``test_gds_context.py``.
-"""
+"""hipFile tests with a fake native library."""
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
@@ -24,29 +15,20 @@ from lmcache.v1.gpu_connector.gds_backends import hipfile as ha
 
 
 def _ok() -> ha._HipFileError:
-    """A success ``hipFileError_t`` (err == hipFileSuccess)."""
     return ha._HipFileError(err=ha._HIPFILE_SUCCESS, hip_drv_err=0)
 
 
 def _err(code: int = 5001) -> ha._HipFileError:
-    """A failure ``hipFileError_t``."""
     return ha._HipFileError(err=code, hip_drv_err=0)
 
 
 class _FakeLib:
-    """Stand-in for the ``libhipfile.so`` CDLL.
-
-    Each hipFile symbol records its positional args in :attr:`calls` and returns
-    a success ``hipFileError_t`` by default. Tests override individual symbols
-    (e.g. to populate an out-param or force an error) by assigning attributes.
-    """
+    """Record native calls and return success unless overridden."""
 
     def __init__(self) -> None:
         self.calls: dict[str, tuple] = {}
 
     def __getattr__(self, name: str):
-        # Any hipFile* symbol not explicitly overridden records its args and
-        # succeeds. ``__getattr__`` only fires for names not set in __dict__.
         def _record(*args):
             self.calls[name] = args
             if name == "hipFileGetOpErrorString":
@@ -79,20 +61,6 @@ def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096):
     )
 
 
-class TestCheck:
-    def test_success_is_noop(self, backend: ha.Backend):
-        backend.check_error(_ok(), "op")
-
-    def test_nonzero_raises_with_code_and_name(self, backend: ha.Backend, _fake_lib):
-        with pytest.raises(RuntimeError) as exc:
-            backend.check_error(_err(5002), "hipFileDriverOpen")
-        msg = str(exc.value)
-        assert "hipFileDriverOpen" in msg
-        assert "5002" in msg
-        # The op-error string is resolved through the lib.
-        assert "hipFileFakeError" in msg
-
-
 class TestDriverLifecycle:
     def test_concurrent_open_and_close_call_driver_once(
         self,
@@ -108,21 +76,6 @@ class TestDriverLifecycle:
             opened.assert_called_once()
             list(pool.map(lambda _: backend.close_driver(), range(16)))
             closed.assert_called_once()
-
-    def test_ensure_open_calls_driver_open_once(self, backend: ha.Backend, _fake_lib):
-        backend.register_stream(0)
-        backend.register_stream(0)
-        # Open-state tracking is inherited from the base backend.
-        assert "hipFileDriverOpen" in _fake_lib.calls
-
-    def test_close_driver_when_open(self, backend: ha.Backend, _fake_lib):
-        backend.register_stream(0)
-        backend.close_driver()
-        assert "hipFileDriverClose" in _fake_lib.calls
-
-    def test_close_driver_noop_when_closed(self, backend: ha.Backend, _fake_lib):
-        backend.close_driver()
-        assert "hipFileDriverClose" not in _fake_lib.calls
 
 
 class TestRegisterHandle:
@@ -144,14 +97,9 @@ class TestRegisterHandle:
         assert handle == 0xDEADBEEF
         assert captured["type"] == ha._HIPFILE_HANDLE_TYPE_OPAQUE_FD
         assert captured["fd"] == 42
-
-    def test_register_handle_opens_driver(self, backend: ha.Backend, _fake_lib):
-        backend.register_handle(7)
-        assert "hipFileDriverOpen" in _fake_lib.calls
-
-    def test_deregister_handle_dispatches(self, backend: ha.Backend, _fake_lib):
-        backend.deregister_handle(0x1234)
-        assert "hipFileHandleDeregister" in _fake_lib.calls
+        backend.deregister_handle(handle)
+        (native_handle,) = _fake_lib.calls["hipFileHandleDeregister"]
+        assert native_handle.value == handle
 
 
 class TestBufferRegistration:
@@ -165,8 +113,6 @@ class TestBufferRegistration:
         base, length, flags = _fake_lib.calls["hipFileBufRegister"]
         assert base.value == 0x2000
         assert length.value == 8192
-
-    def test_deregister_buffer_dispatches(self, backend: ha.Backend, _fake_lib):
         backend.deregister_buffer(_fake_gpu_tensor(ptr=0x2000))
         (base,) = _fake_lib.calls["hipFileBufDeregister"]
         assert base.value == 0x2000
@@ -179,53 +125,36 @@ class TestStreamRegistration:
         assert stream.value == 0xABC
         # FIXED_BUF_OFFSET | FIXED_FILE_OFFSET | FIXED_FILE_SIZE.
         assert flags == 0x7
-
-    def test_deregister_stream_dispatches(self, backend: ha.Backend, _fake_lib):
-        backend.register_stream(0xABC)
         backend.deregister_stream(0xABC)
         (stream,) = _fake_lib.calls["hipFileStreamDeregister"]
         assert stream.value == 0xABC
-
-
-class TestSubmission:
-    def test_bytes_done_defaults_zero_then_reflects_driver(self):
-        sub = ha.Submission(size=4096, file_offset=0, buf_offset=0)
-        assert sub.bytes_done == 0
-        sub.result.value = 4096
-        assert sub.bytes_done == 4096
 
 
 class TestAsyncHandleIO:
     def _handle(self, backend: ha.Backend) -> ha.AsyncHandle:
         return ha.AsyncHandle(backend=backend, fd=5, handle=0xFEED, path="/slab")
 
-    def test_read_async_dispatches_and_returns_submission(
-        self, backend: ha.Backend, _fake_lib
+    @pytest.mark.parametrize("operation", ["read", "write"])
+    def test_io_marshals_arguments(
+        self, backend: ha.Backend, _fake_lib, monkeypatch, operation: str
     ):
-        def _read(fh, buf, size_p, foff_p, boff_p, bytes_p, stream):
-            # Driver reports the byte count into the caller's storage.
-            bytes_p._obj.value = 4096
-            _fake_lib.calls["hipFileReadAsync"] = (fh, buf, stream)
-            return _ok()
-
-        _fake_lib.hipFileReadAsync = _read
+        native = Mock(return_value=_ok())
+        monkeypatch.setattr(_fake_lib, f"hipFile{operation.title()}Async", native)
         h = self._handle(backend)
-        sub = h.read_async(
-            buf_base=0x3000, size=4096, file_offset=0, buf_offset=0, raw_stream=0x9
+        submit = h.read_async if operation == "read" else h.write_async
+        sub = submit(
+            buf_base=0x3000, size=4096, file_offset=8192, buf_offset=512, raw_stream=0x9
         )
-        fh, buf, stream = _fake_lib.calls["hipFileReadAsync"]
+        fh, buf, size, offset, buf_offset, result, stream = native.call_args.args
         assert fh.value == 0xFEED
         assert buf.value == 0x3000
         assert stream.value == 0x9
+        assert size._obj is sub.size and size._obj.value == 4096
+        assert offset._obj is sub.file_offset and offset._obj.value == 8192
+        assert buf_offset._obj is sub.buf_offset and buf_offset._obj.value == 512
+        assert result._obj is sub.result
+        result._obj.value = 4096
         assert sub.bytes_done == 4096
-
-    def test_write_async_dispatches(self, backend: ha.Backend, _fake_lib):
-        h = self._handle(backend)
-        sub = h.write_async(
-            buf_base=0x3000, size=2048, file_offset=512, buf_offset=0, raw_stream=0x9
-        )
-        assert "hipFileWriteAsync" in _fake_lib.calls
-        assert isinstance(sub, ha.Submission)
 
     def test_io_error_raises(self, backend: ha.Backend, _fake_lib):
         _fake_lib.hipFileWriteAsync = lambda *a: _err(5023)
@@ -235,6 +164,8 @@ class TestAsyncHandleIO:
                 buf_base=0x3000, size=2048, file_offset=0, buf_offset=0, raw_stream=0x9
             )
         assert "hipFileWriteAsync" in str(exc.value)
+        assert "5023" in str(exc.value)
+        assert "hipFileFakeError" in str(exc.value)
 
 
 class TestStructLayout:

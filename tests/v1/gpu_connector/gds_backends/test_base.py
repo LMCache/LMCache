@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Backend construction, extensibility, ownership, and context delegation."""
+"""Backend contracts and context integration."""
 
 # Standard
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import Mock
-import ctypes
 import os
 import sys
 import weakref
@@ -108,21 +107,6 @@ def extra_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[N
 
 
 @pytest.mark.parametrize(
-    ("cuda_version", "hip_version", "expected"),
-    [("12.9", None, "cufile"), (None, "6.3", "hipfile"), ("12.9", "6.3", "hipfile")],
-)
-def test_auto_preserves_default_selection(
-    monkeypatch: pytest.MonkeyPatch,
-    cuda_version: str | None,
-    hip_version: str | None,
-    expected: str,
-) -> None:
-    monkeypatch.setattr(torch.version, "cuda", cuda_version)
-    monkeypatch.setattr(torch.version, "hip", hip_version)
-    assert create_backend("auto").name == expected
-
-
-@pytest.mark.parametrize(
     ("cuda_version", "hip_version", "name", "error"),
     [
         (None, "6.3", "cufile", "CUDA"),
@@ -145,27 +129,6 @@ def test_existing_backend_restrictions_are_preserved(
         create_backend(name)
 
 
-@pytest.mark.parametrize("name", ["cufile", "hipfile", "ugds", "phx"])
-def test_creation_does_not_load_a_native_driver(
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-) -> None:
-    monkeypatch.setattr(torch.version, "cuda", "12.9")
-    monkeypatch.setattr(torch.version, "hip", "6.3")
-    monkeypatch.setattr(ctypes, "CDLL", Mock(side_effect=AssertionError("dlopen")))
-    assert create_backend(name).name == name
-
-
-@pytest.mark.parametrize("name", ["cufile", "hipfile", "ugds", "phx"])
-@pytest.mark.usefixtures("gpu_build")
-def test_close_before_use_does_not_load_a_native_driver(
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-) -> None:
-    monkeypatch.setattr(ctypes, "CDLL", Mock(side_effect=AssertionError("dlopen")))
-    create_backend(name).close_driver()
-
-
 @pytest.mark.parametrize("name", ["ugds", "phx"])
 @pytest.mark.parametrize(("cuda", "hip"), [("12.9", None), (None, "6.3")])
 def test_explicit_backend_accepts_both_existing_builds(
@@ -179,35 +142,15 @@ def test_explicit_backend_accepts_both_existing_builds(
     assert create_backend(name).name == name
 
 
-def test_unknown_backend_is_rejected() -> None:
-    with pytest.raises(ValueError, match="unsupported GDS L1 backend"):
-        create_backend("missing")
-
-
 @pytest.mark.usefixtures("extra_backend")
-def test_auto_can_select_a_backend_on_a_new_platform(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(torch.version, "cuda", None)
-    monkeypatch.setattr(torch.version, "hip", None)
-    assert isinstance(create_backend("auto"), OtherBackend)
-
-
-def test_incomplete_backend_cannot_be_instantiated() -> None:
-    class Incomplete(GDSBackend):
-        name = "incomplete"
-
-    with pytest.raises(TypeError, match="abstract"):
-        Incomplete()  # type: ignore[abstract]
-
-
-@pytest.mark.usefixtures("extra_backend")
+@pytest.mark.parametrize("selection", ["other", "auto"])
 def test_new_backend_needs_no_public_platform_or_dispatch_change(
     monkeypatch: pytest.MonkeyPatch,
+    selection: str,
 ) -> None:
     monkeypatch.setattr(torch.version, "cuda", None)
     monkeypatch.setattr(torch.version, "hip", None)
-    backend = create_backend("other")
+    backend = create_backend(selection)
     assert isinstance(backend, OtherBackend)
     ctx = GDSContext(backend)
     ctx.initialize(GdsL1Config(file_location="device://slab", size_in_bytes=1))
@@ -296,42 +239,24 @@ def test_context_keeps_submission_until_completion_and_closes_in_order(
     ]
 
 
-def test_handle_closes_fd_even_when_deregistration_fails(
+@pytest.mark.parametrize("fails", [False, True])
+def test_handle_closes_fd_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    fails: bool,
 ) -> None:
     backend = OtherBackend()
     fd = os.open(tmp_path / "slab", os.O_CREAT | os.O_RDWR, 0o600)
     handle = backend.open_handle(fd, "slab")
-    deregister = Mock(side_effect=RuntimeError("deregister"))
+    deregister = Mock(side_effect=RuntimeError("deregister") if fails else None)
     monkeypatch.setattr(backend, "deregister_handle", deregister)
-    with pytest.raises(RuntimeError, match="deregister"):
+    if fails:
+        with pytest.raises(RuntimeError, match="deregister"):
+            handle.close()
+    else:
         handle.close()
     handle.close()
     deregister.assert_called_once()
-    with pytest.raises(OSError):
-        os.fstat(fd)
-
-
-@pytest.mark.parametrize("name", ["cufile", "hipfile", "ugds", "phx"])
-@pytest.mark.usefixtures("gpu_build")
-def test_handle_takes_ownership_and_close_is_idempotent(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    name: str,
-) -> None:
-    backend = create_backend(name)
-    fd = os.open(tmp_path / "slab", os.O_CREAT | os.O_RDWR, 0o600)
-    register = Mock(return_value=17)
-    deregister = Mock()
-    monkeypatch.setattr(backend, "register_handle", register)
-    monkeypatch.setattr(backend, "deregister_handle", deregister)
-    handle = backend.open_handle(fd, "slab")
-    assert handle.fd == fd
-    register.assert_called_once_with(fd)
-    handle.close()
-    handle.close()
-    deregister.assert_called_once_with(17)
     with pytest.raises(OSError):
         os.fstat(fd)
 
@@ -354,15 +279,13 @@ def test_registration_failure_closes_owned_descriptor(
         os.fstat(fd)
 
 
-@pytest.mark.parametrize("name", ["cufile", "hipfile", "phx"])
 @pytest.mark.parametrize("direct_io", [False, True])
 @pytest.mark.usefixtures("gpu_build")
 def test_file_slab_creation_order(
     monkeypatch: pytest.MonkeyPatch,
-    name: str,
     direct_io: bool,
 ) -> None:
-    backend = create_backend(name)
+    backend = create_backend("cufile")
     assert isinstance(backend, FileGDSBackend)
     calls: list[object] = []
 

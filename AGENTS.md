@@ -67,14 +67,6 @@ pytest -xvs tests/v1/test_cache_engine.py::test_function_name
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
-The async GDS wrapper tests and the pure tests in
-`tests/v1/gpu_connector/test_gds_context.py` run without CUDA or storage
-libraries. Keep hardware skips on individual DMA roundtrip tests, not on the
-whole module. On macOS, mock Linux-only `os.posix_fallocate` and `os.O_DIRECT`
-with `raising=False`; do not assume Linux device-number encoding in sysfs mocks.
-Check lazy backend imports in a fresh Python subprocess: pytest collection
-imports concrete backend classes before tests run, which can hide eager imports.
-
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
 ### Testing Practices
@@ -152,9 +144,6 @@ Every public function and method must have a clear docstring covering:
 
 ### Writing Documentation
 
-`docs/source/locale/zh_CN/` is generated automatically. Do not edit it manually;
-update the source documentation and leave translation updates to generation.
-
 LMCache has three documentation surfaces:
 
 1. **User-facing docs** (`docs/source/`, reStructuredText, Sphinx-built). When adding
@@ -197,12 +186,6 @@ The build must complete **without errors or warnings**. Review the generated HTM
 ```bash
 python -m http.server -d build/html/
 ```
-
-Use `sphinx-build -W --keep-going -w <warning-log>` to retain all diagnostics.
-External intersphinx inventories can fail with truncated downloads; separate
-those network failures from source diagnostics. Check diagnostics against the
-PR base before attributing existing documentation errors to a code-only refactor.
-Generated HTML alone does not mean the strict documentation build passed.
 
 ### Encapsulation
 
