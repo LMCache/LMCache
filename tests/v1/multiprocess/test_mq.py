@@ -21,11 +21,6 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import (
-    BlockingRequestHandler,
-    MessageQueueClient,
-    MessageQueueServer,
-)
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
@@ -33,6 +28,11 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
+    BlockingRequestHandler,
+    MessageQueueClient,
+    MessageQueueServer,
+)
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
     get_zmq_handler_specs,
@@ -402,7 +402,7 @@ def test_mq_register_kv_cache():
     REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
     """
     # First Party
-    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+    from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
 
     # Create test KV cache (list of CudaIPCWrapper objects)
     kv_cache = []
@@ -648,7 +648,7 @@ def test_shared_loop_lifecycle():
     that the loop is torn down when all clients close.
     """
     # First Party
-    from lmcache.v1.multiprocess.mq import ClientPollingLoop
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
 
     context = zmq.Context.instance()
 
@@ -684,7 +684,7 @@ def test_shared_loop_dispatch():
     so both clients share one ClientPollingLoop.
     """
     # First Party
-    from lmcache.v1.multiprocess.mq import ClientPollingLoop
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
 
     server_url = "tcp://127.0.0.1:16020"
     context = zmq.Context.instance()
@@ -807,7 +807,7 @@ def test_shared_loop_recreate():
     Test that closing all clients and creating new ones starts a fresh loop.
     """
     # First Party
-    from lmcache.v1.multiprocess.mq import ClientPollingLoop
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
 
     context = zmq.Context.instance()
 
