@@ -236,6 +236,9 @@ class RetrieveMixin:
                 page_buffer_size=group.shape_desc.nb * group_bs,
                 block_size=group_bs,
                 head_size=rope_state.head_size,
+                # Physical per-block stride; padded pools are wider than bs*hs.
+                block_stride_elems=getattr(group.shape_desc, "block_stride_elems", 0)
+                or 0,
                 slot_mapping_base=0,
                 slot_mapping_capacity=0,
                 is_neox=rope_state.is_neox_style,

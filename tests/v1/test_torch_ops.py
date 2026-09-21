@@ -3,6 +3,7 @@
 from typing import Any, Union
 import ctypes
 import os
+import sys
 import time
 import unittest.mock
 
@@ -18,6 +19,8 @@ from lmcache.v1.multiprocess.native_completion import (
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform import torch_ops as _py_ops
 import lmcache.lmcache_native as lmcache_native
+
+tensor_from_ptr = sys.modules["lmcache.v1.platform.torch_ops._tensor_from_ptr"]
 
 # ==========================================
 # 0. utils functions.
@@ -2539,6 +2542,127 @@ def scenario_multi_layer_block_kv_transfer(
                     paged_tuple[i][kv], paged_tuple_h2d[i][kv], atol=1e-6
                 ), f"Per-layer (K,V) tuple Layer {i} kv={kv} round-trip mismatch"
 
+        # --- vLLM-Ascend MLA/DSA plane tuples (NL_X_NP_X_NB_BS_ONE_HS) ---
+        # Concatenated last-axis slabs into rank-3 [L, tokens, sum(W)].
+        # Same Python-fallback-only constraint as (K, V) tuples above.
+        # (6,) is the NP=1 degenerate case.
+        engine_mla_tuple = ops.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS
+        for widths in ((6,), (6, 2), (6, 2, 4)):
+            width_sum = sum(widths)
+            paged_mla = [
+                tuple(
+                    torch.randn(num_blocks, block_size, 1, w, dtype=dtype).to(device)
+                    for w in widths
+                )
+                for _ in range(num_layers)
+            ]
+            shape_mla = ops.PageBufferShapeDesc()
+            shape_mla.nl = num_layers
+            shape_mla.nb = num_blocks
+            shape_mla.bs = block_size
+            shape_mla.nh = 1
+            shape_mla.hs = width_sum
+            shape_mla.element_size = dtype.itemsize
+            shape_mla.kv_size = 1
+            shape_mla.dtype = dtype
+            d2h_mla = _alloc_chunks((num_layers, chunk_tokens, width_sum), num_chunks)
+            objs_mla = d2h_mla if use_tensor_list else [c.data_ptr() for c in d2h_mla]
+            ops.multi_layer_block_kv_transfer(
+                paged_mla,
+                objs_mla,
+                torch.tensor(block_ids, dtype=torch.int64, device=device),
+                torch.device(device),
+                ops.TransferDirection.D2H,
+                shape_mla,
+                chunk_tokens,
+                engine_mla_tuple,
+                0,
+            )
+            paged_mla_h2d = [
+                tuple(torch.zeros_like(p) for p in layer) for layer in paged_mla
+            ]
+            ops.multi_layer_block_kv_transfer(
+                paged_mla_h2d,
+                objs_mla,
+                torch.tensor(block_ids, dtype=torch.int64, device=device),
+                torch.device(device),
+                ops.TransferDirection.H2D,
+                shape_mla,
+                chunk_tokens,
+                engine_mla_tuple,
+                0,
+            )
+            for i in range(num_layers):
+                for plane_idx, (orig, recon) in enumerate(
+                    zip(paged_mla[i], paged_mla_h2d[i], strict=True)
+                ):
+                    assert torch.allclose(orig, recon, atol=1e-6), (
+                        f"MLA tuple widths={widths} layer={i} plane={plane_idx}"
+                    )
+
+        # int8 latent + float16 scale packs by bytes, not element widths.
+        latent_w, scale_w = 8, 1
+        hidden_bytes = latent_w + scale_w * 2
+        paged_mixed = [
+            (
+                torch.randint(
+                    -8, 8, (num_blocks, block_size, 1, latent_w), dtype=torch.int8
+                ).to(device),
+                (torch.randn(num_blocks, block_size, 1, scale_w) * 0.5)
+                .to(dtype=torch.float16)
+                .to(device),
+            )
+            for _ in range(num_layers)
+        ]
+        shape_mixed = ops.PageBufferShapeDesc()
+        shape_mixed.nl = num_layers
+        shape_mixed.nb = num_blocks
+        shape_mixed.bs = block_size
+        shape_mixed.nh = 1
+        shape_mixed.hs = hidden_bytes
+        shape_mixed.element_size = 1
+        shape_mixed.kv_size = 1
+        shape_mixed.dtype = torch.int8
+        d2h_mixed = [
+            torch.zeros(num_layers, chunk_tokens, hidden_bytes, dtype=torch.int8)
+            for _ in range(num_chunks)
+        ]
+        if device in ("cuda"):
+            d2h_mixed = [chunk.pin_memory() for chunk in d2h_mixed]
+        objs_mixed = d2h_mixed if use_tensor_list else [c.data_ptr() for c in d2h_mixed]
+        ops.multi_layer_block_kv_transfer(
+            paged_mixed,
+            objs_mixed,
+            torch.tensor(block_ids, dtype=torch.int64, device=device),
+            torch.device(device),
+            ops.TransferDirection.D2H,
+            shape_mixed,
+            chunk_tokens,
+            engine_mla_tuple,
+            0,
+        )
+        paged_mixed_h2d = [
+            (torch.zeros_like(a), torch.zeros_like(b)) for a, b in paged_mixed
+        ]
+        ops.multi_layer_block_kv_transfer(
+            paged_mixed_h2d,
+            objs_mixed,
+            torch.tensor(block_ids, dtype=torch.int64, device=device),
+            torch.device(device),
+            ops.TransferDirection.H2D,
+            shape_mixed,
+            chunk_tokens,
+            engine_mla_tuple,
+            0,
+        )
+        for i in range(num_layers):
+            assert torch.equal(paged_mixed[i][0], paged_mixed_h2d[i][0]), (
+                f"mixed-dtype latent layer={i}"
+            )
+            assert torch.equal(paged_mixed[i][1], paged_mixed_h2d[i][1]), (
+                f"mixed-dtype scale layer={i}"
+            )
+
     # --- skip_prefix_n_blocks > 0 ---
     torch.manual_seed(505)
     skip_n = 2
@@ -2841,6 +2965,19 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
     fallback enqueues immediately with time.time(). Both paths satisfy every
     assertion below.
     """
+    # ``drain_recorded_events`` owns a process-global native buffer. Earlier
+    # observability tests can leave an EventBus drain thread running; stop it
+    # before this low-level test so it cannot consume a callback between the
+    # stream synchronization and the assertions below.
+    # First Party
+    from lmcache.v1.mp_observability.event_bus import (
+        EventBusConfig,
+        get_event_bus,
+        init_event_bus,
+    )
+
+    get_event_bus().stop()
+    init_event_bus(EventBusConfig(enabled=False))
     ops.drain_recorded_events()  # clear residual global state
 
     assert ops.drain_recorded_events() == []
@@ -3081,8 +3218,8 @@ def test_tensor_from_ptr_routes_musa_pointer(
         )
         return torch.empty(shape, dtype=dtype)
 
-    monkeypatch.setattr(_py_ops.torch, "device", FakeDevice)
-    monkeypatch.setattr(_py_ops, "_tensor_from_musa_ptr", fake_musa_ptr)
+    monkeypatch.setattr(tensor_from_ptr.torch, "device", FakeDevice)
+    monkeypatch.setattr(tensor_from_ptr, "_tensor_from_musa_ptr", fake_musa_ptr)
 
     tensor = _py_ops._tensor_from_ptr(0x1000, (2, 3), torch.float16, "musa:0")
 
@@ -3142,12 +3279,12 @@ def test_tensor_from_musa_ptr_uses_external_storage(
         return fake_tensor
 
     monkeypatch.setattr(
-        _py_ops.torch._C,
+        tensor_from_ptr.torch._C,
         "_construct_storage_from_data_pointer",
         fake_construct_storage,
         raising=False,
     )
-    monkeypatch.setattr(_py_ops.torch, "empty", fake_empty)
+    monkeypatch.setattr(tensor_from_ptr.torch, "empty", fake_empty)
 
     result = _py_ops._tensor_from_musa_ptr(
         0x1000, (2, 3), torch.float16, fake_device, 12
@@ -3179,7 +3316,7 @@ def test_tensor_from_musa_ptr_fails_without_external_storage(
         raise RuntimeError("storage construction unavailable")
 
     monkeypatch.setattr(
-        _py_ops.torch._C,
+        tensor_from_ptr.torch._C,
         "_construct_storage_from_data_pointer",
         fake_construct_storage,
         raising=False,

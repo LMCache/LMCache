@@ -6,7 +6,6 @@ import ast
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
@@ -17,6 +16,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     iter_methods,
 )
 from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
 
 
 class _RecordingMessageQueueClient(MessageQueueClient):
@@ -84,8 +84,8 @@ def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
     """Business callers must use named methods instead of ZMQ envelopes."""
     repo_root = Path(__file__).parents[3]
     allowed = {
-        repo_root / "lmcache/v1/multiprocess/mq.py",
         repo_root / "lmcache/v1/multiprocess/transport/zmq_impl/client.py",
+        repo_root / "lmcache/v1/multiprocess/transport/zmq_impl/mq.py",
     }
     violations: list[str] = []
     for path in (repo_root / "lmcache").rglob("*.py"):
@@ -121,7 +121,7 @@ def test_business_callers_create_clients_through_factory() -> None:
                 if not isinstance(node, ast.ImportFrom) or node.module is None:
                     continue
                 imports_raw_client = (
-                    node.module == "lmcache.v1.multiprocess.mq"
+                    node.module == "lmcache.v1.multiprocess.transport.zmq_impl.mq"
                     and any(alias.name == "MessageQueueClient" for alias in node.names)
                 )
                 if imports_raw_client or node.module.startswith(
@@ -145,6 +145,27 @@ def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
             ["key", 4],
             get_response_class(RequestType.LOOKUP),
         )
+    ]
+
+
+def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:
+    transport = _RecordingMessageQueueClient()
+    client = ZmqMultiprocessClient(transport)
+
+    client.clear()
+    client.clear(force=True)
+
+    assert transport.calls == [
+        (
+            RequestType.CLEAR,
+            [False],
+            get_response_class(RequestType.CLEAR),
+        ),
+        (
+            RequestType.CLEAR,
+            [True],
+            get_response_class(RequestType.CLEAR),
+        ),
     ]
 
 

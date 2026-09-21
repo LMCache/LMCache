@@ -160,11 +160,11 @@ class ManagementModule:
         return list(self._experimental_transfer)
 
     @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
-    def clear(self) -> None:
+    def clear(self, force: bool = False) -> None:
         """Clear all stored KV cache data from the storage manager."""
         with self._clear_lock:
             self._ctx.storage_manager.memcheck()
-            self._ctx.storage_manager.clear(force=True)
+            self._ctx.storage_manager.clear(force=force)
             self._ctx.storage_manager.memcheck()
 
     @request_handler(RequestType.NOOP)

@@ -204,7 +204,9 @@ class LookupModule:
 
         num_kv_readers = key.require_num_kv_readers()
 
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
+            list(key.token_ids), end=key.end
+        )
         if not chunk_hashes:
             self._register_prefetch_job(
                 _PrefetchJob(
