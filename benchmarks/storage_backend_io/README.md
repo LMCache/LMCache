@@ -173,6 +173,11 @@ PY
 ## Output
 
 The script prints a summary and optionally writes JSON results if `--output-json` is provided.
+For `rust_raw_block`, JSON output also includes payload GiB/s and low-level path
+counters. The counters distinguish POSIX, standard io_uring, io_uring command,
+fixed-buffer, and bounce-buffer requests, including bytes copied through bounce
+buffers. This makes optimization results auditable instead of relying on throughput
+alone.
 
 ### Write Benchmark Output
 
