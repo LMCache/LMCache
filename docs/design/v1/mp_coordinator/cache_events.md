@@ -34,12 +34,18 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   raise `CacheEventPublishError`. Retrying is safe; the current subscriber
   drops a failed drained list, consumes its sequence numbers, and leaves a
   gap that marks the coordinator view stale.
-- A future **Kafka sink** produces to a topic with the message key set
-  to `instance_id`, so one partition carries one instance's stream —
-  partition FIFO is exactly the per-instance FIFO the directory needs.
-  The coordinator side gains a consumer that feeds
-  the coordinator's `EventGate`; the subscriber and producers are
-  untouched.
+- **`KafkaCacheEventSink`** produces one JSON record per batch with the
+  message key set to `instance_id`, so Kafka assigns one instance's
+  records to one partition. The producer enables idempotence, requires
+  `acks=all`, and waits for every delivery report before `publish`
+  succeeds. The JSON value uses the existing `CacheEventsRequest`
+  envelope with exactly one batch, keeping the HTTP and Kafka wire
+  vocabulary identical.
+
+The Kafka sink is producer-side only in this milestone. Until
+coordinator-side Kafka consumption lands, retained records are not
+consumed by the coordinator; direct HTTP remains the default end-to-end
+transport.
 
 On the coordinator side, transport adapters converge at
 `EventGate.ingest_batches`. The current
@@ -185,6 +191,14 @@ and `--coordinator-event-reporting` (or
 `LMCACHE_COORDINATOR_EVENT_REPORTING`) is on;
 `--coordinator-event-flush-interval` paces the subscriber's
 event-driven flushes (default 1s).
+
+`--coordinator-event-transport kafka` selects Kafka instead of HTTP and
+requires `--coordinator-kafka-bootstrap-servers`. The topic defaults to
+`lmcache-cache-events`; `--coordinator-kafka-delivery-timeout` bounds how
+long one flush waits for broker acknowledgement. These flags have no
+environment-variable fallback. `confluent-kafka` ships as the optional
+`lmcache[kafka]` extra and is imported only when the Kafka sink is built,
+so HTTP-only deployments never load it.
 
 ## Known limitations (follow-ups)
 
