@@ -2571,24 +2571,24 @@ class RawBlockCore:
         max_workers = min(self._recovery_read_threads, n)
         ranges = self._build_recovery_item_ranges(n, max_workers)
         work_items = [(offsets, start, end) for start, end in ranges]
-        results: list[Optional[tuple[int, int]]] = [None] * n
-
-        def read_range(
-            work_item: tuple[list[int], int, int],
-        ) -> list[tuple[int, Optional[tuple[int, int]]]]:
-            offsets_in, start, end = work_item
-            return [
-                (i, self._read_slot_header(offsets_in[i])) for i in range(start, end)
-            ]
 
         with ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="rawblk-recover",
         ) as pool:
-            for range_results in pool.map(read_range, work_items):
-                for i, hdr in range_results:
-                    results[i] = hdr
-        return results
+            return [
+                header
+                for range_headers in pool.map(self._read_slot_header_range, work_items)
+                for header in range_headers
+            ]
+
+    def _read_slot_header_range(
+        self,
+        work_item: tuple[list[int], int, int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Read one recovery range, preserving offset order and failed reads."""
+        offsets, start, end = work_item
+        return [self._read_slot_header(offsets[i]) for i in range(start, end)]
 
     def _read_slot_headers_batched(
         self,
