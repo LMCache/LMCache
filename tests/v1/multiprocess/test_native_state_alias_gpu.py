@@ -161,7 +161,7 @@ def _lookup_when_visible(
             break
         attempt += 1
         time.sleep(0.01)
-    pytest.fail(
+    raise AssertionError(
         f"store did not become visible before timeout: "
         f"expected {expected_hit} chunks, last lookup returned {last_hit}"
     )
@@ -255,9 +255,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
                 end=limit_chunks * CHUNK,
                 request_id=f"native-load-{limit_chunks}",
             )
-            lookup_key = _lookup_when_visible(
-                native_client, lookup_key, expected_hit
-            )
+            lookup_key = _lookup_when_visible(native_client, lookup_key, expected_hit)
             retrieve_key = replace(lookup_key, worker_id=0, end=expected_hit * CHUNK)
             target_pages = list(range(16, 16 + expected_hit * 4))
             target_state = [-1] * (expected_hit - 1) + [destination_unit]
@@ -344,7 +342,7 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         )
         pool.fill_(199)
         lookup_key = replace(key, worker_id=None, request_id="same-pool-load")
-        assert _lookup(native_client, lookup_key) == 2
+        lookup_key = _lookup_when_visible(native_client, lookup_key, 2)
         assert _transfer(
             native_client,
             "retrieve",
