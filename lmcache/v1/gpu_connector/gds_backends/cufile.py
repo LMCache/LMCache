@@ -70,9 +70,6 @@ class Backend(FileGDSBackend):
 
     name = "cufile"
 
-    def __init__(self) -> None:
-        self._driver_opened = False
-
     @classmethod
     def is_default(cls) -> bool:
         return torch.version.cuda is not None and torch.version.hip is None
@@ -88,17 +85,6 @@ class Backend(FileGDSBackend):
             os.close(fd)
             raise
         return AsyncHandle(self, fd, handle, path)
-
-    def close_driver(self) -> None:
-        if not self._driver_opened:
-            return
-        # Third Party
-        from cufile.bindings import cuFileDriverClose
-
-        try:
-            cuFileDriverClose()
-        finally:
-            self._driver_opened = False
 
     def register_handle(self, fd: int) -> Any:
         self._ensure_driver_open()
@@ -161,15 +147,18 @@ class Backend(FileGDSBackend):
             "cuFileStreamDeregister",
         )
 
-    def _ensure_driver_open(self) -> None:
-        if self._driver_opened:
-            return
+    def _open_driver(self) -> None:
         # Third Party
         from cufile.bindings import cuFileDriverOpen
 
         cuFileDriverOpen()
         _declare_signatures()
-        self._driver_opened = True
+
+    def _close_driver(self) -> None:
+        # Third Party
+        from cufile.bindings import cuFileDriverClose
+
+        cuFileDriverClose()
 
 
 class AsyncHandle(GDSHandle):

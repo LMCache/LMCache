@@ -50,6 +50,45 @@ def test_driver_opens_once_and_can_reopen_after_close(
     backend.close_driver()
 
 
+def test_failed_driver_open_can_retry(bindings: Mock, backend: CuFileBackend) -> None:
+    bindings.cuFileDriverOpen.side_effect = RuntimeError("open failed")
+    with pytest.raises(RuntimeError, match="open failed"):
+        backend.register_stream(7)
+    backend.close_driver()
+    bindings.cuFileDriverClose.assert_not_called()
+    bindings.cuFileDriverOpen.side_effect = None
+    backend.register_stream(7)
+    assert bindings.cuFileDriverOpen.call_count == 2
+    backend.close_driver()
+    bindings.cuFileDriverClose.assert_called_once()
+
+
+def test_failed_driver_close_resets_state(
+    bindings: Mock, backend: CuFileBackend
+) -> None:
+    backend.register_stream(7)
+    bindings.cuFileDriverClose.side_effect = RuntimeError("close failed")
+    with pytest.raises(RuntimeError, match="close failed"):
+        backend.close_driver()
+    backend.close_driver()
+    bindings.cuFileDriverClose.assert_called_once()
+    bindings.cuFileDriverClose.side_effect = None
+    backend.register_stream(7)
+    assert bindings.cuFileDriverOpen.call_count == 2
+    backend.close_driver()
+
+
+def test_driver_state_is_per_instance(bindings: Mock, backend: CuFileBackend) -> None:
+    other = CuFileBackend()
+    backend.register_stream(7)
+    other.register_stream(9)
+    assert bindings.cuFileDriverOpen.call_count == 2
+    backend.close_driver()
+    bindings.cuFileDriverClose.assert_called_once()
+    other.close_driver()
+    assert bindings.cuFileDriverClose.call_count == 2
+
+
 @pytest.mark.parametrize("operation", ["read", "write"])
 def test_io_retains_native_argument_storage(
     bindings: Mock, backend: CuFileBackend, operation: str

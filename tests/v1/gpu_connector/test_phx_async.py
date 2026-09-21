@@ -414,6 +414,16 @@ class TestAsyncHandleLifecycle:
 
 
 class TestCloseDriver:
+    def test_registration_does_not_explicitly_open_driver(
+        self, backend: pa.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        backend.register_handle(7)
+        backend.register_buffer(_gpu_tensor())
+        backend.register_stream(13)
+        assert "phxFileDriverOpen" not in _fake_lib.calls
+        backend.close_driver()
+        assert _fake_lib.calls["phxFileDriverClose"] == [()]
+
     def test_calls_driver_close(self, backend: pa.Backend, _fake_lib: _FakeLib) -> None:
         backend.library()
         backend.close_driver()

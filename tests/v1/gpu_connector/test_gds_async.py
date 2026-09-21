@@ -30,6 +30,7 @@ class OtherBackend(GDSBackend):
     name = "other"
 
     def __init__(self) -> None:
+        super().__init__()
         self.calls: list[object] = []
 
     def open_slab(self, location: str, size: int, direct_io: bool) -> GDSHandle:

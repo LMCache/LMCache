@@ -107,6 +107,7 @@ class Backend(FileGDSBackend):
     name = "phx"
 
     def __init__(self) -> None:
+        super().__init__()
         self._lib: Optional[ctypes.CDLL] = None
 
     def validate_environment(self) -> None:
@@ -183,6 +184,7 @@ class Backend(FileGDSBackend):
         )
 
     def close_driver(self) -> None:
+        """Clean up the loaded shim without an explicit driver-open transition."""
         # Closing the shim sweeps its registration table and all opened devices.
         if self._lib is not None:
             _check(self._lib.phxFileDriverClose(), "phxFileDriverClose")

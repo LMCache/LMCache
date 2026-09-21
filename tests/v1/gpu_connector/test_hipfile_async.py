@@ -11,7 +11,9 @@ covered by the on-hardware roundtrip tests in ``test_gds_context.py``.
 """
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from unittest.mock import Mock
 import ctypes
 
 # Third Party
@@ -92,10 +94,25 @@ class TestCheck:
 
 
 class TestDriverLifecycle:
+    def test_concurrent_open_and_close_call_driver_once(
+        self,
+        backend: ha.Backend,
+        _fake_lib: _FakeLib,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        opened, closed = Mock(return_value=_ok()), Mock(return_value=_ok())
+        monkeypatch.setattr(_fake_lib, "hipFileDriverOpen", opened)
+        monkeypatch.setattr(_fake_lib, "hipFileDriverClose", closed)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(backend.register_stream, range(16)))
+            opened.assert_called_once()
+            list(pool.map(lambda _: backend.close_driver(), range(16)))
+            closed.assert_called_once()
+
     def test_ensure_open_calls_driver_open_once(self, backend: ha.Backend, _fake_lib):
         backend.register_stream(0)
         backend.register_stream(0)
-        # Recorded means it was called; idempotency guarded by _driver_opened.
+        # Open-state tracking is inherited from the base backend.
         assert "hipFileDriverOpen" in _fake_lib.calls
 
     def test_close_driver_when_open(self, backend: ha.Backend, _fake_lib):

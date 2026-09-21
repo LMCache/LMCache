@@ -118,7 +118,7 @@ class Backend(FileGDSBackend):
     name = "hipfile"
 
     def __init__(self) -> None:
-        self._driver_opened = False
+        super().__init__()
         self._init_lock = threading.Lock()
         self._lib_handle: Optional[ctypes.CDLL] = None
 
@@ -139,16 +139,8 @@ class Backend(FileGDSBackend):
         return AsyncHandle(self, fd, handle, path)
 
     def close_driver(self) -> None:
-        if not self._driver_opened:
-            return
-        lib = self.library()
         with self._init_lock:
-            if not self._driver_opened:
-                return
-            try:
-                self.check_error(lib.hipFileDriverClose(), "hipFileDriverClose")
-            finally:
-                self._driver_opened = False
+            super().close_driver()
 
     def register_handle(self, fd: int) -> int:
         self._ensure_driver_open()
@@ -225,15 +217,16 @@ class Backend(FileGDSBackend):
             )
 
     def _ensure_driver_open(self) -> None:
-        if self._driver_opened:
-            return
         # Load before taking the non-reentrant initialization lock.
-        lib = self.library()
+        self.library()
         with self._init_lock:
-            if self._driver_opened:
-                return
-            self.check_error(lib.hipFileDriverOpen(), "hipFileDriverOpen")
-            self._driver_opened = True
+            super()._ensure_driver_open()
+
+    def _open_driver(self) -> None:
+        self.check_error(self.library().hipFileDriverOpen(), "hipFileDriverOpen")
+
+    def _close_driver(self) -> None:
+        self.check_error(self.library().hipFileDriverClose(), "hipFileDriverClose")
 
     def _op_error_string(self, err_code: int) -> str:
         """Return the human-readable name for a ``hipFileOpError_t`` value."""

@@ -62,6 +62,9 @@ class GDSBackend(ABC):
 
     name: ClassVar[str]
 
+    def __init__(self) -> None:
+        self._driver_opened = False
+
     @classmethod
     def is_default(cls) -> bool:
         """Return whether this implementation is the default for this environment.
@@ -151,14 +154,42 @@ class GDSBackend(ABC):
         This does not destroy the caller's GPU stream or close the driver.
         """
 
-    @abstractmethod
     def close_driver(self) -> None:
         """Close native driver state after registrations and handles are closed.
 
-        Calling before first use must not load a library. Implementations keep
-        their native close behavior, including error propagation; the base adds
-        no reference counting or coordination with other backend instances.
+        For explicit-open drivers, call the implementation's ``_close_driver``
+        once, then reset this instance's state even if closing raises. Calls
+        before opening or after closing do nothing and do not load a library.
+        Backends with implicit initialization may override this method instead
+        of using the open-state helpers. No state is shared between instances.
         """
+        if not self._driver_opened:
+            return
+        try:
+            self._close_driver()
+        finally:
+            self._driver_opened = False
+
+    def _ensure_driver_open(self) -> None:
+        """Open once per instance, leaving failed opens retryable.
+
+        Explicit-open backends call this before native operations that require
+        initialization. Subclasses implement ``_open_driver`` and
+        ``_close_driver``; backends that need neither can ignore these helpers.
+        Any backend-specific synchronization belongs around these calls.
+        """
+        if self._driver_opened:
+            return
+        self._open_driver()
+        self._driver_opened = True
+
+    def _open_driver(self) -> None:
+        """Perform native initialization; the default requires none."""
+        return None
+
+    def _close_driver(self) -> None:
+        """Perform native cleanup; the default requires none."""
+        return None
 
 
 class GDSHandle(ABC):

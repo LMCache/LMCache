@@ -134,7 +134,7 @@ class Backend(GDSBackend):
     name = "ugds"
 
     def __init__(self) -> None:
-        self._driver_opened = False
+        super().__init__()
         self._lib: Optional[ctypes.CDLL] = None
 
     def open_slab(self, location: str, size: int, direct_io: bool) -> "AsyncHandle":
@@ -176,15 +176,6 @@ class Backend(GDSBackend):
             os.close(fd)
             raise
         return AsyncHandle(self, fd, handle, path)
-
-    def close_driver(self) -> None:
-        if not self._driver_opened:
-            return
-        lib = self.library()
-        try:
-            _check(lib.uGDSDriverClose(), "uGDSDriverClose")
-        finally:
-            self._driver_opened = False
 
     def register_handle(self, fd: int) -> int:
         self._ensure_driver_open()
@@ -269,12 +260,11 @@ class Backend(GDSBackend):
         self._lib = lib
         return lib
 
-    def _ensure_driver_open(self) -> None:
-        if self._driver_opened:
-            return
-        lib = self.library()
-        _check(lib.uGDSDriverOpen(), "uGDSDriverOpen")
-        self._driver_opened = True
+    def _open_driver(self) -> None:
+        _check(self.library().uGDSDriverOpen(), "uGDSDriverOpen")
+
+    def _close_driver(self) -> None:
+        _check(self.library().uGDSDriverClose(), "uGDSDriverClose")
 
 
 class AsyncHandle(GDSHandle):
