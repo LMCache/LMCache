@@ -566,13 +566,18 @@ class TestStorageManagerL2Prefetch:
         assert len(ret) == len(keys)
         sm.finish_write(list(ret.keys()))
 
-        # Wait for StoreController to propagate all keys to L2
+        # Wait for StoreController to propagate all keys to L2 and release
+        # the read locks it held while copying from L1.
         adapter = sm._l2_adapters[0]
         ok = wait_for_condition(
-            lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore
+            lambda: all(
+                adapter.debug_has_key(k)  # type: ignore[attr-defined]
+                and sm._l1_manager.is_key_evictable(k)
+                for k in keys
+            ),
             timeout=10.0,
         )
-        assert ok, "Keys should be stored in L2 by StoreController"
+        assert ok, "Keys should be stored in L2 and unlocked by StoreController"
 
     def test_prefetch_from_l2(self, l2_storage_manager_config, basic_layout):
         """Write to L1 → store to L2 → clear L1 → prefetch from L2."""
@@ -689,7 +694,6 @@ class TestStorageManagerL2Prefetch:
 
         # All keys reach L2; delete key 1 from L1 so it is L2-only.
         self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
-        time.sleep(0.05)
         deleted, skipped = sm.delete_l1_keys([all_keys[1]])
         assert (deleted, skipped) == (1, 0)
 
