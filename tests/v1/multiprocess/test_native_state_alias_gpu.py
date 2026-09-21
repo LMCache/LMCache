@@ -135,6 +135,38 @@ def _lookup(client: RequestClient, key: IPCCacheServerKey) -> int:
     return int(result)
 
 
+def _lookup_when_visible(
+    client: RequestClient,
+    key: IPCCacheServerKey,
+    expected_hit: int,
+) -> IPCCacheServerKey:
+    """Wait until an asynchronous store is visible to prefix lookup.
+
+    The store device event covers the D2H copy, while ``finish_write`` runs in
+    a later stream-ordered host callback. A lookup submitted immediately after
+    the device event may therefore observe the previous committed prefix. Each
+    unsuccessful probe releases its lookup locks and session before retrying.
+    """
+    deadline = time.monotonic() + TIMEOUT
+    attempt = 0
+    last_hit = -1
+    while time.monotonic() < deadline:
+        attempt_key = replace(key, request_id=f"{key.request_id}-{attempt}")
+        last_hit = _lookup(client, attempt_key)
+        if last_hit == expected_hit:
+            return attempt_key
+        client.free_lookup_locks(attempt_key, 1).result(TIMEOUT)
+        client.end_session(attempt_key.request_id).result(TIMEOUT)
+        if last_hit > expected_hit:
+            break
+        attempt += 1
+        time.sleep(0.01)
+    pytest.fail(
+        f"store did not become visible before timeout: "
+        f"expected {expected_hit} chunks, last lookup returned {last_hit}"
+    )
+
+
 def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) -> None:
     """Restore exact page/checkpoint payloads without modifying adjacent bytes."""
     device = torch.device("cuda", 0)
@@ -223,7 +255,9 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
                 end=limit_chunks * CHUNK,
                 request_id=f"native-load-{limit_chunks}",
             )
-            assert _lookup(native_client, lookup_key) == expected_hit
+            lookup_key = _lookup_when_visible(
+                native_client, lookup_key, expected_hit
+            )
             retrieve_key = replace(lookup_key, worker_id=0, end=expected_hit * CHUNK)
             target_pages = list(range(16, 16 + expected_hit * 4))
             target_state = [-1] * (expected_hit - 1) + [destination_unit]
