@@ -16,6 +16,7 @@ depend on any one of them. See
 from __future__ import annotations
 
 # Standard
+from collections import deque
 from typing import Protocol, runtime_checkable
 import inspect
 
@@ -160,6 +161,16 @@ class EventIPCBackend(Protocol):
         ...
 
 
+# An exported IPC handle is only meaningful while the event it was taken from is
+# still alive: the importing process resolves the handle against the exporter's
+# event, and a destroyed event leaves it dangling. ``export_event`` therefore
+# keeps a strong reference to everything it hands out. The ring is bounded so a
+# long-lived backend cannot grow without limit; it must be large enough to cover
+# the window between export and the peer's import, which is microseconds to
+# milliseconds on the ``lmcache_driven`` transfer path.
+_EXPORTED_EVENT_RING_SIZE = 8192
+
+
 class DefaultEventIPCBackend(EventIPCBackend):
     """CUDA-style event IPC backend over an injectable event module.
 
@@ -183,6 +194,7 @@ class DefaultEventIPCBackend(EventIPCBackend):
     ) -> None:
         self._event_module = event_module if event_module is not None else torch_dev
         self.device_type = device_type if device_type is not None else torch_device_type
+        self._exported_events: deque[object] = deque(maxlen=_EXPORTED_EVENT_RING_SIZE)
 
     def check_event_support(self, device: object) -> None:
         """Raise ``RuntimeError`` if interprocess events are unsupported.
@@ -216,8 +228,22 @@ class DefaultEventIPCBackend(EventIPCBackend):
         return self._event_module.Event(interprocess=True)  # type: ignore[union-attr]
 
     def export_event(self, event: object, device: object) -> bytes:
-        """Serialize ``event`` into a process-portable IPC handle."""
-        return event.ipc_handle()  # type: ignore[attr-defined]
+        """Serialize ``event`` into a process-portable IPC handle.
+
+        The event is retained (see ``_EXPORTED_EVENT_RING_SIZE``) because the
+        returned handle is only valid while the exporting event is alive.
+
+        Args:
+            event: The interprocess-capable event to export.
+            device: Device that owns the event (unused; part of the protocol
+                signature).
+
+        Returns:
+            The IPC handle bytes for ``event``.
+        """
+        handle = event.ipc_handle()  # type: ignore[attr-defined]
+        self._exported_events.append(event)
+        return handle
 
     def import_event(self, handle: bytes, device: object) -> object:
         """Reconstruct an event from an IPC handle on ``device``."""
