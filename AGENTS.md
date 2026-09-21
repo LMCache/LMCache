@@ -152,6 +152,9 @@ Every public function and method must have a clear docstring covering:
 
 ### Writing Documentation
 
+`docs/source/locale/zh_CN/` is generated automatically. Do not edit it manually;
+update the source documentation and leave translation updates to generation.
+
 LMCache has three documentation surfaces:
 
 1. **User-facing docs** (`docs/source/`, reStructuredText, Sphinx-built). When adding
