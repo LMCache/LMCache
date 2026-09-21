@@ -146,7 +146,24 @@ class ManagementModule:
         Returns:
             The chunk size.
         """
-        return self._ctx.chunk_size
+        return self._ctx.finalize_chunk_size()
+
+    @request_handler(RequestType.NEGOTIATE_CHUNK_SIZE)
+    def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
+        """Negotiate the server chunk size against model geometry.
+
+        Args:
+            required_chunk_alignment: The least common multiple of cacheable
+                engine group ``tokens_per_block`` values.
+
+        Returns:
+            The concrete server chunk size.
+
+        Raises:
+            ValueError: If the context cannot bind or validate the requested
+                geometry.
+        """
+        return self._ctx.negotiate_chunk_size(required_chunk_alignment)
 
     @request_handler(RequestType.GET_EXPERIMENTAL)
     def get_experimental(self) -> list[str]:

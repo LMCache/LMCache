@@ -169,6 +169,22 @@ def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:
     ]
 
 
+def test_zmq_negotiate_chunk_size_delegates_to_request_envelope() -> None:
+    transport = _RecordingMessageQueueClient()
+    client = ZmqMultiprocessClient(transport)
+
+    future = client.negotiate_chunk_size(640)
+
+    assert future.result(timeout=0) is RequestType.NEGOTIATE_CHUNK_SIZE
+    assert transport.calls == [
+        (
+            RequestType.NEGOTIATE_CHUNK_SIZE,
+            [640],
+            get_response_class(RequestType.NEGOTIATE_CHUNK_SIZE),
+        )
+    ]
+
+
 def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
     transport = _RecordingMessageQueueClient()
     client = ZmqMultiprocessClient(transport)

@@ -5,6 +5,7 @@ Controller protocol definitions for cache management and configuration.
 This module defines the protocol for:
 - CLEAR: Clear all caches in the server
 - GET_CHUNK_SIZE: Get the chunk size configuration from the server
+- NEGOTIATE_CHUNK_SIZE: Negotiate chunk size from model KV geometry
 - GET_EXPERIMENTAL: Get the enabled experimental intermediate tensor transfer
 """
 
@@ -15,6 +16,7 @@ from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefiniti
 REQUEST_NAMES = [
     "CLEAR",
     "GET_CHUNK_SIZE",
+    "NEGOTIATE_CHUNK_SIZE",
     "GET_EXPERIMENTAL",
     "PING",
 ]
@@ -41,6 +43,14 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: int - The chunk size value
         "GET_CHUNK_SIZE": ProtocolDefinition(
             payload_classes=[],
+            response_class=int,
+            handler_type=HandlerType.SYNC,
+        ),
+        # Negotiate chunk size against model-specific geometry
+        # Payload: [required_chunk_alignment]
+        # Returns: int - The concrete server chunk size
+        "NEGOTIATE_CHUNK_SIZE": ProtocolDefinition(
+            payload_classes=[int],
             response_class=int,
             handler_type=HandlerType.SYNC,
         ),

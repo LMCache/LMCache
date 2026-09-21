@@ -188,6 +188,15 @@ class ZmqMultiprocessClient(RequestClient):
         """Return the server chunk size."""
         return self._call(RequestType.GET_CHUNK_SIZE)
 
+    def negotiate_chunk_size(
+        self, required_chunk_alignment: int
+    ) -> MessagingFuture[Any]:
+        """Negotiate the server chunk size."""
+        return self._call(
+            RequestType.NEGOTIATE_CHUNK_SIZE,
+            required_chunk_alignment,
+        )
+
     def ping(self, instance_id: int | None) -> MessagingFuture[Any]:
         """Check server health and refresh worker liveness."""
         return self._call(RequestType.PING, instance_id)
