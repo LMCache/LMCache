@@ -36,6 +36,7 @@ def test_lifespan_owns_transport_neutral_request_server(
             "mp": mp_config,
             "storage_manager": MagicMock(),
             "observability": MagicMock(),
+            "http": HTTPFrontendConfig(),
         },
     )
     monkeypatch.setattr(
