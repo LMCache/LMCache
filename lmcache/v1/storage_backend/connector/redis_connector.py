@@ -28,6 +28,37 @@ logger = init_logger(__name__)
 # not supported.
 
 
+def _consecutive_prefix(
+    results: List[MemoryObj | BaseException | None],
+) -> List[MemoryObj]:
+    """Keep the successful prefix and release objects after the first miss/error.
+
+    Args:
+        results: Per-key results in input order, collected with
+            ``asyncio.gather(return_exceptions=True)``.
+
+    Returns:
+        Objects preceding the first None or exception, owned by the caller.
+        Successfully retrieved objects after that boundary are released once.
+
+    Note:
+        Exceptions raised by ``MemoryObj.ref_count_down`` propagate.
+    """
+    memory_objs: List[MemoryObj] = []
+    found_failure = False
+    for result in results:
+        if found_failure:
+            if isinstance(result, MemoryObj):
+                result.ref_count_down()
+        elif isinstance(result, MemoryObj):
+            memory_objs.append(result)
+        else:
+            if isinstance(result, Exception):
+                logger.warning("Exception during batched get: %s", result)
+            found_failure = True
+    return memory_objs
+
+
 class Priorities(IntEnum):
     PEEK = auto()
     PREFETCH = auto()
@@ -432,9 +463,12 @@ class RedisConnector(RemoteConnector):
         lookup_id: str,
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
+        """Get the consecutive prefix and release hits after a miss or error."""
         # calling self.get will create a circular dependency
-        results = await asyncio.gather(*(self._get(key) for key in keys))
-        return [r for r in results if r is not None]
+        results = await asyncio.gather(
+            *(self._get(key) for key in keys), return_exceptions=True
+        )
+        return _consecutive_prefix(results)
 
     async def batched_get_non_blocking(
         self,
@@ -811,9 +845,12 @@ class RedisClusterConnector(RemoteConnector):
         lookup_id: str,
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
+        """Get the consecutive prefix and release hits after a miss or error."""
         # calling self.get will create a circular dependency
-        results = await asyncio.gather(*(self._get(key) for key in keys))
-        return [r for r in results if r is not None]
+        results = await asyncio.gather(
+            *(self._get(key) for key in keys), return_exceptions=True
+        )
+        return _consecutive_prefix(results)
 
     async def batched_get_non_blocking(
         self,
