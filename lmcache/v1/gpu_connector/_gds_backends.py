@@ -1,39 +1,61 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Explicit construction of the built-in GDS backends.
+"""Discover async GDS implementations by module name and import them on demand.
 
-To add an implementation, subclass GDSBackend and add its class to BACKENDS.
-The interfaces and GDSContext do not need to change. Imports stay driver-free.
+Add a public module exporting a Backend subclass to the gds_backends package;
+no factory, interface, context, or configuration registry needs updating.
 """
 
-# First Party
-from lmcache.v1.gpu_connector._cufile_async import CuFileBackend
-from lmcache.v1.gpu_connector._gds_async import GDSBackend
-from lmcache.v1.gpu_connector._hipfile_async import HipFileBackend
-from lmcache.v1.gpu_connector._phx_async import PhxBackend
-from lmcache.v1.gpu_connector._ugds_async import UgdsBackend
+# Standard
+import importlib
+import pkgutil
 
-BACKENDS: dict[str, type[GDSBackend]] = {
-    backend.name: backend
-    for backend in (CuFileBackend, HipFileBackend, UgdsBackend, PhxBackend)
-}
+# First Party
+from lmcache.v1.gpu_connector import gds_backends
+from lmcache.v1.gpu_connector._gds_async import GDSBackend
+
+
+def available_backends() -> tuple[str, ...]:
+    """List backend module names without importing their implementations."""
+    return tuple(
+        sorted(
+            module.name
+            for module in pkgutil.iter_modules(gds_backends.__path__)
+            if not module.name.startswith("_")
+        )
+    )
 
 
 def create_backend(name: str) -> GDSBackend:
     """Construct and validate a backend without loading its native driver.
 
-    ``auto`` uses each implementation's default-selection rule. Unknown names
-    and incompatible environments raise ValueError. No instance is cached.
+    Explicit selection imports only the requested implementation. ``auto``
+    imports candidates in name order until one accepts default selection.
+    Unknown names and incompatible environments raise ValueError. No backend
+    instance is cached, and discovery does not import optional dependencies.
     """
+    names = available_backends()
     if name == "auto":
-        backend_class = next(
-            (backend for backend in BACKENDS.values() if backend.is_default()), None
-        )
-        if backend_class is None:
+        for candidate in names:
+            backend_class = _load_backend_class(candidate)
+            if backend_class.is_default():
+                break
+        else:
             raise ValueError("no default GDS backend for this environment")
     else:
-        backend_class = BACKENDS.get(name)
-        if backend_class is None:
+        if name not in names:
             raise ValueError(f"unsupported GDS L1 backend: {name}")
+        backend_class = _load_backend_class(name)
     backend = backend_class()
     backend.validate_environment()
     return backend
+
+
+def _load_backend_class(name: str) -> type[GDSBackend]:
+    module = importlib.import_module(f"{gds_backends.__name__}.{name}")
+    try:
+        backend_class = module.Backend
+    except AttributeError as error:
+        raise TypeError(f"GDS backend {name!r} must export a Backend class") from error
+    if not isinstance(backend_class, type) or not issubclass(backend_class, GDSBackend):
+        raise TypeError(f"GDS backend {name!r} must export a GDSBackend subclass")
+    return backend_class

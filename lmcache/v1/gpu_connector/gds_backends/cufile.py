@@ -15,8 +15,8 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector._gds_async import GDSHandle, Submission
-from lmcache.v1.gpu_connector._gds_driver import SharedDriver
-from lmcache.v1.gpu_connector._gds_file import FileGDSBackend
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
+from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 
 if TYPE_CHECKING:
     # Third Party
@@ -70,7 +70,7 @@ def _check(err: "CUfileError", op: str) -> None:
 _STREAM_REGISTER_FLAGS = 0x7
 
 
-class CuFileBackend(FileGDSBackend):
+class Backend(FileGDSBackend):
     """Own the cufile driver and its registration operations."""
 
     name = "cufile"
@@ -219,7 +219,7 @@ class CuFileBackend(FileGDSBackend):
 class AsyncHandle(GDSHandle):
     """An owning cufile slab handle with stream-ordered IO."""
 
-    _backend: CuFileBackend
+    _backend: Backend
 
     def read_async(
         self,

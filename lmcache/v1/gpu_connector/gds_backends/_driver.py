@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Lifetime accounting for a native driver's process-wide state."""
+"""Shared lifetime accounting for a native driver's process-wide state."""
 
 # Standard
 from collections.abc import Callable

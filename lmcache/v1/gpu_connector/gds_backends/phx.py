@@ -17,8 +17,8 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector._gds_async import GDSHandle, Submission
-from lmcache.v1.gpu_connector._gds_driver import SharedDriver
-from lmcache.v1.gpu_connector._gds_file import FileGDSBackend
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
+from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 
 logger = init_logger(__name__)
 
@@ -106,7 +106,7 @@ def _check(rc: int, op: str) -> None:
         raise RuntimeError(f"{op} failed: phxFileError(rc={rc} [{why}])")
 
 
-class PhxBackend(FileGDSBackend):
+class Backend(FileGDSBackend):
     """Own the phx driver and its registration operations."""
 
     name = "phx"
@@ -192,7 +192,7 @@ class PhxBackend(FileGDSBackend):
             "phxFileBufRegister",
         )
         logger.debug(
-            "_phx_async: registered 0x%x (%d bytes) via libphxfile probe",
+            "phx: registered 0x%x (%d bytes) via libphxfile probe",
             buf.data_ptr(),
             nbytes,
         )
@@ -280,7 +280,7 @@ class PhxBackend(FileGDSBackend):
 class AsyncHandle(GDSHandle):
     """An owning phx slab handle with stream-ordered IO."""
 
-    _backend: PhxBackend
+    _backend: Backend
 
     def read_async(
         self,

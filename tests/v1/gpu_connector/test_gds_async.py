@@ -2,10 +2,12 @@
 """Backend construction, extensibility, ownership, and context delegation."""
 
 # Standard
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import Mock
 import ctypes
 import os
+import sys
 import weakref
 
 # Third Party
@@ -14,10 +16,10 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.config import GdsL1Config
-from lmcache.v1.gpu_connector import gds_context
+from lmcache.v1.gpu_connector import gds_backends, gds_context
 from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle, Submission
-from lmcache.v1.gpu_connector._gds_backends import BACKENDS, create_backend
-from lmcache.v1.gpu_connector._gds_file import FileGDSBackend
+from lmcache.v1.gpu_connector._gds_backends import create_backend
+from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 from lmcache.v1.gpu_connector.gds_context import GDSContext, SlabDirection
 from lmcache.v1.memory_management import GDSMemoryObject
 
@@ -81,6 +83,29 @@ class OtherHandle(GDSHandle):
         return Submission(size, file_offset, buf_offset)
 
 
+@pytest.fixture
+def gpu_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.version, "cuda", "12.9")
+    monkeypatch.setattr(torch.version, "hip", "6.3")
+
+
+@pytest.fixture
+def extra_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Add a real module to the scanned directory without changing the factory."""
+    (tmp_path / "other.py").write_text(
+        f"from {__name__} import OtherBackend\n"
+        "class Backend(OtherBackend):\n"
+        "    @classmethod\n"
+        "    def is_default(cls):\n"
+        "        return True\n"
+    )
+    monkeypatch.setattr(
+        gds_backends, "__path__", [*gds_backends.__path__, str(tmp_path)]
+    )
+    yield
+    sys.modules.pop(f"{gds_backends.__name__}.other", None)
+
+
 @pytest.mark.parametrize(
     ("cuda_version", "hip_version", "expected"),
     [("12.9", None, "cufile"), (None, "6.3", "hipfile"), ("12.9", "6.3", "hipfile")],
@@ -131,12 +156,13 @@ def test_creation_does_not_load_a_native_driver(
 
 
 @pytest.mark.parametrize("name", ["cufile", "hipfile", "ugds", "phx"])
+@pytest.mark.usefixtures("gpu_build")
 def test_close_before_use_does_not_load_a_native_driver(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
 ) -> None:
     monkeypatch.setattr(ctypes, "CDLL", Mock(side_effect=AssertionError("dlopen")))
-    BACKENDS[name]().close_driver()
+    create_backend(name).close_driver()
 
 
 @pytest.mark.parametrize("name", ["ugds", "phx"])
@@ -157,18 +183,13 @@ def test_unknown_backend_is_rejected() -> None:
         create_backend("missing")
 
 
+@pytest.mark.usefixtures("extra_backend")
 def test_auto_can_select_a_backend_on_a_new_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class DefaultOtherBackend(OtherBackend):
-        @classmethod
-        def is_default(cls) -> bool:
-            return True
-
     monkeypatch.setattr(torch.version, "cuda", None)
     monkeypatch.setattr(torch.version, "hip", None)
-    monkeypatch.setitem(BACKENDS, "other", DefaultOtherBackend)
-    assert isinstance(create_backend("auto"), DefaultOtherBackend)
+    assert isinstance(create_backend("auto"), OtherBackend)
 
 
 def test_incomplete_backend_cannot_be_instantiated() -> None:
@@ -179,12 +200,12 @@ def test_incomplete_backend_cannot_be_instantiated() -> None:
         Incomplete()  # type: ignore[abstract]
 
 
+@pytest.mark.usefixtures("extra_backend")
 def test_new_backend_needs_no_public_platform_or_dispatch_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(torch.version, "cuda", None)
     monkeypatch.setattr(torch.version, "hip", None)
-    monkeypatch.setitem(BACKENDS, OtherBackend.name, OtherBackend)
     backend = create_backend("other")
     assert isinstance(backend, OtherBackend)
     ctx = GDSContext(backend)
@@ -292,12 +313,13 @@ def test_handle_closes_fd_even_when_deregistration_fails(
 
 
 @pytest.mark.parametrize("name", ["cufile", "hipfile", "ugds", "phx"])
+@pytest.mark.usefixtures("gpu_build")
 def test_handle_takes_ownership_and_close_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     name: str,
 ) -> None:
-    backend = BACKENDS[name]()
+    backend = create_backend(name)
     fd = os.open(tmp_path / "slab", os.O_CREAT | os.O_RDWR, 0o600)
     register = Mock(return_value=17)
     deregister = Mock()
@@ -314,12 +336,13 @@ def test_handle_takes_ownership_and_close_is_idempotent(
 
 
 @pytest.mark.parametrize("name", ["cufile", "hipfile", "ugds", "phx"])
+@pytest.mark.usefixtures("gpu_build")
 def test_registration_failure_closes_owned_descriptor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     name: str,
 ) -> None:
-    backend = BACKENDS[name]()
+    backend = create_backend(name)
     fd = os.open(tmp_path / "slab", os.O_CREAT | os.O_RDWR, 0o600)
     monkeypatch.setattr(
         backend, "register_handle", Mock(side_effect=RuntimeError("register"))
@@ -332,12 +355,13 @@ def test_registration_failure_closes_owned_descriptor(
 
 @pytest.mark.parametrize("name", ["cufile", "hipfile", "phx"])
 @pytest.mark.parametrize("direct_io", [False, True])
+@pytest.mark.usefixtures("gpu_build")
 def test_file_slab_creation_order(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     direct_io: bool,
 ) -> None:
-    backend = BACKENDS[name]()
+    backend = create_backend(name)
     assert isinstance(backend, FileGDSBackend)
     calls: list[object] = []
 

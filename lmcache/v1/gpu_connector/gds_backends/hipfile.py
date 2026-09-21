@@ -16,8 +16,8 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector._gds_async import GDSHandle, Submission
-from lmcache.v1.gpu_connector._gds_driver import SharedDriver
-from lmcache.v1.gpu_connector._gds_file import FileGDSBackend
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
+from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 
 _LIBHIPFILE_SONAME = "libhipfile.so"
 
@@ -117,7 +117,7 @@ def _declare_signatures(lib: ctypes.CDLL) -> None:
     lib.hipFileGetOpErrorString.restype = ctypes.c_char_p
 
 
-class HipFileBackend(FileGDSBackend):
+class Backend(FileGDSBackend):
     """Own the hipfile driver and its registration operations."""
 
     name = "hipfile"
@@ -334,7 +334,7 @@ class HipFileBackend(FileGDSBackend):
 class AsyncHandle(GDSHandle):
     """An owning hipfile slab handle with stream-ordered IO."""
 
-    _backend: HipFileBackend
+    _backend: Backend
 
     def read_async(
         self,

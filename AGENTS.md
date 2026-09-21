@@ -74,6 +74,8 @@ whole module. On macOS, mock Linux-only `os.posix_fallocate` and `os.O_DIRECT`
 with `raising=False`; do not assume Linux device-number encoding in sysfs mocks.
 Native-driver mock fixtures must call `backend.close_driver()` before restoring
 the mocked library, so process-wide driver ownership cannot leak between tests.
+Check lazy backend imports in a fresh Python subprocess: pytest collection
+imports concrete backend classes before tests run, which can hide eager imports.
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 

@@ -11,7 +11,7 @@ import sys
 import pytest
 
 # First Party
-from lmcache.v1.gpu_connector._cufile_async import CuFileBackend
+from lmcache.v1.gpu_connector.gds_backends.cufile import Backend as CuFileBackend
 
 
 class _Error(ctypes.Structure):

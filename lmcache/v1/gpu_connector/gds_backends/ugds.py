@@ -18,7 +18,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle, Submission
-from lmcache.v1.gpu_connector._gds_driver import SharedDriver
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 
 logger = init_logger(__name__)
 
@@ -133,7 +133,7 @@ def _buf_register_flags() -> int:
     return _UGDS_REGISTER_DMABUF if torch.version.hip is not None else 0
 
 
-class UgdsBackend(GDSBackend):
+class Backend(GDSBackend):
     """Own the ugds driver and its registration operations."""
 
     name = "ugds"
@@ -197,9 +197,9 @@ class UgdsBackend(GDSBackend):
     def register_handle(self, fd: int) -> int:
         """Register an open uGDS device fd and return the raw uGDSHandle_t.
 
-        Mirrors _cufile_async.register_handle(fd): the caller owns the fd
-        (typically an O_RDWR open of /dev/ugds_drvX) and closes it on
-        registration failure. open_handle() also takes ownership of the fd.
+        The caller owns the fd (typically an O_RDWR open of /dev/ugds_drvX)
+        and closes it on registration failure. open_handle() also takes
+        ownership of the fd.
         """
         self._ensure_driver_open()
         lib = self.library()
@@ -309,7 +309,7 @@ class UgdsBackend(GDSBackend):
 class AsyncHandle(GDSHandle):
     """An owning ugds slab handle with stream-ordered IO."""
 
-    _backend: UgdsBackend
+    _backend: Backend
 
     def capacity(self) -> int:
         """Return this device's finite namespace capacity in bytes."""

@@ -14,13 +14,15 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.config import GdsL1Config
-from lmcache.v1.gpu_connector._cufile_async import CuFileBackend
 from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle
 from lmcache.v1.gpu_connector._gds_backends import create_backend
-from lmcache.v1.gpu_connector._gds_driver import SharedDriver
-from lmcache.v1.gpu_connector._hipfile_async import HipFileBackend, _HipFileError
-from lmcache.v1.gpu_connector._phx_async import PhxBackend
-from lmcache.v1.gpu_connector._ugds_async import UgdsBackend, _uGDSError_t
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
+from lmcache.v1.gpu_connector.gds_backends.cufile import Backend as CuFileBackend
+from lmcache.v1.gpu_connector.gds_backends.hipfile import Backend as HipFileBackend
+from lmcache.v1.gpu_connector.gds_backends.hipfile import _HipFileError
+from lmcache.v1.gpu_connector.gds_backends.phx import Backend as PhxBackend
+from lmcache.v1.gpu_connector.gds_backends.ugds import Backend as UgdsBackend
+from lmcache.v1.gpu_connector.gds_backends.ugds import _uGDSError_t
 from lmcache.v1.gpu_connector.gds_context import GDSContext
 
 Drivers = tuple[GDSBackend, GDSBackend, Mock, Mock]
@@ -30,7 +32,10 @@ class _CuFileError(ctypes.Structure):
     _fields_ = [("err", ctypes.c_int), ("cu_err", ctypes.c_int)]
 
 
-@pytest.fixture(params=[CuFileBackend, HipFileBackend, UgdsBackend, PhxBackend])
+@pytest.fixture(
+    params=[CuFileBackend, HipFileBackend, UgdsBackend, PhxBackend],
+    ids=lambda backend: backend.name,
+)
 def drivers(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Drivers]:
