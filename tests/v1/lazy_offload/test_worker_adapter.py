@@ -53,6 +53,7 @@ def _make_worker_adapter(
     adapter.retrieve_events = {}
     adapter._dropped_retrieves = set()
     adapter.error_block_ids = set()
+    adapter._pending_store_kv_events = {}
     adapter._completed_store_requests = {}
     adapter._failed_store_requests = set()
     return adapter
