@@ -202,7 +202,7 @@ ratio is the fraction of tokens requested by a lookup that were served from
 either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
 vLLM-owned and not observable from LMCache.
 
-Both counters carry `model_name` and `cache_salt` OTel attributes (captured
+All of these counters carry `model_name` and `cache_salt` OTel attributes (captured
 at lookup time from `IPCCacheServerKey`), enabling per-model and per-tenant
 slicing of the hit rate.  `cache_salt` can be high-cardinality; drop it at
 scrape time with `metric_relabel_configs` if storage cost matters.
@@ -211,6 +211,10 @@ scrape time with `metric_relabel_configs` if storage cost matters.
 |---|---|---|---|---|
 | `lmcache_mp.lookup_requested` | `lmcache_mp_lookup_requested_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+requested_tokens` |
 | `lmcache_mp.lookup_hit` | `lmcache_mp_lookup_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
+| `lmcache_mp.lookup_hit_l1` | `lmcache_mp_lookup_hit_l1_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_tokens` (0 if absent) |
+| `lmcache_mp.lookup_hit_l2` | `lmcache_mp_lookup_hit_l2_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_tokens` (0 if absent); `l1 + l2 == lookup_hit` per event |
+| `lmcache_mp.lookups` | `lmcache_mp_lookups_requests_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+1` per completed lookup |
+| `lmcache_mp.lookup_early_exit` | `lmcache_mp_lookup_early_exit_requests_total` | Counter (attrs: `model_name`, `cache_salt`, `reason` ∈ {`no_gpu_context`, `empty_chunk_hashes`, `no_group_layout_descs`}) | `MP_LOOKUP_PREFETCH_END` | `+1` when `early_exit_reason != ""` |
 
 **What it answers:** What fraction of tokens requested by a lookup were served from cache (L1 or L2)?
 
@@ -224,9 +228,22 @@ sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
 / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
 ```
 
-> **Note:** Both counters are driven by the *same* event, so they always
+**Per-tier split and early exits:**
+
+```promql
+# Share of hit tokens that L1 could serve on its own:
+rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
+/ rate(lmcache_mp_lookup_hit_tokens_total[5m])
+
+# Fraction of lookups that early-exited, by reason:
+sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
+/ sum(rate(lmcache_mp_lookups_requests_total[5m]))
+```
+
+> **Note:** All lookup counters are driven by the *same* event, so they always
 > advance together per completed lookup.  Early-exit lookups (no GPU
-> context matches, empty `chunk_hashes`) contribute `0` to both, and
+> context matches, empty `chunk_hashes`) contribute `0` tokens to all four
+> token counters and `+1` to `lookups` and `lookup_early_exit{reason}`, and
 > abandoned lookups (client never polls `query_prefetch_status`)
 > contribute to neither.  See
 > [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
@@ -273,8 +290,12 @@ Per-request throughput of GPU↔CPU copies via
 `L0L1ThroughputSubscriber`. Correlates `MP_{STORE,RETRIEVE}_START` → `MP_{STORE,RETRIEVE}_END`
 pairs by `session_id`, computes `total_bytes / (end_ts - start_ts)` in GB/s.
 Every request contributes one sample (no sampling).
-START/END events fire on the GPU cupy stream (`publish_on_stream`), so
-timestamps reflect true GPU-stream copy time — not Python/lock overhead.
+START/END events fire on the GPU cupy stream (`publish_on_stream`).
+Caveat: on the store path, `reserve_write` runs on the CPU after
+`MP_STORE_START` is already enqueued, so the store denominator includes
+that CPU share. It was measured at well under 1% of the window
+(~0.4 ms against a hundreds-of-ms window at CONC=128), so no separate
+metric or correction is provided.
 
 All throughput histograms carry `engine_id` (vLLM worker instance id),
 `device` (e.g. `"cuda:3"`), and `model_name` OTel attributes, enabling
@@ -283,12 +304,92 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GBs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
-| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GBs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GB_per_second` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
 Are some workers or GPUs underperforming?
+
+---
+
+## Transfer Phase Throughput Histograms (gather vs DMA)
+
+The composite `l0_l1_*` histograms span two serialized GPU phases: the
+gather/scatter kernel (paged blocks ↔ GPU staging buffer, occupies SMs)
+and the DMA staging copy (GPU staging buffer ↔ pinned host memory,
+occupies copy engines).  The native plan executor brackets each phase
+with CUDA event pairs when the caller requests it: the transfer module
+passes `phase_timing_enabled` per executor call, true only when the bus
+is enabled and something subscribes to `MP_TRANSFER_PHASE_SAMPLES` (this
+metrics subscriber and/or the tracing consumer described in `EVENTS.md` /
+`docs/design/observability/request-event-span.md`), so recording is off
+with `--disable-observability` and costs nothing in processes that never
+initialize observability.  `TransferPhaseSampler`
+pops finished pairs on `MP_STORE_END` / `MP_RETRIEVE_END` and publishes them
+as `MP_TRANSFER_PHASE_SAMPLES`.
+
+Labels: `device_index` (e.g. `"0"`), `direction` (`"h2d"` / `"d2h"`);
+the counters additionally carry `phase` (`"kernel"` / `"staging"`).
+The label keeps the bare `"kernel"`, mirroring the `TransferPhase` enum
+shared with the C++ side, while the corresponding trace span is named
+`transfer.kernel_interval`: a label is read next to its metric's
+documentation, a span name is read alone on a waterfall bar and has to
+carry the caveat itself.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.transfer_staging_throughput` | `lmcache_mp_transfer_staging_throughput_GB_per_second` | Histogram | `MP_TRANSFER_PHASE_SAMPLES` | `nbytes / elapsed_ms * 1e3 / 1e9` per batch step |
+| `lmcache_mp.transfer_phase_bytes` | `lmcache_mp_transfer_phase_bytes_total` | Counter | `MP_TRANSFER_PHASE_SAMPLES` | `+nbytes` per batch step, per `phase` |
+| `lmcache_mp.transfer_phase_elapsed` | `lmcache_mp_transfer_phase_elapsed_seconds_total` | Counter | `MP_TRANSFER_PHASE_SAMPLES` | `+elapsed_ms / 1e3` per batch step, per `phase`. The section's stream interval: for `phase="staging"` that is the transfer, for `phase="kernel"` it is mostly the wait for the engine to release the SMs |
+
+**What it answers:** Is the host<->device path healthy, and how much KV is
+actually moving?  `transfer_staging_throughput` is the DMA rate: compare it
+against a measured pinned-copy baseline on this host (never the PCIe spec
+figure) -- it drops when host buffers stop being pinned, when the link
+renegotiates to fewer lanes or an older generation, or when the buffers land
+on a remote NUMA node, and it caps the whole cache's throughput.
+`transfer_phase_bytes` gives volume for capacity planning.  For a byte-weighted
+aggregate DMA rate use
+`rate(lmcache_mp_transfer_phase_bytes_total{phase="staging"}[1m]) /
+rate(lmcache_mp_transfer_phase_elapsed_seconds_total{phase="staging"}[1m])`
+(a mean over the per-step histogram samples is not byte-weighted).
+
+Do **not** form the same ratio for `phase="kernel"`.  Its elapsed is dominated
+by waiting for the co-resident inference engine to release the SMs, not by the
+kernel, so the ratio reports contention -- see the caveats below.  The kernel
+phase's counters are kept because the samples carry both phases, not because
+that ratio is meaningful.  When a transfer looks slow, open a trace: the
+`transfer.kernel_interval` / `transfer.staging` span pair shows the split for that one
+transfer, and a long kernel bar there reads as "this transfer met a busy
+engine", which is the useful statement.
+
+**Caveats:** each section's `nbytes` is exact — staged payload for the
+staging phase, skip-aware launch bytes for the kernel phase — so the two
+phases' byte counters can legitimately differ, and the difference is the
+payload skipped by `skip_prefix_n_blocks` (e.g. sliding windows).
+
+A section's elapsed is the interval between two CUDA events on the transfer
+stream, which is **not** the same as the time that section's work spent
+running.  A stream's ordering guarantee says op N+1 starts after op N, not
+that the device is serving this stream in between.  The gather/scatter kernel
+needs SMs, and LMCache runs beside an inference engine that holds them, so a
+kernel section's interval is mostly the wait for the engine's kernels to
+retire.  Profiled on one box with both processes traced: the kernel executes
+in ~21 us while its section reads ~1280 us, and the 1104 us gap ahead of it is
+100 % engine kernels (4-5 of them).  That is why there is no
+`transfer_kernel_throughput`: a bytes/elapsed ratio there reads ~50x low, and
+differs 7x between directions for reasons that have nothing to do with the
+kernel.  The wait is also not a cost worth charging to the transfer — for
+stores it overlaps the prefill the request is waiting on anyway, and for
+retrieves it measured 119 us against a ~186 ms TTFT.
+
+Staging is exempt: DMA rides the copy engine, which a compute-bound engine
+never touches, so its sections wait 0.4-6 us and `transfer_staging_throughput`
+is the real link rate.  Compare it against a measured pinned-copy baseline on
+the host, never the PCIe spec figure.  The kernel's section time is still
+carried by the `transfer.kernel_interval` span under tracing (off by default), where it
+is read as "this transfer met a busy engine" rather than as a rate.
 
 ---
 

@@ -29,8 +29,15 @@ import (
 
 const (
 	// nvidiaRuntimeClass is the RuntimeClass name registered by the NVIDIA GPU
-	// Operator; engine pods request it when gpuVendor is nvidia.
+	// Operator; engine pods request it when gpuVendor is nvidia unless
+	// spec.runtimeClassName overrides it.
 	nvidiaRuntimeClass = "nvidia"
+
+	// engineContainerName is the engine container name. GPU Operator NRI/CDI
+	// clusters that omit runtimeClassName must annotate this same name, e.g.
+	// nvidia.cdi.k8s.io/container.lmcache: management.nvidia.com/gpu=all via
+	// spec.podAnnotations.
+	engineContainerName = "lmcache"
 
 	// lmcacheServerBinary is the entrypoint binary for the LMCache server inside
 	// the engine image.
@@ -117,8 +124,25 @@ func buildDaemonSetCore(
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
+	// spec.runtimeClassName wins: "" clears it (default container runtime),
+	// any other value is used as-is. Unset keeps the vendor default.
+	// GPU Operator NRI/CDI clusters also omit runtimeClassName; set
+	// spec.podAnnotations to request the management CDI device. The operator
+	// does not add that annotation itself.
+	if spec.RuntimeClassName != nil {
+		if *spec.RuntimeClassName == "" {
+			runtimeClassName = nil
+		} else {
+			rc := *spec.RuntimeClassName
+			runtimeClassName = &rc
+		}
+	}
 	privileged := derefBool(spec.Privileged, false)
-	hostIPC := derefBool(spec.HostIPC, false)
+	// Isolated IPC needs neither the host IPC namespace nor the shared
+	// /dev/shm, and takes priority over spec.hostIPC (see the isolatedIPC
+	// field documentation).
+	isolatedIPC := spec.IsolatedIPCEnabled()
+	hostIPC := derefBool(spec.HostIPC, false) && !isolatedIPC
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -214,9 +238,12 @@ func buildDaemonSetCore(
 	// omitted. Never mount an emptyDir at /dev/shm — it would shadow the host's
 	// tmpfs and break CUDA IPC (cudaIpcOpenMemHandle fails with
 	// cudaErrorMapBufferObjectFailed).
+	// Under isolated IPC the handles rendezvous in the kernel driver, so no
+	// /dev/shm sharing is wired at all.
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
-	if !hostIPC && !HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
+	if !isolatedIPC && !hostIPC &&
+		!HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
 		volumes = append(volumes, BuildDevShmVolume())
 		volumeMounts = append(volumeMounts, BuildDevShmVolumeMount())
 	}
@@ -343,7 +370,7 @@ func buildDaemonSetCore(
 					InitContainers:     spec.InitContainers,
 					Containers: []corev1.Container{
 						{
-							Name:            "lmcache",
+							Name:            engineContainerName,
 							Image:           fmt.Sprintf("%s:%s", imgRepo, imgTag),
 							ImagePullPolicy: imgPullPolicy,
 							Command:         containerCommand,

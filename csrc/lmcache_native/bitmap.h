@@ -152,6 +152,11 @@ class Bitmap {
   std::string to_string() const;
 
   /**
+   * @brief Number of bits in the bitmap.
+   */
+  size_t size() const { return size_; }
+
+  /**
    * @brief Destructor.
    */
   ~Bitmap();

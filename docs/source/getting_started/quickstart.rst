@@ -34,9 +34,10 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          .. tab-item:: MP mode (recommended)
             :sync: mp
 
-            Start the LMCache server. ``--host`` / ``--port`` set the ZMQ
-            address vLLM connects to; they are spelled out here so the two
-            commands line up (these are also the defaults):
+            Start the LMCache server. ``--host`` / ``--port`` set the request
+            address vLLM connects to; ``--transport`` selects ZMQ (the default)
+            or gRPC. The defaults are spelled out here so the two commands
+            line up:
 
             .. code-block:: bash
 
@@ -47,7 +48,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                    --host localhost --port 5555 \
                    --l1-size-gb 20 --eviction-policy LRU --chunk-size 16
 
-            The ZMQ port (``--port``, default **5555**) accepts connections
+            The request port (``--port``, default **5555**) accepts connections
             from vLLM; the HTTP frontend (default **8080**) serves the
             management and metrics endpoints. See :doc:`../mp/configuration`
             for the full list of ``lmcache server`` and connector options.
@@ -55,10 +56,11 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             Start vLLM with the MP connector in a separate terminal. Point the
             connector at the server above via ``lmcache.mp.host`` /
             ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
-            include a ZMQ transport prefix (e.g. ``tcp://``); a bare
-            ``host``/``host:port`` is also accepted and is normalized to
-            ``tcp://`` automatically. See :doc:`/mp/request_transport` for
-            supported endpoint schemes and transport-selection behavior:
+            include a transport prefix: ``tcp://`` for ZMQ or ``grpc://`` for
+            gRPC. A bare ``host``/``host:port`` is also accepted and is
+            normalized to ``tcp://`` automatically. See
+            :doc:`/mp/request_transport` for supported endpoint schemes and
+            transport-selection behavior:
 
             .. code-block:: bash
 
@@ -454,15 +456,18 @@ More MP server options
 The vLLM MP example above runs ``lmcache server`` locally on the default
 ports. Common variations:
 
-**Custom port or remote host** -- by default the connector talks to
-``localhost:5555``. To use a different port, or a server on another host,
-pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
-``kv_connector_extra_config``:
+**Custom port, remote host, or gRPC** -- by default the connector talks to
+``localhost:5555`` over ZMQ. To use a different port, a server on another
+host, or gRPC, pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
+``kv_connector_extra_config`` and select the matching server transport:
 
 .. code-block:: bash
 
    vllm serve Qwen/Qwen3-8B --kv-transfer-config \
      '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://10.0.0.1", "lmcache.mp.port": 6555}}'
+
+For gRPC, start the server with ``--transport grpc`` and use a
+``grpc://10.0.0.1`` connector host.
 
 **CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
