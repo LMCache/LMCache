@@ -105,7 +105,11 @@ Notes:
   idempotent from any intermediate state.
 - **WARM mode**: locks like LOOKUP, but finish releases every read lock it
   holds (there is no retriever to hand them to) and leaves loaded keys
-  unlocked (`finish_write` only).
+  unlocked (`finish_write` only). Its result is not the retained bitmap but
+  the keys this request loaded itself: a key already resident when the warm
+  started is left out, because it may be another lookup's temporary, gone
+  once that reader releases, and a caller acting per key on the result must
+  not take it as warmed.
 
 ## Why lock-all + explicit touch
 

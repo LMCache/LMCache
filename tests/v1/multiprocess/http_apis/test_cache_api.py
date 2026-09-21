@@ -441,23 +441,36 @@ class _PrefetchHandle:
 
 
 class _PrefetchBitmap:
-    def __init__(self, n: int) -> None:
-        self._n = n
+    """Stands in for the loaded-key ``Bitmap``: exactly ``loaded`` of ``size``
+    positions are set."""
+
+    def __init__(self, loaded: set[int], size: int) -> None:
+        self._loaded = loaded
+        self._size = size
 
     def popcount(self) -> int:
-        return self._n
+        return len(self._loaded)
+
+    def __invert__(self) -> "_PrefetchBitmap":
+        return _PrefetchBitmap(set(range(self._size)) - self._loaded, self._size)
+
+    def get_indices_list(self) -> list[int]:
+        return sorted(self._loaded)
 
 
 @dataclass
 class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
+    found: int | None = None
+    """Keys the load brings in; ``None`` means every requested key."""
 
     def submit_prefetch_task(self, spec, **_) -> _PrefetchHandle:
         self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
         return _PrefetchHandle(len(spec.keys))
 
     def query_prefetch_status(self, handle) -> _PrefetchBitmap:
-        return _PrefetchBitmap(handle.total_requested_keys)
+        found = handle.total_requested_keys if self.found is None else self.found
+        return _PrefetchBitmap(set(range(found)), handle.total_requested_keys)
 
 
 @dataclass
@@ -536,7 +549,25 @@ class TestPrefetchEndpoint:
         assert body["status"] == "completed"
         assert body["found_keys"] == 4
         assert body["total_keys"] == 4
+        assert body["missing_key_indices"] == []
         assert client.get(f"/cache/prefetches/{rid}").status_code == 404
+
+    def test_status_reports_missing_key_positions(self):
+        """A partial load reports the positions (chunk-major, then rank) of
+        the keys it did not bring into L1."""
+        ctx = _ctx(layout=object())
+        ctx.storage_manager.found = 1
+        client = TestClient(_make_prefetch_app(ctx))
+        rid = client.post(
+            "/cache/prefetches",
+            json=_prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2),
+        ).json()["request_id"]
+
+        body = client.get(f"/cache/prefetches/{rid}").json()
+        assert body["status"] == "completed"
+        assert body["found_keys"] == 1
+        assert body["total_keys"] == 4
+        assert body["missing_key_indices"] == [1, 2, 3]
 
     def test_status_unknown_request_id_404(self):
         client = TestClient(_make_prefetch_app(_ctx(layout=object())))
