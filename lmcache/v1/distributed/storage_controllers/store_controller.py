@@ -21,7 +21,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_protocol import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -225,7 +225,7 @@ class StoreController(StorageControllerInterface):
 
     def __init__(
         self,
-        l1_manager: L1Manager,
+        l1_manager: L1ManagerInterface,
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[AdapterDescriptor],
         policy: StorePolicy,

@@ -20,7 +20,7 @@ from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_protocol import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -96,7 +96,7 @@ class L1EvictionController(EvictionController):
 
     def __init__(
         self,
-        l1_manager: L1Manager,
+        l1_manager: L1ManagerInterface,
         eviction_config: EvictionConfig,
     ):
         super().__init__()

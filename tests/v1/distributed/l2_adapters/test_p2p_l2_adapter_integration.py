@@ -201,6 +201,7 @@ def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
 
         # --- Peer side: NIXL context over the peer's L1 pool ---
         peer_l1_desc = peer_sm._l1_manager.get_l1_memory_desc()
+        assert peer_l1_desc is not None
         peer_tc_url = _next_url()
         peer_tc_ctx = NixlTransferChannelContext(
             peer_l1_desc, listen_url=peer_tc_url, advertise_url=peer_tc_url
