@@ -4,10 +4,11 @@
 The coordinator is a FastAPI app. Endpoints are auto-discovered from the
 ``http_apis`` package (the same convention as the mp server's HTTP API) and stay
 thin, operating on the shared collaborators carried on ``app.state``: ``config``,
-the view and controller registries, and the ingest layer's ``event_gate``.
+the view and controller registries, and the ingest layer's ``event_source`` /
+``event_gate``.
 The lifespan runs health-checking (eviction of instances whose heartbeats have
-lapsed) and the checkpoint timer, and starts and stops every controller --
-this file names no controller of its own.
+lapsed) and the checkpoint timer, and starts and stops the event source and
+every controller -- this file names no controller of its own.
 
 Adding a capability = a new ``http_apis/<name>_api.py`` router (auto-discovered)
 that uses those shared collaborators. A controller that ships outside this tree
@@ -37,6 +38,7 @@ from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventConsumer,
 )
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -97,8 +99,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     token_hasher = TokenHasher(
         chunk_size=config.chunk_size, hash_algorithm=config.hash_algorithm
     )
-    # Ingest layer: the gate admits, the broadcaster fans out. Adding a
-    # consumer of the fleet's cache-event stream is a register call here.
+    # Ingest layer: the source feeds the gate, which admits before the
+    # broadcaster fans out. Adding a consumer is a register call here.
     event_broadcaster = CacheEventBroadcaster()
     # Views first: a controller acts on the batch a view has consumed.
     # Not everything discovered consumes, so the protocol decides.
@@ -109,6 +111,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # to read across the consumers consistently.
     quiesce = QuiesceLock()
     event_gate = EventGate(event_broadcaster, quiesce)
+    event_source = HttpCacheEventSource(event_gate)
 
     # The gate is named because it is durable but is neither a view nor
     # a controller; everything else advertises its own state.
@@ -130,6 +133,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         controllers=controllers,
         token_hasher=token_hasher,
         event_gate=event_gate,
+        event_source=event_source,
         metadata_persister=metadata_persister,
     )
 
@@ -167,10 +171,11 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         """Start background work and unwind it in order on shutdown.
 
         Registration order is teardown order reversed, and the order is
-        load-bearing: timers stop before controllers so no checkpoint
-        races one settling, controllers before the final write so it
-        captures what they settled on, and the client closes last
-        because a draining controller is still using it.
+        load-bearing: timers stop before the source so no checkpoint races
+        ingestion, the source before controllers so no new work arrives while
+        they settle, controllers before the final write so it captures what
+        they settled on, and the client closes last because a draining
+        controller is still using it.
 
         A controller that raises on the way in is logged and skipped;
         the rest still run.
@@ -204,6 +209,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                     logger.exception(
                         "Controller %s failed to start", type(controller).__name__
                     )
+            await event_source.start()
+            stack.push_async_callback(event_source.stop)
             # Nested, so they stop before the stack unwinds. Awaited too:
             # ``save_checkpoint`` runs in a thread a cancel cannot reach.
             timers = []

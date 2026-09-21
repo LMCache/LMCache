@@ -8,11 +8,15 @@ The K/V-split path is the SGLang regression: it must not be sliced per layer.
 """
 
 # Third Party
+import pytest
 import torch
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import normalize_and_discover_per_layer_formats
+from lmcache.v1.gpu_connector.utils import (
+    get_shape_and_dtype,
+    normalize_and_discover_per_layer_formats,
+)
 import lmcache.lmcache_native as lmcache_native
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -84,3 +88,68 @@ def test_vllm_mixed_rank4_fused_groups():
     assert tuple(normalized[0].shape) == (NB, BS, NH, 2 * HS)
     assert tuple(normalized[3].shape) == (NB, BS, NH, 4 * HS)
     assert formats == [F.NL_X_NB_NH_BS_CS] * 5
+
+
+def _mla_plane_tuple_entry() -> tuple[torch.Tensor, torch.Tensor]:
+    latent = torch.zeros(NB, BS, 1, 8, dtype=torch.int8)
+    rope = torch.zeros(NB, BS, 1, 2, dtype=torch.float16)
+    return latent, rope
+
+
+@pytest.mark.parametrize(
+    ("kv_caches", "layer_indices", "expected"),
+    [
+        pytest.param(
+            [_t(NB, BS, NH, HS)],
+            None,
+            [((NB, BS, NH, HS), DT)],
+            id="bare_tensor",
+        ),
+        pytest.param(
+            [_mla_plane_tuple_entry()],
+            None,
+            [
+                (
+                    ((NB, BS, 1, 8), torch.int8),
+                    ((NB, BS, 1, 2), torch.float16),
+                )
+            ],
+            id="mla_plane_tuple_mixed_dtype",
+        ),
+        pytest.param(
+            [[_t(2, 3), _t(4, 5)]],
+            None,
+            [(((2, 3), DT), ((4, 5), DT))],
+            id="nested_sequence",
+        ),
+        pytest.param(
+            [_t(2), _t(3), _t(4)],
+            [2, 0],
+            [((4,), DT), ((2,), DT)],
+            id="layer_indices_subset",
+        ),
+        pytest.param(
+            [_t(2), _t(3), _t(4)],
+            None,
+            [((2,), DT), ((3,), DT), ((4,), DT)],
+            id="all_layers_in_order",
+        ),
+    ],
+)
+def test_get_shape_and_dtype(
+    kv_caches: list[object],
+    layer_indices: list[int] | None,
+    expected: list[object],
+) -> None:
+    """Walker keys for normalize_and_discover_per_layer_formats shape buckets."""
+    if layer_indices is None:
+        assert get_shape_and_dtype(kv_caches) == expected
+    else:
+        assert get_shape_and_dtype(kv_caches, layer_indices) == expected
+
+
+def test_get_shape_and_dtype_keys_differ_by_dtype() -> None:
+    fp16 = _t(NB, BS, HS)
+    bf16 = torch.zeros(NB, BS, HS, dtype=torch.bfloat16)
+    keys = get_shape_and_dtype([fp16, fp16.clone(), bf16])
+    assert keys[0] == keys[1] and keys[0] != keys[2]

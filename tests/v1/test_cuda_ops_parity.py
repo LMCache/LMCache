@@ -216,6 +216,7 @@ def _has_real_names(params):
 _EXCLUDED_FUNCS: set[str] = {
     "execute_object_group_transfer",
     "execute_cb_retrieve_plan_flat",
+    "pop_completed_phase_timings",
 }
 
 # CUDA-only plan descriptors intentionally remain native-only. Descriptor
