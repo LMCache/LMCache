@@ -91,7 +91,10 @@ class MPServerTracingSubscriber(EventSubscriber):
         # session_id -> REQUEST_END timestamp saved when stores/retrieves are in
         # flight; the last MP_STORE_END / MP_RETRIEVE_END uses this to close the
         # root span
-        self._deferred_session_end_ts: dict[str, float] = {}
+        # Sessions whose MP_REQUEST_END arrived while transfers were still in
+        # flight. Only membership matters: the span is closed with the
+        # *completing* transfer's timestamp, never the saved one.
+        self._deferred_session_ends: set[str] = set()
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the event-to-callback mapping for this subscriber."""
@@ -124,14 +127,14 @@ class MPServerTracingSubscriber(EventSubscriber):
         sessions = (
             set(self._pending_store_count)
             | set(self._pending_retrieve_count)
-            | set(self._deferred_session_end_ts)
+            | set(self._deferred_session_ends)
             | self._registry.all_session_ids()
         )
         for sid in sessions:
             self._registry.clear_session(sid)
         self._pending_store_count.clear()
         self._pending_retrieve_count.clear()
-        self._deferred_session_end_ts.clear()
+        self._deferred_session_ends.clear()
 
     # ------------------------------------------------------------------
     # Root span handlers
@@ -192,7 +195,7 @@ class MPServerTracingSubscriber(EventSubscriber):
         else:
             # Stores/retrieves still in flight — save timestamp; the last
             # MP_STORE_END / MP_RETRIEVE_END closes the root span
-            self._deferred_session_end_ts[sid] = event.timestamp
+            self._deferred_session_ends.add(sid)
 
     # ------------------------------------------------------------------
     # Child span handlers
@@ -299,12 +302,17 @@ class MPServerTracingSubscriber(EventSubscriber):
                 self._pending_retrieve_count[sid] = count - 1
 
         if (
-            sid in self._deferred_session_end_ts
+            sid in self._deferred_session_ends
             and self._pending_store_count.get(sid, 0) == 0
             and self._pending_retrieve_count.get(sid, 0) == 0
         ):
-            deferred_ts = self._deferred_session_end_ts.pop(sid)
-            self._close_request_span(sid, deferred_ts)
+            # Use the transfer's END timestamp, not the saved MP_REQUEST_END
+            # one: MP_STORE_END / MP_RETRIEVE_END are stream-published, so this
+            # is when the GPU actually finished. Closing at the earlier,
+            # CPU-side session end left the last mp.store ending after its own
+            # parent -- a child sticking out past the request span in the
+            # waterfall. Matches cb_server's deferred close.
+            self._close_request_span(sid, event.timestamp)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -356,4 +364,4 @@ class MPServerTracingSubscriber(EventSubscriber):
                 pass
         self._pending_store_count.pop(session_id, None)
         self._pending_retrieve_count.pop(session_id, None)
-        self._deferred_session_end_ts.pop(session_id, None)
+        self._deferred_session_ends.discard(session_id)

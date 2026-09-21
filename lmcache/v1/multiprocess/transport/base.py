@@ -1,11 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Transport-neutral multiprocess request client contract."""
+"""Transport-neutral multiprocess request contracts."""
 
 # Standard
 from typing import Any, Protocol
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
+
+
+class RequestServer(Protocol):
+    """Base interface for multiprocess request servers."""
+
+    def start(self) -> None:
+        """Start accepting request transport traffic."""
+        ...
+
+    def close(self) -> None:
+        """Close the server and release its transport resources."""
+        ...
 
 
 class RequestClient(Protocol):
@@ -94,7 +106,7 @@ class RequestClient(Protocol):
 
     def commit_retrieve(self, key: Any, instance_id: int) -> MessagingFuture[Any]: ...
 
-    def clear(self) -> MessagingFuture[Any]: ...
+    def clear(self, force: bool = False) -> MessagingFuture[Any]: ...
 
     def get_chunk_size(self) -> MessagingFuture[Any]: ...
 
@@ -131,6 +143,8 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[Any]: ...
 
     def cb_unified_lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]: ...
+
+    def cb_protocol_handshake(self, client_version: int) -> MessagingFuture[Any]: ...
 
     def p2p_lookup_and_lock(
         self, keys: list[Any], group_layout_descs: dict[int, Any]

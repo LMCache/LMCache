@@ -379,8 +379,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
         if write_locked:
             try:
-                self._l1_manager.finish_write(write_locked)
-                self._l1_manager.delete(write_locked)
+                self._l1_manager.finish_write_and_delete(write_locked)
             except Exception:
                 logger.exception(
                     "Serde wrapper: error releasing write-locked leftover temps"
@@ -628,12 +627,11 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         return temp_keys, temp_objs
 
     def _release_write_temps(self, temp_keys: list[ObjectKey]) -> None:
-        """Release write-locked temps and delete them. No-op on empty."""
+        """Atomically release write-locked temps and delete them. No-op on empty."""
         if not temp_keys:
             return
         try:
-            self._l1_manager.finish_write(temp_keys)
-            self._l1_manager.delete(temp_keys)
+            self._l1_manager.finish_write_and_delete(temp_keys)
         except Exception:
             logger.exception("Serde wrapper: failed releasing write-locked temps")
 

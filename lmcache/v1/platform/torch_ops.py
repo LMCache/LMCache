@@ -9,7 +9,7 @@ package -- consumers go through :class:`DeviceOps`, never this module directly.
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import shared_memory
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple, cast
 import ctypes
 import ctypes.util
 import os
@@ -575,15 +575,12 @@ def multi_layer_kv_transfer(
             f"Expected torch.Tensor or list, but got {type(key_value_ptrs).__name__}"
         )
 
-    # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
-    # NL_X_NB_TWO_NH_BS_HS) as next step.
-    if int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
-        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
-    ):
+    format_spec = _format_spec(engine_kv_format)
+
+    # TODO: Implement head_size support for HND layouts as next step.
+    if format_spec.is_hnd:
         raise NotImplementedError(
-            "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
-            "are not supported in the non-CUDA fallback. "
+            "HND layouts are not supported in the non-CUDA fallback. "
             "head_size parameter is required but not implemented in this path."
         )
     # 1. Filter out invalid slots.
@@ -606,14 +603,21 @@ def multi_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
-    is_mla = _format_spec(engine_kv_format).is_mla
-    is_flash_infer = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS)
+    is_mla = format_spec.is_mla
+    has_interleaved_kv_blocks = (
+        format_spec.is_layer_list
+        and not format_spec.is_mla
+        and not format_spec.is_fused_packed
+        and not format_spec.is_two_major
+        and not format_spec.is_kv_second_tuple
+    )
 
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
 
-    # For the flash_infer interleaved layout, pre-compute block-level indices.
-    if is_flash_infer:
+    # For layouts with K/V interleaved after the block axis, pre-compute
+    # block-level indices.
+    if has_interleaved_kv_blocks:
         block_indices = valid_slots // block_size
         block_offsets = valid_slots % block_size
 
@@ -623,7 +627,7 @@ def multi_layer_kv_transfer(
 
     if is_mla:
         layer_shape = (page_buffer_size, hidden_size)
-    elif is_flash_infer:
+    elif has_interleaved_kv_blocks:
         num_blocks = page_buffer_size // block_size
         layer_shape = (num_blocks, 2, block_size, hidden_size)
     else:
@@ -655,7 +659,7 @@ def multi_layer_kv_transfer(
                 key_value[0, layer_id, valid_mask_kv, :] = gathered.to(
                     kv_device, non_blocking=False
                 )
-        elif is_flash_infer:
+        elif has_interleaved_kv_blocks:
             # Paged layout : [num_blocks, 2, block_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]
             if int(direction) == int(TransferDirection.H2D):
@@ -789,6 +793,11 @@ def _is_kv_second_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
     return _format_spec(engine_kv_format).is_kv_second_tuple
 
 
+def _is_mla_plane_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when each per-layer entry is a tuple of NP >= 1 MLA planes."""
+    return _is_kv_second_tuple_format(engine_kv_format) and is_mla(engine_kv_format)
+
+
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
     # Maps the byte width of a KV-cache element to a representative torch dtype.
     # Only widths that commonly appear in KV caches are listed; 1-byte entries
@@ -808,54 +817,6 @@ def _is_ptr_tensor(x: object) -> bool:
         and x.dtype in (torch.int64, torch.uint64)
         and x.ndim == 1
     )
-
-
-def _per_layer_paged_shape(
-    engine_kv_format: EngineKVFormat,
-    nb: int,
-    bs: int,
-    nh: int,
-    hs: int,
-) -> tuple[int, ...]:
-    """Return the logical shape of a single per-layer paged buffer tensor.
-
-    Args:
-        engine_kv_format: The format enum that describes how K/V tokens are laid out.
-        nb: Number of blocks in the paged buffer (``shape_desc.nb``).
-        bs: Tokens per block / block size (``shape_desc.bs``).
-        nh: Number of attention heads (``shape_desc.nh``).
-        hs: Per-head hidden size (``shape_desc.hs``).
-
-    Returns:
-        A tuple representing the shape needed to reconstruct one layer's tensor
-        from a raw pointer via :func:`_tensor_from_ptr`.
-    """
-    fmt = int(engine_kv_format)
-    if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
-        return (nb * bs, 1, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
-        return (nb, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
-        return (2, nb, nh, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
-        return (nb, 2, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
-    ):
-        # Blocks-first fused KV (HND): the desc's hs is the packed
-        # 2 * head_size, so each layer is the raw [NB, NH, BS, 2 * HS].
-        return (nb, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
-    ):
-        # Blocks-first fused KV (NHD): tokens before heads.
-        return (nb, bs, nh, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
-        return (2, nb, bs, nh, hs)
-    # Covers NL_X_NB_TWO_BS_NH_HS and any future NHD variants.
-    return (nb, 2, bs, nh, hs)
 
 
 def _infer_kv_dtype(
@@ -926,6 +887,9 @@ def _normalize_paged_layers(
         - ``list[list[torch.Tensor]]`` (2 x NL) for SGLang MHA formats.
         - ``list[(torch.Tensor, torch.Tensor)]`` (NL ``(K, V)`` pairs) for the
           per-layer tuple format (``NL_X_TWO_X_NB_BS_NH_HS``).
+        - ``list[tuple[torch.Tensor, ...]]`` (NL plane tuples of NP >= 1
+          ``[NB, BS, 1, W]`` tensors, W per plane) for
+          ``NL_X_NP_X_NB_BS_ONE_HS``.
         - ``list[torch.Tensor]`` (per-layer) for all other formats.
     """
     if is_cross_layer(engine_kv_format):
@@ -1009,9 +973,12 @@ def _normalize_paged_layers(
             "got: " + type(paged_buffer_ptrs_tensor).__name__
         )
     if _is_kv_second_tuple_format(engine_kv_format):
+        # Plane tuples accept any length >= 1; other tuple formats are
+        # exact (K, V) pairs.
+        is_mla_plane_tuple = _is_mla_plane_tuple_format(engine_kv_format)
         if isinstance(paged_buffer_ptrs_tensor, list) and all(
             isinstance(t, (list, tuple))
-            and len(t) == 2
+            and (len(t) >= 1 if is_mla_plane_tuple else len(t) == 2)
             and all(isinstance(x, torch.Tensor) for x in t)
             for t in paged_buffer_ptrs_tensor
         ):
@@ -1032,7 +999,7 @@ def _normalize_paged_layers(
         bs = int(shape_desc.bs)
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
-        per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
+        per_shape = _format_spec(engine_kv_format).paged_layer_shape(nb, bs, nh, hs)
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0) or 0)
         if block_stride and block_stride != bs * nh * hs:
             raise NotImplementedError(
@@ -1217,6 +1184,22 @@ def multi_layer_block_kv_transfer(
             blocks_per_object,
             block_size,
             engine_kv_format,
+            is_d2h,
+            skip_prefix_n_blocks,
+        )
+    elif _is_mla_plane_tuple_format(engine_kv_format):
+        # Must precede the generic MLA branch: is_mla() is also true here,
+        # but per-layer entries are tuples, not tensors.
+        _transfer_per_layer_mla_tuple(
+            cast(
+                "list[tuple[torch.Tensor, ...] | list[torch.Tensor]]",
+                normalized,
+            ),
+            object_tensors,
+            block_ids,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
             is_d2h,
             skip_prefix_n_blocks,
         )
@@ -1626,6 +1609,84 @@ def _transfer_per_layer_mla(
                 else:
                     src_blocks = src.reshape(n_valid, block_size, hidden_size)
                     layer.index_copy_(0, eff_idx, src_blocks)
+
+
+def _token_rows_as_uint8(rows: torch.Tensor, n_tokens: int) -> torch.Tensor:
+    """View ``[n_tokens, hidden_elems]`` as ``[n_tokens, hidden_bytes]`` uint8."""
+    contiguous = rows.contiguous()
+    return contiguous.view(torch.uint8).view(n_tokens, -1)
+
+
+def _transfer_per_layer_mla_tuple(
+    layer_planes: "list[tuple[torch.Tensor, ...] | list[torch.Tensor]]",
+    object_tensors: list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
+    n_block_ids: int,
+    blocks_per_object: int,
+    block_size: int,
+    is_d2h: bool,
+    skip_prefix_n_blocks: int,
+) -> None:
+    """Handle the MLA/DSA plane-tuple format: NL x planes x [NB, BS, 1, W_p].
+
+    Planes are carved out of the staging object's hidden axis by byte
+    offset; ``W_p`` and the dtype may differ per plane.
+    """
+    if not layer_planes or not object_tensors:
+        return
+
+    target_device = layer_planes[0][0].device
+    block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
+
+    for object_idx, obj in enumerate(object_tensors):
+        valid = _valid_block_range_indices(
+            object_idx,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            skip_prefix_n_blocks,
+        )
+        if valid is None:
+            continue
+        idx_start, idx_end, offset_in_object = valid
+        n_valid = idx_end - idx_start
+        n_tokens = n_valid * block_size
+        token_end = offset_in_object + n_tokens
+        eff_idx = block_ids_dev[idx_start:idx_end]
+
+        if is_d2h:
+            for layer_idx, planes in enumerate(layer_planes):
+                row_u8 = _token_rows_as_uint8(
+                    obj[layer_idx, offset_in_object:token_end], n_tokens
+                )
+                byte_off = 0
+                for plane in planes:
+                    width = int(plane.shape[-1])
+                    nbytes = width * int(plane.element_size())
+                    selected = (
+                        torch.index_select(plane, 0, eff_idx)
+                        .reshape(n_tokens, -1)
+                        .contiguous()
+                    )
+                    selected_u8 = selected.view(torch.uint8).view(n_tokens, nbytes)
+                    row_u8[:, byte_off : byte_off + nbytes].copy_(
+                        selected_u8, non_blocking=True
+                    )
+                    byte_off += nbytes
+        else:
+            chunk_gpu = obj[:, offset_in_object:token_end].to(
+                target_device, non_blocking=True
+            )
+            for layer_idx, planes in enumerate(layer_planes):
+                row_u8 = _token_rows_as_uint8(chunk_gpu[layer_idx], n_tokens)
+                byte_off = 0
+                for plane in planes:
+                    width = int(plane.shape[-1])
+                    nbytes = width * int(plane.element_size())
+                    src_u8 = row_u8[:, byte_off : byte_off + nbytes].contiguous()
+                    src = src_u8.view(plane.dtype).view(n_valid, *plane.shape[1:])
+                    plane.index_copy_(0, eff_idx, src)
+                    byte_off += nbytes
 
 
 def _transfer_per_layer_hnd(

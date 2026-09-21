@@ -70,7 +70,7 @@ class ClearRequest:
     """
 
     tier: Tier = Tier.L1
-    force: bool = True
+    force: bool = False
 
 
 @dataclass(frozen=True)
